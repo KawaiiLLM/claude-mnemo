@@ -214,7 +214,7 @@ describe("claude-mnemo smoke test", () => {
     expect(recallSessions).toContain("[S1] Auth race fix");
     expect(recallSessionTree).toContain("[T1] Diagnose auth");
     expect(recallSessionTree).toContain("[T2] Fix auth race");
-    expect(recallTurn).toContain("[O2] bugfix: Mutex added");
+    expect(recallTurn).toContain("[O2] 🔴 Mutex added");
     expect(replayTurn).toContain('prompt: "Fix it and add tests"');
     expect(replayTurn).toContain("[Tool 1] Edit");
   });
