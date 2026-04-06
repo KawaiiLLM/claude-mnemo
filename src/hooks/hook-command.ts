@@ -19,13 +19,9 @@ const db = createDatabase();
 initializeSchema(db);
 
 const HANDLERS: Record<string, HookHandler> = {
-  SessionStart: createContextHandler({ db, forkMnemosyne }),
+  SessionStart: createContextHandler({ db }),
   PreCompact: createCompactHandler({ db, forkMnemosyne, extractAssistantResponse }),
-  UserPromptSubmit: createSessionInitHandler({
-    db,
-    forkMnemosyne,
-    extractAssistantResponse,
-  }),
+  UserPromptSubmit: createSessionInitHandler({ db }),
   Stop: createStopHandler({
     db,
     forkMnemosyne,

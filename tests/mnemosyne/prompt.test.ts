@@ -28,4 +28,20 @@ describe("buildMnemosynePrompt", () => {
     );
     expect(prompt).toContain('#2 [undone]: "Old branch"');
   });
+
+  test("uses an approximately 80 character prompt preview", () => {
+    const longPrompt =
+      "This is a very long prompt preview that should stay readable for matching and remain close to eighty characters total";
+    const summary = buildExtractionStatusSummary([
+      {
+        promptNumber: 1,
+        status: "pending",
+        promptPreview: longPrompt,
+      },
+    ]);
+
+    expect(summary).toContain(
+      '#1 [pending]: "This is a very long prompt preview that should stay readable for matching and...',
+    );
+  });
 });

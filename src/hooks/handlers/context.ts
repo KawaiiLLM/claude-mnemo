@@ -2,12 +2,10 @@ import type { Database } from "bun:sqlite";
 
 import { getRecentSessions } from "../../db/sessions";
 import { formatSessionCollapsed } from "../../mcp/format";
-import { forkMnemosyne } from "../../mnemosyne/fork";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface ContextHandlerDependencies {
   db: Database;
-  forkMnemosyne: typeof forkMnemosyne;
 }
 
 function buildContextOutput(db: Database): string {

@@ -36,6 +36,7 @@ export interface ParsedReplayTurn {
   userPrompt: string;
   assistantText: string;
   toolCalls: ReplayToolCall[];
+  isSidechain: boolean;
 }
 
 function normalizeAssistantText(text: string): string {
@@ -193,6 +194,7 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
           userPrompt,
           assistantText: "",
           toolCalls: [],
+          isSidechain: Boolean(entry.isSidechain),
         };
         turns.push(currentTurn);
         continue;

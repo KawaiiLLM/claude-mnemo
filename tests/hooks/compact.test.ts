@@ -4,16 +4,15 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { createContextHandler } from "../../src/hooks/handlers/context";
+import { createCompactHandler } from "../../src/hooks/handlers/compact";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
 ): NormalizedHookInput {
   return {
-    eventName: "SessionStart",
-    source: "resume",
-    sessionId: "session-context",
+    eventName: "PreCompact",
+    sessionId: "session-compact",
     cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
     stopHookActive: false,
     raw: {},
@@ -21,7 +20,7 @@ function createInput(
   };
 }
 
-describe("handleContextHook", () => {
+describe("handleCompactHook", () => {
   let db: Database;
   let sessionId: number;
 
@@ -30,10 +29,10 @@ describe("handleContextHook", () => {
     initializeSchema(db);
 
     sessionId = upsertSession(db, {
-      contentSessionId: "session-context",
+      contentSessionId: "session-compact",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
-      title: "Context session",
-      description: "Context hook coverage",
+      title: "Compact session",
+      description: "Compact hook coverage",
       insight: null,
       startedAtEpoch: 100,
       updatedAtEpoch: 110,
@@ -45,21 +44,43 @@ describe("handleContextHook", () => {
     db.close();
   });
 
-  test("does not fork Mnemosyne on resume even when pending turns exist", async () => {
+  test("waits for Mnemosyne to finish before returning", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
       ) VALUES (?, 1, 'pending', 'Pending work', 120)`,
     ).run(sessionId);
 
-    const handler = createContextHandler({
+    let releaseFork!: () => void;
+    const forkMnemosyne = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFork = resolve;
+        }),
+    );
+    const handler = createCompactHandler({
       db,
+      forkMnemosyne,
+      extractAssistantResponse: mock(() => "Backfilled response"),
     });
 
-    const result = await handler(createInput());
+    let settled = false;
+    const handlerPromise = handler(
+      createInput({
+        transcriptPath: "/tmp/session.jsonl",
+      }),
+    ).then(() => {
+      settled = true;
+    });
 
-    expect(result.hookSpecificOutput).toContain(
-      "claude-mnemo memory available via recall() and replay().",
-    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+
+    releaseFork();
+    await handlerPromise;
+
+    expect(settled).toBe(true);
   });
 });

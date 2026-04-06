@@ -5,11 +5,11 @@ export interface ExtractionStatusTurn {
 }
 
 function truncatePreview(promptPreview: string): string {
-  if (promptPreview.length <= 40) {
+  if (promptPreview.length <= 80) {
     return promptPreview;
   }
 
-  return `${promptPreview.slice(0, 37)}...`;
+  return `${promptPreview.slice(0, 77)}...`;
 }
 
 export function buildExtractionStatusSummary(

@@ -2,14 +2,10 @@ import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { getTurnsForSession } from "../../db/turns";
-import { extractAssistantResponse } from "../../shared/transcript-parser";
-import { forkMnemosyne } from "../../mnemosyne/fork";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
   db: Database;
-  forkMnemosyne: typeof forkMnemosyne;
-  extractAssistantResponse: typeof extractAssistantResponse;
   now?: () => number;
 }
 

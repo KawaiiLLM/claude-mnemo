@@ -37,12 +37,8 @@ describe("handleSessionInitHook", () => {
   });
 
   test("first prompt creates session and pending turn without extraction", async () => {
-    const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock(() => "");
     const handler = createSessionInitHandler({
       db,
-      forkMnemosyne,
-      extractAssistantResponse,
     });
 
     const result = await handler(
@@ -61,19 +57,11 @@ describe("handleSessionInitHook", () => {
     expect(session?.project).toBe("/Users/zhaoqixuan/Projects/claude-mnemo");
     expect(turn?.status).toBe("pending");
     expect(turn?.userPrompt).toBe("Diagnose the auth race");
-    expect(forkMnemosyne).not.toHaveBeenCalled();
-    expect(extractAssistantResponse).not.toHaveBeenCalled();
   });
 
   test("second prompt only inserts another pending turn", async () => {
-    const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock(
-      () => "I found a race condition in token refresh.",
-    );
     const handler = createSessionInitHandler({
       db,
-      forkMnemosyne,
-      extractAssistantResponse,
     });
 
     await handler(
@@ -93,20 +81,14 @@ describe("handleSessionInitHook", () => {
     const firstTurn = getTurn(db, session.id, 1)!;
     const secondTurn = getTurn(db, session.id, 2)!;
 
-    expect(extractAssistantResponse).not.toHaveBeenCalled();
     expect(firstTurn.assistantResponse).toBeNull();
     expect(firstTurn.status).toBe("pending");
     expect(secondTurn.status).toBe("pending");
-    expect(forkMnemosyne).not.toHaveBeenCalled();
   });
 
   test("does not do any transcript work even when previous turn is already extracted", async () => {
-    const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock(() => "already handled");
     const handler = createSessionInitHandler({
       db,
-      forkMnemosyne,
-      extractAssistantResponse,
     });
 
     await handler(
@@ -128,8 +110,5 @@ describe("handleSessionInitHook", () => {
         transcriptPath: "/tmp/session.jsonl",
       }),
     );
-
-    expect(extractAssistantResponse).not.toHaveBeenCalled();
-    expect(forkMnemosyne).not.toHaveBeenCalled();
   });
 });

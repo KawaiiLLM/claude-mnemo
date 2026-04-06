@@ -11,7 +11,10 @@ import {
   buildExtractionStatusSummary,
   buildMnemosynePrompt,
 } from "../../mnemosyne/prompt";
-import { extractAssistantResponse } from "../../shared/transcript-parser";
+import {
+  extractAssistantResponse,
+  parseReplayTranscript,
+} from "../../shared/transcript-parser";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -78,13 +81,16 @@ function backfillPendingTurns(
 
 function detectUndoPromptNumbers(
   db: Database,
-  transcriptReader: typeof extractAssistantResponse,
   sessionDbId: number,
   transcriptPath?: string,
 ): number[] {
   if (!transcriptPath) {
     return [];
   }
+
+  const transcriptTurns = new Map(
+    parseReplayTranscript(transcriptPath).map((turn) => [turn.promptNumber, turn]),
+  );
 
   return getTurnsForSession(db, sessionDbId)
     .filter(
@@ -93,12 +99,17 @@ function detectUndoPromptNumbers(
         turn.userPrompt,
     )
     .filter((turn) => {
-      const currentResponse = transcriptReader(
-        transcriptPath,
-        turn.userPrompt ?? "",
-        turn.promptNumber,
-      );
-      return currentResponse !== "" && currentResponse !== (turn.assistantResponse ?? "");
+      const transcriptTurn = transcriptTurns.get(turn.promptNumber);
+
+      if (!transcriptTurn) {
+        return false;
+      }
+
+      if (transcriptTurn.isSidechain) {
+        return true;
+      }
+
+      return transcriptTurn.assistantText !== (turn.assistantResponse ?? "");
     })
     .map((turn) => turn.promptNumber);
 }
@@ -142,7 +153,6 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
 
     const stalePromptNumbers = detectUndoPromptNumbers(
       dependencies.db,
-      dependencies.extractAssistantResponse,
       session.id,
       input.transcriptPath,
     );

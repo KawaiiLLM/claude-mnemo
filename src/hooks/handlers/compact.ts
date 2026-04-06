@@ -22,7 +22,12 @@ function buildPrompt(db: Database, sessionDbId: number): string {
     buildExtractionStatusSummary(
       getTurnsForSession(db, sessionDbId).map((turn) => ({
         promptNumber: turn.promptNumber,
-        status: turn.status as "pending" | "stale" | "extracted" | "skipped",
+        status: turn.status as
+          | "pending"
+          | "stale"
+          | "extracted"
+          | "skipped"
+          | "undone",
         promptPreview: turn.userPrompt ?? "",
       })),
     ),
@@ -63,7 +68,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
     }
 
     if (pendingTurns.length > 0) {
-      void dependencies.forkMnemosyne({
+      await dependencies.forkMnemosyne({
         sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
@@ -75,4 +80,3 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
     };
   };
 }
-

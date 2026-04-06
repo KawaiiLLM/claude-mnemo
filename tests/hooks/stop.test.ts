@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
+import { extractAssistantResponse } from "../../src/shared/transcript-parser";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
@@ -19,6 +23,18 @@ function createInput(
     raw: {},
     ...overrides,
   };
+}
+
+function writeTranscript(lines: unknown[]): { directory: string; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-stop-"));
+  const path = join(directory, "session.jsonl");
+  writeFileSync(
+    path,
+    lines.map((line) => JSON.stringify(line)).join("\n"),
+    "utf8",
+  );
+
+  return { directory, path };
 }
 
 describe("handleStopHook", () => {
@@ -69,6 +85,33 @@ describe("handleStopHook", () => {
   });
 
   test("backfills all pending turns, marks undo as stale, and completes the session", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Diagnose auth" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "New response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Investigate logs" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "from transcript: path" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Fix auth" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Final answer from stop hook" }],
+      },
+    ]);
+
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, assistant_response, title, created_at_epoch
@@ -108,7 +151,7 @@ describe("handleStopHook", () => {
 
     const result = await handler(
       createInput({
-        transcriptPath: "/tmp/session.jsonl",
+        transcriptPath: transcript.path,
         lastAssistantMessage: "Final answer from stop hook",
       }),
     );
@@ -123,7 +166,7 @@ describe("handleStopHook", () => {
       exitCode: 0,
     });
     expect(extractedTurn.status).toBe("stale");
-    expect(secondPendingTurn.assistantResponse).toBe("from transcript: /tmp/session.jsonl");
+    expect(secondPendingTurn.assistantResponse).toBe(`from transcript: ${transcript.path}`);
     expect(lastPendingTurn.assistantResponse).toBe("Final answer from stop hook");
     expect(getPendingTurns(db, sessionId).map((turn) => turn.promptNumber)).toEqual([
       1,
@@ -141,22 +184,19 @@ describe("handleStopHook", () => {
       '#3 [pending]: "Fix auth"',
     );
     expect(extractAssistantResponse).toHaveBeenCalledWith(
-      "/tmp/session.jsonl",
+      transcript.path,
       "Investigate logs",
       2,
     );
-    expect(extractAssistantResponse).toHaveBeenCalledWith(
-      "/tmp/session.jsonl",
-      "Diagnose auth",
-      1,
-    );
     expect(extractAssistantResponse).not.toHaveBeenCalledWith(
-      "/tmp/session.jsonl",
+      transcript.path,
       "Fix auth",
       3,
     );
     expect(session.completedAtEpoch).toBe(500);
     expect(stderrWrite).toHaveBeenCalled();
+
+    rmSync(transcript.directory, { recursive: true, force: true });
   });
 
   test("handles missing transcript by falling back without crashing", async () => {
@@ -184,5 +224,45 @@ describe("handleStopHook", () => {
     expect(result.exitCode).toBe(0);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
     expect(getTurn(db, sessionId, 1)?.assistantResponse).toBe("");
+  });
+
+  test("marks the last extracted turn stale when it was undone before exit", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Undone turn" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Old response" }],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
+      ) VALUES (?, 1, 'extracted', 'Undone turn', 'Old response', 120)`,
+    ).run(sessionId);
+
+    const forkMnemosyne = mock(async () => {});
+    const handler = createStopHandler({
+      db,
+      forkMnemosyne,
+      extractAssistantResponse,
+      stderr: { write: mock(() => true) },
+    });
+
+    await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(getTurn(db, sessionId, 1)?.status).toBe("stale");
+    expect(forkMnemosyne).toHaveBeenCalledTimes(1);
+
+    rmSync(transcript.directory, { recursive: true, force: true });
   });
 });
