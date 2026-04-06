@@ -11,10 +11,7 @@ import {
   buildExtractionStatusSummary,
   buildMnemosynePrompt,
 } from "../../mnemosyne/prompt";
-import {
-  extractAssistantResponse,
-  parseReplayTranscript,
-} from "../../shared/transcript-parser";
+import { parseReplayTranscript } from "../../shared/transcript-parser";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -22,7 +19,6 @@ import type { HookResult, NormalizedHookInput } from "../types";
 export interface StopHandlerDependencies {
   db: Database;
   forkMnemosyne: typeof forkMnemosyne;
-  extractAssistantResponse: typeof extractAssistantResponse;
   stderr?: Pick<NodeJS.WriteStream, "write">;
   now?: () => number;
 }

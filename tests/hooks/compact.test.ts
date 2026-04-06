@@ -140,4 +140,64 @@ describe("handleCompactHook", () => {
 
     rmSync(transcript.directory, { recursive: true, force: true });
   });
+
+  test("leaves stale turns with existing responses untouched", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Already handled" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/stale.ts" } },
+          { type: "text", text: "Transcript response" },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Needs backfill" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/pending.ts" } },
+          { type: "text", text: "Pending response" },
+        ],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
+      ) VALUES (?, 1, 'stale', 'Already handled', 'Keep me', 120)`,
+    ).run(sessionId);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 2, 'pending', 'Needs backfill', 130)`,
+    ).run(sessionId);
+
+    const forkMnemosyne = mock(async () => {});
+    const handler = createCompactHandler({
+      db,
+      forkMnemosyne,
+    });
+
+    await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    const staleTurn = getTurn(db, sessionId, 1)!;
+    const pendingTurn = getTurn(db, sessionId, 2)!;
+
+    expect(staleTurn.assistantResponse).toBe("Keep me");
+    expect(staleTurn.toolCallCount).toBeNull();
+    expect(pendingTurn.assistantResponse).toBe("Pending response");
+    expect(pendingTurn.toolCallCount).toBe(1);
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
 });

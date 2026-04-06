@@ -9,7 +9,6 @@ import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
-import { extractAssistantResponse } from "../../src/shared/transcript-parser";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
@@ -63,11 +62,9 @@ describe("handleStopHook", () => {
 
   test("guards stop_hook_active to avoid infinite loops", async () => {
     const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock(() => "");
     const handler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
       stderr: { write: mock(() => true) },
     });
 
@@ -128,7 +125,6 @@ describe("handleStopHook", () => {
     const handler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse: mock(() => ""),
       stderr: { write: stderrWrite },
       now: () => 500,
     });
@@ -176,11 +172,9 @@ describe("handleStopHook", () => {
     ).run(sessionId);
 
     const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock(() => "");
     const handler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
       stderr: { write: mock(() => true) },
     });
 
@@ -219,7 +213,6 @@ describe("handleStopHook", () => {
     const handler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
       stderr: { write: mock(() => true) },
     });
 

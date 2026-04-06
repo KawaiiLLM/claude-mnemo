@@ -23,6 +23,10 @@ export function backfillFromTranscript(
     pendingTurns[pendingTurns.length - 1]?.promptNumber;
 
   for (const pendingTurn of pendingTurns) {
+    if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
+      continue;
+    }
+
     const transcriptTurn = transcriptTurnsByPromptNumber.get(
       pendingTurn.promptNumber,
     );
