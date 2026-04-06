@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import {
   extractAssistantResponse,
+  parseReplayTranscript,
   parseTranscript,
 } from "../../src/shared/transcript-parser";
 
@@ -165,5 +166,36 @@ describe("parseTranscript", () => {
     expect(
       extractAssistantResponse(transcript.path, "repeat", 2),
     ).toBe("second response");
+  });
+
+  test("parseReplayTranscript retains sidechain turns for raw replay", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Discarded branch" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Final approach" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Kept branch" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const turns = parseReplayTranscript(transcript.path);
+
+    expect(turns.map((turn) => [turn.promptNumber, turn.userPrompt])).toEqual([
+      [1, "Draft approach"],
+      [2, "Final approach"],
+    ]);
   });
 });

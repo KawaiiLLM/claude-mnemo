@@ -232,6 +232,66 @@ describe("turn queries", () => {
     expect(ftsCount).toBe(3);
   });
 
+  test("supports explicit undone status by clearing observations and FTS while retaining the turn row", () => {
+    const firstSave = saveTurn(db, {
+      sessionId,
+      promptNumber: 5,
+      userPrompt: "Try an approach that gets undone",
+      assistantResponse: "Initial branch response",
+      title: "Initial branch",
+      description: "A branch that later gets undone",
+      insight: "- temporary branch",
+      filesRead: ["src/auth.ts"],
+      filesModified: ["src/auth.ts"],
+      createdAtEpoch: 500,
+      updatedAtEpoch: 510,
+      observations: [
+        {
+          type: "change",
+          title: "Temporary edit",
+          description: "Applied an experimental change",
+          narrative: "This branch was later abandoned.",
+          facts: ["experiment"],
+          concepts: ["trade-off"],
+          filesRead: ["src/auth.ts"],
+          filesModified: ["src/auth.ts"],
+        },
+      ],
+    });
+
+    const secondSave = saveTurn(db, {
+      sessionId,
+      promptNumber: 5,
+      status: "undone",
+      userPrompt: "Try an approach that gets undone",
+      assistantResponse: "Initial branch response",
+      title: null,
+      description: null,
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 500,
+      updatedAtEpoch: 520,
+      observations: [],
+    });
+
+    const observationCount = db
+      .query<{ count: number }, [number]>(
+        "SELECT COUNT(*) AS count FROM observations WHERE turn_id = ?",
+      )
+      .get(secondSave.id).count;
+    const ftsCount = db
+      .query<{ count: number }, [number]>(
+        "SELECT COUNT(*) AS count FROM memory_fts WHERE layer IN ('turn', 'observation') AND source_id = ?",
+      )
+      .get(secondSave.id).count;
+
+    expect(secondSave.id).toBe(firstSave.id);
+    expect(secondSave.status).toBe("undone");
+    expect(observationCount).toBe(0);
+    expect(ftsCount).toBe(0);
+  });
+
   test("marks turns stale and returns pending work in prompt order", () => {
     db.query(
       "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (?, ?, ?, ?)",

@@ -108,6 +108,12 @@ function stringifyToolResultContent(content: unknown): string {
 }
 
 export function readTranscriptEntries(transcriptPath: string): TranscriptEntry[] {
+  return readAllTranscriptEntries(transcriptPath).filter(
+    (entry) => !entry.isSidechain && !entry.isApiErrorMessage,
+  );
+}
+
+export function readAllTranscriptEntries(transcriptPath: string): TranscriptEntry[] {
   if (!existsSync(transcriptPath)) {
     return [];
   }
@@ -123,7 +129,7 @@ export function readTranscriptEntries(transcriptPath: string): TranscriptEntry[]
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => JSON.parse(line) as TranscriptEntry)
-    .filter((entry) => !entry.isSidechain && !entry.isApiErrorMessage);
+    .filter((entry) => !entry.isApiErrorMessage);
 }
 
 export function parseTranscript(transcriptPath: string): ParsedTurn[] {
@@ -176,7 +182,7 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
   let promptNumber = 0;
   let currentTurn: ParsedReplayTurn | null = null;
 
-  for (const entry of readTranscriptEntries(transcriptPath)) {
+  for (const entry of readAllTranscriptEntries(transcriptPath)) {
     if (entry.role === "user") {
       const userPrompt = extractUserPrompt(entry);
 

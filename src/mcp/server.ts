@@ -74,6 +74,7 @@ const replayInputSchema = z.object({
 const saveTurnInputSchema = z.object({
   session_id: z.number().int(),
   prompt_number: z.number().int().positive(),
+  status: z.literal("undone").optional(),
   user_prompt: z.string().optional(),
   assistant_response: z.string().optional(),
   title: z.string().optional(),

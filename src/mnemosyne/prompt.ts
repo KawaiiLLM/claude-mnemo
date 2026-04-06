@@ -1,6 +1,6 @@
 export interface ExtractionStatusTurn {
   promptNumber: number;
-  status: "pending" | "stale" | "extracted" | "skipped";
+  status: "pending" | "stale" | "extracted" | "skipped" | "undone";
   promptPreview: string;
 }
 
@@ -40,8 +40,10 @@ ${statusSummary}
 
 Rules:
 - Process turns marked [pending] — match by prompt preview above
-- Re-evaluate turns marked [stale] — user undid changes
-- Do NOT re-process [extracted] or [skipped] turns
+- Re-evaluate turns marked [stale] — user undid changes:
+  - If the turn is part of an undone branch (sidechain), call save_turn with status="undone" (no title/description/observations)
+  - If the turn is still valid with changed context, re-extract normally
+- Do NOT re-process [extracted], [skipped], or [undone] turns
 
 WHAT TO RECORD
 --------------

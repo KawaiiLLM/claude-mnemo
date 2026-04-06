@@ -65,7 +65,7 @@ describe("handleSessionInitHook", () => {
     expect(extractAssistantResponse).not.toHaveBeenCalled();
   });
 
-  test("second prompt backfills the previous turn and triggers extraction", async () => {
+  test("second prompt only inserts another pending turn", async () => {
     const forkMnemosyne = mock(async () => {});
     const extractAssistantResponse = mock(
       () => "I found a race condition in token refresh.",
@@ -93,26 +93,14 @@ describe("handleSessionInitHook", () => {
     const firstTurn = getTurn(db, session.id, 1)!;
     const secondTurn = getTurn(db, session.id, 2)!;
 
-    expect(extractAssistantResponse).toHaveBeenCalledWith(
-      "/tmp/session.jsonl",
-      "Diagnose the auth race",
-      1,
-    );
-    expect(firstTurn.assistantResponse).toBe(
-      "I found a race condition in token refresh.",
-    );
+    expect(extractAssistantResponse).not.toHaveBeenCalled();
+    expect(firstTurn.assistantResponse).toBeNull();
+    expect(firstTurn.status).toBe("pending");
     expect(secondTurn.status).toBe("pending");
-    expect(forkMnemosyne).toHaveBeenCalledTimes(1);
-    expect(forkMnemosyne.mock.calls[0]?.[0]).toMatchObject({
-      sessionId: "session-1",
-      cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
-    });
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      '#1 [pending]: "Diagnose the auth race"',
-    );
+    expect(forkMnemosyne).not.toHaveBeenCalled();
   });
 
-  test("does not retrigger extraction when the previous turn is already extracted", async () => {
+  test("does not do any transcript work even when previous turn is already extracted", async () => {
     const forkMnemosyne = mock(async () => {});
     const extractAssistantResponse = mock(() => "already handled");
     const handler = createSessionInitHandler({

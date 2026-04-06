@@ -85,6 +85,38 @@ describe("MCP write tools", () => {
     expect(getObservationsForTurn(db, turn.id)).toHaveLength(0);
   });
 
+  test("saveTurnTool supports explicit undone status", () => {
+    saveTurnTool(db, {
+      session_id: sessionId,
+      prompt_number: 3,
+      user_prompt: "Undone branch",
+      assistant_response: "No longer part of the final path.",
+      title: "Temporary branch",
+      description: "Will be cleared",
+      observations: [
+        {
+          type: "change",
+          title: "Temporary change",
+        },
+      ],
+      created_at_epoch: 230,
+      updated_at_epoch: 235,
+    });
+
+    const result = saveTurnTool(db, {
+      session_id: sessionId,
+      prompt_number: 3,
+      status: "undone",
+      updated_at_epoch: 240,
+    });
+
+    const turn = getTurn(db, sessionId, 3)!;
+
+    expect(result.content[0]?.text).toContain("status undone");
+    expect(turn.status).toBe("undone");
+    expect(getObservationsForTurn(db, turn.id)).toHaveLength(0);
+  });
+
   test("updateSessionTool updates the session summary", () => {
     const result = updateSessionTool(db, {
       session_id: sessionId,

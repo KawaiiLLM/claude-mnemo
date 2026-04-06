@@ -164,4 +164,212 @@ describe("replayMemory", () => {
 
     expect(output).toBe("Transcript not found.");
   });
+
+  test("shows undone turns in replay overview using DB status while preserving sidechain numbering", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Old draft response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Ship the final fix" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Final response after undo." }],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'undone', ?, ?, ?)`,
+    ).run(
+      sessionId,
+      1,
+      "Draft approach",
+      "Old draft response",
+      110,
+    );
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'pending', ?, ?, ?)`,
+    ).run(
+      sessionId,
+      2,
+      "Ship the final fix",
+      "Final response after undo.",
+      120,
+    );
+
+    const output = replayMemory(db, {
+      session: sessionId,
+      transcriptPath: transcript.path,
+    });
+
+    expect(output).toContain("[T1][undone] #1 Draft approach");
+    expect(output).toContain("[T2] #2 Ship the final fix");
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
+  test("shows undone turn transcript instead of reporting it unavailable", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Old draft response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Ship the final fix" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Final response after undo." }],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'undone', ?, ?, ?)`,
+    ).run(
+      sessionId,
+      1,
+      "Draft approach",
+      "Old draft response",
+      110,
+    );
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'pending', ?, ?, ?)`,
+    ).run(
+      sessionId,
+      2,
+      "Ship the final fix",
+      "Final response after undo.",
+      120,
+    );
+
+    const output = replayMemory(db, {
+      session: sessionId,
+      turn: 1,
+      transcriptPath: transcript.path,
+    });
+
+    expect(output).toContain('[T1][undone] #1');
+    expect(output).toContain('prompt: "Draft approach"');
+    expect(output).toContain('response: "Old draft response"');
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
+  test("disambiguates repeated prompts by preserving sidechain turns in replay numbering", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "repeat" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "discarded response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "repeat" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "kept response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "repeat" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "latest response" }],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'undone', ?, ?, ?)`,
+    ).run(sessionId, 1, "repeat", "discarded response", 110);
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'extracted', ?, ?, ?)`,
+    ).run(sessionId, 2, "repeat", "kept response", 120);
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, 'pending', ?, ?, ?)`,
+    ).run(sessionId, 3, "repeat", "latest response", 130);
+
+    const output = replayMemory(db, {
+      session: sessionId,
+      turn: 3,
+      transcriptPath: transcript.path,
+    });
+
+    expect(output).toContain('[T3] #3');
+    expect(output).toContain('response: "latest response"');
+    expect(output).not.toContain('response: "kept response"');
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
 });

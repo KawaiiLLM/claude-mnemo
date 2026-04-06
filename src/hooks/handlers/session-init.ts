@@ -1,13 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
-import { getTurn, getTurnsForSession } from "../../db/turns";
+import { getTurnsForSession } from "../../db/turns";
 import { extractAssistantResponse } from "../../shared/transcript-parser";
 import { forkMnemosyne } from "../../mnemosyne/fork";
-import {
-  buildExtractionStatusSummary,
-  buildMnemosynePrompt,
-} from "../../mnemosyne/prompt";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
@@ -33,18 +29,6 @@ function createPendingTurn(
       created_at_epoch
     ) VALUES (?, ?, 'pending', ?, ?)`,
   ).run(sessionId, promptNumber, prompt, createdAtEpoch);
-}
-
-function buildSessionStatusPrompt(db: Database, sessionId: number): string {
-  const statusSummary = buildExtractionStatusSummary(
-    getTurnsForSession(db, sessionId).map((turn) => ({
-      promptNumber: turn.promptNumber,
-      status: turn.status as "pending" | "stale" | "extracted" | "skipped",
-      promptPreview: turn.userPrompt ?? "",
-    })),
-  );
-
-  return buildMnemosynePrompt(statusSummary);
 }
 
 export function createSessionInitHandler(
@@ -84,37 +68,9 @@ export function createSessionInitHandler(
       now(),
     );
 
-    if (promptNumber > 1) {
-      const previousTurn = getTurn(dependencies.db, session.id, promptNumber - 1);
-
-      if (previousTurn?.status === "pending") {
-        const assistantResponse =
-          input.transcriptPath && previousTurn.userPrompt
-            ? dependencies.extractAssistantResponse(
-                input.transcriptPath,
-                previousTurn.userPrompt,
-                previousTurn.promptNumber,
-              )
-            : "";
-
-        dependencies.db
-          .query(
-            "UPDATE turns SET assistant_response = ? WHERE id = ?",
-          )
-          .run(assistantResponse, previousTurn.id);
-
-        void dependencies.forkMnemosyne({
-          sessionId: input.sessionId,
-          cwd: input.cwd,
-          prompt: buildSessionStatusPrompt(dependencies.db, session.id),
-        });
-      }
-    }
-
     return {
       continue: true,
       suppressOutput: true,
     };
   };
 }
-

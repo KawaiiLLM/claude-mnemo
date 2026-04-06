@@ -12,6 +12,7 @@ type ToolTextResult = {
 export interface SaveTurnToolInput {
   session_id: number;
   prompt_number: number;
+  status?: "undone";
   user_prompt?: string;
   assistant_response?: string;
   title?: string;
@@ -51,6 +52,7 @@ export function saveTurnTool(
   const turn = saveTurn(db, {
     sessionId: input.session_id,
     promptNumber: input.prompt_number,
+    status: input.status,
     userPrompt: input.user_prompt ?? null,
     assistantResponse: input.assistant_response ?? null,
     title: input.title ?? null,

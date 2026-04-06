@@ -28,42 +28,52 @@ function buildStopPrompt(db: Database, sessionDbId: number): string {
     buildExtractionStatusSummary(
       getTurnsForSession(db, sessionDbId).map((turn) => ({
         promptNumber: turn.promptNumber,
-        status: turn.status as "pending" | "stale" | "extracted" | "skipped",
+        status: turn.status as
+          | "pending"
+          | "stale"
+          | "extracted"
+          | "skipped"
+          | "undone",
         promptPreview: turn.userPrompt ?? "",
       })),
     ),
   );
 }
 
-function backfillLastPendingTurn(
+function backfillPendingTurns(
   db: Database,
   input: NormalizedHookInput,
   transcriptReader: typeof extractAssistantResponse,
   sessionDbId: number,
 ): void {
-  const turns = getTurnsForSession(db, sessionDbId);
-  const lastPendingTurn = [...turns]
-    .reverse()
-    .find((turn) => turn.status === "pending");
+  const pendingTurns = getPendingTurns(db, sessionDbId).filter(
+    (turn) => turn.status === "pending",
+  );
 
-  if (!lastPendingTurn) {
+  if (pendingTurns.length === 0) {
     return;
   }
 
-  const assistantResponse =
-    input.lastAssistantMessage ??
-    (input.transcriptPath && lastPendingTurn.userPrompt
-      ? transcriptReader(
-          input.transcriptPath,
-          lastPendingTurn.userPrompt,
-          lastPendingTurn.promptNumber,
-        )
-      : "");
+  const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
 
-  db.query("UPDATE turns SET assistant_response = ? WHERE id = ?").run(
-    assistantResponse,
-    lastPendingTurn.id,
-  );
+  for (const pendingTurn of pendingTurns) {
+    const assistantResponse =
+      pendingTurn.promptNumber === lastPendingPromptNumber &&
+      input.lastAssistantMessage !== undefined
+        ? input.lastAssistantMessage
+        : input.transcriptPath && pendingTurn.userPrompt
+          ? transcriptReader(
+              input.transcriptPath,
+              pendingTurn.userPrompt,
+              pendingTurn.promptNumber,
+            )
+          : "";
+
+    db.query("UPDATE turns SET assistant_response = ? WHERE id = ?").run(
+      assistantResponse,
+      pendingTurn.id,
+    );
+  }
 }
 
 function detectUndoPromptNumbers(
@@ -77,7 +87,11 @@ function detectUndoPromptNumbers(
   }
 
   return getTurnsForSession(db, sessionDbId)
-    .filter((turn) => turn.status === "extracted" && turn.userPrompt)
+    .filter(
+      (turn) =>
+        (turn.status === "extracted" || turn.status === "skipped") &&
+        turn.userPrompt,
+    )
     .filter((turn) => {
       const currentResponse = transcriptReader(
         transcriptPath,
@@ -119,7 +133,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       };
     }
 
-    backfillLastPendingTurn(
+    backfillPendingTurns(
       dependencies.db,
       input,
       dependencies.extractAssistantResponse,
@@ -166,4 +180,3 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     };
   };
 }
-

@@ -185,7 +185,7 @@ describe("claude-mnemo smoke test", () => {
     });
 
     const session = getSessionByContentId(db, "session-e2e")!;
-    expect(getTurn(db, session.id, 1)?.status).toBe("extracted");
+    expect(getTurn(db, session.id, 1)?.status).toBe("pending");
     expect(getTurn(db, session.id, 2)?.status).toBe("pending");
 
     await stopHandler({
@@ -198,6 +198,7 @@ describe("claude-mnemo smoke test", () => {
       raw: {},
     });
 
+    expect(getTurn(db, session.id, 1)?.status).toBe("extracted");
     expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 

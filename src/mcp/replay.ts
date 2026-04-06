@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 
 import { getSession } from "../db/sessions";
-import { parseReplayTranscript } from "../shared/transcript-parser";
+import { getTurnsForSession } from "../db/turns";
+import {
+  parseReplayTranscript,
+} from "../shared/transcript-parser";
 import { resolveTranscriptPath } from "../shared/paths";
 
 const TOOL_RESULT_PREVIEW_LIMIT = 500;
@@ -41,17 +44,6 @@ function resolveReplayTranscriptPath(
   return resolveTranscriptPath(session.project, session.contentSessionId);
 }
 
-function formatTurnOverview(
-  turns: ReturnType<typeof parseReplayTranscript>,
-): string {
-  return turns
-    .map(
-      (turn) =>
-        `[T${turn.promptNumber}] #${turn.promptNumber} ${turn.userPrompt}`,
-    )
-    .join("\n");
-}
-
 function formatToolBlock(
   index: number,
   toolCall: ReturnType<typeof parseReplayTranscript>[number]["toolCalls"][number],
@@ -64,12 +56,31 @@ function formatToolBlock(
   ].join("\n");
 }
 
+function formatTurnOverviewLine(
+  promptNumber: number,
+  userPrompt: string,
+  status?: string,
+): string {
+  const label =
+    status === "undone"
+      ? `[T${promptNumber}][undone] #${promptNumber}`
+      : `[T${promptNumber}] #${promptNumber}`;
+
+  return `${label} ${userPrompt}`;
+}
+
 function formatTurnDetail(
   turn: ReturnType<typeof parseReplayTranscript>[number],
+  promptNumber: number,
+  status?: string,
   full = false,
 ): string {
+  const header =
+    status === "undone"
+      ? `[T${promptNumber}][undone] #${promptNumber}`
+      : `[T${promptNumber}] #${promptNumber}`;
   const lines = [
-    `[T${turn.promptNumber}] #${turn.promptNumber}`,
+    header,
     `prompt: "${turn.userPrompt}"`,
     `response: "${turn.assistantText}"`,
   ];
@@ -88,20 +99,35 @@ export function replayMemory(db: Database, input: ReplayInput): string {
     return "Transcript not found.";
   }
 
-  const turns = parseReplayTranscript(transcriptPath);
+  const transcriptTurns = parseReplayTranscript(transcriptPath);
+  const session = getSession(db, input.session);
+  const dbTurns = session ? getTurnsForSession(db, session.id) : [];
+  const statusByPromptNumber = new Map(
+    dbTurns.map((turn) => [turn.promptNumber, turn.status]),
+  );
 
   if (input.turn === undefined) {
-    return formatTurnOverview(turns);
+    return transcriptTurns
+      .map((turn) =>
+        formatTurnOverviewLine(
+          turn.promptNumber,
+          turn.userPrompt,
+          statusByPromptNumber.get(turn.promptNumber),
+        ),
+      )
+      .join("\n");
   }
 
-  const turn = turns.find((candidate) => candidate.promptNumber === input.turn);
+  const resolvedTurn =
+    transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ??
+    null;
 
-  if (!turn) {
+  if (!resolvedTurn) {
     return "Turn not found.";
   }
 
   if (input.tool !== undefined) {
-    const toolCall = turn.toolCalls[input.tool - 1];
+    const toolCall = resolvedTurn.toolCalls[input.tool - 1];
 
     if (!toolCall) {
       return "Tool call not found.";
@@ -110,5 +136,10 @@ export function replayMemory(db: Database, input: ReplayInput): string {
     return formatToolBlock(input.tool, toolCall, input.full);
   }
 
-  return formatTurnDetail(turn, input.full);
+  return formatTurnDetail(
+    resolvedTurn,
+    input.turn,
+    statusByPromptNumber.get(input.turn),
+    input.full,
+  );
 }

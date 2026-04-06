@@ -16,6 +16,7 @@ export interface ObservationInput {
 export interface SaveTurnInput {
   sessionId: number;
   promptNumber: number;
+  status?: "undone";
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
@@ -129,7 +130,12 @@ function deleteObservationFts(db: Database, turnId: number): void {
 }
 
 export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
-  const status = hasExtractedContent(input) ? "extracted" : "skipped";
+  const status =
+    input.status === "undone"
+      ? "undone"
+      : hasExtractedContent(input)
+        ? "extracted"
+        : "skipped";
 
   db.exec("BEGIN");
 
