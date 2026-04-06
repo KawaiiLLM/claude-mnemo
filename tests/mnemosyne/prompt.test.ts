@@ -63,6 +63,12 @@ describe("buildMnemosynePrompt", () => {
     const prompt = buildMnemosynePrompt('#1 [pending]: "Fix auth"');
 
     expect(prompt).toContain("Call update_session if the session summary needs updating");
+    expect(prompt).toContain(
+      "Include next_steps when the session has a clear trajectory or planned follow-up.",
+    );
+    expect(prompt).toContain(
+      "next_steps: what was actively being worked on or planned next (not speculative future work).",
+    );
     expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
     expect(prompt).toContain('Good example: save_turn({');
     expect(prompt).toContain(

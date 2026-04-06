@@ -47,6 +47,8 @@ Rules:
   - If the turn is still valid with changed context, re-extract normally
 - Do NOT re-process [extracted], [skipped], or [undone] turns
 - Call update_session if the session summary needs updating.
+- Include next_steps when the session has a clear trajectory or planned follow-up.
+- next_steps: what was actively being worked on or planned next (not speculative future work).
 - Skip update_session if nothing meaningful changed.
 
 WHAT TO RECORD

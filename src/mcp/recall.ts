@@ -118,7 +118,7 @@ function buildFormattedTurn(
   return formattedTurn;
 }
 
-function buildFormattedSession(
+export function buildFormattedSession(
   db: Database,
   sessionId: number,
   expandTurns: number[] = [],
