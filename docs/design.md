@@ -9,7 +9,7 @@ Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured me
 1. **Memory is refined, anchored by raw previews.** The database stores extracted insights (title, description, insight, narrative) plus raw `user_prompt` / `assistant_response` per turn for anchoring and preview. Full transcripts live in session `.jsonl` files and are accessible via `replay`.
 2. **Progressive disclosure.** Memory is organized as a tree (session → turn → observation) that can be expanded on demand. Each level provides just enough to decide whether to drill deeper.
 3. **Cache-preserving extraction.** Mnemosyne inherits the main agent's full tool set to maximize prompt cache hits from `forkSession`. Tool constraints are enforced via prompt, not `disallowedTools`.
-4. **Incremental processing.** Memories are extracted per QA turn, not batched at session end. This makes the system resilient to crashes, compacts, and long sessions.
+4. **Separation of concerns.** UserPromptSubmit only inserts pending turns. Stop reconciles (backfill, undo detection) and extracts via Mnemosyne. PreCompact provides a safety net before context compression. SessionStart only injects context (no LLM calls). Each hook has one clear responsibility.
 5. **Zero external dependencies.** No vector DB, no Python, no HTTP Worker. SQLite + FTS5 + Bun only.
 
 ---
@@ -90,11 +90,14 @@ Derived from real Claude Code session data (~2,600 chars/turn average, ~5% compr
 ```
 pending ──→ extracted    (save_turn with content)
 pending ──→ skipped      (save_turn with empty fields)
-extracted ─→ stale       (undo detected)
-skipped ──→ stale        (undo detected)
-stale ────→ extracted    (re-evaluated with content)
-stale ────→ skipped      (re-evaluated, still not worth recording)
+extracted ─→ stale       (undo detected, transient)
+skipped ──→ stale        (undo detected, transient)
+stale ────→ extracted    (Mnemosyne re-evaluated: still valid)
+stale ────→ skipped      (Mnemosyne re-evaluated: still not worth recording)
+stale ────→ undone       (Mnemosyne confirmed: undone historical branch)
 ```
+
+`stale` is a transient queue state (like `pending`) — it only appears after undo detection and must be resolved by Mnemosyne. `undone` is a stable archive state — the turn was part of an undone branch but is preserved for history. Undone turns retain their `promptNumber` and remain in the DB, ensuring DB numbering always matches the JSONL transcript sequence (which includes sidechain entries).
 
 ### Raw Data Fields
 
@@ -103,7 +106,7 @@ stale ────→ skipped      (re-evaluated, still not worth recording)
 | Field | Source | Timing |
 |-------|--------|--------|
 | `user_prompt` | Hook stdin `prompt` field | session-init creates turn |
-| `assistant_response` | Parsed from `transcript_path` JSONL | session-init extracts prev turn; Stop hook uses `last_assistant_message` for final turn |
+| `assistant_response` | Parsed from `transcript_path` JSONL | Stop/PreCompact backfill from JSONL; Stop uses `last_assistant_message` for final turn |
 
 These fields serve two purposes:
 1. **Anchor for Mnemosyne** — extraction status includes prompt preview so Mnemosyne can match turns to conversation context
@@ -199,11 +202,13 @@ Output format — indented tags, optimized for LLM consumption:
 **`replay`** — Raw transcript playback
 
 ```
-replay(session=142)                → turn overview with prompt previews
+replay(session=142)                → turn overview (includes undone turns marked [undone])
 replay(session=142, turn=3)        → full QA transcript for turn 3
 replay(session=142, turn=3, tool=2) → single tool call detail
 replay(session=142, turn=3, full=true) → no truncation on tool_result
 ```
+
+Replay includes sidechain (undo'd) entries from the JSONL — it does NOT filter `isSidechain`. This ensures `promptNumber` in the replay output always matches the DB's `promptNumber`. The `[undone]` marker is determined by the DB turn's `status` field (not by `isSidechain` in the JSONL — a sidechain entry may still be re-extracted as valid). This is intentional: replay is raw transcript playback, and undo history is part of that record.
 
 ### Write Tools (used by Mnemosyne only)
 
@@ -219,6 +224,9 @@ save_turn({ session_id: 1, prompt_number: 3, title: "补充单测",
 
 // Skip (empty fields → status='skipped')
 save_turn({ session_id: 1, prompt_number: 4 })
+
+// Mark undone (explicit status, no content)
+save_turn({ session_id: 1, prompt_number: 2, status: "undone" })
 ```
 
 **`update_session`** — Update session-level summary
@@ -298,8 +306,11 @@ EXTRACTION STATUS
 
 Rules:
 - Process [pending] and [stale] turns — match by prompt preview above
-- Skip [extracted] and [skipped] turns
-- Use save_turn() to record or skip each turn
+- Skip [extracted], [skipped], and [undone] turns
+- For [stale] turns: determine if it was undone (sidechain branch) or still valid
+  - If undone: call save_turn with explicit status: "undone" (no title/description/observations)
+  - If still valid: re-extract normally with updated content
+- Use save_turn() to record, skip, or mark undone each turn
 - Call update_session() if the session summary needs updating
   (new topic, significant progress, or session ending)
 - If context was compacted, use replay() to recover detail
@@ -341,37 +352,40 @@ Total:  ~750-950 tokens output for a 4-turn session
 | Hook Event | Matcher | Handler | Timeout | Purpose |
 |------------|---------|---------|---------|---------|
 | PreCompact | `manual\|auto` | `compact` | 30s | Extract pending turns BEFORE context compression |
-| SessionStart | `startup\|resume\|clear\|compact` | `context` | 10s | Inject recent memories + recover orphaned turns |
-| UserPromptSubmit | `*` | `session-init` | 10s | Upsert session + fire-and-forget extract prev turn |
-| Stop | `*` | `stop` | 120s | Await extraction of remaining turns + session summary |
+| SessionStart | `startup\|resume\|clear\|compact` | `context` | 10s | Inject recent memories (no extraction, no LLM calls) |
+| UserPromptSubmit | `*` | `session-init` | 10s | Upsert session + insert pending turn (no extraction) |
+| Stop | `*` | `stop` | 120s | Backfill all turns + undo detection + await Mnemosyne extraction |
 
-`StopFailure` is intentionally not handled — failed turns stay `pending` and are recovered via `SessionStart[resume]`.
+`StopFailure` is intentionally not handled — failed turns stay `pending` and are recovered at the next session's Stop.
+
+`SessionEnd` is intentionally not handled — at session end the prompt cache is cold, making Mnemosyne forks expensive (~$0.75 per fork for a 50k token session). Stop already handles extraction at session end. If Stop didn't fire (crash/force-quit), pending turns are recovered at the next session's Stop.
 
 Note: `PreCompact` fires **before** compaction (with `trigger: "manual"|"auto"`), unlike `SessionStart[compact]` which fires after. Known bug: `transcript_path` may be empty in PreCompact (Issue #13668) — fallback to constructing path from `session_id`.
 
-The `context` handler on `SessionStart[resume]` also scans for orphaned pending turns from prior interrupted sessions (where Stop hook didn't fire) and triggers recovery extraction.
+SessionStart does NOT trigger Mnemosyne or any LLM API calls — at startup there is no prompt cache, and the user may just be browsing. Orphaned pending turns from prior crashed sessions are handled when the session ends normally via Stop.
 
 ### Extraction Timeline
+
+**Principle**: UserPromptSubmit only inserts. Stop reconciles and extracts. PreCompact is a safety net for long sessions. Orphaned pending turns from crashes are recovered at the next session's Stop.
 
 ```
 User prompt #1  → session-init: create session, insert turn #1 (pending, user_prompt from stdin)
   Agent works...
 User prompt #2  → session-init: insert turn #2 (pending, user_prompt from stdin)
-                   parse JSONL → backfill turn #1 assistant_response
-                   fork Mnemosyne for turn #1
   Agent works...
 User prompt #3  → session-init: insert turn #3 (pending, user_prompt from stdin)
-                   parse JSONL → backfill turn #2 assistant_response
-                   fork Mnemosyne for turn #2
   Agent works...
-PreCompact      → compact handler: parse JSONL → backfill turn #3 assistant_response
-                   fork Mnemosyne for turn #3 (before context compressed)
+PreCompact      → compact handler: backfill assistant_response for all pending turns from JSONL
+                   fork Mnemosyne for pending turns (before context compressed)
   Agent works (compacted context)...
-User prompt #4  → session-init: insert turn #4 (pending), no prev pending
+User prompt #4  → session-init: insert turn #4 (pending, user_prompt from stdin)
   Agent works...
-User exits      → stop handler: backfill turn #4 via last_assistant_message from stdin
-                   fork Mnemosyne for turn #4 + update_session
+User exits      → stop handler: backfill all pending turns' assistant_response
+                   detect undos → mark stale
+                   await Mnemosyne (extract pending/stale + update_session)
 ```
+
+This means extraction is batched to PreCompact and Stop, not incremental per-turn. For typical sessions (3-8 turns), Stop handles everything. For long sessions that hit compaction, PreCompact prevents data loss before context is compressed.
 
 ### Prompt Number Tracking
 
@@ -392,7 +406,12 @@ WHERE session_id = ? AND status IN ('extracted', 'skipped')
   AND prompt_number IN (/* turns whose context changed due to undo */)
 ```
 
-Mnemosyne then sees `[stale]` turns in the extraction status and re-evaluates them.
+`stale` is a **transient** queue state — Mnemosyne must resolve every stale turn to one of:
+- `extracted` — re-evaluated, turn is still valid with updated content
+- `skipped` — re-evaluated, still not worth recording
+- `undone` — confirmed as an undone historical branch
+
+Mnemosyne makes this judgment by examining the inherited conversation context. If the turn's prompt is part of a sidechain (undo'd branch), it calls `save_turn` with `status: "undone"`. Undone turns are preserved in the DB with their original `promptNumber`, maintaining alignment with the JSONL transcript sequence.
 
 ### Re-extraction Semantics
 
@@ -400,11 +419,13 @@ When `save_turn` is called for a `stale` or already-`extracted` turn, it perform
 
 1. DELETE existing observations for the turn
 2. DELETE existing FTS rows for the turn and its observations
-3. INSERT new observations
-4. INSERT new FTS rows
+3. INSERT new observations (if status is `extracted`)
+4. INSERT new FTS rows (if status is `extracted`)
 5. UPDATE turn fields (title, description, insight, status)
 
 All within a single transaction. This prevents duplicate observations and stale search results.
+
+When the resulting status is `undone`, steps 3-4 are skipped — the turn has no observations and is excluded from FTS. The turn row is retained with its original `promptNumber` to preserve DB↔JSONL alignment.
 
 ### Edge Cases
 
@@ -416,7 +437,7 @@ Mnemosyne handles this via its skip guidance ("Aborted work with no outcome"). F
 
 #### StopFailure (API Error)
 
-When Claude encounters an API error, `StopFailure` fires instead of `Stop`. We do NOT add a `StopFailure` handler — the failed turn stays `pending` and is recovered via `SessionStart[resume]` recovery on the next session start. This avoids duplicating Stop logic for a rare case.
+When Claude encounters an API error, `StopFailure` fires instead of `Stop`. We do NOT add a `StopFailure` handler — the failed turn stays `pending` and is recovered at the next session's Stop. This avoids duplicating Stop logic for a rare case.
 
 #### /clear Mid-Session
 
@@ -424,13 +445,11 @@ When Claude encounters an API error, `StopFailure` fires instead of `Stop`. We d
 
 #### Fork Failure (Timeout / Error)
 
-Fire-and-forget Mnemosyne forks may fail silently (network error, timeout, MCP server crash). The affected turn stays `pending`. It will be retried at:
-- Next `UserPromptSubmit` (session-init checks for pending previous turns)
-- `PreCompact` (extracts all pending turns)
-- `Stop` (extracts all remaining turns)
-- `SessionStart[resume]` (recovery on next session start)
+Mnemosyne forks (at PreCompact or Stop) may fail silently (network error, timeout, MCP server crash). The affected turn stays `pending`. It will be retried at:
+- `PreCompact` (extracts all pending turns before compression)
+- `Stop` (extracts all remaining turns at session end)
 
-This multi-layered retry ensures no turn is permanently lost — at worst, extraction is delayed.
+If both fail (session crashes without Stop firing), pending turns are carried over to the next session and processed at the next Stop. No turn is permanently lost — at worst, extraction is delayed to the next session's end.
 
 #### Concurrent Mnemosyne Forks
 
@@ -516,7 +535,7 @@ entry.message.content
 
 | Hook | `user_prompt` source | `assistant_response` source |
 |------|---------------------|---------------------------|
-| UserPromptSubmit | stdin `prompt` field (current turn) | Parse JSONL backwards for prev turn |
+| UserPromptSubmit | stdin `prompt` field (current turn) | — (insert only, no backfill) |
 | PreCompact | Already in DB | Parse JSONL backwards for current turn (note: `transcript_path` may be empty — fallback to constructed path) |
 | Stop | Already in DB | stdin `last_assistant_message` (v2.1.47+), fallback to JSONL |
 
@@ -524,12 +543,12 @@ entry.message.content
 
 | Edge Case | Strategy |
 |-----------|----------|
-| `isSidechain: true` | Filter out — these are undo'd branches |
+| `isSidechain: true` | Filter out for `extractAssistantResponse` (backfill only wants current response). **Include** in `parseReplayTranscript` (replay shows full history, preserves numbering alignment with DB). |
 | `isApiErrorMessage: true` | Filter out — not real assistant responses |
 | `compact_boundary` | No special handling needed — we parse backwards from end |
 | `parentUuid` DAG | No DAG traversal — linear backwards scan is sufficient |
 
-This matches claude-mem's approach: simple linear backwards scan with minimal filtering. Claude-mem does not filter sidechain or API errors either, but we add these two checks defensively (two lines of code, near-zero cost).
+**Why replay includes sidechain entries**: DB assigns `promptNumber` at UserPromptSubmit time via `count + 1`. If an undo occurs, the undo'd prompt still has a DB turn (marked `stale` → `undone`). The JSONL retains the entry as `isSidechain: true`. By including sidechain entries in replay's transcript parsing, promptNumbers naturally align between DB and JSONL — no mapping layer needed. Undone turns are displayed with an `[undone]` marker based on DB turn `status` (not JSONL `isSidechain`).
 
 ### Matching Turn to JSONL Entry
 
@@ -561,7 +580,7 @@ Injected memories are wrapped in `<claude-mnemo-context>` tags to prevent recurs
 | Aspect | Claude-Mem | Claude-Mnemo |
 |--------|-----------|--------------|
 | Memory granularity | Per tool call (observation) | Per QA turn (turn + observations) |
-| Extraction trigger | PostToolUse hook (every tool call) | UserPromptSubmit (prev turn) + Stop (final) |
+| Extraction trigger | PostToolUse hook (every tool call) | PreCompact + Stop (batch extraction via Mnemosyne) |
 | Agent architecture | Separate Worker HTTP API + SDK Agent | forkSession directly from hooks |
 | LLM invocation | Dedicated SDK Agent with disallowedTools | Mnemosyne via forkSession, same tool set |
 | Cache efficiency | Separate session, no cache sharing | Same tool set → prompt cache hit |
@@ -585,4 +604,4 @@ Injected memories are wrapped in `<claude-mnemo-context>` tags to prevent recurs
 - **Exit code strategy** (0=success, 1=non-blocking, 2=blocking)
 - **Worktree detection** via `.git` file parsing
 - **Tag stripping with ReDoS protection** (max 100 tags)
-- **Fire-and-forget** pattern for non-blocking extraction at UserPromptSubmit
+- **Batch extraction** at natural checkpoints (PreCompact before compression, Stop at session end)

@@ -13,16 +13,18 @@
 - **Prompt caching**: Cache key = `hash(tools + system + messages_prefix)`. forkSession inherits the main session's message prefix. Keeping the tool set identical means cache hit on the full conversation context (~free input tokens). Changing `disallowedTools` would break all cache (~$0.75/fork for a 50k token session).
 - **Compact handling**: `PreCompact` hook (matcher: `manual|auto`) triggers extraction of pending turns BEFORE context is compressed. Known bug: `transcript_path` may be empty in PreCompact (Issue #13668) — fallback to constructing path from `session_id`. Mnemosyne can also call `replay()` to recover original transcript if needed.
 - **Hook re-entry prevention**: forkSession subprocess loads the same plugins/hooks. Guard in `hook-command.ts`: `if (process.env.CLAUDE_CODE_ENTRYPOINT === 'sdk-ts') process.exit(0)`. Mnemosyne's `env.ts` strips `CLAUDECODE` and sets `CLAUDE_CODE_ENTRYPOINT=sdk-ts`.
-- **Resume recovery**: `SessionStart[resume]` context handler scans for orphaned pending turns from prior interrupted sessions (where Stop didn't fire, or StopFailure fired instead) and triggers recovery extraction. `StopFailure` is intentionally not handled — recovery is deferred to resume.
-- **Re-extraction semantics**: `save_turn` on stale/extracted turns does DELETE-then-INSERT for observations + FTS rows within one transaction. No duplicate observations.
+- **No SessionStart extraction**: SessionStart does NOT trigger Mnemosyne — no prompt cache at startup, and user may just be browsing. Orphaned pending turns from crashed sessions are processed at the next Stop. `StopFailure` is intentionally not handled — recovery deferred to next normal Stop.
+- **Re-extraction semantics**: `save_turn` on stale/extracted turns does DELETE-then-INSERT for observations + FTS rows within one transaction. No duplicate observations. For `undone` turns, observations and FTS are cleared but the turn row is retained.
+- **Undo lifecycle**: `stale` is transient (queue state for Mnemosyne re-evaluation). Mnemosyne resolves stale turns to `extracted`, `skipped`, or `undone`. `undone` is a stable archive state — the turn is preserved with its original `promptNumber` for DB↔JSONL alignment.
+- **Hook responsibility separation**: UserPromptSubmit only inserts pending turns (no backfill, no extraction). Stop reconciles (backfill all assistant_response, undo detection) and extracts via Mnemosyne. PreCompact is a safety net for long sessions. SessionStart only injects context (no LLM calls — cold cache makes forking expensive, and user may just be browsing).
 - **SQLite concurrency**: WAL mode + `busy_timeout=5000` + all writes in transactions. No external retry/backoff needed — single-writer contention is bounded by busy_timeout.
 - **Prompt number tracking**: Claude Code's hook stdin does NOT provide `prompt_number`. We track it internally by counting `UserPromptSubmit` calls per `session_id` in the DB.
 - **Bun runtime**: All compiled scripts (.cjs) use `bun:sqlite` and must run via Bun. A `bun-runner.js` wrapper auto-detects/installs Bun and invokes scripts.
 - **FTS5 sync**: FTS indexing is integrated into `saveTurn()` and `upsertSession()` — not via triggers, not as a separate step.
 - **save_turn skip convention**: Calling `save_turn` with no title/description/observations = skip (status='skipped'). No separate `skip_turn` tool needed.
 - **Mnemosyne prompt**: English, following claude-mem patterns (observer role, verb-focused recording, explicit skip conditions). Instructs agent to only use save_turn, update_session, recall, replay — never Read/Write/Edit/Bash. Extraction status uses prompt previews (first ~80 chars of `user_prompt`) as anchors, not titles.
-- **Raw data in turns**: `user_prompt` stored at turn creation (from hook stdin). `assistant_response` backfilled by hook via JSONL parsing (UserPromptSubmit/compact) or `last_assistant_message` from stdin (Stop). These fields are populated by hook layer, NOT by Mnemosyne.
-- **Transcript parsing**: Linear backwards scan of JSONL, filter `isSidechain`/`isApiErrorMessage`, extract only `text` blocks from assistant content. Matches claude-mem's approach (no DAG traversal, no compact_boundary handling).
+- **Raw data in turns**: `user_prompt` stored at turn creation (from hook stdin). `assistant_response` backfilled by hook via JSONL parsing (Stop/PreCompact) or `last_assistant_message` from stdin (Stop). These fields are populated by hook layer, NOT by Mnemosyne.
+- **Transcript parsing**: Two modes: (1) `extractAssistantResponse` filters `isSidechain`/`isApiErrorMessage` for backfill (only current response). (2) `parseReplayTranscript` includes ALL entries (no sidechain filter) so replay promptNumbers align with DB. No DAG traversal, no compact_boundary handling.
 
 ---
 
@@ -50,7 +52,7 @@ claude-mnemo/
 │   │   ├── handlers/
 │   │   │   ├── context.ts          # SessionStart: inject memory context
 │   │   │   ├── compact.ts          # PreCompact: extract pending turns before compression
-│   │   │   ├── session-init.ts     # UserPromptSubmit: init session + trigger prev turn extraction
+│   │   │   ├── session-init.ts     # UserPromptSubmit: upsert session + insert pending turn (no extraction)
 │   │   │   └── stop.ts             # Stop: extract last turn + update session
 │   │   └── types.ts                # NormalizedHookInput, HookResult
 │   ├── mnemosyne/
@@ -268,7 +270,7 @@ git commit -m "feat: session CRUD with upsert + FTS sync"
 
 - [ ] **Step 2: Run test — expect FAIL**
 
-- [ ] **Step 3: Implement turns.ts** — `saveTurn()` with skip detection (`hasContent ? 'extracted' : 'skipped'`), atomic transaction wrapping turn upsert + observation insert + FTS indexing. For re-extraction (stale/extracted turns): DELETE existing observations + FTS rows before INSERT within the same transaction. `getTurn()`, `getTurnsForSession()`, `getPendingTurns()`, `markTurnsStale(sessionId, promptNumbers[])`.
+- [ ] **Step 3: Implement turns.ts** — `saveTurn()` with status detection: `hasContent ? 'extracted' : 'skipped'`; also accept explicit `status='undone'` from Mnemosyne (undone turns: clear observations+FTS but retain turn row for DB↔JSONL alignment). Atomic transaction wrapping turn upsert + observation insert + FTS indexing. For re-extraction (stale/extracted turns): DELETE existing observations + FTS rows before INSERT within the same transaction. `getTurn()`, `getTurnsForSession()`, `getPendingTurns()`, `markTurnsStale(sessionId, promptNumbers[])`.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
@@ -316,14 +318,19 @@ git commit -m "feat: observation queries + FTS5 search across all layers"
 - Create: `src/utils/hash.ts`, `src/utils/token-estimate.ts`, `src/utils/worktree.ts`
 - Test: `tests/shared/transcript-parser.test.ts`, `tests/shared/tag-stripping.test.ts`
 
-- [ ] **Step 1: Write transcript parser tests** — extracts turns from JSONL, skips system/empty messages, counts prompt numbers correctly, extracts tool_use blocks within turns. Verify `isSidechain` and `isApiErrorMessage` entries are filtered out. Verify assistant text extraction (only `text` blocks, strips `<system-reminder>` tags).
+- [ ] **Step 1: Write transcript parser tests** — extracts turns from JSONL, skips system/empty messages, counts prompt numbers correctly, extracts tool_use blocks within turns. Test both parsing modes: (1) backfill path (`readTranscriptEntries` / `extractAssistantResponse`) filters out `isSidechain` and `isApiErrorMessage`; (2) replay path (`readAllTranscriptEntries` / `parseReplayTranscript`) retains `isSidechain` entries (only filters `isApiErrorMessage`), preserving promptNumber alignment with DB. Verify assistant text extraction (only `text` blocks, strips `<system-reminder>` tags).
 
 - [ ] **Step 2: Run test — expect FAIL**
 
 - [ ] **Step 3: Implement all shared utilities**
 
 Key files:
-- `transcript-parser.ts`: JSONL → `Turn[]` with `promptNumber`, `userPrompt`, `assistantText`, `toolCalls[]`. Must correctly identify QA turn boundaries (non-empty, non-tool-result user messages). Filter out `isSidechain: true` and `isApiErrorMessage: true` entries. Extract assistant text from `content` array: only `type: 'text'` blocks (skip thinking/tool_use/image), join with `\n`, strip `<system-reminder>` tags, collapse `\n{3,}` to `\n\n`. Provide `extractAssistantResponse(transcriptPath, userPromptPrefix)` for matching a specific turn's response by prompt prefix. **Returns empty string (never throws) when no matching assistant entry found** — handles interrupted turns gracefully.
+- `transcript-parser.ts`: Two parsing modes with different sidechain handling:
+  - `readTranscriptEntries(path)`: filters `isSidechain`/`isApiErrorMessage` — used by `extractAssistantResponse` for backfill (only current response).
+  - `readAllTranscriptEntries(path)`: NO sidechain filter, only filters `isApiErrorMessage` — used by `parseReplayTranscript` so replay promptNumbers align with DB.
+  - `parseTranscript(path)` / `extractAssistantResponse(path, prefix)`: use filtered entries for backfill. Returns empty string (never throws) when no match found.
+  - `parseReplayTranscript(path)`: uses unfiltered entries — includes sidechain turns for promptNumber alignment with DB. The `[undone]` marker comes from DB turn `status`, not `isSidechain`.
+  - Common: extract `text` blocks from assistant content, strip `<system-reminder>`, collapse `\n{3,}`.
 - `paths.ts`: DB path resolution (env → settings → default). Session JSONL path: `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
 - `tag-stripping.ts`: Strip `<private>` and `<claude-mnemo-context>` tags. ReDoS-safe with tag counting (max 100).
 - `logger.ts`: stderr-based, component tags (HOOK/MCP/DB/MNEMOSYNE), lazy init.
@@ -402,11 +409,11 @@ git commit -m "feat: recall tool — tree drill-down, search, filter, timeline"
 - Create: `src/mcp/replay.ts`
 - Test: `tests/mcp/replay.test.ts`
 
-- [ ] **Step 1: Write replay tests** — `replay(session=1)` → turn overview, `replay(session=1, turn=1)` → full QA, `replay(session=1, turn=1, tool=2)` → single tool call, `replay(session=1, turn=1, full=true)` → no truncation, missing JSONL → graceful error.
+- [ ] **Step 1: Write replay tests** — `replay(session=1)` → turn overview, `replay(session=1, turn=1)` → full QA, `replay(session=1, turn=1, tool=2)` → single tool call, `replay(session=1, turn=1, full=true)` → no truncation, missing JSONL → graceful error. Additional tests for undo alignment: DB turns with sidechain'd JSONL entries → replay shows undone turns with `[undone]` marker, `promptNumber` matches DB numbering.
 
 - [ ] **Step 2: Run test — expect FAIL**
 
-- [ ] **Step 3: Implement replay.ts** — resolve JSONL path via `paths.ts`, parse with `transcript-parser.ts`, format for display. Default: truncate tool_result to 500 chars.
+- [ ] **Step 3: Implement replay.ts** — resolve JSONL path via `paths.ts`, parse with `parseReplayTranscript` (includes sidechain entries — no filtering). Uses DB turn `status` field as the authority for `[undone]` markers — not `isSidechain` from JSONL (a sidechain entry may be re-extracted as valid). `promptNumber` in display always matches DB. Default: truncate tool_result to 500 chars.
 
 - [ ] **Step 4: Wire into server.ts**
 
@@ -427,7 +434,7 @@ git commit -m "feat: replay tool — raw transcript playback with truncation"
 - Create: `src/mcp/save-turn.ts`
 - Create: `src/mcp/update-session.ts`
 
-- [ ] **Step 1: Implement save-turn.ts** — MCP tool handler that calls `saveTurn()` from `db/turns.ts`. Input: `{ session_id, prompt_number, title?, description?, insight?, files_read?, files_modified?, observations?[{ type, title, description?, narrative?, facts?[], concepts?[], files_read?[], files_modified?[] }] }`. Empty title+description+observations → skip (status='skipped'). For re-extraction (turn already has status extracted/stale): DELETE existing observations + FTS rows, then INSERT new ones — all within `saveTurn()`'s transaction. Returns confirmation text.
+- [ ] **Step 1: Implement save-turn.ts** — MCP tool handler that calls `saveTurn()` from `db/turns.ts`. Input: `{ session_id, prompt_number, status?, title?, description?, insight?, files_read?, files_modified?, observations?[{ type, title, description?, narrative?, facts?[], concepts?[], files_read?[], files_modified?[] }] }`. Status logic: explicit `status="undone"` → mark as undone (clear observations+FTS, retain turn row); empty title+description+observations → skip (status='skipped'); otherwise → extracted. For re-extraction (turn already has status extracted/stale): DELETE existing observations + FTS rows, then INSERT new ones — all within `saveTurn()`'s transaction. Returns confirmation text.
 
 - [ ] **Step 2: Implement update-session.ts** — MCP tool handler that calls `upsertSession()` with updated title/description/insight. FTS indexing is handled inside `upsertSession()` (not called separately). Returns confirmation text.
 
@@ -501,8 +508,10 @@ EXTRACTION STATUS
 
 Rules:
 - Process turns marked [pending] — match by prompt preview above
-- Re-evaluate turns marked [stale] — user undid changes
-- Do NOT re-process [extracted] or [skipped] turns
+- Re-evaluate turns marked [stale] — user undid changes:
+  - If the turn is part of an undone branch (sidechain), call save_turn with status="undone" (no title/description/observations)
+  - If the turn is still valid with changed context, re-extract normally
+- Do NOT re-process [extracted], [skipped], or [undone] turns
 
 WHAT TO RECORD
 --------------
@@ -559,7 +568,7 @@ git commit -m "feat: Mnemosyne agent — forkSession, English prompt, env isolat
 - Create: `src/hooks/handlers/context.ts`
 - Create: `src/hooks/handlers/compact.ts`
 
-- [ ] **Step 1: Implement context.ts** — query recent sessions from DB, format as compact context string, return as `hookSpecificOutput`. This is how Claude learns memory tools exist. On `source=resume`: also scan for orphaned pending turns from prior interrupted sessions (where Stop didn't fire) and trigger recovery extraction via fire-and-forget Mnemosyne fork.
+- [ ] **Step 1: Implement context.ts** — query recent sessions from DB, format as compact context string, return as `hookSpecificOutput`. This is how Claude learns memory tools exist. No Mnemosyne fork, no LLM calls — SessionStart is read-only.
 
 - [ ] **Step 2: Implement compact.ts** — triggered by `PreCompact` hook (fires BEFORE compaction, with `trigger: "manual"|"auto"`). Query pending turns for current session, if any exist → backfill assistant_response from JSONL → fork Mnemosyne to extract them before context is compressed. **Note**: PreCompact's `transcript_path` may be empty (Bug #13668) — fallback to constructing path from `session_id` via `paths.ts`.
 
@@ -578,27 +587,22 @@ git commit -m "feat: SessionStart context + compact handler for pre-compression 
 - Create: `src/hooks/handlers/session-init.ts`
 - Test: `tests/hooks/session-init.test.ts`
 
-- [ ] **Step 1: Write tests** — first prompt creates session+pending turn (no extraction), second prompt creates pending turn and fire-and-forget extracts previous, existing extracted turn skipped.
+- [ ] **Step 1: Write tests** — first prompt creates session+pending turn, second prompt creates another pending turn. No extraction, no backfill, no Mnemosyne fork. Verify only insert happens.
 
 - [ ] **Step 2: Run test — expect FAIL**
 
 - [ ] **Step 3: Implement session-init.ts**
 
 ```
-1. Parse input (sessionId, cwd, prompt, transcriptPath)
-2. Upsert session in DB
-3. Determine promptNumber: COUNT turns for this session + 1
-4. Insert turn row (status='pending', user_prompt from stdin prompt)
-5. If promptNumber > 1:
-   a. Query previous turn (N-1) status
-   b. If 'pending':
-      i.  Parse transcriptPath JSONL → extract assistant_response for turn N-1
-          (backwards scan, filter isSidechain/isApiErrorMessage, match by user_prompt prefix)
-      ii. UPDATE turns SET assistant_response = ? WHERE id = prev_turn_id
-      iii. Fire-and-forget forkMnemosyne
-           (Mnemosyne calls save_turn/update_session via MCP tools)
+1. Parse input (sessionId, cwd, prompt)
+2. If missing required fields → return { continue: true, suppressOutput: true }
+3. Upsert session in DB (preserve existing title/description/insight)
+4. Determine promptNumber: COUNT turns for this session + 1
+5. Insert turn row (status='pending', user_prompt from stdin prompt)
 6. Return { continue: true, suppressOutput: true }
 ```
+
+No JSONL parsing, no backfill, no Mnemosyne fork. UserPromptSubmit only inserts.
 
 - [ ] **Step 4: Run tests — expect PASS**
 
@@ -606,7 +610,7 @@ git commit -m "feat: SessionStart context + compact handler for pre-compression 
 
 ```bash
 git add src/hooks/handlers/session-init.ts tests/hooks/session-init.test.ts
-git commit -m "feat: UserPromptSubmit — session init + incremental extraction"
+git commit -m "feat: UserPromptSubmit — insert pending turn only"
 ```
 
 ---
@@ -617,7 +621,7 @@ git commit -m "feat: UserPromptSubmit — session init + incremental extraction"
 - Create: `src/hooks/handlers/stop.ts`
 - Test: `tests/hooks/stop.test.ts`
 
-- [ ] **Step 1: Write tests** — extracts remaining pending/stale turns, marks undo'd turns as stale, updates session, outputs progress to stderr, handles missing transcript, guards `stop_hook_active` to prevent infinite loops.
+- [ ] **Step 1: Write tests** — backfills all pending turns' assistant_response, marks undo'd turns as stale, extracts all pending/stale turns via Mnemosyne, updates session, outputs progress to stderr, handles missing transcript, guards `stop_hook_active` to prevent infinite loops.
 
 - [ ] **Step 2: Run test — expect FAIL**
 
@@ -626,16 +630,18 @@ git commit -m "feat: UserPromptSubmit — session init + incremental extraction"
 ```
 1. Parse input (sessionId, transcriptPath, lastAssistantMessage, stopHookActive)
 2. If stopHookActive → exit 0 immediately (prevent infinite loop)
-3. For the last pending turn: backfill assistant_response
-   - Prefer last_assistant_message from Stop hook stdin (no JSONL parsing needed)
-   - Fallback: parse transcriptPath JSONL if last_assistant_message unavailable
+3. Backfill ALL pending turns' assistant_response from JSONL
+   - For the last pending turn: prefer last_assistant_message from stdin, fallback to JSONL
+   - For all other pending turns: parse JSONL (extractAssistantResponse with promptNumber)
 4. Detect undo: compare current JSONL state against extracted turns
    - If any extracted turn's context changed → markTurnsStale(sessionId, promptNumbers)
+   - `stale` is transient — Mnemosyne will resolve to extracted/skipped/undone
 5. Query all turns with status='pending' or 'stale'
 6. Build Mnemosyne prompt with status summary (prompt previews as anchors)
 7. Fork Mnemosyne (await completion, within 120s timeout)
    (Mnemosyne calls save_turn + update_session via MCP tools)
-8. Output to stderr: "Mnemosyne: 2 turns extracted, 1 skipped (1.2s)"
+   - For stale turns, Mnemosyne determines: still valid → re-extract; undone branch → mark undone
+8. Output to stderr: "Mnemosyne: 2 turns extracted, 1 skipped, 1 undone (1.2s)"
 9. Mark session as completed
 10. Return { continue: true, exitCode: 0 }
 ```
@@ -775,8 +781,8 @@ git commit -m "feat: plugin config — hooks, MCP, skill, bun-runner, CLAUDE.md"
 - [ ] **Step 1: Write E2E test** — simulate full lifecycle:
   1. Create in-memory DB
   2. Call session-init handler (prompt #1) → session + pending turn created
-  3. Call session-init handler (prompt #2) → pending turn created, prev turn extracted
-  4. Call stop handler → last turn extracted + session updated
+  3. Call session-init handler (prompt #2) → pending turn created (no extraction)
+  4. Call stop handler → all pending turns backfilled + extracted + session updated
   5. Use recall() → verify sessions returned
   6. Use recall(session=N) → verify turns returned
   7. Use recall(turn=N) → verify observations returned
@@ -837,16 +843,16 @@ git commit -m "chore: v0.1.0 — claude-mnemo initial release"
 ```
 Claude Code Main Agent
   │
-  ├─ PreCompact[manual|auto] → compact handler → fork Mnemosyne (extract pending before compress)
-  ├─ SessionStart[startup|resume|clear|compact] → context handler → inject recent memories + recover orphaned turns
-  ├─ UserPromptSubmit → session-init handler → upsert session + fire-and-forget fork Mnemosyne (prev turn)
-  └─ Stop → stop handler → mark stale turns + await fork Mnemosyne (remaining turns + session summary)
+  ├─ UserPromptSubmit → session-init → upsert session + insert pending turn (no extraction)
+  ├─ PreCompact[manual|auto] → compact → backfill + fork Mnemosyne (extract pending before compress)
+  ├─ SessionStart[startup|resume|clear|compact] → context → inject recent memories (read-only, no LLM calls)
+  └─ Stop → stop → backfill all turns + undo detection + await Mnemosyne (all pending/stale + session summary)
 
 Mnemosyne (forked agent, same tool set, prompt-constrained)
   │
   ├─ recall()        → read existing memories (avoid duplicates)
-  ├─ replay()        → read original transcript (recover compact detail)
-  ├─ save_turn()     → write turn + observations to SQLite (or skip if empty)
+  ├─ replay()        → read original transcript (includes sidechain/undone entries)
+  ├─ save_turn()     → write turn + observations (or skip, or mark undone)
   └─ update_session() → update session title/description/insight
 
 MCP Server (stdio, shared SQLite)
