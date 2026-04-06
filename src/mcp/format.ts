@@ -1,3 +1,12 @@
+export const TYPE_EMOJI: Record<string, string> = {
+  bugfix: "🔴",
+  feature: "🟣",
+  refactor: "🔄",
+  change: "✅",
+  discovery: "🔵",
+  decision: "⚖️",
+};
+
 export interface FormattedObservation {
   id: number;
   type: string;
@@ -14,10 +23,13 @@ export interface FormattedTurn {
   id: number;
   promptNumber: number;
   title: string | null;
-  observationCount: number;
+  description?: string | null;
+  observationCount?: number | null;
+  toolCallCount?: number | null;
+  filesReadCount?: number | null;
+  filesModifiedCount?: number | null;
   promptPreview?: string | null;
   responsePreview?: string | null;
-  description?: string | null;
   insight?: string[];
   filesRead?: string[];
   filesModified?: string[];
@@ -31,6 +43,9 @@ export interface FormattedSession {
   startedAtEpoch: number;
   description?: string | null;
   insight?: string[];
+  nextSteps?: string | null;
+  turnCount?: number | null;
+  observationCount?: number | null;
   turns?: FormattedTurn[];
 }
 
@@ -41,45 +56,86 @@ interface TurnFormatOptions {
 
 function formatEpoch(epoch: number): string {
   const date = new Date(epoch * 1000);
+  const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
-  const hour = String(date.getUTCHours()).padStart(2, "0");
-  const minute = String(date.getUTCMinutes()).padStart(2, "0");
 
-  return `${month}-${day} ${hour}:${minute}`;
+  return `${year}-${month}-${day}`;
 }
 
-function formatFiles(
-  filesRead: string[] = [],
-  filesModified: string[] = [],
-  indent: string,
-): string[] {
+function typeEmoji(type: string): string {
+  return TYPE_EMOJI[type] ?? "⚪";
+}
+
+function normalizeCount(value?: number | null): number {
+  if (!value || value < 0) {
+    return 0;
+  }
+
+  return value;
+}
+
+function formatStats(parts: string[]): string {
+  return parts.join(" ");
+}
+
+function formatSessionStats(session: FormattedSession): string {
   const parts: string[] = [];
+  const turnCount = normalizeCount(session.turnCount ?? session.turns?.length);
+  const observationCount = normalizeCount(
+    session.observationCount ??
+      session.turns?.reduce(
+        (sum, turn) => sum + normalizeCount(turn.observationCount),
+        0,
+      ),
+  );
 
-  if (filesRead.length > 0) {
-    parts.push(`[R] ${filesRead.join(", ")}`);
+  if (turnCount > 0) {
+    parts.push(`💬${turnCount}`);
   }
 
-  if (filesModified.length > 0) {
-    parts.push(`[M] ${filesModified.join(", ")}`);
+  if (observationCount > 0) {
+    parts.push(`💡${observationCount}`);
   }
 
-  if (parts.length === 0) {
-    return [];
-  }
-
-  return [`${indent}files: ${parts.join(" ")}`];
+  return formatStats(parts);
 }
 
-function pushInsight(lines: string[], insight: string[] | undefined, indent: string): void {
-  if (!insight || insight.length === 0) {
-    return;
+function formatTurnStats(turn: FormattedTurn): string {
+  const parts: string[] = [];
+  const observationCount = normalizeCount(
+    turn.observationCount ?? turn.observations?.length,
+  );
+  const filesReadCount = normalizeCount(
+    turn.filesReadCount ?? turn.filesRead?.length,
+  );
+  const filesModifiedCount = normalizeCount(
+    turn.filesModifiedCount ?? turn.filesModified?.length,
+  );
+  const toolCallCount = normalizeCount(turn.toolCallCount);
+
+  if (observationCount > 0) {
+    parts.push(`💡${observationCount}`);
   }
 
-  lines.push(`${indent}insight:`);
+  if (filesReadCount > 0) {
+    parts.push(`📖${filesReadCount}`);
+  }
 
-  for (const bullet of insight) {
-    lines.push(`${indent}- ${bullet}`);
+  if (filesModifiedCount > 0) {
+    parts.push(`✏️${filesModifiedCount}`);
+  }
+
+  if (toolCallCount > 0) {
+    parts.push(`🔧${toolCallCount}`);
+  }
+
+  return formatStats(parts);
+}
+
+function pushBullets(lines: string[], indent: string, values: string[]): void {
+  for (const value of values) {
+    lines.push(`${indent}- ${value}`);
   }
 }
 
@@ -97,26 +153,37 @@ function isTurnExpanded(turn: FormattedTurn): boolean {
   return Boolean(
     turn.promptPreview ||
       turn.responsePreview ||
-      turn.description ||
       (turn.insight && turn.insight.length > 0) ||
-      (turn.filesRead && turn.filesRead.length > 0) ||
-      (turn.filesModified && turn.filesModified.length > 0) ||
       (turn.observations && turn.observations.length > 0),
   );
 }
 
 export function formatSessionCollapsed(session: FormattedSession): string {
-  return `[S${session.id}] ${session.title ?? "Untitled"} | ${formatEpoch(session.startedAtEpoch)} | ${session.project}`;
+  const stats = formatSessionStats(session);
+  const statsSegment = stats ? ` | ${stats}` : "";
+  const lines = [
+    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.startedAtEpoch)} | ${session.project}`,
+  ];
+
+  if (session.description) {
+    lines.push(`  - desc: ${session.description}`);
+  }
+
+  return lines.join("\n");
 }
 
 export function formatSessionExpanded(session: FormattedSession): string {
   const lines = [formatSessionCollapsed(session)];
 
-  if (session.description) {
-    lines.push(`  description: ${session.description}`);
+  if (session.insight && session.insight.length > 0) {
+    lines.push("  - insight:");
+    pushBullets(lines, "    ", session.insight);
   }
 
-  pushInsight(lines, session.insight, "  ");
+  if (session.nextSteps) {
+    lines.push("  - next_steps:");
+    lines.push(`    - ${session.nextSteps}`);
+  }
 
   return lines.join("\n");
 }
@@ -127,17 +194,26 @@ function formatTurnLabel(
 ): string {
   const prefix =
     sessionId === undefined
-      ? `${indent}[T${turn.promptNumber}]`
-      : `${indent}[S${sessionId}][T${turn.promptNumber}]`;
+      ? `${indent}- [T${turn.promptNumber}]`
+      : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
+  const stats = formatTurnStats(turn);
+  const statsSegment = stats ? ` | ${stats}` : "";
 
-  return `${prefix} ${turn.title ?? "Untitled"} | ${turn.observationCount} obs`;
+  return `${prefix} ${turn.title ?? "Untitled"}${statsSegment}`;
 }
 
 export function formatTurnCollapsed(
   turn: FormattedTurn,
   options: TurnFormatOptions = {},
 ): string {
-  return formatTurnLabel(turn, options);
+  const { indent = "  " } = options;
+  const lines = [formatTurnLabel(turn, options)];
+
+  if (turn.description) {
+    lines.push(`${indent}  - desc: ${turn.description}`);
+  }
+
+  return lines.join("\n");
 }
 
 export function formatTurnExpanded(
@@ -149,19 +225,17 @@ export function formatTurnExpanded(
   const lines = [formatTurnCollapsed(turn, options)];
 
   if (turn.promptPreview) {
-    lines.push(`${detailIndent}prompt: "${turn.promptPreview}"`);
+    lines.push(`${detailIndent}- prompt: "${turn.promptPreview}"`);
   }
 
   if (turn.responsePreview) {
-    lines.push(`${detailIndent}response: "${turn.responsePreview}"`);
+    lines.push(`${detailIndent}- response: "${turn.responsePreview}"`);
   }
 
-  if (turn.description) {
-    lines.push(`${detailIndent}description: ${turn.description}`);
+  if (turn.insight && turn.insight.length > 0) {
+    lines.push(`${detailIndent}- insight:`);
+    pushBullets(lines, `${detailIndent}  `, turn.insight);
   }
-
-  pushInsight(lines, turn.insight, detailIndent);
-  lines.push(...formatFiles(turn.filesRead, turn.filesModified, detailIndent));
 
   return lines.join("\n");
 }
@@ -169,9 +243,13 @@ export function formatTurnExpanded(
 export function formatObservationCollapsed(
   observation: FormattedObservation,
 ): string {
-  const suffix = observation.description ? ` — ${observation.description}` : "";
+  const lines = [`    - [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`];
 
-  return `    [O${observation.id}] ${observation.type}: ${observation.title}${suffix}`;
+  if (observation.description) {
+    lines.push(`      - desc: ${observation.description}`);
+  }
+
+  return lines.join("\n");
 }
 
 export function formatObservationExpanded(
@@ -180,20 +258,31 @@ export function formatObservationExpanded(
   const lines = [formatObservationCollapsed(observation)];
 
   if (observation.narrative) {
-    lines.push(`      narrative: ${observation.narrative}`);
+    lines.push(`      - narrative: ${observation.narrative}`);
   }
 
   if (observation.facts && observation.facts.length > 0) {
-    lines.push(`      facts: ${observation.facts.join("; ")}`);
+    lines.push("      - facts:");
+    pushBullets(lines, "        ", observation.facts);
   }
 
   if (observation.concepts && observation.concepts.length > 0) {
-    lines.push(`      concepts: ${observation.concepts.join(", ")}`);
+    lines.push(`      - concepts: ${observation.concepts.join(", ")}`);
   }
 
-  lines.push(
-    ...formatFiles(observation.filesRead, observation.filesModified, "      "),
-  );
+  const filesParts: string[] = [];
+
+  if (observation.filesRead && observation.filesRead.length > 0) {
+    filesParts.push(`📖 ${observation.filesRead.join(", ")}`);
+  }
+
+  if (observation.filesModified && observation.filesModified.length > 0) {
+    filesParts.push(`✏️ ${observation.filesModified.join(", ")}`);
+  }
+
+  if (filesParts.length > 0) {
+    lines.push(`      - files: ${filesParts.join(" ")}`);
+  }
 
   return lines.join("\n");
 }
