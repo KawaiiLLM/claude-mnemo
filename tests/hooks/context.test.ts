@@ -200,6 +200,23 @@ describe("handleContextHook", () => {
     db.close();
   });
 
+  test("returns the fallback message when no memory rows exist", async () => {
+    const emptyDb = createDatabase(":memory:");
+    initializeSchema(emptyDb);
+
+    const handler = createContextHandler({
+      db: emptyDb,
+    });
+
+    const result = await handler(createInput({ sessionId: "missing-session" }));
+
+    expect(result.hookSpecificOutput).toBe(
+      "claude-mnemo memory available via recall() and replay().",
+    );
+
+    emptyDb.close();
+  });
+
   test("anchors on the current session and applies graduated depth", async () => {
     const currentTurn1 = insertTurn(db, {
       sessionId: currentSessionId,

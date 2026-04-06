@@ -19,6 +19,8 @@ export interface ContextHandlerDependencies {
   db: Database;
 }
 
+const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
+
 function truncate(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
     return value;
@@ -194,7 +196,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   const recentSessions = buildRecentSessions(db, primarySession);
 
   if (!primarySession) {
-    return buildHeader(db);
+    return EMPTY_CONTEXT_FALLBACK;
   }
 
   const nextTwoSessions = recentSessions.slice(0, 2);
