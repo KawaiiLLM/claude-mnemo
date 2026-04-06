@@ -7,7 +7,6 @@ import {
 import { createDatabase } from "../db/database";
 import { initializeDatabase } from "../db/schema";
 import { forkMnemosyne } from "../mnemosyne/fork";
-import { extractAssistantResponse } from "../shared/transcript-parser";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import { createContextHandler } from "./handlers/context";
@@ -20,12 +19,11 @@ initializeDatabase(db);
 
 const HANDLERS: Record<string, HookHandler> = {
   SessionStart: createContextHandler({ db }),
-  PreCompact: createCompactHandler({ db, forkMnemosyne, extractAssistantResponse }),
+  PreCompact: createCompactHandler({ db, forkMnemosyne }),
   UserPromptSubmit: createSessionInitHandler({ db }),
   Stop: createStopHandler({
     db,
     forkMnemosyne,
-    extractAssistantResponse,
   }),
 };
 
