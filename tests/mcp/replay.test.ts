@@ -103,8 +103,9 @@ describe("replayMemory", () => {
       transcriptPath,
     });
 
-    expect(output).toContain("[T1] #1 Why am I getting 401 errors?");
-    expect(output).toContain("[T2] #2 Fix it and add coverage");
+    expect(output).toContain("- [T1] Why am I getting 401 errors? | 🔧2");
+    expect(output).toContain("- [T2] Fix it and add coverage | 🔧1");
+    expect(output).not.toContain("#1");
   });
 
   test("shows a full QA transcript for a specific turn", () => {
@@ -225,8 +226,10 @@ describe("replayMemory", () => {
       transcriptPath: transcript.path,
     });
 
-    expect(output).toContain("[T1][undone] #1 Draft approach");
-    expect(output).toContain("[T2] #2 Ship the final fix");
+    expect(output).toContain("- [T1] ⏪ Draft approach");
+    expect(output).toContain("- [T2] Ship the final fix");
+    expect(output).not.toContain("[undone]");
+    expect(output).not.toContain("#1");
 
     rmSync(transcript.directory, { recursive: true, force: true });
   });

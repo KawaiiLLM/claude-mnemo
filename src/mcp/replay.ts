@@ -59,14 +59,13 @@ function formatToolBlock(
 function formatTurnOverviewLine(
   promptNumber: number,
   userPrompt: string,
+  toolCallCount: number,
   status?: string,
 ): string {
-  const label =
-    status === "undone"
-      ? `[T${promptNumber}][undone] #${promptNumber}`
-      : `[T${promptNumber}] #${promptNumber}`;
+  const statusPrefix = status === "undone" ? "⏪ " : "";
+  const stats = toolCallCount > 0 ? ` | 🔧${toolCallCount}` : "";
 
-  return `${label} ${userPrompt}`;
+  return `- [T${promptNumber}] ${statusPrefix}${userPrompt}${stats}`;
 }
 
 function formatTurnDetail(
@@ -105,6 +104,9 @@ export function replayMemory(db: Database, input: ReplayInput): string {
   const statusByPromptNumber = new Map(
     dbTurns.map((turn) => [turn.promptNumber, turn.status]),
   );
+  const toolCallCountByPromptNumber = new Map(
+    transcriptTurns.map((turn) => [turn.promptNumber, turn.toolCalls.length]),
+  );
 
   if (input.turn === undefined) {
     return transcriptTurns
@@ -112,6 +114,7 @@ export function replayMemory(db: Database, input: ReplayInput): string {
         formatTurnOverviewLine(
           turn.promptNumber,
           turn.userPrompt,
+          toolCallCountByPromptNumber.get(turn.promptNumber) ?? 0,
           statusByPromptNumber.get(turn.promptNumber),
         ),
       )

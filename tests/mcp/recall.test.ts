@@ -36,6 +36,7 @@ describe("recallMemory", () => {
       title: "Auth race fix",
       description: "Fixes the refresh race",
       insight: "- mutex avoids overlap",
+      nextSteps: "verify refresh under load",
       startedAtEpoch: 200,
       updatedAtEpoch: 210,
       completedAtEpoch: 220,
@@ -101,24 +102,29 @@ describe("recallMemory", () => {
   test("returns recent sessions when called without filters", () => {
     const output = recallMemory(db, {});
 
-    expect(output).toContain("[S3] UI cleanup");
-    expect(output).toContain("[S2] Auth race fix");
+    expect(output).toContain("- [S3] UI cleanup | 1970-01-01 | claude-mnemo");
+    expect(output).toContain("  - desc: Unrelated UI work");
+    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
     expect(output.indexOf("[S3]")).toBeLessThan(output.indexOf("[S2]"));
   });
 
   test("searches by keyword across memory layers", () => {
     const output = recallMemory(db, { query: "race" });
 
-    expect(output).toContain("[S2] Auth race fix");
-    expect(output).toContain("[S2][T1] Diagnose auth race");
-    expect(output).toContain("[O1] bugfix: Auth mutex");
+    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
+    expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2");
+    expect(output).toContain("- [O1] 🔴 Auth mutex");
   });
 
   test("shows turns for a session", () => {
     const output = recallMemory(db, { session: authSessionId });
 
-    expect(output).toContain("[S2] Auth race fix");
-    expect(output).toContain("[T1] Diagnose auth race | 2 obs");
+    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
+    expect(output).toContain("  - desc: Fixes the refresh race");
+    expect(output).toContain("  - insight:");
+    expect(output).toContain("  - next_steps:");
+    expect(output).toContain("  - [T1] Diagnose auth race | 💡2 📖1 ✏️2");
+    expect(output).toContain("    - desc: Refresh overlap diagnosed");
     expect(output).not.toContain("#1");
   });
 
@@ -128,17 +134,19 @@ describe("recallMemory", () => {
       expandTurns: [1],
     });
 
-    expect(output).toContain('prompt: "Why am I getting 401 errors?"');
-    expect(output).toContain('response: "There is a race condition in token refresh."');
-    expect(output).toContain("[O1] bugfix: Auth mutex");
+    expect(output).toContain('  - prompt: "Why am I getting 401 errors?"');
+    expect(output).toContain('  - response: "There is a race condition in token refresh."');
+    expect(output).toContain("  - [O1] 🔴 Auth mutex");
+    expect(output).toContain("      - narrative: Serialized refresh work with a shared promise.");
   });
 
   test("shows observations for a session-scoped turn prompt number", () => {
     const output = recallMemory(db, { session: authSessionId, turn: 1 });
 
-    expect(output).toContain("[T1] Diagnose auth race | 2 obs");
-    expect(output).toContain("[O1] bugfix: Auth mutex");
-    expect(output).toContain("[O2] decision: Add regression test");
+    expect(output).toContain("- [T1] Diagnose auth race | 💡2 📖1 ✏️2");
+    expect(output).toContain("  - desc: Refresh overlap diagnosed");
+    expect(output).toContain("  - [O1] 🔴 Auth mutex");
+    expect(output).toContain("  - [O2] ⚖️ Add regression test");
   });
 
   test("rejects turn lookup without session context", () => {
@@ -160,9 +168,12 @@ describe("recallMemory", () => {
   test("shows full detail for a specific observation", () => {
     const output = recallMemory(db, { observation: authObservationId });
 
-    expect(output).toContain("[O1] bugfix: Auth mutex");
-    expect(output).toContain("narrative: Serialized refresh work with a shared promise.");
-    expect(output).toContain("facts: mutex added; race resolved");
+    expect(output).toContain("- [O1] 🔴 Auth mutex");
+    expect(output).toContain("  - desc: Guards refresh");
+    expect(output).toContain("  - narrative: Serialized refresh work with a shared promise.");
+    expect(output).toContain("  - facts:");
+    expect(output).toContain("    - mutex added");
+    expect(output).toContain("    - race resolved");
   });
 
   test("rejects observation mixed with other selectors", () => {
@@ -205,14 +216,14 @@ describe("recallMemory", () => {
   test("filters by file path", () => {
     const output = recallMemory(db, { file: "src/auth.ts" });
 
-    expect(output).toContain("[S2][T1] Diagnose auth race");
-    expect(output).toContain("[O1] bugfix: Auth mutex");
+    expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2");
+    expect(output).toContain("- [O1] 🔴 Auth mutex");
   });
 
   test("filters by observation type", () => {
     const output = recallMemory(db, { type: "bugfix" });
 
-    expect(output).toContain("[O1] bugfix: Auth mutex");
-    expect(output).not.toContain("[O2] decision: Add regression test");
+    expect(output).toContain("- [O1] 🔴 Auth mutex");
+    expect(output).not.toContain("- [O2] ⚖️ Add regression test");
   });
 });

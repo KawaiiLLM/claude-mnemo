@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory } from "../db/search";
 import { getRecentSessions, getSession } from "../db/sessions";
-import { getTurn, getTurnById, getTurnsForSession } from "../db/turns";
+import { getTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import {
   formatObservationCollapsed,
   formatObservationExpanded,
@@ -77,6 +77,47 @@ function splitInsight(insight: string | null): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
+function buildFormattedTurn(
+  db: Database,
+  turn: TurnRecord,
+  expand = false,
+): FormattedTurn {
+  const observations = getObservationsForTurn(db, turn.id);
+  const formattedTurn: FormattedTurn = {
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    description: turn.description,
+    observationCount: observations.length,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+  };
+
+  if (expand) {
+    formattedTurn.promptPreview = turn.userPrompt;
+    formattedTurn.responsePreview = turn.assistantResponse;
+    formattedTurn.insight = splitInsight(turn.insight);
+    formattedTurn.filesRead = turn.filesRead;
+    formattedTurn.filesModified = turn.filesModified;
+    formattedTurn.observations = observations.map<FormattedObservation>(
+      (observation) => ({
+        id: observation.id,
+        type: observation.type,
+        title: observation.title,
+        description: observation.description,
+        narrative: observation.narrative,
+        facts: observation.facts,
+        concepts: observation.concepts,
+        filesRead: observation.filesRead,
+        filesModified: observation.filesModified,
+      }),
+    );
+  }
+
+  return formattedTurn;
+}
+
 function buildFormattedSession(
   db: Database,
   sessionId: number,
@@ -89,34 +130,7 @@ function buildFormattedSession(
   }
 
   const turns = getTurnsForSession(db, session.id).map((turn) => {
-    const observations = getObservationsForTurn(db, turn.id);
-    const shouldExpand = expandTurns.includes(turn.promptNumber);
-
-    const formattedTurn: FormattedTurn = {
-      id: turn.id,
-      promptNumber: turn.promptNumber,
-      title: turn.title,
-      observationCount: observations.length,
-    };
-
-    if (shouldExpand) {
-      formattedTurn.promptPreview = turn.userPrompt;
-      formattedTurn.responsePreview = turn.assistantResponse;
-      formattedTurn.description = turn.description;
-      formattedTurn.insight = splitInsight(turn.insight);
-      formattedTurn.filesRead = turn.filesRead;
-      formattedTurn.filesModified = turn.filesModified;
-      formattedTurn.observations = observations.map<FormattedObservation>(
-        (observation) => ({
-          id: observation.id,
-          type: observation.type,
-          title: observation.title,
-          description: observation.description,
-        }),
-      );
-    }
-
-    return formattedTurn;
+    return buildFormattedTurn(db, turn, expandTurns.includes(turn.promptNumber));
   });
 
   return {
@@ -126,6 +140,12 @@ function buildFormattedSession(
     startedAtEpoch: session.startedAtEpoch,
     description: session.description,
     insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    turnCount: turns.length,
+    observationCount: turns.reduce(
+      (sum, turn) => sum + (turn.observationCount ?? 0),
+      0,
+    ),
     turns,
   };
 }
@@ -136,11 +156,25 @@ function formatSearchResults(db: Database, input: RecallInput): string {
   return results
     .map((result) => {
       if (result.layer === "session") {
+        const session = getSession(db, result.sessionId);
+
+        if (!session) {
+          return null;
+        }
+
         return formatSessionCollapsed({
-          id: result.sessionId,
-          title: result.title,
-          project: result.project,
-          startedAtEpoch: result.timestampEpoch,
+          id: session.id,
+          title: session.title,
+          project: session.project,
+          startedAtEpoch: session.startedAtEpoch,
+          description: session.description,
+          insight: splitInsight(session.insight),
+          nextSteps: session.nextSteps,
+          turnCount: getTurnsForSession(db, session.id).length,
+          observationCount: getTurnsForSession(db, session.id).reduce(
+            (sum, turn) => sum + getObservationsForTurn(db, turn.id).length,
+            0,
+          ),
         });
       }
 
@@ -152,10 +186,7 @@ function formatSearchResults(db: Database, input: RecallInput): string {
         }
 
         return formatTurnCollapsed({
-          id: turn.id,
-          promptNumber: turn.promptNumber,
-          title: turn.title,
-          observationCount: getObservationsForTurn(db, turn.id).length,
+          ...buildFormattedTurn(db, turn),
         }, { indent: "", sessionId: result.sessionId });
       }
 
@@ -192,18 +223,14 @@ function formatTurnObservations(
   }
 
   const lines = [
-    formatTurnExpanded({
-      id: turn.id,
-      promptNumber: turn.promptNumber,
-      title: turn.title,
-      observationCount: getObservationsForTurn(db, turn.id).length,
-      promptPreview: turn.userPrompt,
-      responsePreview: turn.assistantResponse,
-      description: turn.description,
-      insight: splitInsight(turn.insight),
-      filesRead: turn.filesRead,
-      filesModified: turn.filesModified,
-    }, { indent: "" }),
+    formatTurnExpanded(
+      {
+        ...buildFormattedTurn(db, turn, true),
+        promptPreview: turn.userPrompt,
+        responsePreview: turn.assistantResponse,
+      },
+      { indent: "" },
+    ),
   ];
 
   for (const observation of getObservationsForTurn(db, turn.id)) {
@@ -213,7 +240,7 @@ function formatTurnObservations(
         type: observation.type,
         title: observation.title,
         description: observation.description,
-      }),
+      }, { indent: "  " }),
     );
   }
 
@@ -290,6 +317,14 @@ function formatTimeline(db: Database, anchor: string, before = 0, after = 0): st
         title: session.title,
         project: session.project,
         startedAtEpoch: session.startedAtEpoch,
+        description: session.description,
+        insight: splitInsight(session.insight),
+        nextSteps: session.nextSteps,
+        turnCount: getTurnsForSession(db, session.id).length,
+        observationCount: getTurnsForSession(db, session.id).reduce(
+          (sum, turn) => sum + getObservationsForTurn(db, turn.id).length,
+          0,
+        ),
       }),
     )
     .join("\n");
@@ -347,13 +382,8 @@ export function recallMemory(db: Database, input: RecallInput): string {
   }
 
   return getRecentSessions(db)
-    .map((session) =>
-      formatSessionCollapsed({
-        id: session.id,
-        title: session.title,
-        project: session.project,
-        startedAtEpoch: session.startedAtEpoch,
-      }),
-    )
+    .map((session) => buildFormattedSession(db, session.id))
+    .filter((session): session is FormattedSession => session !== null)
+    .map((session) => formatSessionCollapsed(session))
     .join("\n");
 }
