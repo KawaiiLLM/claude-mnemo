@@ -5,7 +5,7 @@ import {
   HOOK_SUCCESS_EXIT_CODE,
 } from "../shared/hook-constants";
 import { createDatabase } from "../db/database";
-import { initializeSchema } from "../db/schema";
+import { initializeDatabase } from "../db/schema";
 import { forkMnemosyne } from "../mnemosyne/fork";
 import { extractAssistantResponse } from "../shared/transcript-parser";
 import { normalizeHookInput } from "./adapters";
@@ -16,7 +16,7 @@ import { createStopHandler } from "./handlers/stop";
 import type { HookHandler, HookResult } from "./types";
 
 const db = createDatabase();
-initializeSchema(db);
+initializeDatabase(db);
 
 const HANDLERS: Record<string, HookHandler> = {
   SessionStart: createContextHandler({ db }),

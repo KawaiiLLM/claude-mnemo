@@ -91,3 +91,8 @@ export function migrateSchema(db: Database): void {
     db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
   }
 }
+
+export function initializeDatabase(db: Database): void {
+  initializeSchema(db);
+  migrateSchema(db);
+}
