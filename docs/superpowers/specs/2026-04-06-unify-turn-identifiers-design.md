@@ -137,13 +137,15 @@ Observation ids remain globally addressable:
 
 If both `observation` and `session`/`turn` are supplied, return the existing parameter error style rather than guessing precedence.
 
+If `expand_turns` is provided without `session`, return a parameter error rather than silently ignoring it. This should match the strict behavior for `turn`.
+
 ## Database Access Pattern
 
 No schema change is needed.
 
-Add a session-scoped lookup helper:
+Use the existing session-scoped lookup helper:
 
-- `getTurnByPromptNumber(db, sessionId, promptNumber)`
+- `getTurn(db, sessionId, promptNumber)`
 
 This replaces public use of `getTurnById()` inside `recall` turn lookup paths. `getTurnById()` remains valid for internal joins and observation ownership.
 
@@ -207,8 +209,20 @@ Mitigation:
 - cross-session views must render `[Sx][Ty]`
 - session drill-down views may use `[Ty]` alone
 
+### Observation navigation remains one-way
+
+Observation ids remain globally addressable via `[O7]`, but observation detail still does not provide a direct parent session/turn navigation handle.
+
+This is an existing limitation, not one introduced by the turn-identifier cleanup.
+
+Mitigation:
+
+- keep observation lookup unchanged for this iteration
+- track parent-navigation improvements as a follow-up design item
+
 ## Non-Goals
 
 - Do not invent session-scoped observation numbering.
 - Do not persist transcript offsets or external replay ids.
 - Do not add a compatibility alias such as `turn_id`.
+- Do not solve observation-to-parent navigation in this change.
