@@ -204,7 +204,7 @@ describe("claude-mnemo smoke test", () => {
 
     const recallSessions = recallMemory(db, {});
     const recallSessionTree = recallMemory(db, { session: session.id, expandTurns: [1, 2] });
-    const recallTurn = recallMemory(db, { turn: getTurn(db, session.id, 2)!.id });
+    const recallTurn = recallMemory(db, { session: session.id, turn: 2 });
     const replayTurn = replayMemory(db, {
       session: session.id,
       turn: 2,
@@ -212,8 +212,8 @@ describe("claude-mnemo smoke test", () => {
     });
 
     expect(recallSessions).toContain("[S1] Auth race fix");
-    expect(recallSessionTree).toContain("[T1] #1 Diagnose auth");
-    expect(recallSessionTree).toContain("[T2] #2 Fix auth race");
+    expect(recallSessionTree).toContain("[T1] Diagnose auth");
+    expect(recallSessionTree).toContain("[T2] Fix auth race");
     expect(recallTurn).toContain("[O2] bugfix: Mutex added");
     expect(replayTurn).toContain('prompt: "Fix it and add tests"');
     expect(replayTurn).toContain("[Tool 1] Edit");

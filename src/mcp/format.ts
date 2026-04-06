@@ -34,6 +34,11 @@ export interface FormattedSession {
   turns?: FormattedTurn[];
 }
 
+interface TurnFormatOptions {
+  indent?: string;
+  sessionId?: number;
+}
+
 function formatEpoch(epoch: number): string {
   const date = new Date(epoch * 1000);
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
@@ -116,27 +121,47 @@ export function formatSessionExpanded(session: FormattedSession): string {
   return lines.join("\n");
 }
 
-export function formatTurnCollapsed(turn: FormattedTurn): string {
-  return `  [T${turn.id}] #${turn.promptNumber} ${turn.title ?? "Untitled"} | ${turn.observationCount} obs`;
+function formatTurnLabel(
+  turn: FormattedTurn,
+  { indent = "  ", sessionId }: TurnFormatOptions = {},
+): string {
+  const prefix =
+    sessionId === undefined
+      ? `${indent}[T${turn.promptNumber}]`
+      : `${indent}[S${sessionId}][T${turn.promptNumber}]`;
+
+  return `${prefix} ${turn.title ?? "Untitled"} | ${turn.observationCount} obs`;
 }
 
-export function formatTurnExpanded(turn: FormattedTurn): string {
-  const lines = [formatTurnCollapsed(turn)];
+export function formatTurnCollapsed(
+  turn: FormattedTurn,
+  options: TurnFormatOptions = {},
+): string {
+  return formatTurnLabel(turn, options);
+}
+
+export function formatTurnExpanded(
+  turn: FormattedTurn,
+  options: TurnFormatOptions = {},
+): string {
+  const { indent = "  " } = options;
+  const detailIndent = `${indent}  `;
+  const lines = [formatTurnCollapsed(turn, options)];
 
   if (turn.promptPreview) {
-    lines.push(`    prompt: "${turn.promptPreview}"`);
+    lines.push(`${detailIndent}prompt: "${turn.promptPreview}"`);
   }
 
   if (turn.responsePreview) {
-    lines.push(`    response: "${turn.responsePreview}"`);
+    lines.push(`${detailIndent}response: "${turn.responsePreview}"`);
   }
 
   if (turn.description) {
-    lines.push(`    description: ${turn.description}`);
+    lines.push(`${detailIndent}description: ${turn.description}`);
   }
 
-  pushInsight(lines, turn.insight, "    ");
-  lines.push(...formatFiles(turn.filesRead, turn.filesModified, "    "));
+  pushInsight(lines, turn.insight, detailIndent);
+  lines.push(...formatFiles(turn.filesRead, turn.filesModified, detailIndent));
 
   return lines.join("\n");
 }

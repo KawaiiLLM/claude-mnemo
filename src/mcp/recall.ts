@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory } from "../db/search";
 import { getRecentSessions, getSession } from "../db/sessions";
-import { getTurnById, getTurnsForSession } from "../db/turns";
+import { getTurn, getTurnById, getTurnsForSession } from "../db/turns";
 import {
   formatObservationCollapsed,
   formatObservationExpanded,
@@ -31,6 +31,29 @@ export interface RecallInput {
   project?: string;
   fromEpoch?: number;
   toEpoch?: number;
+}
+
+function validateRecallInput(input: RecallInput): string | null {
+  if (input.observation !== undefined) {
+    const hasOtherSelector =
+      input.session !== undefined ||
+      input.turn !== undefined ||
+      (input.expandTurns?.length ?? 0) > 0;
+
+    if (hasOtherSelector) {
+      return "Parameter error: observation cannot be combined with session, turn, or expand_turns.";
+    }
+  }
+
+  if (input.turn !== undefined && input.session === undefined) {
+    return "Parameter error: turn requires session; use recall(session=142, turn=3).";
+  }
+
+  if ((input.expandTurns?.length ?? 0) > 0 && input.session === undefined) {
+    return "Parameter error: expand_turns requires session; use recall(session=142, expand_turns=[1]).";
+  }
+
+  return null;
 }
 
 function splitInsight(insight: string | null): string[] {
@@ -124,7 +147,7 @@ function formatSearchResults(db: Database, input: RecallInput): string {
           promptNumber: turn.promptNumber,
           title: turn.title,
           observationCount: getObservationsForTurn(db, turn.id).length,
-        });
+        }, { indent: "", sessionId: result.sessionId });
       }
 
       if (result.layer === "observation" && result.observationId !== null) {
@@ -148,8 +171,12 @@ function formatSearchResults(db: Database, input: RecallInput): string {
     .join("\n");
 }
 
-function formatTurnObservations(db: Database, turnId: number): string {
-  const turn = getTurnById(db, turnId);
+function formatTurnObservations(
+  db: Database,
+  sessionId: number,
+  promptNumber: number,
+): string {
+  const turn = getTurn(db, sessionId, promptNumber);
 
   if (!turn) {
     return "Turn not found.";
@@ -167,7 +194,7 @@ function formatTurnObservations(db: Database, turnId: number): string {
       insight: splitInsight(turn.insight),
       filesRead: turn.filesRead,
       filesModified: turn.filesModified,
-    }),
+    }, { indent: "" }),
   ];
 
   for (const observation of getObservationsForTurn(db, turn.id)) {
@@ -260,12 +287,18 @@ function formatTimeline(db: Database, anchor: string, before = 0, after = 0): st
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
+  const validationError = validateRecallInput(input);
+
+  if (validationError) {
+    return validationError;
+  }
+
   if (input.observation !== undefined) {
     return formatObservationDetail(db, input.observation);
   }
 
-  if (input.turn !== undefined) {
-    return formatTurnObservations(db, input.turn);
+  if (input.session !== undefined && input.turn !== undefined) {
+    return formatTurnObservations(db, input.session, input.turn);
   }
 
   if (input.session !== undefined) {

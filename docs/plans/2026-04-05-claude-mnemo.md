@@ -384,7 +384,7 @@ git commit -m "feat: MCP server skeleton + indented-tag format renderer"
 - Create: `src/mcp/recall.ts`
 - Test: `tests/mcp/recall.test.ts`
 
-- [ ] **Step 1: Write recall tests** — all modes: `recall()` → recent sessions, `recall(query="auth")` → FTS5 search, `recall(session=1)` → turns, `recall(turn=1)` → observations, `recall(observation=1)` → full detail, `recall(session=1, expand_turns=[1])` → tree expansion, `recall(around="S1", before=2, after=2)` → cross-session timeline, `recall(file="auth.ts")` → file filter, `recall(type="bugfix")` → type filter.
+- [ ] **Step 1: Write recall tests** — all modes: `recall()` → recent sessions, `recall(query="auth")` → FTS5 search, `recall(session=1)` → turns, `recall(session=1, turn=1)` → observations, `recall(observation=1)` → full detail, `recall(session=1, expand_turns=[1])` → tree expansion, `recall(around="S1", before=2, after=2)` → cross-session timeline, `recall(file="auth.ts")` → file filter, `recall(type="bugfix")` → type filter.
 
 - [ ] **Step 2: Run test — expect FAIL**
 
@@ -785,7 +785,7 @@ git commit -m "feat: plugin config — hooks, MCP, skill, bun-runner, CLAUDE.md"
   4. Call stop handler → all pending turns backfilled + extracted + session updated
   5. Use recall() → verify sessions returned
   6. Use recall(session=N) → verify turns returned
-  7. Use recall(turn=N) → verify observations returned
+  7. Use recall(session=N, turn=1) → verify observations returned
   8. Use replay with mock JSONL → verify transcript returned
 
 - [ ] **Step 2: Run and iterate**

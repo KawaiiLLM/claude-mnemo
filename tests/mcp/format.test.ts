@@ -30,7 +30,19 @@ describe("MCP format renderer", () => {
         title: "Diagnose auth",
         observationCount: 2,
       }),
-    ).toBe("  [T1] #1 Diagnose auth | 2 obs");
+    ).toBe("  [T1] Diagnose auth | 2 obs");
+
+    expect(
+      formatTurnCollapsed(
+        {
+          id: 1,
+          promptNumber: 1,
+          title: "Diagnose auth",
+          observationCount: 2,
+        },
+        { indent: "", sessionId: 142 },
+      ),
+    ).toBe("[S142][T1] Diagnose auth | 2 obs");
 
     expect(
       formatObservationCollapsed({
@@ -77,7 +89,7 @@ describe("MCP format renderer", () => {
       }),
     ).toBe(
       [
-        "  [T1] #1 Diagnose auth | 2 obs",
+        "  [T1] Diagnose auth | 2 obs",
         '    prompt: "Why am I getting 401 errors?"',
         '    response: "I found a race condition in refresh logic."',
         "    description: Refresh overlap diagnosed",
@@ -149,7 +161,7 @@ describe("MCP format renderer", () => {
         "  description: Fix race + add tests",
         "  insight:",
         "  - prompt cache preserved",
-        "  [T1] #1 Diagnose auth | 1 obs",
+        "  [T1] Diagnose auth | 1 obs",
         '    prompt: "Why am I getting 401 errors?"',
         '    response: "I found a race condition in refresh logic."',
         "    description: Refresh overlap diagnosed",

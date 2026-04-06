@@ -110,7 +110,7 @@ describe("recallMemory", () => {
     const output = recallMemory(db, { query: "race" });
 
     expect(output).toContain("[S2] Auth race fix");
-    expect(output).toContain("[T1] #1 Diagnose auth race");
+    expect(output).toContain("[S2][T1] Diagnose auth race");
     expect(output).toContain("[O1] bugfix: Auth mutex");
   });
 
@@ -118,7 +118,8 @@ describe("recallMemory", () => {
     const output = recallMemory(db, { session: authSessionId });
 
     expect(output).toContain("[S2] Auth race fix");
-    expect(output).toContain("[T1] #1 Diagnose auth race | 2 obs");
+    expect(output).toContain("[T1] Diagnose auth race | 2 obs");
+    expect(output).not.toContain("#1");
   });
 
   test("expands selected turns inside a session tree", () => {
@@ -132,11 +133,28 @@ describe("recallMemory", () => {
     expect(output).toContain("[O1] bugfix: Auth mutex");
   });
 
-  test("shows observations for a specific turn", () => {
-    const output = recallMemory(db, { turn: authTurnId });
+  test("shows observations for a session-scoped turn prompt number", () => {
+    const output = recallMemory(db, { session: authSessionId, turn: 1 });
 
+    expect(output).toContain("[T1] Diagnose auth race | 2 obs");
     expect(output).toContain("[O1] bugfix: Auth mutex");
     expect(output).toContain("[O2] decision: Add regression test");
+  });
+
+  test("rejects turn lookup without session context", () => {
+    const output = recallMemory(db, { turn: authTurnId });
+
+    expect(output).toBe(
+      "Parameter error: turn requires session; use recall(session=142, turn=3).",
+    );
+  });
+
+  test("rejects expand_turns without session context", () => {
+    const output = recallMemory(db, { expandTurns: [1] });
+
+    expect(output).toBe(
+      "Parameter error: expand_turns requires session; use recall(session=142, expand_turns=[1]).",
+    );
   });
 
   test("shows full detail for a specific observation", () => {
@@ -176,7 +194,7 @@ describe("recallMemory", () => {
   test("filters by file path", () => {
     const output = recallMemory(db, { file: "src/auth.ts" });
 
-    expect(output).toContain("[T1] #1 Diagnose auth race");
+    expect(output).toContain("[S2][T1] Diagnose auth race");
     expect(output).toContain("[O1] bugfix: Auth mutex");
   });
 

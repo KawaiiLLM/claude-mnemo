@@ -167,7 +167,7 @@ Four tools exposed via a single MCP server (stdio transport):
 recall()                                    → recent sessions
 recall(query="auth竞态")                    → FTS5 search
 recall(session=142)                         → turns in session
-recall(turn=3)                              → observations in turn
+recall(session=142, turn=3)                 → observations in turn 3
 recall(observation=7)                       → full detail
 recall(session=142, expand_turns=[1,3])     → tree expansion
 recall(around="2026-04-03", before=3)       → cross-session timeline
@@ -183,7 +183,7 @@ Output format — indented tags, optimized for LLM consumption:
   - forkSession可复用完整上下文
   - 记忆粒度应提升到per-QA-turn
 
-  [T1] #1 诊断401错误 | 3 obs
+  [T1] 诊断401错误 | 3 obs
     prompt: "Why am I getting 401 errors on the /api/auth endp..."
     response: "I found the issue - there's a race condition in ref..."
     description: 发现refreshToken竞态
@@ -193,7 +193,7 @@ Output format — indented tags, optimized for LLM consumption:
     [O1] bugfix: refreshToken竞态 — auth.ts:42缺少锁
     [O2] discovery: 并发请求触发多次刷新 — Promise.all场景复现
 
-  [T2] #2 修复竞态条件 | 4 obs
+  [T2] 修复竞态条件 | 4 obs
     prompt: "Fix the race condition in auth..."
     response: "I've added a mutex lock to prevent concurrent token..."
     description: 加mutex+重试逻辑
@@ -482,7 +482,7 @@ Each node has a consistent pattern:
 - **Collapsed**: one-line with `[ID] title | metadata`
 - **Expanded**: multi-line with `key: value` fields + child nodes
 
-IDs (`[S142]`, `[T3]`, `[O7]`) are directly referenceable in follow-up tool calls.
+IDs (`[S142]`, `[T3]`, `[O7]`) are directly referenceable in follow-up tool calls. Turn references are session-scoped prompt numbers, so turn detail uses `recall(session=142, turn=3)`.
 
 ### Token Budget for Typical Retrieval
 
