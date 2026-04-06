@@ -93,6 +93,7 @@ export function createSessionInitHandler(
             ? dependencies.extractAssistantResponse(
                 input.transcriptPath,
                 previousTurn.userPrompt,
+                previousTurn.promptNumber,
               )
             : "";
 

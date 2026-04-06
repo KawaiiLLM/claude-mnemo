@@ -140,4 +140,30 @@ describe("parseTranscript", () => {
 
     expect(extractAssistantResponse(transcript.path, "Missing prefix")).toBe("");
   });
+
+  test("can target a repeated prompt by prompt number", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "repeat" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "first response" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "repeat" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "second response" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(
+      extractAssistantResponse(transcript.path, "repeat", 2),
+    ).toBe("second response");
+  });
 });

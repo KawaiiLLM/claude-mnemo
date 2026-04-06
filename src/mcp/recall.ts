@@ -205,11 +205,39 @@ function formatObservationDetail(db: Database, observationId: number): string {
 }
 
 function formatTimeline(db: Database, anchor: string, before = 0, after = 0): string {
-  const anchorId = Number(anchor.replace(/^S/i, ""));
   const sessions = getRecentSessions(db, { limit: 1_000 }).sort(
     (left, right) => left.startedAtEpoch - right.startedAtEpoch,
   );
-  const anchorIndex = sessions.findIndex((session) => session.id === anchorId);
+
+  if (sessions.length === 0) {
+    return "Anchor session not found.";
+  }
+
+  const anchorId = Number(anchor.replace(/^S/i, ""));
+  let anchorIndex = /^S\d+$/i.test(anchor)
+    ? sessions.findIndex((session) => session.id === anchorId)
+    : -1;
+
+  if (anchorIndex === -1) {
+    const dateMatch = anchor.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (dateMatch) {
+      const [, year, month, day] = dateMatch;
+      const anchorEpoch = Math.floor(
+        Date.UTC(Number(year), Number(month) - 1, Number(day)) / 1000,
+      );
+
+      if (!Number.isNaN(anchorEpoch)) {
+        anchorIndex = sessions.findIndex(
+          (session) => session.startedAtEpoch >= anchorEpoch,
+        );
+
+        if (anchorIndex === -1) {
+          anchorIndex = sessions.length - 1;
+        }
+      }
+    }
+  }
 
   if (anchorIndex === -1) {
     return "Anchor session not found.";

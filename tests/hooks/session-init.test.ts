@@ -96,6 +96,7 @@ describe("handleSessionInitHook", () => {
     expect(extractAssistantResponse).toHaveBeenCalledWith(
       "/tmp/session.jsonl",
       "Diagnose the auth race",
+      1,
     );
     expect(firstTurn.assistantResponse).toBe(
       "I found a race condition in token refresh.",

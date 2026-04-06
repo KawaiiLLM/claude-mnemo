@@ -138,6 +138,20 @@ function combineClauses(clauses: string[]): string {
   return filtered.length > 0 ? ` WHERE ${filtered.join(" AND ")}` : "";
 }
 
+function buildSafeFtsQuery(query?: string): string | undefined {
+  const terms = query
+    ?.trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) => `"${term.replace(/"/g, '""')}"`);
+
+  if (!terms || terms.length === 0) {
+    return undefined;
+  }
+
+  return terms.join(" AND ");
+}
+
 function indexFtsRecord(
   db: Database,
   layer: "session" | "turn" | "observation",
@@ -235,7 +249,7 @@ export function searchMemory(
   }
 
   const results: SearchMemoryResult[] = [];
-  const query = options.query;
+  const query = buildSafeFtsQuery(options.query);
 
   const sessionProjectClause = buildProjectClause(options.project);
   const sessionDateClause = buildDateClause(

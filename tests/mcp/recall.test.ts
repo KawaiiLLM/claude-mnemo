@@ -161,6 +161,18 @@ describe("recallMemory", () => {
     expect(output.indexOf("[S2]")).toBeLessThan(output.indexOf("[S3]"));
   });
 
+  test("accepts a date anchor for the cross-session timeline", () => {
+    const output = recallMemory(db, {
+      around: "1970-01-01",
+      before: 1,
+      after: 1,
+    });
+
+    expect(output).toContain("[S1] Auth baseline");
+    expect(output).toContain("[S2] Auth race fix");
+    expect(output.indexOf("[S1]")).toBeLessThan(output.indexOf("[S2]"));
+  });
+
   test("filters by file path", () => {
     const output = recallMemory(db, { file: "src/auth.ts" });
 

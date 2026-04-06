@@ -239,10 +239,14 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
 export function extractAssistantResponse(
   transcriptPath: string,
   userPromptPrefix: string,
+  promptNumber?: number,
 ): string {
-  const turn = parseTranscript(transcriptPath).find((candidate) =>
-    candidate.userPrompt.startsWith(userPromptPrefix),
-  );
+  const turns = parseTranscript(transcriptPath);
+  const turn =
+    (promptNumber !== undefined
+      ? turns.find((candidate) => candidate.promptNumber === promptNumber)
+      : undefined) ??
+    turns.find((candidate) => candidate.userPrompt.startsWith(userPromptPrefix));
 
   return turn?.assistantText ?? "";
 }

@@ -14,7 +14,7 @@ export function resolveDatabasePath(explicitPath?: string): string {
 }
 
 export function encodeProjectPath(projectPath: string): string {
-  return encodeURIComponent(projectPath);
+  return projectPath.replace(/[/:\\]+/g, "-");
 }
 
 export function resolveTranscriptPath(

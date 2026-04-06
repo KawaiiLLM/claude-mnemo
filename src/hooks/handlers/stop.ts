@@ -54,7 +54,11 @@ function backfillLastPendingTurn(
   const assistantResponse =
     input.lastAssistantMessage ??
     (input.transcriptPath && lastPendingTurn.userPrompt
-      ? transcriptReader(input.transcriptPath, lastPendingTurn.userPrompt)
+      ? transcriptReader(
+          input.transcriptPath,
+          lastPendingTurn.userPrompt,
+          lastPendingTurn.promptNumber,
+        )
       : "");
 
   db.query("UPDATE turns SET assistant_response = ? WHERE id = ?").run(
@@ -76,7 +80,11 @@ function detectUndoPromptNumbers(
   return getTurnsForSession(db, sessionDbId)
     .filter((turn) => turn.status === "extracted" && turn.userPrompt)
     .filter((turn) => {
-      const currentResponse = transcriptReader(transcriptPath, turn.userPrompt ?? "");
+      const currentResponse = transcriptReader(
+        transcriptPath,
+        turn.userPrompt ?? "",
+        turn.promptNumber,
+      );
       return currentResponse !== "" && currentResponse !== (turn.assistantResponse ?? "");
     })
     .map((turn) => turn.promptNumber);
