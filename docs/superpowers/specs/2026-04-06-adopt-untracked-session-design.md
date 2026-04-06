@@ -2,7 +2,7 @@
 
 ## Goal
 
-Handle resumed Claude Code sessions that already have transcript history but no stored memory rows, without breaking `prompt_number` alignment between the database and `replay`.
+Handle resumed Claude Code sessions that already have transcript history but no stored memory rows, without breaking `prompt_number` alignment between the database, `replay`, and hook backfill.
 
 ## Problem
 
@@ -66,14 +66,32 @@ max_stored_prompt_number + 1
 
 This keeps DB numbering aligned with replay numbering without requiring re-import of the full historical transcript.
 
-## What Counts As A Historical Transcript Turn
+## Canonical Turn Numbering
 
-Use the same logical turn boundary as `replay`.
+There must be exactly one turn-numbering system in the product.
+
+`prompt_number` means:
+
+> the Nth real user prompt in the main session transcript, including sidechain turns
+
+This canonical numbering is used by:
+
+- DB `turns.prompt_number`
+- `recall(session=..., turn=N)`
+- `replay(session=..., turn=N)`
+- hook backfill when resolving `assistant_response`
+- undo detection
+
+Sidechain affects visibility and status, not identity. A turn that later becomes `undone` keeps the same `prompt_number`.
+
+## What Counts As A Canonical Transcript Turn
+
+Canonical numbering uses the same logical turn boundary everywhere.
 
 Count only real user prompts in the main session transcript:
 
 - include non-empty user prompt entries
-- include sidechain user prompts (replay includes them and assigns prompt numbers to them)
+- include sidechain user prompts
 
 Do not count:
 
@@ -83,7 +101,7 @@ Do not count:
 - subagent transcript files such as `agent-*.jsonl`
 - plugin-internal synthetic control messages that are not part of the main user turn stream
 
-The counting rule must be implemented in one shared place so adoption and replay cannot drift apart.
+The counting and turn-resolution rule must be implemented in one shared place so adoption, replay, backfill, and undo detection cannot drift apart.
 
 ## Numbering Rules
 
@@ -144,18 +162,28 @@ Replace `getTurnsForSession(...).length + 1` with:
 
 The `prompt_number` written into the DB remains the durable source of truth after insertion.
 
-## Shared Counting Logic
+## Shared Transcript Logic
 
-To avoid drift, adoption must reuse the same turn-counting semantics as replay.
+To avoid drift, all turn-aware paths must reuse the same canonical transcript parser.
 
 Recommended shape:
 
-- keep `parseReplayTranscript()` as the transcript truth for replay
-- add a small helper that returns:
-  - `countReplayTurns(transcriptPath)`
-  - or `getReplayTurnCount(transcriptPath)`
+- replace the current split between replay-counting and backfill-counting with one canonical parser
+- that parser returns transcript turns keyed by canonical `prompt_number`
+- each parsed turn may carry metadata such as:
+  - `isSidechain`
+  - `assistantText`
+  - `toolCalls`
 
-The adoption path should use that helper instead of duplicating counting rules inside hooks.
+Derived views may filter canonical turns for display, but must not renumber them.
+
+Recommended helpers:
+
+- `parseCanonicalTranscript(transcriptPath)`
+- `getCanonicalTurnCount(transcriptPath)`
+- `getCanonicalTurnByPromptNumber(transcriptPath, promptNumber)`
+
+The adoption path should use this shared logic instead of duplicating counting rules inside hooks.
 
 ## Data Model
 
@@ -191,9 +219,9 @@ New behavior:
 
 ### Stop
 
-No semantic change.
+No lifecycle change, but the transcript resolution path changes.
 
-Once the pending row is created with the correct prompt number, stop/backfill continues to use DB turn identity as it already does.
+Once the pending row is created with the correct prompt number, stop/backfill must resolve `assistant_response` using canonical numbering, not a sidechain-filtered numbering scheme.
 
 ## Edge Cases
 
@@ -210,11 +238,12 @@ This should be rare, and replay/recall mismatch is acceptable only in this expli
 
 ### Sidechain history
 
-If replay counts sidechain turns, adoption must also count them.
+Canonical numbering includes sidechain turns.
 
 This ensures:
 
 - `replay(session=..., turn=N)` and DB `prompt_number = N` remain aligned
+- backfill resolves the same `turn=N`
 - undo history does not shift future numbering
 
 ### Synthetic/plugin-internal prompts
@@ -233,6 +262,8 @@ Required tests:
 4. adoption and replay report the same turn count for the same transcript
 5. missing transcript path on adoption falls back to `1` and does not crash
 6. successful adoption emits a diagnostic log with the adopted baseline
+7. backfill resolves `assistant_response` by canonical `prompt_number` even when earlier turns are sidechained
+8. canonical filtered views may hide sidechain turns, but do not renumber later turns
 
 ## Risks
 
@@ -245,19 +276,14 @@ Mitigation:
 - share counting logic with replay
 - add regression tests using real-world transcript fixtures
 
-### Backfill still uses a different transcript numbering basis
+### Canonical parser must exclude synthetic prompts correctly
 
-Adoption is replay-compatible and counts sidechain turns. Current backfill logic still resolves assistant responses through `parseTranscript()`, which filters sidechains and therefore uses a different prompt-number sequence.
-
-This means adoption can make an existing backfill fragility real:
-
-- DB may assign a newly adopted turn `prompt_number = 8`
-- backfill may only see 6 non-sidechain turns
-- prompt-number lookup can miss and fall back to prompt-prefix matching
+Once every path shares one numbering system, mistakes in canonical parsing affect adoption, replay, backfill, and undo detection simultaneously.
 
 Mitigation:
 
-- treat this as a required follow-up during implementation
+- regression-test canonical parsing against real transcript fixtures
+- keep synthetic-entry exclusion structural rather than text-based
 - unify backfill turn resolution with replay-compatible numbering, or route both through one shared transcript turn resolver
 
 ### First-prompt timing ambiguity
