@@ -16,6 +16,7 @@ import {
   parseReplayTranscript,
 } from "../../shared/transcript-parser";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
+import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface StopHandlerDependencies {
@@ -41,42 +42,6 @@ function buildStopPrompt(db: Database, sessionDbId: number): string {
       })),
     ),
   );
-}
-
-function backfillPendingTurns(
-  db: Database,
-  input: NormalizedHookInput,
-  transcriptReader: typeof extractAssistantResponse,
-  sessionDbId: number,
-): void {
-  const pendingTurns = getPendingTurns(db, sessionDbId).filter(
-    (turn) => turn.status === "pending",
-  );
-
-  if (pendingTurns.length === 0) {
-    return;
-  }
-
-  const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
-
-  for (const pendingTurn of pendingTurns) {
-    const assistantResponse =
-      pendingTurn.promptNumber === lastPendingPromptNumber &&
-      input.lastAssistantMessage !== undefined
-        ? input.lastAssistantMessage
-        : input.transcriptPath && pendingTurn.userPrompt
-          ? transcriptReader(
-              input.transcriptPath,
-              pendingTurn.userPrompt,
-              pendingTurn.promptNumber,
-            )
-          : "";
-
-    db.query("UPDATE turns SET assistant_response = ? WHERE id = ?").run(
-      assistantResponse,
-      pendingTurn.id,
-    );
-  }
 }
 
 function detectUndoPromptNumbers(
@@ -144,11 +109,13 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       };
     }
 
-    backfillPendingTurns(
+    backfillFromTranscript(
       dependencies.db,
-      input,
-      dependencies.extractAssistantResponse,
-      session.id,
+      getPendingTurns(dependencies.db, session.id).filter(
+        (turn) => turn.status === "pending",
+      ),
+      input.transcriptPath,
+      input.lastAssistantMessage,
     );
 
     const stalePromptNumbers = detectUndoPromptNumbers(

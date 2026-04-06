@@ -4,8 +4,12 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { getTurn } from "../../src/db/turns";
 import { createCompactHandler } from "../../src/hooks/handlers/compact";
 import type { NormalizedHookInput } from "../../src/hooks/types";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -18,6 +22,18 @@ function createInput(
     raw: {},
     ...overrides,
   };
+}
+
+function writeTranscript(lines: unknown[]): { directory: string; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-compact-"));
+  const path = join(directory, "session.jsonl");
+  writeFileSync(
+    path,
+    lines.map((line) => JSON.stringify(line)).join("\n"),
+    "utf8",
+  );
+
+  return { directory, path };
 }
 
 describe("handleCompactHook", () => {
@@ -61,8 +77,7 @@ describe("handleCompactHook", () => {
     const handler = createCompactHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse: mock(() => "Backfilled response"),
-    });
+    } as any);
 
     let settled = false;
     const handlerPromise = handler(
@@ -82,5 +97,47 @@ describe("handleCompactHook", () => {
     await handlerPromise;
 
     expect(settled).toBe(true);
+  });
+
+  test("backfills assistant responses and tool counts without an extractor dependency", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Compact pending work" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/compact.ts" } },
+          { type: "text", text: "Compact response" },
+        ],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'pending', 'Compact pending work', 120)`,
+    ).run(sessionId);
+
+    const forkMnemosyne = mock(async () => {});
+    const handler = createCompactHandler({
+      db,
+      forkMnemosyne,
+    } as any);
+
+    await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    const turn = getTurn(db, sessionId, 1)!;
+
+    expect(turn.assistantResponse).toBe("Compact response");
+    expect(turn.toolCallCount).toBe(1);
+    expect(forkMnemosyne).toHaveBeenCalledTimes(1);
+
+    rmSync(transcript.directory, { recursive: true, force: true });
   });
 });

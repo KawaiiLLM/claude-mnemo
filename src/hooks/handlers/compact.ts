@@ -7,14 +7,13 @@ import {
   buildExtractionStatusSummary,
   buildMnemosynePrompt,
 } from "../../mnemosyne/prompt";
+import { backfillFromTranscript } from "../backfill";
 import { resolveTranscriptPath } from "../../shared/paths";
-import { extractAssistantResponse } from "../../shared/transcript-parser";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface CompactHandlerDependencies {
   db: Database;
   forkMnemosyne: typeof forkMnemosyne;
-  extractAssistantResponse: typeof extractAssistantResponse;
 }
 
 function buildPrompt(db: Database, sessionDbId: number): string {
@@ -52,20 +51,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
       input.transcriptPath ||
       (input.cwd ? resolveTranscriptPath(input.cwd, input.sessionId) : undefined);
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
-
-    for (const turn of pendingTurns) {
-      if (turn.assistantResponse || !turn.userPrompt) {
-        continue;
-      }
-
-      const assistantResponse = transcriptPath
-        ? dependencies.extractAssistantResponse(transcriptPath, turn.userPrompt, turn.promptNumber)
-        : "";
-
-      dependencies.db
-        .query("UPDATE turns SET assistant_response = ? WHERE id = ?")
-        .run(assistantResponse, turn.id);
-    }
+    backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
 
     if (pendingTurns.length > 0) {
       await dependencies.forkMnemosyne({

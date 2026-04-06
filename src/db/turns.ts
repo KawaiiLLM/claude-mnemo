@@ -359,3 +359,17 @@ export function markTurnsStale(
        AND status IN ('extracted', 'skipped')`,
   ).run(now, sessionId, ...promptNumbers);
 }
+
+export function updateTurnBackfill(
+  db: Database,
+  turnId: number,
+  assistantResponse: string,
+  toolCallCount: number,
+): void {
+  db.query(
+    `UPDATE turns
+     SET assistant_response = ?,
+         tool_call_count = ?
+     WHERE id = ?`,
+  ).run(assistantResponse, toolCallCount, turnId);
+}

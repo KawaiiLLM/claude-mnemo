@@ -84,15 +84,20 @@ describe("handleStopHook", () => {
     expect(forkMnemosyne).not.toHaveBeenCalled();
   });
 
-  test("backfills all pending turns, marks undo as stale, and completes the session", async () => {
+  test("backfills pending turns using replay numbering and writes tool counts", async () => {
     const transcript = writeTranscript([
       {
         role: "user",
-        content: [{ type: "text", text: "Diagnose auth" }],
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
       },
       {
         role: "assistant",
-        content: [{ type: "text", text: "New response" }],
+        isSidechain: true,
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/draft.ts" } },
+          { type: "text", text: "Draft response" },
+        ],
       },
       {
         role: "user",
@@ -100,51 +105,30 @@ describe("handleStopHook", () => {
       },
       {
         role: "assistant",
-        content: [{ type: "text", text: "from transcript: path" }],
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "Fix auth" }],
-      },
-      {
-        role: "assistant",
-        content: [{ type: "text", text: "Final answer from stop hook" }],
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/auth.ts" } },
+          { type: "text", text: "Replay-compatible response" },
+        ],
       },
     ]);
 
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, assistant_response, title, created_at_epoch
-      ) VALUES (?, 1, 'extracted', 'Diagnose auth', 'Old response', 'Diagnose auth', 120)`,
+      ) VALUES (?, 1, 'extracted', 'Draft approach', 'Draft response', 'Draft approach', 120)`,
     ).run(sessionId);
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
       ) VALUES (?, 2, 'pending', 'Investigate logs', 130)`,
     ).run(sessionId);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch
-      ) VALUES (?, 3, 'pending', 'Fix auth', 140)`,
-    ).run(sessionId);
 
     const forkMnemosyne = mock(async () => {});
-    const extractAssistantResponse = mock((path: string, promptPrefix: string) => {
-      if (promptPrefix === "Diagnose auth") {
-        return "New response";
-      }
-
-      if (promptPrefix === "Investigate logs") {
-        return `from transcript: ${path}`;
-      }
-
-      return "";
-    });
     const stderrWrite = mock(() => true);
     const handler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
+      extractAssistantResponse: mock(() => ""),
       stderr: { write: stderrWrite },
       now: () => 500,
     });
@@ -152,13 +136,11 @@ describe("handleStopHook", () => {
     const result = await handler(
       createInput({
         transcriptPath: transcript.path,
-        lastAssistantMessage: "Final answer from stop hook",
       }),
     );
 
     const extractedTurn = getTurn(db, sessionId, 1)!;
     const secondPendingTurn = getTurn(db, sessionId, 2)!;
-    const lastPendingTurn = getTurn(db, sessionId, 3)!;
     const session = getSessionByContentId(db, "session-stop")!;
 
     expect(result).toEqual({
@@ -166,32 +148,19 @@ describe("handleStopHook", () => {
       exitCode: 0,
     });
     expect(extractedTurn.status).toBe("stale");
-    expect(secondPendingTurn.assistantResponse).toBe(`from transcript: ${transcript.path}`);
-    expect(lastPendingTurn.assistantResponse).toBe("Final answer from stop hook");
+    expect(extractedTurn.toolCallCount).toBeNull();
+    expect(secondPendingTurn.assistantResponse).toBe("Replay-compatible response");
+    expect(secondPendingTurn.toolCallCount).toBe(1);
     expect(getPendingTurns(db, sessionId).map((turn) => turn.promptNumber)).toEqual([
       1,
       2,
-      3,
     ]);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
     expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      '#1 [stale]: "Diagnose auth"',
+      '#1 [stale]: "Draft approach"',
     );
     expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
       '#2 [pending]: "Investigate logs"',
-    );
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      '#3 [pending]: "Fix auth"',
-    );
-    expect(extractAssistantResponse).toHaveBeenCalledWith(
-      transcript.path,
-      "Investigate logs",
-      2,
-    );
-    expect(extractAssistantResponse).not.toHaveBeenCalledWith(
-      transcript.path,
-      "Fix auth",
-      3,
     );
     expect(session.completedAtEpoch).toBe(500);
     expect(stderrWrite).toHaveBeenCalled();
