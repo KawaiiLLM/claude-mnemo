@@ -73,7 +73,7 @@ Use the same logical turn boundary as `replay`.
 Count only real user prompts in the main session transcript:
 
 - include non-empty user prompt entries
-- include sidechain user prompts if replay includes them
+- include sidechain user prompts (replay includes them and assigns prompt numbers to them)
 
 Do not count:
 
@@ -187,6 +187,7 @@ New behavior:
 3. if DB already has turns, use `max(prompt_number) + 1`
 4. if DB has no turns and a transcript path is available, count historical replay turns and use `count + 1`
 5. insert the new pending turn with that derived `prompt_number`
+6. log successful adoption with the session identifier and adopted baseline prompt count
 
 ### Stop
 
@@ -231,6 +232,7 @@ Required tests:
 3. adoption ignores `queue-operation`, `last-prompt`, and tool-result-only user entries
 4. adoption and replay report the same turn count for the same transcript
 5. missing transcript path on adoption falls back to `1` and does not crash
+6. successful adoption emits a diagnostic log with the adopted baseline
 
 ## Risks
 
@@ -242,6 +244,21 @@ Mitigation:
 
 - share counting logic with replay
 - add regression tests using real-world transcript fixtures
+
+### Backfill still uses a different transcript numbering basis
+
+Adoption is replay-compatible and counts sidechain turns. Current backfill logic still resolves assistant responses through `parseTranscript()`, which filters sidechains and therefore uses a different prompt-number sequence.
+
+This means adoption can make an existing backfill fragility real:
+
+- DB may assign a newly adopted turn `prompt_number = 8`
+- backfill may only see 6 non-sidechain turns
+- prompt-number lookup can miss and fall back to prompt-prefix matching
+
+Mitigation:
+
+- treat this as a required follow-up during implementation
+- unify backfill turn resolution with replay-compatible numbering, or route both through one shared transcript turn resolver
 
 ### First-prompt timing ambiguity
 
