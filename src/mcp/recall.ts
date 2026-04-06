@@ -38,10 +38,19 @@ function validateRecallInput(input: RecallInput): string | null {
     const hasOtherSelector =
       input.session !== undefined ||
       input.turn !== undefined ||
-      (input.expandTurns?.length ?? 0) > 0;
+      (input.expandTurns?.length ?? 0) > 0 ||
+      input.query !== undefined ||
+      input.around !== undefined ||
+      input.before !== undefined ||
+      input.after !== undefined ||
+      input.file !== undefined ||
+      input.type !== undefined ||
+      input.project !== undefined ||
+      input.fromEpoch !== undefined ||
+      input.toEpoch !== undefined;
 
     if (hasOtherSelector) {
-      return "Parameter error: observation cannot be combined with session, turn, or expand_turns.";
+      return "Parameter error: observation cannot be combined with other selectors.";
     }
   }
 

@@ -165,6 +165,17 @@ describe("recallMemory", () => {
     expect(output).toContain("facts: mutex added; race resolved");
   });
 
+  test("rejects observation mixed with other selectors", () => {
+    const output = recallMemory(db, {
+      observation: authObservationId,
+      query: "auth",
+    });
+
+    expect(output).toBe(
+      "Parameter error: observation cannot be combined with other selectors.",
+    );
+  });
+
   test("returns a cross-session timeline around an anchor session", () => {
     const output = recallMemory(db, {
       around: `S${authSessionId}`,
