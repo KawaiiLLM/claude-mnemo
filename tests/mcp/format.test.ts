@@ -79,6 +79,23 @@ describe("MCP format renderer", () => {
       } as any),
     ).toBe(
       [
+        "- [O7] 🔴 Added mutex",
+        "  - desc: Guards refresh",
+      ].join("\n"),
+    );
+
+    expect(
+      formatObservationCollapsed(
+        {
+          id: 7,
+          type: "bugfix",
+          title: "Added mutex",
+          description: "Guards refresh",
+        } as any,
+        { indent: "    " },
+      ),
+    ).toBe(
+      [
         "    - [O7] 🔴 Added mutex",
         "      - desc: Guards refresh",
       ].join("\n"),
@@ -188,16 +205,27 @@ describe("MCP format renderer", () => {
       } as any),
     ).toBe(
       [
-        "    - [O7] 🔴 Added mutex",
-        "      - desc: Guards refresh",
-        "      - narrative: Serialized token refresh work with a shared promise.",
-        "      - facts:",
-        "        - mutex added",
-        "        - retry path preserved",
-        "      - concepts: problem-solution, trade-off",
-        "      - files: 📖 src/auth.ts ✏️ src/auth.ts",
+        "- [O7] 🔴 Added mutex",
+        "  - desc: Guards refresh",
+        "  - narrative: Serialized token refresh work with a shared promise.",
+        "  - facts:",
+        "    - mutex added",
+        "    - retry path preserved",
+        "  - concepts: problem-solution, trade-off",
+        "  - files: 📖 src/auth.ts ✏️ src/auth.ts",
       ].join("\n"),
     );
+
+    expect(
+      formatObservationExpanded(
+        {
+          id: 7,
+          type: "mystery",
+          title: "Unknown type",
+        } as any,
+        { indent: "    " },
+      ),
+    ).toBe("    - [O7] mystery Unknown type");
   });
 
   test("formats a mixed expansion tree without extra blank lines", () => {
@@ -224,7 +252,7 @@ describe("MCP format renderer", () => {
             promptPreview: "Why am I getting 401 errors?",
             responsePreview: "I found a race condition in refresh logic.",
             insight: ["concurrent refreshes collide"],
-            observations: [
+        observations: [
               {
                 id: 7,
                 type: "bugfix",

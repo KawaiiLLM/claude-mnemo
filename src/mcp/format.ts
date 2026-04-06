@@ -19,6 +19,10 @@ export interface FormattedObservation {
   filesModified?: string[];
 }
 
+interface ObservationFormatOptions {
+  indent?: string;
+}
+
 export interface FormattedTurn {
   id: number;
   promptNumber: number;
@@ -64,7 +68,7 @@ function formatEpoch(epoch: number): string {
 }
 
 function typeEmoji(type: string): string {
-  return TYPE_EMOJI[type] ?? "⚪";
+  return TYPE_EMOJI[type] ?? type;
 }
 
 function normalizeCount(value?: number | null): number {
@@ -240,13 +244,22 @@ export function formatTurnExpanded(
   return lines.join("\n");
 }
 
+function formatObservationLabel(
+  observation: FormattedObservation,
+  { indent = "" }: ObservationFormatOptions = {},
+): string {
+  return `${indent}- [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`;
+}
+
 export function formatObservationCollapsed(
   observation: FormattedObservation,
+  options: ObservationFormatOptions = {},
 ): string {
-  const lines = [`    - [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`];
+  const { indent = "" } = options;
+  const lines = [formatObservationLabel(observation, options)];
 
   if (observation.description) {
-    lines.push(`      - desc: ${observation.description}`);
+    lines.push(`${indent}  - desc: ${observation.description}`);
   }
 
   return lines.join("\n");
@@ -254,20 +267,23 @@ export function formatObservationCollapsed(
 
 export function formatObservationExpanded(
   observation: FormattedObservation,
+  options: ObservationFormatOptions = {},
 ): string {
-  const lines = [formatObservationCollapsed(observation)];
+  const { indent = "" } = options;
+  const detailIndent = `${indent}  `;
+  const lines = [formatObservationCollapsed(observation, options)];
 
   if (observation.narrative) {
-    lines.push(`      - narrative: ${observation.narrative}`);
+    lines.push(`${detailIndent}- narrative: ${observation.narrative}`);
   }
 
   if (observation.facts && observation.facts.length > 0) {
-    lines.push("      - facts:");
-    pushBullets(lines, "        ", observation.facts);
+    lines.push(`${detailIndent}- facts:`);
+    pushBullets(lines, `${detailIndent}  `, observation.facts);
   }
 
   if (observation.concepts && observation.concepts.length > 0) {
-    lines.push(`      - concepts: ${observation.concepts.join(", ")}`);
+    lines.push(`${detailIndent}- concepts: ${observation.concepts.join(", ")}`);
   }
 
   const filesParts: string[] = [];
@@ -281,7 +297,7 @@ export function formatObservationExpanded(
   }
 
   if (filesParts.length > 0) {
-    lines.push(`      - files: ${filesParts.join(" ")}`);
+    lines.push(`${detailIndent}- files: ${filesParts.join(" ")}`);
   }
 
   return lines.join("\n");
@@ -299,8 +315,8 @@ export function formatTree(sessions: FormattedSession[]): string {
       for (const observation of turn.observations ?? []) {
         lines.push(
           isObservationExpanded(observation)
-            ? formatObservationExpanded(observation)
-            : formatObservationCollapsed(observation),
+            ? formatObservationExpanded(observation, { indent: "    " })
+            : formatObservationCollapsed(observation, { indent: "    " }),
         );
       }
     }
