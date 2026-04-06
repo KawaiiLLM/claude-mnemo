@@ -250,5 +250,11 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-  void startMcpServer();
+  void (async () => {
+    const { createDatabase } = await import("../db/database");
+    const { initializeSchema } = await import("../db/schema");
+    const db = createDatabase();
+    initializeSchema(db);
+    await startMcpServer({ database: db });
+  })();
 }

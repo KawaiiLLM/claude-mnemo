@@ -3,7 +3,6 @@ import type { Database } from "bun:sqlite";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import {
   getPendingTurns,
-  getTurn,
   getTurnsForSession,
   markTurnsStale,
 } from "../../db/turns";
@@ -168,16 +167,3 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
   };
 }
 
-export function handleStopHook(input: NormalizedHookInput): HookResult {
-  if (input.stopHookActive) {
-    return {
-      continue: true,
-      exitCode: HOOK_SUCCESS_EXIT_CODE,
-    };
-  }
-
-  return {
-    continue: true,
-    exitCode: HOOK_SUCCESS_EXIT_CODE,
-  };
-}

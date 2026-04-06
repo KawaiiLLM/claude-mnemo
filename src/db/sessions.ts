@@ -63,12 +63,12 @@ export function upsertSession(
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
-        title = excluded.title,
-        description = excluded.description,
-        insight = excluded.insight,
+        title = COALESCE(excluded.title, sessions.title),
+        description = COALESCE(excluded.description, sessions.description),
+        insight = COALESCE(excluded.insight, sessions.insight),
         started_at_epoch = excluded.started_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
-        completed_at_epoch = excluded.completed_at_epoch
+        completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
       RETURNING
         id,
         content_session_id AS contentSessionId,

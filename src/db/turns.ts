@@ -150,8 +150,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       db.query(
         `UPDATE turns
          SET status = ?,
-             user_prompt = ?,
-             assistant_response = ?,
+             user_prompt = COALESCE(?, user_prompt),
+             assistant_response = COALESCE(?, assistant_response),
              title = ?,
              description = ?,
              insight = ?,
@@ -340,11 +340,13 @@ export function markTurnsStale(
 
   const placeholders = promptNumbers.map(() => "?").join(", ");
 
+  const now = Math.floor(Date.now() / 1000);
+
   db.query(
     `UPDATE turns
-     SET status = 'stale'
+     SET status = 'stale', updated_at_epoch = ?
      WHERE session_id = ?
        AND prompt_number IN (${placeholders})
        AND status IN ('extracted', 'skipped')`,
-  ).run(sessionId, ...promptNumbers);
+  ).run(now, sessionId, ...promptNumbers);
 }

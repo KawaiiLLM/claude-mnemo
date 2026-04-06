@@ -54,7 +54,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
       }
 
       const assistantResponse = transcriptPath
-        ? dependencies.extractAssistantResponse(transcriptPath, turn.userPrompt)
+        ? dependencies.extractAssistantResponse(transcriptPath, turn.userPrompt, turn.promptNumber)
         : "";
 
       dependencies.db
@@ -76,8 +76,3 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
   };
 }
 
-export function handleCompactHook(_input: NormalizedHookInput): HookResult {
-  return {
-    continue: true,
-  };
-}

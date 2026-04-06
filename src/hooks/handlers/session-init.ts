@@ -118,9 +118,3 @@ export function createSessionInitHandler(
   };
 }
 
-export function handleSessionInitHook(_input: NormalizedHookInput): HookResult {
-  return {
-    continue: true,
-    suppressOutput: true,
-  };
-}

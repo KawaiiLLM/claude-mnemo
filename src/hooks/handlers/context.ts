@@ -70,8 +70,3 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
   };
 }
 
-export function handleContextHook(_input: NormalizedHookInput): HookResult {
-  return {
-    continue: true,
-  };
-}

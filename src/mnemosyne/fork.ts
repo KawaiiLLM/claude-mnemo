@@ -17,6 +17,7 @@ export async function forkMnemosyne(
       cwd: input.cwd,
       resume: input.sessionId,
       forkSession: true,
+      maxTurns: 15,
       env: buildIsolatedEnv(),
     },
   });
