@@ -105,6 +105,7 @@ const updateSessionInputSchema = z.object({
   title: z.string().optional(),
   description: z.string().optional(),
   insight: z.string().optional(),
+  next_steps: z.string().optional(),
   updated_at_epoch: z.number().int().optional(),
   completed_at_epoch: z.number().int().optional(),
 });

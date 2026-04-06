@@ -8,6 +8,7 @@ const SCHEMA_SQL = `
     title TEXT,
     description TEXT,
     insight TEXT,
+    next_steps TEXT,
     started_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -25,6 +26,7 @@ const SCHEMA_SQL = `
     insight TEXT,
     files_read TEXT,
     files_modified TEXT,
+    tool_call_count INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -70,4 +72,22 @@ const SCHEMA_SQL = `
 
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+}
+
+function hasColumn(db: Database, table: string, column: string): boolean {
+  const rows = db
+    .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('${table}')`)
+    .all();
+
+  return rows.some((row) => row.name === column);
+}
+
+export function migrateSchema(db: Database): void {
+  if (!hasColumn(db, "sessions", "next_steps")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
+  }
+
+  if (!hasColumn(db, "turns", "tool_call_count")) {
+    db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
+  }
 }

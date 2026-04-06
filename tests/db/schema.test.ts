@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { initializeSchema } from "../../src/db/schema";
+import { initializeSchema, migrateSchema } from "../../src/db/schema";
 
 describe("initializeSchema", () => {
   let db: Database;
@@ -46,6 +46,7 @@ describe("initializeSchema", () => {
       "title",
       "description",
       "insight",
+      "next_steps",
       "started_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
@@ -125,5 +126,54 @@ describe("initializeSchema", () => {
     expect(turnColumns).toContain("assistant_response");
     expect(turnColumns).toContain("files_read");
     expect(turnColumns).toContain("files_modified");
+  });
+
+  test("migrates sessions and turns to add next_steps and tool_call_count", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        insight TEXT,
+        started_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        description TEXT,
+        insight TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+
+    initializeSchema(db);
+    migrateSchema(db);
+    expect(() => migrateSchema(db)).not.toThrow();
+
+    const sessionColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => row.name);
+    const turnColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+
+    expect(sessionColumns).toContain("next_steps");
+    expect(turnColumns).toContain("tool_call_count");
   });
 });

@@ -41,6 +41,7 @@ export interface TurnRecord {
   insight: string | null;
   filesRead: string[];
   filesModified: string[];
+  toolCallCount: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -57,6 +58,7 @@ interface TurnRow {
   insight: string | null;
   filesRead: string | null;
   filesModified: string | null;
+  toolCallCount: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -74,6 +76,7 @@ const TURN_SELECT = `
     insight,
     files_read AS filesRead,
     files_modified AS filesModified,
+    tool_call_count AS toolCallCount,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns

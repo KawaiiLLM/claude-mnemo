@@ -9,6 +9,7 @@ export interface SessionRecord {
   title: string | null;
   description: string | null;
   insight: string | null;
+  nextSteps: string | null;
   startedAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -20,6 +21,7 @@ export interface UpsertSessionInput {
   title: string | null;
   description: string | null;
   insight: string | null;
+  nextSteps?: string | null;
   startedAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -38,6 +40,7 @@ const SESSION_SELECT = `
     title,
     description,
     insight,
+    next_steps AS nextSteps,
     started_at_epoch AS startedAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -49,23 +52,25 @@ export function upsertSession(
   input: UpsertSessionInput,
 ): SessionRecord {
   const session =
-    db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, number, number | null, number | null]>(`
+  db
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
         title,
         description,
         insight,
+        next_steps,
         started_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
         description = COALESCE(excluded.description, sessions.description),
         insight = COALESCE(excluded.insight, sessions.insight),
+        next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
         started_at_epoch = excluded.started_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -76,6 +81,7 @@ export function upsertSession(
         title,
         description,
         insight,
+        next_steps AS nextSteps,
         started_at_epoch AS startedAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -86,6 +92,7 @@ export function upsertSession(
       input.title,
       input.description,
       input.insight,
+      input.nextSteps ?? null,
       input.startedAtEpoch,
       input.updatedAtEpoch,
       input.completedAtEpoch,

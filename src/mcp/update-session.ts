@@ -14,6 +14,7 @@ export interface UpdateSessionToolInput {
   title?: string;
   description?: string;
   insight?: string;
+  next_steps?: string;
   updated_at_epoch?: number;
   completed_at_epoch?: number;
 }
@@ -45,6 +46,7 @@ export function updateSessionTool(
     title: input.title ?? session.title,
     description: input.description ?? session.description,
     insight: input.insight ?? session.insight,
+    nextSteps: input.next_steps,
     startedAtEpoch: session.startedAtEpoch,
     updatedAtEpoch:
       input.updated_at_epoch ?? Math.floor(Date.now() / 1000),

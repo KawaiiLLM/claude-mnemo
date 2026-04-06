@@ -29,6 +29,7 @@ describe("session queries", () => {
       title: "Auth fixes",
       description: "Investigated and fixed token refresh issues",
       insight: "- race condition reproduced",
+      nextSteps: "- verify refresh token rotation",
       startedAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: 120,
@@ -46,6 +47,7 @@ describe("session queries", () => {
       title: "Initial title",
       description: "Initial description",
       insight: "- first insight",
+      nextSteps: "- draft follow-up",
       startedAtEpoch: 200,
       updatedAtEpoch: 210,
       completedAtEpoch: null,
@@ -73,6 +75,34 @@ describe("session queries", () => {
     expect(updated.updatedAtEpoch).toBe(260);
     expect(updated.completedAtEpoch).toBe(300);
     expect(rowCount).toBe(1);
+  });
+
+  test("preserves nextSteps when an update omits it", () => {
+    const created = upsertSession(db, {
+      contentSessionId: "content-8",
+      project: "claude-mnemo",
+      title: "Initial title",
+      description: "Initial description",
+      insight: "- first insight",
+      nextSteps: "- keep working",
+      startedAtEpoch: 300,
+      updatedAtEpoch: 310,
+      completedAtEpoch: null,
+    });
+
+    const updated = upsertSession(db, {
+      contentSessionId: "content-8",
+      project: "claude-mnemo",
+      title: "Updated title",
+      description: "Updated description",
+      insight: "- updated insight",
+      startedAtEpoch: 300,
+      updatedAtEpoch: 360,
+      completedAtEpoch: null,
+    });
+
+    expect(updated.id).toBe(created.id);
+    expect(updated.nextSteps).toBe("- keep working");
   });
 
   test("getRecentSessions orders by startedAtEpoch descending", () => {
