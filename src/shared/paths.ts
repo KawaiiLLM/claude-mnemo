@@ -4,11 +4,13 @@ import { join } from "node:path";
 const DEFAULT_DB_PATH = join(homedir(), ".claude-mnemo", "claude-mnemo.db");
 
 export function resolveDatabasePath(explicitPath?: string): string {
-  if (explicitPath) {
-    return explicitPath;
+  const candidatePath = explicitPath || process.env.CLAUDE_MNEMO_DB_PATH || DEFAULT_DB_PATH;
+
+  if (candidatePath.startsWith("~/")) {
+    return join(homedir(), candidatePath.slice(2));
   }
 
-  return process.env.CLAUDE_MNEMO_DB_PATH ?? DEFAULT_DB_PATH;
+  return candidatePath;
 }
 
 export function encodeProjectPath(projectPath: string): string {

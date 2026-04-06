@@ -9,6 +9,8 @@ import { replayMemory } from "./replay";
 import { saveTurnTool } from "./save-turn";
 import { updateSessionTool } from "./update-session";
 
+declare const __DEFAULT_PACKAGE_VERSION__: string;
+
 type ToolResult = {
   content: Array<{
     type: "text";
@@ -170,7 +172,7 @@ export function createMcpServer(
   const server = new McpServer(
     {
       name: "claude-mnemo",
-      version: "0.1.0",
+      version: __DEFAULT_PACKAGE_VERSION__,
     },
     {
       capabilities: {
@@ -240,4 +242,13 @@ export async function startMcpServer(
   } finally {
     clearInterval(heartbeat);
   }
+}
+
+function isDirectExecution(): boolean {
+  const entry = process.argv[1] ?? "";
+  return entry.endsWith("/server.ts") || entry.endsWith("/mcp-server.cjs");
+}
+
+if (isDirectExecution()) {
+  void startMcpServer();
 }

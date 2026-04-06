@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mnemo": {
+      "type": "stdio",
+      "command": "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/mcp-server.cjs"
+    }
+  }
+}

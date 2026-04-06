@@ -1,22 +1,14 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 
 import { Database } from "bun:sqlite";
-
-const DEFAULT_DB_DIRECTORY = join(homedir(), ".claude-mnemo");
-const DEFAULT_DB_PATH = join(DEFAULT_DB_DIRECTORY, "claude-mnemo.db");
+import { resolveDatabasePath as resolveConfiguredDatabasePath } from "../shared/paths";
 
 function resolveDatabasePath(path?: string): string {
   if (!path || path.trim() === "") {
-    return DEFAULT_DB_PATH;
+    return resolveConfiguredDatabasePath();
   }
-
-  if (path.startsWith("~/")) {
-    return join(homedir(), path.slice(2));
-  }
-
-  return path;
+  return resolveConfiguredDatabasePath(path);
 }
 
 function ensureParentDirectory(databasePath: string): void {

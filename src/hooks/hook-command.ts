@@ -43,6 +43,21 @@ function readJsonFromStdin(): Record<string, unknown> {
   return JSON.parse(input) as Record<string, unknown>;
 }
 
+function eventNameFromCommandArgument(arg?: string): string | undefined {
+  switch (arg) {
+    case "context":
+      return "SessionStart";
+    case "compact":
+      return "PreCompact";
+    case "session-init":
+      return "UserPromptSubmit";
+    case "stop":
+      return "Stop";
+    default:
+      return undefined;
+  }
+}
+
 function writeHookResult(result: HookResult): void {
   const output: Record<string, unknown> = {
     continue: result.continue,
@@ -67,7 +82,14 @@ export async function runHookCommand(): Promise<number> {
   }
 
   try {
-    const normalizedInput = normalizeHookInput(readJsonFromStdin());
+    const rawInput = readJsonFromStdin();
+    const eventNameOverride = eventNameFromCommandArgument(process.argv[2]);
+
+    if (eventNameOverride && !("event_name" in rawInput) && !("hook_event_name" in rawInput)) {
+      rawInput.event_name = eventNameOverride;
+    }
+
+    const normalizedInput = normalizeHookInput(rawInput);
     const handler = HANDLERS[normalizedInput.eventName];
 
     if (!handler) {
@@ -86,7 +108,13 @@ export async function runHookCommand(): Promise<number> {
   }
 }
 
-if (import.meta.main) {
-  const exitCode = await runHookCommand();
-  process.exit(exitCode);
+function isDirectExecution(): boolean {
+  const entry = process.argv[1] ?? "";
+  return entry.endsWith("/hook-command.ts") || entry.endsWith("/hook-command.cjs");
+}
+
+if (isDirectExecution()) {
+  void runHookCommand().then((exitCode) => {
+    process.exit(exitCode);
+  });
 }
