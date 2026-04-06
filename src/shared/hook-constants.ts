@@ -1,0 +1,7 @@
+export const HOOK_HEALTH_TIMEOUT_MS = 3_000;
+export const HOOK_READINESS_TIMEOUT_MS = 30_000;
+export const HOOK_STOP_TIMEOUT_MS = 120_000;
+export const HOOK_SUCCESS_EXIT_CODE = 0;
+export const HOOK_NON_BLOCKING_EXIT_CODE = 1;
+export const HOOK_BLOCKING_EXIT_CODE = 2;
+export const WINDOWS_MULTIPLIER = 1.5;

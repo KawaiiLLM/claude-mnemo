@@ -1,0 +1,7 @@
+node_modules/
+dist/
+plugin/scripts/*.cjs
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
