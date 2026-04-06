@@ -15,8 +15,9 @@ This change is scoped to prompt behavior only. It does not alter:
 The current prompt establishes the basic observer role and turn-state rules, but it is still underspecified in the areas that most affect extraction quality:
 
 - Output discipline is weak. It says "only tool calls", but does not explicitly forbid explanatory filler like "Skipping" or "No meaningful changes".
+- Identity discipline is weak. It says Mnemosyne is an observer, but does not explicitly forbid writing observations about the observer's own behavior ("analyzed", "recorded", "stored findings") instead of what was actually learned, built, fixed, or decided in the primary session.
 - Durable-signal boundaries are too vague. It does not clearly say that concrete debugging evidence from logs, queue state, DB rows, routing, and code-path inspection should be recorded.
-- Field-quality requirements are thin. It lacks explicit guidance for writing strong `title`, `description`, `facts`, and `files_*` fields.
+- Field-quality requirements are thin. It lacks explicit guidance for writing strong `title`, `description`, `narrative`, `facts`, `concepts`, and `files_*` fields.
 - Deduplication is underspecified. It does not clearly tell Mnemosyne to avoid recording the same conclusion repeatedly across adjacent turns.
 - The prompt has no positive/negative examples to anchor behavior.
 
@@ -54,8 +55,17 @@ Retain the existing lifecycle guidance:
 - re-evaluate `[stale]`
 - skip `[extracted]`, `[skipped]`, `[undone]`
 - use explicit `status="undone"` for undone branches
+- retain the existing `update_session` decision rule: call it when the session summary needs updating; skip it when nothing meaningful changed
 
 This section should remain near the top because it is the most important routing rule.
+
+This section must also explicitly reinforce identity:
+- record what was learned, built, fixed, decided, deployed, or configured in the primary session
+- do not describe the observer's own behavior
+
+The prompt should include a short positive/negative contrast such as:
+- good: a statement about the system, fix, finding, or decision
+- bad: a statement about analyzing, observing, recording, or storing findings
 
 ### 2. What To Record
 
@@ -80,7 +90,9 @@ Retain the current skip guidance, but make the principle more explicit:
 Add explicit rules for the generated fields:
 - `title`: short, action- or outcome-oriented, not generic
 - `description`: concise statement of what changed or was learned, not a restatement of the user prompt
+- `narrative`: the highest-value search field; explain what was done, how it works, and why it matters
 - `facts`: independent, verifiable statements rather than vague summaries
+- `concepts`: use only the fixed concept vocabulary; do not repeat the observation `type` as a concept
 - `files_read` / `files_modified`: list only files that materially informed or changed the recorded result
 
 ### 5. Deduplication Rules
@@ -96,6 +108,7 @@ Strengthen the current output restriction:
 - only tool calls
 - no prose explanations
 - do not emit filler like "Skipping", "No changes", or "Nothing to record"
+- preserve the existing `<private>...</private>` exclusion rule verbatim
 
 This must be worded as a hard constraint because casual prose weakens tool-only behavior.
 
@@ -103,9 +116,10 @@ This must be worded as a hard constraint because casual prose weakens tool-only 
 
 Add two short examples:
 - one good extraction example for a bugfix/debugging turn
+- one bad example that narrates observer behavior instead of session outcomes
 - one skip example for a low-signal turn
 
-Examples should be short enough to avoid bloating the prompt, but concrete enough to anchor behavior.
+Examples should be short enough to avoid bloating the prompt, but concrete enough to anchor behavior. Because Mnemosyne emits MCP tool calls rather than XML, the examples should use concise `save_turn(...)` / skip-style tool-call examples instead of plain prose snippets.
 
 ## Testing
 
@@ -113,6 +127,11 @@ Update prompt tests to verify:
 - explicit undone handling remains present
 - output-discipline wording forbids prose skip responses
 - durable debugging signals are explicitly listed
+- identity discipline forbids self-referential observer summaries
+- `narrative` guidance explicitly covers what was done, how it works, and why it matters
+- `concepts` guidance explicitly separates concepts from observation type
+- the `update_session` decision guidance remains present
+- the `<private>` exclusion rule remains present
 - long prompt previews remain near the current ~80-character target
 
 ## Non-Goals
