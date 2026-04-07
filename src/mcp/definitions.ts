@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+const selectorShape = z.union([
+  z.number().int(),
+  z.array(z.number().int()),
+  z.string(),
+]);
+
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store.",
   replay: "Replay raw transcript content from the source JSONL.",
@@ -8,16 +14,20 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
 } as const;
 
 export const recallInputShape = {
+  scope: z.enum(["sessions", "turns", "observations"]),
+  session: selectorShape.optional(),
+  turn: selectorShape.optional(),
+  obs: selectorShape.optional(),
   query: z.string().optional(),
-  session: z.number().int().optional(),
-  turn: z.number().int().optional(),
+  type: z.string().optional(),
+  file: z.string().optional(),
+  after: z.number().int().nonnegative().optional(),
+  before: z.number().int().nonnegative().optional(),
+  time: z.string().optional(),
+  depth: z.enum(["collapsed", "expanded", "full"]).optional(),
   observation: z.number().int().optional(),
   expand_turns: z.array(z.number().int()).optional(),
   around: z.string().optional(),
-  before: z.number().int().nonnegative().optional(),
-  after: z.number().int().nonnegative().optional(),
-  file: z.string().optional(),
-  type: z.string().optional(),
   project: z.string().optional(),
   from_epoch: z.number().int().optional(),
   to_epoch: z.number().int().optional(),

@@ -7,6 +7,9 @@ export const TYPE_EMOJI: Record<string, string> = {
   decision: "⚖️",
 };
 
+const FIELD_TRUNCATION_LIMIT = 200;
+const FIELD_TRUNCATION_SUFFIX = "...";
+
 export interface FormattedObservation {
   id: number;
   type: string;
@@ -21,6 +24,8 @@ export interface FormattedObservation {
 
 interface ObservationFormatOptions {
   indent?: string;
+  sessionId?: number;
+  turnPromptNumber?: number;
 }
 
 export interface FormattedTurn {
@@ -32,6 +37,7 @@ export interface FormattedTurn {
   toolCallCount?: number | null;
   filesReadCount?: number | null;
   filesModifiedCount?: number | null;
+  status?: string | null;
   promptPreview?: string | null;
   responsePreview?: string | null;
   insight?: string[];
@@ -56,6 +62,11 @@ export interface FormattedSession {
 interface TurnFormatOptions {
   indent?: string;
   sessionId?: number;
+}
+
+export interface OmissionResult<T> {
+  items: Array<T | { omittedCount: number }>;
+  omittedCount: number;
 }
 
 function formatEpoch(epoch: number): string {
@@ -143,6 +154,42 @@ function pushBullets(lines: string[], indent: string, values: string[]): void {
   }
 }
 
+function joinHint(sessionId: number | undefined, turnPromptNumber: number | undefined): string {
+  if (sessionId === undefined && turnPromptNumber === undefined) {
+    return "";
+  }
+
+  if (sessionId === undefined) {
+    return `replay(turn=${turnPromptNumber})`;
+  }
+
+  if (turnPromptNumber === undefined) {
+    return `replay(session=${sessionId})`;
+  }
+
+  return `replay(session=${sessionId}, turn=${turnPromptNumber})`;
+}
+
+function truncateText(
+  text: string,
+  sessionId?: number,
+  turnPromptNumber?: number,
+): string {
+  if (text.length <= FIELD_TRUNCATION_LIMIT) {
+    return text;
+  }
+
+  const hint = joinHint(sessionId, turnPromptNumber);
+
+  return `${text.slice(0, FIELD_TRUNCATION_LIMIT)}${FIELD_TRUNCATION_SUFFIX}${
+    hint ? ` [use ${hint} for full content]` : ""
+  }`;
+}
+
+function formatStatus(status?: string | null): string {
+  return status ? ` [${status}]` : "";
+}
+
 function isObservationExpanded(observation: FormattedObservation): boolean {
   return Boolean(
     observation.narrative ||
@@ -170,7 +217,7 @@ export function formatSessionCollapsed(session: FormattedSession): string {
   ];
 
   if (session.description) {
-    lines.push(`  - desc: ${session.description}`);
+    lines.push(`  - desc: ${truncateText(session.description, session.id)}`);
   }
 
   return lines.join("\n");
@@ -181,12 +228,16 @@ export function formatSessionExpanded(session: FormattedSession): string {
 
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
-    pushBullets(lines, "    ", session.insight);
+    pushBullets(
+      lines,
+      "    ",
+      session.insight.map((line) => truncateText(line, session.id)),
+    );
   }
 
   if (session.nextSteps) {
     lines.push("  - next_steps:");
-    lines.push(`    - ${session.nextSteps}`);
+    lines.push(`    - ${truncateText(session.nextSteps, session.id)}`);
   }
 
   return lines.join("\n");
@@ -203,7 +254,7 @@ function formatTurnLabel(
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
 
-  return `${prefix} ${turn.title ?? "Untitled"}${statsSegment}`;
+  return `${prefix} ${turn.title ?? "Untitled"}${statsSegment}${formatStatus(turn.status)}`;
 }
 
 export function formatTurnCollapsed(
@@ -214,7 +265,9 @@ export function formatTurnCollapsed(
   const lines = [formatTurnLabel(turn, options)];
 
   if (turn.description) {
-    lines.push(`${indent}  - desc: ${turn.description}`);
+    lines.push(
+      `${indent}  - desc: ${truncateText(turn.description, options.sessionId, turn.promptNumber)}`,
+    );
   }
 
   return lines.join("\n");
@@ -229,16 +282,34 @@ export function formatTurnExpanded(
   const lines = [formatTurnCollapsed(turn, options)];
 
   if (turn.promptPreview) {
-    lines.push(`${detailIndent}- prompt: "${turn.promptPreview}"`);
+    lines.push(
+      `${detailIndent}- prompt: "${truncateText(
+        turn.promptPreview,
+        options.sessionId,
+        turn.promptNumber,
+      )}"`,
+    );
   }
 
   if (turn.responsePreview) {
-    lines.push(`${detailIndent}- response: "${turn.responsePreview}"`);
+    lines.push(
+      `${detailIndent}- response: "${truncateText(
+        turn.responsePreview,
+        options.sessionId,
+        turn.promptNumber,
+      )}"`,
+    );
   }
 
   if (turn.insight && turn.insight.length > 0) {
     lines.push(`${detailIndent}- insight:`);
-    pushBullets(lines, `${detailIndent}  `, turn.insight);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      turn.insight.map((line) =>
+        truncateText(line, options.sessionId, turn.promptNumber),
+      ),
+    );
   }
 
   return lines.join("\n");
@@ -259,7 +330,13 @@ export function formatObservationCollapsed(
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.description) {
-    lines.push(`${indent}  - desc: ${observation.description}`);
+    lines.push(
+      `${indent}  - desc: ${truncateText(
+        observation.description,
+        options.sessionId,
+        options.turnPromptNumber,
+      )}`,
+    );
   }
 
   return lines.join("\n");
@@ -274,26 +351,52 @@ export function formatObservationExpanded(
   const lines = [formatObservationCollapsed(observation, options)];
 
   if (observation.narrative) {
-    lines.push(`${detailIndent}- narrative: ${observation.narrative}`);
+    lines.push(
+      `${detailIndent}- narrative: ${truncateText(
+        observation.narrative,
+        options.sessionId,
+        options.turnPromptNumber,
+      )}`,
+    );
   }
 
   if (observation.facts && observation.facts.length > 0) {
     lines.push(`${detailIndent}- facts:`);
-    pushBullets(lines, `${detailIndent}  `, observation.facts);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      observation.facts.map((fact) =>
+        truncateText(fact, options.sessionId, options.turnPromptNumber),
+      ),
+    );
   }
 
   if (observation.concepts && observation.concepts.length > 0) {
-    lines.push(`${detailIndent}- concepts: ${observation.concepts.join(", ")}`);
+    lines.push(
+      `${detailIndent}- concepts: ${truncateText(
+        observation.concepts.join(", "),
+        options.sessionId,
+        options.turnPromptNumber,
+      )}`,
+    );
   }
 
   const filesParts: string[] = [];
 
   if (observation.filesRead && observation.filesRead.length > 0) {
-    filesParts.push(`📖 ${observation.filesRead.join(", ")}`);
+    filesParts.push(`📖 ${truncateText(
+      observation.filesRead.join(", "),
+      options.sessionId,
+      options.turnPromptNumber,
+    )}`);
   }
 
   if (observation.filesModified && observation.filesModified.length > 0) {
-    filesParts.push(`✏️ ${observation.filesModified.join(", ")}`);
+    filesParts.push(`✏️ ${truncateText(
+      observation.filesModified.join(", "),
+      options.sessionId,
+      options.turnPromptNumber,
+    )}`);
   }
 
   if (filesParts.length > 0) {
@@ -303,20 +406,121 @@ export function formatObservationExpanded(
   return lines.join("\n");
 }
 
+export function sampleWithOmissions<T>(
+  items: T[],
+  isProtected: (item: T, index: number) => boolean = () => false,
+): OmissionResult<T> {
+  if (items.length <= 50) {
+    return { items: [...items], omittedCount: 0 };
+  }
+
+  const visibleIndexes = new Set<number>();
+  const headCount = Math.min(5, items.length);
+  const tailCount = Math.min(10, items.length - headCount);
+
+  for (let index = 0; index < headCount; index += 1) {
+    visibleIndexes.add(index);
+  }
+
+  for (let index = items.length - tailCount; index < items.length; index += 1) {
+    if (index >= 0) {
+      visibleIndexes.add(index);
+    }
+  }
+
+  const middleStart = headCount;
+  const middleEnd = Math.max(headCount, items.length - tailCount);
+  const middleLength = middleEnd - middleStart;
+
+  if (middleLength > 0) {
+    const sampleTargets = new Set<number>();
+
+    for (let sampleIndex = 0; sampleIndex < 5; sampleIndex += 1) {
+      const position = Math.round(
+        (sampleIndex * Math.max(middleLength - 1, 0)) / Math.max(5 - 1, 1),
+      );
+      sampleTargets.add(middleStart + Math.min(position, middleLength - 1));
+    }
+
+    for (const index of sampleTargets) {
+      visibleIndexes.add(index);
+    }
+  }
+
+  items.forEach((item, index) => {
+    if (isProtected(item, index)) {
+      visibleIndexes.add(index);
+    }
+  });
+
+  const orderedItems: Array<T | { omittedCount: number }> = [];
+  let omittedCount = 0;
+  let gapStart: number | null = null;
+
+  for (let index = 0; index < items.length; index += 1) {
+    if (visibleIndexes.has(index)) {
+      if (gapStart !== null) {
+        orderedItems.push({ omittedCount: index - gapStart });
+        gapStart = null;
+      }
+
+      orderedItems.push(items[index]!);
+    } else {
+      omittedCount += 1;
+      if (gapStart === null) {
+        gapStart = index;
+      }
+    }
+  }
+
+  if (gapStart !== null) {
+    orderedItems.push({ omittedCount: items.length - gapStart });
+  }
+
+  return { items: orderedItems, omittedCount };
+}
+
 export function formatTree(sessions: FormattedSession[]): string {
   const lines: string[] = [];
 
   for (const session of sessions) {
     lines.push(formatSessionExpanded(session));
 
-    for (const turn of session.turns ?? []) {
-      lines.push(isTurnExpanded(turn) ? formatTurnExpanded(turn) : formatTurnCollapsed(turn));
+    const turnsResult = sampleWithOmissions(session.turns ?? []);
+    for (const entry of turnsResult.items) {
+      if ("omittedCount" in entry) {
+        lines.push(`  - ... ${entry.omittedCount} omitted ...`);
+        continue;
+      }
 
-      for (const observation of turn.observations ?? []) {
+      const turnLine = isTurnExpanded(entry)
+        ? formatTurnExpanded(entry, { sessionId: session.id })
+        : formatTurnCollapsed(entry, { sessionId: session.id });
+      lines.push(turnLine);
+
+      const observationsResult = sampleWithOmissions(
+        entry.observations ?? [],
+        (observation) => Boolean(observation),
+      );
+
+      for (const observationEntry of observationsResult.items) {
+        if ("omittedCount" in observationEntry) {
+          lines.push(`    - ... ${observationEntry.omittedCount} omitted ...`);
+          continue;
+        }
+
         lines.push(
-          isObservationExpanded(observation)
-            ? formatObservationExpanded(observation, { indent: "    " })
-            : formatObservationCollapsed(observation, { indent: "    " }),
+          isObservationExpanded(observationEntry)
+            ? formatObservationExpanded(observationEntry, {
+                indent: "    ",
+                sessionId: session.id,
+                turnPromptNumber: entry.promptNumber,
+              })
+            : formatObservationCollapsed(observationEntry, {
+                indent: "    ",
+                sessionId: session.id,
+                turnPromptNumber: entry.promptNumber,
+              }),
         );
       }
     }

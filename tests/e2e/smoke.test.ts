@@ -200,9 +200,18 @@ describe("claude-mnemo smoke test", () => {
     expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 
-    const recallSessions = recallMemory(db, {});
-    const recallSessionTree = recallMemory(db, { session: session.id, expandTurns: [1, 2] });
-    const recallTurn = recallMemory(db, { session: session.id, turn: 2 });
+    const recallSessions = recallMemory(db, { scope: "sessions" });
+    const recallSessionTree = recallMemory(db, {
+      scope: "turns",
+      session: session.id,
+      depth: "expanded",
+    });
+    const recallTurn = recallMemory(db, {
+      scope: "observations",
+      session: session.id,
+      turn: 2,
+      depth: "expanded",
+    });
     const replayTurn = replayMemory(db, {
       session: session.id,
       turn: 2,

@@ -24,10 +24,13 @@ export interface ObservationFtsRecord {
 }
 
 export interface SearchMemoryOptions {
+  scope?: "sessions" | "turns" | "observations";
   query?: string;
   project?: string;
   type?: string;
   file?: string;
+  after?: number;
+  before?: number;
   fromEpoch?: number;
   toEpoch?: number;
   limit?: number;
@@ -79,22 +82,39 @@ function mapSearchRow(row: SearchRow): SearchMemoryResult {
   };
 }
 
+function resolveEpochRange(options: SearchMemoryOptions): {
+  after?: number;
+  before?: number;
+} {
+  const lowerBounds = [options.after, options.fromEpoch].filter(
+    (value): value is number => value !== undefined,
+  );
+  const upperBounds = [options.before, options.toEpoch].filter(
+    (value): value is number => value !== undefined,
+  );
+
+  return {
+    after: lowerBounds.length > 0 ? Math.max(...lowerBounds) : undefined,
+    before: upperBounds.length > 0 ? Math.min(...upperBounds) : undefined,
+  };
+}
+
 function buildDateClause(
   column: string,
-  fromEpoch?: number,
-  toEpoch?: number,
+  options: SearchMemoryOptions,
 ): { clause: string; params: number[] } {
+  const { after, before } = resolveEpochRange(options);
   const clauses: string[] = [];
   const params: number[] = [];
 
-  if (fromEpoch !== undefined) {
+  if (after !== undefined) {
     clauses.push(`${column} >= ?`);
-    params.push(fromEpoch);
+    params.push(after);
   }
 
-  if (toEpoch !== undefined) {
+  if (before !== undefined) {
     clauses.push(`${column} <= ?`);
-    params.push(toEpoch);
+    params.push(before);
   }
 
   return {
@@ -208,202 +228,328 @@ export function indexObservationToFTS(
   );
 }
 
+function queryRows(
+  db: Database,
+  sql: string,
+  params: Array<string | number>,
+): SearchMemoryResult[] {
+  return db.query<SearchRow, Array<string | number>>(sql).all(...params).map(mapSearchRow);
+}
+
+function queryRecentSessions(db: Database, options: SearchMemoryOptions): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  return queryRows(
+    db,
+    `
+      SELECT
+        'session' AS layer,
+        s.id AS sourceId,
+        s.id AS sessionId,
+        NULL AS turnId,
+        NULL AS observationId,
+        s.project AS project,
+        s.title AS title,
+        s.description AS description,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        s.started_at_epoch AS timestampEpoch
+      FROM sessions s
+      ${combineClauses([projectClause.clause])}
+      ORDER BY s.started_at_epoch DESC
+      LIMIT ?
+    `,
+    [...projectClause.params, options.limit ?? 20],
+  );
+}
+
+function queryRecentTurns(db: Database, options: SearchMemoryOptions): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  return queryRows(
+    db,
+    `
+      SELECT
+        'turn' AS layer,
+        t.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        NULL AS observationId,
+        s.project AS project,
+        t.title AS title,
+        t.description AS description,
+        NULL AS type,
+        t.files_read AS filesRead,
+        t.files_modified AS filesModified,
+        t.created_at_epoch AS timestampEpoch
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses([projectClause.clause])}
+      ORDER BY t.created_at_epoch DESC
+      LIMIT ?
+    `,
+    [...projectClause.params, options.limit ?? 20],
+  );
+}
+
+function queryRecentObservations(
+  db: Database,
+  options: SearchMemoryOptions,
+): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  return queryRows(
+    db,
+    `
+      SELECT
+        'observation' AS layer,
+        o.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        o.id AS observationId,
+        s.project AS project,
+        o.title AS title,
+        o.description AS description,
+        o.type AS type,
+        o.files_read AS filesRead,
+        o.files_modified AS filesModified,
+        o.created_at_epoch AS timestampEpoch
+      FROM observations o
+      JOIN turns t ON t.id = o.turn_id
+      JOIN sessions s ON s.id = t.session_id
+      ${combineClauses([projectClause.clause])}
+      ORDER BY o.created_at_epoch DESC
+      LIMIT ?
+    `,
+    [...projectClause.params, options.limit ?? 20],
+  );
+}
+
+function querySessionsByScope(
+  db: Database,
+  options: SearchMemoryOptions,
+  query?: string,
+): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("s.started_at_epoch", options);
+  const whereClauses = [projectClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
+
+  if (query) {
+    whereClauses.push("f.memory_fts MATCH ?");
+    params.push(query);
+  }
+
+  if (options.type) {
+    whereClauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM observations o
+        JOIN turns t ON t.id = o.turn_id
+        WHERE t.session_id = s.id
+          AND o.type = ?
+      )`,
+    );
+    params.push(options.type);
+  }
+
+  if (options.file) {
+    whereClauses.push(
+      `(
+        EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM observations o
+          JOIN turns t ON t.id = o.turn_id
+          WHERE t.session_id = s.id
+            AND (o.files_read LIKE ? OR o.files_modified LIKE ?)
+        )
+      )`,
+    );
+    params.push(`%${options.file}%`, `%${options.file}%`, `%${options.file}%`, `%${options.file}%`);
+  }
+
+  return queryRows(
+    db,
+    `
+      SELECT
+        'session' AS layer,
+        s.id AS sourceId,
+        s.id AS sessionId,
+        NULL AS turnId,
+        NULL AS observationId,
+        s.project AS project,
+        s.title AS title,
+        s.description AS description,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
+        s.started_at_epoch AS timestampEpoch
+      FROM sessions s
+      ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
+      ${combineClauses(whereClauses)}
+      ORDER BY s.started_at_epoch DESC
+      LIMIT ?
+    `,
+    [...params, options.limit ?? 20],
+  );
+}
+
+function queryTurnsByScope(
+  db: Database,
+  options: SearchMemoryOptions,
+  query?: string,
+): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("t.created_at_epoch", options);
+  const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params, ...fileClause.params];
+
+  if (query) {
+    whereClauses.push("f.memory_fts MATCH ?");
+    params.push(query);
+  }
+
+  if (options.type) {
+    whereClauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM observations o
+        WHERE o.turn_id = t.id
+          AND o.type = ?
+      )`,
+    );
+    params.push(options.type);
+  }
+
+  return queryRows(
+    db,
+    `
+      SELECT
+        'turn' AS layer,
+        t.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        NULL AS observationId,
+        s.project AS project,
+        t.title AS title,
+        t.description AS description,
+        NULL AS type,
+        t.files_read AS filesRead,
+        t.files_modified AS filesModified,
+        t.created_at_epoch AS timestampEpoch
+      FROM turns t
+      JOIN sessions s ON s.id = t.session_id
+      ${query ? "JOIN memory_fts f ON f.layer = 'turn' AND f.source_id = t.id" : ""}
+      ${combineClauses(whereClauses)}
+      ORDER BY t.created_at_epoch DESC
+      LIMIT ?
+    `,
+    [...params, options.limit ?? 20],
+  );
+}
+
+function queryObservationsByScope(
+  db: Database,
+  options: SearchMemoryOptions,
+  query?: string,
+): SearchMemoryResult[] {
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("o.created_at_epoch", options);
+  const fileClause = buildFileClause("o.files_read", "o.files_modified", options.file);
+  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params, ...fileClause.params];
+
+  if (query) {
+    whereClauses.push("f.memory_fts MATCH ?");
+    params.push(query);
+  }
+
+  if (options.type) {
+    whereClauses.push("o.type = ?");
+    params.push(options.type);
+  }
+
+  return queryRows(
+    db,
+    `
+      SELECT
+        'observation' AS layer,
+        o.id AS sourceId,
+        t.session_id AS sessionId,
+        t.id AS turnId,
+        o.id AS observationId,
+        s.project AS project,
+        o.title AS title,
+        o.description AS description,
+        o.type AS type,
+        o.files_read AS filesRead,
+        o.files_modified AS filesModified,
+        o.created_at_epoch AS timestampEpoch
+      FROM observations o
+      JOIN turns t ON t.id = o.turn_id
+      JOIN sessions s ON s.id = t.session_id
+      ${query ? "JOIN memory_fts f ON f.layer = 'observation' AND f.source_id = o.id" : ""}
+      ${combineClauses(whereClauses)}
+      ORDER BY o.created_at_epoch DESC
+      LIMIT ?
+    `,
+    [...params, options.limit ?? 20],
+  );
+}
+
 export function searchMemory(
   db: Database,
   options: SearchMemoryOptions,
 ): SearchMemoryResult[] {
-  const limit = options.limit ?? 20;
-
-  if (
-    !options.query &&
-    !options.type &&
-    !options.file &&
-    options.fromEpoch === undefined &&
-    options.toEpoch === undefined
-  ) {
-    const projectClause = buildProjectClause(options.project);
-    const whereClause = combineClauses([projectClause.clause]);
-
-    return db
-      .query<SearchRow, Array<string | number>>(`
-        SELECT
-          'session' AS layer,
-          s.id AS sourceId,
-          s.id AS sessionId,
-          NULL AS turnId,
-          NULL AS observationId,
-          s.project AS project,
-          s.title AS title,
-          s.description AS description,
-          NULL AS type,
-          NULL AS filesRead,
-          NULL AS filesModified,
-          s.started_at_epoch AS timestampEpoch
-        FROM sessions s
-        ${whereClause}
-        ORDER BY s.started_at_epoch DESC
-        LIMIT ?
-      `)
-      .all(...projectClause.params, limit)
-      .map(mapSearchRow);
-  }
-
-  const results: SearchMemoryResult[] = [];
   const query = buildSafeFtsQuery(options.query);
+  const hasFilters =
+    Boolean(options.type) ||
+    Boolean(options.file) ||
+    options.after !== undefined ||
+    options.before !== undefined ||
+    options.fromEpoch !== undefined ||
+    options.toEpoch !== undefined;
 
-  const sessionProjectClause = buildProjectClause(options.project);
-  const sessionDateClause = buildDateClause(
-    "s.started_at_epoch",
-    options.fromEpoch,
-    options.toEpoch,
-  );
-  const sessionWhereClause = combineClauses([
-    sessionProjectClause.clause,
-    sessionDateClause.clause,
-    query ? "f.memory_fts MATCH ?" : "",
-  ]);
+  if (!query && !hasFilters) {
+    if (!options.scope || options.scope === "sessions") {
+      return queryRecentSessions(db, options);
+    }
 
-  if (!options.type && !options.file) {
-    results.push(
-      ...db
-        .query<SearchRow, Array<string | number>>(`
-          SELECT
-            'session' AS layer,
-            s.id AS sourceId,
-            s.id AS sessionId,
-            NULL AS turnId,
-            NULL AS observationId,
-            s.project AS project,
-            s.title AS title,
-            s.description AS description,
-            NULL AS type,
-            NULL AS filesRead,
-            NULL AS filesModified,
-            s.started_at_epoch AS timestampEpoch
-          FROM sessions s
-          ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
-          ${sessionWhereClause}
-          ORDER BY s.started_at_epoch DESC
-          LIMIT ?
-        `)
-        .all(
-          ...sessionProjectClause.params,
-          ...sessionDateClause.params,
-          ...(query ? [query] : []),
-          limit,
-        )
-        .map(mapSearchRow),
-    );
+    if (options.scope === "turns") {
+      return queryRecentTurns(db, options);
+    }
+
+    return queryRecentObservations(db, options);
   }
 
-  const turnProjectClause = buildProjectClause(options.project);
-  const turnDateClause = buildDateClause(
-    "t.created_at_epoch",
-    options.fromEpoch,
-    options.toEpoch,
-  );
-  const turnFileClause = buildFileClause(
-    "t.files_read",
-    "t.files_modified",
-    options.file,
-  );
-  const turnWhereClause = combineClauses([
-    "t.status = 'extracted'",
-    turnProjectClause.clause,
-    turnDateClause.clause,
-    turnFileClause.clause,
-    query ? "f.memory_fts MATCH ?" : "",
-  ]);
+  if (!options.scope) {
+    const results: SearchMemoryResult[] = [];
 
-  if (!options.type) {
-    results.push(
-      ...db
-        .query<SearchRow, Array<string | number>>(`
-          SELECT
-            'turn' AS layer,
-            t.id AS sourceId,
-            t.session_id AS sessionId,
-            t.id AS turnId,
-            NULL AS observationId,
-            s.project AS project,
-            t.title AS title,
-            t.description AS description,
-            NULL AS type,
-            t.files_read AS filesRead,
-            t.files_modified AS filesModified,
-            t.created_at_epoch AS timestampEpoch
-          FROM turns t
-          JOIN sessions s ON s.id = t.session_id
-          ${query ? "JOIN memory_fts f ON f.layer = 'turn' AND f.source_id = t.id" : ""}
-          ${turnWhereClause}
-          ORDER BY t.created_at_epoch DESC
-          LIMIT ?
-        `)
-        .all(
-          ...turnProjectClause.params,
-          ...turnDateClause.params,
-          ...turnFileClause.params,
-          ...(query ? [query] : []),
-          limit,
-        )
-        .map(mapSearchRow),
-    );
+    if (!options.type && !options.file) {
+      results.push(...querySessionsByScope(db, options, query));
+    }
+
+    if (!options.type) {
+      results.push(...queryTurnsByScope(db, options, query));
+    }
+
+    results.push(...queryObservationsByScope(db, options, query));
+
+    return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
   }
 
-  const observationProjectClause = buildProjectClause(options.project);
-  const observationDateClause = buildDateClause(
-    "o.created_at_epoch",
-    options.fromEpoch,
-    options.toEpoch,
-  );
-  const observationFileClause = buildFileClause(
-    "o.files_read",
-    "o.files_modified",
-    options.file,
-  );
-  const observationTypeClause = options.type ? "o.type = ?" : "";
-  const observationWhereClause = combineClauses([
-    observationProjectClause.clause,
-    observationDateClause.clause,
-    observationFileClause.clause,
-    observationTypeClause,
-    query ? "f.memory_fts MATCH ?" : "",
-  ]);
+  if (options.scope === "sessions") {
+    return querySessionsByScope(db, options, query);
+  }
 
-  results.push(
-    ...db
-      .query<SearchRow, Array<string | number>>(`
-        SELECT
-          'observation' AS layer,
-          o.id AS sourceId,
-          t.session_id AS sessionId,
-          t.id AS turnId,
-          o.id AS observationId,
-          s.project AS project,
-          o.title AS title,
-          o.description AS description,
-          o.type AS type,
-          o.files_read AS filesRead,
-          o.files_modified AS filesModified,
-          o.created_at_epoch AS timestampEpoch
-        FROM observations o
-        JOIN turns t ON t.id = o.turn_id
-        JOIN sessions s ON s.id = t.session_id
-        ${query ? "JOIN memory_fts f ON f.layer = 'observation' AND f.source_id = o.id" : ""}
-        ${observationWhereClause}
-        ORDER BY o.created_at_epoch DESC
-        LIMIT ?
-      `)
-      .all(
-        ...observationProjectClause.params,
-        ...observationDateClause.params,
-        ...observationFileClause.params,
-        ...(options.type ? [options.type] : []),
-        ...(query ? [query] : []),
-        limit,
-      )
-      .map(mapSearchRow),
-  );
+  if (options.scope === "turns") {
+    return queryTurnsByScope(db, options, query);
+  }
 
-  return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
+  return queryObservationsByScope(db, options, query);
 }

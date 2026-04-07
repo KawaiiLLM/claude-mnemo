@@ -16,7 +16,7 @@ import {
 const startedAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
 
 describe("MCP format renderer", () => {
-  test("formats collapsed lines with list structure and stats", () => {
+  test("formats collapsed lines with list structure, stats, and status", () => {
     const session: FormattedSession = {
       id: 142,
       title: "Auth refactor",
@@ -35,6 +35,7 @@ describe("MCP format renderer", () => {
       toolCallCount: 4,
       filesReadCount: 1,
       filesModifiedCount: 2,
+      status: "extracted",
     };
     const observation: FormattedObservation = {
       id: 7,
@@ -43,51 +44,35 @@ describe("MCP format renderer", () => {
       description: "Guards refresh",
     };
 
-    expect(
-      formatSessionCollapsed(session),
-    ).toBe(
+    expect(formatSessionCollapsed(session)).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
       ].join("\n"),
     );
 
-    expect(
-      formatTurnCollapsed(turn),
-    ).toBe(
+    expect(formatTurnCollapsed(turn)).toBe(
       [
-        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4",
+        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
-    expect(
-      formatTurnCollapsed(
-        turn,
-        { indent: "", sessionId: 142 },
-      ),
-    ).toBe(
+    expect(formatTurnCollapsed(turn, { indent: "", sessionId: 142 })).toBe(
       [
-        "- [S142][T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4",
+        "- [S142][T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "  - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
-    expect(
-      formatObservationCollapsed(observation),
-    ).toBe(
+    expect(formatObservationCollapsed(observation)).toBe(
       [
         "- [O7] 🔴 Added mutex",
         "  - desc: Guards refresh",
       ].join("\n"),
     );
 
-    expect(
-      formatObservationCollapsed(
-        observation,
-        { indent: "    " },
-      ),
-    ).toBe(
+    expect(formatObservationCollapsed(observation, { indent: "    " })).toBe(
       [
         "    - [O7] 🔴 Added mutex",
         "      - desc: Guards refresh",
@@ -114,28 +99,25 @@ describe("MCP format renderer", () => {
       toolCallCount: 0,
       filesReadCount: 0,
       filesModifiedCount: 0,
+      status: "pending",
     };
 
-    expect(
-      formatSessionCollapsed(session),
-    ).toBe(
+    expect(formatSessionCollapsed(session)).toBe(
       [
         "- [S9] Empty stats | 2026-04-05 | claude-mnemo",
         "  - desc: Collapsed description stays visible",
       ].join("\n"),
     );
 
-    expect(
-      formatTurnCollapsed(turn),
-    ).toBe(
+    expect(formatTurnCollapsed(turn)).toBe(
       [
-        "  - [T2] No stats",
+        "  - [T2] No stats [pending]",
         "    - desc: Collapsed description stays visible",
       ].join("\n"),
     );
   });
 
-  test("renders expanded lines with detail blocks", () => {
+  test("renders expanded lines with detail blocks and truncation", () => {
     const session: FormattedSession = {
       id: 142,
       title: "Auth refactor",
@@ -155,6 +137,7 @@ describe("MCP format renderer", () => {
       toolCallCount: 4,
       filesReadCount: 1,
       filesModifiedCount: 2,
+      status: "extracted",
       promptPreview: "Why am I getting 401 errors?",
       responsePreview: "I found a race condition in refresh logic.",
       description: "Refresh overlap diagnosed",
@@ -173,15 +156,16 @@ describe("MCP format renderer", () => {
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts"],
     };
-    const unknownObservation: FormattedObservation = {
-      id: 7,
-      type: "mystery",
-      title: "Unknown type",
+    const longTurn: FormattedTurn = {
+      id: 9,
+      promptNumber: 9,
+      title: "Verbose turn",
+      status: "extracted",
+      promptPreview: "p".repeat(260),
+      responsePreview: "r".repeat(260),
     };
 
-    expect(
-      formatSessionExpanded(session),
-    ).toBe(
+    expect(formatSessionExpanded(session)).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
@@ -193,11 +177,9 @@ describe("MCP format renderer", () => {
       ].join("\n"),
     );
 
-    expect(
-      formatTurnExpanded(turn),
-    ).toBe(
+    expect(formatTurnExpanded(turn)).toBe(
       [
-        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4",
+        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
         '    - prompt: "Why am I getting 401 errors?"',
         '    - response: "I found a race condition in refresh logic."',
@@ -206,9 +188,7 @@ describe("MCP format renderer", () => {
       ].join("\n"),
     );
 
-    expect(
-      formatObservationExpanded(observation),
-    ).toBe(
+    expect(formatObservationExpanded(observation)).toBe(
       [
         "- [O7] 🔴 Added mutex",
         "  - desc: Guards refresh",
@@ -221,12 +201,15 @@ describe("MCP format renderer", () => {
       ].join("\n"),
     );
 
-    expect(
-      formatObservationExpanded(
-        unknownObservation,
-        { indent: "    " },
-      ),
-    ).toBe("    - [O7] mystery Unknown type");
+    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
+      "[use replay(session=142, turn=9) for full content]",
+    );
+    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
+      "p".repeat(200),
+    );
+    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
+      "r".repeat(200),
+    );
   });
 
   test("formats a mixed expansion tree without extra blank lines", () => {
@@ -238,49 +221,33 @@ describe("MCP format renderer", () => {
         startedAtEpoch,
         description: "Fix race + add tests",
         nextSteps: "verify startup migration",
-        turnCount: 1,
-        observationCount: 1,
         turns: [
           {
             id: 1,
             promptNumber: 1,
             title: "Diagnose auth",
-            description: "Refresh overlap diagnosed",
             observationCount: 1,
-            toolCallCount: 4,
-            filesReadCount: 1,
-            filesModifiedCount: 0,
-            promptPreview: "Why am I getting 401 errors?",
-            responsePreview: "I found a race condition in refresh logic.",
-            insight: ["concurrent refreshes collide"],
+            status: "extracted",
             observations: [
               {
                 id: 7,
                 type: "bugfix",
-                title: "Added mutex",
-                description: "Guards refresh",
+                title: "Mutex added",
               },
             ],
           },
         ],
       },
     ];
-    const output = formatTree(tree);
 
-    expect(output).toBe(
+    expect(formatTree(tree)).toBe(
       [
         "- [S142] Auth refactor | 💬1 💡1 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
         "  - next_steps:",
         "    - verify startup migration",
-        "  - [T1] Diagnose auth | 💡1 📖1 🔧4",
-        "    - desc: Refresh overlap diagnosed",
-        '    - prompt: "Why am I getting 401 errors?"',
-        '    - response: "I found a race condition in refresh logic."',
-        "    - insight:",
-        "      - concurrent refreshes collide",
-        "    - [O7] 🔴 Added mutex",
-        "      - desc: Guards refresh",
+        "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
+        "    - [O7] 🔴 Mutex added",
       ].join("\n"),
     );
   });

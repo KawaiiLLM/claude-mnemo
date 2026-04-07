@@ -1,26 +1,26 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurn } from "../../src/db/turns";
-import { saveTurn } from "../../src/db/turns";
+import { getTurn, saveTurn } from "../../src/db/turns";
 import { recallMemory } from "../../src/mcp/recall";
-import * as turnsModule from "../../src/db/turns";
 
 describe("recallMemory", () => {
   let db: Database;
+  let baselineSessionId: number;
   let authSessionId: number;
   let authTurnId: number;
   let authObservationId: number;
+  let bigSessionId: number;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
 
-    upsertSession(db, {
+    const baseline = upsertSession(db, {
       contentSessionId: "session-1",
       project: "claude-mnemo",
       title: "Auth baseline",
@@ -30,6 +30,7 @@ describe("recallMemory", () => {
       updatedAtEpoch: 110,
       completedAtEpoch: 120,
     });
+    baselineSessionId = baseline.id;
 
     const authSession = upsertSession(db, {
       contentSessionId: "session-2",
@@ -84,158 +85,149 @@ describe("recallMemory", () => {
     authTurnId = authTurn.id;
     authObservationId = getObservationsForTurn(db, authTurn.id)[0]!.id;
 
-    upsertSession(db, {
-      contentSessionId: "session-3",
+    const bigSession = upsertSession(db, {
+      contentSessionId: "session-big",
       project: "claude-mnemo",
-      title: "UI cleanup",
-      description: "Unrelated UI work",
+      title: "Large timeline",
+      description: "For omission coverage",
       insight: null,
       startedAtEpoch: 300,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
+    bigSessionId = bigSession.id;
+
+    const insertTurn = db.query(`
+      INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        title,
+        description,
+        insight,
+        files_read,
+        files_modified,
+        tool_call_count,
+        created_at_epoch,
+        updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (let promptNumber = 1; promptNumber <= 60; promptNumber += 1) {
+      const status =
+        promptNumber === 12
+          ? "pending"
+          : promptNumber === 20
+            ? "stale"
+            : "extracted";
+
+      insertTurn.run(
+        bigSession.id,
+        promptNumber,
+        status,
+        `Prompt ${promptNumber}`,
+        `Response ${promptNumber}`,
+        `Turn ${promptNumber}`,
+        `Description ${promptNumber}`,
+        null,
+        JSON.stringify([]),
+        JSON.stringify([]),
+        0,
+        300 + promptNumber,
+        300 + promptNumber,
+      );
+    }
   });
 
   afterEach(() => {
     db.close();
   });
 
-  test("returns recent sessions when called without filters", () => {
-    const output = recallMemory(db, {});
-
-    expect(output).toContain("- [S3] UI cleanup | 1970-01-01 | claude-mnemo");
-    expect(output).toContain("  - desc: Unrelated UI work");
-    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
-    expect(output.indexOf("[S3]")).toBeLessThan(output.indexOf("[S2]"));
-  });
-
-  test("searches by keyword across memory layers", () => {
-    const output = recallMemory(db, { query: "race" });
-
-    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
-    expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2");
-    expect(output).toContain("- [O1] 🔴 Auth mutex");
-  });
-
-  test("reuses one fetched turn list for session search stats", () => {
-    const getTurnsForSessionSpy = spyOn(turnsModule, "getTurnsForSession");
-
-    const output = recallMemory(db, { query: "race" });
-
-    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
-    expect(getTurnsForSessionSpy).toHaveBeenCalledTimes(1);
-
-    getTurnsForSessionSpy.mockRestore();
-  });
-
-  test("shows turns for a session", () => {
-    const output = recallMemory(db, { session: authSessionId });
-
-    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
-    expect(output).toContain("  - desc: Fixes the refresh race");
-    expect(output).toContain("  - insight:");
-    expect(output).toContain("  - next_steps:");
-    expect(output).toContain("  - [T1] Diagnose auth race | 💡2 📖1 ✏️2");
-    expect(output).toContain("    - desc: Refresh overlap diagnosed");
-    expect(output).not.toContain("#1");
-  });
-
-  test("expands selected turns inside a session tree", () => {
+  test("renders scoped sessions and intersects time filters", () => {
     const output = recallMemory(db, {
-      session: authSessionId,
-      expandTurns: [1],
+      scope: "sessions",
+      time: "1970-01-01..1970-01-01",
+      after: 150,
+      before: 250,
     });
 
-    expect(output).toContain('  - prompt: "Why am I getting 401 errors?"');
-    expect(output).toContain('  - response: "There is a race condition in token refresh."');
-    expect(output).toContain("  - [O1] 🔴 Auth mutex");
-    expect(output).toContain("      - narrative: Serialized refresh work with a shared promise.");
+    expect(output).toContain("[S2] Auth race fix");
+    expect(output).not.toContain("[S1] Auth baseline");
+    expect(output).not.toContain("[S3] Large timeline");
   });
 
-  test("shows observations for a session-scoped turn prompt number", () => {
-    const output = recallMemory(db, { session: authSessionId, turn: 1 });
+  test("parses turn range selectors and expands selected turns", () => {
+    const output = recallMemory(db, {
+      scope: "turns",
+      session: authSessionId,
+      turn: "1..1",
+      depth: "expanded",
+    });
 
-    expect(output).toContain("- [T1] Diagnose auth race | 💡2 📖1 ✏️2");
-    expect(output).toContain("  - desc: Refresh overlap diagnosed");
-    expect(output).toContain("  - [O1] 🔴 Auth mutex");
-    expect(output).toContain("  - [O2] ⚖️ Add regression test");
+    expect(output).toContain("- [S2] Auth race fix");
+    expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2 [extracted]");
+    expect(output).toContain('prompt: "Why am I getting 401 errors?"');
+    expect(output).toContain('response: "There is a race condition in token refresh."');
+    expect(output).toContain("- [O");
   });
 
-  test("rejects turn lookup without session context", () => {
-    const output = recallMemory(db, { turn: authTurnId });
+  test("accepts array selectors for sessions", () => {
+    const output = recallMemory(db, {
+      scope: "sessions",
+      session: [authSessionId, baselineSessionId],
+    });
 
-    expect(output).toBe(
-      "Parameter error: turn requires session; use recall(session=142, turn=3).",
-    );
+    expect(output).toContain("[S2] Auth race fix");
+    expect(output).toContain("[S1] Auth baseline");
   });
 
-  test("rejects expand_turns without session context", () => {
-    const output = recallMemory(db, { expandTurns: [1] });
+  test("rejects turns that do not belong to the selected session", () => {
+    const output = recallMemory(db, {
+      scope: "turns",
+      session: baselineSessionId,
+      turn: 1,
+    });
 
-    expect(output).toBe(
-      "Parameter error: expand_turns requires session; use recall(session=142, expand_turns=[1]).",
-    );
+    expect(output).toContain("Parameter error:");
+    expect(output).toContain("does not belong to session");
   });
 
-  test("shows full detail for a specific observation", () => {
-    const output = recallMemory(db, { observation: authObservationId });
+  test("rejects observations that do not belong to the selected session", () => {
+    const output = recallMemory(db, {
+      scope: "observations",
+      session: baselineSessionId,
+      obs: authObservationId,
+    });
 
+    expect(output).toContain("Parameter error:");
+    expect(output).toContain("does not belong to session");
+  });
+
+  test("renders observation scope with parent headers when session and turn are selected", () => {
+    const output = recallMemory(db, {
+      scope: "observations",
+      session: authSessionId,
+      turn: 1,
+      obs: authObservationId,
+      depth: "expanded",
+    });
+
+    expect(output).toContain("- [S2] Auth race fix");
+    expect(output).toContain("- [S2][T1] Diagnose auth race");
     expect(output).toContain("- [O1] 🔴 Auth mutex");
     expect(output).toContain("  - desc: Guards refresh");
-    expect(output).toContain("  - narrative: Serialized refresh work with a shared promise.");
-    expect(output).toContain("  - facts:");
-    expect(output).toContain("    - mutex added");
-    expect(output).toContain("    - race resolved");
   });
 
-  test("rejects observation mixed with other selectors", () => {
+  test("keeps pending and stale turns out of omission sampling", () => {
     const output = recallMemory(db, {
-      observation: authObservationId,
-      query: "auth",
+      scope: "turns",
+      session: bigSessionId,
     });
 
-    expect(output).toBe(
-      "Parameter error: observation cannot be combined with other selectors.",
-    );
-  });
-
-  test("returns a cross-session timeline around an anchor session", () => {
-    const output = recallMemory(db, {
-      around: `S${authSessionId}`,
-      before: 1,
-      after: 1,
-    });
-
-    expect(output).toContain("[S1] Auth baseline");
-    expect(output).toContain("[S2] Auth race fix");
-    expect(output).toContain("[S3] UI cleanup");
-    expect(output.indexOf("[S1]")).toBeLessThan(output.indexOf("[S2]"));
-    expect(output.indexOf("[S2]")).toBeLessThan(output.indexOf("[S3]"));
-  });
-
-  test("accepts a date anchor for the cross-session timeline", () => {
-    const output = recallMemory(db, {
-      around: "1970-01-01",
-      before: 1,
-      after: 1,
-    });
-
-    expect(output).toContain("[S1] Auth baseline");
-    expect(output).toContain("[S2] Auth race fix");
-    expect(output.indexOf("[S1]")).toBeLessThan(output.indexOf("[S2]"));
-  });
-
-  test("filters by file path", () => {
-    const output = recallMemory(db, { file: "src/auth.ts" });
-
-    expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2");
-    expect(output).toContain("- [O1] 🔴 Auth mutex");
-  });
-
-  test("filters by observation type", () => {
-    const output = recallMemory(db, { type: "bugfix" });
-
-    expect(output).toContain("- [O1] 🔴 Auth mutex");
-    expect(output).not.toContain("- [O2] ⚖️ Add regression test");
+    expect(output).toContain("... ");
+    expect(output).toContain("[pending]");
+    expect(output).toContain("[stale]");
   });
 });
