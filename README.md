@@ -25,10 +25,10 @@ Observations are typed: 🔴 bugfix, 🟣 feature, 🔄 refactor, ✅ change, �
 
 ## Installation
 
-Add the marketplace and install:
+In Claude Code, add the marketplace and install:
 
 ```
-/plugin marketplace add moedb/claude-mnemo
+/plugin marketplace add KawaiiLLM/claude-mnemo
 /plugin install claude-mnemo
 ```
 
@@ -37,7 +37,7 @@ Bun is the only runtime dependency — `bun-runner.js` auto-installs it if missi
 ### From Source
 
 ```bash
-git clone https://github.com/moedb/claude-mnemo.git
+git clone https://github.com/KawaiiLLM/claude-mnemo.git
 cd claude-mnemo
 npm install
 npm run build
