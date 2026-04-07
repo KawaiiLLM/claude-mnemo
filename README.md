@@ -33,6 +33,7 @@ In Claude Code, add the marketplace and install:
 ```
 
 Bun is the only runtime dependency — `bun-runner.js` auto-installs it if missing.
+Marketplace and source installs ship with prebuilt `plugin/scripts/*.cjs` entrypoints, so hooks and MCP can run without a post-install build.
 
 ### From Source
 
@@ -48,6 +49,8 @@ Then symlink the built plugin:
 ```bash
 ln -s "$(pwd)/plugin" ~/.claude/plugins/claude-mnemo
 ```
+
+For contributors, `npm run build` refreshes the committed release artifacts in `plugin/scripts/`.
 
 ## Usage
 
