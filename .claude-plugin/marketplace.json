@@ -1,0 +1,21 @@
+{
+  "name": "claude-mnemo",
+  "owner": {
+    "name": "KawaiiLLM"
+  },
+  "metadata": {
+    "description": "Structured memory system for Claude Code powered by Mnemosyne.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "claude-mnemo",
+      "description": "Structured memory for Claude Code powered by Mnemosyne",
+      "version": "0.1.0",
+      "author": {
+        "name": "KawaiiLLM"
+      },
+      "source": "./plugin"
+    }
+  ]
+}
