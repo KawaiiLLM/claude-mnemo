@@ -4,11 +4,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import * as nodeFs from "node:fs";
+
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
+import type { ForkMnemosyneResult } from "../../src/mnemosyne/fork";
 import * as transcriptParser from "../../src/shared/transcript-parser";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
@@ -227,6 +230,51 @@ describe("handleStopHook", () => {
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
 
     rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
+  test("logs extraction metrics when forkMnemosyne returns results", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'pending', 'Pending work', 120)`,
+    ).run(sessionId);
+
+    const forkResult: ForkMnemosyneResult = {
+      numTurns: 3,
+      inputTokens: 45000,
+      outputTokens: 1800,
+      cacheReadInputTokens: 39000,
+      cacheCreationInputTokens: 0,
+      durationMs: 4200,
+    };
+    const forkMnemosyne = mock(async () => forkResult);
+
+    const appendSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(
+      () => {},
+    );
+
+    const handler = createStopHandler({
+      db,
+      forkMnemosyne,
+      stderr: { write: mock(() => true) },
+    });
+
+    await handler(createInput());
+
+    const logCalls = appendSpy.mock.calls.filter(([path]) =>
+      (path as string).includes("claude-mnemo.log"),
+    );
+    expect(logCalls.length).toBeGreaterThanOrEqual(1);
+
+    const entry = JSON.parse((logCalls[0][1] as string).trim());
+    expect(entry.message).toBe("extraction complete");
+    expect(entry.context.hook).toBe("stop");
+    expect(entry.context.inputTokens).toBe(45000);
+    expect(entry.context.cacheReadTokens).toBe(39000);
+    expect(entry.context.cacheHitPct).toBe(87);
+    expect(entry.context.durationMs).toBe(4200);
+
+    appendSpy.mockRestore();
   });
 
   test("parses the replay transcript once per stop event", async () => {

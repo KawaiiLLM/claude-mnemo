@@ -159,6 +159,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
               )
             : 0;
         log.info("extraction complete", {
+          hook: "stop",
           turns: result.numTurns,
           inputTokens: result.inputTokens,
           outputTokens: result.outputTokens,
