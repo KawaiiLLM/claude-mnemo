@@ -429,7 +429,9 @@ describe("handleContextHook", () => {
     expect(output).toContain("Types: 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision");
     expect(output).toContain("Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools");
     expect(output).toContain("Format:");
-    expect(output).toContain("Expand: recall(session=x, turn=y) | Raw: replay(session=x, turn=y)");
+    expect(output).toContain(
+      'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)',
+    );
     expect(output).toContain("## Current Session");
     expect(output).toContain("## Recent Sessions");
     expect(output).toContain(

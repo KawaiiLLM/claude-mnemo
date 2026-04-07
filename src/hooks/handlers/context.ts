@@ -144,7 +144,7 @@ function buildHeader(db: Database): string {
     "  - [Sx] title | 💬n 💡n | yyyy-mm-dd | project",
     "  - [Tx] title | 💡n 📖n ✏️n 🔧n",
     "  - [Ox] 🔵 title",
-    "Expand: recall(session=x, turn=y) | Raw: replay(session=x, turn=y)",
+    'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)',
   ].join("\n");
 }
 
