@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
+import * as transcriptParser from "../../src/shared/transcript-parser";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
@@ -225,6 +226,46 @@ describe("handleStopHook", () => {
     expect(getTurn(db, sessionId, 1)?.status).toBe("stale");
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
 
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
+  test("parses the replay transcript once per stop event", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Investigate logs" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Replay-compatible response" }],
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'pending', 'Investigate logs', 130)`,
+    ).run(sessionId);
+
+    const parseReplayTranscriptSpy = spyOn(
+      transcriptParser,
+      "parseReplayTranscript",
+    );
+    const handler = createStopHandler({
+      db,
+      forkMnemosyne: mock(async () => {}),
+      stderr: { write: mock(() => true) },
+    });
+
+    await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(parseReplayTranscriptSpy).toHaveBeenCalledTimes(1);
+
+    parseReplayTranscriptSpy.mockRestore();
     rmSync(transcript.directory, { recursive: true, force: true });
   });
 });

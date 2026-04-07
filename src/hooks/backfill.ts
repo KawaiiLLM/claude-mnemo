@@ -1,24 +1,33 @@
 import type { Database } from "bun:sqlite";
 
 import { updateTurnBackfill, type TurnRecord } from "../db/turns";
-import { parseReplayTranscript } from "../shared/transcript-parser";
+import {
+  parseReplayTranscript,
+  type ParsedReplayTurn,
+} from "../shared/transcript-parser";
+
+function buildReplayTurnLookup(
+  transcriptTurns: ParsedReplayTurn[],
+): Map<number, ParsedReplayTurn> {
+  return new Map(transcriptTurns.map((turn) => [turn.promptNumber, turn]));
+}
 
 export function backfillFromTranscript(
   db: Database,
   pendingTurns: TurnRecord[],
   transcriptPath?: string,
   lastAssistantMessage?: string,
+  transcriptTurnsByPromptNumber?: Map<number, ParsedReplayTurn>,
 ): void {
   if (pendingTurns.length === 0) {
     return;
   }
 
-  const transcriptTurns = transcriptPath
-    ? parseReplayTranscript(transcriptPath)
-    : [];
-  const transcriptTurnsByPromptNumber = new Map(
-    transcriptTurns.map((turn) => [turn.promptNumber, turn]),
-  );
+  const replayTurnsByPromptNumber =
+    transcriptTurnsByPromptNumber ??
+    buildReplayTurnLookup(
+      transcriptPath ? parseReplayTranscript(transcriptPath) : [],
+    );
   const lastPendingPromptNumber =
     pendingTurns[pendingTurns.length - 1]?.promptNumber;
 
@@ -27,7 +36,7 @@ export function backfillFromTranscript(
       continue;
     }
 
-    const transcriptTurn = transcriptTurnsByPromptNumber.get(
+    const transcriptTurn = replayTurnsByPromptNumber.get(
       pendingTurn.promptNumber,
     );
     const assistantResponse =
