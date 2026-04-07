@@ -36122,14 +36122,33 @@ function buildSessionView(db2, session) {
     turns
   };
 }
-function buildFormattedSession(db2, sessionId, expandTurns = []) {
+function getObservationCountByTurnId(db2, turnIds) {
+  if (turnIds.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db2.query(
+    `SELECT turn_id AS turnId, COUNT(*) AS count
+       FROM observations
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`
+  ).all(...turnIds);
+  return new Map(rows.map((row) => [row.turnId, row.count]));
+}
+function buildSessionSummary(db2, sessionId) {
   const session = getSession(db2, sessionId);
   if (!session) {
     return null;
   }
-  const turns = getTurnsForSession(db2, session.id).map(
-    (turn) => buildTurnView(db2, turn)
-  );
+  const turnCount = db2.query(
+    "SELECT COUNT(*) AS count FROM turns WHERE session_id = ?"
+  ).get(session.id)?.count ?? 0;
+  const observationCount = db2.query(
+    `SELECT COUNT(*) AS count
+         FROM observations o
+         JOIN turns t ON t.id = o.turn_id
+         WHERE t.session_id = ?`
+  ).get(session.id)?.count ?? 0;
   return {
     id: session.id,
     title: session.title,
@@ -36138,21 +36157,27 @@ function buildFormattedSession(db2, sessionId, expandTurns = []) {
     description: session.description,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
-    turnCount: turns.length,
-    observationCount: turns.reduce(
-      (sum, turn) => sum + (turn.observationCount ?? 0),
-      0
-    ),
-    turns: turns.map(
-      (turn) => expandTurns.includes(turn.promptNumber) ? turn : {
-        ...turn,
-        promptPreview: void 0,
-        responsePreview: void 0,
-        insight: void 0,
-        observations: void 0
-      }
-    )
+    turnCount,
+    observationCount
   };
+}
+function buildCollapsedTurnsForSession(db2, sessionId) {
+  const turns = getTurnsForSession(db2, sessionId);
+  const observationCounts = getObservationCountByTurnId(
+    db2,
+    turns.map((turn) => turn.id)
+  );
+  return turns.map((turn) => ({
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    description: turn.description,
+    observationCount: observationCounts.get(turn.id) ?? 0,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status
+  }));
 }
 function buildTurnView(db2, turn) {
   const observations = getObservationsForTurn(db2, turn.id);
@@ -37413,16 +37438,16 @@ function resolvePrimarySessionRecord(db2, input, recentSessions) {
   const currentSession = input.sessionId ? getSessionByContentId(db2, input.sessionId) : null;
   return currentSession ?? recentSessions[0] ?? null;
 }
-function buildCurrentSessionOutput(session) {
+function buildCurrentSessionOutput(session, turns) {
   const lines = [formatSessionExpanded(session)];
-  for (const turn of session.turns ?? []) {
+  for (const turn of turns) {
     lines.push(formatTurnCollapsed(turn));
   }
   return lines.join("\n");
 }
 function buildRecentSessionsOutput(db2, recentSessions, primarySessionId) {
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
-  return others.map((session) => buildFormattedSession(db2, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
+  return others.map((session) => buildSessionSummary(db2, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
 }
 function buildContextOutput(db2, input) {
   const recentSessions = getRecentSessions(db2, { limit: 5 });
@@ -37434,10 +37459,11 @@ function buildContextOutput(db2, input) {
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  const primarySession = buildFormattedSession(db2, primarySessionRecord.id);
+  const primarySession = buildSessionSummary(db2, primarySessionRecord.id);
   if (!primarySession) {
     return EMPTY_CONTEXT_FALLBACK;
   }
+  const primaryTurns = buildCollapsedTurnsForSession(db2, primarySessionRecord.id);
   const recentSessionOutputs = buildRecentSessionsOutput(
     db2,
     recentSessions,
@@ -37448,7 +37474,7 @@ function buildContextOutput(db2, input) {
     "",
     "## Current Session",
     "",
-    buildCurrentSessionOutput(primarySession),
+    buildCurrentSessionOutput(primarySession, primaryTurns),
     "",
     "## Recent Sessions",
     "",
