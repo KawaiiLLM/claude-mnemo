@@ -92,7 +92,6 @@ describe("forkMnemosyne", () => {
 
     const result = await forkMnemosyne(
       {
-        sessionId: "session-123",
         prompt: "extract memory",
         cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
         database: db,
@@ -132,6 +131,8 @@ describe("forkMnemosyne", () => {
       "mcp__mnemo__recall",
       "mcp__mnemo__replay",
     ]);
+    expect(options.resume).toBeUndefined();
+    expect(options.forkSession).toBeUndefined();
     expect(options.pathToClaudeCodeExecutable).toBe("/usr/local/bin/claude");
   });
 
@@ -162,7 +163,6 @@ describe("forkMnemosyne", () => {
 
     await forkMnemosyne(
       {
-        sessionId: "session-456",
         prompt: "extract memory",
       },
       {
@@ -184,5 +184,7 @@ describe("forkMnemosyne", () => {
       "mcp__mnemo__recall",
       "mcp__mnemo__replay",
     ]);
+    expect(options.resume).toBeUndefined();
+    expect(options.forkSession).toBeUndefined();
   });
 });

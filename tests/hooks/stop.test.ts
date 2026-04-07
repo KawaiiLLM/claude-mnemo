@@ -157,11 +157,13 @@ describe("handleStopHook", () => {
     ]);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
     expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      '#1 [stale]: "Draft approach"',
+      "[T1] Draft approach",
     );
+    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain("[stale]");
     expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      '#2 [pending]: "Investigate logs"',
+      "[T2] Untitled",
     );
+    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain("[pending]");
     expect(session.completedAtEpoch).toBe(500);
     expect(stderrWrite).toHaveBeenCalled();
 

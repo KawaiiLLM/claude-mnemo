@@ -8,7 +8,7 @@ import {
 } from "../../db/turns";
 import { forkMnemosyne, type ForkMnemosyneResult } from "../../mnemosyne/fork";
 import {
-  buildExtractionStatusSummary,
+  buildExtractionContext,
   buildMnemosynePrompt,
 } from "../../mnemosyne/prompt";
 import {
@@ -30,20 +30,7 @@ export interface StopHandlerDependencies {
 }
 
 function buildStopPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(
-    buildExtractionStatusSummary(
-      getTurnsForSession(db, sessionDbId).map((turn) => ({
-        promptNumber: turn.promptNumber,
-        status: turn.status as
-          | "pending"
-          | "stale"
-          | "extracted"
-          | "skipped"
-          | "undone",
-        promptPreview: turn.userPrompt ?? "",
-      })),
-    ),
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 
 function detectUndoPromptNumbers(
@@ -146,7 +133,6 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
 
     if (pendingTurns.length > 0) {
       const result = await dependencies.forkMnemosyne({
-        sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
         database: dependencies.db,

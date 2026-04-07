@@ -2,13 +2,13 @@
 
 ## Overview
 
-Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured memory across sessions. After each conversation, a forked agent named **Mnemosyne** reviews the dialogue and extracts memories into a 3-layer data model. Future sessions retrieve these memories via two MCP tools: `recall` (structured memory tree) and `replay` (raw transcript playback).
+Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured memory across sessions. After each conversation, an isolated extraction agent named **Mnemosyne** reviews the dialogue and extracts memories into a 3-layer data model. Future sessions retrieve these memories via two MCP tools: `recall` (structured memory tree) and `replay` (raw transcript playback).
 
 ### Design Principles
 
 1. **Memory is refined, anchored by raw previews.** The database stores extracted insights (title, description, insight, narrative) plus raw `user_prompt` / `assistant_response` per turn for anchoring and preview. Full transcripts live in session `.jsonl` files and are accessible via `replay`.
 2. **Progressive disclosure.** Memory is organized as a tree (session → turn → observation) that can be expanded on demand. Each level provides just enough to decide whether to drill deeper.
-3. **Cache-preserving extraction.** Mnemosyne inherits the main agent's full tool set to maximize prompt cache hits from `forkSession`. Tool constraints are enforced via prompt, not `disallowedTools`.
+3. **Self-contained extraction.** Mnemosyne runs as an isolated SDK session with an in-process `mnemo` MCP server injected explicitly. It does not depend on the parent Claude session's plugin/MCP connection state.
 4. **Separation of concerns.** UserPromptSubmit only inserts pending turns. Stop reconciles (backfill, undo detection) and extracts via Mnemosyne. PreCompact provides a safety net before context compression. SessionStart only injects context (no LLM calls). Each hook has one clear responsibility.
 5. **Zero external dependencies.** No vector DB, no Python, no HTTP Worker. SQLite + FTS5 + Bun only.
 
@@ -247,30 +247,28 @@ Mnemosyne (Μνημοσύνη) — the Greek goddess of memory. She reviews comp
 
 ### Invocation
 
-Mnemosyne is a Claude Code subprocess created via `forkSession`:
+Mnemosyne is an isolated Claude Code SDK subprocess:
 
 ```typescript
 query({
   prompt: mnemosynePrompt,
   options: {
-    resume: sessionId,
-    forkSession: true,  // inherits full context, writes to separate .jsonl
     cwd: projectCwd,
     maxTurns: 15,
+    mcpServers: { mnemo: createSdkMcpServer(...) },
+    allowedTools: ["mcp__mnemo__save_turn", "mcp__mnemo__update_session", "mcp__mnemo__recall", "mcp__mnemo__replay"],
   }
-  // NO disallowedTools — same tool set as main agent → cache hit
+  // isolated extraction session — no dependency on parent plugin runtime state
 })
 ```
 
-### Why No `disallowedTools`
+### Why Inject Tools Explicitly
 
-Prompt cache key = `hash(tools + system + messages_prefix)`. Tools are at the TOP of the cache hierarchy. Removing any tool changes the hash and invalidates ALL cached layers.
-
-For a 20-turn session (~50k tokens), cache miss costs ~$0.75 per fork. By keeping the tool set identical and constraining via prompt, forkSession gets the full conversation context essentially free.
+Mnemosyne now runs as an isolated extraction session rather than a true `forkSession` of the parent conversation. The four memory tools are injected via an in-process SDK MCP server so extraction does not depend on whether the main Claude session's plugin MCP connection is currently healthy.
 
 ### Hook Re-entry Prevention
 
-The `forkSession` subprocess is a full `claude` CLI process that loads plugins and hooks. Without guards, Mnemosyne's prompt submission would trigger `UserPromptSubmit` → `session-init` → infinite recursion.
+The SDK subprocess still loads the Claude runtime and would recurse through hooks unless guarded. Without guards, Mnemosyne's prompt submission would trigger `UserPromptSubmit` → `session-init` → infinite recursion.
 
 **Solution**: Multi-layer isolation (borrowing from claude-mem's proven approach):
 

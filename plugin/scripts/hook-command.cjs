@@ -36327,8 +36327,6 @@ async function forkMnemosyne(input, deps = {}) {
     prompt: input.prompt,
     options: {
       cwd: input.cwd,
-      resume: input.sessionId,
-      forkSession: true,
       maxTurns: 15,
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
@@ -36429,35 +36427,138 @@ function normalizeHookInput(raw, platform = "claude-code") {
 }
 
 // src/mnemosyne/prompt.ts
-function truncatePreview(promptPreview) {
-  if (promptPreview.length <= 80) {
-    return promptPreview;
-  }
-  return `${promptPreview.slice(0, 77)}...`;
+var EXPAND_TAIL = 3;
+var COLLAPSED_HEAD = 3;
+var MAX_CONTENT_LENGTH = 1500;
+function splitInsight2(insight) {
+  if (!insight) return [];
+  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
 }
-function buildExtractionStatusSummary(turns) {
-  if (turns.length === 0) {
-    return "No tracked turns.";
-  }
-  return turns.map(
-    (turn) => `#${turn.promptNumber} [${turn.status}]: "${truncatePreview(turn.promptPreview)}"`
-  ).join("\n");
+function truncateContent(content, sessionId, promptNumber) {
+  if (content.length <= MAX_CONTENT_LENGTH) return content;
+  return `${content.slice(0, MAX_CONTENT_LENGTH)}\u2026 [truncated \u2014 use replay(session=${sessionId}, turn=${promptNumber}) for full content]`;
 }
-function buildMnemosynePrompt(statusSummary) {
+function turnStats(turn, observationCount) {
+  const parts = [];
+  if (observationCount > 0) parts.push(`\u{1F4A1}${observationCount}`);
+  if (turn.toolCallCount && turn.toolCallCount > 0)
+    parts.push(`\u{1F527}${turn.toolCallCount}`);
+  if (turn.filesRead.length > 0) parts.push(`\u{1F4D6}${turn.filesRead.length}`);
+  if (turn.filesModified.length > 0)
+    parts.push(`\u270F\uFE0F${turn.filesModified.length}`);
+  return parts.length > 0 ? ` | ${parts.join(" ")}` : "";
+}
+function formatCollapsed(turn, observationCount) {
+  const stats = turnStats(turn, observationCount);
+  const title = turn.title ?? "Untitled";
+  const lines = [
+    `  - [T${turn.promptNumber}] ${title}${stats} [${turn.status}]`
+  ];
+  if (turn.description) {
+    lines.push(`    - desc: ${turn.description}`);
+  }
+  return lines.join("\n");
+}
+function formatExpanded(turn, observations, sessionId) {
+  const stats = turnStats(turn, observations.length);
+  const title = turn.title ?? "Untitled";
+  const lines = [
+    `  - [T${turn.promptNumber}] ${title}${stats} [${turn.status}]`
+  ];
+  if (turn.description) {
+    lines.push(`    - desc: ${turn.description}`);
+  }
+  if (turn.userPrompt) {
+    lines.push(
+      `    - prompt: "${truncateContent(turn.userPrompt, sessionId, turn.promptNumber)}"`
+    );
+  }
+  if (turn.assistantResponse) {
+    lines.push(
+      `    - response: "${truncateContent(turn.assistantResponse, sessionId, turn.promptNumber)}"`
+    );
+  }
+  const insight = splitInsight2(turn.insight);
+  if (insight.length > 0) {
+    lines.push("    - insight:");
+    for (const item of insight) {
+      lines.push(`      - ${item}`);
+    }
+  }
+  if (observations.length > 0) {
+    for (const obs of observations) {
+      lines.push(formatObservationCollapsed(obs, { indent: "    " }));
+    }
+  }
+  return lines.join("\n");
+}
+function getRenderMode(status, index, total) {
+  if (status === "pending" || status === "stale") return "expanded";
+  if (index >= total - EXPAND_TAIL) return "expanded";
+  if (index < COLLAPSED_HEAD) return "collapsed";
+  return "omitted";
+}
+function buildExtractionContext(db2, sessionDbId) {
+  const session = getSession(db2, sessionDbId);
+  if (!session) return "Session not found.";
+  const turns = getTurnsForSession(db2, sessionDbId);
+  const total = turns.length;
+  const lines = [];
+  lines.push(`Session ID: ${session.id}`);
+  lines.push(`Project: ${session.project}`);
+  if (session.title) lines.push(`Title: ${session.title}`);
+  if (session.description) lines.push(`Description: ${session.description}`);
+  lines.push("");
+  if (total === 0) {
+    lines.push("  No turns recorded.");
+    return lines.join("\n");
+  }
+  let i = 0;
+  while (i < total) {
+    const turn = turns[i];
+    const mode = getRenderMode(turn.status, i, total);
+    if (mode === "expanded") {
+      const observations = getObservationsForTurn(db2, turn.id).map((o) => ({
+        id: o.id,
+        type: o.type,
+        title: o.title,
+        description: o.description
+      }));
+      lines.push(formatExpanded(turn, observations, session.id));
+      i++;
+    } else if (mode === "collapsed") {
+      const observationCount = getObservationsForTurn(db2, turn.id).length;
+      lines.push(formatCollapsed(turn, observationCount));
+      i++;
+    } else {
+      let omitEnd = i;
+      while (omitEnd < total) {
+        const next = turns[omitEnd];
+        if (getRenderMode(next.status, omitEnd, total) !== "omitted")
+          break;
+        omitEnd++;
+      }
+      lines.push(`  - ... ${omitEnd - i} more turns ...`);
+      i = omitEnd;
+    }
+  }
+  return lines.join("\n");
+}
+function buildMnemosynePrompt(context) {
   return `You are Mnemosyne, the memory guardian for Claude Code.
 
-You have just inherited the full context of a conversation.
+The conversation context is embedded below.
 Your role is to extract structured memories for future retrieval.
 You are NOT the agent who did the work \u2014 you are observing and recording.
 Record what was learned, built, fixed, decided, deployed, or configured in the primary session.
 Do not describe the observer's own behavior such as analyzing, observing, recording, or storing findings.
 
-EXTRACTION STATUS
------------------
-${statusSummary}
+CONVERSATION CONTEXT
+--------------------
+${context}
 
 Rules:
-- Process turns marked [pending] \u2014 match by prompt preview above
+- Process turns marked [pending] \u2014 extract observations from their content above
 - Re-evaluate turns marked [stale] \u2014 user undid changes:
   - If the turn is part of an undone branch (sidechain), call save_turn with status="undone" (no title/description/observations)
   - If the turn is still valid with changed context, re-extract normally
@@ -36513,7 +36614,8 @@ OUTPUT DISCIPLINE
 - Never output prose explanations.
 - Never output filler like "Skipping", "No changes", or "Nothing to record".
 
-If context was compacted and detail is missing, use replay() to recover.
+Use recall() for context from past sessions if needed for dedup.
+Use replay(session=<session_id>, turn=<N>) to recover full content if a turn above was truncated.
 Do NOT use Read, Write, Edit, Bash, or any file operation tools.
 Only use: save_turn, update_session, recall, replay.
 Content inside <private>...</private> tags must NOT be recorded.
@@ -36603,15 +36705,7 @@ function createLogger(component) {
 // src/hooks/handlers/compact.ts
 var log = createLogger("MNEMOSYNE");
 function buildPrompt(db2, sessionDbId) {
-  return buildMnemosynePrompt(
-    buildExtractionStatusSummary(
-      getTurnsForSession(db2, sessionDbId).map((turn) => ({
-        promptNumber: turn.promptNumber,
-        status: turn.status,
-        promptPreview: turn.userPrompt ?? ""
-      }))
-    )
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db2, sessionDbId));
 }
 function createCompactHandler(dependencies) {
   return async function handleCompactHook(input) {
@@ -36627,7 +36721,6 @@ function createCompactHandler(dependencies) {
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
     if (pendingTurns.length > 0) {
       const result = await dependencies.forkMnemosyne({
-        sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
         database: dependencies.db
@@ -36857,15 +36950,7 @@ function createSessionInitHandler(dependencies) {
 // src/hooks/handlers/stop.ts
 var log2 = createLogger("MNEMOSYNE");
 function buildStopPrompt(db2, sessionDbId) {
-  return buildMnemosynePrompt(
-    buildExtractionStatusSummary(
-      getTurnsForSession(db2, sessionDbId).map((turn) => ({
-        promptNumber: turn.promptNumber,
-        status: turn.status,
-        promptPreview: turn.userPrompt ?? ""
-      }))
-    )
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db2, sessionDbId));
 }
 function detectUndoPromptNumbers(db2, sessionDbId, transcriptPath, transcriptTurnsByPromptNumber) {
   if (!transcriptPath) {
@@ -36935,7 +37020,6 @@ function createStopHandler(dependencies) {
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     if (pendingTurns.length > 0) {
       const result = await dependencies.forkMnemosyne({
-        sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
         database: dependencies.db

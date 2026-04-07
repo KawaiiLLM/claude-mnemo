@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { getSessionByContentId } from "../../src/db/sessions";
+import { getSession, getSessionByContentId } from "../../src/db/sessions";
 import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
@@ -81,13 +81,14 @@ describe("claude-mnemo smoke test", () => {
 
   test("walks the full memory lifecycle", async () => {
     const forkMnemosyne = async ({
-      sessionId,
+      prompt,
     }: {
-      sessionId: string;
       prompt: string;
       cwd?: string;
     }) => {
-      const session = getSessionByContentId(db, sessionId)!;
+      const match = prompt.match(/Session ID: (\d+)/);
+      if (!match) return;
+      const session = getSession(db, Number(match[1]))!;
 
       for (const turn of getPendingTurns(db, session.id).filter((candidate) => candidate.assistantResponse)) {
         saveTurnTool(db, {

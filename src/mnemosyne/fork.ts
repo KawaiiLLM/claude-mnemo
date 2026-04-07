@@ -24,7 +24,6 @@ import {
 import { buildIsolatedEnv } from "./env";
 
 export interface ForkMnemosyneInput {
-  sessionId: string;
   prompt: string;
   cwd?: string;
   database?: Database;
@@ -162,8 +161,6 @@ export async function forkMnemosyne(
     prompt: input.prompt,
     options: {
       cwd: input.cwd,
-      resume: input.sessionId,
-      forkSession: true,
       maxTurns: 15,
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,

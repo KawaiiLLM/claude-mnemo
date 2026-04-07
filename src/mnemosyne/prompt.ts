@@ -1,47 +1,187 @@
-export interface ExtractionStatusTurn {
-  promptNumber: number;
-  status: "pending" | "stale" | "extracted" | "skipped" | "undone";
-  promptPreview: string;
+import type { Database } from "bun:sqlite";
+
+import { getObservationsForTurn } from "../db/observations";
+import { getSession } from "../db/sessions";
+import { getTurnsForSession, type TurnRecord } from "../db/turns";
+import {
+  formatObservationCollapsed,
+  type FormattedObservation,
+} from "../mcp/format";
+
+const EXPAND_TAIL = 3;
+const COLLAPSED_HEAD = 3;
+const MAX_CONTENT_LENGTH = 1500;
+
+type TurnStatus = "pending" | "stale" | "extracted" | "skipped" | "undone";
+type RenderMode = "expanded" | "collapsed" | "omitted";
+
+function splitInsight(insight: string | null): string[] {
+  if (!insight) return [];
+  return insight
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^-+\s*/, ""));
 }
 
-function truncatePreview(promptPreview: string): string {
-  if (promptPreview.length <= 80) {
-    return promptPreview;
-  }
-
-  return `${promptPreview.slice(0, 77)}...`;
-}
-
-export function buildExtractionStatusSummary(
-  turns: ExtractionStatusTurn[],
+function truncateContent(
+  content: string,
+  sessionId: number,
+  promptNumber: number,
 ): string {
-  if (turns.length === 0) {
-    return "No tracked turns.";
-  }
-
-  return turns
-    .map(
-      (turn) =>
-        `#${turn.promptNumber} [${turn.status}]: "${truncatePreview(turn.promptPreview)}"`,
-    )
-    .join("\n");
+  if (content.length <= MAX_CONTENT_LENGTH) return content;
+  return `${content.slice(0, MAX_CONTENT_LENGTH)}… [truncated — use replay(session=${sessionId}, turn=${promptNumber}) for full content]`;
 }
 
-export function buildMnemosynePrompt(statusSummary: string): string {
+function turnStats(turn: TurnRecord, observationCount: number): string {
+  const parts: string[] = [];
+  if (observationCount > 0) parts.push(`💡${observationCount}`);
+  if (turn.toolCallCount && turn.toolCallCount > 0)
+    parts.push(`🔧${turn.toolCallCount}`);
+  if (turn.filesRead.length > 0) parts.push(`📖${turn.filesRead.length}`);
+  if (turn.filesModified.length > 0)
+    parts.push(`✏️${turn.filesModified.length}`);
+  return parts.length > 0 ? ` | ${parts.join(" ")}` : "";
+}
+
+function formatCollapsed(turn: TurnRecord, observationCount: number): string {
+  const stats = turnStats(turn, observationCount);
+  const title = turn.title ?? "Untitled";
+  const lines = [
+    `  - [T${turn.promptNumber}] ${title}${stats} [${turn.status}]`,
+  ];
+  if (turn.description) {
+    lines.push(`    - desc: ${turn.description}`);
+  }
+  return lines.join("\n");
+}
+
+function formatExpanded(
+  turn: TurnRecord,
+  observations: FormattedObservation[],
+  sessionId: number,
+): string {
+  const stats = turnStats(turn, observations.length);
+  const title = turn.title ?? "Untitled";
+  const lines = [
+    `  - [T${turn.promptNumber}] ${title}${stats} [${turn.status}]`,
+  ];
+
+  if (turn.description) {
+    lines.push(`    - desc: ${turn.description}`);
+  }
+
+  if (turn.userPrompt) {
+    lines.push(
+      `    - prompt: "${truncateContent(turn.userPrompt, sessionId, turn.promptNumber)}"`,
+    );
+  }
+
+  if (turn.assistantResponse) {
+    lines.push(
+      `    - response: "${truncateContent(turn.assistantResponse, sessionId, turn.promptNumber)}"`,
+    );
+  }
+
+  const insight = splitInsight(turn.insight);
+  if (insight.length > 0) {
+    lines.push("    - insight:");
+    for (const item of insight) {
+      lines.push(`      - ${item}`);
+    }
+  }
+
+  if (observations.length > 0) {
+    for (const obs of observations) {
+      lines.push(formatObservationCollapsed(obs, { indent: "    " }));
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function getRenderMode(
+  status: TurnStatus,
+  index: number,
+  total: number,
+): RenderMode {
+  if (status === "pending" || status === "stale") return "expanded";
+  if (index >= total - EXPAND_TAIL) return "expanded";
+  if (index < COLLAPSED_HEAD) return "collapsed";
+  return "omitted";
+}
+
+export function buildExtractionContext(
+  db: Database,
+  sessionDbId: number,
+): string {
+  const session = getSession(db, sessionDbId);
+  if (!session) return "Session not found.";
+
+  const turns = getTurnsForSession(db, sessionDbId);
+  const total = turns.length;
+
+  const lines: string[] = [];
+  lines.push(`Session ID: ${session.id}`);
+  lines.push(`Project: ${session.project}`);
+  if (session.title) lines.push(`Title: ${session.title}`);
+  if (session.description) lines.push(`Description: ${session.description}`);
+  lines.push("");
+
+  if (total === 0) {
+    lines.push("  No turns recorded.");
+    return lines.join("\n");
+  }
+
+  let i = 0;
+  while (i < total) {
+    const turn = turns[i];
+    const mode = getRenderMode(turn.status as TurnStatus, i, total);
+
+    if (mode === "expanded") {
+      const observations = getObservationsForTurn(db, turn.id).map((o) => ({
+        id: o.id,
+        type: o.type,
+        title: o.title,
+        description: o.description,
+      }));
+      lines.push(formatExpanded(turn, observations, session.id));
+      i++;
+    } else if (mode === "collapsed") {
+      const observationCount = getObservationsForTurn(db, turn.id).length;
+      lines.push(formatCollapsed(turn, observationCount));
+      i++;
+    } else {
+      let omitEnd = i;
+      while (omitEnd < total) {
+        const next = turns[omitEnd];
+        if (getRenderMode(next.status as TurnStatus, omitEnd, total) !== "omitted")
+          break;
+        omitEnd++;
+      }
+      lines.push(`  - ... ${omitEnd - i} more turns ...`);
+      i = omitEnd;
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function buildMnemosynePrompt(context: string): string {
   return `You are Mnemosyne, the memory guardian for Claude Code.
 
-You have just inherited the full context of a conversation.
+The conversation context is embedded below.
 Your role is to extract structured memories for future retrieval.
 You are NOT the agent who did the work — you are observing and recording.
 Record what was learned, built, fixed, decided, deployed, or configured in the primary session.
 Do not describe the observer's own behavior such as analyzing, observing, recording, or storing findings.
 
-EXTRACTION STATUS
------------------
-${statusSummary}
+CONVERSATION CONTEXT
+--------------------
+${context}
 
 Rules:
-- Process turns marked [pending] — match by prompt preview above
+- Process turns marked [pending] — extract observations from their content above
 - Re-evaluate turns marked [stale] — user undid changes:
   - If the turn is part of an undone branch (sidechain), call save_turn with status="undone" (no title/description/observations)
   - If the turn is still valid with changed context, re-extract normally
@@ -97,7 +237,8 @@ OUTPUT DISCIPLINE
 - Never output prose explanations.
 - Never output filler like "Skipping", "No changes", or "Nothing to record".
 
-If context was compacted and detail is missing, use replay() to recover.
+Use recall() for context from past sessions if needed for dedup.
+Use replay(session=<session_id>, turn=<N>) to recover full content if a turn above was truncated.
 Do NOT use Read, Write, Edit, Bash, or any file operation tools.
 Only use: save_turn, update_session, recall, replay.
 Content inside <private>...</private> tags must NOT be recorded.

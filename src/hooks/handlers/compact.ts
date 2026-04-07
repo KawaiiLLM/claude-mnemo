@@ -1,10 +1,10 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
-import { getPendingTurns, getTurnsForSession } from "../../db/turns";
+import { getPendingTurns } from "../../db/turns";
 import { forkMnemosyne } from "../../mnemosyne/fork";
 import {
-  buildExtractionStatusSummary,
+  buildExtractionContext,
   buildMnemosynePrompt,
 } from "../../mnemosyne/prompt";
 import { backfillFromTranscript } from "../backfill";
@@ -20,20 +20,7 @@ export interface CompactHandlerDependencies {
 }
 
 function buildPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(
-    buildExtractionStatusSummary(
-      getTurnsForSession(db, sessionDbId).map((turn) => ({
-        promptNumber: turn.promptNumber,
-        status: turn.status as
-          | "pending"
-          | "stale"
-          | "extracted"
-          | "skipped"
-          | "undone",
-        promptPreview: turn.userPrompt ?? "",
-      })),
-    ),
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 
 export function createCompactHandler(dependencies: CompactHandlerDependencies) {
@@ -58,7 +45,6 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
 
     if (pendingTurns.length > 0) {
       const result = await dependencies.forkMnemosyne({
-        sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
         database: dependencies.db,
