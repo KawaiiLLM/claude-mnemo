@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
-import { getRecentSessions, getSessionByContentId } from "../../db/sessions";
+import { getRecentSessions, getSessionByContentId, type SessionRecord } from "../../db/sessions";
+import { getTurnsForSession } from "../../db/turns";
 import { buildFormattedSession } from "../../mcp/recall";
 import {
   formatObservationCollapsed,
@@ -147,35 +148,43 @@ function buildHeader(db: Database): string {
   ].join("\n");
 }
 
-function resolvePrimarySession(db: Database, input: NormalizedHookInput): FormattedSession | null {
-  const recentSessions = getRecentSessions(db, { limit: 5 });
+function resolvePrimarySessionRecord(
+  db: Database,
+  input: NormalizedHookInput,
+  recentSessions: SessionRecord[],
+): SessionRecord | null {
   const currentSession = input.sessionId
     ? getSessionByContentId(db, input.sessionId)
     : null;
-  const session = currentSession ?? recentSessions[0];
 
-  if (!session) {
+  return currentSession ?? recentSessions[0] ?? null;
+}
+
+function buildPrimarySession(
+  db: Database,
+  primarySessionRecord: SessionRecord | null,
+): FormattedSession | null {
+  if (!primarySessionRecord) {
     return null;
   }
 
-  const preview = buildFormattedSession(db, session.id);
-  const expandTurnNumbers =
-    preview?.turns?.slice(-3).map((turn) => turn.promptNumber) ?? [];
-  const base = buildFormattedSession(
+  const expandTurnNumbers = getTurnsForSession(db, primarySessionRecord.id)
+    .slice(-3)
+    .map((turn) => turn.promptNumber);
+  const primarySession = buildFormattedSession(
     db,
-    session.id,
+    primarySessionRecord.id,
     expandTurnNumbers,
   );
 
-  return base ? truncateSession(base) : null;
+  return primarySession ? truncateSession(primarySession) : null;
 }
 
 function buildRecentSessions(
   db: Database,
+  recentSessions: SessionRecord[],
   primarySession: FormattedSession | null,
 ): FormattedSession[] {
-  const recentSessions = getRecentSessions(db, { limit: 5 });
-
   if (!primarySession) {
     return [];
   }
@@ -192,15 +201,25 @@ function buildRecentSessions(
 }
 
 function buildContextOutput(db: Database, input: NormalizedHookInput): string {
-  const primarySession = resolvePrimarySession(db, input);
-  const recentSessions = buildRecentSessions(db, primarySession);
+  const recentSessions = getRecentSessions(db, { limit: 5 });
+  const primarySessionRecord = resolvePrimarySessionRecord(
+    db,
+    input,
+    recentSessions,
+  );
+  const primarySession = buildPrimarySession(db, primarySessionRecord);
+  const formattedRecentSessions = buildRecentSessions(
+    db,
+    recentSessions,
+    primarySession,
+  );
 
   if (!primarySession) {
     return EMPTY_CONTEXT_FALLBACK;
   }
 
-  const nextTwoSessions = recentSessions.slice(0, 2);
-  const lastTwoSessions = recentSessions.slice(2, 4);
+  const nextTwoSessions = formattedRecentSessions.slice(0, 2);
+  const lastTwoSessions = formattedRecentSessions.slice(2, 4);
 
   return [
     buildHeader(db),

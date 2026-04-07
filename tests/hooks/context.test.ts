@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
+import * as recallModule from "../../src/mcp/recall";
+import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function createInput(
@@ -215,6 +217,41 @@ describe("handleContextHook", () => {
     );
 
     emptyDb.close();
+  });
+
+  test("queries recent sessions once and builds the primary session once", async () => {
+    const singleSessionDb = createDatabase(":memory:");
+    initializeSchema(singleSessionDb);
+
+    upsertSession(singleSessionDb, {
+      contentSessionId: "single-session",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: "Single session",
+      description: "Single session description",
+      insight: null,
+      startedAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    });
+
+    const getRecentSessionsSpy = spyOn(sessionsModule, "getRecentSessions");
+    const buildFormattedSessionSpy = spyOn(recallModule, "buildFormattedSession");
+    const handler = createContextHandler({
+      db: singleSessionDb,
+    });
+
+    await handler(
+      createInput({
+        sessionId: "single-session",
+      }),
+    );
+
+    expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
+    expect(buildFormattedSessionSpy).toHaveBeenCalledTimes(1);
+
+    getRecentSessionsSpy.mockRestore();
+    buildFormattedSessionSpy.mockRestore();
+    singleSessionDb.close();
   });
 
   test("anchors on the current session and applies graduated depth", async () => {
