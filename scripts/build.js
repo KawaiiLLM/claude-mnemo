@@ -42,7 +42,7 @@ for (const build of builds) {
     define: {
       __DEFAULT_PACKAGE_VERSION__: JSON.stringify(defaultVersion),
     },
-    external: ["bun:sqlite", "@anthropic-ai/claude-agent-sdk"],
+    external: ["bun:sqlite"],
   });
 
   chmodSync(build.outputFile, 0o755);
