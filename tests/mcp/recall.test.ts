@@ -6,6 +6,7 @@ import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn, saveTurn } from "../../src/db/turns";
+import { recallInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
 
 describe("recallMemory", () => {
@@ -15,6 +16,7 @@ describe("recallMemory", () => {
   let authTurnId: number;
   let authObservationId: number;
   let bigSessionId: number;
+  let observationIds: number[] = [];
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -139,6 +141,44 @@ describe("recallMemory", () => {
         300 + promptNumber,
       );
     }
+
+    const observationSession = upsertSession(db, {
+      contentSessionId: "session-observations",
+      project: "claude-mnemo",
+      title: "Observation flood",
+      description: "For direct observation omission coverage",
+      insight: null,
+      startedAtEpoch: 400,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    saveTurn(db, {
+      sessionId: observationSession.id,
+      promptNumber: 1,
+      userPrompt: "Collect many observations",
+      assistantResponse: "Collected many observations.",
+      title: "Observation flood",
+      description: "Many observations",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 410,
+      updatedAtEpoch: 420,
+      observations: Array.from({ length: 60 }, (_, index) => ({
+        type: "discovery",
+        title: `Observation ${index + 1}`,
+        description: `Description ${index + 1}`,
+        narrative: null,
+        facts: [],
+        concepts: [],
+        filesRead: [],
+        filesModified: [],
+      })),
+    });
+
+    const floodTurn = getTurn(db, observationSession.id, 1)!;
+    observationIds = getObservationsForTurn(db, floodTurn.id).map((observation) => observation.id);
   });
 
   afterEach(() => {
@@ -156,6 +196,11 @@ describe("recallMemory", () => {
     expect(output).toContain("[S2] Auth race fix");
     expect(output).not.toContain("[S1] Auth baseline");
     expect(output).not.toContain("[S3] Large timeline");
+  });
+
+  test("accepts legacy recall calls without scope in the schema", () => {
+    expect(() => recallInputSchema.parse({ query: "auth" })).not.toThrow();
+    expect(recallMemory(db, { session: authSessionId })).toContain("[S2] Auth race fix");
   });
 
   test("parses turn range selectors and expands selected turns", () => {
@@ -229,5 +274,17 @@ describe("recallMemory", () => {
     expect(output).toContain("... ");
     expect(output).toContain("[pending]");
     expect(output).toContain("[stale]");
+  });
+
+  test("applies omission sampling to direct observation browsing", () => {
+    const output = recallMemory(db, {
+      scope: "observations",
+      obs: `${observationIds[0]}..${observationIds[observationIds.length - 1]}`,
+      depth: "collapsed",
+    });
+
+    expect(output).toContain("... ");
+    expect(output).toContain("[O");
+    expect(output).not.toContain("[S");
   });
 });

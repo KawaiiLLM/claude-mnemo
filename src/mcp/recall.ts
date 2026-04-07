@@ -330,7 +330,15 @@ function renderSession(
   turnSelector?: Set<number>,
 ): string {
   const view = buildSessionView(db, session);
-  const lines = [formatSessionExpanded(view)];
+  const lines = [
+    depth === "collapsed"
+      ? formatSessionCollapsed(view)
+      : formatSessionExpanded(view),
+  ];
+
+  if (depth === "collapsed") {
+    return lines.join("\n");
+  }
 
   const turns = getTurnsForSession(db, session.id).filter((turn) =>
     turnSelector ? turnSelector.has(turn.promptNumber) : true,
@@ -347,79 +355,12 @@ function renderSession(
     }
 
     const turnView = buildTurnView(db, item);
-    const turnLines =
-      depth === "collapsed"
-        ? formatTurnCollapsed(turnView, { sessionId: session.id })
-        : formatTurnExpanded(turnView, { sessionId: session.id });
+    const turnLines = formatTurnExpanded(turnView, { sessionId: session.id });
     lines.push(turnLines);
 
     const observations = turnView.observations ?? [];
-    const observationSample = sampleWithOmissions(observations);
-    for (const observationItem of observationSample.items) {
-      if ("omittedCount" in observationItem) {
-        lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
-        continue;
-      }
-
-      const observationLines =
-        depth === "full"
-          ? formatObservationExpanded(observationItem, {
-              indent: "    ",
-              sessionId: session.id,
-              turnPromptNumber: turnView.promptNumber,
-            })
-          : formatObservationCollapsed(observationItem, {
-              indent: "    ",
-              sessionId: session.id,
-              turnPromptNumber: turnView.promptNumber,
-            });
-      lines.push(observationLines);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-function renderTurnScope(
-  db: Database,
-  turns: TurnRecord[],
-  depth: "collapsed" | "expanded" | "full",
-): string {
-  const lines: string[] = [];
-  const grouped = new Map<number, TurnRecord[]>();
-  for (const turn of turns) {
-    const list = grouped.get(turn.sessionId) ?? [];
-    list.push(turn);
-    grouped.set(turn.sessionId, list);
-  }
-
-  const sessions = getRecentSessions(db, { limit: 1000 }).filter((session) =>
-    grouped.has(session.id),
-  );
-
-  for (const session of sessions) {
-    const view = buildSessionView(db, session);
-    lines.push(formatSessionExpanded(view));
-
-    const sessionTurns = grouped.get(session.id) ?? [];
-    const sampledTurns = sampleWithOmissions(sessionTurns, (turn) =>
-      turn.status === "pending" || turn.status === "stale",
-    );
-
-    for (const item of sampledTurns.items) {
-      if ("omittedCount" in item) {
-        lines.push(`  - ... ${item.omittedCount} omitted ...`);
-        continue;
-      }
-
-      const turnView = buildTurnView(db, item);
-      lines.push(
-        depth === "collapsed"
-          ? formatTurnCollapsed(turnView, { sessionId: session.id })
-          : formatTurnExpanded(turnView, { sessionId: session.id }),
-      );
-
-      const observationSample = sampleWithOmissions(turnView.observations ?? []);
+    if (depth === "expanded" || depth === "full") {
+      const observationSample = sampleWithOmissions(observations);
       for (const observationItem of observationSample.items) {
         if ("omittedCount" in observationItem) {
           lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
@@ -446,6 +387,74 @@ function renderTurnScope(
   return lines.join("\n");
 }
 
+function renderTurnScope(
+  db: Database,
+  turns: TurnRecord[],
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  const lines: string[] = [];
+  const grouped = new Map<number, TurnRecord[]>();
+  for (const turn of turns) {
+    const list = grouped.get(turn.sessionId) ?? [];
+    list.push(turn);
+    grouped.set(turn.sessionId, list);
+  }
+
+  const sessions = getRecentSessions(db, { limit: 1000 }).filter((session) =>
+    grouped.has(session.id),
+  );
+
+  for (const session of sessions) {
+    const view = buildSessionView(db, session);
+    lines.push(formatSessionCollapsed(view));
+
+    const sessionTurns = grouped.get(session.id) ?? [];
+    const sampledTurns = sampleWithOmissions(sessionTurns, (turn) =>
+      turn.status === "pending" || turn.status === "stale",
+    );
+
+    for (const item of sampledTurns.items) {
+      if ("omittedCount" in item) {
+        lines.push(`  - ... ${item.omittedCount} omitted ...`);
+        continue;
+      }
+
+      const turnView = buildTurnView(db, item);
+      lines.push(
+        depth === "collapsed"
+          ? formatTurnCollapsed(turnView, { sessionId: session.id })
+          : formatTurnExpanded(turnView, { sessionId: session.id }),
+      );
+
+      if (depth !== "collapsed") {
+        const observationSample = sampleWithOmissions(turnView.observations ?? []);
+        for (const observationItem of observationSample.items) {
+          if ("omittedCount" in observationItem) {
+            lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
+            continue;
+          }
+
+          lines.push(
+            depth === "full"
+              ? formatObservationExpanded(observationItem, {
+                  indent: "    ",
+                  sessionId: session.id,
+                  turnPromptNumber: turnView.promptNumber,
+                })
+              : formatObservationCollapsed(observationItem, {
+                  indent: "    ",
+                  sessionId: session.id,
+                  turnPromptNumber: turnView.promptNumber,
+                }),
+          );
+        }
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
 function renderObservationScope(
   db: Database,
   observations: Array<{ sessionId: number; turnId: number; observationId: number }>,
@@ -464,7 +473,14 @@ function renderObservationScope(
   }
 
   if (!includeParents) {
-    for (const row of observations) {
+    const sampledObservations = sampleWithOmissions(observations);
+    for (const entry of sampledObservations.items) {
+      if ("omittedCount" in entry) {
+        lines.push(`- ... ${entry.omittedCount} omitted ...`);
+        continue;
+      }
+
+      const row = entry;
       const observation = getObservation(db, row.observationId);
       if (!observation) {
         continue;
@@ -498,7 +514,7 @@ function renderObservationScope(
 
   for (const session of sessions) {
     const sessionView = buildSessionView(db, session);
-    lines.push(formatSessionExpanded(sessionView));
+    lines.push(formatSessionCollapsed(sessionView));
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
     const turns = getTurnsForSession(db, session.id).filter((turn) =>
       turnMap.has(turn.id),
@@ -513,7 +529,18 @@ function renderObservationScope(
       );
 
       const observationIds = turnMap.get(turn.id) ?? [];
-      for (const observationId of observationIds) {
+      const sampledObservations = sampleWithOmissions(observationIds);
+      for (const observationEntry of sampledObservations.items) {
+        if (
+          typeof observationEntry === "object" &&
+          observationEntry !== null &&
+          "omittedCount" in observationEntry
+        ) {
+          lines.push(`    - ... ${observationEntry.omittedCount} omitted ...`);
+          continue;
+        }
+
+        const observationId = observationEntry;
         const observation = getObservation(db, observationId);
         if (!observation) {
           continue;
@@ -650,15 +677,6 @@ function legacyRecallMemory(db: Database, input: RecallInput): string {
 
   const results = getRecentSessions(db, { limit: 20 });
   return results.map((session) => renderSession(db, session, "collapsed")).join("\n");
-}
-
-function normalizeLegacySelector(value: SelectorInput | undefined): number[] {
-  if (value === undefined) {
-    return [];
-  }
-
-  const parsed = parseSelectorValue(value, "selector");
-  return parsed.values;
 }
 
 function shouldUseLegacyPath(input: RecallInput): boolean {
