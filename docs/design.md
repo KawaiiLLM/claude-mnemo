@@ -145,11 +145,11 @@ FTS indexing is integrated into `saveTurn()` and `upsertSession()` — atomic wi
 
 | Mode | Query | Backend |
 |------|-------|---------|
-| Browse | `recall()` | `SELECT FROM sessions ORDER BY started_at_epoch DESC` |
-| Keyword search | `recall(query="auth竞态")` | `FTS5 MATCH` across all layers |
-| Filter | `recall(type="bugfix")`, `recall(file="auth.ts")` | SQL WHERE + LIKE |
-| Date range | `recall(from="2026-04-01", to="2026-04-05")` | SQL WHERE on epoch |
-| Cross-session timeline | `recall(around="S142", before=3, after=3)` | SQL offset from anchor epoch |
+| Browse | `recall(scope="sessions")` | `SELECT FROM sessions ORDER BY started_at_epoch DESC` |
+| Keyword search | `recall(scope="sessions", query="auth竞态")` | `FTS5 MATCH` across the selected scope |
+| Filter | `recall(scope="observations", type="bugfix")`, `recall(scope="observations", file="auth.ts")` | SQL WHERE + LIKE |
+| Date range | `recall(scope="sessions", time="2026-04-01..2026-04-05")` | SQL WHERE on epoch |
+| Session drill-down | `recall(scope="turns", session=142, depth="expanded")` | Structured tree rendering |
 
 No vector DB. No Chroma. No Python dependency.
 
@@ -164,14 +164,14 @@ Four tools exposed via a single MCP server (stdio transport):
 **`recall`** — Progressive memory tree
 
 ```
-recall()                                    → recent sessions
-recall(query="auth竞态")                    → FTS5 search
-recall(session=142)                         → turns in session
-recall(session=142, turn=3)                 → observations in turn 3
-recall(observation=7)                       → full detail
-recall(session=142, expand_turns=[1,3])     → tree expansion
-recall(around="2026-04-03", before=3)       → cross-session timeline
-recall(type="bugfix", file="auth.ts")       → filters
+recall(scope="sessions")                                    → recent sessions
+recall(scope="sessions", query="auth竞态")                  → FTS5 search
+recall(scope="turns", session=142)                         → turns in session
+recall(scope="observations", session=142, turn=3)          → observations in turn 3
+recall(scope="observations", obs=7)                        → full detail for one observation
+recall(scope="turns", session=142, depth="expanded")      → tree expansion
+recall(scope="sessions", time="2026-04-03")                → cross-session timeline
+recall(scope="observations", type="bugfix", file="auth.ts") → filters
 ```
 
 Output format — indented tags, optimized for LLM consumption:
@@ -480,12 +480,12 @@ Each node has a consistent pattern:
 - **Collapsed**: one-line with `[ID] title | metadata`
 - **Expanded**: multi-line with `key: value` fields + child nodes
 
-IDs (`[S142]`, `[T3]`, `[O7]`) are directly referenceable in follow-up tool calls. Turn references are session-scoped prompt numbers, so turn detail uses `recall(session=142, turn=3)`.
+IDs (`[S142]`, `[T3]`, `[O7]`) are directly referenceable in follow-up tool calls. Turn references are session-scoped prompt numbers, so turn detail uses `recall(scope="turns", session=142, turn=3)` and observation detail uses `recall(scope="observations", obs=7)`.
 
 ### Token Budget for Typical Retrieval
 
 ```
-recall(session=142, expand_turns=[1,3], expand_observations=[2])
+recall(scope="turns", session=142, depth="expanded")
 
 Session header                ~15 tokens
   description + insight       ~60 tokens

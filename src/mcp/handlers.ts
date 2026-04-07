@@ -47,19 +47,29 @@ export function createDatabaseBackedHandlers(
     recall: (args) =>
       textResult(
         recallMemory(database, {
+          scope: args.scope as "sessions" | "turns" | "observations" | undefined,
           query: args.query as string | undefined,
           session: args.session as number | undefined,
           turn: args.turn as number | undefined,
+          obs: (args.obs as number | number[] | string | undefined) ?? undefined,
+          time: args.time as string | undefined,
+          depth: args.depth as "collapsed" | "expanded" | "full" | undefined,
           observation: args.observation as number | undefined,
-          expandTurns: args.expand_turns as number[] | undefined,
+          expandTurns:
+            (args.expand_turns as number[] | undefined) ??
+            (args.expandTurns as number[] | undefined),
           around: args.around as string | undefined,
           before: args.before as number | undefined,
           after: args.after as number | undefined,
           file: args.file as string | undefined,
           type: args.type as string | undefined,
           project: args.project as string | undefined,
-          fromEpoch: args.from_epoch as number | undefined,
-          toEpoch: args.to_epoch as number | undefined,
+          fromEpoch:
+            (args.fromEpoch as number | undefined) ??
+            (args.from_epoch as number | undefined),
+          toEpoch:
+            (args.toEpoch as number | undefined) ??
+            (args.to_epoch as number | undefined),
         }),
       ),
     replay: (args) =>

@@ -61,13 +61,18 @@ Once installed, Claude-Mnemo works automatically. No manual invocation needed �
 Browse and drill into past work through the `recall` MCP tool:
 
 ```
-recall()                                  → recent sessions
-recall(query="auth race")                 → full-text search across all layers
-recall(session=12)                        → turns in a session
-recall(session=12, turn=2)                → observations for a turn
-recall(observation=7)                     → full detail for one observation
-recall(type="bugfix", file="src/auth.ts") → filter by type and file
+recall(scope="sessions")                                        → recent sessions
+recall(scope="sessions", query="auth race")                     → full-text search
+recall(scope="turns", session=12)                               → turns in a session
+recall(scope="turns", session=12, depth="expanded")             → session turns with prompt/response
+recall(scope="observations", session=12, turn=2)                → observations for a turn
+recall(scope="observations", obs=7)                             → full detail for one observation
+recall(scope="observations", type="bugfix", file="src/auth.ts") → filter by type and file
 ```
+
+Observation IDs are global SQLite row IDs. Use `[O7]` directly in follow-up `recall(scope="observations", obs=7)` calls.
+
+Legacy aliases like `observation`, `from_epoch`, `to_epoch`, `expand_turns`, and `around` still resolve during migration, but `scope`-based calls are the canonical API.
 
 ### Replay: Raw Transcript Playback
 

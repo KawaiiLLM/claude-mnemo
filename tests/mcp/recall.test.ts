@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import * as nodeFs from "node:fs";
 
 import { createDatabase } from "../../src/db/database";
 import { getObservationsForTurn } from "../../src/db/observations";
@@ -201,6 +202,23 @@ describe("recallMemory", () => {
   test("accepts legacy recall calls without scope in the schema", () => {
     expect(() => recallInputSchema.parse({ query: "auth" })).not.toThrow();
     expect(recallMemory(db, { session: authSessionId })).toContain("[S2] Auth race fix");
+  });
+
+  test("normalizes legacy observation aliases and logs the migration warning", () => {
+    const logSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
+
+    const output = recallMemory(db, {
+      observation: authObservationId,
+    });
+
+    expect(output).toContain("[O1] 🔴 Auth mutex");
+    expect(
+      logSpy.mock.calls.some(([, payload]) =>
+        String(payload).includes("legacy recall parameters normalized"),
+      ),
+    ).toBe(true);
+
+    logSpy.mockRestore();
   });
 
   test("parses turn range selectors and expands selected turns", () => {

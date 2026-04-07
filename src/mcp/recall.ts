@@ -9,6 +9,7 @@ import {
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
+import { createLogger } from "../shared/logger";
 import {
   formatObservationCollapsed,
   formatObservationExpanded,
@@ -50,6 +51,8 @@ interface ParsedTimeRange {
   before?: number;
 }
 
+const log = createLogger("MCP");
+
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
     return [];
@@ -64,6 +67,81 @@ function splitInsight(insight: string | null): string[] {
 
 function formatParameterError(message: string): string {
   return `Parameter error: ${message}`;
+}
+
+function normalizeRecallInput(input: RecallInput): RecallInput {
+  const normalized: RecallInput = { ...input };
+  const legacyFields: string[] = [];
+
+  if (normalized.observation !== undefined && normalized.obs === undefined) {
+    normalized.obs = normalized.observation;
+    legacyFields.push("observation");
+  }
+
+  if (normalized.fromEpoch !== undefined && normalized.after === undefined) {
+    normalized.after = normalized.fromEpoch;
+    legacyFields.push("from_epoch");
+  }
+
+  if (normalized.toEpoch !== undefined && normalized.before === undefined) {
+    normalized.before = normalized.toEpoch;
+    legacyFields.push("to_epoch");
+  }
+
+  if (normalized.expandTurns !== undefined) {
+    legacyFields.push("expand_turns");
+  }
+
+  if (normalized.around !== undefined) {
+    legacyFields.push("around");
+  }
+
+  if (normalized.scope === undefined) {
+    legacyFields.push("scope");
+
+    if (
+      normalized.session !== undefined &&
+      normalized.turn !== undefined &&
+      normalized.query === undefined &&
+      normalized.type === undefined &&
+      normalized.file === undefined &&
+      normalized.expandTurns === undefined &&
+      normalized.around === undefined
+    ) {
+      normalized.scope = "turns";
+      normalized.depth ??= "expanded";
+    } else if (
+      normalized.session !== undefined &&
+      normalized.turn === undefined &&
+      normalized.query === undefined &&
+      normalized.type === undefined &&
+      normalized.file === undefined &&
+      normalized.expandTurns === undefined &&
+      normalized.around === undefined
+    ) {
+      normalized.scope = "turns";
+    } else if (
+      normalized.obs !== undefined &&
+      normalized.session === undefined &&
+      normalized.turn === undefined &&
+      normalized.query === undefined &&
+      normalized.type === undefined &&
+      normalized.file === undefined &&
+      normalized.expandTurns === undefined &&
+      normalized.around === undefined
+    ) {
+      normalized.scope = "observations";
+    }
+  }
+
+  if (legacyFields.length > 0) {
+    log.warn("legacy recall parameters normalized", {
+      legacyFields,
+      normalizedScope: normalized.scope ?? "legacy",
+    });
+  }
+
+  return normalized;
 }
 
 function parseSelectorValue(
@@ -684,26 +762,28 @@ function shouldUseLegacyPath(input: RecallInput): boolean {
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
-  if (shouldUseLegacyPath(input)) {
-    return legacyRecallMemory(db, input);
+  const normalizedInput = normalizeRecallInput(input);
+
+  if (shouldUseLegacyPath(normalizedInput)) {
+    return legacyRecallMemory(db, normalizedInput);
   }
 
-  const depth = input.depth ?? "collapsed";
-  const timeRange = mergeTimeRanges(input);
+  const depth = normalizedInput.depth ?? "collapsed";
+  const timeRange = mergeTimeRanges(normalizedInput);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
   }
 
-  if (input.query || input.type || input.file) {
+  if (normalizedInput.query || normalizedInput.type || normalizedInput.file) {
     const results = selectSearchResults(
       db,
-      { ...input, scope: input.scope! },
+      { ...normalizedInput, scope: normalizedInput.scope! },
       timeRange.after,
       timeRange.before,
     );
     return renderSearchResults(
       db,
-      input as RecallInput & { scope: RecallScope },
+      normalizedInput as RecallInput & { scope: RecallScope },
       results,
       depth,
     );
@@ -711,7 +791,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
   return renderScopedMemory(
     db,
-    input as RecallInput & { scope: RecallScope },
+    normalizedInput as RecallInput & { scope: RecallScope },
     depth,
     timeRange.after,
     timeRange.before,

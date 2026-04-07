@@ -28,7 +28,7 @@ Out of scope:
 
 The project currently exposes two different turn identifiers:
 
-- `recall(turn=37)` uses DB turn id
+- legacy `recall(turn=37)` used the DB turn id
 - `replay(session=142, turn=3)` uses session-local `promptNumber`
 
 This causes three problems:
@@ -43,7 +43,7 @@ Use `promptNumber` as the only public turn identifier.
 
 Turn references must always be session-scoped:
 
-- `recall(session=142, turn=3)`
+- `recall(scope="turns", session=142, turn=3)`
 - `replay(session=142, turn=3)`
 
 The database `turn.id` remains an internal primary key used only for joins, persistence, and indexing.
@@ -54,24 +54,24 @@ The database `turn.id` remains an internal primary key used only for joins, pers
 
 Supported forms:
 
-- `recall()`
-- `recall(query="...")`
-- `recall(session=142)`
-- `recall(session=142, turn=3)`
-- `recall(observation=7)`
-- existing session search/filter forms
+- `recall(scope="sessions")`
+- `recall(scope="sessions", query="...")`
+- `recall(scope="turns", session=142)`
+- `recall(scope="turns", session=142, turn=3)`
+- `recall(scope="observations", obs=7)`
+- existing scope-based search/filter forms
 
-Rejected form:
+Legacy compatibility during migration:
 
-- `recall(turn=3)` without `session`
+- `recall(turn=3)` without `session` remains accepted at runtime for now, but emits a deprecation warning and resolves through the compatibility shim.
 
-If `turn` is provided without `session`, return a clear parameter error:
+The public contract should still prefer:
 
-`turn requires session; use recall(session=142, turn=3)`
+`turn requires session; use recall(scope="turns", session=142, turn=3)`
 
 Lookup rule:
 
-- `recall(session=142, turn=3)` resolves the turn by `(session_id=142, prompt_number=3)`
+- `recall(scope="turns", session=142, turn=3)` resolves the turn by `(session_id=142, prompt_number=3)`
 
 ### replay
 
@@ -132,12 +132,10 @@ Observation ids remain globally addressable:
 
 - `observation` is exclusive with all other selectors
 - `turn` requires `session`
-- `expand_turns` requires `session`
+- legacy `expand_turns` is accepted only through the compatibility shim
 - `session` without `turn` remains valid
 
-If both `observation` and `session`/`turn` are supplied, return the existing parameter error style rather than guessing precedence.
-
-If `expand_turns` is provided without `session`, return a parameter error rather than silently ignoring it. This should match the strict behavior for `turn`.
+If both `observation` and `session`/`turn` are supplied, return the existing parameter error style rather than guessing precedence. Legacy `expand_turns` should warn and fall back to the closest scope-based behavior rather than silently disappearing.
 
 ## Database Access Pattern
 
@@ -155,8 +153,8 @@ This is a deliberate API cleanup, not a dual-mode compatibility layer.
 
 Chosen behavior:
 
-- Stop supporting public `recall(turn=<db_id>)`
-- Require `session` whenever `turn` is used
+- Require `session` whenever `turn` is used in the new API
+- Keep the compatibility shim for old no-scope calls during migration
 - Update all docs, tests, and skill guidance to the new contract
 
 Reasoning:
@@ -177,11 +175,11 @@ Reasoning:
 
 Required behavioral tests:
 
-1. `recall(session=1, turn=2)` returns the correct turn observations.
-2. `recall(turn=2)` returns a parameter error.
-3. `recall(session=1)` renders `[T1]`, `[T2]` without DB turn ids.
-4. Turn hits in `recall(query="...")` render with `[Sx][Ty]`.
-5. `recall(session=1, turn=2)` and `replay(session=1, turn=2)` refer to the same logical turn.
+1. `recall(scope="turns", session=1, turn=2)` returns the correct turn observations.
+2. `recall(session=1, turn=2)` continues to resolve through the compatibility shim during migration.
+3. `recall(scope="turns", session=1)` renders `[T1]`, `[T2]` without DB turn ids.
+4. Turn hits in `recall(scope="sessions", query="...")` render with `[Sx][Ty]`.
+5. `recall(scope="turns", session=1, turn=2)` and `replay(session=1, turn=2)` refer to the same logical turn.
 6. Undo scenarios still preserve shared `promptNumber` semantics across both tools.
 
 Regression checks:
@@ -193,7 +191,7 @@ Regression checks:
 
 ### Breaking existing manual usage
 
-Anyone currently calling `recall(turn=<db_id>)` will need to switch to `recall(session=<id>, turn=<promptNumber>)`.
+Anyone currently calling `recall(turn=<db_id>)` will need to switch to `recall(scope="turns", session=<id>, turn=<promptNumber>)`.
 
 Mitigation:
 
