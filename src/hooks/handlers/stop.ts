@@ -6,7 +6,7 @@ import {
   getTurnsForSession,
   markTurnsStale,
 } from "../../db/turns";
-import { forkMnemosyne } from "../../mnemosyne/fork";
+import { forkMnemosyne, type ForkMnemosyneResult } from "../../mnemosyne/fork";
 import {
   buildExtractionStatusSummary,
   buildMnemosynePrompt,
@@ -16,8 +16,11 @@ import {
   type ParsedReplayTurn,
 } from "../../shared/transcript-parser";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
+import { createLogger } from "../../shared/logger";
 import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
+
+const log = createLogger("MNEMOSYNE");
 
 export interface StopHandlerDependencies {
   db: Database;
@@ -142,11 +145,29 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
 
     if (pendingTurns.length > 0) {
-      await dependencies.forkMnemosyne({
+      const result = await dependencies.forkMnemosyne({
         sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
       });
+
+      if (result) {
+        const cacheHitPct =
+          result.inputTokens > 0
+            ? Math.round(
+                (result.cacheReadInputTokens / result.inputTokens) * 100,
+              )
+            : 0;
+        log.info("extraction complete", {
+          turns: result.numTurns,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+          cacheReadTokens: result.cacheReadInputTokens,
+          cacheCreationTokens: result.cacheCreationInputTokens,
+          cacheHitPct,
+          durationMs: result.durationMs,
+        });
+      }
     }
 
     upsertSession(dependencies.db, {

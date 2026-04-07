@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const DEFAULT_DB_PATH = join(homedir(), ".claude-mnemo", "claude-mnemo.db");
+export const DATA_DIR = join(homedir(), ".claude-mnemo");
+const DEFAULT_DB_PATH = join(DATA_DIR, "claude-mnemo.db");
 
 export function resolveDatabasePath(explicitPath?: string): string {
   const candidatePath = explicitPath || process.env.CLAUDE_MNEMO_DB_PATH || DEFAULT_DB_PATH;
