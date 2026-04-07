@@ -3,10 +3,8 @@ import type { Database } from "bun:sqlite";
 import { getSessionByContentId } from "../../db/sessions";
 import { getPendingTurns } from "../../db/turns";
 import { forkMnemosyne } from "../../mnemosyne/fork";
-import {
-  buildExtractionContext,
-  buildMnemosynePrompt,
-} from "../../mnemosyne/prompt";
+import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
+import { recallMemory } from "../../mcp/recall";
 import { backfillFromTranscript } from "../backfill";
 import { createLogger } from "../../shared/logger";
 import { resolveTranscriptPath } from "../../shared/paths";
@@ -20,7 +18,13 @@ export interface CompactHandlerDependencies {
 }
 
 function buildPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
+  return buildMnemosynePrompt(
+    recallMemory(db, {
+      scope: "turns",
+      session: sessionDbId,
+      depth: "expanded",
+    }),
+  );
 }
 
 export function createCompactHandler(dependencies: CompactHandlerDependencies) {

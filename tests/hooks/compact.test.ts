@@ -135,10 +135,15 @@ describe("handleCompactHook", () => {
     );
 
     const turn = getTurn(db, sessionId, 1)!;
+    const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
 
     expect(turn.assistantResponse).toBe("Compact response");
     expect(turn.toolCallCount).toBe(1);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
+    expect(prompt).toContain(`[S${sessionId}] Compact session`);
+    expect(prompt).toContain("/Users/zhaoqixuan/Projects/claude-mnemo");
+    expect(prompt).toContain("Compact hook coverage");
+    expect(prompt).toContain("[T1] Untitled");
 
     rmSync(transcript.directory, { recursive: true, force: true });
   });

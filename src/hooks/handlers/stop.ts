@@ -7,10 +7,8 @@ import {
   markTurnsStale,
 } from "../../db/turns";
 import { forkMnemosyne, type ForkMnemosyneResult } from "../../mnemosyne/fork";
-import {
-  buildExtractionContext,
-  buildMnemosynePrompt,
-} from "../../mnemosyne/prompt";
+import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
+import { recallMemory } from "../../mcp/recall";
 import {
   parseReplayTranscript,
   type ParsedReplayTurn,
@@ -30,7 +28,13 @@ export interface StopHandlerDependencies {
 }
 
 function buildStopPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
+  return buildMnemosynePrompt(
+    recallMemory(db, {
+      scope: "turns",
+      session: sessionDbId,
+      depth: "expanded",
+    }),
+  );
 }
 
 function detectUndoPromptNumbers(

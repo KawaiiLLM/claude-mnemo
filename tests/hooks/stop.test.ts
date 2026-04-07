@@ -156,14 +156,14 @@ describe("handleStopHook", () => {
       2,
     ]);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      "[T1] Draft approach",
-    );
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain("[stale]");
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain(
-      "[T2] Untitled",
-    );
-    expect(forkMnemosyne.mock.calls[0]?.[0]?.prompt).toContain("[pending]");
+    const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
+    expect(prompt).toContain(`[S${sessionId}] Stop handler session`);
+    expect(prompt).toContain("/Users/zhaoqixuan/Projects/claude-mnemo");
+    expect(prompt).toContain("Stop hook coverage");
+    expect(prompt).toContain("[T1] Draft approach");
+    expect(prompt).toContain("[stale]");
+    expect(prompt).toContain("[T2] Untitled");
+    expect(prompt).toContain("[pending]");
     expect(session.completedAtEpoch).toBe(500);
     expect(stderrWrite).toHaveBeenCalled();
 

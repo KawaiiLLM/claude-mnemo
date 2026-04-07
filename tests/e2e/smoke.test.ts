@@ -86,7 +86,7 @@ describe("claude-mnemo smoke test", () => {
       prompt: string;
       cwd?: string;
     }) => {
-      const match = prompt.match(/Session ID: (\d+)/);
+      const match = prompt.match(/\[S(\d+)\]/);
       if (!match) return;
       const session = getSession(db, Number(match[1]))!;
 
