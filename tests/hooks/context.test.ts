@@ -23,14 +23,6 @@ function createInput(
   };
 }
 
-function truncate(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-
-  return `${value.slice(0, maxLength - 3)}...`;
-}
-
 function insertTurn(
   db: Database,
   input: {
@@ -219,11 +211,11 @@ describe("handleContextHook", () => {
     emptyDb.close();
   });
 
-  test("queries recent sessions once and builds the primary session once", async () => {
+  test("queries recent sessions once and uses shared session formatting for the current session wrapper", async () => {
     const singleSessionDb = createDatabase(":memory:");
     initializeSchema(singleSessionDb);
 
-    upsertSession(singleSessionDb, {
+    const singleSession = upsertSession(singleSessionDb, {
       contentSessionId: "single-session",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Single session",
@@ -248,6 +240,10 @@ describe("handleContextHook", () => {
 
     expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
     expect(buildFormattedSessionSpy).toHaveBeenCalledTimes(1);
+    expect(buildFormattedSessionSpy).toHaveBeenCalledWith(
+      singleSessionDb,
+      singleSession.id,
+    );
 
     getRecentSessionsSpy.mockRestore();
     buildFormattedSessionSpy.mockRestore();
@@ -416,6 +412,7 @@ describe("handleContextHook", () => {
     const handler = createContextHandler({
       db,
     });
+    const buildFormattedSessionSpy = spyOn(recallModule, "buildFormattedSession");
 
     const result = await handler(
       createInput({
@@ -437,73 +434,52 @@ describe("handleContextHook", () => {
     expect(output).toContain(
       `- [S3] Anchored session | 💬4 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
-    expect(output).toContain(`  - desc: ${truncate(
-      "Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
-      60,
-    )}`);
+    expect(output).toContain(
+      "  - desc: Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
+    );
     expect(output).toContain("  - insight:");
     expect(output).toContain("    - Primary insight bullet for the current session");
     expect(output).toContain("  - next_steps:");
     expect(output).toContain("    - Implement the mutex fix before the next session begins.");
 
     expect(output).toContain(`  - [T1] Prep cache | 🔧1`);
-    expect(output).toContain(`    - desc: ${truncate(
-      "This turn description is intentionally verbose so the collapsed line must be truncated at sixty characters.",
-      60,
-    )}`);
+    expect(output).toContain(
+      "    - desc: This turn description is intentionally verbose so the collapsed line must be truncated at sixty characters.",
+    );
     expect(output).toContain(
       `  - [T2] Investigate timeout | 💡1 📖1 ✏️1 🔧2`,
     );
     expect(output).toContain(
-      `    - prompt: "${truncate(
-        "Investigate the timeout path under parallel load and capture the important findings in the session summary.",
-        120,
-      )}"`,
-    );
-    expect(output).toContain(
-      `    - response: "${truncate(
-        "The timeout is caused by overlapping refresh requests that each open a new retry window and race each other.",
-        200,
-      )}"`,
-    );
-    expect(output).toContain(
       `  - [T4] Document findings | 💡4 📖2 ✏️1 🔧4`,
     );
-    expect(output).toContain("    - [O");
-    expect(output).toContain("    - ... and 1 more observations");
+    expect(output).not.toContain("    - prompt:");
+    expect(output).not.toContain("    - response:");
+    expect(output).not.toContain("    - [O");
+    expect(output).not.toContain("more observations");
 
     expect(output).toContain(
       `- [S1] Most recent session | 💬6 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
-      `  - desc: ${truncate(
-        "Most recent session description that should be truncated in the context hook output because it is intentionally too long for the collapsed view.",
-        60,
-      )}`,
+      "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long for the collapsed view.",
     );
-    expect(output).toContain("  - ... and 1 more turns");
-    expect(output).toContain(`  - [T2] Recent turn 2 | 🔧2`);
-    expect(output).toContain(`  - [T6] Recent turn 6 | 🔧6`);
+    expect(output).not.toContain("Recent turn 1");
+    expect(output).not.toContain("Recent turn 2");
+    expect(output).not.toContain("Recent turn 6");
     expect(output).not.toContain("Recent turn 1");
 
     expect(output).toContain(
       `- [S2] Secondary session | 💬2 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
-      `  - desc: ${truncate(
-        "Secondary session description that should also be truncated in the context hook output because it exceeds the visible budget.",
-        60,
-      )}`,
+      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible budget.",
     );
 
     expect(output).toContain(
       `- [S4] Older session | 💬1 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
-      `  - desc: ${truncate(
-        "Older session description that should be visible only as a collapsed header with truncation applied.",
-        60,
-      )}`,
+      "  - desc: Older session description that should be visible only as a collapsed header with truncation applied.",
     );
     expect(output).not.toContain("Older turn 1");
 
@@ -511,15 +487,23 @@ describe("handleContextHook", () => {
       `- [S5] Oldest session | 💬1 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
-      `  - desc: ${truncate(
-        "Oldest session description that is intentionally long so the collapsed-only header uses the truncated form.",
-        60,
-      )}`,
+      "  - desc: Oldest session description that is intentionally long so the collapsed-only header uses the truncated form.",
     );
     expect(output).not.toContain("Oldest turn 1");
 
     expect(output.indexOf("- [S3] Anchored session")).toBeLessThan(
       output.indexOf("- [S1] Most recent session"),
     );
+    expect(buildFormattedSessionSpy).toHaveBeenCalledTimes(5);
+    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(
+      1,
+      db,
+      currentSessionId,
+    );
+    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(2, db, 1);
+    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(3, db, 2);
+    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(4, db, 4);
+    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(5, db, 5);
+    buildFormattedSessionSpy.mockRestore();
   });
 });
