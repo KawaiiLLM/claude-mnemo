@@ -162,6 +162,8 @@ function formatSearchResults(db: Database, input: RecallInput): string {
           return null;
         }
 
+        const turns = getTurnsForSession(db, session.id);
+
         return formatSessionCollapsed({
           id: session.id,
           title: session.title,
@@ -170,8 +172,8 @@ function formatSearchResults(db: Database, input: RecallInput): string {
           description: session.description,
           insight: splitInsight(session.insight),
           nextSteps: session.nextSteps,
-          turnCount: getTurnsForSession(db, session.id).length,
-          observationCount: getTurnsForSession(db, session.id).reduce(
+          turnCount: turns.length,
+          observationCount: turns.reduce(
             (sum, turn) => sum + getObservationsForTurn(db, turn.id).length,
             0,
           ),

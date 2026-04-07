@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -8,6 +8,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { saveTurn } from "../../src/db/turns";
 import { recallMemory } from "../../src/mcp/recall";
+import * as turnsModule from "../../src/db/turns";
 
 describe("recallMemory", () => {
   let db: Database;
@@ -114,6 +115,17 @@ describe("recallMemory", () => {
     expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
     expect(output).toContain("- [S2][T1] Diagnose auth race | 💡2 📖1 ✏️2");
     expect(output).toContain("- [O1] 🔴 Auth mutex");
+  });
+
+  test("reuses one fetched turn list for session search stats", () => {
+    const getTurnsForSessionSpy = spyOn(turnsModule, "getTurnsForSession");
+
+    const output = recallMemory(db, { query: "race" });
+
+    expect(output).toContain("- [S2] Auth race fix | 💬1 💡2 | 1970-01-01 | claude-mnemo");
+    expect(getTurnsForSessionSpy).toHaveBeenCalledTimes(1);
+
+    getTurnsForSessionSpy.mockRestore();
   });
 
   test("shows turns for a session", () => {
