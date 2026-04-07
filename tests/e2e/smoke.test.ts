@@ -14,7 +14,6 @@ import { recallMemory } from "../../src/mcp/recall";
 import { replayMemory } from "../../src/mcp/replay";
 import { saveTurnTool } from "../../src/mcp/save-turn";
 import { updateSessionTool } from "../../src/mcp/update-session";
-import { extractAssistantResponse } from "../../src/shared/transcript-parser";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-e2e-"));
@@ -147,7 +146,6 @@ describe("claude-mnemo smoke test", () => {
     const sessionInitHandler = createSessionInitHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
       now: (() => {
         let time = 100;
         return () => ++time;
@@ -156,7 +154,6 @@ describe("claude-mnemo smoke test", () => {
     const stopHandler = createStopHandler({
       db,
       forkMnemosyne,
-      extractAssistantResponse,
       stderr: { write: () => true },
       now: () => 300,
     });

@@ -313,8 +313,10 @@ function formatTimeline(db: Database, anchor: string, before = 0, after = 0): st
 
   return sessions
     .slice(startIndex, endIndex)
-    .map((session) =>
-      formatSessionCollapsed({
+    .map((session) => {
+      const turns = getTurnsForSession(db, session.id);
+
+      return formatSessionCollapsed({
         id: session.id,
         title: session.title,
         project: session.project,
@@ -322,13 +324,13 @@ function formatTimeline(db: Database, anchor: string, before = 0, after = 0): st
         description: session.description,
         insight: splitInsight(session.insight),
         nextSteps: session.nextSteps,
-        turnCount: getTurnsForSession(db, session.id).length,
-        observationCount: getTurnsForSession(db, session.id).reduce(
+        turnCount: turns.length,
+        observationCount: turns.reduce(
           (sum, turn) => sum + getObservationsForTurn(db, turn.id).length,
           0,
         ),
-      }),
-    )
+      });
+    })
     .join("\n");
 }
 
