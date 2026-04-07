@@ -72,6 +72,19 @@ function formatParameterError(message: string): string {
 function normalizeRecallInput(input: RecallInput): RecallInput {
   const normalized: RecallInput = { ...input };
   const legacyFields: string[] = [];
+  const hasObservationFilters =
+    normalized.obs !== undefined ||
+    normalized.observation !== undefined ||
+    normalized.type !== undefined ||
+    normalized.file !== undefined;
+  const hasSearchOrTimeFilters =
+    normalized.query !== undefined ||
+    normalized.project !== undefined ||
+    normalized.time !== undefined ||
+    normalized.after !== undefined ||
+    normalized.before !== undefined ||
+    normalized.fromEpoch !== undefined ||
+    normalized.toEpoch !== undefined;
 
   if (normalized.observation !== undefined && normalized.obs === undefined) {
     normalized.obs = normalized.observation;
@@ -99,38 +112,15 @@ function normalizeRecallInput(input: RecallInput): RecallInput {
   if (normalized.scope === undefined) {
     legacyFields.push("scope");
 
-    if (
-      normalized.session !== undefined &&
-      normalized.turn !== undefined &&
-      normalized.query === undefined &&
-      normalized.type === undefined &&
-      normalized.file === undefined &&
-      normalized.expandTurns === undefined &&
-      normalized.around === undefined
-    ) {
+    if (hasObservationFilters) {
+      normalized.scope = "observations";
+    } else if (normalized.session !== undefined && normalized.turn !== undefined) {
       normalized.scope = "turns";
       normalized.depth ??= "expanded";
-    } else if (
-      normalized.session !== undefined &&
-      normalized.turn === undefined &&
-      normalized.query === undefined &&
-      normalized.type === undefined &&
-      normalized.file === undefined &&
-      normalized.expandTurns === undefined &&
-      normalized.around === undefined
-    ) {
+    } else if (normalized.session !== undefined) {
       normalized.scope = "turns";
-    } else if (
-      normalized.obs !== undefined &&
-      normalized.session === undefined &&
-      normalized.turn === undefined &&
-      normalized.query === undefined &&
-      normalized.type === undefined &&
-      normalized.file === undefined &&
-      normalized.expandTurns === undefined &&
-      normalized.around === undefined
-    ) {
-      normalized.scope = "observations";
+    } else if (hasSearchOrTimeFilters) {
+      normalized.scope = "sessions";
     }
   }
 

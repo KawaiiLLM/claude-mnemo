@@ -221,6 +221,24 @@ describe("recallMemory", () => {
     logSpy.mockRestore();
   });
 
+  test("normalizes legacy query-only calls to session scope", () => {
+    const output = recallMemory(db, {
+      query: "mutex",
+    });
+
+    expect(output).toContain("[S2] Auth race fix");
+    expect(output).not.toContain("[S3] Large timeline");
+  });
+
+  test("normalizes legacy type filters to observation scope", () => {
+    const output = recallMemory(db, {
+      type: "bugfix",
+    });
+
+    expect(output).toContain("[O1] 🔴 Auth mutex");
+    expect(output).not.toContain("[S2] Auth race fix");
+  });
+
   test("parses turn range selectors and expands selected turns", () => {
     const output = recallMemory(db, {
       scope: "turns",
