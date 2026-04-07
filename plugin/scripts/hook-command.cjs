@@ -35956,6 +35956,8 @@ function formatParameterError(message) {
 function normalizeRecallInput(input) {
   const normalized = { ...input };
   const legacyFields = [];
+  const hasObservationFilters = normalized.obs !== void 0 || normalized.observation !== void 0 || normalized.type !== void 0 || normalized.file !== void 0;
+  const hasSearchOrTimeFilters = normalized.query !== void 0 || normalized.project !== void 0 || normalized.time !== void 0 || normalized.after !== void 0 || normalized.before !== void 0 || normalized.fromEpoch !== void 0 || normalized.toEpoch !== void 0;
   if (normalized.observation !== void 0 && normalized.obs === void 0) {
     normalized.obs = normalized.observation;
     legacyFields.push("observation");
@@ -35976,13 +35978,15 @@ function normalizeRecallInput(input) {
   }
   if (normalized.scope === void 0) {
     legacyFields.push("scope");
-    if (normalized.session !== void 0 && normalized.turn !== void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
+    if (hasObservationFilters) {
+      normalized.scope = "observations";
+    } else if (normalized.session !== void 0 && normalized.turn !== void 0) {
       normalized.scope = "turns";
       normalized.depth ??= "expanded";
-    } else if (normalized.session !== void 0 && normalized.turn === void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
+    } else if (normalized.session !== void 0) {
       normalized.scope = "turns";
-    } else if (normalized.obs !== void 0 && normalized.session === void 0 && normalized.turn === void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
-      normalized.scope = "observations";
+    } else if (hasSearchOrTimeFilters) {
+      normalized.scope = "sessions";
     }
   }
   if (legacyFields.length > 0) {
@@ -37391,79 +37395,6 @@ function createCompactHandler(dependencies) {
 
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
-function truncate2(value, maxLength) {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return `${value.slice(0, maxLength - 3)}...`;
-}
-function truncateSession(session) {
-  return {
-    ...session,
-    description: session.description ? truncate2(session.description, 60) : null,
-    insight: session.insight?.map((item) => truncate2(item, 80)),
-    nextSteps: session.nextSteps ? truncate2(session.nextSteps, 80) : null,
-    turns: session.turns?.map(truncateTurn)
-  };
-}
-function truncateTurn(turn) {
-  return {
-    ...turn,
-    description: turn.description ? truncate2(turn.description, 60) : null,
-    promptPreview: turn.promptPreview ? truncate2(turn.promptPreview, 120) : null,
-    responsePreview: turn.responsePreview ? truncate2(turn.responsePreview, 200) : null,
-    insight: turn.insight?.map((item) => truncate2(item, 80)),
-    observations: turn.observations?.map(truncateObservation)
-  };
-}
-function truncateObservation(observation) {
-  return {
-    ...observation,
-    description: observation.description ? truncate2(observation.description, 60) : null
-  };
-}
-function isDetailedObservation(observation) {
-  return Boolean(
-    observation.narrative || observation.facts && observation.facts.length > 0 || observation.concepts && observation.concepts.length > 0 || observation.filesRead && observation.filesRead.length > 0 || observation.filesModified && observation.filesModified.length > 0
-  );
-}
-function formatObservationContext(observation) {
-  return isDetailedObservation(observation) ? formatObservationExpanded(observation, { indent: "    " }) : formatObservationCollapsed(observation, { indent: "    " });
-}
-function formatPrimarySession(session) {
-  const lines = [formatSessionExpanded(truncateSession(session))];
-  const turns = session.turns ?? [];
-  const expandedTurnNumbers = new Set(
-    turns.slice(Math.max(0, turns.length - 3)).map((turn) => turn.promptNumber)
-  );
-  for (const turn of turns) {
-    const truncatedTurn = truncateTurn(turn);
-    if (!expandedTurnNumbers.has(turn.promptNumber)) {
-      lines.push(formatTurnCollapsed(truncatedTurn));
-      continue;
-    }
-    lines.push(formatTurnExpanded(truncatedTurn));
-    const observations = (turn.observations ?? []).slice(0, 3);
-    for (const observation of observations) {
-      lines.push(formatObservationContext(truncateObservation(observation)));
-    }
-    if ((turn.observations?.length ?? 0) > 3) {
-      lines.push(`    - ... and ${turn.observations.length - 3} more observations`);
-    }
-  }
-  return lines.join("\n");
-}
-function formatRecentSession(session) {
-  const lines = [formatSessionCollapsed(truncateSession(session))];
-  const turns = (session.turns ?? []).slice(-5);
-  for (const turn of turns) {
-    lines.push(formatTurnCollapsed(truncateTurn(turn)));
-  }
-  if ((session.turns?.length ?? 0) > 5) {
-    lines.push(`  - ... and ${session.turns.length - 5} more turns`);
-  }
-  return lines.join("\n");
-}
 function buildHeader(db2) {
   const sessionCount = db2.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
   const observationCount = db2.query("SELECT COUNT(*) AS count FROM observations").get()?.count ?? 0;
@@ -37482,25 +37413,16 @@ function resolvePrimarySessionRecord(db2, input, recentSessions) {
   const currentSession = input.sessionId ? getSessionByContentId(db2, input.sessionId) : null;
   return currentSession ?? recentSessions[0] ?? null;
 }
-function buildPrimarySession(db2, primarySessionRecord) {
-  if (!primarySessionRecord) {
-    return null;
+function buildCurrentSessionOutput(session) {
+  const lines = [formatSessionExpanded(session)];
+  for (const turn of session.turns ?? []) {
+    lines.push(formatTurnCollapsed(turn));
   }
-  const expandTurnNumbers = getTurnsForSession(db2, primarySessionRecord.id).slice(-3).map((turn) => turn.promptNumber);
-  const primarySession = buildFormattedSession(
-    db2,
-    primarySessionRecord.id,
-    expandTurnNumbers
-  );
-  return primarySession ? truncateSession(primarySession) : null;
+  return lines.join("\n");
 }
-function buildRecentSessions(db2, recentSessions, primarySession) {
-  if (!primarySession) {
-    return [];
-  }
-  const primaryId = primarySession.id;
-  const others = recentSessions.filter((session) => session.id !== primaryId).slice(0, 4);
-  return others.map((session) => buildFormattedSession(db2, session.id)).filter((session) => session !== null).map(truncateSession);
+function buildRecentSessionsOutput(db2, recentSessions, primarySessionId) {
+  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
+  return others.map((session) => buildFormattedSession(db2, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
 }
 function buildContextOutput(db2, input) {
   const recentSessions = getRecentSessions(db2, { limit: 5 });
@@ -37509,28 +37431,28 @@ function buildContextOutput(db2, input) {
     input,
     recentSessions
   );
-  const primarySession = buildPrimarySession(db2, primarySessionRecord);
-  const formattedRecentSessions = buildRecentSessions(
-    db2,
-    recentSessions,
-    primarySession
-  );
+  if (!primarySessionRecord) {
+    return EMPTY_CONTEXT_FALLBACK;
+  }
+  const primarySession = buildFormattedSession(db2, primarySessionRecord.id);
   if (!primarySession) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  const nextTwoSessions = formattedRecentSessions.slice(0, 2);
-  const lastTwoSessions = formattedRecentSessions.slice(2, 4);
+  const recentSessionOutputs = buildRecentSessionsOutput(
+    db2,
+    recentSessions,
+    primarySessionRecord.id
+  );
   return [
     buildHeader(db2),
     "",
     "## Current Session",
     "",
-    formatPrimarySession(primarySession),
+    buildCurrentSessionOutput(primarySession),
     "",
     "## Recent Sessions",
     "",
-    ...nextTwoSessions.map((session) => formatRecentSession(session)),
-    ...lastTwoSessions.map((session) => formatSessionCollapsed(session))
+    ...recentSessionOutputs
   ].join("\n");
 }
 function createContextHandler(dependencies) {

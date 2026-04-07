@@ -31458,6 +31458,8 @@ function formatParameterError(message) {
 function normalizeRecallInput(input) {
   const normalized = { ...input };
   const legacyFields = [];
+  const hasObservationFilters = normalized.obs !== void 0 || normalized.observation !== void 0 || normalized.type !== void 0 || normalized.file !== void 0;
+  const hasSearchOrTimeFilters = normalized.query !== void 0 || normalized.project !== void 0 || normalized.time !== void 0 || normalized.after !== void 0 || normalized.before !== void 0 || normalized.fromEpoch !== void 0 || normalized.toEpoch !== void 0;
   if (normalized.observation !== void 0 && normalized.obs === void 0) {
     normalized.obs = normalized.observation;
     legacyFields.push("observation");
@@ -31478,13 +31480,15 @@ function normalizeRecallInput(input) {
   }
   if (normalized.scope === void 0) {
     legacyFields.push("scope");
-    if (normalized.session !== void 0 && normalized.turn !== void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
+    if (hasObservationFilters) {
+      normalized.scope = "observations";
+    } else if (normalized.session !== void 0 && normalized.turn !== void 0) {
       normalized.scope = "turns";
       normalized.depth ??= "expanded";
-    } else if (normalized.session !== void 0 && normalized.turn === void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
+    } else if (normalized.session !== void 0) {
       normalized.scope = "turns";
-    } else if (normalized.obs !== void 0 && normalized.session === void 0 && normalized.turn === void 0 && normalized.query === void 0 && normalized.type === void 0 && normalized.file === void 0 && normalized.expandTurns === void 0 && normalized.around === void 0) {
-      normalized.scope = "observations";
+    } else if (hasSearchOrTimeFilters) {
+      normalized.scope = "sessions";
     }
   }
   if (legacyFields.length > 0) {
