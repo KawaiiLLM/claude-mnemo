@@ -255,7 +255,7 @@ describe("handleContextHook", () => {
   });
 
   test("anchors on the current session and applies graduated depth", async () => {
-    const currentTurn1 = insertTurn(db, {
+    insertTurn(db, {
       sessionId: currentSessionId,
       promptNumber: 1,
       title: "Prep cache",

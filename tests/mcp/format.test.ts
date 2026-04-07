@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  type FormattedObservation,
+  type FormattedSession,
+  type FormattedTurn,
   formatObservationCollapsed,
   formatObservationExpanded,
   formatSessionCollapsed,
@@ -14,16 +17,34 @@ const startedAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
 
 describe("MCP format renderer", () => {
   test("formats collapsed lines with list structure and stats", () => {
+    const session: FormattedSession = {
+      id: 142,
+      title: "Auth refactor",
+      project: "claude-mnemo",
+      startedAtEpoch,
+      description: "Fix race + add tests",
+      turnCount: 3,
+      observationCount: 8,
+    };
+    const turn: FormattedTurn = {
+      id: 1,
+      promptNumber: 1,
+      title: "Diagnose auth",
+      description: "Refresh overlap diagnosed",
+      observationCount: 2,
+      toolCallCount: 4,
+      filesReadCount: 1,
+      filesModifiedCount: 2,
+    };
+    const observation: FormattedObservation = {
+      id: 7,
+      type: "bugfix",
+      title: "Added mutex",
+      description: "Guards refresh",
+    };
+
     expect(
-      formatSessionCollapsed({
-        id: 142,
-        title: "Auth refactor",
-        project: "claude-mnemo",
-        startedAtEpoch,
-        description: "Fix race + add tests",
-        turnCount: 3,
-        observationCount: 8,
-      } as any),
+      formatSessionCollapsed(session),
     ).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
@@ -32,16 +53,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(
-      formatTurnCollapsed({
-        id: 1,
-        promptNumber: 1,
-        title: "Diagnose auth",
-        description: "Refresh overlap diagnosed",
-        observationCount: 2,
-        toolCallCount: 4,
-        filesReadCount: 1,
-        filesModifiedCount: 2,
-      } as any),
+      formatTurnCollapsed(turn),
     ).toBe(
       [
         "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4",
@@ -51,16 +63,7 @@ describe("MCP format renderer", () => {
 
     expect(
       formatTurnCollapsed(
-        {
-          id: 1,
-          promptNumber: 1,
-          title: "Diagnose auth",
-          description: "Refresh overlap diagnosed",
-          observationCount: 2,
-          toolCallCount: 4,
-          filesReadCount: 1,
-          filesModifiedCount: 2,
-        } as any,
+        turn,
         { indent: "", sessionId: 142 },
       ),
     ).toBe(
@@ -71,12 +74,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(
-      formatObservationCollapsed({
-        id: 7,
-        type: "bugfix",
-        title: "Added mutex",
-        description: "Guards refresh",
-      } as any),
+      formatObservationCollapsed(observation),
     ).toBe(
       [
         "- [O7] 🔴 Added mutex",
@@ -86,12 +84,7 @@ describe("MCP format renderer", () => {
 
     expect(
       formatObservationCollapsed(
-        {
-          id: 7,
-          type: "bugfix",
-          title: "Added mutex",
-          description: "Guards refresh",
-        } as any,
+        observation,
         { indent: "    " },
       ),
     ).toBe(
@@ -103,16 +96,28 @@ describe("MCP format renderer", () => {
   });
 
   test("omits zero-value stats while keeping desc visible", () => {
+    const session: FormattedSession = {
+      id: 9,
+      title: "Empty stats",
+      project: "claude-mnemo",
+      startedAtEpoch,
+      description: "Collapsed description stays visible",
+      turnCount: 0,
+      observationCount: 0,
+    };
+    const turn: FormattedTurn = {
+      id: 2,
+      promptNumber: 2,
+      title: "No stats",
+      description: "Collapsed description stays visible",
+      observationCount: 0,
+      toolCallCount: 0,
+      filesReadCount: 0,
+      filesModifiedCount: 0,
+    };
+
     expect(
-      formatSessionCollapsed({
-        id: 9,
-        title: "Empty stats",
-        project: "claude-mnemo",
-        startedAtEpoch,
-        description: "Collapsed description stays visible",
-        turnCount: 0,
-        observationCount: 0,
-      } as any),
+      formatSessionCollapsed(session),
     ).toBe(
       [
         "- [S9] Empty stats | 2026-04-05 | claude-mnemo",
@@ -121,16 +126,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(
-      formatTurnCollapsed({
-        id: 2,
-        promptNumber: 2,
-        title: "No stats",
-        description: "Collapsed description stays visible",
-        observationCount: 0,
-        toolCallCount: 0,
-        filesReadCount: 0,
-        filesModifiedCount: 0,
-      } as any),
+      formatTurnCollapsed(turn),
     ).toBe(
       [
         "  - [T2] No stats",
@@ -140,18 +136,51 @@ describe("MCP format renderer", () => {
   });
 
   test("renders expanded lines with detail blocks", () => {
+    const session: FormattedSession = {
+      id: 142,
+      title: "Auth refactor",
+      project: "claude-mnemo",
+      startedAtEpoch,
+      description: "Fix race + add tests",
+      insight: ["prompt cache preserved", "per-turn extraction is resilient"],
+      nextSteps: "verify startup migration",
+      turnCount: 3,
+      observationCount: 8,
+    };
+    const turn: FormattedTurn = {
+      id: 1,
+      promptNumber: 1,
+      title: "Diagnose auth",
+      observationCount: 2,
+      toolCallCount: 4,
+      filesReadCount: 1,
+      filesModifiedCount: 2,
+      promptPreview: "Why am I getting 401 errors?",
+      responsePreview: "I found a race condition in refresh logic.",
+      description: "Refresh overlap diagnosed",
+      insight: ["concurrent refreshes collide"],
+      filesRead: ["src/auth.ts"],
+      filesModified: ["src/auth.ts", "tests/auth.test.ts"],
+    };
+    const observation: FormattedObservation = {
+      id: 7,
+      type: "bugfix",
+      title: "Added mutex",
+      description: "Guards refresh",
+      narrative: "Serialized token refresh work with a shared promise.",
+      facts: ["mutex added", "retry path preserved"],
+      concepts: ["problem-solution", "trade-off"],
+      filesRead: ["src/auth.ts"],
+      filesModified: ["src/auth.ts"],
+    };
+    const unknownObservation: FormattedObservation = {
+      id: 7,
+      type: "mystery",
+      title: "Unknown type",
+    };
+
     expect(
-      formatSessionExpanded({
-        id: 142,
-        title: "Auth refactor",
-        project: "claude-mnemo",
-        startedAtEpoch,
-        description: "Fix race + add tests",
-        insight: ["prompt cache preserved", "per-turn extraction is resilient"],
-        nextSteps: "verify startup migration",
-        turnCount: 3,
-        observationCount: 8,
-      } as any),
+      formatSessionExpanded(session),
     ).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
@@ -165,22 +194,8 @@ describe("MCP format renderer", () => {
     );
 
     expect(
-      formatTurnExpanded({
-        id: 1,
-        promptNumber: 1,
-        title: "Diagnose auth",
-        observationCount: 2,
-        toolCallCount: 4,
-        filesReadCount: 1,
-        filesModifiedCount: 2,
-        promptPreview: "Why am I getting 401 errors?",
-        responsePreview: "I found a race condition in refresh logic.",
-        description: "Refresh overlap diagnosed",
-        insight: ["concurrent refreshes collide"],
-        filesRead: ["src/auth.ts"],
-        filesModified: ["src/auth.ts", "tests/auth.test.ts"],
-      } as any),
-      ).toBe(
+      formatTurnExpanded(turn),
+    ).toBe(
       [
         "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4",
         "    - desc: Refresh overlap diagnosed",
@@ -192,17 +207,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(
-      formatObservationExpanded({
-        id: 7,
-        type: "bugfix",
-        title: "Added mutex",
-        description: "Guards refresh",
-        narrative: "Serialized token refresh work with a shared promise.",
-        facts: ["mutex added", "retry path preserved"],
-        concepts: ["problem-solution", "trade-off"],
-        filesRead: ["src/auth.ts"],
-        filesModified: ["src/auth.ts"],
-      } as any),
+      formatObservationExpanded(observation),
     ).toBe(
       [
         "- [O7] 🔴 Added mutex",
@@ -218,18 +223,14 @@ describe("MCP format renderer", () => {
 
     expect(
       formatObservationExpanded(
-        {
-          id: 7,
-          type: "mystery",
-          title: "Unknown type",
-        } as any,
+        unknownObservation,
         { indent: "    " },
       ),
     ).toBe("    - [O7] mystery Unknown type");
   });
 
   test("formats a mixed expansion tree without extra blank lines", () => {
-    const output = formatTree([
+    const tree: FormattedSession[] = [
       {
         id: 142,
         title: "Auth refactor",
@@ -252,7 +253,7 @@ describe("MCP format renderer", () => {
             promptPreview: "Why am I getting 401 errors?",
             responsePreview: "I found a race condition in refresh logic.",
             insight: ["concurrent refreshes collide"],
-        observations: [
+            observations: [
               {
                 id: 7,
                 type: "bugfix",
@@ -263,7 +264,8 @@ describe("MCP format renderer", () => {
           },
         ],
       },
-    ] as any);
+    ];
+    const output = formatTree(tree);
 
     expect(output).toBe(
       [
