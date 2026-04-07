@@ -299,6 +299,88 @@ function buildSessionView(
   };
 }
 
+function getObservationCountByTurnId(
+  db: Database,
+  turnIds: number[],
+): Map<number, number> {
+  if (turnIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db
+    .query<{ turnId: number; count: number }, number[]>(
+      `SELECT turn_id AS turnId, COUNT(*) AS count
+       FROM observations
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`,
+    )
+    .all(...turnIds);
+
+  return new Map(rows.map((row) => [row.turnId, row.count]));
+}
+
+export function buildSessionSummary(
+  db: Database,
+  sessionId: number,
+): FormattedSession | null {
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return null;
+  }
+
+  const turnCount =
+    db
+      .query<{ count: number }, [number]>(
+        "SELECT COUNT(*) AS count FROM turns WHERE session_id = ?",
+      )
+      .get(session.id)?.count ?? 0;
+  const observationCount =
+    db
+      .query<{ count: number }, [number]>(
+        `SELECT COUNT(*) AS count
+         FROM observations o
+         JOIN turns t ON t.id = o.turn_id
+         WHERE t.session_id = ?`,
+      )
+      .get(session.id)?.count ?? 0;
+
+  return {
+    id: session.id,
+    title: session.title,
+    project: session.project,
+    startedAtEpoch: session.startedAtEpoch,
+    description: session.description,
+    insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    turnCount,
+    observationCount,
+  };
+}
+
+export function buildCollapsedTurnsForSession(
+  db: Database,
+  sessionId: number,
+): FormattedTurn[] {
+  const turns = getTurnsForSession(db, sessionId);
+  const observationCounts = getObservationCountByTurnId(
+    db,
+    turns.map((turn) => turn.id),
+  );
+
+  return turns.map((turn) => ({
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    description: turn.description,
+    observationCount: observationCounts.get(turn.id) ?? 0,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status,
+  }));
+}
+
 export function buildFormattedSession(
   db: Database,
   sessionId: number,

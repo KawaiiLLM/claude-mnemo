@@ -5,12 +5,16 @@ import {
   getSessionByContentId,
   type SessionRecord,
 } from "../../db/sessions";
-import { buildFormattedSession } from "../../mcp/recall";
+import {
+  buildCollapsedTurnsForSession,
+  buildSessionSummary,
+} from "../../mcp/recall";
 import {
   formatSessionCollapsed,
   formatSessionExpanded,
   formatTurnCollapsed,
   type FormattedSession,
+  type FormattedTurn,
 } from "../../mcp/format";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -52,10 +56,13 @@ function resolvePrimarySessionRecord(
   return currentSession ?? recentSessions[0] ?? null;
 }
 
-function buildCurrentSessionOutput(session: FormattedSession): string {
+function buildCurrentSessionOutput(
+  session: FormattedSession,
+  turns: FormattedTurn[],
+): string {
   const lines = [formatSessionExpanded(session)];
 
-  for (const turn of session.turns ?? []) {
+  for (const turn of turns) {
     lines.push(formatTurnCollapsed(turn));
   }
 
@@ -70,7 +77,7 @@ function buildRecentSessionsOutput(
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
 
   return others
-    .map((session) => buildFormattedSession(db, session.id))
+    .map((session) => buildSessionSummary(db, session.id))
     .filter((session): session is FormattedSession => session !== null)
     .map((session) => formatSessionCollapsed(session));
 }
@@ -87,10 +94,11 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     return EMPTY_CONTEXT_FALLBACK;
   }
 
-  const primarySession = buildFormattedSession(db, primarySessionRecord.id);
+  const primarySession = buildSessionSummary(db, primarySessionRecord.id);
   if (!primarySession) {
     return EMPTY_CONTEXT_FALLBACK;
   }
+  const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
 
   const recentSessionOutputs = buildRecentSessionsOutput(
     db,
@@ -103,7 +111,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     "",
     "## Current Session",
     "",
-    buildCurrentSessionOutput(primarySession),
+    buildCurrentSessionOutput(primarySession, primaryTurns),
     "",
     "## Recent Sessions",
     "",

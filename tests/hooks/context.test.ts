@@ -227,7 +227,8 @@ describe("handleContextHook", () => {
     });
 
     const getRecentSessionsSpy = spyOn(sessionsModule, "getRecentSessions");
-    const buildFormattedSessionSpy = spyOn(recallModule, "buildFormattedSession");
+    const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
+    const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
     const handler = createContextHandler({
       db: singleSessionDb,
     });
@@ -239,14 +240,20 @@ describe("handleContextHook", () => {
     );
 
     expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
-    expect(buildFormattedSessionSpy).toHaveBeenCalledTimes(1);
-    expect(buildFormattedSessionSpy).toHaveBeenCalledWith(
+    expect(buildSessionSummarySpy).toHaveBeenCalledTimes(1);
+    expect(buildSessionSummarySpy).toHaveBeenCalledWith(
+      singleSessionDb,
+      singleSession.id,
+    );
+    expect(buildCollapsedTurnsSpy).toHaveBeenCalledTimes(1);
+    expect(buildCollapsedTurnsSpy).toHaveBeenCalledWith(
       singleSessionDb,
       singleSession.id,
     );
 
     getRecentSessionsSpy.mockRestore();
-    buildFormattedSessionSpy.mockRestore();
+    buildSessionSummarySpy.mockRestore();
+    buildCollapsedTurnsSpy.mockRestore();
     singleSessionDb.close();
   });
 
@@ -412,7 +419,8 @@ describe("handleContextHook", () => {
     const handler = createContextHandler({
       db,
     });
-    const buildFormattedSessionSpy = spyOn(recallModule, "buildFormattedSession");
+    const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
+    const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
 
     const result = await handler(
       createInput({
@@ -494,16 +502,19 @@ describe("handleContextHook", () => {
     expect(output.indexOf("- [S3] Anchored session")).toBeLessThan(
       output.indexOf("- [S1] Most recent session"),
     );
-    expect(buildFormattedSessionSpy).toHaveBeenCalledTimes(5);
-    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(
+    expect(buildSessionSummarySpy).toHaveBeenCalledTimes(5);
+    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(
       1,
       db,
       currentSessionId,
     );
-    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(2, db, 1);
-    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(3, db, 2);
-    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(4, db, 4);
-    expect(buildFormattedSessionSpy).toHaveBeenNthCalledWith(5, db, 5);
-    buildFormattedSessionSpy.mockRestore();
+    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(2, db, 1);
+    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(3, db, 2);
+    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(4, db, 4);
+    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(5, db, 5);
+    expect(buildCollapsedTurnsSpy).toHaveBeenCalledTimes(1);
+    expect(buildCollapsedTurnsSpy).toHaveBeenCalledWith(db, currentSessionId);
+    buildSessionSummarySpy.mockRestore();
+    buildCollapsedTurnsSpy.mockRestore();
   });
 });
