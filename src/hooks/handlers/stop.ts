@@ -149,6 +149,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
         sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
+        database: dependencies.db,
       });
 
       if (result) {

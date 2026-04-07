@@ -30305,6 +30305,75 @@ var StdioServerTransport = class {
   }
 };
 
+// src/mcp/definitions.ts
+var MNEMO_TOOL_DESCRIPTIONS = {
+  recall: "Recall structured memories from the SQLite store.",
+  replay: "Replay raw transcript content from the source JSONL.",
+  save_turn: "Persist one extracted turn and its observations.",
+  update_session: "Update the session summary fields."
+};
+var recallInputShape = {
+  query: external_exports3.string().optional(),
+  session: external_exports3.number().int().optional(),
+  turn: external_exports3.number().int().optional(),
+  observation: external_exports3.number().int().optional(),
+  expand_turns: external_exports3.array(external_exports3.number().int()).optional(),
+  around: external_exports3.string().optional(),
+  before: external_exports3.number().int().nonnegative().optional(),
+  after: external_exports3.number().int().nonnegative().optional(),
+  file: external_exports3.string().optional(),
+  type: external_exports3.string().optional(),
+  project: external_exports3.string().optional(),
+  from_epoch: external_exports3.number().int().optional(),
+  to_epoch: external_exports3.number().int().optional()
+};
+var replayInputShape = {
+  session: external_exports3.number().int(),
+  turn: external_exports3.number().int().optional(),
+  tool: external_exports3.number().int().positive().optional(),
+  full: external_exports3.boolean().optional(),
+  transcript_path: external_exports3.string().optional()
+};
+var saveTurnInputShape = {
+  session_id: external_exports3.number().int(),
+  prompt_number: external_exports3.number().int().positive(),
+  status: external_exports3.literal("undone").optional(),
+  user_prompt: external_exports3.string().optional(),
+  assistant_response: external_exports3.string().optional(),
+  title: external_exports3.string().optional(),
+  description: external_exports3.string().optional(),
+  insight: external_exports3.string().optional(),
+  files_read: external_exports3.array(external_exports3.string()).optional(),
+  files_modified: external_exports3.array(external_exports3.string()).optional(),
+  created_at_epoch: external_exports3.number().int().optional(),
+  updated_at_epoch: external_exports3.number().int().optional(),
+  observations: external_exports3.array(
+    external_exports3.object({
+      type: external_exports3.string(),
+      title: external_exports3.string(),
+      description: external_exports3.string().optional(),
+      narrative: external_exports3.string().optional(),
+      facts: external_exports3.array(external_exports3.string()).optional(),
+      concepts: external_exports3.array(external_exports3.string()).optional(),
+      files_read: external_exports3.array(external_exports3.string()).optional(),
+      files_modified: external_exports3.array(external_exports3.string()).optional()
+    })
+  ).optional()
+};
+var updateSessionInputShape = {
+  session_id: external_exports3.number().int(),
+  title: external_exports3.string().optional(),
+  description: external_exports3.string().optional(),
+  insight: external_exports3.string().optional(),
+  next_steps: external_exports3.string().optional(),
+  updated_at_epoch: external_exports3.number().int().optional(),
+  completed_at_epoch: external_exports3.number().int().optional()
+};
+var recallInputSchema = external_exports3.object(recallInputShape);
+var replayInputSchema = external_exports3.object(replayInputShape);
+var saveTurnInputSchema = external_exports3.object(saveTurnInputShape);
+var updateSessionInputSchema = external_exports3.object(updateSessionInputShape);
+
 // src/db/observations.ts
 var OBSERVATION_SELECT = `
   SELECT
@@ -31615,7 +31684,7 @@ function updateSessionTool(db, input) {
   return textResult2(`Updated session ${input.session_id}.`);
 }
 
-// src/mcp/server.ts
+// src/mcp/handlers.ts
 function textResult3(text) {
   return {
     content: [
@@ -31629,63 +31698,6 @@ function textResult3(text) {
 function createStubHandler(toolName) {
   return async () => textResult3(`${toolName} not implemented`);
 }
-var recallInputSchema = external_exports3.object({
-  query: external_exports3.string().optional(),
-  session: external_exports3.number().int().optional(),
-  turn: external_exports3.number().int().optional(),
-  observation: external_exports3.number().int().optional(),
-  expand_turns: external_exports3.array(external_exports3.number().int()).optional(),
-  around: external_exports3.string().optional(),
-  before: external_exports3.number().int().nonnegative().optional(),
-  after: external_exports3.number().int().nonnegative().optional(),
-  file: external_exports3.string().optional(),
-  type: external_exports3.string().optional(),
-  project: external_exports3.string().optional(),
-  from_epoch: external_exports3.number().int().optional(),
-  to_epoch: external_exports3.number().int().optional()
-});
-var replayInputSchema = external_exports3.object({
-  session: external_exports3.number().int(),
-  turn: external_exports3.number().int().optional(),
-  tool: external_exports3.number().int().positive().optional(),
-  full: external_exports3.boolean().optional(),
-  transcript_path: external_exports3.string().optional()
-});
-var saveTurnInputSchema = external_exports3.object({
-  session_id: external_exports3.number().int(),
-  prompt_number: external_exports3.number().int().positive(),
-  status: external_exports3.literal("undone").optional(),
-  user_prompt: external_exports3.string().optional(),
-  assistant_response: external_exports3.string().optional(),
-  title: external_exports3.string().optional(),
-  description: external_exports3.string().optional(),
-  insight: external_exports3.string().optional(),
-  files_read: external_exports3.array(external_exports3.string()).optional(),
-  files_modified: external_exports3.array(external_exports3.string()).optional(),
-  created_at_epoch: external_exports3.number().int().optional(),
-  updated_at_epoch: external_exports3.number().int().optional(),
-  observations: external_exports3.array(
-    external_exports3.object({
-      type: external_exports3.string(),
-      title: external_exports3.string(),
-      description: external_exports3.string().optional(),
-      narrative: external_exports3.string().optional(),
-      facts: external_exports3.array(external_exports3.string()).optional(),
-      concepts: external_exports3.array(external_exports3.string()).optional(),
-      files_read: external_exports3.array(external_exports3.string()).optional(),
-      files_modified: external_exports3.array(external_exports3.string()).optional()
-    })
-  ).optional()
-});
-var updateSessionInputSchema = external_exports3.object({
-  session_id: external_exports3.number().int(),
-  title: external_exports3.string().optional(),
-  description: external_exports3.string().optional(),
-  insight: external_exports3.string().optional(),
-  next_steps: external_exports3.string().optional(),
-  updated_at_epoch: external_exports3.number().int().optional(),
-  completed_at_epoch: external_exports3.number().int().optional()
-});
 function createDatabaseBackedHandlers(database) {
   if (!database) {
     return {};
@@ -31724,6 +31736,8 @@ function createDatabaseBackedHandlers(database) {
     )
   };
 }
+
+// src/mcp/server.ts
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
@@ -31758,7 +31772,7 @@ function createMcpServer(options = {}) {
   server.registerTool(
     "recall",
     {
-      description: "Recall structured memories from the SQLite store.",
+      description: MNEMO_TOOL_DESCRIPTIONS.recall,
       inputSchema: recallInputSchema
     },
     (args) => toolHandlers.recall(args)
@@ -31766,7 +31780,7 @@ function createMcpServer(options = {}) {
   server.registerTool(
     "replay",
     {
-      description: "Replay raw transcript content from the source JSONL.",
+      description: MNEMO_TOOL_DESCRIPTIONS.replay,
       inputSchema: replayInputSchema
     },
     (args) => toolHandlers.replay(args)
@@ -31774,7 +31788,7 @@ function createMcpServer(options = {}) {
   server.registerTool(
     "save_turn",
     {
-      description: "Persist one extracted turn and its observations.",
+      description: MNEMO_TOOL_DESCRIPTIONS.save_turn,
       inputSchema: saveTurnInputSchema
     },
     (args) => toolHandlers.save_turn(args)
@@ -31782,7 +31796,7 @@ function createMcpServer(options = {}) {
   server.registerTool(
     "update_session",
     {
-      description: "Update the session summary fields.",
+      description: MNEMO_TOOL_DESCRIPTIONS.update_session,
       inputSchema: updateSessionInputSchema
     },
     (args) => toolHandlers.update_session(args)

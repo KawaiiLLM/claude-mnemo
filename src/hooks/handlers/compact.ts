@@ -61,6 +61,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
         sessionId: input.sessionId,
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
+        database: dependencies.db,
       });
 
       if (result) {
