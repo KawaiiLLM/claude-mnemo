@@ -58,6 +58,10 @@ function extractUserPrompt(entry: TranscriptEntry): string {
     .trim();
 }
 
+function isCountedUserPrompt(entry: TranscriptEntry): boolean {
+  return entry.role === "user" && extractUserPrompt(entry) !== "";
+}
+
 function extractAssistantParts(entry: TranscriptEntry): {
   assistantText: string;
   toolCalls: TranscriptToolCall[];
@@ -139,12 +143,8 @@ export function parseTranscript(transcriptPath: string): ParsedTurn[] {
   let currentTurn: ParsedTurn | null = null;
 
   for (const entry of readTranscriptEntries(transcriptPath)) {
-    if (entry.role === "user") {
+    if (isCountedUserPrompt(entry)) {
       const userPrompt = extractUserPrompt(entry);
-
-      if (userPrompt === "") {
-        continue;
-      }
 
       promptNumber += 1;
       currentTurn = {
@@ -184,22 +184,22 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
   let currentTurn: ParsedReplayTurn | null = null;
 
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (entry.role === "user") {
+    if (isCountedUserPrompt(entry)) {
       const userPrompt = extractUserPrompt(entry);
 
-      if (userPrompt !== "") {
-        promptNumber += 1;
-        currentTurn = {
-          promptNumber,
-          userPrompt,
-          assistantText: "",
-          toolCalls: [],
-          isSidechain: Boolean(entry.isSidechain),
-        };
-        turns.push(currentTurn);
-        continue;
-      }
+      promptNumber += 1;
+      currentTurn = {
+        promptNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+      };
+      turns.push(currentTurn);
+      continue;
+    }
 
+    if (entry.role === "user") {
       if (!currentTurn) {
         continue;
       }
@@ -242,6 +242,18 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
     ...turn,
     assistantText: normalizeAssistantText(turn.assistantText),
   }));
+}
+
+export function countUserPromptsInTranscript(transcriptPath: string): number {
+  let count = 0;
+
+  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+    if (isCountedUserPrompt(entry)) {
+      count += 1;
+    }
+  }
+
+  return count;
 }
 
 export function extractAssistantResponse(

@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { getTurnsForSession } from "../../db/turns";
+import { countUserPromptsInTranscript } from "../../shared/transcript-parser";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
@@ -54,7 +55,9 @@ export function createSessionInitHandler(
       completedAtEpoch: existingSession?.completedAtEpoch ?? null,
     });
 
-    const promptNumber = getTurnsForSession(dependencies.db, session.id).length + 1;
+    const promptNumber = input.transcriptPath
+      ? countUserPromptsInTranscript(input.transcriptPath) + 1
+      : getTurnsForSession(dependencies.db, session.id).length + 1;
 
     createPendingTurn(
       dependencies.db,

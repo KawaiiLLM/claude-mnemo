@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -37,38 +37,7 @@ describe("claude-mnemo smoke test", () => {
     db = createDatabase(":memory:");
     initializeSchema(db);
 
-    const transcript = writeTranscript([
-      {
-        role: "user",
-        content: [{ type: "text", text: "Diagnose the auth race" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          { type: "tool_use", name: "Read", input: { file_path: "src/auth.ts" } },
-          { type: "text", text: "The refresh path races under parallel load." },
-        ],
-      },
-      {
-        role: "user",
-        content: [{ type: "tool_result", content: "auth.ts contents" }],
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "Fix it and add tests" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          { type: "tool_use", name: "Edit", input: { file_path: "src/auth.ts" } },
-          { type: "text", text: "Added a mutex and regression coverage." },
-        ],
-      },
-      {
-        role: "user",
-        content: [{ type: "tool_result", content: "edit applied" }],
-      },
-    ]);
+    const transcript = writeTranscript([]);
 
     transcriptDirectory = transcript.directory;
     transcriptPath = transcript.path;
@@ -172,6 +141,24 @@ describe("claude-mnemo smoke test", () => {
     const sessionAfterFirstPrompt = getSessionByContentId(db, "session-e2e")!;
     expect(getTurn(db, sessionAfterFirstPrompt.id, 1)?.status).toBe("pending");
 
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "Diagnose the auth race" }],
+      })}\n${JSON.stringify({
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "src/auth.ts" } },
+          { type: "text", text: "The refresh path races under parallel load." },
+        ],
+      })}\n${JSON.stringify({
+        role: "user",
+        content: [{ type: "tool_result", content: "auth.ts contents" }],
+      })}\n`,
+      "utf8",
+    );
+
     await sessionInitHandler({
       eventName: "UserPromptSubmit",
       sessionId: "session-e2e",
@@ -181,6 +168,24 @@ describe("claude-mnemo smoke test", () => {
       stopHookActive: false,
       raw: {},
     });
+
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        role: "user",
+        content: [{ type: "text", text: "Fix it and add tests" }],
+      })}\n${JSON.stringify({
+        role: "assistant",
+        content: [
+          { type: "tool_use", name: "Edit", input: { file_path: "src/auth.ts" } },
+          { type: "text", text: "Added a mutex and regression coverage." },
+        ],
+      })}\n${JSON.stringify({
+        role: "user",
+        content: [{ type: "tool_result", content: "edit applied" }],
+      })}`,
+      "utf8",
+    );
 
     const session = getSessionByContentId(db, "session-e2e")!;
     expect(getTurn(db, session.id, 1)?.status).toBe("pending");

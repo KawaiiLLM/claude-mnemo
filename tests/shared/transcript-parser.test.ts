@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  countUserPromptsInTranscript,
   extractAssistantResponse,
   parseReplayTranscript,
   parseTranscript,
@@ -197,5 +198,79 @@ describe("parseTranscript", () => {
       [1, "Draft approach"],
       [2, "Final approach"],
     ]);
+  });
+
+  test("countUserPromptsInTranscript matches parseReplayTranscript length", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        content: [{ type: "text", text: "First prompt" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "First answer" }],
+      },
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Sidechain prompt" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Sidechain answer" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Final prompt" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(
+      parseReplayTranscript(transcript.path).length,
+    );
+  });
+
+  test("countUserPromptsInTranscript includes sidechain user entries", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Discarded branch" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Final approach" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Kept branch" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const turns = parseReplayTranscript(transcript.path);
+
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(2);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]?.isSidechain).toBe(true);
+  });
+
+  test("countUserPromptsInTranscript returns 0 for missing or empty files", () => {
+    const missingPath = join(tmpdir(), `claude-mnemo-missing-${Date.now()}.jsonl`);
+
+    const emptyDirectory = mkdtempSync(join(tmpdir(), "claude-mnemo-empty-"));
+    const emptyPath = join(emptyDirectory, "session.jsonl");
+    writeFileSync(emptyPath, "", "utf8");
+    directories.push(emptyDirectory);
+
+    expect(countUserPromptsInTranscript(missingPath)).toBe(0);
+    expect(countUserPromptsInTranscript(emptyPath)).toBe(0);
   });
 });
