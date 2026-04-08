@@ -138,12 +138,15 @@ describe("buildMnemosynePrompt", () => {
   test("keeps update_session, private-tag exclusion, and tool-call examples", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("Call update_session if the session summary needs updating");
+    expect(prompt).toContain('Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.');
+    expect(prompt).toContain("Use update_session only as a compatibility fallback for legacy callers.");
     expect(prompt).toContain(
       "Include next_steps when the session has a clear trajectory or planned follow-up.",
     );
     expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
     expect(prompt).toContain('Good example: remember({ parent: "S1"');
+    expect(prompt).toContain('Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." })');
+    expect(prompt).not.toContain("observations: [");
     expect(prompt).toContain('Skip example: remember({ parent: "S1", status: "skipped" })');
   });
 
@@ -166,5 +169,6 @@ describe("buildMnemosynePrompt", () => {
     expect(prompt).toContain('remember({ parent: "S{id}"');
     expect(prompt).toContain('remember({ parent: "S{id}/T{n}"');
     expect(prompt).toContain('remember({ type: "feedback", scope: "global"');
+    expect(prompt).toContain('remember({ id: "S1"');
   });
 });

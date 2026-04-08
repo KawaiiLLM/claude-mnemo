@@ -38292,7 +38292,8 @@ Rules:
   - If the turn is part of an undone branch (sidechain), call remember({ parent: "S{id}", status: "undone" }) (no title/description/observations)
   - If the turn is still valid with changed context, re-extract normally
 - Do NOT re-process [extracted], [skipped], or [undone] turns
-- Call update_session if the session summary needs updating.
+- Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.
+- Use update_session only as a compatibility fallback for legacy callers.
 - Include next_steps when the session has a clear trajectory or planned follow-up.
 - next_steps: what was actively being worked on or planned next (not speculative future work).
 - Skip update_session if nothing meaningful changed.
@@ -38324,7 +38325,8 @@ For each pending/stale turn, call remember with:
 - title: 10-25 chars, what was done
 - description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
-- observations: array of notable events:
+- Then call separate remember calls for each observation from that turn:
+  - parent: "S{id}/T{n}"
   - type: bugfix|feature|refactor|change|discovery|decision
   - title: short, action- or outcome-oriented, not generic
   - description: concise outcome, not a restatement of the user prompt
@@ -38356,9 +38358,11 @@ Content inside <private>...</private> tags must NOT be recorded.
 
 EXAMPLES
 --------
-Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added", observations: [{ type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." }] })
+Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
 Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
+Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." })
+Good example: remember({ id: "S1", title: "Fix auth race", content: "Updated the session summary after the mutex fix", insight: "Session summary now reflects the concurrency fix" })
 Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
 Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
 Skip example: remember({ parent: "S1", status: "skipped" })`;

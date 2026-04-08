@@ -233,8 +233,8 @@ Found 5 results for "竞态":
 ```
 Phase 1 — Chronicle extraction (existing, uses remember)
   For each pending turn:
-    remember({ parent: "S{id}", title=..., content=..., insight=... })
-    remember({ parent: "S{id}/T{n}", type="bugfix", ... })      → observations
+    remember({ parent: "S{id}", title: ..., content: ..., insight: ... })
+    remember({ parent: "S{id}/T{n}", type: "bugfix", ... })      → observations
     or: remember({ parent: "S{id}", status: "skipped" })
   For each stale turn:
     remember({ parent: "S{id}", status: "undone" })
@@ -242,7 +242,7 @@ Phase 1 — Chronicle extraction (existing, uses remember)
 
 Phase 2 — Knowledge distillation (new)
   recall(scope="memories") to check existing
-  New knowledge → remember({ type="feedback", scope="global", ... })
+  New knowledge → remember({ type: "feedback", scope: "global", ... })
   Contradicts existing → remember({ id: "M{old}", status: "archived" }) + create new
   No new knowledge → skip (most common)
 

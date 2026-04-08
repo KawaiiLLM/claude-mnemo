@@ -31,8 +31,8 @@ Session (one per conversation)  →  [S12]
 Memory (durable knowledge)      →  [M1]
 ```
 
-Output IDs `[S12]`, `[T2]`, `[O7]`, and `[M1]` can be used directly in follow-up `recall` calls.
-Turn IDs are session-scoped promptNumbers, so `recall(scope="turns", session=12, turn=2)` and `replay(session=12, turn=2)` both refer to `[T2]`.
+Output IDs `[S12]`, `[O7]`, and `[M1]` can be used directly in follow-up `recall` calls.
+Turn IDs are session-scoped promptNumbers, so use `recall(scope="turns", session=12, turn=2)` or `replay(session=12, turn=2)` for `[T2]`.
 Observation IDs are global database IDs, so `[O7]` maps to `recall(scope="observations", obs=7)`.
 Memory IDs are global database IDs, so `[M1]` maps to `recall(scope="memories", id="M1")`.
 
