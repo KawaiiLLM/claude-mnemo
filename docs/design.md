@@ -2,12 +2,12 @@
 
 ## Overview
 
-Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured memory across sessions. After each conversation, an isolated extraction agent named **Mnemosyne** reviews the dialogue and extracts memories into a 3-layer data model. Future sessions retrieve these memories via two MCP tools: `recall` (structured memory tree) and `replay` (raw transcript playback).
+Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured memory across sessions. After each conversation, an isolated extraction agent named **Mnemosyne** reviews the dialogue and extracts memories into two connected layers: a session → turn → observation chronicle, plus a durable knowledge layer of standalone `memories`. Future sessions retrieve these memories via `recall` (structured memory tree) and `replay` (raw transcript playback), while Mnemosyne writes primarily through `remember`.
 
 ### Design Principles
 
 1. **Memory is refined, anchored by raw previews.** The database stores extracted insights (title, description, insight, narrative) plus raw `user_prompt` / `assistant_response` per turn for anchoring and preview. Full transcripts live in session `.jsonl` files and are accessible via `replay`.
-2. **Progressive disclosure.** Memory is organized as a tree (session → turn → observation) that can be expanded on demand. Each level provides just enough to decide whether to drill deeper.
+2. **Progressive disclosure.** Chronicle memory is organized as a tree (session → turn → observation) that can be expanded on demand, while the knowledge layer stores standalone reusable memories. Each view provides just enough detail to decide whether to drill deeper.
 3. **Self-contained extraction.** Mnemosyne runs as an isolated SDK session with an in-process `mnemo` MCP server injected explicitly. It does not depend on the parent Claude session's plugin/MCP connection state.
 4. **Separation of concerns.** UserPromptSubmit only inserts pending turns. Stop reconciles (backfill, undo detection) and extracts via Mnemosyne. PreCompact provides a safety net before context compression. SessionStart only injects context (no LLM calls). Each hook has one clear responsibility.
 5. **Zero external dependencies.** No vector DB, no Python, no HTTP Worker. SQLite + FTS5 + Bun only.
@@ -16,12 +16,14 @@ Claude-Mnemo is a Claude Code plugin that gives Claude persistent, structured me
 
 ## Data Model
 
-### 3-Layer Hierarchy
+### Chronicle + Knowledge Hierarchy
 
 ```
 Session (one per Claude Code conversation)
   └─ Turn (one per QA round — user prompt + agent response)
        └─ Observation (one per notable tool call or event within a turn)
+
+Memory (standalone durable knowledge, optionally sourced from a turn)
 ```
 
 ### Schema
@@ -32,8 +34,10 @@ CREATE TABLE sessions (
   content_session_id  TEXT UNIQUE NOT NULL,  -- Claude Code session UUID → JSONL filename
   project             TEXT NOT NULL,
   title               TEXT,                  -- 10-20 chars: what this session was about
+  content             TEXT,                  -- canonical session summary body
   description         TEXT,                  -- 30-60 chars: what was accomplished
   insight             TEXT,                  -- markdown list: cross-turn learnings
+  next_steps          TEXT,                  -- active follow-up trajectory
   started_at_epoch    INTEGER NOT NULL,
   updated_at_epoch    INTEGER,               -- set on resume/re-extraction
   completed_at_epoch  INTEGER
@@ -48,13 +52,16 @@ CREATE TABLE turns (
     -- extracted: memory extracted successfully
     -- skipped:   evaluated, deemed not worth recording
     -- stale:     extracted but user undid changes, needs re-evaluation
+    -- undone:    extracted historical branch preserved for replay alignment
   user_prompt         TEXT,                  -- full user prompt text, stored at turn creation
   assistant_response  TEXT,                  -- full assistant response text, stored by hook via JSONL parsing
   title               TEXT,                  -- 10-25 chars
+  content             TEXT,                  -- canonical turn summary body
   description         TEXT,                  -- 40-80 chars
   insight             TEXT,                  -- markdown list
   files_read          TEXT,                  -- JSON array
   files_modified      TEXT,                  -- JSON array
+  tool_call_count     INTEGER,
   created_at_epoch    INTEGER NOT NULL,
   updated_at_epoch    INTEGER,
   UNIQUE(session_id, prompt_number)
@@ -65,13 +72,34 @@ CREATE TABLE observations (
   turn_id             INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
   type                TEXT NOT NULL,         -- bugfix|feature|refactor|change|discovery|decision
   title               TEXT NOT NULL,         -- 10-20 chars
+  content             TEXT,                  -- canonical observation body
   description         TEXT,                  -- 15-30 chars
+  insight             TEXT,                  -- concise significance note
   narrative           TEXT,                  -- 50-150 chars: full context (most valuable for search)
   facts               TEXT,                  -- JSON array of concise statements
+  tags                TEXT,                  -- JSON array: retrieval labels
   concepts            TEXT,                  -- JSON array: how-it-works|why-it-exists|what-changed|problem-solution|gotcha|pattern|trade-off
   files_read          TEXT,                  -- JSON array
   files_modified      TEXT,                  -- JSON array
   created_at_epoch    INTEGER NOT NULL
+);
+
+CREATE TABLE memories (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  type                TEXT NOT NULL,         -- feedback|project|reference|user
+  scope               TEXT NOT NULL,         -- global|<project>
+  title               TEXT NOT NULL,
+  content             TEXT NOT NULL,
+  reasoning           TEXT,
+  application         TEXT,
+  tags                TEXT,                  -- JSON array
+  status              TEXT NOT NULL DEFAULT 'active',
+    -- active|superseded|archived
+  superseded_by       INTEGER REFERENCES memories(id),
+  expires_at_epoch    INTEGER,
+  source_turn_id      INTEGER REFERENCES turns(id),
+  created_at_epoch    INTEGER NOT NULL,
+  updated_at_epoch    INTEGER
 );
 ```
 
@@ -79,11 +107,12 @@ CREATE TABLE observations (
 
 Derived from real Claude Code session data (~2,600 chars/turn average, ~5% compression ratio):
 
-| Layer | title | description | insight | narrative |
-|-------|-------|-------------|---------|-----------|
+| Layer | title | description/content | insight | narrative/reasoning |
+|-------|-------|---------------------|---------|---------------------|
 | Session | 10-20 chars | 30-60 chars | 3-5 bullet points | — |
 | Turn | 10-25 chars | 40-80 chars | 2-4 bullet points | — |
-| Observation | 10-20 chars | 15-30 chars | — | 50-150 chars |
+| Observation | 10-20 chars | 15-30 chars | short significance note | 50-150 chars |
+| Memory | 10-25 chars | 40-100 chars | — | optional reasoning/application |
 
 ### Status Transitions
 
@@ -127,19 +156,19 @@ The JSONL file is immutable after session end. Memories are permanent; raw data 
 
 ### FTS5 Unified Index
 
-A single FTS5 virtual table indexes all three layers:
+A single FTS5 virtual table indexes all four layers:
 
 ```sql
 CREATE VIRTUAL TABLE memory_fts USING fts5(
-  layer,          -- 'session' | 'turn' | 'observation'
+  layer,          -- 'session' | 'turn' | 'observation' | 'memory'
   source_id,      -- original table id
   title,
-  description,
-  extra           -- session/turn: insight; observation: narrative+facts+concepts
+  content,
+  extra           -- session/turn: insight; observation: narrative+facts+tags+concepts; memory: reasoning+application+tags
 );
 ```
 
-FTS indexing is integrated into `saveTurn()` and `upsertSession()` — atomic with the data write, not a separate sync step.
+FTS indexing is integrated into `saveTurn()`, `upsertSession()`, `createObservation()`, and `createMemory()` / `updateMemory()` — atomic with the data write, not a separate sync step.
 
 ### Search Modes
 
@@ -148,6 +177,7 @@ FTS indexing is integrated into `saveTurn()` and `upsertSession()` — atomic wi
 | Browse | `recall(scope="sessions")` | `SELECT FROM sessions ORDER BY started_at_epoch DESC` |
 | Keyword search | `recall(scope="sessions", query="auth竞态")` | `FTS5 MATCH` across the selected scope |
 | Filter | `recall(scope="observations", type="bugfix")`, `recall(scope="observations", file="auth.ts")` | SQL WHERE + LIKE |
+| Knowledge browse | `recall(scope="memories")`, `recall(scope="memories", type="feedback")` | SQL WHERE + structured rendering |
 | Date range | `recall(scope="sessions", time="2026-04-01..2026-04-05")` | SQL WHERE on epoch |
 | Session drill-down | `recall(scope="turns", session=142, depth="expanded")` | Structured tree rendering |
 
@@ -157,7 +187,10 @@ No vector DB. No Chroma. No Python dependency.
 
 ## MCP Tools
 
-Four tools exposed via a single MCP server (stdio transport):
+The runtime exposes five tools through a single MCP server:
+- `recall`, `replay` — read paths
+- `remember` — primary write path
+- `save_turn`, `update_session` — compatibility write tools retained for legacy callers
 
 ### Read Tools (used by main agent and Mnemosyne)
 
@@ -172,6 +205,8 @@ recall(scope="observations", obs=7)                        → full detail for o
 recall(scope="turns", session=142, depth="expanded")      → tree expansion
 recall(scope="sessions", time="2026-04-03")                → cross-session timeline
 recall(scope="observations", type="bugfix", file="auth.ts") → filters
+recall(scope="memories")                                   → active global + project memories
+recall(scope="memories", id="M1")                          → full detail for one memory
 ```
 
 Output format — indented tags, optimized for LLM consumption:
@@ -211,6 +246,28 @@ replay(session=142, turn=3, full=true) → no truncation on tool_result
 Replay includes sidechain (undo'd) entries from the JSONL — it does NOT filter `isSidechain`. This ensures `promptNumber` in the replay output always matches the DB's `promptNumber`. The `[undone]` marker is determined by the DB turn's `status` field (not by `isSidechain` in the JSONL — a sidechain entry may still be re-extracted as valid). This is intentional: replay is raw transcript playback, and undo history is part of that record.
 
 ### Write Tools (used by Mnemosyne only)
+
+**`remember`** — Primary routed write tool
+
+```
+remember({ parent: "S1", prompt_number: 3, title: "补充单测",
+           content: "覆盖并发场景", insight: "- 10并发稳定通过" })
+
+remember({ parent: "S1/T3", type: "feature", title: "并发测试",
+           content: "新增10并发用例", insight: "锁行为已覆盖",
+           tags: ["testing", "concurrency"], files_modified: ["tests/auth.test.ts"] })
+
+remember({ id: "S1", title: "auth中间件重构",
+           content: "修复竞态+补测试", insight: "- mutex是并发安全的关键",
+           next_steps: "继续验证 compact 后的提取链路" })
+
+remember({ type: "feedback", scope: "global", title: "优先真实DB测试",
+           content: "并发/锁相关场景必须走真实 SQLite。", reasoning: "mock 隐藏事务边界。" })
+
+remember({ id: "M1", status: "archived" })
+```
+
+Turn remembers default to `extracted` / `skipped` based on whether content is present; only special turn states such as `skipped` or `undone` should be passed explicitly. Observation remembers do not accept `status`. Memory remembers use explicit knowledge-layer statuses (`active`, `superseded`, `archived`).
 
 **`save_turn`** — Write or skip one turn
 
@@ -253,10 +310,17 @@ Mnemosyne is an isolated Claude Code SDK subprocess:
 query({
   prompt: mnemosynePrompt,
   options: {
+    model: "claude-sonnet-4-6",
     cwd: projectCwd,
     maxTurns: 15,
     mcpServers: { mnemo: createSdkMcpServer(...) },
-    allowedTools: ["mcp__mnemo__save_turn", "mcp__mnemo__update_session", "mcp__mnemo__recall", "mcp__mnemo__replay"],
+    allowedTools: [
+      "mcp__mnemo__remember",
+      "mcp__mnemo__save_turn",
+      "mcp__mnemo__update_session",
+      "mcp__mnemo__recall",
+      "mcp__mnemo__replay"
+    ],
   }
   // isolated extraction session — no dependency on parent plugin runtime state
 })
@@ -264,7 +328,7 @@ query({
 
 ### Why Inject Tools Explicitly
 
-Mnemosyne now runs as an isolated extraction session rather than a true `forkSession` of the parent conversation. The four memory tools are injected via an in-process SDK MCP server so extraction does not depend on whether the main Claude session's plugin MCP connection is currently healthy.
+Mnemosyne now runs as an isolated extraction session rather than a true `forkSession` of the parent conversation. The five mnemo tools are injected via an in-process SDK MCP server so extraction does not depend on whether the main Claude session's plugin MCP connection is currently healthy.
 
 ### Hook Re-entry Prevention
 
@@ -283,7 +347,7 @@ The SDK subprocess still loads the Claude runtime and would recurse through hook
    }
    ```
 
-3. **Explicit tool injection**: the four memory tools are provided by the in-process `mnemo` MCP server passed to `query()`, so Mnemosyne does not rely on inheriting plugin runtime state from the parent Claude session.
+3. **Explicit tool injection**: the mnemo tool set (`remember`, `save_turn`, `update_session`, `recall`, `replay`) is provided by the in-process SDK MCP server passed to `query()`, so Mnemosyne does not rely on inheriting plugin runtime state from the parent Claude session.
 
 This gives extraction reliability (tools always present) and re-entry safety (hooks exit immediately).
 
@@ -306,10 +370,12 @@ Rules:
 - Process [pending] and [stale] turns — match by prompt preview above
 - Skip [extracted], [skipped], and [undone] turns
 - For [stale] turns: determine if it was undone (sidechain branch) or still valid
-  - If undone: call save_turn with explicit status: "undone" (no title/description/observations)
+  - If undone: call remember({ parent: "S{id}", status: "undone" }) (no title/description/observations)
   - If still valid: re-extract normally with updated content
-- Use save_turn() to record, skip, or mark undone each turn
-- Call update_session() if the session summary needs updating
+- Use remember() as the primary write path for turns, observations, session summaries, and standalone memories
+- Use save_turn() / update_session() only as compatibility fallbacks
+- Include prompt_number when writing a specific turn from the embedded context
+- Call remember({ id: "S{id}", ... }) if the session summary needs updating
   (new topic, significant progress, or session ending)
 - If context was compacted, use replay() to recover detail
 - Do NOT use Read, Write, Edit, Bash
@@ -336,10 +402,20 @@ Cost is ~150 tokens per call. Giving the agent judgment avoids both stale summar
 ```
 Input:  ~session tree from recall(scope="turns", depth="expanded")
         + ~150 tokens (Mnemosyne instructions and turn anchors)
-Output: ~200 tokens per turn (save_turn tool call)
-        + ~150 tokens (update_session, when called)
+Output: ~200 tokens per turn (remember tool calls)
+        + ~150 tokens (session summary update, when called)
 Total:  ~750-950 tokens output for a 4-turn session
 ```
+
+### Agent Session Diagnostics
+
+The main Claude conversation transcript stays in `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`. Mnemosyne's own isolated SDK session also produces a Claude JSONL file; after extraction completes, that file is moved to:
+
+```
+~/.claude-mnemo/sessions/<session_id>.jsonl
+```
+
+This keeps extraction-agent diagnostics separate from the main conversation transcript while preserving raw SDK output for debugging.
 
 ---
 
@@ -387,15 +463,7 @@ This means extraction is batched to PreCompact and Stop, not incremental per-tur
 
 ### Prompt Number Tracking
 
-Claude Code does not provide `prompt_number` in hook stdin. Current implementation derives it by counting existing turns per session:
-
-```sql
-SELECT COUNT(*) + 1 FROM turns WHERE session_id = ?
-```
-
-**Known limitation:** This assumes every prior turn in the session was tracked by mnemo. If a session was started before mnemo was installed (adopted/untracked session), the count will be wrong — the DB has fewer turns than the JSONL, so `prompt_number` will be offset from the actual Nth user message in the transcript. This breaks the `turns.prompt_number → Nth user message in the JSONL file` invariant, which causes `replay` to locate the wrong turn (it uses `prompt_number` as a positional index into the JSONL).
-
-**Fix:** Derive `prompt_number` from the JSONL instead of DB count. Fall back to DB count when `transcriptPath` is unavailable:
+Claude Code does not provide `prompt_number` in hook stdin. Current implementation derives it from the transcript, not from DB row count:
 
 ```typescript
 // Count ALL user messages (including sidechain, excluding error/empty)
@@ -405,7 +473,7 @@ const promptNumber = transcriptPath
   : getTurnsForSession(db, session.id).length + 1;
 ```
 
-`countUserPromptsInTranscript` is a lightweight function that only counts `role: "user"` entries with non-empty prompt text — no assistant/tool parsing needed.
+`countUserPromptsInTranscript` is a lightweight function that only counts `role: "user"` entries with non-empty prompt text — no assistant/tool parsing needed. The DB fallback remains only for cases where `transcriptPath` is unavailable.
 
 **Alignment requirement:** `prompt_number` must align with `parseReplayTranscript`, which **includes** sidechain entries (undo'd turns still get a number). The counting rules are:
 
@@ -415,7 +483,7 @@ const promptNumber = transcriptPath
 
 This matches `readAllTranscriptEntries` (used by replay), NOT `readTranscriptEntries` (used by backfill, which filters sidechain). The two parsers intentionally use different filters — `countUserPromptsInTranscript` must follow replay's rules.
 
-**Historical data:** Existing turns created with the old `COUNT(*) + 1` logic may have wrong `prompt_number` values for adopted sessions. Options:
+**Historical data:** Turns created before this fix may still have wrong `prompt_number` values for adopted sessions. Options:
 - **Lazy repair**: when Stop backfills a session, compare DB prompt_numbers against JSONL-derived numbers and fix mismatches in a transaction.
 - **Ignore**: if no adopted sessions exist yet, historical data is correct and no repair needed. The fix only prevents future drift.
 
@@ -609,9 +677,9 @@ Injected memories are wrapped in `<claude-mnemo-context>` tags to prevent recurs
 | LLM invocation | Dedicated SDK Agent with disallowedTools | Mnemosyne via isolated `query()` call using structured recall context |
 | Cache efficiency | Separate session, no cache sharing | Separate extraction session; no dependence on parent-session cache reuse |
 | Search backend | Chroma (Python) + FTS5 (deprecated) | FTS5 only, no external dependencies |
-| Data model | sdk_sessions + observations + session_summaries | sessions → turns → observations (3-layer tree) |
+| Data model | sdk_sessions + observations + session_summaries | sessions → turns → observations chronicle + standalone memories |
 | Display format | Markdown tables | Indented tags (~30% fewer tokens) |
-| Retrieval tools | search + timeline + get_observations (3 tools) | recall + replay (2 tools, progressive disclosure) |
+| Retrieval tools | search + timeline + get_observations (3 tools) | recall + replay for reads, remember as the primary write path (+ compat save_turn/update_session) |
 | Worker service | Express HTTP server on port 37777 | None |
 | Message queue | pending_messages table + claim-confirm | Direct SQLite writes via MCP tools |
 | Compact handling | Not handled | Dedicated compact hook for pre-compression extraction |
