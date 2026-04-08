@@ -6,7 +6,7 @@ import {
   getTurnsForSession,
   markTurnsStale,
 } from "../../db/turns";
-import { forkMnemosyne, type ForkMnemosyneResult } from "../../mnemosyne/fork";
+import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
 import { recallMemory } from "../../mcp/recall";
 import {
@@ -14,11 +14,8 @@ import {
   type ParsedReplayTurn,
 } from "../../shared/transcript-parser";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
-import { createLogger } from "../../shared/logger";
 import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
-
-const log = createLogger("MNEMOSYNE");
 
 export interface StopHandlerDependencies {
   db: Database;
@@ -136,30 +133,11 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
 
     if (pendingTurns.length > 0) {
-      const result = await dependencies.forkMnemosyne({
+      await dependencies.forkMnemosyne({
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
         database: dependencies.db,
       });
-
-      if (result) {
-        const cacheHitPct =
-          result.inputTokens > 0
-            ? Math.round(
-                (result.cacheReadInputTokens / result.inputTokens) * 100,
-              )
-            : 0;
-        log.info("extraction complete", {
-          hook: "stop",
-          turns: result.numTurns,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          cacheReadTokens: result.cacheReadInputTokens,
-          cacheCreationTokens: result.cacheCreationInputTokens,
-          cacheHitPct,
-          durationMs: result.durationMs,
-        });
-      }
     }
 
     upsertSession(dependencies.db, {

@@ -6,11 +6,8 @@ import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
 import { recallMemory } from "../../mcp/recall";
 import { backfillFromTranscript } from "../backfill";
-import { createLogger } from "../../shared/logger";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
-
-const log = createLogger("MNEMOSYNE");
 
 export interface CompactHandlerDependencies {
   db: Database;
@@ -48,30 +45,11 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
 
     if (pendingTurns.length > 0) {
-      const result = await dependencies.forkMnemosyne({
+      await dependencies.forkMnemosyne({
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
         database: dependencies.db,
       });
-
-      if (result) {
-        const cacheHitPct =
-          result.inputTokens > 0
-            ? Math.round(
-                (result.cacheReadInputTokens / result.inputTokens) * 100,
-              )
-            : 0;
-        log.info("extraction complete", {
-          hook: "compact",
-          turns: result.numTurns,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          cacheReadTokens: result.cacheReadInputTokens,
-          cacheCreationTokens: result.cacheCreationInputTokens,
-          cacheHitPct,
-          durationMs: result.durationMs,
-        });
-      }
     }
 
     return {

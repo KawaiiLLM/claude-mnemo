@@ -18,6 +18,8 @@ export function encodeProjectPath(projectPath: string): string {
   return projectPath.replace(/[/:\\]+/g, "-");
 }
 
+export const SESSIONS_DIR = join(DATA_DIR, "sessions");
+
 export function resolveTranscriptPath(
   projectPath: string,
   sessionId: string,
@@ -29,4 +31,8 @@ export function resolveTranscriptPath(
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`,
   );
+}
+
+export function resolveAgentSessionPath(sessionId: string): string {
+  return join(SESSIONS_DIR, `${sessionId}.jsonl`);
 }

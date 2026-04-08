@@ -1,13 +1,11 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import * as nodeFs from "node:fs";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { createCompactHandler } from "../../src/hooks/handlers/compact";
-import type { ForkMnemosyneResult } from "../../src/mnemosyne/fork";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -208,26 +206,23 @@ describe("handleCompactHook", () => {
     rmSync(transcript.directory, { recursive: true, force: true });
   });
 
-  test("logs extraction metrics when forkMnemosyne returns results", async () => {
+  test("calls forkMnemosyne for pending turns", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
       ) VALUES (?, 1, 'pending', 'Pending work', 120)`,
     ).run(sessionId);
 
-    const forkResult: ForkMnemosyneResult = {
+    const forkMnemosyne = mock(async () => ({
+      sessionId: "test-extraction",
       numTurns: 2,
       inputTokens: 30000,
       outputTokens: 1200,
       cacheReadInputTokens: 25000,
       cacheCreationInputTokens: 0,
       durationMs: 3100,
-    };
-    const forkMnemosyne = mock(async () => forkResult);
-
-    const appendSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(
-      () => {},
-    );
+      totalCostUsd: 0.03,
+    }));
 
     const handler = createCompactHandler({ db, forkMnemosyne });
 
@@ -237,18 +232,6 @@ describe("handleCompactHook", () => {
       }),
     );
 
-    const logCalls = appendSpy.mock.calls.filter(([path]) =>
-      (path as string).includes("claude-mnemo.log"),
-    );
-    expect(logCalls.length).toBeGreaterThanOrEqual(1);
-
-    const entry = JSON.parse((logCalls[0][1] as string).trim());
-    expect(entry.message).toBe("extraction complete");
-    expect(entry.context.hook).toBe("compact");
-    expect(entry.context.inputTokens).toBe(30000);
-    expect(entry.context.cacheReadTokens).toBe(25000);
-    expect(entry.context.cacheHitPct).toBe(83);
-
-    appendSpy.mockRestore();
+    expect(forkMnemosyne).toHaveBeenCalledTimes(1);
   });
 });

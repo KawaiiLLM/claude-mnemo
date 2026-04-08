@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
@@ -23,6 +23,7 @@ import {
   createDatabaseBackedHandlers,
   type MnemoToolHandlers,
 } from "../mcp/handlers";
+import { resolveAgentSessionPath, resolveTranscriptPath } from "../shared/paths";
 import { buildIsolatedEnv } from "./env";
 
 export interface ForkMnemosyneInput {
@@ -32,12 +33,14 @@ export interface ForkMnemosyneInput {
 }
 
 export interface ForkMnemosyneResult {
+  sessionId: string;
   numTurns: number;
   inputTokens: number;
   outputTokens: number;
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
   durationMs: number;
+  totalCostUsd: number;
 }
 
 interface ClaudeExecutableResolverDeps {
@@ -150,6 +153,26 @@ function missingHandler(toolName: string): never {
   throw new Error(`Missing Mnemo tool handler: ${toolName}`);
 }
 
+function moveAgentSession(cwd: string, sessionId: string): void {
+  const srcPath = resolveTranscriptPath(cwd, sessionId);
+  const destPath = resolveAgentSessionPath(sessionId);
+
+  if (!existsSync(srcPath)) {
+    return;
+  }
+
+  mkdirSync(dirname(destPath), { recursive: true });
+
+  try {
+    renameSync(srcPath, destPath);
+  } catch {
+    // Cross-device move: copy then delete
+    const content = Bun.file(srcPath).text();
+    Bun.write(destPath, content);
+    unlinkSync(srcPath);
+  }
+}
+
 export async function forkMnemosyne(
   input: ForkMnemosyneInput,
   deps: ForkMnemosyneDeps = {},
@@ -191,14 +214,20 @@ export async function forkMnemosyne(
   for await (const message of execution) {
     if (message.type === "result") {
       result = {
+        sessionId: message.session_id,
         numTurns: message.num_turns,
         inputTokens: message.usage.input_tokens,
         outputTokens: message.usage.output_tokens,
         cacheReadInputTokens: message.usage.cache_read_input_tokens,
         cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
         durationMs: message.duration_ms,
+        totalCostUsd: "total_cost_usd" in message ? message.total_cost_usd : 0,
       };
     }
+  }
+
+  if (result) {
+    moveAgentSession(input.cwd ?? process.cwd(), result.sessionId);
   }
 
   return result;

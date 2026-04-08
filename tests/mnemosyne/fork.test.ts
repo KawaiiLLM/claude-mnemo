@@ -77,6 +77,7 @@ describe("forkMnemosyne", () => {
         async *[Symbol.asyncIterator]() {
           yield {
             type: "result",
+            session_id: "test-session-id",
             num_turns: 1,
             usage: {
               input_tokens: 10,
@@ -85,6 +86,7 @@ describe("forkMnemosyne", () => {
               cache_creation_input_tokens: 40,
             },
             duration_ms: 50,
+            total_cost_usd: 0.01,
           };
         },
       };
@@ -104,12 +106,14 @@ describe("forkMnemosyne", () => {
     );
 
     expect(result).toEqual({
+      sessionId: "test-session-id",
       numTurns: 1,
       inputTokens: 10,
       outputTokens: 20,
       cacheReadInputTokens: 30,
       cacheCreationInputTokens: 40,
       durationMs: 50,
+      totalCostUsd: 0.01,
     });
     expect(createSdkMcpServerImpl).toHaveBeenCalledTimes(1);
     expect(capturedToolNames).toEqual([
