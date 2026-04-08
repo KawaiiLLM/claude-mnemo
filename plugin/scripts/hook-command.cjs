@@ -60,6 +60,7 @@ function resolveDatabasePath(explicitPath) {
 function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\]+/g, "-");
 }
+var SESSIONS_DIR = (0, import_node_path.join)(DATA_DIR, "sessions");
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
     (0, import_node_os.homedir)(),
@@ -68,6 +69,9 @@ function resolveTranscriptPath(projectPath, sessionId) {
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
   );
+}
+function resolveAgentSessionPath(sessionId) {
+  return (0, import_node_path.join)(SESSIONS_DIR, `${sessionId}.jsonl`);
 }
 
 // src/db/database.ts
@@ -4993,11 +4997,11 @@ var require_core = __commonJS((exports2) => {
   Ajv.ValidationError = validation_error_1.default;
   Ajv.MissingRefError = ref_error_1.default;
   exports2.default = Ajv;
-  function checkOptions(checkOpts, options, msg, log4 = "error") {
+  function checkOptions(checkOpts, options, msg, log2 = "error") {
     for (const key in checkOpts) {
       const opt = key;
       if (opt in options)
-        this.logger[log4](`${msg}: option ${key}. ${checkOpts[opt]}`);
+        this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
     }
   }
   function getSchEnv(keyRef) {
@@ -37716,9 +37720,12 @@ function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
     return null;
   }
-  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
-    const allowedText = allowedStatuses === null ? "no status values" : allowedStatuses.map((value) => `"${value}"`).join(", ");
-    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
   }
   return null;
 }
@@ -38285,6 +38292,35 @@ function createMnemoSdkServer(database, defaultProject, deps) {
 function missingHandler(toolName) {
   throw new Error(`Missing Mnemo tool handler: ${toolName}`);
 }
+var defaultMoveDeps = {
+  resolveSrcPath: resolveTranscriptPath,
+  resolveDestPath: resolveAgentSessionPath,
+  existsSync: import_node_fs5.existsSync,
+  mkdirSync: import_node_fs5.mkdirSync,
+  renameSync: import_node_fs5.renameSync,
+  copyFileSync: import_node_fs5.copyFileSync,
+  unlinkSync: import_node_fs5.unlinkSync
+};
+function isExdevError(error49) {
+  return error49 instanceof Error && "code" in error49 && error49.code === "EXDEV";
+}
+function moveAgentSession(cwd2, sessionId, deps = defaultMoveDeps) {
+  const srcPath = deps.resolveSrcPath(cwd2, sessionId);
+  const destPath = deps.resolveDestPath(sessionId);
+  if (!deps.existsSync(srcPath)) {
+    return;
+  }
+  deps.mkdirSync((0, import_node_path4.dirname)(destPath), { recursive: true });
+  try {
+    deps.renameSync(srcPath, destPath);
+  } catch (error49) {
+    if (!isExdevError(error49)) {
+      throw error49;
+    }
+    deps.copyFileSync(srcPath, destPath);
+    deps.unlinkSync(srcPath);
+  }
+}
 async function forkMnemosyne(input, deps = {}) {
   const pathResolver = deps.resolveClaudeCodeExecutablePathImpl ?? resolveClaudeCodeExecutablePath;
   const pathToClaudeCodeExecutable = pathResolver();
@@ -38304,6 +38340,7 @@ async function forkMnemosyne(input, deps = {}) {
   const execution = queryImpl({
     prompt: input.prompt,
     options: {
+      model: "claude-sonnet-4-6",
       cwd: input.cwd,
       maxTurns: 15,
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
@@ -38316,14 +38353,19 @@ async function forkMnemosyne(input, deps = {}) {
   for await (const message of execution) {
     if (message.type === "result") {
       result = {
+        sessionId: message.session_id,
         numTurns: message.num_turns,
         inputTokens: message.usage.input_tokens,
         outputTokens: message.usage.output_tokens,
         cacheReadInputTokens: message.usage.cache_read_input_tokens,
         cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
-        durationMs: message.duration_ms
+        durationMs: message.duration_ms,
+        totalCostUsd: "total_cost_usd" in message ? message.total_cost_usd : 0
       };
     }
+  }
+  if (result) {
+    moveAgentSession(input.cwd ?? process.cwd(), result.sessionId);
   }
   return result;
 }
@@ -38454,6 +38496,7 @@ Call remember with NO title/description/observations for:
 HOW TO EXTRACT
 --------------
 For each pending/stale turn, call remember with:
+- prompt_number: the turn number from the context above (do not rely on auto-assignment)
 - title: 10-25 chars, what was done
 - content or description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
@@ -38488,14 +38531,14 @@ Content inside <private>...</private> tags must NOT be recorded.
 
 EXAMPLES
 --------
-Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
+Good example: remember({ parent: "S1", prompt_number: 2, title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
 Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })
 Good example: remember({ id: "S1", title: "Fix auth race", content: "Updated the session summary after the mutex fix", insight: "Session summary now reflects the concurrency fix" })
 Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
 Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
-Skip example: remember({ parent: "S1", status: "skipped" })`;
+Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })`;
 }
 
 // src/hooks/backfill.ts
@@ -38529,7 +38572,6 @@ function backfillFromTranscript(db2, pendingTurns, transcriptPath, lastAssistant
 }
 
 // src/hooks/handlers/compact.ts
-var log2 = createLogger("MNEMOSYNE");
 function buildPrompt(db2, sessionDbId) {
   return buildMnemosynePrompt(
     recallMemory(db2, {
@@ -38552,26 +38594,11 @@ function createCompactHandler(dependencies) {
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
     if (pendingTurns.length > 0) {
-      const result = await dependencies.forkMnemosyne({
+      await dependencies.forkMnemosyne({
         cwd: input.cwd,
         prompt: buildPrompt(dependencies.db, session.id),
         database: dependencies.db
       });
-      if (result) {
-        const cacheHitPct = result.inputTokens > 0 ? Math.round(
-          result.cacheReadInputTokens / result.inputTokens * 100
-        ) : 0;
-        log2.info("extraction complete", {
-          hook: "compact",
-          turns: result.numTurns,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          cacheReadTokens: result.cacheReadInputTokens,
-          cacheCreationTokens: result.cacheCreationInputTokens,
-          cacheHitPct,
-          durationMs: result.durationMs
-        });
-      }
     }
     return {
       continue: true
@@ -38766,7 +38793,6 @@ function createSessionInitHandler(dependencies) {
 }
 
 // src/hooks/handlers/stop.ts
-var log3 = createLogger("MNEMOSYNE");
 function buildStopPrompt(db2, sessionDbId) {
   return buildMnemosynePrompt(
     recallMemory(db2, {
@@ -38843,26 +38869,11 @@ function createStopHandler(dependencies) {
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     if (pendingTurns.length > 0) {
-      const result = await dependencies.forkMnemosyne({
+      await dependencies.forkMnemosyne({
         cwd: input.cwd,
         prompt: buildStopPrompt(dependencies.db, session.id),
         database: dependencies.db
       });
-      if (result) {
-        const cacheHitPct = result.inputTokens > 0 ? Math.round(
-          result.cacheReadInputTokens / result.inputTokens * 100
-        ) : 0;
-        log3.info("extraction complete", {
-          hook: "stop",
-          turns: result.numTurns,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-          cacheReadTokens: result.cacheReadInputTokens,
-          cacheCreationTokens: result.cacheCreationInputTokens,
-          cacheHitPct,
-          durationMs: result.durationMs
-        });
-      }
     }
     upsertSession(dependencies.db, {
       contentSessionId: session.contentSessionId,

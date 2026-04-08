@@ -7387,7 +7387,7 @@ function resolveTranscriptPath(projectPath, sessionId) {
     `${sessionId}.jsonl`
   );
 }
-var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH;
+var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, SESSIONS_DIR;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
     "use strict";
@@ -7395,6 +7395,7 @@ var init_paths = __esm({
     import_node_path = require("node:path");
     DATA_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude-mnemo");
     DEFAULT_DB_PATH = (0, import_node_path.join)(DATA_DIR, "claude-mnemo.db");
+    SESSIONS_DIR = (0, import_node_path.join)(DATA_DIR, "sessions");
   }
 });
 
@@ -33214,9 +33215,12 @@ function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
     return null;
   }
-  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
-    const allowedText = allowedStatuses === null ? "no status values" : allowedStatuses.map((value) => `"${value}"`).join(", ");
-    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
   }
   return null;
 }
