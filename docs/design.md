@@ -350,7 +350,7 @@ Total:  ~750-950 tokens output for a 4-turn session
 | Hook Event | Matcher | Handler | Timeout | Purpose |
 |------------|---------|---------|---------|---------|
 | PreCompact | `manual\|auto` | `compact` | 30s | Extract pending turns BEFORE context compression |
-| SessionStart | `startup\|resume\|clear\|compact` | `context` | 10s | Inject recent memories (no extraction, no LLM calls) |
+| SessionStart | `startup\|resume\|clear\|compact` | `context` | 10s | Inject recent session context (no extraction, no LLM calls) |
 | UserPromptSubmit | `*` | `session-init` | 10s | Upsert session + insert pending turn (no extraction) |
 | Stop | `*` | `stop` | 120s | Backfill all turns + undo detection + await Mnemosyne extraction |
 
@@ -387,11 +387,37 @@ This means extraction is batched to PreCompact and Stop, not incremental per-tur
 
 ### Prompt Number Tracking
 
-Claude Code does not provide `prompt_number` in hook stdin. We track it by counting existing turns per session:
+Claude Code does not provide `prompt_number` in hook stdin. Current implementation derives it by counting existing turns per session:
 
 ```sql
 SELECT COUNT(*) + 1 FROM turns WHERE session_id = ?
 ```
+
+**Known limitation:** This assumes every prior turn in the session was tracked by mnemo. If a session was started before mnemo was installed (adopted/untracked session), the count will be wrong — the DB has fewer turns than the JSONL, so `prompt_number` will be offset from the actual Nth user message in the transcript. This breaks the `turns.prompt_number → Nth user message in the JSONL file` invariant, which causes `replay` to locate the wrong turn (it uses `prompt_number` as a positional index into the JSONL).
+
+**Fix:** Derive `prompt_number` from the JSONL instead of DB count. Fall back to DB count when `transcriptPath` is unavailable:
+
+```typescript
+// Count ALL user messages (including sidechain, excluding error/empty)
+// Must match parseReplayTranscript's counting — prompt_number aligns with replay
+const promptNumber = transcriptPath
+  ? countUserPromptsInTranscript(transcriptPath) + 1
+  : getTurnsForSession(db, session.id).length + 1;
+```
+
+`countUserPromptsInTranscript` is a lightweight function that only counts `role: "user"` entries with non-empty prompt text — no assistant/tool parsing needed.
+
+**Alignment requirement:** `prompt_number` must align with `parseReplayTranscript`, which **includes** sidechain entries (undo'd turns still get a number). The counting rules are:
+
+- **Include** `isSidechain` entries (replay includes them, DB keeps them as `undone`)
+- **Exclude** `isApiErrorMessage` entries
+- **Exclude** empty user prompts
+
+This matches `readAllTranscriptEntries` (used by replay), NOT `readTranscriptEntries` (used by backfill, which filters sidechain). The two parsers intentionally use different filters — `countUserPromptsInTranscript` must follow replay's rules.
+
+**Historical data:** Existing turns created with the old `COUNT(*) + 1` logic may have wrong `prompt_number` values for adopted sessions. Options:
+- **Lazy repair**: when Stop backfills a session, compare DB prompt_numbers against JSONL-derived numbers and fix mismatches in a transaction.
+- **Ignore**: if no adopted sessions exist yet, historical data is correct and no repair needed. The fix only prevents future drift.
 
 ### Undo Detection and Stale Marking
 
