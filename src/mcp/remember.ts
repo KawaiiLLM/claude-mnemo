@@ -20,11 +20,19 @@ type ToolTextResult = {
 
 type RememberStatus = "skipped" | "undone" | "active" | "superseded" | "archived";
 
+const TURN_REMEMBER_STATUSES = ["skipped", "undone"] as const;
+const MEMORY_REMEMBER_STATUSES = [
+  "active",
+  "superseded",
+  "archived",
+] as const;
+
 export interface RememberToolInput {
   parent?: string;
   id?: string;
   type?: string;
   scope?: string;
+  prompt_number?: number;
   title?: string;
   content?: string;
   description?: string;
@@ -56,6 +64,10 @@ function textResult(text: string): ToolTextResult {
   };
 }
 
+function parameterError(message: string): ToolTextResult {
+  return textResult(`Parameter error: ${message}`);
+}
+
 function parseSessionId(value: string): number | null {
   const match = /^S(\d+)$/.exec(value.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;
@@ -83,6 +95,27 @@ function resolveContent(input: Pick<RememberToolInput, "content" | "description"
   return input.content ?? input.description ?? null;
 }
 
+function validateStatusForRoute(
+  status: RememberStatus | undefined,
+  allowedStatuses: readonly RememberStatus[] | null,
+  routeLabel: string,
+): string | null {
+  if (status === undefined) {
+    return null;
+  }
+
+  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
+    const allowedText =
+      allowedStatuses === null
+        ? "no status values"
+        : allowedStatuses.map((value) => `"${value}"`).join(", ");
+
+    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  }
+
+  return null;
+}
+
 function resolveNextPromptNumber(db: Database, sessionId: number): number {
   const pendingTurns = getPendingTurns(db, sessionId);
 
@@ -104,11 +137,21 @@ function handleTurnRemember(
   sessionId: number,
   input: RememberToolInput,
 ): ToolTextResult {
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember",
+  );
+
+  if (statusError) {
+    return parameterError(statusError);
+  }
+
   if (!getSession(db, sessionId)) {
     return textResult(`Session ${sessionId} not found.`);
   }
 
-  const promptNumber = resolveNextPromptNumber(db, sessionId);
+  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
   const content = input.status === "skipped" ? null : resolveContent(input);
   const turn = saveTurn(db, {
     sessionId,
@@ -135,6 +178,16 @@ function handleObservationRemember(
   parent: { sessionId: number; promptNumber: number },
   input: RememberToolInput,
 ): ToolTextResult {
+  const statusError = validateStatusForRoute(
+    input.status,
+    null,
+    "observation remember",
+  );
+
+  if (statusError) {
+    return parameterError(statusError);
+  }
+
   const turn = getTurn(db, parent.sessionId, parent.promptNumber);
 
   if (!turn) {
@@ -160,6 +213,16 @@ function handleObservationRemember(
 }
 
 function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextResult {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember",
+  );
+
+  if (statusError) {
+    return parameterError(statusError);
+  }
+
   if (!input.type || !input.scope || !input.title || !resolveContent(input)) {
     return textResult("Memory creation requires type, scope, title, and content.");
   }
@@ -193,6 +256,16 @@ function handleMemoryUpdate(
   memoryId: number,
   input: RememberToolInput,
 ): ToolTextResult {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember",
+  );
+
+  if (statusError) {
+    return parameterError(statusError);
+  }
+
   const memory = updateMemory(db, memoryId, {
     type: input.type,
     scope: input.scope,
@@ -243,6 +316,12 @@ export function rememberTool(
     const sessionId = parseSessionId(input.id);
 
     if (sessionId !== null) {
+      const statusError = validateStatusForRoute(input.status, null, "session remember");
+
+      if (statusError) {
+        return parameterError(statusError);
+      }
+
       const session = getSession(db, sessionId);
 
       if (!session) {

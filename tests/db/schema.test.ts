@@ -1,12 +1,15 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createMemory } from "../../src/db/memories";
 import {
   initializeDatabase,
   initializeSchema,
   migrateSchema,
 } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import * as searchModule from "../../src/db/search";
 
 describe("initializeSchema", () => {
   let db: Database;
@@ -162,6 +165,64 @@ describe("initializeSchema", () => {
     expect(ftsColumns).toContain("content");
   });
 
+  test("skips rebuilding the search index when the database is empty", () => {
+    const rebuildSpy = spyOn(searchModule, "rebuildSearchIndex");
+
+    initializeDatabase(db);
+
+    expect(rebuildSpy).not.toHaveBeenCalled();
+
+    rebuildSpy.mockRestore();
+  });
+
+  test("rebuilds the search index when a populated layer is missing from FTS", () => {
+    initializeSchema(db);
+
+    upsertSession(db, {
+      contentSessionId: "session-fts-rebuild",
+      project: "claude-mnemo",
+      title: "FTS rebuild",
+      description: "Needs an indexed session row",
+      insight: null,
+      startedAtEpoch: 10,
+      updatedAtEpoch: 20,
+      completedAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "feedback",
+      scope: "global",
+      title: "Rebuild FTS gate",
+      content: "The startup gate should restore missing memory rows.",
+      reasoning: null,
+      application: null,
+      tags: ["fts"],
+      createdAtEpoch: 30,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    db.query("DELETE FROM memory_fts WHERE layer = 'memory'").run();
+
+    const rebuildSpy = spyOn(searchModule, "rebuildSearchIndex");
+
+    initializeDatabase(db);
+
+    expect(rebuildSpy).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'memory'",
+        )
+        .get().count,
+    ).toBe(1);
+
+    rebuildSpy.mockRestore();
+  });
+
   test("migrates sessions and turns to add next_steps and tool_call_count", () => {
     db.exec(`
       CREATE TABLE sessions (
@@ -209,6 +270,155 @@ describe("initializeSchema", () => {
 
     expect(sessionColumns).toContain("next_steps");
     expect(turnColumns).toContain("tool_call_count");
+  });
+
+  test("skips observation backfill rows that have no legacy source values", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        insight TEXT,
+        started_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        description TEXT,
+        insight TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+
+      CREATE TABLE observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        narrative TEXT,
+        facts TEXT,
+        concepts TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        created_at_epoch INTEGER NOT NULL
+      );
+    `);
+
+    db.query(
+      `INSERT INTO sessions (content_session_id, project, started_at_epoch)
+       VALUES (?, ?, ?)`,
+    ).run("legacy-session", "claude-mnemo", 1);
+
+    const session = db
+      .query<{ id: number }, []>("SELECT id FROM sessions WHERE content_session_id = ?")
+      .get("legacy-session");
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).run(session.id, 1, "extracted", "Legacy turn", 2);
+
+    const turn = db
+      .query<{ id: number }, []>("SELECT id FROM turns WHERE session_id = ?")
+      .get(session.id);
+
+    db.query(
+      `INSERT INTO observations (
+        turn_id,
+        type,
+        title,
+        description,
+        narrative,
+        facts,
+        concepts,
+        files_read,
+        files_modified,
+        created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      turn.id,
+      "discovery",
+      "No legacy source data",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      3,
+    );
+
+    db.query(
+      `INSERT INTO observations (
+        turn_id,
+        type,
+        title,
+        description,
+        narrative,
+        facts,
+        concepts,
+        files_read,
+        files_modified,
+        created_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      turn.id,
+      "bugfix",
+      "Legacy backfill data",
+      "Legacy description",
+      "Legacy narrative",
+      JSON.stringify(["legacy fact"]),
+      JSON.stringify(["legacy-tag"]),
+      JSON.stringify(["src/legacy.ts"]),
+      JSON.stringify(["src/legacy.ts"]),
+      4,
+    );
+
+    initializeSchema(db);
+    migrateSchema(db);
+
+    const untouchedObservation = db
+      .query<
+        { content: string | null; insight: string | null; tags: string | null },
+        [number]
+      >("SELECT content, insight, tags FROM observations WHERE title = ?")
+      .get("No legacy source data");
+    const migratedObservation = db
+      .query<
+        { content: string | null; insight: string | null; tags: string | null },
+        [number]
+      >("SELECT content, insight, tags FROM observations WHERE title = ?")
+      .get("Legacy backfill data");
+
+    expect(untouchedObservation).toEqual({
+      content: null,
+      insight: null,
+      tags: null,
+    });
+    expect(migratedObservation).toEqual({
+      content: "Legacy description",
+      insight: "Legacy narrative",
+      tags: JSON.stringify(["legacy-tag"]),
+    });
   });
 
   test("initializeDatabase applies schema creation and migrations together", () => {

@@ -48,6 +48,7 @@ export const rememberInputShape = {
   id: z.string().optional(),
   type: z.string().optional(),
   scope: z.string().optional(),
+  prompt_number: z.number().int().positive().optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   description: z.string().optional(),

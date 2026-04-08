@@ -104,24 +104,53 @@ function buildMemoryView(memory: MemoryRecord): FormattedMemory {
   };
 }
 
+function mergeMemoryLists(...memoryLists: MemoryRecord[][]): MemoryRecord[] {
+  const seen = new Set<number>();
+  const merged: MemoryRecord[] = [];
+
+  for (const list of memoryLists) {
+    for (const memory of list) {
+      if (seen.has(memory.id)) {
+        continue;
+      }
+
+      seen.add(memory.id);
+      merged.push(memory);
+    }
+  }
+
+  return merged
+    .sort((left, right) => {
+      const leftTimestamp = left.updatedAtEpoch ?? left.createdAtEpoch;
+      const rightTimestamp = right.updatedAtEpoch ?? right.createdAtEpoch;
+
+      if (rightTimestamp !== leftTimestamp) {
+        return rightTimestamp - leftTimestamp;
+      }
+
+      return right.id - left.id;
+    })
+    .slice(0, 50);
+}
+
 function buildMemoriesOutput(
   db: Database,
   projectScope: string | undefined,
 ): string[] {
-  const memories = [
-    ...listMemories(db, {
+  const memories = mergeMemoryLists(
+    listMemories(db, {
       scope: "global",
       status: "active",
       limit: 50,
     }),
-    ...(projectScope
+    projectScope
       ? listMemories(db, {
           scope: projectScope,
           status: "active",
           limit: 50,
         })
-      : []),
-  ];
+      : [],
+  );
 
   if (memories.length === 0) {
     return [];

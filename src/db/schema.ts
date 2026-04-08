@@ -115,7 +115,49 @@ function hasColumn(db: Database, table: string, column: string): boolean {
   return rows.some((row) => row.name === column);
 }
 
-export function migrateSchema(db: Database): void {
+function hasRow(
+  db: Database,
+  sql: string,
+  params: Array<string | number> = [],
+): boolean {
+  return (
+    db.query<{ hasRows: number }, Array<string | number>>(
+      `SELECT EXISTS(${sql}) AS hasRows`,
+    ).get(...params)?.hasRows === 1
+  );
+}
+
+function shouldRebuildSearchIndex(db: Database): boolean {
+  const sourceLayers = [
+    { table: "sessions", layer: "session" },
+    { table: "turns", layer: "turn" },
+    { table: "observations", layer: "observation" },
+    { table: "memories", layer: "memory" },
+  ] as const;
+
+  const hasAnySourceRows = sourceLayers.some(({ table }) =>
+    hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`),
+  );
+  const hasAnyFtsRows = hasRow(db, "SELECT 1 FROM memory_fts LIMIT 1");
+
+  if (!hasAnySourceRows && !hasAnyFtsRows) {
+    return false;
+  }
+
+  if (hasAnySourceRows !== hasAnyFtsRows) {
+    return true;
+  }
+
+  return sourceLayers.some(
+    ({ table, layer }) =>
+      hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) &&
+      !hasRow(db, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer]),
+  );
+}
+
+export function migrateSchema(db: Database): boolean {
+  let searchIndexNeedsRebuild = false;
+
   if (!hasColumn(db, "sessions", "next_steps")) {
     db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
   }
@@ -144,29 +186,60 @@ export function migrateSchema(db: Database): void {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
 
-  db.exec(`
-    UPDATE sessions
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
+  if (
+    hasRow(
+      db,
+      "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1",
+    )
+  ) {
+    db.exec(`
+      UPDATE sessions
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
 
-  db.exec(`
-    UPDATE turns
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
+  if (
+    hasRow(
+      db,
+      "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1",
+    )
+  ) {
+    db.exec(`
+      UPDATE turns
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
 
-  db.exec(`
-    UPDATE observations
-    SET
-      content = COALESCE(content, description),
-      insight = COALESCE(insight, narrative),
-      tags = COALESCE(tags, concepts)
-    WHERE
-      content IS NULL
-      OR insight IS NULL
-      OR tags IS NULL
-  `);
+  if (
+    hasRow(
+      db,
+      `
+        SELECT 1 FROM observations
+        WHERE
+          (content IS NULL AND description IS NOT NULL)
+          OR (insight IS NULL AND narrative IS NOT NULL)
+          OR (tags IS NULL AND concepts IS NOT NULL)
+        LIMIT 1
+      `,
+    )
+  ) {
+    db.exec(`
+      UPDATE observations
+      SET
+        content = COALESCE(content, description),
+        insight = COALESCE(insight, narrative),
+        tags = COALESCE(tags, concepts)
+      WHERE
+        (content IS NULL AND description IS NOT NULL)
+        OR (insight IS NULL AND narrative IS NOT NULL)
+        OR (tags IS NULL AND concepts IS NOT NULL)
+    `);
+    searchIndexNeedsRebuild = true;
+  }
 
   const ftsColumns = db
     .query<{ name: string }, []>("SELECT name FROM pragma_table_info('memory_fts')")
@@ -184,11 +257,17 @@ export function migrateSchema(db: Database): void {
         extra
       )
     `);
+    searchIndexNeedsRebuild = true;
   }
+
+  return searchIndexNeedsRebuild;
 }
 
 export function initializeDatabase(db: Database): void {
   initializeSchema(db);
-  migrateSchema(db);
-  rebuildSearchIndex(db);
+  const migrationNeedsRebuild = migrateSchema(db);
+
+  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db)) {
+    rebuildSearchIndex(db);
+  }
 }

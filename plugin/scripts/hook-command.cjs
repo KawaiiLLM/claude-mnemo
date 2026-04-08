@@ -769,7 +769,34 @@ function hasColumn(db2, table, column) {
   const rows = db2.query(`SELECT name FROM pragma_table_info('${table}')`).all();
   return rows.some((row) => row.name === column);
 }
+function hasRow(db2, sql, params = []) {
+  return db2.query(
+    `SELECT EXISTS(${sql}) AS hasRows`
+  ).get(...params)?.hasRows === 1;
+}
+function shouldRebuildSearchIndex(db2) {
+  const sourceLayers = [
+    { table: "sessions", layer: "session" },
+    { table: "turns", layer: "turn" },
+    { table: "observations", layer: "observation" },
+    { table: "memories", layer: "memory" }
+  ];
+  const hasAnySourceRows = sourceLayers.some(
+    ({ table }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`)
+  );
+  const hasAnyFtsRows = hasRow(db2, "SELECT 1 FROM memory_fts LIMIT 1");
+  if (!hasAnySourceRows && !hasAnyFtsRows) {
+    return false;
+  }
+  if (hasAnySourceRows !== hasAnyFtsRows) {
+    return true;
+  }
+  return sourceLayers.some(
+    ({ table, layer }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`) && !hasRow(db2, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer])
+  );
+}
 function migrateSchema(db2) {
+  let searchIndexNeedsRebuild = false;
   if (!hasColumn(db2, "sessions", "next_steps")) {
     db2.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
   }
@@ -791,27 +818,52 @@ function migrateSchema(db2) {
   if (!hasColumn(db2, "observations", "tags")) {
     db2.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
-  db2.exec(`
-    UPDATE sessions
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
-  db2.exec(`
-    UPDATE turns
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
-  db2.exec(`
-    UPDATE observations
-    SET
-      content = COALESCE(content, description),
-      insight = COALESCE(insight, narrative),
-      tags = COALESCE(tags, concepts)
-    WHERE
-      content IS NULL
-      OR insight IS NULL
-      OR tags IS NULL
-  `);
+  if (hasRow(
+    db2,
+    "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
+  )) {
+    db2.exec(`
+      UPDATE sessions
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
+  if (hasRow(
+    db2,
+    "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
+  )) {
+    db2.exec(`
+      UPDATE turns
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
+  if (hasRow(
+    db2,
+    `
+        SELECT 1 FROM observations
+        WHERE
+          (content IS NULL AND description IS NOT NULL)
+          OR (insight IS NULL AND narrative IS NOT NULL)
+          OR (tags IS NULL AND concepts IS NOT NULL)
+        LIMIT 1
+      `
+  )) {
+    db2.exec(`
+      UPDATE observations
+      SET
+        content = COALESCE(content, description),
+        insight = COALESCE(insight, narrative),
+        tags = COALESCE(tags, concepts)
+      WHERE
+        (content IS NULL AND description IS NOT NULL)
+        OR (insight IS NULL AND narrative IS NOT NULL)
+        OR (tags IS NULL AND concepts IS NOT NULL)
+    `);
+    searchIndexNeedsRebuild = true;
+  }
   const ftsColumns = db2.query("SELECT name FROM pragma_table_info('memory_fts')").all().map((row) => row.name);
   if (ftsColumns.length > 0 && !ftsColumns.includes("content")) {
     db2.exec("DROP TABLE IF EXISTS memory_fts");
@@ -824,12 +876,16 @@ function migrateSchema(db2) {
         extra
       )
     `);
+    searchIndexNeedsRebuild = true;
   }
+  return searchIndexNeedsRebuild;
 }
 function initializeDatabase(db2) {
   initializeSchema(db2);
-  migrateSchema(db2);
-  rebuildSearchIndex(db2);
+  const migrationNeedsRebuild = migrateSchema(db2);
+  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db2)) {
+    rebuildSearchIndex(db2);
+  }
 }
 
 // src/mnemosyne/fork.ts
@@ -35452,6 +35508,7 @@ var rememberInputShape = {
   id: external_exports.string().optional(),
   type: external_exports.string().optional(),
   scope: external_exports.string().optional(),
+  prompt_number: external_exports.number().int().positive().optional(),
   title: external_exports.string().optional(),
   content: external_exports.string().optional(),
   description: external_exports.string().optional(),
@@ -37247,6 +37304,9 @@ function legacyRecallMemory(db2, input) {
 function shouldUseLegacyPath(input) {
   return input.scope === void 0 && input.id === void 0;
 }
+function hasIdSelectorConflict(input) {
+  return input.scope !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.observation !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.around !== void 0 || input.project !== void 0 || input.fromEpoch !== void 0 || input.toEpoch !== void 0;
+}
 function firstLine(value) {
   return value.split("\n")[0] ?? value;
 }
@@ -37276,6 +37336,11 @@ function formatMixedSearchResult(db2, result) {
 function recallMemory(db2, input) {
   const normalizedInput = normalizeRecallInput(input);
   if (normalizedInput.id) {
+    if (hasIdSelectorConflict(normalizedInput)) {
+      return formatParameterError(
+        "id cannot be combined with scope, session, turn, obs, or search filters."
+      );
+    }
     return renderRoutedId(db2, normalizedInput.id);
   }
   if (normalizedInput.scope === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
@@ -37595,6 +37660,12 @@ function updateSessionTool(db2, input) {
 }
 
 // src/mcp/remember.ts
+var TURN_REMEMBER_STATUSES = ["skipped", "undone"];
+var MEMORY_REMEMBER_STATUSES = [
+  "active",
+  "superseded",
+  "archived"
+];
 function textResult2(text) {
   return {
     content: [
@@ -37604,6 +37675,9 @@ function textResult2(text) {
       }
     ]
   };
+}
+function parameterError(message) {
+  return textResult2(`Parameter error: ${message}`);
 }
 function parseSessionId(value) {
   const match = /^S(\d+)$/.exec(value.trim());
@@ -37626,6 +37700,16 @@ function parseTurnParent(value) {
 function resolveContent(input) {
   return input.content ?? input.description ?? null;
 }
+function validateStatusForRoute(status, allowedStatuses, routeLabel) {
+  if (status === void 0) {
+    return null;
+  }
+  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses === null ? "no status values" : allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  }
+  return null;
+}
 function resolveNextPromptNumber(db2, sessionId) {
   const pendingTurns = getPendingTurns(db2, sessionId);
   if (pendingTurns.length > 0) {
@@ -37638,10 +37722,18 @@ function resolveNextPromptNumber(db2, sessionId) {
   return Math.max(...existingTurns.map((turn) => turn.promptNumber)) + 1;
 }
 function handleTurnRemember(db2, sessionId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   if (!getSession(db2, sessionId)) {
     return textResult2(`Session ${sessionId} not found.`);
   }
-  const promptNumber = resolveNextPromptNumber(db2, sessionId);
+  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db2, sessionId);
   const content = input.status === "skipped" ? null : resolveContent(input);
   const turn = saveTurn(db2, {
     sessionId,
@@ -37662,6 +37754,14 @@ function handleTurnRemember(db2, sessionId, input) {
   return textResult2(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
 }
 function handleObservationRemember(db2, parent, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    null,
+    "observation remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   const turn = getTurn(db2, parent.sessionId, parent.promptNumber);
   if (!turn) {
     return textResult2(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
@@ -37683,6 +37783,14 @@ function handleObservationRemember(db2, parent, input) {
   return textResult2(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
 }
 function handleMemoryCreate(db2, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   if (!input.type || !input.scope || !input.title || !resolveContent(input)) {
     return textResult2("Memory creation requires type, scope, title, and content.");
   }
@@ -37704,6 +37812,14 @@ function handleMemoryCreate(db2, input) {
   return textResult2(`Created memory M${memory.id}.`);
 }
 function handleMemoryUpdate(db2, memoryId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   const memory = updateMemory(db2, memoryId, {
     type: input.type,
     scope: input.scope,
@@ -37737,6 +37853,10 @@ function rememberTool(db2, input) {
   if (input.id) {
     const sessionId = parseSessionId(input.id);
     if (sessionId !== null) {
+      const statusError = validateStatusForRoute(input.status, null, "session remember");
+      if (statusError) {
+        return parameterError(statusError);
+      }
       const session = getSession(db2, sessionId);
       if (!session) {
         return textResult2(`Session ${sessionId} not found.`);
@@ -38323,17 +38443,15 @@ HOW TO EXTRACT
 --------------
 For each pending/stale turn, call remember with:
 - title: 10-25 chars, what was done
-- description: 40-80 chars, how/what achieved
+- content or description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
 - Then call separate remember calls for each observation from that turn:
   - parent: "S{id}/T{n}"
   - type: bugfix|feature|refactor|change|discovery|decision
   - title: short, action- or outcome-oriented, not generic
-  - description: concise outcome, not a restatement of the user prompt
-  - narrative: explain what was done, how it works, and why it matters
-  - facts: independent, verifiable statements
-  - concepts (from fixed vocabulary): how-it-works|why-it-exists|what-changed|problem-solution|gotcha|pattern|trade-off
-  - Do NOT use the observation type as a concept
+  - content or description: concise outcome, not a restatement of the user prompt
+  - insight: explain what was done, how it works, and why it matters
+  - tags: independent, verifiable labels for retrieval
   - files_read/files_modified: only files that materially informed or changed the result
 - When a stable lesson applies beyond the current turn, record it with remember(type="feedback" | "project" | "reference" | "user", scope="global" | "<project>", ...).
 - Prefer remember for durable knowledge; save_turn/update_session are compatibility fallbacks, not the default path.
@@ -38361,7 +38479,7 @@ EXAMPLES
 Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
 Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
-Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." })
+Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })
 Good example: remember({ id: "S1", title: "Fix auth race", content: "Updated the session summary after the mutex fix", insight: "Session summary now reflects the concurrency fix" })
 Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
 Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
@@ -38498,19 +38616,40 @@ function buildMemoryView2(memory) {
     source: null
   };
 }
+function mergeMemoryLists(...memoryLists) {
+  const seen = /* @__PURE__ */ new Set();
+  const merged = [];
+  for (const list of memoryLists) {
+    for (const memory of list) {
+      if (seen.has(memory.id)) {
+        continue;
+      }
+      seen.add(memory.id);
+      merged.push(memory);
+    }
+  }
+  return merged.sort((left, right) => {
+    const leftTimestamp = left.updatedAtEpoch ?? left.createdAtEpoch;
+    const rightTimestamp = right.updatedAtEpoch ?? right.createdAtEpoch;
+    if (rightTimestamp !== leftTimestamp) {
+      return rightTimestamp - leftTimestamp;
+    }
+    return right.id - left.id;
+  }).slice(0, 50);
+}
 function buildMemoriesOutput(db2, projectScope) {
-  const memories = [
-    ...listMemories(db2, {
+  const memories = mergeMemoryLists(
+    listMemories(db2, {
       scope: "global",
       status: "active",
       limit: 50
     }),
-    ...projectScope ? listMemories(db2, {
+    projectScope ? listMemories(db2, {
       scope: projectScope,
       status: "active",
       limit: 50
     }) : []
-  ];
+  );
   if (memories.length === 0) {
     return [];
   }

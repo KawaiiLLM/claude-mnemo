@@ -306,6 +306,64 @@ describe("handleContextHook", () => {
     singleSessionDb.close();
   });
 
+  test("caps the combined memory block at 50 rows", async () => {
+    for (let index = 0; index < 35; index += 1) {
+      createMemory(db, {
+        type: "feedback",
+        scope: "global",
+        title: `Global memory ${index + 1}`,
+        content: `Global memory content ${index + 1}`,
+        reasoning: null,
+        application: null,
+        tags: ["global"],
+        createdAtEpoch: 1_000 - index,
+        updatedAtEpoch: 1_000 - index,
+        sourceTurnId: null,
+        status: "active",
+        supersededBy: null,
+        expiresAtEpoch: null,
+      });
+    }
+
+    for (let index = 0; index < 35; index += 1) {
+      createMemory(db, {
+        type: "feedback",
+        scope: "claude-mnemo",
+        title: `Project memory ${index + 1}`,
+        content: `Project memory content ${index + 1}`,
+        reasoning: null,
+        application: null,
+        tags: ["project"],
+        createdAtEpoch: 900 - index,
+        updatedAtEpoch: 900 - index,
+        sourceTurnId: null,
+        status: "active",
+        supersededBy: null,
+        expiresAtEpoch: null,
+      });
+    }
+
+    const handler = createContextHandler({
+      db,
+    });
+
+    const result = await handler(
+      createInput({
+        sessionId: "session-context",
+      }),
+    );
+
+    const memoryLines = (result.hookSpecificOutput ?? "")
+      .split("\n")
+      .filter((line) => /^-\s+\[M\d+\]/.test(line.trimStart()));
+    const memoryIds = memoryLines
+      .map((line) => line.match(/\[M(\d+)\]/)?.[1])
+      .filter((value): value is string => value !== undefined);
+
+    expect(memoryLines).toHaveLength(50);
+    expect(new Set(memoryIds).size).toBe(50);
+  });
+
   test("anchors on the current session and applies graduated depth", async () => {
     insertTurn(db, {
       sessionId: currentSessionId,

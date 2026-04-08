@@ -1045,6 +1045,27 @@ function shouldUseLegacyPath(input: RecallInput): boolean {
   return input.scope === undefined && input.id === undefined;
 }
 
+function hasIdSelectorConflict(input: RecallInput): boolean {
+  return (
+    input.scope !== undefined ||
+    input.session !== undefined ||
+    input.turn !== undefined ||
+    input.obs !== undefined ||
+    input.observation !== undefined ||
+    input.query !== undefined ||
+    input.type !== undefined ||
+    input.file !== undefined ||
+    input.after !== undefined ||
+    input.before !== undefined ||
+    input.time !== undefined ||
+    input.expandTurns !== undefined ||
+    input.around !== undefined ||
+    input.project !== undefined ||
+    input.fromEpoch !== undefined ||
+    input.toEpoch !== undefined
+  );
+}
+
 function firstLine(value: string): string {
   return value.split("\n")[0] ?? value;
 }
@@ -1089,6 +1110,12 @@ export function recallMemory(db: Database, input: RecallInput): string {
   const normalizedInput = normalizeRecallInput(input);
 
   if (normalizedInput.id) {
+    if (hasIdSelectorConflict(normalizedInput)) {
+      return formatParameterError(
+        "id cannot be combined with scope, session, turn, obs, or search filters.",
+      );
+    }
+
     return renderRoutedId(db, normalizedInput.id);
   }
 

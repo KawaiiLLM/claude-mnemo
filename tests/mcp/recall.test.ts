@@ -276,6 +276,16 @@ describe("recallMemory", () => {
     expect(() => recallInputSchema.parse({ id: "M1" })).not.toThrow();
   });
 
+  test("rejects ambiguous id and scope combinations", () => {
+    const output = recallMemory(db, {
+      id: `S${authSessionId}`,
+      scope: "sessions",
+    });
+
+    expect(output).toContain("Parameter error:");
+    expect(output).toContain("id cannot be combined");
+  });
+
   test("normalizes legacy observation aliases and logs the migration warning", () => {
     const logSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
 

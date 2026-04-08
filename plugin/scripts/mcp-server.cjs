@@ -7458,7 +7458,34 @@ function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
   return rows.some((row) => row.name === column);
 }
+function hasRow(db, sql, params = []) {
+  return db.query(
+    `SELECT EXISTS(${sql}) AS hasRows`
+  ).get(...params)?.hasRows === 1;
+}
+function shouldRebuildSearchIndex(db) {
+  const sourceLayers = [
+    { table: "sessions", layer: "session" },
+    { table: "turns", layer: "turn" },
+    { table: "observations", layer: "observation" },
+    { table: "memories", layer: "memory" }
+  ];
+  const hasAnySourceRows = sourceLayers.some(
+    ({ table }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`)
+  );
+  const hasAnyFtsRows = hasRow(db, "SELECT 1 FROM memory_fts LIMIT 1");
+  if (!hasAnySourceRows && !hasAnyFtsRows) {
+    return false;
+  }
+  if (hasAnySourceRows !== hasAnyFtsRows) {
+    return true;
+  }
+  return sourceLayers.some(
+    ({ table, layer }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) && !hasRow(db, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer])
+  );
+}
 function migrateSchema(db) {
+  let searchIndexNeedsRebuild = false;
   if (!hasColumn(db, "sessions", "next_steps")) {
     db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
   }
@@ -7480,27 +7507,52 @@ function migrateSchema(db) {
   if (!hasColumn(db, "observations", "tags")) {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
-  db.exec(`
-    UPDATE sessions
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
-  db.exec(`
-    UPDATE turns
-    SET content = COALESCE(content, description)
-    WHERE content IS NULL AND description IS NOT NULL
-  `);
-  db.exec(`
-    UPDATE observations
-    SET
-      content = COALESCE(content, description),
-      insight = COALESCE(insight, narrative),
-      tags = COALESCE(tags, concepts)
-    WHERE
-      content IS NULL
-      OR insight IS NULL
-      OR tags IS NULL
-  `);
+  if (hasRow(
+    db,
+    "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
+  )) {
+    db.exec(`
+      UPDATE sessions
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
+  if (hasRow(
+    db,
+    "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
+  )) {
+    db.exec(`
+      UPDATE turns
+      SET content = COALESCE(content, description)
+      WHERE content IS NULL AND description IS NOT NULL
+    `);
+    searchIndexNeedsRebuild = true;
+  }
+  if (hasRow(
+    db,
+    `
+        SELECT 1 FROM observations
+        WHERE
+          (content IS NULL AND description IS NOT NULL)
+          OR (insight IS NULL AND narrative IS NOT NULL)
+          OR (tags IS NULL AND concepts IS NOT NULL)
+        LIMIT 1
+      `
+  )) {
+    db.exec(`
+      UPDATE observations
+      SET
+        content = COALESCE(content, description),
+        insight = COALESCE(insight, narrative),
+        tags = COALESCE(tags, concepts)
+      WHERE
+        (content IS NULL AND description IS NOT NULL)
+        OR (insight IS NULL AND narrative IS NOT NULL)
+        OR (tags IS NULL AND concepts IS NOT NULL)
+    `);
+    searchIndexNeedsRebuild = true;
+  }
   const ftsColumns = db.query("SELECT name FROM pragma_table_info('memory_fts')").all().map((row) => row.name);
   if (ftsColumns.length > 0 && !ftsColumns.includes("content")) {
     db.exec("DROP TABLE IF EXISTS memory_fts");
@@ -7513,12 +7565,16 @@ function migrateSchema(db) {
         extra
       )
     `);
+    searchIndexNeedsRebuild = true;
   }
+  return searchIndexNeedsRebuild;
 }
 function initializeDatabase(db) {
   initializeSchema(db);
-  migrateSchema(db);
-  rebuildSearchIndex(db);
+  const migrationNeedsRebuild = migrateSchema(db);
+  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db)) {
+    rebuildSearchIndex(db);
+  }
 }
 var SCHEMA_SQL;
 var init_schema = __esm({
@@ -30997,6 +31053,7 @@ var rememberInputShape = {
   id: external_exports3.string().optional(),
   type: external_exports3.string().optional(),
   scope: external_exports3.string().optional(),
+  prompt_number: external_exports3.number().int().positive().optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
   description: external_exports3.string().optional(),
@@ -32746,6 +32803,9 @@ function legacyRecallMemory(db, input) {
 function shouldUseLegacyPath(input) {
   return input.scope === void 0 && input.id === void 0;
 }
+function hasIdSelectorConflict(input) {
+  return input.scope !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.observation !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.around !== void 0 || input.project !== void 0 || input.fromEpoch !== void 0 || input.toEpoch !== void 0;
+}
 function firstLine(value) {
   return value.split("\n")[0] ?? value;
 }
@@ -32775,6 +32835,11 @@ function formatMixedSearchResult(db, result) {
 function recallMemory(db, input) {
   const normalizedInput = normalizeRecallInput(input);
   if (normalizedInput.id) {
+    if (hasIdSelectorConflict(normalizedInput)) {
+      return formatParameterError(
+        "id cannot be combined with scope, session, turn, obs, or search filters."
+      );
+    }
     return renderRoutedId(db, normalizedInput.id);
   }
   if (normalizedInput.scope === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
@@ -33094,6 +33159,12 @@ function updateSessionTool(db, input) {
 }
 
 // src/mcp/remember.ts
+var TURN_REMEMBER_STATUSES = ["skipped", "undone"];
+var MEMORY_REMEMBER_STATUSES = [
+  "active",
+  "superseded",
+  "archived"
+];
 function textResult2(text) {
   return {
     content: [
@@ -33103,6 +33174,9 @@ function textResult2(text) {
       }
     ]
   };
+}
+function parameterError(message) {
+  return textResult2(`Parameter error: ${message}`);
 }
 function parseSessionId(value) {
   const match = /^S(\d+)$/.exec(value.trim());
@@ -33125,6 +33199,16 @@ function parseTurnParent(value) {
 function resolveContent(input) {
   return input.content ?? input.description ?? null;
 }
+function validateStatusForRoute(status, allowedStatuses, routeLabel) {
+  if (status === void 0) {
+    return null;
+  }
+  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses === null ? "no status values" : allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  }
+  return null;
+}
 function resolveNextPromptNumber(db, sessionId) {
   const pendingTurns = getPendingTurns(db, sessionId);
   if (pendingTurns.length > 0) {
@@ -33137,10 +33221,18 @@ function resolveNextPromptNumber(db, sessionId) {
   return Math.max(...existingTurns.map((turn) => turn.promptNumber)) + 1;
 }
 function handleTurnRemember(db, sessionId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   if (!getSession(db, sessionId)) {
     return textResult2(`Session ${sessionId} not found.`);
   }
-  const promptNumber = resolveNextPromptNumber(db, sessionId);
+  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
   const content = input.status === "skipped" ? null : resolveContent(input);
   const turn = saveTurn(db, {
     sessionId,
@@ -33161,6 +33253,14 @@ function handleTurnRemember(db, sessionId, input) {
   return textResult2(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
 }
 function handleObservationRemember(db, parent, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    null,
+    "observation remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   const turn = getTurn(db, parent.sessionId, parent.promptNumber);
   if (!turn) {
     return textResult2(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
@@ -33182,6 +33282,14 @@ function handleObservationRemember(db, parent, input) {
   return textResult2(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
 }
 function handleMemoryCreate(db, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   if (!input.type || !input.scope || !input.title || !resolveContent(input)) {
     return textResult2("Memory creation requires type, scope, title, and content.");
   }
@@ -33203,6 +33311,14 @@ function handleMemoryCreate(db, input) {
   return textResult2(`Created memory M${memory.id}.`);
 }
 function handleMemoryUpdate(db, memoryId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    MEMORY_REMEMBER_STATUSES,
+    "memory remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
   const memory = updateMemory(db, memoryId, {
     type: input.type,
     scope: input.scope,
@@ -33236,6 +33352,10 @@ function rememberTool(db, input) {
   if (input.id) {
     const sessionId = parseSessionId(input.id);
     if (sessionId !== null) {
+      const statusError = validateStatusForRoute(input.status, null, "session remember");
+      if (statusError) {
+        return parameterError(statusError);
+      }
       const session = getSession(db, sessionId);
       if (!session) {
         return textResult2(`Session ${sessionId} not found.`);
