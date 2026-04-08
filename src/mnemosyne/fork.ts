@@ -176,6 +176,7 @@ export async function forkMnemosyne(
   const execution = queryImpl({
     prompt: input.prompt,
     options: {
+      model: "claude-sonnet-4-6",
       cwd: input.cwd,
       maxTurns: 15,
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
