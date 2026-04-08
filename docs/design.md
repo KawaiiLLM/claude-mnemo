@@ -180,7 +180,7 @@ Output format — indented tags, optimized for LLM consumption:
 [S142] auth中间件重构 | 04-05 14:30 | claude-mem
   description: 修复竞态+补测试
   insight:
-  - forkSession可复用完整上下文
+  - 提取代理应与主会话运行态解耦
   - 记忆粒度应提升到per-QA-turn
 
   [T1] 诊断401错误 | 3 obs
@@ -234,7 +234,7 @@ save_turn({ session_id: 1, prompt_number: 2, status: "undone" })
 ```
 update_session({ session_id: 1, title: "auth中间件重构",
                  description: "修复竞态+补测试",
-                 insight: "- mutex是并发安全的关键\n- forkSession可复用上下文" })
+                 insight: "- mutex是并发安全的关键\n- 提取应依赖结构化上下文而非父会话运行态" })
 ```
 
 ---
@@ -283,9 +283,9 @@ The SDK subprocess still loads the Claude runtime and would recurse through hook
    }
    ```
 
-3. **Tool set preservation**: `settingSources` is passed to load the same plugins/MCP servers (identical tool set → cache hit), but hooks are short-circuited by the guard above.
+3. **Explicit tool injection**: the four memory tools are provided by the in-process `mnemo` MCP server passed to `query()`, so Mnemosyne does not rely on inheriting plugin runtime state from the parent Claude session.
 
-This gives both cache hits (same tools) and re-entry safety (hooks exit immediately).
+This gives extraction reliability (tools always present) and re-entry safety (hooks exit immediately).
 
 ### Prompt Design
 
@@ -293,7 +293,7 @@ English, following claude-mem's observer pattern:
 
 ```
 You are Mnemosyne, the memory guardian for Claude Code.
-You have just inherited the full context of a conversation.
+The conversation context is embedded below.
 You are NOT the agent who did the work — you are observing and recording.
 
 EXTRACTION STATUS
@@ -316,7 +316,7 @@ Rules:
 - Never record content inside <private>...</private> tags
 ```
 
-Status summary is injected by the hook from a DB query (~100 tokens), not from a `recall` call. Each turn's `user_prompt` prefix (first ~80 chars) serves as an anchor so Mnemosyne can locate the corresponding turn in the inherited conversation context, rather than relying on counting user messages.
+The extraction context is built by the hook via `recall(scope="turns", session=..., depth="expanded")`, then embedded into the Mnemosyne prompt. Each turn's `user_prompt` prefix (first ~80 chars) still serves as an anchor, but the agent now reasons over this structured extracted context rather than inheriting the full parent conversation runtime.
 
 ### When to Call `update_session`
 
@@ -334,8 +334,8 @@ Cost is ~150 tokens per call. Giving the agent judgment avoids both stale summar
 ### Token Budget
 
 ```
-Input:  ~free (forkSession prompt cache hit on full conversation)
-        + ~150 tokens (status prompt with prompt previews)
+Input:  ~session tree from recall(scope="turns", depth="expanded")
+        + ~150 tokens (Mnemosyne instructions and turn anchors)
 Output: ~200 tokens per turn (save_turn tool call)
         + ~150 tokens (update_session, when called)
 Total:  ~750-950 tokens output for a 4-turn session
@@ -409,7 +409,7 @@ WHERE session_id = ? AND status IN ('extracted', 'skipped')
 - `skipped` — re-evaluated, still not worth recording
 - `undone` — confirmed as an undone historical branch
 
-Mnemosyne makes this judgment by examining the inherited conversation context. If the turn's prompt is part of a sidechain (undo'd branch), it calls `save_turn` with `status: "undone"`. Undone turns are preserved in the DB with their original `promptNumber`, maintaining alignment with the JSONL transcript sequence.
+Mnemosyne makes this judgment by examining the structured extraction context provided by the hook. If the turn's prompt is part of a sidechain (undo'd branch), it calls `save_turn` with `status: "undone"`. Undone turns are preserved in the DB with their original `promptNumber`, maintaining alignment with the JSONL transcript sequence.
 
 ### Re-extraction Semantics
 
@@ -579,9 +579,9 @@ Injected memories are wrapped in `<claude-mnemo-context>` tags to prevent recurs
 |--------|-----------|--------------|
 | Memory granularity | Per tool call (observation) | Per QA turn (turn + observations) |
 | Extraction trigger | PostToolUse hook (every tool call) | PreCompact + Stop (batch extraction via Mnemosyne) |
-| Agent architecture | Separate Worker HTTP API + SDK Agent | forkSession directly from hooks |
-| LLM invocation | Dedicated SDK Agent with disallowedTools | Mnemosyne via forkSession, same tool set |
-| Cache efficiency | Separate session, no cache sharing | Same tool set → prompt cache hit |
+| Agent architecture | Separate Worker HTTP API + SDK Agent | Isolated SDK extraction agent + in-process `mnemo` MCP server |
+| LLM invocation | Dedicated SDK Agent with disallowedTools | Mnemosyne via isolated `query()` call using structured recall context |
+| Cache efficiency | Separate session, no cache sharing | Separate extraction session; no dependence on parent-session cache reuse |
 | Search backend | Chroma (Python) + FTS5 (deprecated) | FTS5 only, no external dependencies |
 | Data model | sdk_sessions + observations + session_summaries | sessions → turns → observations (3-layer tree) |
 | Display format | Markdown tables | Indented tags (~30% fewer tokens) |
