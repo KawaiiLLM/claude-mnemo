@@ -121,6 +121,7 @@ export const saveTurnInputSchema = z.object(saveTurnInputShape);
 export const updateSessionInputSchema = z.object(updateSessionInputShape);
 
 export const MNEMO_ALLOWED_TOOLS = [
+  "mcp__mnemo__remember",
   "mcp__mnemo__save_turn",
   "mcp__mnemo__update_session",
   "mcp__mnemo__recall",

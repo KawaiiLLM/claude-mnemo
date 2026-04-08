@@ -14,13 +14,16 @@ ${context}
 Rules:
 - Process turns marked [pending] — extract observations from their content above
 - Re-evaluate turns marked [stale] — user undid changes:
-  - If the turn is part of an undone branch (sidechain), call save_turn with status="undone" (no title/description/observations)
+  - If the turn is part of an undone branch (sidechain), call remember({ parent: "S{id}", status: "undone" }) (no title/description/observations)
   - If the turn is still valid with changed context, re-extract normally
 - Do NOT re-process [extracted], [skipped], or [undone] turns
 - Call update_session if the session summary needs updating.
 - Include next_steps when the session has a clear trajectory or planned follow-up.
 - next_steps: what was actively being worked on or planned next (not speculative future work).
 - Skip update_session if nothing meaningful changed.
+- Primary write tool is remember.
+- Use remember for sessions, turns, observations, and memories whenever possible.
+- Use save_turn and update_session only for compatibility with older callers or when a legacy shape is still the safest fit.
 
 WHAT TO RECORD
 --------------
@@ -34,7 +37,7 @@ Use verbs: implemented, fixed, deployed, configured, discovered, traced
 
 WHEN TO SKIP
 ------------
-Call save_turn with NO title/description/observations for:
+Call remember with NO title/description/observations for:
 - Empty or trivial prompts
 - Routine checks with no findings
 - Repetitive operations already documented
@@ -42,7 +45,7 @@ Call save_turn with NO title/description/observations for:
 
 HOW TO EXTRACT
 --------------
-For each pending/stale turn, call save_turn with:
+For each pending/stale turn, call remember with:
 - title: 10-25 chars, what was done
 - description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
@@ -55,6 +58,8 @@ For each pending/stale turn, call save_turn with:
   - concepts (from fixed vocabulary): how-it-works|why-it-exists|what-changed|problem-solution|gotcha|pattern|trade-off
   - Do NOT use the observation type as a concept
   - files_read/files_modified: only files that materially informed or changed the result
+- When a stable lesson applies beyond the current turn, record it with remember(type="feedback" | "project" | "reference" | "user", scope="global" | "<project>", ...).
+- Prefer remember for durable knowledge; save_turn/update_session are compatibility fallbacks, not the default path.
 
 DEDUP
 -----
@@ -71,12 +76,15 @@ OUTPUT DISCIPLINE
 Use recall() for context from past sessions if needed for dedup.
 Use replay(session=<session_id>, turn=<N>) to recover full content if a turn above was truncated.
 Do NOT use Read, Write, Edit, Bash, or any file operation tools.
-Only use: save_turn, update_session, recall, replay.
+Only use: remember, save_turn, update_session, recall, replay.
 Content inside <private>...</private> tags must NOT be recorded.
 
 EXAMPLES
 --------
-Good example: save_turn({ session_id: 1, prompt_number: 2, title: "Fix auth race", description: "Serialized token refresh under parallel load", observations: [{ type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." }] })
-Bad example: save_turn({ session_id: 1, prompt_number: 2, title: "Analyzed auth flow", description: "Recorded findings from investigation" })
-Skip example: save_turn({ session_id: 1, prompt_number: 3 })`;
+Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added", observations: [{ type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." }] })
+Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
+Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
+Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
+Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
+Skip example: remember({ parent: "S1", status: "skipped" })`;
 }

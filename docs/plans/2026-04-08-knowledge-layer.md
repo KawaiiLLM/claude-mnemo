@@ -152,32 +152,32 @@ Routing: `parent` → create child, `id` → update existing, neither → create
 
 ```
 # Create turn (parent is session)
-remember(parent="S142", title="补充单测", content="覆盖并发场景",
-         insight="- 10并发稳定通过")
+remember({ parent: "S142", title: "补充单测", content: "覆盖并发场景",
+           insight: "- 10并发稳定通过" })
 
 # Skip turn
-remember(parent="S142", status="skipped")
+remember({ parent: "S142", status: "skipped" })
 
 # Create observation (parent is turn)
-remember(parent="S142/T3", type="bugfix", title="refreshToken 竞态",
-         content="auth.ts:42 缺少锁", insight="并发请求互相覆盖 token",
-         tags=["concurrency", "auth"])
+remember({ parent: "S142/T3", type: "bugfix", title: "refreshToken 竞态",
+           content: "auth.ts:42 缺少锁", insight: "并发请求互相覆盖 token",
+           tags: ["concurrency", "auth"] })
 
 # Update session
-remember(id="S142", title="auth中间件重构", content="修复竞态+补测试",
-         insight="- mutex 是并发安全的关键")
+remember({ id: "S142", title: "auth中间件重构", content: "修复竞态+补测试",
+           insight: "- mutex 是并发安全的关键" })
 
 # Create memory (no parent, no id)
-remember(type="feedback", scope="global", title="测试禁用 DB mock",
-         content="集成测试连真实数据库，不要 mock",
-         reasoning="mock/prod 差异导致竞态 bug 漏检",
-         application="编写涉及 DB 的测试代码时")
+remember({ type: "feedback", scope: "global", title: "测试禁用 DB mock",
+           content: "集成测试连真实数据库，不要 mock",
+           reasoning: "mock/prod 差异导致竞态 bug 漏检",
+           application: "编写涉及 DB 的测试代码时" })
 
 # Update memory
-remember(id="M1", content="updated content")
+remember({ id: "M1", content: "updated content" })
 
 # Archive memory
-remember(id="M3", status="archived")
+remember({ id: "M3", status: "archived" })
 ```
 
 ### replay — Raw transcript (unchanged)
@@ -233,21 +233,21 @@ Found 5 results for "竞态":
 ```
 Phase 1 — Chronicle extraction (existing, uses remember)
   For each pending turn:
-    remember(parent="S{id}", title=..., content=..., insight=...)
-    remember(parent="S{id}/T{n}", type="bugfix", ...)      → observations
-    or: remember(parent="S{id}", status="skipped")
+    remember({ parent: "S{id}", title=..., content=..., insight=... })
+    remember({ parent: "S{id}/T{n}", type="bugfix", ... })      → observations
+    or: remember({ parent: "S{id}", status: "skipped" })
   For each stale turn:
-    remember(parent="S{id}", status="undone")
+    remember({ parent: "S{id}", status: "undone" })
     or: re-extract
 
 Phase 2 — Knowledge distillation (new)
   recall(scope="memories") to check existing
-  New knowledge → remember(type="feedback", scope="global", ...)
-  Contradicts existing → remember(id="M{old}", status="archived") + create new
+  New knowledge → remember({ type="feedback", scope="global", ... })
+  Contradicts existing → remember({ id: "M{old}", status: "archived" }) + create new
   No new knowledge → skip (most common)
 
 Phase 3 — Session summary (existing, uses remember)
-  remember(id="S{id}", title=..., content=..., insight=...)
+  remember({ id: "S{id}", title: ..., content: ..., insight: ... })
 ```
 
 ### Updated Allowed Tools

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createMemory } from "../../src/db/memories";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
@@ -187,6 +188,54 @@ describe("handleContextHook", () => {
       startedAtEpoch: 100,
       updatedAtEpoch: 105,
       completedAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "feedback",
+      scope: "global",
+      title: "Use real DB tests",
+      content: "Integration tests should exercise the real database layer.",
+      reasoning: "Mocks hide transaction and locking behavior.",
+      application: "When validating persistence or concurrency changes.",
+      tags: ["testing", "database"],
+      createdAtEpoch: 250,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "project",
+      scope: "claude-mnemo",
+      title: "Auth mutex policy",
+      content: "Refresh token work must be serialized with a mutex.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 260,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "project",
+      scope: "other-project",
+      title: "Other project note",
+      content: "This should stay out of the current project memory block.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 270,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
     });
   });
 
@@ -438,10 +487,18 @@ describe("handleContextHook", () => {
       'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)',
     );
     expect(output).toContain("## Current Session");
+    expect(output).toContain("## Memories");
     expect(output).toContain("## Recent Sessions");
     expect(output).toContain(
       `- [S3] Anchored session | 💬4 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
+    expect(output).toContain(
+      `[M1] feedback/global: Use real DB tests | 1970-01-01`,
+    );
+    expect(output).toContain(
+      `[M2] project/claude-mnemo: Auth mutex policy | 1970-01-01`,
+    );
+    expect(output).not.toContain("Other project note");
     expect(output).toContain(
       "  - desc: Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
     );

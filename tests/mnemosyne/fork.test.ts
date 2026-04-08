@@ -113,6 +113,7 @@ describe("forkMnemosyne", () => {
     });
     expect(createSdkMcpServerImpl).toHaveBeenCalledTimes(1);
     expect(capturedToolNames).toEqual([
+      "remember",
       "save_turn",
       "update_session",
       "recall",
@@ -126,6 +127,7 @@ describe("forkMnemosyne", () => {
       mnemo: fakeServer,
     });
     expect(options.allowedTools).toEqual([
+      "mcp__mnemo__remember",
       "mcp__mnemo__save_turn",
       "mcp__mnemo__update_session",
       "mcp__mnemo__recall",
@@ -179,6 +181,7 @@ describe("forkMnemosyne", () => {
 
     expect(options.mcpServers).toBeUndefined();
     expect(options.allowedTools).toEqual([
+      "mcp__mnemo__remember",
       "mcp__mnemo__save_turn",
       "mcp__mnemo__update_session",
       "mcp__mnemo__recall",

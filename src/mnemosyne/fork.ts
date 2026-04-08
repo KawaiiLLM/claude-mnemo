@@ -14,6 +14,7 @@ import {
   MNEMO_ALLOWED_TOOLS,
   MNEMO_TOOL_DESCRIPTIONS,
   recallInputShape,
+  rememberInputShape,
   replayInputShape,
   saveTurnInputShape,
   updateSessionInputShape,
@@ -111,6 +112,12 @@ function createMnemoSdkServer(
     name: "mnemo",
     version: "0.1.0",
     tools: [
+      deps.toolImpl(
+        "remember",
+        MNEMO_TOOL_DESCRIPTIONS.remember,
+        rememberInputShape,
+        async (args) => handlers.remember(args as Record<string, unknown>),
+      ),
       deps.toolImpl(
         "save_turn",
         MNEMO_TOOL_DESCRIPTIONS.save_turn,

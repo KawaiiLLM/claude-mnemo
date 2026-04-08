@@ -113,7 +113,9 @@ describe("buildMnemosynePrompt", () => {
   test("documents stale re-evaluation and explicit undone handling", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain('call save_turn with status="undone"');
+    expect(prompt).toContain("Primary write tool is remember");
+    expect(prompt).toContain('call remember({ parent: "S{id}", status: "undone" })');
+    expect(prompt).toContain("Use save_turn and update_session only for compatibility");
     expect(prompt).toContain(
       "Do NOT re-process [extracted], [skipped], or [undone] turns",
     );
@@ -141,8 +143,8 @@ describe("buildMnemosynePrompt", () => {
       "Include next_steps when the session has a clear trajectory or planned follow-up.",
     );
     expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
-    expect(prompt).toContain('Good example: save_turn({');
-    expect(prompt).toContain("Skip example: save_turn({ session_id: 1, prompt_number: 3 })");
+    expect(prompt).toContain('Good example: remember({ parent: "S1"');
+    expect(prompt).toContain('Skip example: remember({ parent: "S1", status: "skipped" })');
   });
 
   test("references recall and replay tools for additional context", () => {
@@ -156,5 +158,13 @@ describe("buildMnemosynePrompt", () => {
     const prompt = buildMnemosynePrompt("test context");
 
     expect(prompt.match(/Never output prose/g)?.length).toBe(1);
+  });
+
+  test("guides remember as the primary write path", () => {
+    const prompt = buildMnemosynePrompt("test context");
+
+    expect(prompt).toContain('remember({ parent: "S{id}"');
+    expect(prompt).toContain('remember({ parent: "S{id}/T{n}"');
+    expect(prompt).toContain('remember({ type: "feedback", scope: "global"');
   });
 });
