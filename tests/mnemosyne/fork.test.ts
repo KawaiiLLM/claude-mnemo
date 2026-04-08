@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeDatabase } from "../../src/db/schema";
-import { resolveAgentSessionPath } from "../../src/shared/paths";
 
-import { forkMnemosyne, resolveClaudeCodeExecutablePath } from "../../src/mnemosyne/fork";
+import {
+  forkMnemosyne,
+  moveAgentSession,
+  resolveClaudeCodeExecutablePath,
+  type MoveAgentSessionDeps,
+} from "../../src/mnemosyne/fork";
 
 describe("resolveClaudeCodeExecutablePath", () => {
   test("prefers explicit CLAUDE_CODE_PATH when it exists", () => {
@@ -235,56 +236,72 @@ describe("forkMnemosyne", () => {
     expect(options.model).toBe("claude-sonnet-4-6");
   });
 
-  test("moves agent session JSONL to ~/.claude-mnemo/sessions/", async () => {
-    db = createDatabase(":memory:");
-    initializeDatabase(db);
+});
 
-    const testCwd = "/tmp/mnemo-move-test-project";
-    const testSessionId = "move-test-" + Date.now();
+describe("moveAgentSession", () => {
+  function createMockDeps(overrides: Partial<MoveAgentSessionDeps> = {}): MoveAgentSessionDeps {
+    return {
+      resolveSrcPath: () => "/src/session.jsonl",
+      resolveDestPath: () => "/dest/sessions/session.jsonl",
+      existsSync: () => true,
+      mkdirSync: mock(() => undefined),
+      renameSync: mock(() => undefined),
+      copyFileSync: mock(() => undefined),
+      unlinkSync: mock(() => undefined),
+      ...overrides,
+    };
+  }
 
-    // Create source JSONL at the path resolveTranscriptPath would compute
-    const { resolveTranscriptPath } = await import("../../src/shared/paths");
-    const srcPath = resolveTranscriptPath(testCwd, testSessionId);
-    mkdirSync(join(srcPath, ".."), { recursive: true });
-    writeFileSync(srcPath, '{"type":"test-payload"}\n');
+  test("renames source to dest on same device", () => {
+    const deps = createMockDeps();
 
-    const queryImpl = mock(() => ({
-      async *[Symbol.asyncIterator]() {
-        yield {
-          type: "result",
-          session_id: testSessionId,
-          num_turns: 1,
-          usage: {
-            input_tokens: 5,
-            output_tokens: 10,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-          },
-          duration_ms: 100,
-          total_cost_usd: 0,
-        };
-      },
-    }));
+    moveAgentSession("/project", "abc-123", deps);
 
-    await forkMnemosyne(
-      {
-        prompt: "test",
-        cwd: testCwd,
-        database: db,
-      },
-      {
-        queryImpl: queryImpl as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query,
-        resolveClaudeCodeExecutablePathImpl: () => "/usr/local/bin/claude",
-      },
+    expect(deps.renameSync).toHaveBeenCalledWith(
+      "/src/session.jsonl",
+      "/dest/sessions/session.jsonl",
     );
+    expect(deps.copyFileSync).not.toHaveBeenCalled();
+    expect(deps.unlinkSync).not.toHaveBeenCalled();
+  });
 
-    const destPath = resolveAgentSessionPath(testSessionId);
+  test("skips move when source does not exist", () => {
+    const deps = createMockDeps({ existsSync: () => false });
 
-    expect(existsSync(destPath)).toBe(true);
-    expect(readFileSync(destPath, "utf-8")).toBe('{"type":"test-payload"}\n');
-    expect(existsSync(srcPath)).toBe(false);
+    moveAgentSession("/project", "abc-123", deps);
 
-    // Clean up
-    try { require("node:fs").unlinkSync(destPath); } catch {}
+    expect(deps.renameSync).not.toHaveBeenCalled();
+    expect(deps.copyFileSync).not.toHaveBeenCalled();
+  });
+
+  test("falls back to copy+delete on EXDEV", () => {
+    const exdevError = Object.assign(new Error("cross-device link"), {
+      code: "EXDEV",
+    });
+    const deps = createMockDeps({
+      renameSync: mock(() => { throw exdevError; }),
+    });
+
+    moveAgentSession("/project", "abc-123", deps);
+
+    expect(deps.copyFileSync).toHaveBeenCalledWith(
+      "/src/session.jsonl",
+      "/dest/sessions/session.jsonl",
+    );
+    expect(deps.unlinkSync).toHaveBeenCalledWith("/src/session.jsonl");
+  });
+
+  test("rethrows non-EXDEV errors from renameSync", () => {
+    const permError = Object.assign(new Error("permission denied"), {
+      code: "EACCES",
+    });
+    const deps = createMockDeps({
+      renameSync: mock(() => { throw permError; }),
+    });
+
+    expect(() => moveAgentSession("/project", "abc-123", deps)).toThrow(
+      "permission denied",
+    );
+    expect(deps.copyFileSync).not.toHaveBeenCalled();
   });
 });

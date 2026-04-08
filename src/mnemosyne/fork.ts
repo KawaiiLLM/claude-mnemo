@@ -153,22 +153,58 @@ function missingHandler(toolName: string): never {
   throw new Error(`Missing Mnemo tool handler: ${toolName}`);
 }
 
-function moveAgentSession(cwd: string, sessionId: string): void {
-  const srcPath = resolveTranscriptPath(cwd, sessionId);
-  const destPath = resolveAgentSessionPath(sessionId);
+export interface MoveAgentSessionDeps {
+  resolveSrcPath: (cwd: string, sessionId: string) => string;
+  resolveDestPath: (sessionId: string) => string;
+  existsSync: typeof existsSync;
+  mkdirSync: typeof mkdirSync;
+  renameSync: typeof renameSync;
+  copyFileSync: typeof copyFileSync;
+  unlinkSync: typeof unlinkSync;
+}
 
-  if (!existsSync(srcPath)) {
+const defaultMoveDeps: MoveAgentSessionDeps = {
+  resolveSrcPath: resolveTranscriptPath,
+  resolveDestPath: resolveAgentSessionPath,
+  existsSync,
+  mkdirSync,
+  renameSync,
+  copyFileSync,
+  unlinkSync,
+};
+
+function isExdevError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "EXDEV"
+  );
+}
+
+export function moveAgentSession(
+  cwd: string,
+  sessionId: string,
+  deps: MoveAgentSessionDeps = defaultMoveDeps,
+): void {
+  const srcPath = deps.resolveSrcPath(cwd, sessionId);
+  const destPath = deps.resolveDestPath(sessionId);
+
+  if (!deps.existsSync(srcPath)) {
     return;
   }
 
-  mkdirSync(dirname(destPath), { recursive: true });
+  deps.mkdirSync(dirname(destPath), { recursive: true });
 
   try {
-    renameSync(srcPath, destPath);
-  } catch {
+    deps.renameSync(srcPath, destPath);
+  } catch (error) {
+    if (!isExdevError(error)) {
+      throw error;
+    }
+
     // Cross-device move: sync copy then delete
-    copyFileSync(srcPath, destPath);
-    unlinkSync(srcPath);
+    deps.copyFileSync(srcPath, destPath);
+    deps.unlinkSync(srcPath);
   }
 }
 
