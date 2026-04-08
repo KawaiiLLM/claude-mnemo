@@ -791,8 +791,11 @@ function shouldRebuildSearchIndex(db2) {
   if (hasAnySourceRows !== hasAnyFtsRows) {
     return true;
   }
+  const indexedLayers = new Set(
+    db2.query("SELECT DISTINCT layer FROM memory_fts").all().map((row) => row.layer)
+  );
   return sourceLayers.some(
-    ({ table, layer }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`) && !hasRow(db2, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer])
+    ({ table, layer }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`) && !indexedLayers.has(layer)
   );
 }
 function migrateSchema(db2) {
@@ -35642,9 +35645,10 @@ function listMemories(db2, options = {}) {
     params.push(options.status);
   }
   const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const boundParams = [...params, options.limit ?? 50];
   return db2.query(
     `${MEMORY_SELECT}${whereClause} ORDER BY COALESCE(updated_at_epoch, created_at_epoch) DESC, id DESC LIMIT ?`
-  ).all(...params, options.limit ?? 50).map((row) => mapMemoryRow(row)).filter((record3) => record3 !== null);
+  ).all(...boundParams).map((row) => mapMemoryRow(row)).filter((record3) => record3 !== null);
 }
 function createMemory(db2, input) {
   const created = mapMemoryRow(
@@ -35704,65 +35708,73 @@ function createMemory(db2, input) {
   return created;
 }
 function updateMemory(db2, id, input) {
-  const existing = getMemory(db2, id);
-  if (!existing) {
-    return null;
-  }
-  const updated = mapMemoryRow(
-    db2.query(
-      `
-          UPDATE memories
-          SET
-            type = ?,
-            scope = ?,
-            title = ?,
-            content = ?,
-            reasoning = ?,
-            application = ?,
-            tags = ?,
-            status = ?,
-            superseded_by = ?,
-            expires_at_epoch = ?,
-            source_turn_id = ?,
-            updated_at_epoch = ?
-          WHERE id = ?
-          RETURNING
-            id,
-            type,
-            scope,
-            title,
-            content,
-            reasoning,
-            application,
-            tags,
-            status,
-            superseded_by AS supersededBy,
-            expires_at_epoch AS expiresAtEpoch,
-            source_turn_id AS sourceTurnId,
-            created_at_epoch AS createdAtEpoch,
-            updated_at_epoch AS updatedAtEpoch
+  db2.exec("BEGIN IMMEDIATE");
+  try {
+    const existing = getMemory(db2, id);
+    if (!existing) {
+      db2.exec("ROLLBACK");
+      return null;
+    }
+    const updated = mapMemoryRow(
+      db2.query(
         `
-    ).get(
-      input.type ?? existing.type,
-      input.scope ?? existing.scope,
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      hasOwn(input, "reasoning") ? input.reasoning ?? null : existing.reasoning,
-      hasOwn(input, "application") ? input.application ?? null : existing.application,
-      stringifyJsonArray(input.tags ?? existing.tags),
-      input.status ?? existing.status,
-      hasOwn(input, "supersededBy") ? input.supersededBy ?? null : existing.supersededBy,
-      hasOwn(input, "expiresAtEpoch") ? input.expiresAtEpoch ?? null : existing.expiresAtEpoch,
-      hasOwn(input, "sourceTurnId") ? input.sourceTurnId ?? null : existing.sourceTurnId,
-      input.updatedAtEpoch ?? Math.floor(Date.now() / 1e3),
-      id
-    )
-  );
-  if (!updated) {
-    throw new Error("Failed to update memory.");
+            UPDATE memories
+            SET
+              type = ?,
+              scope = ?,
+              title = ?,
+              content = ?,
+              reasoning = ?,
+              application = ?,
+              tags = ?,
+              status = ?,
+              superseded_by = ?,
+              expires_at_epoch = ?,
+              source_turn_id = ?,
+              updated_at_epoch = ?
+            WHERE id = ?
+            RETURNING
+              id,
+              type,
+              scope,
+              title,
+              content,
+              reasoning,
+              application,
+              tags,
+              status,
+              superseded_by AS supersededBy,
+              expires_at_epoch AS expiresAtEpoch,
+              source_turn_id AS sourceTurnId,
+              created_at_epoch AS createdAtEpoch,
+              updated_at_epoch AS updatedAtEpoch
+          `
+      ).get(
+        input.type ?? existing.type,
+        input.scope ?? existing.scope,
+        input.title ?? existing.title,
+        input.content ?? existing.content,
+        hasOwn(input, "reasoning") ? input.reasoning ?? null : existing.reasoning,
+        hasOwn(input, "application") ? input.application ?? null : existing.application,
+        stringifyJsonArray(input.tags ?? existing.tags),
+        input.status ?? existing.status,
+        hasOwn(input, "supersededBy") ? input.supersededBy ?? null : existing.supersededBy,
+        hasOwn(input, "expiresAtEpoch") ? input.expiresAtEpoch ?? null : existing.expiresAtEpoch,
+        hasOwn(input, "sourceTurnId") ? input.sourceTurnId ?? null : existing.sourceTurnId,
+        input.updatedAtEpoch ?? Math.floor(Date.now() / 1e3),
+        id
+      )
+    );
+    if (!updated) {
+      throw new Error("Failed to update memory.");
+    }
+    indexMemoryToFTS(db2, updated);
+    db2.exec("COMMIT");
+    return updated;
+  } catch (error49) {
+    db2.exec("ROLLBACK");
+    throw error49;
   }
-  indexMemoryToFTS(db2, updated);
-  return updated;
 }
 
 // src/db/observations.ts

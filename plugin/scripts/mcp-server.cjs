@@ -7480,8 +7480,11 @@ function shouldRebuildSearchIndex(db) {
   if (hasAnySourceRows !== hasAnyFtsRows) {
     return true;
   }
+  const indexedLayers = new Set(
+    db.query("SELECT DISTINCT layer FROM memory_fts").all().map((row) => row.layer)
+  );
   return sourceLayers.some(
-    ({ table, layer }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) && !hasRow(db, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer])
+    ({ table, layer }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) && !indexedLayers.has(layer)
   );
 }
 function migrateSchema(db) {
@@ -31223,65 +31226,73 @@ function createMemory(db, input) {
   return created;
 }
 function updateMemory(db, id, input) {
-  const existing = getMemory(db, id);
-  if (!existing) {
-    return null;
-  }
-  const updated = mapMemoryRow(
-    db.query(
-      `
-          UPDATE memories
-          SET
-            type = ?,
-            scope = ?,
-            title = ?,
-            content = ?,
-            reasoning = ?,
-            application = ?,
-            tags = ?,
-            status = ?,
-            superseded_by = ?,
-            expires_at_epoch = ?,
-            source_turn_id = ?,
-            updated_at_epoch = ?
-          WHERE id = ?
-          RETURNING
-            id,
-            type,
-            scope,
-            title,
-            content,
-            reasoning,
-            application,
-            tags,
-            status,
-            superseded_by AS supersededBy,
-            expires_at_epoch AS expiresAtEpoch,
-            source_turn_id AS sourceTurnId,
-            created_at_epoch AS createdAtEpoch,
-            updated_at_epoch AS updatedAtEpoch
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const existing = getMemory(db, id);
+    if (!existing) {
+      db.exec("ROLLBACK");
+      return null;
+    }
+    const updated = mapMemoryRow(
+      db.query(
         `
-    ).get(
-      input.type ?? existing.type,
-      input.scope ?? existing.scope,
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      hasOwn(input, "reasoning") ? input.reasoning ?? null : existing.reasoning,
-      hasOwn(input, "application") ? input.application ?? null : existing.application,
-      stringifyJsonArray(input.tags ?? existing.tags),
-      input.status ?? existing.status,
-      hasOwn(input, "supersededBy") ? input.supersededBy ?? null : existing.supersededBy,
-      hasOwn(input, "expiresAtEpoch") ? input.expiresAtEpoch ?? null : existing.expiresAtEpoch,
-      hasOwn(input, "sourceTurnId") ? input.sourceTurnId ?? null : existing.sourceTurnId,
-      input.updatedAtEpoch ?? Math.floor(Date.now() / 1e3),
-      id
-    )
-  );
-  if (!updated) {
-    throw new Error("Failed to update memory.");
+            UPDATE memories
+            SET
+              type = ?,
+              scope = ?,
+              title = ?,
+              content = ?,
+              reasoning = ?,
+              application = ?,
+              tags = ?,
+              status = ?,
+              superseded_by = ?,
+              expires_at_epoch = ?,
+              source_turn_id = ?,
+              updated_at_epoch = ?
+            WHERE id = ?
+            RETURNING
+              id,
+              type,
+              scope,
+              title,
+              content,
+              reasoning,
+              application,
+              tags,
+              status,
+              superseded_by AS supersededBy,
+              expires_at_epoch AS expiresAtEpoch,
+              source_turn_id AS sourceTurnId,
+              created_at_epoch AS createdAtEpoch,
+              updated_at_epoch AS updatedAtEpoch
+          `
+      ).get(
+        input.type ?? existing.type,
+        input.scope ?? existing.scope,
+        input.title ?? existing.title,
+        input.content ?? existing.content,
+        hasOwn(input, "reasoning") ? input.reasoning ?? null : existing.reasoning,
+        hasOwn(input, "application") ? input.application ?? null : existing.application,
+        stringifyJsonArray(input.tags ?? existing.tags),
+        input.status ?? existing.status,
+        hasOwn(input, "supersededBy") ? input.supersededBy ?? null : existing.supersededBy,
+        hasOwn(input, "expiresAtEpoch") ? input.expiresAtEpoch ?? null : existing.expiresAtEpoch,
+        hasOwn(input, "sourceTurnId") ? input.sourceTurnId ?? null : existing.sourceTurnId,
+        input.updatedAtEpoch ?? Math.floor(Date.now() / 1e3),
+        id
+      )
+    );
+    if (!updated) {
+      throw new Error("Failed to update memory.");
+    }
+    indexMemoryToFTS(db, updated);
+    db.exec("COMMIT");
+    return updated;
+  } catch (error48) {
+    db.exec("ROLLBACK");
+    throw error48;
   }
-  indexMemoryToFTS(db, updated);
-  return updated;
 }
 
 // src/db/observations.ts

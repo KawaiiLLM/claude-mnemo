@@ -167,8 +167,8 @@ export async function forkMnemosyne(
           input.database,
           basename(input.cwd ?? process.cwd()),
           {
-          createSdkMcpServerImpl,
-          toolImpl,
+            createSdkMcpServerImpl,
+            toolImpl,
           },
         ),
       }

@@ -148,10 +148,17 @@ function shouldRebuildSearchIndex(db: Database): boolean {
     return true;
   }
 
+  const indexedLayers = new Set(
+    db
+      .query<{ layer: string }, []>("SELECT DISTINCT layer FROM memory_fts")
+      .all()
+      .map((row) => row.layer),
+  );
+
   return sourceLayers.some(
     ({ table, layer }) =>
       hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) &&
-      !hasRow(db, "SELECT 1 FROM memory_fts WHERE layer = ? LIMIT 1", [layer]),
+      !indexedLayers.has(layer),
   );
 }
 
