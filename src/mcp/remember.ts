@@ -95,6 +95,11 @@ function resolveContent(input: Pick<RememberToolInput, "content" | "description"
   return input.content ?? input.description ?? null;
 }
 
+// Status conventions per route:
+// - turn remember: defaults to extracted/skipped by content; only pass status for "skipped" or "undone"
+// - observation remember: does not accept a status field
+// - session remember: does not accept a status field
+// - memory create/update: status is an explicit business field ("active", "superseded", "archived")
 function validateStatusForRoute(
   status: RememberStatus | undefined,
   allowedStatuses: readonly RememberStatus[] | null,
@@ -104,13 +109,13 @@ function validateStatusForRoute(
     return null;
   }
 
-  if (allowedStatuses === null || !allowedStatuses.includes(status)) {
-    const allowedText =
-      allowedStatuses === null
-        ? "no status values"
-        : allowedStatuses.map((value) => `"${value}"`).join(", ");
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
 
-    return `status "${status}" is not supported for ${routeLabel}. Allowed statuses: ${allowedText}.`;
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
   }
 
   return null;

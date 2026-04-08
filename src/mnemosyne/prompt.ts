@@ -47,6 +47,7 @@ Call remember with NO title/description/observations for:
 HOW TO EXTRACT
 --------------
 For each pending/stale turn, call remember with:
+- prompt_number: the turn number from the context above (do not rely on auto-assignment)
 - title: 10-25 chars, what was done
 - content or description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
@@ -81,12 +82,12 @@ Content inside <private>...</private> tags must NOT be recorded.
 
 EXAMPLES
 --------
-Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
+Good example: remember({ parent: "S1", prompt_number: 2, title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
 Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })
 Good example: remember({ id: "S1", title: "Fix auth race", content: "Updated the session summary after the mutex fix", insight: "Session summary now reflects the concurrency fix" })
 Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
 Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
-Skip example: remember({ parent: "S1", status: "skipped" })`;
+Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })`;
 }

@@ -152,7 +152,7 @@ describe("buildMnemosynePrompt", () => {
     expect(prompt).toContain('Good example: remember({ parent: "S1"');
     expect(prompt).toContain('Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })');
     expect(prompt).not.toContain("observations: [");
-    expect(prompt).toContain('Skip example: remember({ parent: "S1", status: "skipped" })');
+    expect(prompt).toContain('Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })');
   });
 
   test("references recall and replay tools for additional context", () => {
