@@ -15,7 +15,8 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
 } as const;
 
 export const recallInputShape = {
-  scope: z.enum(["sessions", "turns", "observations"]).optional(),
+  scope: z.enum(["sessions", "turns", "observations", "memories"]).optional(),
+  id: z.string().optional(),
   session: selectorShape.optional(),
   turn: selectorShape.optional(),
   obs: selectorShape.optional(),

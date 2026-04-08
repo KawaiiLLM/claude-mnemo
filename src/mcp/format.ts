@@ -22,6 +22,28 @@ export interface FormattedObservation {
   filesModified?: string[];
 }
 
+export interface FormattedMemorySource {
+  sessionId: number;
+  promptNumber: number;
+  title: string | null;
+  createdAtEpoch: number;
+}
+
+export interface FormattedMemory {
+  id: number;
+  type: string;
+  scope: string;
+  title: string;
+  content: string;
+  reasoning?: string | null;
+  application?: string | null;
+  tags?: string[];
+  createdAtEpoch: number;
+  updatedAtEpoch?: number | null;
+  sourceCount?: number | null;
+  source?: FormattedMemorySource | null;
+}
+
 interface ObservationFormatOptions {
   indent?: string;
   sessionId?: number;
@@ -76,6 +98,16 @@ function formatEpoch(epoch: number): string {
   const day = String(date.getUTCDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+function formatSourceCount(value?: number | null): string {
+  const count = normalizeCount(value);
+
+  if (count === 0) {
+    return "";
+  }
+
+  return `${count} source${count === 1 ? "" : "s"}`;
 }
 
 function typeEmoji(type: string): string {
@@ -320,6 +352,57 @@ function formatObservationLabel(
   { indent = "" }: ObservationFormatOptions = {},
 ): string {
   return `${indent}- [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`;
+}
+
+function formatMemoryLabel(
+  memory: FormattedMemory,
+  { includeSourceCount = true }: { includeSourceCount?: boolean } = {},
+): string {
+  const parts = [
+    `- [M${memory.id}] ${memory.type}/${memory.scope}: ${memory.title}`,
+    formatEpoch(memory.updatedAtEpoch ?? memory.createdAtEpoch),
+  ];
+  const sourceCount = includeSourceCount
+    ? formatSourceCount(memory.sourceCount)
+    : "";
+
+  if (sourceCount) {
+    parts.push(sourceCount);
+  }
+
+  return parts.join(" | ");
+}
+
+export function formatMemoryCollapsed(memory: FormattedMemory): string {
+  return formatMemoryLabel(memory);
+}
+
+export function formatMemoryExpanded(memory: FormattedMemory): string {
+  const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
+
+  lines.push(`  - content: ${memory.content}`);
+
+  if (memory.reasoning) {
+    lines.push(`  - reasoning: ${memory.reasoning}`);
+  }
+
+  if (memory.application) {
+    lines.push(`  - application: ${memory.application}`);
+  }
+
+  if (memory.tags && memory.tags.length > 0) {
+    lines.push(`  - tags: [${memory.tags.join(", ")}]`);
+  }
+
+  if (memory.source) {
+    lines.push(
+      `  - source: [S${memory.source.sessionId}/T${memory.source.promptNumber}] ${
+        memory.source.title ?? "Untitled"
+      } | ${formatEpoch(memory.source.createdAtEpoch)}`,
+    );
+  }
+
+  return lines.join("\n");
 }
 
 export function formatObservationCollapsed(

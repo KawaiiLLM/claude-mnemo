@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createMemory } from "../../src/db/memories";
 import {
   getObservation,
   getObservationsForTurn,
@@ -117,11 +118,90 @@ describe("observation queries and search", () => {
       ],
     });
 
+    createMemory(db, {
+      type: "feedback",
+      scope: "global",
+      title: "Avoid auth refresh races",
+      content: "Use a mutex for auth refresh race handling.",
+      reasoning: "Parallel refresh race work collides without coordination.",
+      application: "When auth middleware updates tokens.",
+      tags: ["auth", "concurrency"],
+      createdAtEpoch: 250,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
     const results = searchMemory(db, { query: "race" });
 
     expect(new Set(results.map((result) => result.layer))).toEqual(
-      new Set(["session", "turn", "observation"]),
+      new Set(["session", "turn", "observation", "memory"]),
     );
+  });
+
+  test("supports scoped memory search by type, project, and query", () => {
+    createMemory(db, {
+      type: "feedback",
+      scope: "claude-mnemo",
+      title: "Prefer mutex over debounce",
+      content: "Use a mutex for auth refresh coordination.",
+      reasoning: "Debounce still allows stale shared state.",
+      application: "When multiple requests may refresh together.",
+      tags: ["auth", "concurrency"],
+      createdAtEpoch: 600,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "feedback",
+      scope: "other-project",
+      title: "Other project memory",
+      content: "Mutex note that should not match project filtering.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 610,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "reference",
+      scope: "claude-mnemo",
+      title: "Reference note",
+      content: "This is a reference memory, not feedback.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 620,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    const results = searchMemory(db, {
+      scope: "memories",
+      type: "feedback",
+      project: "claude-mnemo",
+      query: "mutex",
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.layer).toBe("memory");
+    expect(results[0]?.project).toBe("claude-mnemo");
+    expect(results[0]?.type).toBe("feedback");
+    expect(results[0]?.title).toBe("Prefer mutex over debounce");
   });
 
   test("filters keyword results by project", () => {

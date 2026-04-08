@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { getMemory } from "../db/memories";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import { getRecentSessions, getSession } from "../db/sessions";
@@ -11,6 +12,8 @@ import {
 } from "../db/turns";
 import { createLogger } from "../shared/logger";
 import {
+  formatMemoryCollapsed,
+  formatMemoryExpanded,
   formatObservationCollapsed,
   formatObservationExpanded,
   formatSessionCollapsed,
@@ -18,16 +21,18 @@ import {
   formatTurnCollapsed,
   formatTurnExpanded,
   sampleWithOmissions,
+  type FormattedMemory,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
 } from "./format";
 
-export type RecallScope = "sessions" | "turns" | "observations";
+export type RecallScope = "sessions" | "turns" | "observations" | "memories";
 export type SelectorInput = number | number[] | string;
 
 export interface RecallInput {
   scope?: RecallScope;
+  id?: string;
   session?: SelectorInput;
   turn?: SelectorInput;
   obs?: SelectorInput;
@@ -50,6 +55,12 @@ interface ParsedTimeRange {
   after?: number;
   before?: number;
 }
+
+type RoutedRecallId =
+  | { kind: "session"; sessionId: number }
+  | { kind: "turn"; sessionId: number; promptNumber: number }
+  | { kind: "observation"; observationId: number }
+  | { kind: "memory"; memoryId: number };
 
 const log = createLogger("MCP");
 
@@ -109,7 +120,7 @@ function normalizeRecallInput(input: RecallInput): RecallInput {
     legacyFields.push("around");
   }
 
-  if (normalized.scope === undefined) {
+  if (normalized.scope === undefined && normalized.id === undefined) {
     legacyFields.push("scope");
 
     if (hasObservationFilters) {
@@ -249,6 +260,45 @@ function parseUtcDate(value: string): number | null {
   return Number.isNaN(epoch) ? null : epoch;
 }
 
+function parseRoutedId(value: string): RoutedRecallId | null {
+  const trimmed = value.trim();
+
+  const turnMatch = /^S(\d+)\/T(\d+)$/i.exec(trimmed);
+  if (turnMatch) {
+    return {
+      kind: "turn",
+      sessionId: Number(turnMatch[1]),
+      promptNumber: Number(turnMatch[2]),
+    };
+  }
+
+  const sessionMatch = /^S(\d+)$/i.exec(trimmed);
+  if (sessionMatch) {
+    return {
+      kind: "session",
+      sessionId: Number(sessionMatch[1]),
+    };
+  }
+
+  const observationMatch = /^O(\d+)$/i.exec(trimmed);
+  if (observationMatch) {
+    return {
+      kind: "observation",
+      observationId: Number(observationMatch[1]),
+    };
+  }
+
+  const memoryMatch = /^M(\d+)$/i.exec(trimmed);
+  if (memoryMatch) {
+    return {
+      kind: "memory",
+      memoryId: Number(memoryMatch[1]),
+    };
+  }
+
+  return null;
+}
+
 function mergeTimeRanges(
   input: RecallInput,
 ): { after?: number; before?: number; error?: string } {
@@ -272,6 +322,10 @@ function mergeTimeRanges(
   }
 
   return { after, before };
+}
+
+function resolveDefaultProject(db: Database): string | undefined {
+  return getRecentSessions(db, { limit: 1 })[0]?.project ?? undefined;
 }
 
 function buildSessionView(
@@ -450,6 +504,38 @@ function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
       filesRead: observation.filesRead,
       filesModified: observation.filesModified,
     })),
+  };
+}
+
+function buildMemoryView(
+  db: Database,
+  memory: NonNullable<ReturnType<typeof getMemory>>,
+): FormattedMemory {
+  const sourceTurn = memory.sourceTurnId !== null
+    ? getTurnById(db, memory.sourceTurnId)
+    : null;
+
+  return {
+    id: memory.id,
+    type: memory.type,
+    scope: memory.scope,
+    title: memory.title,
+    content: memory.content,
+    reasoning: memory.reasoning,
+    application: memory.application,
+    tags: memory.tags,
+    createdAtEpoch: memory.createdAtEpoch,
+    updatedAtEpoch: memory.updatedAtEpoch,
+    sourceCount: memory.sourceTurnId !== null ? 1 : 0,
+    source:
+      sourceTurn !== null
+        ? {
+            sessionId: sourceTurn.sessionId,
+            promptNumber: sourceTurn.promptNumber,
+            title: sourceTurn.title,
+            createdAtEpoch: sourceTurn.createdAtEpoch,
+          }
+        : null,
   };
 }
 
@@ -728,6 +814,113 @@ function renderObservationScope(
   return lines.join("\n");
 }
 
+function renderMemoryScope(
+  db: Database,
+  memoryIds: number[],
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  return memoryIds
+    .map((memoryId) => getMemory(db, memoryId))
+    .filter(
+      (memory): memory is NonNullable<ReturnType<typeof getMemory>> => memory !== null,
+    )
+    .map((memory) => buildMemoryView(db, memory))
+    .map((memory) =>
+      depth === "collapsed"
+        ? formatMemoryCollapsed(memory)
+        : formatMemoryExpanded(memory),
+    )
+    .join("\n");
+}
+
+function renderSessionDetailById(db: Database, sessionId: number): string {
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return "Session not found.";
+  }
+
+  const lines = [formatSessionExpanded(buildSessionView(db, session))];
+
+  for (const turn of buildCollapsedTurnsForSession(db, session.id)) {
+    lines.push(formatTurnCollapsed(turn, { sessionId: session.id }));
+  }
+
+  return lines.join("\n");
+}
+
+function renderTurnDetailById(
+  db: Database,
+  sessionId: number,
+  promptNumber: number,
+): string {
+  const turn = getTurn(db, sessionId, promptNumber);
+  if (!turn) {
+    return "Turn not found.";
+  }
+
+  const turnView = buildTurnView(db, turn);
+  return [
+    formatTurnExpanded(turnView, { sessionId }),
+    ...(turnView.observations ?? []).map((observation) =>
+      formatObservationCollapsed(observation, {
+        indent: "  ",
+        sessionId,
+        turnPromptNumber: turn.promptNumber,
+      }),
+    ),
+  ].join("\n");
+}
+
+function renderObservationDetailById(db: Database, observationId: number): string {
+  const observation = getObservation(db, observationId);
+  if (!observation) {
+    return "Observation not found.";
+  }
+
+  return formatObservationExpanded({
+    id: observation.id,
+    type: observation.type,
+    title: observation.title,
+    description: observation.description,
+    narrative: observation.narrative,
+    facts: observation.facts,
+    concepts: observation.concepts,
+    filesRead: observation.filesRead,
+    filesModified: observation.filesModified,
+  });
+}
+
+function renderMemoryDetailById(db: Database, memoryId: number): string {
+  const memory = getMemory(db, memoryId);
+  if (!memory) {
+    return "Memory not found.";
+  }
+
+  return formatMemoryExpanded(buildMemoryView(db, memory));
+}
+
+function renderRoutedId(db: Database, id: string): string {
+  const routed = parseRoutedId(id);
+
+  if (!routed) {
+    return formatParameterError(`invalid id selector "${id}"`);
+  }
+
+  if (routed.kind === "session") {
+    return renderSessionDetailById(db, routed.sessionId);
+  }
+
+  if (routed.kind === "turn") {
+    return renderTurnDetailById(db, routed.sessionId, routed.promptNumber);
+  }
+
+  if (routed.kind === "observation") {
+    return renderObservationDetailById(db, routed.observationId);
+  }
+
+  return renderMemoryDetailById(db, routed.memoryId);
+}
+
 function legacyRecallMemory(db: Database, input: RecallInput): string {
   if (input.observation !== undefined) {
     const observation = getObservation(db, input.observation);
@@ -830,11 +1023,15 @@ function legacyRecallMemory(db: Database, input: RecallInput): string {
 }
 
 function shouldUseLegacyPath(input: RecallInput): boolean {
-  return input.scope === undefined;
+  return input.scope === undefined && input.id === undefined;
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
   const normalizedInput = normalizeRecallInput(input);
+
+  if (normalizedInput.id) {
+    return renderRoutedId(db, normalizedInput.id);
+  }
 
   if (shouldUseLegacyPath(normalizedInput)) {
     return legacyRecallMemory(db, normalizedInput);
@@ -876,8 +1073,22 @@ function renderSearchResults(
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded" | "full",
 ): string {
+  if (input.scope === "memories") {
+    return renderMemoryScope(
+      db,
+      results
+        .filter((result) => result.layer === "memory")
+        .map((result) => result.sourceId),
+      depth,
+    );
+  }
+
   if (input.scope === "sessions") {
     const sessions = results
+      .filter(
+        (result): result is SearchMemoryResult & { sessionId: number } =>
+          result.sessionId !== null,
+      )
       .map((result) => getSession(db, result.sessionId))
       .filter(
         (session): session is NonNullable<ReturnType<typeof getSession>> =>
@@ -894,11 +1105,20 @@ function renderSearchResults(
   }
 
   const observations = results
-    .filter((result) => result.observationId !== null)
+    .filter(
+      (result): result is SearchMemoryResult & {
+        sessionId: number;
+        turnId: number;
+        observationId: number;
+      } =>
+        result.sessionId !== null &&
+        result.turnId !== null &&
+        result.observationId !== null,
+    )
     .map((result) => ({
       sessionId: result.sessionId,
-      turnId: result.turnId!,
-      observationId: result.observationId!,
+      turnId: result.turnId,
+      observationId: result.observationId,
     }));
   const includeParents = Boolean(input.session !== undefined || input.turn !== undefined);
   return renderObservationScope(db, observations, depth, includeParents);
@@ -911,6 +1131,25 @@ function renderScopedMemory(
   after?: number,
   before?: number,
 ): string {
+  if (input.scope === "memories") {
+    const project = input.project ?? resolveDefaultProject(db);
+    const results = searchMemory(db, {
+      scope: "memories",
+      project,
+      after,
+      before,
+      limit: 200,
+    });
+
+    return renderMemoryScope(
+      db,
+      results
+        .filter((result) => result.layer === "memory")
+        .map((result) => result.sourceId),
+      depth,
+    );
+  }
+
   const sessionSelector = parseSelectorValue(input.session, "session");
   const turnSelector = parseSelectorValue(input.turn, "turn");
   const observationSelector = parseSelectorValue(

@@ -49,7 +49,8 @@ export function createDatabaseBackedHandlers(
     recall: (args) =>
       textResult(
         recallMemory(database, {
-          scope: args.scope as "sessions" | "turns" | "observations" | undefined,
+          scope: args.scope as "sessions" | "turns" | "observations" | "memories" | undefined,
+          id: args.id as string | undefined,
           query: args.query as string | undefined,
           session: args.session as number | undefined,
           turn: args.turn as number | undefined,

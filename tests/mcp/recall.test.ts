@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import * as nodeFs from "node:fs";
 
 import { createDatabase } from "../../src/db/database";
+import { createMemory } from "../../src/db/memories";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -17,6 +18,8 @@ describe("recallMemory", () => {
   let authTurnId: number;
   let authObservationId: number;
   let bigSessionId: number;
+  let globalMemoryId: number;
+  let projectMemoryId: number;
   let observationIds: number[] = [];
 
   beforeEach(() => {
@@ -87,6 +90,70 @@ describe("recallMemory", () => {
     const authTurn = getTurn(db, authSession.id, 1)!;
     authTurnId = authTurn.id;
     authObservationId = getObservationsForTurn(db, authTurn.id)[0]!.id;
+
+    globalMemoryId = createMemory(db, {
+      type: "feedback",
+      scope: "global",
+      title: "Use real DB integration tests",
+      content: "Integration tests should use the real database layer.",
+      reasoning: "Mocks hide locking and transaction behavior.",
+      application: "When validating concurrency or persistence changes.",
+      tags: ["testing", "database"],
+      createdAtEpoch: 245,
+      updatedAtEpoch: null,
+      sourceTurnId: authTurn.id,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    }).id;
+
+    projectMemoryId = createMemory(db, {
+      type: "project",
+      scope: "claude-mnemo",
+      title: "Auth mutex policy",
+      content: "Refresh token work must be serialized with a mutex.",
+      reasoning: "Concurrent refreshes overwrite shared auth state.",
+      application: "When auth middleware touches refresh tokens.",
+      tags: ["auth", "concurrency"],
+      createdAtEpoch: 246,
+      updatedAtEpoch: null,
+      sourceTurnId: authTurn.id,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    }).id;
+
+    createMemory(db, {
+      type: "project",
+      scope: "other-project",
+      title: "Other project note",
+      content: "This should stay out of the default project memory list.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 247,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "active",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
+
+    createMemory(db, {
+      type: "feedback",
+      scope: "claude-mnemo",
+      title: "Archived note",
+      content: "This should not appear in active memory recall.",
+      reasoning: null,
+      application: null,
+      tags: [],
+      createdAtEpoch: 248,
+      updatedAtEpoch: null,
+      sourceTurnId: null,
+      status: "archived",
+      supersededBy: null,
+      expiresAtEpoch: null,
+    });
 
     const bigSession = upsertSession(db, {
       contentSessionId: "session-big",
@@ -204,6 +271,11 @@ describe("recallMemory", () => {
     expect(recallMemory(db, { session: authSessionId })).toContain("[S2] Auth race fix");
   });
 
+  test("accepts memory scope and id selectors in the schema", () => {
+    expect(() => recallInputSchema.parse({ scope: "memories" })).not.toThrow();
+    expect(() => recallInputSchema.parse({ id: "M1" })).not.toThrow();
+  });
+
   test("normalizes legacy observation aliases and logs the migration warning", () => {
     const logSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
 
@@ -237,6 +309,58 @@ describe("recallMemory", () => {
 
     expect(output).toContain("[O1] 🔴 Auth mutex");
     expect(output).not.toContain("[S2] Auth race fix");
+  });
+
+  test("lists active global and current-project memories", () => {
+    const output = recallMemory(db, {
+      scope: "memories",
+    });
+
+    expect(output).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
+    expect(output).toContain(`[M${globalMemoryId}] feedback/global: Use real DB integration tests`);
+    expect(output).not.toContain("Other project note");
+    expect(output).not.toContain("Archived note");
+  });
+
+  test("renders memory detail by routed id", () => {
+    const output = recallMemory(db, {
+      id: `M${projectMemoryId}`,
+    });
+
+    expect(output).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
+    expect(output).toContain("content: Refresh token work must be serialized with a mutex.");
+    expect(output).toContain("reasoning: Concurrent refreshes overwrite shared auth state.");
+    expect(output).toContain("application: When auth middleware touches refresh tokens.");
+    expect(output).toContain("tags: [auth, concurrency]");
+    expect(output).toContain(`[S${authSessionId}/T1] Diagnose auth race`);
+  });
+
+  test("routes session, turn, observation, and memory ids through the read path", () => {
+    const sessionOutput = recallMemory(db, {
+      id: `S${authSessionId}`,
+    });
+    const turnOutput = recallMemory(db, {
+      id: `S${authSessionId}/T1`,
+    });
+    const observationOutput = recallMemory(db, {
+      id: `O${authObservationId}`,
+    });
+    const memoryOutput = recallMemory(db, {
+      id: `M${projectMemoryId}`,
+    });
+
+    expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(sessionOutput).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
+
+    expect(turnOutput).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
+    expect(turnOutput).toContain("[O1] 🔴 Auth mutex");
+
+    expect(observationOutput).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
+    expect(observationOutput).toContain("narrative: Serialized refresh work with a shared promise.");
+
+    expect(memoryOutput).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
   });
 
   test("parses turn range selectors and expands selected turns", () => {
