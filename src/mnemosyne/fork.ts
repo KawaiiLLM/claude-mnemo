@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
@@ -88,12 +89,15 @@ export function resolveClaudeCodeExecutablePath(
 
 function createMnemoSdkServer(
   database: Database,
+  defaultProject: string | undefined,
   deps: {
     createSdkMcpServerImpl: typeof createSdkMcpServer;
     toolImpl: typeof tool;
   },
 ) {
-  const partialHandlers = createDatabaseBackedHandlers(database);
+  const partialHandlers = createDatabaseBackedHandlers(database, {
+    defaultProject,
+  });
   const handlers: MnemoToolHandlers = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
     replay: partialHandlers.replay ?? missingHandler("replay"),
@@ -152,10 +156,14 @@ export async function forkMnemosyne(
   const toolImpl = deps.toolImpl ?? tool;
   const mcpServers = input.database
     ? {
-        mnemo: createMnemoSdkServer(input.database, {
+        mnemo: createMnemoSdkServer(
+          input.database,
+          basename(input.cwd ?? process.cwd()),
+          {
           createSdkMcpServerImpl,
           toolImpl,
-        }),
+          },
+        ),
       }
     : undefined;
   const execution = queryImpl({

@@ -293,21 +293,23 @@ describe("recallMemory", () => {
     logSpy.mockRestore();
   });
 
-  test("normalizes legacy query-only calls to session scope", () => {
+  test("keeps legacy query-only recall as cross-layer search", () => {
     const output = recallMemory(db, {
-      query: "mutex",
+      query: "refresh",
     });
 
+    expect(output).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
     expect(output).toContain("[S2] Auth race fix");
-    expect(output).not.toContain("[S3] Large timeline");
+    expect(output).toContain("[T1] Diagnose auth race | S2");
+    expect(output).toContain(`[O${authObservationId}] bugfix: Auth mutex | S2/T1`);
   });
 
-  test("normalizes legacy type filters to observation scope", () => {
+  test("treats legacy type filters as unscoped search filters", () => {
     const output = recallMemory(db, {
       type: "bugfix",
     });
 
-    expect(output).toContain("[O1] 🔴 Auth mutex");
+    expect(output).toContain(`[O${authObservationId}] bugfix: Auth mutex | S2/T1`);
     expect(output).not.toContain("[S2] Auth race fix");
   });
 

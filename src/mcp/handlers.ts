@@ -23,6 +23,10 @@ export interface MnemoToolHandlers {
   update_session: ToolHandler;
 }
 
+export interface CreateDatabaseBackedHandlersOptions {
+  defaultProject?: string;
+}
+
 export function textResult(text: string): ToolResult {
   return {
     content: [
@@ -40,6 +44,7 @@ export function createStubHandler(toolName: string): ToolHandler {
 
 export function createDatabaseBackedHandlers(
   database?: Database,
+  options: CreateDatabaseBackedHandlersOptions = {},
 ): Partial<MnemoToolHandlers> {
   if (!database) {
     return {};
@@ -66,7 +71,8 @@ export function createDatabaseBackedHandlers(
           after: args.after as number | undefined,
           file: args.file as string | undefined,
           type: args.type as string | undefined,
-          project: args.project as string | undefined,
+          project:
+            (args.project as string | undefined) ?? options.defaultProject,
           fromEpoch:
             (args.fromEpoch as number | undefined) ??
             (args.from_epoch as number | undefined),

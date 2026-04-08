@@ -83,12 +83,11 @@ function formatParameterError(message: string): string {
 function normalizeRecallInput(input: RecallInput): RecallInput {
   const normalized: RecallInput = { ...input };
   const legacyFields: string[] = [];
-  const hasObservationFilters =
-    normalized.obs !== undefined ||
-    normalized.observation !== undefined ||
-    normalized.type !== undefined ||
-    normalized.file !== undefined;
+  const hasObservationSelectors =
+    normalized.obs !== undefined || normalized.observation !== undefined;
   const hasSearchOrTimeFilters =
+    normalized.type !== undefined ||
+    normalized.file !== undefined ||
     normalized.query !== undefined ||
     normalized.project !== undefined ||
     normalized.time !== undefined ||
@@ -123,15 +122,13 @@ function normalizeRecallInput(input: RecallInput): RecallInput {
   if (normalized.scope === undefined && normalized.id === undefined) {
     legacyFields.push("scope");
 
-    if (hasObservationFilters) {
+    if (hasObservationSelectors) {
       normalized.scope = "observations";
     } else if (normalized.session !== undefined && normalized.turn !== undefined) {
       normalized.scope = "turns";
       normalized.depth ??= "expanded";
     } else if (normalized.session !== undefined) {
       normalized.scope = "turns";
-    } else if (hasSearchOrTimeFilters) {
-      normalized.scope = "sessions";
     }
   }
 
@@ -325,7 +322,29 @@ function mergeTimeRanges(
 }
 
 function resolveDefaultProject(db: Database): string | undefined {
-  return getRecentSessions(db, { limit: 1 })[0]?.project ?? undefined;
+  const projects = db
+    .query<{ project: string }, []>(
+      "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project ASC LIMIT 2",
+    )
+    .all()
+    .map((row) => row.project)
+    .filter(Boolean);
+
+  return projects.length === 1 ? projects[0] : undefined;
+}
+
+function hasUnscopedSearchFilters(input: RecallInput): boolean {
+  return (
+    input.query !== undefined ||
+    input.type !== undefined ||
+    input.file !== undefined ||
+    input.project !== undefined ||
+    input.time !== undefined ||
+    input.after !== undefined ||
+    input.before !== undefined ||
+    input.fromEpoch !== undefined ||
+    input.toEpoch !== undefined
+  );
 }
 
 function buildSessionView(
@@ -541,7 +560,7 @@ function buildMemoryView(
 
 function selectSearchResults(
   db: Database,
-  input: Required<Pick<RecallInput, "scope">> & RecallInput,
+  input: RecallInput,
   after?: number,
   before?: number,
 ): SearchMemoryResult[] {
@@ -1026,11 +1045,71 @@ function shouldUseLegacyPath(input: RecallInput): boolean {
   return input.scope === undefined && input.id === undefined;
 }
 
+function firstLine(value: string): string {
+  return value.split("\n")[0] ?? value;
+}
+
+function formatMixedSearchResult(db: Database, result: SearchMemoryResult): string {
+  if (result.layer === "memory") {
+    const memory = getMemory(db, result.sourceId);
+    return memory ? formatMemoryCollapsed(buildMemoryView(db, memory)) : `- [M${result.sourceId}]`;
+  }
+
+  if (result.layer === "session" && result.sessionId !== null) {
+    const session = buildSessionSummary(db, result.sessionId);
+    return session ? firstLine(formatSessionCollapsed(session)) : `- [S${result.sessionId}]`;
+  }
+
+  if (result.layer === "turn" && result.turnId !== null) {
+    const turn = getTurnById(db, result.turnId);
+    if (!turn) {
+      return `- [T?] ${result.title ?? "Untitled"}`;
+    }
+
+    return `- [T${turn.promptNumber}] ${turn.title ?? "Untitled"} | S${turn.sessionId}`;
+  }
+
+  if (
+    result.layer === "observation" &&
+    result.observationId !== null &&
+    result.turnId !== null &&
+    result.sessionId !== null
+  ) {
+    const turn = getTurnById(db, result.turnId);
+    const promptNumber = turn?.promptNumber ?? "?";
+    return `- [O${result.observationId}] ${result.type ?? "observation"}: ${
+      result.title ?? "Untitled"
+    } | S${result.sessionId}/T${promptNumber}`;
+  }
+
+  return `- [${result.layer}] ${result.title ?? "Untitled"}`;
+}
+
 export function recallMemory(db: Database, input: RecallInput): string {
   const normalizedInput = normalizeRecallInput(input);
 
   if (normalizedInput.id) {
     return renderRoutedId(db, normalizedInput.id);
+  }
+
+  if (normalizedInput.scope === undefined && hasUnscopedSearchFilters(normalizedInput)) {
+    const timeRange = mergeTimeRanges(normalizedInput);
+    if (timeRange.error) {
+      return formatParameterError(timeRange.error);
+    }
+
+    const results = selectSearchResults(
+      db,
+      normalizedInput,
+      timeRange.after,
+      timeRange.before,
+    );
+    return renderSearchResults(
+      db,
+      normalizedInput,
+      results,
+      normalizedInput.depth ?? "collapsed",
+    );
   }
 
   if (shouldUseLegacyPath(normalizedInput)) {
@@ -1046,16 +1125,11 @@ export function recallMemory(db: Database, input: RecallInput): string {
   if (normalizedInput.query || normalizedInput.type || normalizedInput.file) {
     const results = selectSearchResults(
       db,
-      { ...normalizedInput, scope: normalizedInput.scope! },
+      normalizedInput,
       timeRange.after,
       timeRange.before,
     );
-    return renderSearchResults(
-      db,
-      normalizedInput as RecallInput & { scope: RecallScope },
-      results,
-      depth,
-    );
+    return renderSearchResults(db, normalizedInput, results, depth);
   }
 
   return renderScopedMemory(
@@ -1069,10 +1143,14 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
 function renderSearchResults(
   db: Database,
-  input: RecallInput & { scope: RecallScope },
+  input: RecallInput,
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded" | "full",
 ): string {
+  if (input.scope === undefined) {
+    return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
+  }
+
   if (input.scope === "memories") {
     return renderMemoryScope(
       db,
