@@ -48,17 +48,15 @@ HOW TO EXTRACT
 --------------
 For each pending/stale turn, call remember with:
 - title: 10-25 chars, what was done
-- description: 40-80 chars, how/what achieved
+- content or description: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
 - Then call separate remember calls for each observation from that turn:
   - parent: "S{id}/T{n}"
   - type: bugfix|feature|refactor|change|discovery|decision
   - title: short, action- or outcome-oriented, not generic
-  - description: concise outcome, not a restatement of the user prompt
-  - narrative: explain what was done, how it works, and why it matters
-  - facts: independent, verifiable statements
-  - concepts (from fixed vocabulary): how-it-works|why-it-exists|what-changed|problem-solution|gotcha|pattern|trade-off
-  - Do NOT use the observation type as a concept
+  - content or description: concise outcome, not a restatement of the user prompt
+  - insight: explain what was done, how it works, and why it matters
+  - tags: independent, verifiable labels for retrieval
   - files_read/files_modified: only files that materially informed or changed the result
 - When a stable lesson applies beyond the current turn, record it with remember(type="feedback" | "project" | "reference" | "user", scope="global" | "<project>", ...).
 - Prefer remember for durable knowledge; save_turn/update_session are compatibility fallbacks, not the default path.
@@ -86,7 +84,7 @@ EXAMPLES
 Good example: remember({ parent: "S1", title: "Fix auth race", content: "Serialized token refresh under parallel load", insight: "- mutex added" })
 Good example: remember({ parent: "S{id}/T{n}", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
 Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap" })
-Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." })
+Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })
 Good example: remember({ id: "S1", title: "Fix auth race", content: "Updated the session summary after the mutex fix", insight: "Session summary now reflects the concurrency fix" })
 Good example: remember({ type: "feedback", scope: "global", title: "Prefer real DB tests", content: "Use the real database for concurrency integration tests.", reasoning: "Mocks hide transaction boundaries.", application: "When testing lock-sensitive code paths." })
 Bad example: remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })

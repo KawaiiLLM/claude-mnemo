@@ -131,8 +131,13 @@ describe("buildMnemosynePrompt", () => {
   test("keeps field quality and concept/type separation guidance", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("narrative: explain what was done, how it works, and why it matters");
-    expect(prompt).toContain("Do NOT use the observation type as a concept");
+    expect(prompt).toContain("content or description: concise outcome, not a restatement of the user prompt");
+    expect(prompt).toContain("insight: explain what was done, how it works, and why it matters");
+    expect(prompt).toContain("tags: independent, verifiable labels for retrieval");
+    expect(prompt).toContain("files_read/files_modified: only files that materially informed or changed the result");
+    expect(prompt).not.toContain("narrative:");
+    expect(prompt).not.toContain("facts:");
+    expect(prompt).not.toContain("concepts (from fixed vocabulary)");
   });
 
   test("keeps update_session, private-tag exclusion, and tool-call examples", () => {
@@ -145,7 +150,7 @@ describe("buildMnemosynePrompt", () => {
     );
     expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
     expect(prompt).toContain('Good example: remember({ parent: "S1"');
-    expect(prompt).toContain('Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", narrative: "Refresh now uses a shared promise, preventing overlapping token refresh calls." })');
+    expect(prompt).toContain('Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })');
     expect(prompt).not.toContain("observations: [");
     expect(prompt).toContain('Skip example: remember({ parent: "S1", status: "skipped" })');
   });
