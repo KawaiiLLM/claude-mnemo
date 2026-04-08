@@ -32,6 +32,7 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("sessions");
     expect(tableNames).toContain("turns");
     expect(tableNames).toContain("observations");
+    expect(tableNames).toContain("memories");
     expect(tableNames).toContain("memory_fts");
   });
 
@@ -48,6 +49,7 @@ describe("initializeSchema", () => {
       "content_session_id",
       "project",
       "title",
+      "content",
       "description",
       "insight",
       "next_steps",
@@ -127,9 +129,37 @@ describe("initializeSchema", () => {
       .map((row) => row.name);
 
     expect(turnColumns).toContain("user_prompt");
+    expect(turnColumns).toContain("content");
     expect(turnColumns).toContain("assistant_response");
     expect(turnColumns).toContain("files_read");
     expect(turnColumns).toContain("files_modified");
+  });
+
+  test("creates the memory indexes and content-based observation columns", () => {
+    initializeDatabase(db);
+
+    const observationColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(observations)")
+      .all()
+      .map((row) => row.name);
+    const memoryIndexes = db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memories'",
+      )
+      .all()
+      .map((row) => row.name);
+    const ftsColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(memory_fts)")
+      .all()
+      .map((row) => row.name);
+
+    expect(observationColumns).toContain("content");
+    expect(observationColumns).toContain("insight");
+    expect(observationColumns).toContain("tags");
+    expect(memoryIndexes).toContain("idx_memories_scope");
+    expect(memoryIndexes).toContain("idx_memories_type");
+    expect(memoryIndexes).toContain("idx_memories_status");
+    expect(ftsColumns).toContain("content");
   });
 
   test("migrates sessions and turns to add next_steps and tool_call_count", () => {

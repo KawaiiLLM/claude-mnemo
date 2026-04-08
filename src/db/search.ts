@@ -3,24 +3,32 @@ import type { Database } from "bun:sqlite";
 export interface SessionFtsRecord {
   id: number;
   title: string | null;
-  description: string | null;
+  content: string | null;
   insight: string | null;
 }
 
 export interface TurnFtsRecord {
   id: number;
   title: string | null;
-  description: string | null;
+  content: string | null;
   insight: string | null;
 }
 
 export interface ObservationFtsRecord {
   id: number;
   title: string;
-  description: string | null;
-  narrative: string | null;
-  facts: string[];
-  concepts: string[];
+  content: string | null;
+  insight: string | null;
+  tags: string[];
+}
+
+export interface MemoryFtsRecord {
+  id: number;
+  title: string;
+  content: string;
+  reasoning: string | null;
+  application: string | null;
+  tags: string[];
 }
 
 export interface SearchMemoryOptions {
@@ -174,10 +182,10 @@ function buildSafeFtsQuery(query?: string): string | undefined {
 
 function indexFtsRecord(
   db: Database,
-  layer: "session" | "turn" | "observation",
+  layer: "session" | "turn" | "observation" | "memory",
   sourceId: number,
   title: string | null,
-  description: string | null,
+  content: string | null,
   extra: string,
 ): void {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
@@ -186,8 +194,8 @@ function indexFtsRecord(
   );
 
   db.query(
-    "INSERT INTO memory_fts (layer, source_id, title, description, extra) VALUES (?, ?, ?, ?, ?)",
-  ).run(layer, sourceId, title, description, extra);
+    "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES (?, ?, ?, ?, ?)",
+  ).run(layer, sourceId, title, content, extra);
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
@@ -196,7 +204,7 @@ export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void
     "session",
     session.id,
     session.title,
-    session.description,
+    session.content,
     session.insight ?? "",
   );
 }
@@ -207,7 +215,7 @@ export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
     "turn",
     turn.id,
     turn.title,
-    turn.description,
+    turn.content,
     turn.insight ?? "",
   );
 }
@@ -221,11 +229,135 @@ export function indexObservationToFTS(
     "observation",
     observation.id,
     observation.title,
-    observation.description,
-    [observation.narrative ?? "", ...observation.facts, ...observation.concepts]
+    observation.content,
+    [observation.insight ?? "", ...observation.tags].filter(Boolean).join("\n"),
+  );
+}
+
+export function indexMemoryToFTS(
+  db: Database,
+  memory: MemoryFtsRecord,
+): void {
+  indexFtsRecord(
+    db,
+    "memory",
+    memory.id,
+    memory.title,
+    memory.content,
+    [memory.reasoning ?? "", memory.application ?? "", ...memory.tags]
       .filter(Boolean)
       .join("\n"),
   );
+}
+
+export function rebuildSearchIndex(db: Database): void {
+  db.exec("DELETE FROM memory_fts");
+
+  const sessionRows = db
+    .query<
+      { id: number; title: string | null; content: string | null; insight: string | null },
+      []
+    >(
+      `
+        SELECT
+          id,
+          title,
+          COALESCE(content, description) AS content,
+          insight
+        FROM sessions
+      `,
+    )
+    .all();
+
+  for (const session of sessionRows) {
+    indexSessionToFTS(db, session);
+  }
+
+  const turnRows = db
+    .query<
+      { id: number; title: string | null; content: string | null; insight: string | null },
+      []
+    >(
+      `
+        SELECT
+          id,
+          title,
+          COALESCE(content, description) AS content,
+          insight
+        FROM turns
+        WHERE status = 'extracted'
+      `,
+    )
+    .all();
+
+  for (const turn of turnRows) {
+    indexTurnToFTS(db, turn);
+  }
+
+  const observationRows = db
+    .query<
+      {
+        id: number;
+        title: string;
+        content: string | null;
+        insight: string | null;
+        tags: string | null;
+      },
+      []
+    >(
+      `
+        SELECT
+          id,
+          title,
+          COALESCE(content, description) AS content,
+          COALESCE(insight, narrative) AS insight,
+          COALESCE(tags, concepts) AS tags
+        FROM observations
+      `,
+    )
+    .all();
+
+  for (const observation of observationRows) {
+    indexObservationToFTS(db, {
+      id: observation.id,
+      title: observation.title,
+      content: observation.content,
+      insight: observation.insight,
+      tags: observation.tags ? (JSON.parse(observation.tags) as string[]) : [],
+    });
+  }
+
+  const memoryRows = db
+    .query<
+      {
+        id: number;
+        title: string;
+        content: string;
+        reasoning: string | null;
+        application: string | null;
+        tags: string | null;
+      },
+      []
+    >(
+      `
+        SELECT
+          id,
+          title,
+          content,
+          reasoning,
+          application,
+          tags
+        FROM memories
+      `,
+    )
+    .all();
+
+  for (const memory of memoryRows) {
+    indexMemoryToFTS(db, {
+      ...memory,
+      tags: memory.tags ? (JSON.parse(memory.tags) as string[]) : [],
+    });
+  }
 }
 
 function queryRows(

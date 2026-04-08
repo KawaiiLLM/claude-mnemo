@@ -7,6 +7,7 @@ export interface SessionRecord {
   contentSessionId: string;
   project: string;
   title: string | null;
+  content: string | null;
   description: string | null;
   insight: string | null;
   nextSteps: string | null;
@@ -19,7 +20,8 @@ export interface UpsertSessionInput {
   contentSessionId: string;
   project: string;
   title: string | null;
-  description: string | null;
+  content?: string | null;
+  description?: string | null;
   insight: string | null;
   nextSteps?: string | null;
   startedAtEpoch: number;
@@ -38,7 +40,8 @@ const SESSION_SELECT = `
     content_session_id AS contentSessionId,
     project,
     title,
-    description,
+    COALESCE(content, description) AS content,
+    COALESCE(content, description) AS description,
     insight,
     next_steps AS nextSteps,
     started_at_epoch AS startedAtEpoch,
@@ -47,27 +50,34 @@ const SESSION_SELECT = `
   FROM sessions
 `;
 
+function resolveSessionContent(input: Pick<UpsertSessionInput, "content" | "description">): string | null {
+  return input.content ?? input.description ?? null;
+}
+
 export function upsertSession(
   db: Database,
   input: UpsertSessionInput,
 ): SessionRecord {
+  const content = resolveSessionContent(input);
   const session =
   db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
         title,
+        content,
         description,
         insight,
         next_steps,
         started_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
+        content = COALESCE(excluded.content, excluded.description, sessions.content, sessions.description),
         description = COALESCE(excluded.description, sessions.description),
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
@@ -79,7 +89,8 @@ export function upsertSession(
         content_session_id AS contentSessionId,
         project,
         title,
-        description,
+        COALESCE(content, description) AS content,
+        COALESCE(content, description) AS description,
         insight,
         next_steps AS nextSteps,
         started_at_epoch AS startedAtEpoch,
@@ -90,7 +101,8 @@ export function upsertSession(
       input.contentSessionId,
       input.project,
       input.title,
-      input.description,
+      content,
+      content,
       input.insight,
       input.nextSteps ?? null,
       input.startedAtEpoch,

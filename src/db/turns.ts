@@ -1,14 +1,18 @@
 import type { Database } from "bun:sqlite";
 
-import { indexObservationToFTS, indexTurnToFTS } from "./search";
+import { createObservation } from "./observations";
+import { indexTurnToFTS } from "./search";
 
 export interface ObservationInput {
   type: string;
   title: string;
-  description: string | null;
-  narrative: string | null;
-  facts: string[];
-  concepts: string[];
+  content?: string | null;
+  description?: string | null;
+  insight?: string | null;
+  narrative?: string | null;
+  facts?: string[];
+  tags?: string[];
+  concepts?: string[];
   filesRead: string[];
   filesModified: string[];
 }
@@ -20,7 +24,8 @@ export interface SaveTurnInput {
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
-  description: string | null;
+  content?: string | null;
+  description?: string | null;
   insight: string | null;
   filesRead: string[];
   filesModified: string[];
@@ -37,6 +42,7 @@ export interface TurnRecord {
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
+  content: string | null;
   description: string | null;
   insight: string | null;
   filesRead: string[];
@@ -54,6 +60,7 @@ interface TurnRow {
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
+  content: string | null;
   description: string | null;
   insight: string | null;
   filesRead: string | null;
@@ -72,7 +79,8 @@ const TURN_SELECT = `
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
     title,
-    description,
+    COALESCE(content, description) AS content,
+    COALESCE(content, description) AS description,
     insight,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -84,6 +92,38 @@ const TURN_SELECT = `
 
 function stringifyArray(values: string[]): string {
   return JSON.stringify(values);
+}
+
+function resolveTurnContent(input: Pick<SaveTurnInput, "content" | "description">): string | null {
+  return input.content ?? input.description ?? null;
+}
+
+function resolveObservationContent(
+  observation: Pick<ObservationInput, "content" | "description">,
+): string | null {
+  return observation.content ?? observation.description ?? null;
+}
+
+function resolveObservationTags(
+  observation: Pick<ObservationInput, "tags" | "concepts">,
+): string[] {
+  return observation.tags ?? observation.concepts ?? [];
+}
+
+function resolveObservationInsight(
+  observation: Pick<ObservationInput, "insight" | "narrative" | "facts">,
+): string | null {
+  if (observation.insight) {
+    return observation.insight;
+  }
+
+  const facts = observation.facts ?? [];
+
+  if (observation.narrative && facts.length > 0) {
+    return [observation.narrative, ...facts].join("\n");
+  }
+
+  return observation.narrative ?? (facts.length > 0 ? facts.join("\n") : null);
 }
 
 function parseJsonArray(value: string | null): string[] {
@@ -107,9 +147,10 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
 }
 
 function hasExtractedContent(input: SaveTurnInput): boolean {
+  const content = resolveTurnContent(input);
   return Boolean(
     input.title ||
-      input.description ||
+      content ||
       input.insight ||
       input.observations.length > 0,
   );
@@ -139,6 +180,7 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       : hasExtractedContent(input)
         ? "extracted"
         : "skipped";
+  const content = resolveTurnContent(input);
 
   db.exec("BEGIN");
 
@@ -162,6 +204,7 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
              user_prompt = COALESCE(?, user_prompt),
              assistant_response = COALESCE(?, assistant_response),
              title = ?,
+             content = ?,
              description = ?,
              insight = ?,
              files_read = ?,
@@ -174,7 +217,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
         input.userPrompt,
         input.assistantResponse,
         input.title,
-        input.description,
+        content,
+        content,
         input.insight,
         filesRead,
         filesModified,
@@ -186,7 +230,24 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       turnId = existingTurn.id;
     } else {
       const insertedTurn = db
-        .query<{ id: number }, [number, number, string, string | null, string | null, string | null, string | null, string | null, string, string, number, number | null]>(`
+        .query<
+          { id: number },
+          [
+            number,
+            number,
+            string,
+            string | null,
+            string | null,
+            string | null,
+            string | null,
+            string | null,
+            string | null,
+            string,
+            string,
+            number,
+            number | null,
+          ]
+        >(`
           INSERT INTO turns (
             session_id,
             prompt_number,
@@ -194,13 +255,14 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
             user_prompt,
             assistant_response,
             title,
+            content,
             description,
             insight,
             files_read,
             files_modified,
             created_at_epoch,
             updated_at_epoch
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           RETURNING id
         `)
         .get(
@@ -210,7 +272,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
           input.userPrompt,
           input.assistantResponse,
           input.title,
-          input.description,
+          content,
+          content,
           input.insight,
           filesRead,
           filesModified,
@@ -234,50 +297,21 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
     if (status === "extracted") {
       indexTurnToFTS(db, turn);
 
-      const insertObservationStatement = db.query<
-        { id: number },
-        [number, string, string, string | null, string | null, string, string, string, string, number]
-      >(`
-        INSERT INTO observations (
-          turn_id,
-          type,
-          title,
-          description,
-          narrative,
-          facts,
-          concepts,
-          files_read,
-          files_modified,
-          created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING id
-      `);
-
       for (const observation of input.observations) {
-        const insertedObservation = insertObservationStatement.get(
+        createObservation(db, {
           turnId,
-          observation.type,
-          observation.title,
-          observation.description,
-          observation.narrative,
-          stringifyArray(observation.facts),
-          stringifyArray(observation.concepts),
-          stringifyArray(observation.filesRead),
-          stringifyArray(observation.filesModified),
-          input.updatedAtEpoch ?? input.createdAtEpoch,
-        );
-
-        if (!insertedObservation) {
-          throw new Error("Failed to insert observation.");
-        }
-
-        indexObservationToFTS(db, {
-          id: insertedObservation.id,
+          type: observation.type,
           title: observation.title,
-          description: observation.description,
-          narrative: observation.narrative,
-          facts: observation.facts,
-          concepts: observation.concepts,
+          content: resolveObservationContent(observation),
+          description: resolveObservationContent(observation),
+          insight: resolveObservationInsight(observation),
+          narrative: observation.narrative ?? resolveObservationInsight(observation),
+          facts: observation.facts ?? [],
+          tags: resolveObservationTags(observation),
+          concepts: resolveObservationTags(observation),
+          filesRead: observation.filesRead,
+          filesModified: observation.filesModified,
+          createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch,
         });
       }
     }

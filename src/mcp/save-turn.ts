@@ -16,6 +16,7 @@ export interface SaveTurnToolInput {
   user_prompt?: string;
   assistant_response?: string;
   title?: string;
+  content?: string;
   description?: string;
   insight?: string;
   files_read?: string[];
@@ -25,9 +26,12 @@ export interface SaveTurnToolInput {
   observations?: Array<{
     type: string;
     title: string;
+    content?: string;
     description?: string;
+    insight?: string;
     narrative?: string;
     facts?: string[];
+    tags?: string[];
     concepts?: string[];
     files_read?: string[];
     files_modified?: string[];
@@ -56,7 +60,8 @@ export function saveTurnTool(
     userPrompt: input.user_prompt ?? null,
     assistantResponse: input.assistant_response ?? null,
     title: input.title ?? null,
-    description: input.description ?? null,
+    content: input.content ?? input.description ?? null,
+    description: input.content ?? input.description ?? null,
     insight: input.insight ?? null,
     filesRead: input.files_read ?? [],
     filesModified: input.files_modified ?? [],
@@ -65,9 +70,12 @@ export function saveTurnTool(
     observations: (input.observations ?? []).map((observation) => ({
       type: observation.type,
       title: observation.title,
-      description: observation.description ?? null,
+      content: observation.content ?? observation.description ?? null,
+      description: observation.content ?? observation.description ?? null,
+      insight: observation.insight ?? observation.narrative ?? null,
       narrative: observation.narrative ?? null,
       facts: observation.facts ?? [],
+      tags: observation.tags ?? observation.concepts ?? [],
       concepts: observation.concepts ?? [],
       filesRead: observation.files_read ?? [],
       filesModified: observation.files_modified ?? [],

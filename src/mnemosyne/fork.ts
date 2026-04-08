@@ -97,6 +97,7 @@ function createMnemoSdkServer(
   const handlers: MnemoToolHandlers = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
     replay: partialHandlers.replay ?? missingHandler("replay"),
+    remember: partialHandlers.remember ?? missingHandler("remember"),
     save_turn: partialHandlers.save_turn ?? missingHandler("save_turn"),
     update_session:
       partialHandlers.update_session ?? missingHandler("update_session"),

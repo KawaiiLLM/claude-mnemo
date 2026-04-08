@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { recallMemory } from "./recall";
+import { rememberTool } from "./remember";
 import { replayMemory } from "./replay";
 import { saveTurnTool } from "./save-turn";
 import { updateSessionTool } from "./update-session";
@@ -17,6 +18,7 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 export interface MnemoToolHandlers {
   recall: ToolHandler;
   replay: ToolHandler;
+  remember: ToolHandler;
   save_turn: ToolHandler;
   update_session: ToolHandler;
 }
@@ -82,6 +84,8 @@ export function createDatabaseBackedHandlers(
           transcriptPath: args.transcript_path as string | undefined,
         }),
       ),
+    remember: (args) =>
+      rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
     save_turn: (args) =>
       saveTurnTool(database, args as unknown as Parameters<typeof saveTurnTool>[1]),
     update_session: (args) =>

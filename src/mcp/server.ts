@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   recallInputSchema,
+  rememberInputSchema,
   replayInputSchema,
   saveTurnInputSchema,
   updateSessionInputSchema,
@@ -58,6 +59,7 @@ export function createMcpServer(
   const toolHandlers: MnemoToolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     replay: mergedHandlers.replay ?? createStubHandler("replay"),
+    remember: mergedHandlers.remember ?? createStubHandler("remember"),
     save_turn: mergedHandlers.save_turn ?? createStubHandler("save_turn"),
     update_session:
       mergedHandlers.update_session ?? createStubHandler("update_session"),
@@ -78,6 +80,14 @@ export function createMcpServer(
       inputSchema: replayInputSchema,
     },
     (args) => toolHandlers.replay(args as Record<string, unknown>),
+  );
+  server.registerTool(
+    "remember",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.remember,
+      inputSchema: rememberInputSchema,
+    },
+    (args) => toolHandlers.remember(args as Record<string, unknown>),
   );
   server.registerTool(
     "save_turn",

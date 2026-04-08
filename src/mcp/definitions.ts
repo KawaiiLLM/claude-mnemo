@@ -9,6 +9,7 @@ const selectorShape = z.union([
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store.",
   replay: "Replay raw transcript content from the source JSONL.",
+  remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
   save_turn: "Persist one extracted turn and its observations.",
   update_session: "Update the session summary fields.",
 } as const;
@@ -41,6 +42,33 @@ export const replayInputShape = {
   transcript_path: z.string().optional(),
 };
 
+export const rememberInputShape = {
+  parent: z.string().optional(),
+  id: z.string().optional(),
+  type: z.string().optional(),
+  scope: z.string().optional(),
+  title: z.string().optional(),
+  content: z.string().optional(),
+  description: z.string().optional(),
+  insight: z.string().optional(),
+  reasoning: z.string().optional(),
+  application: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  status: z
+    .enum(["skipped", "undone", "active", "superseded", "archived"])
+    .optional(),
+  next_steps: z.string().optional(),
+  user_prompt: z.string().optional(),
+  assistant_response: z.string().optional(),
+  files_read: z.array(z.string()).optional(),
+  files_modified: z.array(z.string()).optional(),
+  source_turn_id: z.number().int().positive().optional(),
+  created_at_epoch: z.number().int().optional(),
+  updated_at_epoch: z.number().int().optional(),
+  completed_at_epoch: z.number().int().optional(),
+  expires_at_epoch: z.number().int().optional(),
+};
+
 export const saveTurnInputShape = {
   session_id: z.number().int(),
   prompt_number: z.number().int().positive(),
@@ -48,6 +76,7 @@ export const saveTurnInputShape = {
   user_prompt: z.string().optional(),
   assistant_response: z.string().optional(),
   title: z.string().optional(),
+  content: z.string().optional(),
   description: z.string().optional(),
   insight: z.string().optional(),
   files_read: z.array(z.string()).optional(),
@@ -59,9 +88,12 @@ export const saveTurnInputShape = {
       z.object({
         type: z.string(),
         title: z.string(),
+        content: z.string().optional(),
         description: z.string().optional(),
+        insight: z.string().optional(),
         narrative: z.string().optional(),
         facts: z.array(z.string()).optional(),
+        tags: z.array(z.string()).optional(),
         concepts: z.array(z.string()).optional(),
         files_read: z.array(z.string()).optional(),
         files_modified: z.array(z.string()).optional(),
@@ -73,6 +105,7 @@ export const saveTurnInputShape = {
 export const updateSessionInputShape = {
   session_id: z.number().int(),
   title: z.string().optional(),
+  content: z.string().optional(),
   description: z.string().optional(),
   insight: z.string().optional(),
   next_steps: z.string().optional(),
@@ -82,6 +115,7 @@ export const updateSessionInputShape = {
 
 export const recallInputSchema = z.object(recallInputShape);
 export const replayInputSchema = z.object(replayInputShape);
+export const rememberInputSchema = z.object(rememberInputShape);
 export const saveTurnInputSchema = z.object(saveTurnInputShape);
 export const updateSessionInputSchema = z.object(updateSessionInputShape);
 

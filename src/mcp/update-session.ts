@@ -12,6 +12,7 @@ type ToolTextResult = {
 export interface UpdateSessionToolInput {
   session_id: number;
   title?: string;
+  content?: string;
   description?: string;
   insight?: string;
   next_steps?: string;
@@ -44,7 +45,8 @@ export function updateSessionTool(
     contentSessionId: session.contentSessionId,
     project: session.project,
     title: input.title ?? session.title,
-    description: input.description ?? session.description,
+    content: input.content ?? input.description ?? session.content,
+    description: input.content ?? input.description ?? session.content,
     insight: input.insight ?? session.insight,
     nextSteps: input.next_steps,
     startedAtEpoch: session.startedAtEpoch,
