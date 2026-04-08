@@ -56,7 +56,7 @@ describe("database-backed MCP handlers", () => {
     });
 
     const result = await handlers.recall?.({
-      scope: "memories",
+      view: "memories",
     });
 
     expect(result?.content[0]?.text).toContain("Auth mutex policy");

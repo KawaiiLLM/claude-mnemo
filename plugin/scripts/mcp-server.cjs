@@ -4318,11 +4318,11 @@ var require_core = __commonJS({
     Ajv2.ValidationError = validation_error_1.default;
     Ajv2.MissingRefError = ref_error_1.default;
     exports2.default = Ajv2;
-    function checkOptions(checkOpts, options, msg, log2 = "error") {
+    function checkOptions(checkOpts, options, msg, log = "error") {
       for (const key in checkOpts) {
         const opt = key;
         if (opt in options)
-          this.logger[log2](`${msg}: option ${key}. ${checkOpts[opt]}`);
+          this.logger[log](`${msg}: option ${key}. ${checkOpts[opt]}`);
       }
     }
     function getSchEnv(keyRef) {
@@ -6940,7 +6940,7 @@ function rebuildSearchIndex(db) {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
+          content,
           insight
         FROM sessions
       `
@@ -6953,7 +6953,7 @@ function rebuildSearchIndex(db) {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
+          content,
           insight
         FROM turns
         WHERE status = 'extracted'
@@ -6967,9 +6967,9 @@ function rebuildSearchIndex(db) {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
-          COALESCE(insight, narrative) AS insight,
-          COALESCE(tags, concepts) AS tags
+          content,
+          insight,
+          tags
         FROM observations
       `
   ).all();
@@ -7018,14 +7018,14 @@ function queryRecentSessions(db, options) {
         NULL AS sourceTurnId,
         s.project AS project,
         s.title AS title,
-        s.description AS description,
+        s.content AS content,
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.started_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch
       FROM sessions s
       ${combineClauses([projectClause.clause])}
-      ORDER BY s.started_at_epoch DESC
+      ORDER BY s.created_at_epoch DESC
       LIMIT ?
     `,
     [...projectClause.params, options.limit ?? 20]
@@ -7045,7 +7045,7 @@ function queryRecentTurns(db, options) {
         NULL AS sourceTurnId,
         s.project AS project,
         t.title AS title,
-        t.description AS description,
+        t.content AS content,
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
@@ -7073,7 +7073,7 @@ function queryRecentObservations(db, options) {
         NULL AS sourceTurnId,
         s.project AS project,
         o.title AS title,
-        o.description AS description,
+        o.content AS content,
         o.type AS type,
         o.files_read AS filesRead,
         o.files_modified AS filesModified,
@@ -7106,7 +7106,7 @@ function queryRecentMemories(db, options) {
         m.source_turn_id AS sourceTurnId,
         m.scope AS project,
         m.title AS title,
-        m.content AS description,
+        m.content AS content,
         m.type AS type,
         NULL AS filesRead,
         NULL AS filesModified,
@@ -7121,7 +7121,7 @@ function queryRecentMemories(db, options) {
 }
 function querySessionsByScope(db, options, query) {
   const projectClause = buildProjectClause(options.project);
-  const dateClause = buildDateClause("s.started_at_epoch", options);
+  const dateClause = buildDateClause("s.created_at_epoch", options);
   const whereClauses = [projectClause.clause, dateClause.clause];
   const params = [...projectClause.params, ...dateClause.params];
   if (query) {
@@ -7172,15 +7172,15 @@ function querySessionsByScope(db, options, query) {
         NULL AS sourceTurnId,
         s.project AS project,
         s.title AS title,
-        s.description AS description,
+        s.content AS content,
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.started_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch
       FROM sessions s
       ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
       ${combineClauses(whereClauses)}
-      ORDER BY s.started_at_epoch DESC
+      ORDER BY s.created_at_epoch DESC
       LIMIT ?
     `,
     [...params, options.limit ?? 20]
@@ -7219,7 +7219,7 @@ function queryTurnsByScope(db, options, query) {
         NULL AS sourceTurnId,
         s.project AS project,
         t.title AS title,
-        t.description AS description,
+        t.content AS content,
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
@@ -7260,7 +7260,7 @@ function queryObservationsByScope(db, options, query) {
         NULL AS sourceTurnId,
         s.project AS project,
         o.title AS title,
-        o.description AS description,
+        o.content AS content,
         o.type AS type,
         o.files_read AS filesRead,
         o.files_modified AS filesModified,
@@ -7307,7 +7307,7 @@ function queryMemoriesByScope(db, options, query) {
         m.source_turn_id AS sourceTurnId,
         m.scope AS project,
         m.title AS title,
-        m.content AS description,
+        m.content AS content,
         m.type AS type,
         NULL AS filesRead,
         NULL AS filesModified,
@@ -7414,9 +7414,9 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
-  if (!(0, import_node_fs4.existsSync)(parentDirectory)) {
-    (0, import_node_fs4.mkdirSync)(parentDirectory, { recursive: true });
+  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
+  if (!(0, import_node_fs3.existsSync)(parentDirectory)) {
+    (0, import_node_fs3.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
 function configureDatabase(db) {
@@ -7434,12 +7434,12 @@ function createDatabase(path) {
   configureDatabase(db);
   return db;
 }
-var import_node_fs4, import_node_path3, import_bun_sqlite;
+var import_node_fs3, import_node_path2, import_bun_sqlite;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
-    import_node_fs4 = require("node:fs");
-    import_node_path3 = require("node:path");
+    import_node_fs3 = require("node:fs");
+    import_node_path2 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
   }
@@ -7454,6 +7454,23 @@ __export(schema_exports, {
 });
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureSessionProjectIndex(db);
+}
+function ensureSessionProjectIndex(db) {
+  if (hasColumn(db, "sessions", "created_at_epoch")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_project_created_at
+        ON sessions(project, created_at_epoch DESC)
+    `);
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    return;
+  }
+  if (hasColumn(db, "sessions", "started_at_epoch")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
+        ON sessions(project, started_at_epoch DESC)
+    `);
+  }
 }
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
@@ -7490,6 +7507,11 @@ function shouldRebuildSearchIndex(db) {
 }
 function migrateSchema(db) {
   let searchIndexNeedsRebuild = false;
+  if (hasColumn(db, "sessions", "started_at_epoch") && !hasColumn(db, "sessions", "created_at_epoch")) {
+    db.exec("ALTER TABLE sessions RENAME COLUMN started_at_epoch TO created_at_epoch");
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    ensureSessionProjectIndex(db);
+  }
   if (!hasColumn(db, "sessions", "next_steps")) {
     db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
   }
@@ -7595,7 +7617,7 @@ var init_schema = __esm({
     description TEXT,
     insight TEXT,
     next_steps TEXT,
-    started_at_epoch INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
   );
@@ -7653,9 +7675,6 @@ var init_schema = __esm({
     updated_at_epoch INTEGER
   );
 
-  CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
-    ON sessions(project, started_at_epoch DESC);
-
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -7695,7 +7714,7 @@ __export(server_exports, {
   startMcpServer: () => startMcpServer
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_path4 = require("node:path");
+var import_node_path3 = require("node:path");
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -31021,12 +31040,10 @@ var selectorShape = external_exports3.union([
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store.",
   replay: "Replay raw transcript content from the source JSONL.",
-  remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
-  save_turn: "Persist one extracted turn and its observations.",
-  update_session: "Update the session summary fields."
+  remember: "Persist sessions, turns, observations, or memories through one routed write tool."
 };
 var recallInputShape = {
-  scope: external_exports3.enum(["sessions", "turns", "observations", "memories"]).optional(),
+  view: external_exports3.enum(["sessions", "turns", "observations", "memories"]).optional(),
   id: external_exports3.string().optional(),
   session: selectorShape.optional(),
   turn: selectorShape.optional(),
@@ -31038,12 +31055,9 @@ var recallInputShape = {
   before: external_exports3.number().int().nonnegative().optional(),
   time: external_exports3.string().optional(),
   depth: external_exports3.enum(["collapsed", "expanded", "full"]).optional(),
-  observation: external_exports3.number().int().optional(),
+  limit: external_exports3.number().int().positive().optional(),
   expand_turns: external_exports3.array(external_exports3.number().int()).optional(),
-  around: external_exports3.string().optional(),
-  project: external_exports3.string().optional(),
-  from_epoch: external_exports3.number().int().optional(),
-  to_epoch: external_exports3.number().int().optional()
+  project: external_exports3.string().optional()
 };
 var replayInputShape = {
   session: external_exports3.number().int(),
@@ -31060,68 +31074,19 @@ var rememberInputShape = {
   prompt_number: external_exports3.number().int().positive().optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
-  description: external_exports3.string().optional(),
   insight: external_exports3.string().optional(),
   reasoning: external_exports3.string().optional(),
   application: external_exports3.string().optional(),
   tags: external_exports3.array(external_exports3.string()).optional(),
   status: external_exports3.enum(["skipped", "undone", "active", "superseded", "archived"]).optional(),
   next_steps: external_exports3.string().optional(),
-  user_prompt: external_exports3.string().optional(),
-  assistant_response: external_exports3.string().optional(),
   files_read: external_exports3.array(external_exports3.string()).optional(),
   files_modified: external_exports3.array(external_exports3.string()).optional(),
-  source_turn_id: external_exports3.number().int().positive().optional(),
-  created_at_epoch: external_exports3.number().int().optional(),
-  updated_at_epoch: external_exports3.number().int().optional(),
-  completed_at_epoch: external_exports3.number().int().optional(),
-  expires_at_epoch: external_exports3.number().int().optional()
-};
-var saveTurnInputShape = {
-  session_id: external_exports3.number().int(),
-  prompt_number: external_exports3.number().int().positive(),
-  status: external_exports3.literal("undone").optional(),
-  user_prompt: external_exports3.string().optional(),
-  assistant_response: external_exports3.string().optional(),
-  title: external_exports3.string().optional(),
-  content: external_exports3.string().optional(),
-  description: external_exports3.string().optional(),
-  insight: external_exports3.string().optional(),
-  files_read: external_exports3.array(external_exports3.string()).optional(),
-  files_modified: external_exports3.array(external_exports3.string()).optional(),
-  created_at_epoch: external_exports3.number().int().optional(),
-  updated_at_epoch: external_exports3.number().int().optional(),
-  observations: external_exports3.array(
-    external_exports3.object({
-      type: external_exports3.string(),
-      title: external_exports3.string(),
-      content: external_exports3.string().optional(),
-      description: external_exports3.string().optional(),
-      insight: external_exports3.string().optional(),
-      narrative: external_exports3.string().optional(),
-      facts: external_exports3.array(external_exports3.string()).optional(),
-      tags: external_exports3.array(external_exports3.string()).optional(),
-      concepts: external_exports3.array(external_exports3.string()).optional(),
-      files_read: external_exports3.array(external_exports3.string()).optional(),
-      files_modified: external_exports3.array(external_exports3.string()).optional()
-    })
-  ).optional()
-};
-var updateSessionInputShape = {
-  session_id: external_exports3.number().int(),
-  title: external_exports3.string().optional(),
-  content: external_exports3.string().optional(),
-  description: external_exports3.string().optional(),
-  insight: external_exports3.string().optional(),
-  next_steps: external_exports3.string().optional(),
-  updated_at_epoch: external_exports3.number().int().optional(),
-  completed_at_epoch: external_exports3.number().int().optional()
+  source_turn_id: external_exports3.number().int().positive().optional()
 };
 var recallInputSchema = external_exports3.object(recallInputShape);
 var replayInputSchema = external_exports3.object(replayInputShape);
 var rememberInputSchema = external_exports3.object(rememberInputShape);
-var saveTurnInputSchema = external_exports3.object(saveTurnInputShape);
-var updateSessionInputSchema = external_exports3.object(updateSessionInputShape);
 
 // src/db/memories.ts
 init_search();
@@ -31304,13 +31269,9 @@ var OBSERVATION_SELECT = `
     turn_id AS turnId,
     type,
     title,
-    COALESCE(content, description) AS content,
-    COALESCE(content, description) AS description,
+    content,
     insight,
-    narrative,
-    facts,
-    COALESCE(tags, concepts) AS tags,
-    concepts,
+    tags,
     files_read AS filesRead,
     files_modified AS filesModified,
     created_at_epoch AS createdAtEpoch
@@ -31325,40 +31286,18 @@ function parseJsonArray3(value) {
 function stringifyJsonArray2(values) {
   return JSON.stringify(values);
 }
-function combineLegacyInsight(narrative, facts) {
-  if (narrative && facts.length > 0) {
-    return [narrative, ...facts].join("\n");
-  }
-  return narrative ?? (facts.length > 0 ? facts.join("\n") : null);
-}
 function mapObservationRow(row) {
   if (!row) {
     return null;
   }
-  const facts = parseJsonArray3(row.facts);
-  const tags = parseJsonArray3(row.tags);
-  const concepts = parseJsonArray3(row.concepts);
-  const resolvedTags = tags.length > 0 ? tags : concepts;
-  const resolvedInsight = row.insight ?? combineLegacyInsight(row.narrative, facts);
   return {
     ...row,
-    description: row.description ?? row.content,
-    insight: resolvedInsight,
-    narrative: row.narrative ?? resolvedInsight,
-    facts,
-    tags: resolvedTags,
-    concepts: concepts.length > 0 ? concepts : resolvedTags,
+    tags: parseJsonArray3(row.tags),
     filesRead: parseJsonArray3(row.filesRead),
     filesModified: parseJsonArray3(row.filesModified)
   };
 }
 function createObservation(db, input) {
-  const content = input.content ?? input.description ?? null;
-  const facts = input.facts ?? [];
-  const tags = input.tags ?? input.concepts ?? [];
-  const insight = input.insight ?? combineLegacyInsight(input.narrative ?? null, facts);
-  const narrative = input.narrative ?? insight;
-  const concepts = input.concepts ?? tags;
   const inserted = db.query(
     `
         INSERT INTO observations (
@@ -31366,28 +31305,20 @@ function createObservation(db, input) {
           type,
           title,
           content,
-          description,
           insight,
-          narrative,
-          facts,
           tags,
-          concepts,
           files_read,
           files_modified,
           created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING
           id,
           turn_id AS turnId,
           type,
           title,
-          COALESCE(content, description) AS content,
-          COALESCE(content, description) AS description,
+          content,
           insight,
-          narrative,
-          facts,
-          COALESCE(tags, concepts) AS tags,
-          concepts,
+          tags,
           files_read AS filesRead,
           files_modified AS filesModified,
           created_at_epoch AS createdAtEpoch
@@ -31396,13 +31327,9 @@ function createObservation(db, input) {
     input.turnId,
     input.type,
     input.title,
-    content,
-    content,
-    insight,
-    narrative,
-    stringifyJsonArray2(facts),
-    stringifyJsonArray2(tags),
-    stringifyJsonArray2(concepts),
+    input.content ?? null,
+    input.insight ?? null,
+    stringifyJsonArray2(input.tags ?? []),
     stringifyJsonArray2(input.filesRead ?? []),
     stringifyJsonArray2(input.filesModified ?? []),
     input.createdAtEpoch
@@ -31436,41 +31363,34 @@ var SESSION_SELECT = `
     content_session_id AS contentSessionId,
     project,
     title,
-    COALESCE(content, description) AS content,
-    COALESCE(content, description) AS description,
+    content,
     insight,
     next_steps AS nextSteps,
-    started_at_epoch AS startedAtEpoch,
+    created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
-function resolveSessionContent(input) {
-  return input.content ?? input.description ?? null;
-}
 function upsertSession(db, input) {
-  const content = resolveSessionContent(input);
   const session = db.query(`
       INSERT INTO sessions (
         content_session_id,
         project,
         title,
         content,
-        description,
         insight,
         next_steps,
-        started_at_epoch,
+        created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, excluded.description, sessions.content, sessions.description),
-        description = COALESCE(excluded.description, sessions.description),
+        content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        started_at_epoch = excluded.started_at_epoch,
+        created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
       RETURNING
@@ -31478,22 +31398,20 @@ function upsertSession(db, input) {
         content_session_id AS contentSessionId,
         project,
         title,
-        COALESCE(content, description) AS content,
-        COALESCE(content, description) AS description,
+        content,
         insight,
         next_steps AS nextSteps,
-        started_at_epoch AS startedAtEpoch,
+        created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
     `).get(
     input.contentSessionId,
     input.project,
     input.title,
-    content,
-    content,
+    input.content ?? null,
     input.insight,
     input.nextSteps ?? null,
-    input.startedAtEpoch,
+    input.createdAtEpoch,
     input.updatedAtEpoch,
     input.completedAtEpoch
   );
@@ -31516,7 +31434,7 @@ function getRecentSessions(db, options = {}) {
   const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
   const limit = options.limit ?? 20;
   return db.query(
-    `${SESSION_SELECT}${whereClause} ORDER BY started_at_epoch DESC LIMIT ?`
+    `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
 }
 
@@ -31531,8 +31449,7 @@ var TURN_SELECT = `
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
     title,
-    COALESCE(content, description) AS content,
-    COALESCE(content, description) AS description,
+    content,
     insight,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -31543,25 +31460,6 @@ var TURN_SELECT = `
 `;
 function stringifyArray(values) {
   return JSON.stringify(values);
-}
-function resolveTurnContent(input) {
-  return input.content ?? input.description ?? null;
-}
-function resolveObservationContent(observation) {
-  return observation.content ?? observation.description ?? null;
-}
-function resolveObservationTags(observation) {
-  return observation.tags ?? observation.concepts ?? [];
-}
-function resolveObservationInsight(observation) {
-  if (observation.insight) {
-    return observation.insight;
-  }
-  const facts = observation.facts ?? [];
-  if (observation.narrative && facts.length > 0) {
-    return [observation.narrative, ...facts].join("\n");
-  }
-  return observation.narrative ?? (facts.length > 0 ? facts.join("\n") : null);
 }
 function parseJsonArray4(value) {
   if (!value) {
@@ -31580,9 +31478,8 @@ function mapTurnRow(row) {
   };
 }
 function hasExtractedContent(input) {
-  const content = resolveTurnContent(input);
   return Boolean(
-    input.title || content || input.insight || input.observations.length > 0
+    input.title || input.content || input.insight || input.observations.length > 0
   );
 }
 function deleteObservationFts(db, turnId) {
@@ -31598,7 +31495,6 @@ function deleteObservationFts(db, turnId) {
 }
 function saveTurn(db, input) {
   const status = input.status === "undone" ? "undone" : hasExtractedContent(input) ? "extracted" : "skipped";
-  const content = resolveTurnContent(input);
   db.exec("BEGIN");
   try {
     const existingTurn = getTurn(db, input.sessionId, input.promptNumber);
@@ -31618,7 +31514,6 @@ function saveTurn(db, input) {
              assistant_response = COALESCE(?, assistant_response),
              title = ?,
              content = ?,
-             description = ?,
              insight = ?,
              files_read = ?,
              files_modified = ?,
@@ -31630,8 +31525,7 @@ function saveTurn(db, input) {
         input.userPrompt,
         input.assistantResponse,
         input.title,
-        content,
-        content,
+        input.content ?? null,
         input.insight,
         filesRead,
         filesModified,
@@ -31650,13 +31544,12 @@ function saveTurn(db, input) {
             assistant_response,
             title,
             content,
-            description,
             insight,
             files_read,
             files_modified,
             created_at_epoch,
             updated_at_epoch
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           RETURNING id
         `).get(
         input.sessionId,
@@ -31665,8 +31558,7 @@ function saveTurn(db, input) {
         input.userPrompt,
         input.assistantResponse,
         input.title,
-        content,
-        content,
+        input.content ?? null,
         input.insight,
         filesRead,
         filesModified,
@@ -31689,13 +31581,9 @@ function saveTurn(db, input) {
           turnId,
           type: observation.type,
           title: observation.title,
-          content: resolveObservationContent(observation),
-          description: resolveObservationContent(observation),
-          insight: resolveObservationInsight(observation),
-          narrative: observation.narrative ?? resolveObservationInsight(observation),
-          facts: observation.facts ?? [],
-          tags: resolveObservationTags(observation),
-          concepts: resolveObservationTags(observation),
+          content: observation.content ?? null,
+          insight: observation.insight ?? null,
+          tags: observation.tags ?? [],
           filesRead: observation.filesRead,
           filesModified: observation.filesModified,
           createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch
@@ -31730,52 +31618,6 @@ function getPendingTurns(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? AND status IN ('pending', 'stale') ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
-}
-
-// src/shared/logger.ts
-var import_node_fs = require("node:fs");
-var import_node_path2 = require("node:path");
-init_paths();
-var LOG_PATH = (0, import_node_path2.join)(DATA_DIR, "claude-mnemo.log");
-var dirEnsured = false;
-function ensureLogDir() {
-  if (!dirEnsured) {
-    (0, import_node_fs.mkdirSync)(DATA_DIR, { recursive: true });
-    dirEnsured = true;
-  }
-}
-function writeLog(level, component, message, context) {
-  const line = JSON.stringify({
-    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-    level,
-    component,
-    message,
-    context: context ?? null
-  });
-  try {
-    ensureLogDir();
-    (0, import_node_fs.appendFileSync)(LOG_PATH, `${line}
-`);
-  } catch {
-    process.stderr.write(`${line}
-`);
-  }
-}
-function createLogger(component) {
-  return {
-    debug(message, context) {
-      writeLog("debug", component, message, context);
-    },
-    info(message, context) {
-      writeLog("info", component, message, context);
-    },
-    warn(message, context) {
-      writeLog("warn", component, message, context);
-    },
-    error(message, context) {
-      writeLog("error", component, message, context);
-    }
-  };
 }
 
 // src/mcp/format.ts
@@ -31889,10 +31731,10 @@ function formatSessionCollapsed(session) {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
-    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.startedAtEpoch)} | ${session.project}`
+    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
   ];
-  if (session.description) {
-    lines.push(`  - desc: ${truncateText(session.description, session.id)}`);
+  if (session.content) {
+    lines.push(`  - desc: ${truncateText(session.content, session.id)}`);
   }
   return lines.join("\n");
 }
@@ -31921,9 +31763,9 @@ function formatTurnLabel(turn, { indent = "  ", sessionId } = {}) {
 function formatTurnCollapsed(turn, options = {}) {
   const { indent = "  " } = options;
   const lines = [formatTurnLabel(turn, options)];
-  if (turn.description) {
+  if (turn.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(turn.description, options.sessionId, turn.promptNumber)}`
+      `${indent}  - desc: ${truncateText(turn.content, options.sessionId, turn.promptNumber)}`
     );
   }
   return lines.join("\n");
@@ -32001,10 +31843,10 @@ function formatMemoryExpanded(memory) {
 function formatObservationCollapsed(observation, options = {}) {
   const { indent = "" } = options;
   const lines = [formatObservationLabel(observation, options)];
-  if (observation.description) {
+  if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(
-        observation.description,
+        observation.content,
         options.sessionId,
         options.turnPromptNumber
       )}`
@@ -32016,29 +31858,19 @@ function formatObservationExpanded(observation, options = {}) {
   const { indent = "" } = options;
   const detailIndent = `${indent}  `;
   const lines = [formatObservationCollapsed(observation, options)];
-  if (observation.narrative) {
+  if (observation.insight) {
     lines.push(
-      `${detailIndent}- narrative: ${truncateText(
-        observation.narrative,
+      `${detailIndent}- insight: ${truncateText(
+        observation.insight,
         options.sessionId,
         options.turnPromptNumber
       )}`
     );
   }
-  if (observation.facts && observation.facts.length > 0) {
-    lines.push(`${detailIndent}- facts:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      observation.facts.map(
-        (fact) => truncateText(fact, options.sessionId, options.turnPromptNumber)
-      )
-    );
-  }
-  if (observation.concepts && observation.concepts.length > 0) {
+  if (observation.tags && observation.tags.length > 0) {
     lines.push(
-      `${detailIndent}- concepts: ${truncateText(
-        observation.concepts.join(", "),
+      `${detailIndent}- tags: ${truncateText(
+        observation.tags.join(", "),
         options.sessionId,
         options.turnPromptNumber
       )}`
@@ -32123,7 +31955,6 @@ function sampleWithOmissions(items, isProtected = () => false) {
 }
 
 // src/mcp/recall.ts
-var log = createLogger("MCP");
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -32135,43 +31966,18 @@ function formatParameterError(message) {
 }
 function normalizeRecallInput(input) {
   const normalized = { ...input };
-  const legacyFields = [];
-  const hasObservationSelectors = normalized.obs !== void 0 || normalized.observation !== void 0;
-  const hasSearchOrTimeFilters = normalized.type !== void 0 || normalized.file !== void 0 || normalized.query !== void 0 || normalized.project !== void 0 || normalized.time !== void 0 || normalized.after !== void 0 || normalized.before !== void 0 || normalized.fromEpoch !== void 0 || normalized.toEpoch !== void 0;
-  if (normalized.observation !== void 0 && normalized.obs === void 0) {
-    normalized.obs = normalized.observation;
-    legacyFields.push("observation");
-  }
-  if (normalized.fromEpoch !== void 0 && normalized.after === void 0) {
-    normalized.after = normalized.fromEpoch;
-    legacyFields.push("from_epoch");
-  }
-  if (normalized.toEpoch !== void 0 && normalized.before === void 0) {
-    normalized.before = normalized.toEpoch;
-    legacyFields.push("to_epoch");
-  }
-  if (normalized.expandTurns !== void 0) {
-    legacyFields.push("expand_turns");
-  }
-  if (normalized.around !== void 0) {
-    legacyFields.push("around");
-  }
-  if (normalized.scope === void 0 && normalized.id === void 0) {
-    legacyFields.push("scope");
+  const hasObservationSelectors = normalized.obs !== void 0;
+  if (normalized.view === void 0 && normalized.id === void 0) {
     if (hasObservationSelectors) {
-      normalized.scope = "observations";
+      normalized.view = "observations";
     } else if (normalized.session !== void 0 && normalized.turn !== void 0) {
-      normalized.scope = "turns";
+      normalized.view = "turns";
       normalized.depth ??= "expanded";
     } else if (normalized.session !== void 0) {
-      normalized.scope = "turns";
+      normalized.view = "turns";
+    } else if (!hasUnscopedSearchFilters(normalized)) {
+      normalized.view = "sessions";
     }
-  }
-  if (legacyFields.length > 0) {
-    log.warn("legacy recall parameters normalized", {
-      legacyFields,
-      normalizedScope: normalized.scope ?? "legacy"
-    });
   }
   return normalized;
 }
@@ -32300,10 +32106,10 @@ function mergeTimeRanges(input) {
   if (parsedTime.error) {
     return { error: parsedTime.error };
   }
-  const lowerBounds = [input.after, input.fromEpoch, parsedTime.range?.after].filter(
+  const lowerBounds = [input.after, parsedTime.range?.after].filter(
     (value) => value !== void 0
   );
-  const upperBounds = [input.before, input.toEpoch, parsedTime.range?.before].filter(
+  const upperBounds = [input.before, parsedTime.range?.before].filter(
     (value) => value !== void 0
   );
   const after = lowerBounds.length > 0 ? Math.max(...lowerBounds) : void 0;
@@ -32320,7 +32126,7 @@ function resolveDefaultProject(db) {
   return projects.length === 1 ? projects[0] : void 0;
 }
 function hasUnscopedSearchFilters(input) {
-  return input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.project !== void 0 || input.time !== void 0 || input.after !== void 0 || input.before !== void 0 || input.fromEpoch !== void 0 || input.toEpoch !== void 0;
+  return input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.project !== void 0 || input.time !== void 0 || input.after !== void 0 || input.before !== void 0;
 }
 function buildSessionView(db, session) {
   const turns = getTurnsForSession(db, session.id).map(
@@ -32330,8 +32136,8 @@ function buildSessionView(db, session) {
     id: session.id,
     title: session.title,
     project: session.project,
-    startedAtEpoch: session.startedAtEpoch,
-    description: session.description,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount: turns.length,
@@ -32373,8 +32179,8 @@ function buildSessionSummary(db, sessionId) {
     id: session.id,
     title: session.title,
     project: session.project,
-    startedAtEpoch: session.startedAtEpoch,
-    description: session.description,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount,
@@ -32391,7 +32197,7 @@ function buildCollapsedTurnsForSession(db, sessionId) {
     id: turn.id,
     promptNumber: turn.promptNumber,
     title: turn.title,
-    description: turn.description,
+    content: turn.content,
     observationCount: observationCounts.get(turn.id) ?? 0,
     toolCallCount: turn.toolCallCount,
     filesReadCount: turn.filesRead.length,
@@ -32405,7 +32211,7 @@ function buildTurnView(db, turn) {
     id: turn.id,
     promptNumber: turn.promptNumber,
     title: turn.title,
-    description: turn.description,
+    content: turn.content,
     observationCount: observations.length,
     toolCallCount: turn.toolCallCount,
     filesReadCount: turn.filesRead.length,
@@ -32420,10 +32226,9 @@ function buildTurnView(db, turn) {
       id: observation.id,
       type: observation.type,
       title: observation.title,
-      description: observation.description,
-      narrative: observation.narrative,
-      facts: observation.facts,
-      concepts: observation.concepts,
+      content: observation.content,
+      insight: observation.insight,
+      tags: observation.tags,
       filesRead: observation.filesRead,
       filesModified: observation.filesModified
     }))
@@ -32453,16 +32258,14 @@ function buildMemoryView(db, memory) {
 }
 function selectSearchResults(db, input, after, before) {
   return searchMemory(db, {
-    scope: input.scope,
+    scope: input.view,
     query: input.query,
     project: input.project,
     type: input.type,
     file: input.file,
     after,
     before,
-    fromEpoch: input.fromEpoch,
-    toEpoch: input.toEpoch,
-    limit: 200
+    limit: input.limit ?? (input.view === "memories" ? 200 : input.view === "sessions" ? 1e3 : 20)
   });
 }
 function renderSession(db, session, depth, turnSelector) {
@@ -32590,10 +32393,9 @@ function renderObservationScope(db, observations, depth, includeParents) {
         id: observation.id,
         type: observation.type,
         title: observation.title,
-        description: observation.description,
-        narrative: observation.narrative,
-        facts: observation.facts,
-        concepts: observation.concepts,
+        content: observation.content,
+        insight: observation.insight,
+        tags: observation.tags,
         filesRead: observation.filesRead,
         filesModified: observation.filesModified
       };
@@ -32634,10 +32436,9 @@ function renderObservationScope(db, observations, depth, includeParents) {
           id: observation.id,
           type: observation.type,
           title: observation.title,
-          description: observation.description,
-          narrative: observation.narrative,
-          facts: observation.facts,
-          concepts: observation.concepts,
+          content: observation.content,
+          insight: observation.insight,
+          tags: observation.tags,
           filesRead: observation.filesRead,
           filesModified: observation.filesModified
         };
@@ -32701,10 +32502,9 @@ function renderObservationDetailById(db, observationId) {
     id: observation.id,
     type: observation.type,
     title: observation.title,
-    description: observation.description,
-    narrative: observation.narrative,
-    facts: observation.facts,
-    concepts: observation.concepts,
+    content: observation.content,
+    insight: observation.insight,
+    tags: observation.tags,
     filesRead: observation.filesRead,
     filesModified: observation.filesModified
   });
@@ -32732,91 +32532,8 @@ function renderRoutedId(db, id) {
   }
   return renderMemoryDetailById(db, routed.memoryId);
 }
-function legacyRecallMemory(db, input) {
-  if (input.observation !== void 0) {
-    const observation = getObservation(db, input.observation);
-    if (!observation) {
-      return "Observation not found.";
-    }
-    return formatObservationExpanded({
-      id: observation.id,
-      type: observation.type,
-      title: observation.title,
-      description: observation.description,
-      narrative: observation.narrative,
-      facts: observation.facts,
-      concepts: observation.concepts,
-      filesRead: observation.filesRead,
-      filesModified: observation.filesModified
-    });
-  }
-  if (input.session !== void 0 && input.turn !== void 0) {
-    const sessionId = typeof input.session === "number" ? input.session : null;
-    if (sessionId === null) {
-      return formatParameterError("turn requires session; use recall(session=142, turn=3).");
-    }
-    const turn = getTurn(db, sessionId, input.turn);
-    if (!turn) {
-      return "Turn not found.";
-    }
-    const turnView = buildTurnView(db, turn);
-    return [
-      formatTurnExpanded(turnView, { sessionId }),
-      ...turnView.observations.map(
-        (observation) => formatObservationCollapsed(observation, {
-          indent: "  ",
-          sessionId,
-          turnPromptNumber: turn.promptNumber
-        })
-      )
-    ].join("\n");
-  }
-  if (input.session !== void 0) {
-    const sessionId = typeof input.session === "number" ? input.session : null;
-    if (sessionId === null) {
-      return formatParameterError("session selector requires a numeric id in legacy mode.");
-    }
-    const session = getSession(db, sessionId);
-    if (!session) {
-      return "Session not found.";
-    }
-    return renderSession(db, session, input.depth ?? "collapsed");
-  }
-  if (input.around) {
-    const sessions = getRecentSessions(db, { limit: 1e3 }).sort(
-      (left, right) => left.startedAtEpoch - right.startedAtEpoch
-    );
-    if (sessions.length === 0) {
-      return "Anchor session not found.";
-    }
-    const anchorId = Number(input.around.replace(/^S/i, ""));
-    let anchorIndex = /^S\d+$/i.test(input.around) ? sessions.findIndex((session) => session.id === anchorId) : -1;
-    if (anchorIndex === -1) {
-      const dateEpoch = parseUtcDate(input.around);
-      if (dateEpoch !== null) {
-        anchorIndex = sessions.findIndex(
-          (session) => session.startedAtEpoch >= dateEpoch
-        );
-        if (anchorIndex === -1) {
-          anchorIndex = sessions.length - 1;
-        }
-      }
-    }
-    if (anchorIndex === -1) {
-      return "Anchor session not found.";
-    }
-    const startIndex = Math.max(0, anchorIndex - (input.before ?? 0));
-    const endIndex = Math.min(sessions.length, anchorIndex + (input.after ?? 0) + 1);
-    return sessions.slice(startIndex, endIndex).map((session) => renderSession(db, session, "collapsed")).join("\n");
-  }
-  const results = getRecentSessions(db, { limit: 20 });
-  return results.map((session) => renderSession(db, session, "collapsed")).join("\n");
-}
-function shouldUseLegacyPath(input) {
-  return input.scope === void 0 && input.id === void 0;
-}
 function hasIdSelectorConflict(input) {
-  return input.scope !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.observation !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.around !== void 0 || input.project !== void 0 || input.fromEpoch !== void 0 || input.toEpoch !== void 0;
+  return input.view !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.project !== void 0 || input.limit !== void 0;
 }
 function firstLine(value) {
   return value.split("\n")[0] ?? value;
@@ -32849,12 +32566,12 @@ function recallMemory(db, input) {
   if (normalizedInput.id) {
     if (hasIdSelectorConflict(normalizedInput)) {
       return formatParameterError(
-        "id cannot be combined with scope, session, turn, obs, or search filters."
+        "id cannot be combined with view, session, turn, obs, or search filters."
       );
     }
     return renderRoutedId(db, normalizedInput.id);
   }
-  if (normalizedInput.scope === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
+  if (normalizedInput.view === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
     const timeRange2 = mergeTimeRanges(normalizedInput);
     if (timeRange2.error) {
       return formatParameterError(timeRange2.error);
@@ -32871,9 +32588,6 @@ function recallMemory(db, input) {
       results,
       normalizedInput.depth ?? "collapsed"
     );
-  }
-  if (shouldUseLegacyPath(normalizedInput)) {
-    return legacyRecallMemory(db, normalizedInput);
   }
   const depth = normalizedInput.depth ?? "collapsed";
   const timeRange = mergeTimeRanges(normalizedInput);
@@ -32898,17 +32612,17 @@ function recallMemory(db, input) {
   );
 }
 function renderSearchResults(db, input, results, depth) {
-  if (input.scope === void 0) {
+  if (input.view === void 0) {
     return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
   }
-  if (input.scope === "memories") {
+  if (input.view === "memories") {
     return renderMemoryScope(
       db,
       results.filter((result) => result.layer === "memory").map((result) => result.sourceId),
       depth
     );
   }
-  if (input.scope === "sessions") {
+  if (input.view === "sessions") {
     const sessions = results.filter(
       (result) => result.sessionId !== null
     ).map((result) => getSession(db, result.sessionId)).filter(
@@ -32916,7 +32630,7 @@ function renderSearchResults(db, input, results, depth) {
     );
     return sessions.map((session) => renderSession(db, session, depth)).join("\n");
   }
-  if (input.scope === "turns") {
+  if (input.view === "turns") {
     const turns = results.map((result) => getTurnById(db, result.turnId ?? -1)).filter((turn) => turn !== null);
     return renderTurnScope(db, turns, depth);
   }
@@ -32931,14 +32645,14 @@ function renderSearchResults(db, input, results, depth) {
   return renderObservationScope(db, observations, depth, includeParents);
 }
 function renderScopedMemory(db, input, depth, after, before) {
-  if (input.scope === "memories") {
+  if (input.view === "memories") {
     const project = input.project ?? resolveDefaultProject(db);
     const results = searchMemory(db, {
       scope: "memories",
       project,
       after,
       before,
-      limit: 200
+      limit: input.limit ?? 200
     });
     return renderMemoryScope(
       db,
@@ -32949,7 +32663,7 @@ function renderScopedMemory(db, input, depth, after, before) {
   const sessionSelector = parseSelectorValue(input.session, "session");
   const turnSelector = parseSelectorValue(input.turn, "turn");
   const observationSelector = parseSelectorValue(
-    input.obs ?? input.observation,
+    input.obs,
     "observation"
   );
   if (sessionSelector.error) {
@@ -32964,9 +32678,9 @@ function renderScopedMemory(db, input, depth, after, before) {
   const sessionIds = sessionSelector.values;
   const turnNumbers = turnSelector.values;
   const observationIds = observationSelector.values;
-  if (input.scope === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
+  if (input.view === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
     return formatParameterError(
-      'turn requires session; use recall(scope="turns", session=142, turn=3).'
+      'turn requires session; use recall(view="turns", session=142, turn=3).'
     );
   }
   if (sessionIds.length > 0 && turnNumbers.length > 0) {
@@ -33012,10 +32726,10 @@ function renderScopedMemory(db, input, depth, after, before) {
       }
     }
   }
-  if (input.scope === "sessions") {
+  if (input.view === "sessions") {
     const candidateSessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
       (session) => session !== null
-    ) : getRecentSessions(db, { limit: 1e3 });
+    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
     const observationSessionIds = /* @__PURE__ */ new Set();
     if (observationIds.length > 0) {
       for (const observationId of observationIds) {
@@ -33030,10 +32744,10 @@ function renderScopedMemory(db, input, depth, after, before) {
       }
     }
     const filtered = candidateSessions.filter((session) => {
-      if (after !== void 0 && session.startedAtEpoch < after) {
+      if (after !== void 0 && session.createdAtEpoch < after) {
         return false;
       }
-      if (before !== void 0 && session.startedAtEpoch > before) {
+      if (before !== void 0 && session.createdAtEpoch > before) {
         return false;
       }
       if (turnNumbers.length > 0 && !getTurnsForSession(db, session.id).some(
@@ -33049,13 +32763,13 @@ function renderScopedMemory(db, input, depth, after, before) {
     const turnSelector2 = turnNumbers.length > 0 ? new Set(turnNumbers) : void 0;
     return filtered.map((session) => renderSession(db, session, depth, turnSelector2)).join("\n");
   }
-  if (input.scope === "turns") {
+  if (input.view === "turns") {
     if (input.turn !== void 0 && sessionIds.length === 0) {
-      return formatParameterError('turn requires session; use recall(scope="turns", session=142, turn=3).');
+      return formatParameterError('turn requires session; use recall(view="turns", session=142, turn=3).');
     }
     const sessions2 = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
       (session) => session !== null
-    ) : getRecentSessions(db, { limit: 1e3 });
+    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
     const turns = [];
     for (const session of sessions2) {
       turns.push(
@@ -33103,7 +32817,7 @@ function renderScopedMemory(db, input, depth, after, before) {
   }
   const sessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
     (session) => session !== null
-  ) : getRecentSessions(db, { limit: 1e3 });
+  ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
   const turnIds = /* @__PURE__ */ new Set();
   const observations = [];
   for (const session of sessions) {
@@ -33128,7 +32842,7 @@ function renderScopedMemory(db, input, depth, after, before) {
     }
   }
   const turnRecords = [...turnIds].map((turnId) => getTurnById(db, turnId)).filter((turn) => turn !== null);
-  if (input.scope === "observations") {
+  if (input.view === "observations") {
     return renderObservationScope(
       db,
       observations,
@@ -33139,67 +32853,27 @@ function renderScopedMemory(db, input, depth, after, before) {
   return renderTurnScope(db, turnRecords, depth);
 }
 
-// src/mcp/update-session.ts
-function textResult(text) {
-  return {
-    content: [
-      {
-        type: "text",
-        text
-      }
-    ]
-  };
-}
-function updateSessionTool(db, input) {
-  const session = getSession(db, input.session_id);
-  if (!session) {
-    return textResult(`Session ${input.session_id} not found.`);
-  }
-  upsertSession(db, {
-    contentSessionId: session.contentSessionId,
-    project: session.project,
-    title: input.title ?? session.title,
-    content: input.content ?? input.description ?? session.content,
-    description: input.content ?? input.description ?? session.content,
-    insight: input.insight ?? session.insight,
-    nextSteps: input.next_steps,
-    startedAtEpoch: session.startedAtEpoch,
-    updatedAtEpoch: input.updated_at_epoch ?? Math.floor(Date.now() / 1e3),
-    completedAtEpoch: input.completed_at_epoch ?? session.completedAtEpoch
-  });
-  return textResult(`Updated session ${input.session_id}.`);
-}
-
 // src/mcp/remember.ts
 var TURN_REMEMBER_STATUSES = ["skipped", "undone"];
-var MEMORY_REMEMBER_STATUSES = [
-  "active",
-  "superseded",
-  "archived"
-];
-function textResult2(text) {
+var MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"];
+function textResult(text) {
   return {
-    content: [
-      {
-        type: "text",
-        text
-      }
-    ]
+    content: [{ type: "text", text }]
   };
 }
 function parameterError(message) {
-  return textResult2(`Parameter error: ${message}`);
+  return textResult(`Parameter error: ${message}`);
 }
 function parseSessionId(value) {
-  const match = /^S(\d+)$/.exec(value.trim());
+  const match = /^S(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
 function parseMemoryId(value) {
-  const match = /^M(\d+)$/.exec(value.trim());
+  const match = /^M(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
 function parseTurnParent(value) {
-  const match = /^S(\d+)\/T(\d+)$/.exec(value.trim());
+  const match = /^S(\d+)\/T(\d+)$/i.exec(value.trim());
   if (!match) {
     return null;
   }
@@ -33207,9 +32881,6 @@ function parseTurnParent(value) {
     sessionId: Number.parseInt(match[1], 10),
     promptNumber: Number.parseInt(match[2], 10)
   };
-}
-function resolveContent(input) {
-  return input.content ?? input.description ?? null;
 }
 function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
@@ -33245,27 +32916,26 @@ function handleTurnRemember(db, sessionId, input) {
     return parameterError(statusError);
   }
   if (!getSession(db, sessionId)) {
-    return textResult2(`Session ${sessionId} not found.`);
+    return textResult(`Session ${sessionId} not found.`);
   }
   const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
-  const content = input.status === "skipped" ? null : resolveContent(input);
+  const isSkipped = input.status === "skipped";
   const turn = saveTurn(db, {
     sessionId,
     promptNumber,
     status: input.status === "undone" ? "undone" : void 0,
-    userPrompt: input.user_prompt ?? null,
-    assistantResponse: input.assistant_response ?? null,
-    title: input.status === "skipped" ? null : input.title ?? null,
-    content,
-    description: content,
-    insight: input.status === "skipped" ? null : input.insight ?? null,
-    filesRead: input.status === "skipped" ? [] : input.files_read ?? [],
-    filesModified: input.status === "skipped" ? [] : input.files_modified ?? [],
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1e3),
-    updatedAtEpoch: input.updated_at_epoch ?? null,
+    userPrompt: null,
+    assistantResponse: null,
+    title: isSkipped ? null : input.title ?? null,
+    content: isSkipped ? null : input.content ?? null,
+    insight: isSkipped ? null : input.insight ?? null,
+    filesRead: isSkipped ? [] : input.files_read ?? [],
+    filesModified: isSkipped ? [] : input.files_modified ?? [],
+    createdAtEpoch: Math.floor(Date.now() / 1e3),
+    updatedAtEpoch: null,
     observations: []
   });
-  return textResult2(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
+  return textResult(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
 }
 function handleObservationRemember(db, parent, input) {
   const statusError = validateStatusForRoute(
@@ -33278,23 +32948,20 @@ function handleObservationRemember(db, parent, input) {
   }
   const turn = getTurn(db, parent.sessionId, parent.promptNumber);
   if (!turn) {
-    return textResult2(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
+    return textResult(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
   }
   const observation = createObservation(db, {
     turnId: turn.id,
     type: input.type ?? "discovery",
     title: input.title ?? "Untitled observation",
-    content: resolveContent(input),
-    description: resolveContent(input),
+    content: input.content ?? null,
     insight: input.insight ?? null,
-    narrative: input.insight ?? null,
     tags: input.tags ?? [],
-    concepts: input.tags ?? [],
     filesRead: input.files_read ?? [],
     filesModified: input.files_modified ?? [],
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1e3)
+    createdAtEpoch: Math.floor(Date.now() / 1e3)
   });
-  return textResult2(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
+  return textResult(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
 }
 function handleMemoryCreate(db, input) {
   const statusError = validateStatusForRoute(
@@ -33305,25 +32972,24 @@ function handleMemoryCreate(db, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (!input.type || !input.scope || !input.title || !resolveContent(input)) {
-    return textResult2("Memory creation requires type, scope, title, and content.");
+  if (!input.type || !input.scope || !input.title || !input.content) {
+    return textResult("Memory creation requires type, scope, title, and content.");
   }
   const memory = createMemory(db, {
     type: input.type,
     scope: input.scope,
     title: input.title,
-    content: resolveContent(input),
+    content: input.content,
     reasoning: input.reasoning ?? null,
     application: input.application ?? null,
     tags: input.tags ?? [],
     status: input.status === "active" || input.status === "superseded" || input.status === "archived" ? input.status : "active",
     supersededBy: null,
-    expiresAtEpoch: input.expires_at_epoch ?? null,
     sourceTurnId: input.source_turn_id ?? null,
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1e3),
-    updatedAtEpoch: input.updated_at_epoch ?? null
+    createdAtEpoch: Math.floor(Date.now() / 1e3),
+    updatedAtEpoch: null
   });
-  return textResult2(`Created memory M${memory.id}.`);
+  return textResult(`Created memory M${memory.id}.`);
 }
 function handleMemoryUpdate(db, memoryId, input) {
   const statusError = validateStatusForRoute(
@@ -33338,19 +33004,40 @@ function handleMemoryUpdate(db, memoryId, input) {
     type: input.type,
     scope: input.scope,
     title: input.title,
-    content: resolveContent(input) ?? void 0,
+    content: input.content,
     reasoning: input.reasoning,
     application: input.application,
     tags: input.tags,
     status: input.status === "active" || input.status === "superseded" || input.status === "archived" ? input.status : void 0,
-    expiresAtEpoch: input.expires_at_epoch,
     sourceTurnId: input.source_turn_id,
-    updatedAtEpoch: input.updated_at_epoch
+    updatedAtEpoch: Math.floor(Date.now() / 1e3)
   });
   if (!memory) {
-    return textResult2(`Memory M${memoryId} not found.`);
+    return textResult(`Memory M${memoryId} not found.`);
   }
-  return textResult2(`Updated memory M${memory.id}.`);
+  return textResult(`Updated memory M${memory.id}.`);
+}
+function handleSessionRemember(db, sessionId, input) {
+  const statusError = validateStatusForRoute(input.status, null, "session remember");
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+  upsertSession(db, {
+    contentSessionId: session.contentSessionId,
+    project: session.project,
+    title: input.title ?? session.title,
+    content: input.content ?? session.content,
+    insight: input.insight ?? session.insight,
+    nextSteps: input.next_steps ?? session.nextSteps,
+    createdAtEpoch: session.createdAtEpoch,
+    updatedAtEpoch: Math.floor(Date.now() / 1e3),
+    completedAtEpoch: session.completedAtEpoch
+  });
+  return textResult(`Updated session ${sessionId}.`);
 }
 function rememberTool(db, input) {
   if (input.parent) {
@@ -33362,44 +33049,27 @@ function rememberTool(db, input) {
     if (sessionId !== null) {
       return handleTurnRemember(db, sessionId, input);
     }
-    return textResult2(`Unsupported parent selector: ${input.parent}`);
+    return textResult(`Unsupported parent selector: ${input.parent}`);
   }
   if (input.id) {
     const sessionId = parseSessionId(input.id);
     if (sessionId !== null) {
-      const statusError = validateStatusForRoute(input.status, null, "session remember");
-      if (statusError) {
-        return parameterError(statusError);
-      }
-      const session = getSession(db, sessionId);
-      if (!session) {
-        return textResult2(`Session ${sessionId} not found.`);
-      }
-      return updateSessionTool(db, {
-        session_id: sessionId,
-        title: input.title,
-        content: resolveContent(input) ?? void 0,
-        description: resolveContent(input) ?? void 0,
-        insight: input.insight,
-        next_steps: input.next_steps,
-        updated_at_epoch: input.updated_at_epoch,
-        completed_at_epoch: input.completed_at_epoch
-      });
+      return handleSessionRemember(db, sessionId, input);
     }
     const memoryId = parseMemoryId(input.id);
     if (memoryId !== null) {
       return handleMemoryUpdate(db, memoryId, input);
     }
-    return textResult2(`Unsupported id selector: ${input.id}`);
+    return textResult(`Unsupported id selector: ${input.id}`);
   }
   return handleMemoryCreate(db, input);
 }
 
 // src/mcp/replay.ts
-var import_node_fs3 = require("node:fs");
+var import_node_fs2 = require("node:fs");
 
 // src/shared/transcript-parser.ts
-var import_node_fs2 = require("node:fs");
+var import_node_fs = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -33444,10 +33114,10 @@ function stringifyToolResultContent(content) {
   return JSON.stringify(content);
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs2.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs2.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -33551,7 +33221,7 @@ function formatTurnDetail(turn, promptNumber, status, full = false) {
 }
 function replayMemory(db, input) {
   const transcriptPath = resolveReplayTranscriptPath(db, input);
-  if (!transcriptPath || !(0, import_node_fs3.existsSync)(transcriptPath)) {
+  if (!transcriptPath || !(0, import_node_fs2.existsSync)(transcriptPath)) {
     return "Transcript not found.";
   }
   const transcriptTurns = parseReplayTranscript(transcriptPath);
@@ -33592,51 +33262,8 @@ function replayMemory(db, input) {
   );
 }
 
-// src/mcp/save-turn.ts
-function textResult3(text) {
-  return {
-    content: [
-      {
-        type: "text",
-        text
-      }
-    ]
-  };
-}
-function saveTurnTool(db, input) {
-  const turn = saveTurn(db, {
-    sessionId: input.session_id,
-    promptNumber: input.prompt_number,
-    status: input.status,
-    userPrompt: input.user_prompt ?? null,
-    assistantResponse: input.assistant_response ?? null,
-    title: input.title ?? null,
-    content: input.content ?? input.description ?? null,
-    description: input.content ?? input.description ?? null,
-    insight: input.insight ?? null,
-    filesRead: input.files_read ?? [],
-    filesModified: input.files_modified ?? [],
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1e3),
-    updatedAtEpoch: input.updated_at_epoch ?? null,
-    observations: (input.observations ?? []).map((observation) => ({
-      type: observation.type,
-      title: observation.title,
-      content: observation.content ?? observation.description ?? null,
-      description: observation.content ?? observation.description ?? null,
-      insight: observation.insight ?? observation.narrative ?? null,
-      narrative: observation.narrative ?? null,
-      facts: observation.facts ?? [],
-      tags: observation.tags ?? observation.concepts ?? [],
-      concepts: observation.concepts ?? [],
-      filesRead: observation.files_read ?? [],
-      filesModified: observation.files_modified ?? []
-    }))
-  });
-  return textResult3(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
-}
-
 // src/mcp/handlers.ts
-function textResult4(text) {
+function textResult2(text) {
   return {
     content: [
       {
@@ -33647,16 +33274,16 @@ function textResult4(text) {
   };
 }
 function createStubHandler(toolName) {
-  return async () => textResult4(`${toolName} not implemented`);
+  return async () => textResult2(`${toolName} not implemented`);
 }
 function createDatabaseBackedHandlers(database, options = {}) {
   if (!database) {
     return {};
   }
   return {
-    recall: (args) => textResult4(
+    recall: (args) => textResult2(
       recallMemory(database, {
-        scope: args.scope,
+        view: args.view,
         id: args.id,
         query: args.query,
         session: args.session,
@@ -33664,19 +33291,16 @@ function createDatabaseBackedHandlers(database, options = {}) {
         obs: args.obs ?? void 0,
         time: args.time,
         depth: args.depth,
-        observation: args.observation,
+        limit: args.limit,
         expandTurns: args.expand_turns ?? args.expandTurns,
-        around: args.around,
         before: args.before,
         after: args.after,
         file: args.file,
         type: args.type,
-        project: args.project ?? options.defaultProject,
-        fromEpoch: args.fromEpoch ?? args.from_epoch,
-        toEpoch: args.toEpoch ?? args.to_epoch
+        project: args.project ?? options.defaultProject
       })
     ),
-    replay: (args) => textResult4(
+    replay: (args) => textResult2(
       replayMemory(database, {
         session: args.session,
         turn: args.turn,
@@ -33685,12 +33309,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
         transcriptPath: args.transcript_path
       })
     ),
-    remember: (args) => rememberTool(database, args),
-    save_turn: (args) => saveTurnTool(database, args),
-    update_session: (args) => updateSessionTool(
-      database,
-      args
-    )
+    remember: (args) => rememberTool(database, args)
   };
 }
 
@@ -33718,16 +33337,14 @@ function createMcpServer(options = {}) {
   );
   const mergedHandlers = {
     ...createDatabaseBackedHandlers(options.database, {
-      defaultProject: (0, import_node_path4.basename)(process.cwd())
+      defaultProject: (0, import_node_path3.basename)(process.cwd())
     }),
     ...options.handlers
   };
   const toolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     replay: mergedHandlers.replay ?? createStubHandler("replay"),
-    remember: mergedHandlers.remember ?? createStubHandler("remember"),
-    save_turn: mergedHandlers.save_turn ?? createStubHandler("save_turn"),
-    update_session: mergedHandlers.update_session ?? createStubHandler("update_session")
+    remember: mergedHandlers.remember ?? createStubHandler("remember")
   };
   server.registerTool(
     "recall",
@@ -33752,22 +33369,6 @@ function createMcpServer(options = {}) {
       inputSchema: rememberInputSchema
     },
     (args) => toolHandlers.remember(args)
-  );
-  server.registerTool(
-    "save_turn",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.save_turn,
-      inputSchema: saveTurnInputSchema
-    },
-    (args) => toolHandlers.save_turn(args)
-  );
-  server.registerTool(
-    "update_session",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.update_session,
-      inputSchema: updateSessionInputSchema
-    },
-    (args) => toolHandlers.update_session(args)
   );
   return server;
 }

@@ -12,7 +12,7 @@ const SCHEMA_SQL = `
     description TEXT,
     insight TEXT,
     next_steps TEXT,
-    started_at_epoch INTEGER NOT NULL,
+    created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
   );
@@ -70,9 +70,6 @@ const SCHEMA_SQL = `
     updated_at_epoch INTEGER
   );
 
-  CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
-    ON sessions(project, started_at_epoch DESC);
-
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -105,6 +102,25 @@ const SCHEMA_SQL = `
 
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+  ensureSessionProjectIndex(db);
+}
+
+function ensureSessionProjectIndex(db: Database): void {
+  if (hasColumn(db, "sessions", "created_at_epoch")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_project_created_at
+        ON sessions(project, created_at_epoch DESC)
+    `);
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    return;
+  }
+
+  if (hasColumn(db, "sessions", "started_at_epoch")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
+        ON sessions(project, started_at_epoch DESC)
+    `);
+  }
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -164,6 +180,15 @@ function shouldRebuildSearchIndex(db: Database): boolean {
 
 export function migrateSchema(db: Database): boolean {
   let searchIndexNeedsRebuild = false;
+
+  if (
+    hasColumn(db, "sessions", "started_at_epoch") &&
+    !hasColumn(db, "sessions", "created_at_epoch")
+  ) {
+    db.exec("ALTER TABLE sessions RENAME COLUMN started_at_epoch TO created_at_epoch");
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    ensureSessionProjectIndex(db);
+  }
 
   if (!hasColumn(db, "sessions", "next_steps")) {
     db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");

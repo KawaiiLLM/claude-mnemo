@@ -48,9 +48,9 @@ export function createSessionInitHandler(
       contentSessionId: input.sessionId,
       project: input.cwd,
       title: existingSession?.title ?? null,
-      description: existingSession?.description ?? null,
+      content: existingSession?.content ?? null,
       insight: existingSession?.insight ?? null,
-      startedAtEpoch: existingSession?.startedAtEpoch ?? now(),
+      createdAtEpoch: existingSession?.createdAtEpoch ?? now(),
       updatedAtEpoch: now(),
       completedAtEpoch: existingSession?.completedAtEpoch ?? null,
     });

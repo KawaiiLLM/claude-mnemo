@@ -11,9 +11,8 @@ import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
+import { rememberTool } from "../../src/mcp/remember";
 import { replayMemory } from "../../src/mcp/replay";
-import { saveTurnTool } from "../../src/mcp/save-turn";
-import { updateSessionTool } from "../../src/mcp/update-session";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-e2e-"));
@@ -60,13 +59,11 @@ describe("claude-mnemo smoke test", () => {
       const session = getSession(db, Number(match[1]))!;
 
       for (const turn of getPendingTurns(db, session.id).filter((candidate) => candidate.assistantResponse)) {
-        saveTurnTool(db, {
-          session_id: session.id,
+        rememberTool(db, {
+          parent: `S${session.id}`,
           prompt_number: turn.promptNumber,
-          user_prompt: turn.userPrompt ?? undefined,
-          assistant_response: turn.assistantResponse ?? undefined,
           title: turn.promptNumber === 1 ? "Diagnose auth" : "Fix auth race",
-          description:
+          content:
             turn.promptNumber === 1
               ? "Captured the race condition in auth refresh"
               : "Implemented mutex and regression coverage",
@@ -77,38 +74,31 @@ describe("claude-mnemo smoke test", () => {
           files_read: ["src/auth.ts"],
           files_modified:
             turn.promptNumber === 1 ? [] : ["src/auth.ts", "tests/auth.test.ts"],
-          created_at_epoch: turn.createdAtEpoch,
-          updated_at_epoch: turn.updatedAtEpoch ?? turn.createdAtEpoch + 1,
-          observations: [
-            {
-              type: turn.promptNumber === 1 ? "discovery" : "bugfix",
-              title: turn.promptNumber === 1 ? "Race confirmed" : "Mutex added",
-              description:
-                turn.promptNumber === 1
-                  ? "Parallel refresh collides"
-                  : "Refresh is serialized",
-              narrative:
-                turn.promptNumber === 1
-                  ? "Concurrent 401 handling reproduced the auth race."
-                  : "A shared promise now serializes refresh work.",
-              facts:
-                turn.promptNumber === 1
-                  ? ["race reproduced"]
-                  : ["mutex added", "test added"],
-              concepts:
-                turn.promptNumber === 1 ? ["gotcha"] : ["problem-solution"],
-              files_read: ["src/auth.ts"],
-              files_modified:
-                turn.promptNumber === 1 ? [] : ["src/auth.ts", "tests/auth.test.ts"],
-            },
-          ],
+        });
+
+        rememberTool(db, {
+          parent: `S${session.id}/T${turn.promptNumber}`,
+          type: turn.promptNumber === 1 ? "discovery" : "bugfix",
+          title: turn.promptNumber === 1 ? "Race confirmed" : "Mutex added",
+          content:
+            turn.promptNumber === 1
+              ? "Parallel refresh collides"
+              : "Refresh is serialized",
+          insight:
+            turn.promptNumber === 1
+              ? "Concurrent 401 handling reproduced the auth race."
+              : "A shared promise now serializes refresh work.",
+          tags: turn.promptNumber === 1 ? ["gotcha"] : ["problem-solution"],
+          files_read: ["src/auth.ts"],
+          files_modified:
+            turn.promptNumber === 1 ? [] : ["src/auth.ts", "tests/auth.test.ts"],
         });
       }
 
-      updateSessionTool(db, {
-        session_id: session.id,
+      rememberTool(db, {
+        id: `S${session.id}`,
         title: "Auth race fix",
-        description: "Diagnosed and fixed the refresh race",
+        content: "Diagnosed and fixed the refresh race",
         insight: "- durable memory extracted",
       });
     };
@@ -205,14 +195,14 @@ describe("claude-mnemo smoke test", () => {
     expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 
-    const recallSessions = recallMemory(db, { scope: "sessions" });
+    const recallSessions = recallMemory(db, { view: "sessions" });
     const recallSessionTree = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: session.id,
       depth: "expanded",
     });
     const recallTurn = recallMemory(db, {
-      scope: "observations",
+      view: "observations",
       session: session.id,
       turn: 2,
       depth: "expanded",

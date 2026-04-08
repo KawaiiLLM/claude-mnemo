@@ -27,10 +27,10 @@ describe("session queries", () => {
       contentSessionId: "content-1",
       project: "claude-mnemo",
       title: "Auth fixes",
-      description: "Investigated and fixed token refresh issues",
+      content: "Investigated and fixed token refresh issues",
       insight: "- race condition reproduced",
       nextSteps: "- verify refresh token rotation",
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: 120,
     });
@@ -45,10 +45,10 @@ describe("session queries", () => {
       contentSessionId: "content-2",
       project: "claude-mnemo",
       title: "Initial title",
-      description: "Initial description",
+      content: "Initial description",
       insight: "- first insight",
       nextSteps: "- draft follow-up",
-      startedAtEpoch: 200,
+      createdAtEpoch: 200,
       updatedAtEpoch: 210,
       completedAtEpoch: null,
     });
@@ -57,9 +57,9 @@ describe("session queries", () => {
       contentSessionId: "content-2",
       project: "claude-mnemo",
       title: "Updated title",
-      description: "Updated description",
+      content: "Updated description",
       insight: "- updated insight",
-      startedAtEpoch: 200,
+      createdAtEpoch: 200,
       updatedAtEpoch: 260,
       completedAtEpoch: 300,
     });
@@ -70,7 +70,7 @@ describe("session queries", () => {
 
     expect(updated.id).toBe(created.id);
     expect(updated.title).toBe("Updated title");
-    expect(updated.description).toBe("Updated description");
+    expect(updated.content).toBe("Updated description");
     expect(updated.insight).toBe("- updated insight");
     expect(updated.updatedAtEpoch).toBe(260);
     expect(updated.completedAtEpoch).toBe(300);
@@ -82,10 +82,10 @@ describe("session queries", () => {
       contentSessionId: "content-8",
       project: "claude-mnemo",
       title: "Initial title",
-      description: "Initial description",
+      content: "Initial description",
       insight: "- first insight",
       nextSteps: "- keep working",
-      startedAtEpoch: 300,
+      createdAtEpoch: 300,
       updatedAtEpoch: 310,
       completedAtEpoch: null,
     });
@@ -94,9 +94,9 @@ describe("session queries", () => {
       contentSessionId: "content-8",
       project: "claude-mnemo",
       title: "Updated title",
-      description: "Updated description",
+      content: "Updated description",
       insight: "- updated insight",
-      startedAtEpoch: 300,
+      createdAtEpoch: 300,
       updatedAtEpoch: 360,
       completedAtEpoch: null,
     });
@@ -105,14 +105,14 @@ describe("session queries", () => {
     expect(updated.nextSteps).toBe("- keep working");
   });
 
-  test("getRecentSessions orders by startedAtEpoch descending", () => {
+  test("getRecentSessions orders by createdAtEpoch descending", () => {
     upsertSession(db, {
       contentSessionId: "content-3",
       project: "claude-mnemo",
       title: "Earlier",
-      description: "Earlier work",
+      content: "Earlier work",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -121,9 +121,9 @@ describe("session queries", () => {
       contentSessionId: "content-4",
       project: "claude-mnemo",
       title: "Latest",
-      description: "Later work",
+      content: "Later work",
       insight: null,
-      startedAtEpoch: 400,
+      createdAtEpoch: 400,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -132,9 +132,9 @@ describe("session queries", () => {
       contentSessionId: "content-5",
       project: "claude-mnemo",
       title: "Middle",
-      description: "Middle work",
+      content: "Middle work",
       insight: null,
-      startedAtEpoch: 250,
+      createdAtEpoch: 250,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -153,9 +153,9 @@ describe("session queries", () => {
       contentSessionId: "content-6",
       project: "claude-mnemo",
       title: "Mnemo work",
-      description: "Memory feature work",
+      content: "Memory feature work",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -164,9 +164,9 @@ describe("session queries", () => {
       contentSessionId: "content-7",
       project: "other-project",
       title: "Other work",
-      description: "Something else",
+      content: "Something else",
       insight: null,
-      startedAtEpoch: 200,
+      createdAtEpoch: 200,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });

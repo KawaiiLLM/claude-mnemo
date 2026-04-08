@@ -19,9 +19,9 @@ describe("observation round trips", () => {
       contentSessionId: "observations-session",
       project: "claude-mnemo",
       title: "Observations",
-      description: "Observation round-trip testing",
+      content: "Observation round-trip testing",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -70,11 +70,8 @@ describe("observation round trips", () => {
 
     expect(loaded).not.toBeNull();
     expect(loaded?.content).toBe("Observation content");
-    expect(loaded?.description).toBe("Observation content");
     expect(loaded?.insight).toBe("Observation insight");
-    expect(loaded?.narrative).toBe("Observation insight");
     expect(loaded?.tags).toEqual(["auth", "cache"]);
-    expect(loaded?.concepts).toEqual(["auth", "cache"]);
     expect(loaded?.filesRead).toEqual(["src/observations.ts"]);
     expect(loaded?.filesModified).toEqual(["src/observations.ts"]);
     expect(ftsRow).toEqual({ layer: "observation", sourceId: created.id });

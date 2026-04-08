@@ -53,7 +53,7 @@ export interface SearchMemoryResult {
   sourceTurnId: number | null;
   project: string;
   title: string | null;
-  description: string | null;
+  content: string | null;
   type: string | null;
   filesRead: string[];
   filesModified: string[];
@@ -69,7 +69,7 @@ interface SearchRow {
   sourceTurnId: number | null;
   project: string;
   title: string | null;
-  description: string | null;
+  content: string | null;
   type: string | null;
   filesRead: string | null;
   filesModified: string | null;
@@ -278,7 +278,7 @@ export function rebuildSearchIndex(db: Database): void {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
+          content,
           insight
         FROM sessions
       `,
@@ -298,7 +298,7 @@ export function rebuildSearchIndex(db: Database): void {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
+          content,
           insight
         FROM turns
         WHERE status = 'extracted'
@@ -325,9 +325,9 @@ export function rebuildSearchIndex(db: Database): void {
         SELECT
           id,
           title,
-          COALESCE(content, description) AS content,
-          COALESCE(insight, narrative) AS insight,
-          COALESCE(tags, concepts) AS tags
+          content,
+          insight,
+          tags
         FROM observations
       `,
     )
@@ -398,14 +398,14 @@ function queryRecentSessions(db: Database, options: SearchMemoryOptions): Search
         NULL AS sourceTurnId,
         s.project AS project,
         s.title AS title,
-        s.description AS description,
+        s.content AS content,
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.started_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch
       FROM sessions s
       ${combineClauses([projectClause.clause])}
-      ORDER BY s.started_at_epoch DESC
+      ORDER BY s.created_at_epoch DESC
       LIMIT ?
     `,
     [...projectClause.params, options.limit ?? 20],
@@ -426,7 +426,7 @@ function queryRecentTurns(db: Database, options: SearchMemoryOptions): SearchMem
         NULL AS sourceTurnId,
         s.project AS project,
         t.title AS title,
-        t.description AS description,
+        t.content AS content,
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
@@ -458,7 +458,7 @@ function queryRecentObservations(
         NULL AS sourceTurnId,
         s.project AS project,
         o.title AS title,
-        o.description AS description,
+        o.content AS content,
         o.type AS type,
         o.files_read AS filesRead,
         o.files_modified AS filesModified,
@@ -496,7 +496,7 @@ function queryRecentMemories(
         m.source_turn_id AS sourceTurnId,
         m.scope AS project,
         m.title AS title,
-        m.content AS description,
+        m.content AS content,
         m.type AS type,
         NULL AS filesRead,
         NULL AS filesModified,
@@ -516,7 +516,7 @@ function querySessionsByScope(
   query?: string,
 ): SearchMemoryResult[] {
   const projectClause = buildProjectClause(options.project);
-  const dateClause = buildDateClause("s.started_at_epoch", options);
+  const dateClause = buildDateClause("s.created_at_epoch", options);
   const whereClauses = [projectClause.clause, dateClause.clause];
   const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
 
@@ -571,15 +571,15 @@ function querySessionsByScope(
         NULL AS sourceTurnId,
         s.project AS project,
         s.title AS title,
-        s.description AS description,
+        s.content AS content,
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.started_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch
       FROM sessions s
       ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
       ${combineClauses(whereClauses)}
-      ORDER BY s.started_at_epoch DESC
+      ORDER BY s.created_at_epoch DESC
       LIMIT ?
     `,
     [...params, options.limit ?? 20],
@@ -626,7 +626,7 @@ function queryTurnsByScope(
         NULL AS sourceTurnId,
         s.project AS project,
         t.title AS title,
-        t.description AS description,
+        t.content AS content,
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
@@ -675,7 +675,7 @@ function queryObservationsByScope(
         NULL AS sourceTurnId,
         s.project AS project,
         o.title AS title,
-        o.description AS description,
+        o.content AS content,
         o.type AS type,
         o.files_read AS filesRead,
         o.files_modified AS filesModified,
@@ -731,7 +731,7 @@ function queryMemoriesByScope(
         m.source_turn_id AS sourceTurnId,
         m.scope AS project,
         m.title AS title,
-        m.content AS description,
+        m.content AS content,
         m.type AS type,
         NULL AS filesRead,
         NULL AS filesModified,

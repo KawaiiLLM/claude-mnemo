@@ -48,9 +48,9 @@ describe("handleCompactHook", () => {
       contentSessionId: "session-compact",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Compact session",
-      description: "Compact hook coverage",
+      content: "Compact hook coverage",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: null,
     }).id;

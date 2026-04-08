@@ -49,9 +49,9 @@ describe("handleStopHook", () => {
       contentSessionId: "session-stop",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Stop handler session",
-      description: "Stop hook coverage",
+      content: "Stop hook coverage",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: null,
     }).id;

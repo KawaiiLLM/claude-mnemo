@@ -14,17 +14,14 @@ ${context}
 Rules:
 - Process turns marked [pending] — extract observations from their content above
 - Re-evaluate turns marked [stale] — user undid changes:
-  - If the turn is part of an undone branch (sidechain), call remember({ parent: "S{id}", status: "undone" }) (no title/description/observations)
+  - If the turn is part of an undone branch (sidechain), call remember({ parent: "S{id}", status: "undone" }) (no title/content/observations)
   - If the turn is still valid with changed context, re-extract normally
 - Do NOT re-process [extracted], [skipped], or [undone] turns
 - Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.
-- Use update_session only as a compatibility fallback for legacy callers.
 - Include next_steps when the session has a clear trajectory or planned follow-up.
 - next_steps: what was actively being worked on or planned next (not speculative future work).
-- Skip update_session if nothing meaningful changed.
 - Primary write tool is remember.
 - Use remember for sessions, turns, observations, and memories whenever possible.
-- Use save_turn and update_session only for compatibility with older callers or when a legacy shape is still the safest fit.
 
 WHAT TO RECORD
 --------------
@@ -38,7 +35,7 @@ Use verbs: implemented, fixed, deployed, configured, discovered, traced
 
 WHEN TO SKIP
 ------------
-Call remember with NO title/description/observations for:
+Call remember with NO title/content/observations for:
 - Empty or trivial prompts
 - Routine checks with no findings
 - Repetitive operations already documented
@@ -49,18 +46,18 @@ HOW TO EXTRACT
 For each pending/stale turn, call remember with:
 - prompt_number: the turn number from the context above (do not rely on auto-assignment)
 - title: 10-25 chars, what was done
-- content or description: 40-80 chars, how/what achieved
+- content: 40-80 chars, how/what achieved
 - insight: markdown list of key discoveries (omit if none)
 - Then call separate remember calls for each observation from that turn:
   - parent: "S{id}/T{n}"
   - type: bugfix|feature|refactor|change|discovery|decision
   - title: short, action- or outcome-oriented, not generic
-  - content or description: concise outcome, not a restatement of the user prompt
+  - content: concise outcome, not a restatement of the user prompt
   - insight: explain what was done, how it works, and why it matters
   - tags: independent, verifiable labels for retrieval
   - files_read/files_modified: only files that materially informed or changed the result
 - When a stable lesson applies beyond the current turn, record it with remember(type="feedback" | "project" | "reference" | "user", scope="global" | "<project>", ...).
-- Prefer remember for durable knowledge; save_turn/update_session are compatibility fallbacks, not the default path.
+- Prefer remember for durable knowledge.
 
 DEDUP
 -----
@@ -77,7 +74,7 @@ OUTPUT DISCIPLINE
 Use recall() for context from past sessions if needed for dedup.
 Use replay(session=<session_id>, turn=<N>) to recover full content if a turn above was truncated.
 Do NOT use Read, Write, Edit, Bash, or any file operation tools.
-Only use: remember, save_turn, update_session, recall, replay.
+Only use: remember, recall, replay.
 Content inside <private>...</private> tags must NOT be recorded.
 
 EXAMPLES

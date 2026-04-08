@@ -14,10 +14,9 @@ export interface FormattedObservation {
   id: number;
   type: string;
   title: string;
-  description?: string | null;
-  narrative?: string | null;
-  facts?: string[];
-  concepts?: string[];
+  content?: string | null;
+  insight?: string | null;
+  tags?: string[];
   filesRead?: string[];
   filesModified?: string[];
 }
@@ -54,7 +53,7 @@ export interface FormattedTurn {
   id: number;
   promptNumber: number;
   title: string | null;
-  description?: string | null;
+  content?: string | null;
   observationCount?: number | null;
   toolCallCount?: number | null;
   filesReadCount?: number | null;
@@ -72,8 +71,8 @@ export interface FormattedSession {
   id: number;
   title: string | null;
   project: string;
-  startedAtEpoch: number;
-  description?: string | null;
+  createdAtEpoch: number;
+  content?: string | null;
   insight?: string[];
   nextSteps?: string | null;
   turnCount?: number | null;
@@ -224,9 +223,8 @@ function formatStatus(status?: string | null): string {
 
 function isObservationExpanded(observation: FormattedObservation): boolean {
   return Boolean(
-    observation.narrative ||
-      (observation.facts && observation.facts.length > 0) ||
-      (observation.concepts && observation.concepts.length > 0) ||
+    observation.insight ||
+      (observation.tags && observation.tags.length > 0) ||
       (observation.filesRead && observation.filesRead.length > 0) ||
       (observation.filesModified && observation.filesModified.length > 0),
   );
@@ -245,11 +243,11 @@ export function formatSessionCollapsed(session: FormattedSession): string {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
-    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.startedAtEpoch)} | ${session.project}`,
+    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`,
   ];
 
-  if (session.description) {
-    lines.push(`  - desc: ${truncateText(session.description, session.id)}`);
+  if (session.content) {
+    lines.push(`  - desc: ${truncateText(session.content, session.id)}`);
   }
 
   return lines.join("\n");
@@ -296,9 +294,9 @@ export function formatTurnCollapsed(
   const { indent = "  " } = options;
   const lines = [formatTurnLabel(turn, options)];
 
-  if (turn.description) {
+  if (turn.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(turn.description, options.sessionId, turn.promptNumber)}`,
+      `${indent}  - desc: ${truncateText(turn.content, options.sessionId, turn.promptNumber)}`,
     );
   }
 
@@ -412,10 +410,10 @@ export function formatObservationCollapsed(
   const { indent = "" } = options;
   const lines = [formatObservationLabel(observation, options)];
 
-  if (observation.description) {
+  if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(
-        observation.description,
+        observation.content,
         options.sessionId,
         options.turnPromptNumber,
       )}`,
@@ -433,31 +431,20 @@ export function formatObservationExpanded(
   const detailIndent = `${indent}  `;
   const lines = [formatObservationCollapsed(observation, options)];
 
-  if (observation.narrative) {
+  if (observation.insight) {
     lines.push(
-      `${detailIndent}- narrative: ${truncateText(
-        observation.narrative,
+      `${detailIndent}- insight: ${truncateText(
+        observation.insight,
         options.sessionId,
         options.turnPromptNumber,
       )}`,
     );
   }
 
-  if (observation.facts && observation.facts.length > 0) {
-    lines.push(`${detailIndent}- facts:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      observation.facts.map((fact) =>
-        truncateText(fact, options.sessionId, options.turnPromptNumber),
-      ),
-    );
-  }
-
-  if (observation.concepts && observation.concepts.length > 0) {
+  if (observation.tags && observation.tags.length > 0) {
     lines.push(
-      `${detailIndent}- concepts: ${truncateText(
-        observation.concepts.join(", "),
+      `${detailIndent}- tags: ${truncateText(
+        observation.tags.join(", "),
         options.sessionId,
         options.turnPromptNumber,
       )}`,

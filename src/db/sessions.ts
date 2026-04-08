@@ -8,10 +8,9 @@ export interface SessionRecord {
   project: string;
   title: string | null;
   content: string | null;
-  description: string | null;
   insight: string | null;
   nextSteps: string | null;
-  startedAtEpoch: number;
+  createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
 }
@@ -21,10 +20,9 @@ export interface UpsertSessionInput {
   project: string;
   title: string | null;
   content?: string | null;
-  description?: string | null;
   insight: string | null;
   nextSteps?: string | null;
-  startedAtEpoch: number;
+  createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
 }
@@ -40,48 +38,40 @@ const SESSION_SELECT = `
     content_session_id AS contentSessionId,
     project,
     title,
-    COALESCE(content, description) AS content,
-    COALESCE(content, description) AS description,
+    content,
     insight,
     next_steps AS nextSteps,
-    started_at_epoch AS startedAtEpoch,
+    created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
 
-function resolveSessionContent(input: Pick<UpsertSessionInput, "content" | "description">): string | null {
-  return input.content ?? input.description ?? null;
-}
-
 export function upsertSession(
   db: Database,
   input: UpsertSessionInput,
 ): SessionRecord {
-  const content = resolveSessionContent(input);
   const session =
   db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
         title,
         content,
-        description,
         insight,
         next_steps,
-        started_at_epoch,
+        created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, excluded.description, sessions.content, sessions.description),
-        description = COALESCE(excluded.description, sessions.description),
+        content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        started_at_epoch = excluded.started_at_epoch,
+        created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
       RETURNING
@@ -89,11 +79,10 @@ export function upsertSession(
         content_session_id AS contentSessionId,
         project,
         title,
-        COALESCE(content, description) AS content,
-        COALESCE(content, description) AS description,
+        content,
         insight,
         next_steps AS nextSteps,
-        started_at_epoch AS startedAtEpoch,
+        created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
     `)
@@ -101,11 +90,10 @@ export function upsertSession(
       input.contentSessionId,
       input.project,
       input.title,
-      content,
-      content,
+      input.content ?? null,
       input.insight,
       input.nextSteps ?? null,
-      input.startedAtEpoch,
+      input.createdAtEpoch,
       input.updatedAtEpoch,
       input.completedAtEpoch,
     );
@@ -158,7 +146,7 @@ export function getRecentSessions(
 
   return db
     .query<SessionRecord, Array<string | number>>(
-      `${SESSION_SELECT}${whereClause} ORDER BY started_at_epoch DESC LIMIT ?`,
+      `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`,
     )
     .all(...params, limit);
 }

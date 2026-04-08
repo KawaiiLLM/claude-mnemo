@@ -84,9 +84,9 @@ describe("replayMemory", () => {
       contentSessionId: "session-replay",
       project: "/tmp/project",
       title: "Replay session",
-      description: "Replay coverage",
+      content: "Replay coverage",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     }).id;

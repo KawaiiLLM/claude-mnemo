@@ -7,12 +7,8 @@ export interface ObservationInput {
   type: string;
   title: string;
   content?: string | null;
-  description?: string | null;
   insight?: string | null;
-  narrative?: string | null;
-  facts?: string[];
   tags?: string[];
-  concepts?: string[];
   filesRead: string[];
   filesModified: string[];
 }
@@ -25,7 +21,6 @@ export interface SaveTurnInput {
   assistantResponse: string | null;
   title: string | null;
   content?: string | null;
-  description?: string | null;
   insight: string | null;
   filesRead: string[];
   filesModified: string[];
@@ -43,7 +38,6 @@ export interface TurnRecord {
   assistantResponse: string | null;
   title: string | null;
   content: string | null;
-  description: string | null;
   insight: string | null;
   filesRead: string[];
   filesModified: string[];
@@ -61,7 +55,6 @@ interface TurnRow {
   assistantResponse: string | null;
   title: string | null;
   content: string | null;
-  description: string | null;
   insight: string | null;
   filesRead: string | null;
   filesModified: string | null;
@@ -79,8 +72,7 @@ const TURN_SELECT = `
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
     title,
-    COALESCE(content, description) AS content,
-    COALESCE(content, description) AS description,
+    content,
     insight,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -92,38 +84,6 @@ const TURN_SELECT = `
 
 function stringifyArray(values: string[]): string {
   return JSON.stringify(values);
-}
-
-function resolveTurnContent(input: Pick<SaveTurnInput, "content" | "description">): string | null {
-  return input.content ?? input.description ?? null;
-}
-
-function resolveObservationContent(
-  observation: Pick<ObservationInput, "content" | "description">,
-): string | null {
-  return observation.content ?? observation.description ?? null;
-}
-
-function resolveObservationTags(
-  observation: Pick<ObservationInput, "tags" | "concepts">,
-): string[] {
-  return observation.tags ?? observation.concepts ?? [];
-}
-
-function resolveObservationInsight(
-  observation: Pick<ObservationInput, "insight" | "narrative" | "facts">,
-): string | null {
-  if (observation.insight) {
-    return observation.insight;
-  }
-
-  const facts = observation.facts ?? [];
-
-  if (observation.narrative && facts.length > 0) {
-    return [observation.narrative, ...facts].join("\n");
-  }
-
-  return observation.narrative ?? (facts.length > 0 ? facts.join("\n") : null);
 }
 
 function parseJsonArray(value: string | null): string[] {
@@ -147,10 +107,9 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
 }
 
 function hasExtractedContent(input: SaveTurnInput): boolean {
-  const content = resolveTurnContent(input);
   return Boolean(
     input.title ||
-      content ||
+      input.content ||
       input.insight ||
       input.observations.length > 0,
   );
@@ -180,8 +139,6 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       : hasExtractedContent(input)
         ? "extracted"
         : "skipped";
-  const content = resolveTurnContent(input);
-
   db.exec("BEGIN");
 
   try {
@@ -205,7 +162,6 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
              assistant_response = COALESCE(?, assistant_response),
              title = ?,
              content = ?,
-             description = ?,
              insight = ?,
              files_read = ?,
              files_modified = ?,
@@ -217,8 +173,7 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
         input.userPrompt,
         input.assistantResponse,
         input.title,
-        content,
-        content,
+        input.content ?? null,
         input.insight,
         filesRead,
         filesModified,
@@ -241,7 +196,6 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
             string | null,
             string | null,
             string | null,
-            string | null,
             string,
             string,
             number,
@@ -256,13 +210,12 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
             assistant_response,
             title,
             content,
-            description,
             insight,
             files_read,
             files_modified,
             created_at_epoch,
             updated_at_epoch
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           RETURNING id
         `)
         .get(
@@ -272,8 +225,7 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
           input.userPrompt,
           input.assistantResponse,
           input.title,
-          content,
-          content,
+          input.content ?? null,
           input.insight,
           filesRead,
           filesModified,
@@ -302,13 +254,9 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
           turnId,
           type: observation.type,
           title: observation.title,
-          content: resolveObservationContent(observation),
-          description: resolveObservationContent(observation),
-          insight: resolveObservationInsight(observation),
-          narrative: observation.narrative ?? resolveObservationInsight(observation),
-          facts: observation.facts ?? [],
-          tags: resolveObservationTags(observation),
-          concepts: resolveObservationTags(observation),
+          content: observation.content ?? null,
+          insight: observation.insight ?? null,
+          tags: observation.tags ?? [],
           filesRead: observation.filesRead,
           filesModified: observation.filesModified,
           createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch,

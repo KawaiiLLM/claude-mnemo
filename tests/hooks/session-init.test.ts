@@ -154,9 +154,9 @@ describe("handleSessionInitHook", () => {
       contentSessionId: "session-1",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: null,
-      description: null,
+      content: null,
       insight: null,
-      startedAtEpoch: 1000,
+      createdAtEpoch: 1000,
       updatedAtEpoch: 1000,
       completedAtEpoch: null,
     });

@@ -17,7 +17,7 @@ export interface CompactHandlerDependencies {
 function buildPrompt(db: Database, sessionDbId: number): string {
   return buildMnemosynePrompt(
     recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: sessionDbId,
       depth: "expanded",
     }),

@@ -27,7 +27,7 @@ export interface StopHandlerDependencies {
 function buildStopPrompt(db: Database, sessionDbId: number): string {
   return buildMnemosynePrompt(
     recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: sessionDbId,
       depth: "expanded",
     }),
@@ -144,9 +144,9 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       contentSessionId: session.contentSessionId,
       project: session.project,
       title: session.title,
-      description: session.description,
+      content: session.content,
       insight: session.insight,
-      startedAtEpoch: session.startedAtEpoch,
+      createdAtEpoch: session.createdAtEpoch,
       updatedAtEpoch: now(),
       completedAtEpoch: now(),
     });

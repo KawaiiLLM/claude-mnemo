@@ -21,9 +21,9 @@ describe("remember tool routing and validation", () => {
       contentSessionId: "remember-session",
       project: "claude-mnemo",
       title: "Before update",
-      description: "Initial session summary",
+      content: "Initial session summary",
       insight: "- initial insight",
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: null,
     }).id;
@@ -44,7 +44,6 @@ describe("remember tool routing and validation", () => {
       title: "Explicit turn number",
       content: "Use the provided prompt number instead of deriving the next one.",
       insight: "- prompt number override respected",
-      updated_at_epoch: 130,
     });
 
     const explicitTurn = getTurn(db, sessionId, 7);
@@ -52,7 +51,7 @@ describe("remember tool routing and validation", () => {
 
     expect(result.content[0]?.text).toContain("Saved turn #7");
     expect(explicitTurn?.status).toBe("extracted");
-    expect(explicitTurn?.description).toBe(
+    expect(explicitTurn?.content).toBe(
       "Use the provided prompt number instead of deriving the next one.",
     );
     expect(pendingTurn?.status).toBe("pending");
@@ -104,7 +103,7 @@ describe("remember tool routing and validation", () => {
     expect(result.content[0]?.text).toContain("Parameter error:");
     expect(result.content[0]?.text).toContain("session remember");
     expect(session.title).toBe("Before update");
-    expect(session.description).toBe("Initial session summary");
+    expect(session.content).toBe("Initial session summary");
   });
 
   test("rejects invalid statuses for memory writes", () => {

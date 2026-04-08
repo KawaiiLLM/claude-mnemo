@@ -30,7 +30,7 @@ function insertTurn(
     sessionId: number;
     promptNumber: number;
     title: string;
-    description: string;
+    content: string;
     userPrompt: string;
     assistantResponse: string;
     toolCallCount: number;
@@ -85,7 +85,7 @@ function insertObservation(
   input: {
     type: string;
     title: string;
-    description: string;
+    content: string;
     narrative?: string;
     facts?: string[];
     concepts?: string[];
@@ -133,10 +133,10 @@ describe("handleContextHook", () => {
       contentSessionId: "session-newest",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Most recent session",
-      description:
+      content:
         "Most recent session description that should be truncated in the context hook output because it is intentionally too long for the collapsed view.",
       insight: null,
-      startedAtEpoch: 500,
+      createdAtEpoch: 500,
       updatedAtEpoch: 505,
       completedAtEpoch: null,
     });
@@ -145,10 +145,10 @@ describe("handleContextHook", () => {
       contentSessionId: "session-secondary",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Secondary session",
-      description:
+      content:
         "Secondary session description that should also be truncated in the context hook output because it exceeds the visible budget.",
       insight: null,
-      startedAtEpoch: 400,
+      createdAtEpoch: 400,
       updatedAtEpoch: 405,
       completedAtEpoch: null,
     });
@@ -157,11 +157,11 @@ describe("handleContextHook", () => {
       contentSessionId: "session-context",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Anchored session",
-      description:
+      content:
         "Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
       insight: "- Primary insight bullet for the current session",
       nextSteps: "Implement the mutex fix before the next session begins.",
-      startedAtEpoch: 300,
+      createdAtEpoch: 300,
       updatedAtEpoch: 305,
       completedAtEpoch: null,
     }).id;
@@ -170,10 +170,10 @@ describe("handleContextHook", () => {
       contentSessionId: "session-older",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Older session",
-      description:
+      content:
         "Older session description that should be visible only as a collapsed header with truncation applied.",
       insight: null,
-      startedAtEpoch: 200,
+      createdAtEpoch: 200,
       updatedAtEpoch: 205,
       completedAtEpoch: null,
     });
@@ -182,10 +182,10 @@ describe("handleContextHook", () => {
       contentSessionId: "session-oldest",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Oldest session",
-      description:
+      content:
         "Oldest session description that is intentionally long so the collapsed-only header uses the truncated form.",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 105,
       completedAtEpoch: null,
     });
@@ -268,9 +268,9 @@ describe("handleContextHook", () => {
       contentSessionId: "single-session",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Single session",
-      description: "Single session description",
+      content: "Single session description",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: null,
     });
@@ -369,7 +369,7 @@ describe("handleContextHook", () => {
       sessionId: currentSessionId,
       promptNumber: 1,
       title: "Prep cache",
-      description:
+      content:
         "This turn description is intentionally verbose so the collapsed line must be truncated at sixty characters.",
       userPrompt: "Prep cache",
       assistantResponse: "Prepared cache state.",
@@ -381,7 +381,7 @@ describe("handleContextHook", () => {
       sessionId: currentSessionId,
       promptNumber: 2,
       title: "Investigate timeout",
-      description: "Trace the timeout path under parallel load.",
+      content: "Trace the timeout path under parallel load.",
       userPrompt:
         "Investigate the timeout path under parallel load and capture the important findings in the session summary.",
       assistantResponse:
@@ -405,7 +405,7 @@ describe("handleContextHook", () => {
     insertObservation(db, turn2.id, {
       type: "discovery",
       title: "Parallel requests share a refresh race",
-      description: "Logs confirmed the race window under load.",
+      content: "Logs confirmed the race window under load.",
       createdAtEpoch: 321,
     });
 
@@ -413,7 +413,7 @@ describe("handleContextHook", () => {
       sessionId: currentSessionId,
       promptNumber: 3,
       title: "Validate fix",
-      description: "Confirm the mutex patch removes the race.",
+      content: "Confirm the mutex patch removes the race.",
       userPrompt: "Validate the fix with the regression suite.",
       assistantResponse: "The regression suite passes and the race no longer reproduces.",
       toolCallCount: 3,
@@ -426,7 +426,7 @@ describe("handleContextHook", () => {
       sessionId: currentSessionId,
       promptNumber: 4,
       title: "Document findings",
-      description: "Document the durable outcome and follow-up work.",
+      content: "Document the durable outcome and follow-up work.",
       userPrompt:
         "Document the findings in enough detail that future sessions can resume the investigation without rereading the logs.",
       assistantResponse:
@@ -440,28 +440,28 @@ describe("handleContextHook", () => {
     insertObservation(db, turn4, {
       type: "discovery",
       title: "Parallel refreshes share one race window",
-      description: "Timing confirmed the overlap under concurrent requests.",
+      content: "Timing confirmed the overlap under concurrent requests.",
       createdAtEpoch: 341,
     });
 
     insertObservation(db, turn4, {
       type: "decision",
       title: "Use a mutex instead of a queue",
-      description: "The simpler guard keeps the common path fast.",
+      content: "The simpler guard keeps the common path fast.",
       createdAtEpoch: 342,
     });
 
     insertObservation(db, turn4, {
       type: "bugfix",
       title: "Mutex patch applied",
-      description: "The shared refresh path is now serialized.",
+      content: "The shared refresh path is now serialized.",
       createdAtEpoch: 343,
     });
 
     insertObservation(db, turn4, {
       type: "feature",
       title: "Follow-up regression kept",
-      description: "The regression test still exercises the race.",
+      content: "The regression test still exercises the race.",
       createdAtEpoch: 344,
     });
 
@@ -471,7 +471,7 @@ describe("handleContextHook", () => {
         sessionId: 1,
         promptNumber,
         title: `Recent turn ${promptNumber}`,
-        description: `Recent turn ${promptNumber} description that should be truncated in collapsed context output.`,
+        content: `Recent turn ${promptNumber} description that should be truncated in collapsed context output.`,
         userPrompt: `Recent prompt ${promptNumber}`,
         assistantResponse: `Recent response ${promptNumber}`,
         toolCallCount: promptNumber,
@@ -483,7 +483,7 @@ describe("handleContextHook", () => {
       sessionId: 2,
       promptNumber: 1,
       title: "Secondary turn 1",
-      description: "Secondary turn one description.",
+      content: "Secondary turn one description.",
       userPrompt: "Secondary prompt 1",
       assistantResponse: "Secondary response 1",
       toolCallCount: 1,
@@ -494,7 +494,7 @@ describe("handleContextHook", () => {
       sessionId: 2,
       promptNumber: 2,
       title: "Secondary turn 2",
-      description: "Secondary turn two description.",
+      content: "Secondary turn two description.",
       userPrompt: "Secondary prompt 2",
       assistantResponse: "Secondary response 2",
       toolCallCount: 2,
@@ -505,7 +505,7 @@ describe("handleContextHook", () => {
       sessionId: 4,
       promptNumber: 1,
       title: "Older turn 1",
-      description: "Older turn one description.",
+      content: "Older turn one description.",
       userPrompt: "Older prompt 1",
       assistantResponse: "Older response 1",
       toolCallCount: 1,
@@ -516,7 +516,7 @@ describe("handleContextHook", () => {
       sessionId: 5,
       promptNumber: 1,
       title: "Oldest turn 1",
-      description: "Oldest turn one description.",
+      content: "Oldest turn one description.",
       userPrompt: "Oldest prompt 1",
       assistantResponse: "Oldest response 1",
       toolCallCount: 1,
@@ -566,9 +566,6 @@ describe("handleContextHook", () => {
     expect(output).toContain("    - Implement the mutex fix before the next session begins.");
 
     expect(output).toContain(`  - [T1] Prep cache | 🔧1`);
-    expect(output).toContain(
-      "    - desc: This turn description is intentionally verbose so the collapsed line must be truncated at sixty characters.",
-    );
     expect(output).toContain(
       `  - [T2] Investigate timeout | 💡1 📖1 ✏️1 🔧2`,
     );

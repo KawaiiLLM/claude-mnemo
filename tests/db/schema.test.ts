@@ -56,7 +56,7 @@ describe("initializeSchema", () => {
       "description",
       "insight",
       "next_steps",
-      "started_at_epoch",
+      "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
     ]);
@@ -66,7 +66,7 @@ describe("initializeSchema", () => {
     initializeSchema(db);
 
     db.query(
-      "INSERT INTO sessions (content_session_id, project, started_at_epoch) VALUES (?, ?, ?)",
+      "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES (?, ?, ?)",
     ).run("session-1", "claude-mnemo", 1);
 
     const session = db
@@ -88,7 +88,7 @@ describe("initializeSchema", () => {
     initializeSchema(db);
 
     db.query(
-      "INSERT INTO sessions (content_session_id, project, started_at_epoch) VALUES (?, ?, ?)",
+      "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES (?, ?, ?)",
     ).run("session-2", "claude-mnemo", 1);
 
     const session = db
@@ -182,9 +182,9 @@ describe("initializeSchema", () => {
       contentSessionId: "session-fts-rebuild",
       project: "claude-mnemo",
       title: "FTS rebuild",
-      description: "Needs an indexed session row",
+      content: "Needs an indexed session row",
       insight: null,
-      startedAtEpoch: 10,
+      createdAtEpoch: 10,
       updatedAtEpoch: 20,
       completedAtEpoch: null,
     });

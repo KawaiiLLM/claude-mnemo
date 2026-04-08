@@ -1,6 +1,5 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import * as nodeFs from "node:fs";
 
 import { createDatabase } from "../../src/db/database";
 import { createMemory } from "../../src/db/memories";
@@ -30,9 +29,9 @@ describe("recallMemory", () => {
       contentSessionId: "session-1",
       project: "claude-mnemo",
       title: "Auth baseline",
-      description: "Initial auth investigation",
+      content: "Initial auth investigation",
       insight: "- baseline captured",
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: 120,
     });
@@ -42,10 +41,10 @@ describe("recallMemory", () => {
       contentSessionId: "session-2",
       project: "claude-mnemo",
       title: "Auth race fix",
-      description: "Fixes the refresh race",
+      content: "Fixes the refresh race",
       insight: "- mutex avoids overlap",
       nextSteps: "verify refresh under load",
-      startedAtEpoch: 200,
+      createdAtEpoch: 200,
       updatedAtEpoch: 210,
       completedAtEpoch: 220,
     });
@@ -57,7 +56,7 @@ describe("recallMemory", () => {
       userPrompt: "Why am I getting 401 errors?",
       assistantResponse: "There is a race condition in token refresh.",
       title: "Diagnose auth race",
-      description: "Refresh overlap diagnosed",
+      content: "Refresh overlap diagnosed",
       insight: "- concurrent refreshes collide",
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts", "tests/auth.test.ts"],
@@ -67,20 +66,18 @@ describe("recallMemory", () => {
         {
           type: "bugfix",
           title: "Auth mutex",
-          description: "Guards refresh",
-          narrative: "Serialized refresh work with a shared promise.",
-          facts: ["mutex added", "race resolved"],
-          concepts: ["problem-solution", "trade-off"],
+          content: "Guards refresh",
+          insight: "Serialized refresh work with a shared promise.",
+          tags: ["mutex", "race-resolved"],
           filesRead: ["src/auth.ts"],
           filesModified: ["src/auth.ts"],
         },
         {
           type: "decision",
           title: "Add regression test",
-          description: "Protects overlap path",
-          narrative: "Regression coverage now checks parallel refresh calls.",
-          facts: ["Promise.all test added"],
-          concepts: ["pattern"],
+          content: "Protects overlap path",
+          insight: "Regression coverage now checks parallel refresh calls.",
+          tags: ["promise-all", "regression-test"],
           filesRead: ["tests/auth.test.ts"],
           filesModified: ["tests/auth.test.ts"],
         },
@@ -159,9 +156,9 @@ describe("recallMemory", () => {
       contentSessionId: "session-big",
       project: "claude-mnemo",
       title: "Large timeline",
-      description: "For omission coverage",
+      content: "For omission coverage",
       insight: null,
-      startedAtEpoch: 300,
+      createdAtEpoch: 300,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -175,7 +172,7 @@ describe("recallMemory", () => {
         user_prompt,
         assistant_response,
         title,
-        description,
+        content,
         insight,
         files_read,
         files_modified,
@@ -214,9 +211,9 @@ describe("recallMemory", () => {
       contentSessionId: "session-observations",
       project: "claude-mnemo",
       title: "Observation flood",
-      description: "For direct observation omission coverage",
+      content: "For direct observation omission coverage",
       insight: null,
-      startedAtEpoch: 400,
+      createdAtEpoch: 400,
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
@@ -227,7 +224,7 @@ describe("recallMemory", () => {
       userPrompt: "Collect many observations",
       assistantResponse: "Collected many observations.",
       title: "Observation flood",
-      description: "Many observations",
+      content: "Many observations",
       insight: null,
       filesRead: [],
       filesModified: [],
@@ -236,10 +233,9 @@ describe("recallMemory", () => {
       observations: Array.from({ length: 60 }, (_, index) => ({
         type: "discovery",
         title: `Observation ${index + 1}`,
-        description: `Description ${index + 1}`,
-        narrative: null,
-        facts: [],
-        concepts: [],
+        content: `Description ${index + 1}`,
+        insight: null,
+        tags: [],
         filesRead: [],
         filesModified: [],
       })),
@@ -255,7 +251,7 @@ describe("recallMemory", () => {
 
   test("renders scoped sessions and intersects time filters", () => {
     const output = recallMemory(db, {
-      scope: "sessions",
+      view: "sessions",
       time: "1970-01-01..1970-01-01",
       after: 150,
       before: 250,
@@ -271,36 +267,27 @@ describe("recallMemory", () => {
     expect(recallMemory(db, { session: authSessionId })).toContain("[S2] Auth race fix");
   });
 
-  test("accepts memory scope and id selectors in the schema", () => {
-    expect(() => recallInputSchema.parse({ scope: "memories" })).not.toThrow();
+  test("accepts memory view and id selectors in the schema", () => {
+    expect(() => recallInputSchema.parse({ view: "memories" })).not.toThrow();
     expect(() => recallInputSchema.parse({ id: "M1" })).not.toThrow();
   });
 
-  test("rejects ambiguous id and scope combinations", () => {
+  test("rejects ambiguous id and view combinations", () => {
     const output = recallMemory(db, {
       id: `S${authSessionId}`,
-      scope: "sessions",
+      view: "sessions",
     });
 
     expect(output).toContain("Parameter error:");
     expect(output).toContain("id cannot be combined");
   });
 
-  test("normalizes legacy observation aliases and logs the migration warning", () => {
-    const logSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(() => {});
-
+  test("supports obs selectors directly", () => {
     const output = recallMemory(db, {
-      observation: authObservationId,
+      obs: authObservationId,
     });
 
     expect(output).toContain("[O1] 🔴 Auth mutex");
-    expect(
-      logSpy.mock.calls.some(([, payload]) =>
-        String(payload).includes("legacy recall parameters normalized"),
-      ),
-    ).toBe(true);
-
-    logSpy.mockRestore();
   });
 
   test("keeps legacy query-only recall as cross-layer search", () => {
@@ -325,7 +312,7 @@ describe("recallMemory", () => {
 
   test("lists active global and current-project memories", () => {
     const output = recallMemory(db, {
-      scope: "memories",
+      view: "memories",
     });
 
     expect(output).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
@@ -370,14 +357,14 @@ describe("recallMemory", () => {
     expect(turnOutput).toContain("[O1] 🔴 Auth mutex");
 
     expect(observationOutput).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
-    expect(observationOutput).toContain("narrative: Serialized refresh work with a shared promise.");
+    expect(observationOutput).toContain("insight: Serialized refresh work with a shared promise.");
 
     expect(memoryOutput).toContain(`[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`);
   });
 
   test("parses turn range selectors and expands selected turns", () => {
     const output = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: authSessionId,
       turn: "1..1",
       depth: "expanded",
@@ -392,7 +379,7 @@ describe("recallMemory", () => {
 
   test("accepts array selectors for sessions", () => {
     const output = recallMemory(db, {
-      scope: "sessions",
+      view: "sessions",
       session: [authSessionId, baselineSessionId],
     });
 
@@ -402,7 +389,7 @@ describe("recallMemory", () => {
 
   test("rejects turns that do not belong to the selected session", () => {
     const output = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: baselineSessionId,
       turn: 1,
     });
@@ -413,7 +400,7 @@ describe("recallMemory", () => {
 
   test("rejects observations that do not belong to the selected session", () => {
     const output = recallMemory(db, {
-      scope: "observations",
+      view: "observations",
       session: baselineSessionId,
       obs: authObservationId,
     });
@@ -424,7 +411,7 @@ describe("recallMemory", () => {
 
   test("renders observation scope with parent headers when session and turn are selected", () => {
     const output = recallMemory(db, {
-      scope: "observations",
+      view: "observations",
       session: authSessionId,
       turn: 1,
       obs: authObservationId,
@@ -439,7 +426,7 @@ describe("recallMemory", () => {
 
   test("keeps pending and stale turns out of omission sampling", () => {
     const output = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: bigSessionId,
     });
 
@@ -450,7 +437,7 @@ describe("recallMemory", () => {
 
   test("applies omission sampling to direct observation browsing", () => {
     const output = recallMemory(db, {
-      scope: "observations",
+      view: "observations",
       obs: `${observationIds[0]}..${observationIds[observationIds.length - 1]}`,
       depth: "collapsed",
     });

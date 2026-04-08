@@ -9,8 +9,6 @@ import {
   recallInputSchema,
   rememberInputSchema,
   replayInputSchema,
-  saveTurnInputSchema,
-  updateSessionInputSchema,
 } from "./definitions";
 import {
   createDatabaseBackedHandlers,
@@ -63,9 +61,6 @@ export function createMcpServer(
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     replay: mergedHandlers.replay ?? createStubHandler("replay"),
     remember: mergedHandlers.remember ?? createStubHandler("remember"),
-    save_turn: mergedHandlers.save_turn ?? createStubHandler("save_turn"),
-    update_session:
-      mergedHandlers.update_session ?? createStubHandler("update_session"),
   };
 
   server.registerTool(
@@ -91,22 +86,6 @@ export function createMcpServer(
       inputSchema: rememberInputSchema,
     },
     (args) => toolHandlers.remember(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "save_turn",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.save_turn,
-      inputSchema: saveTurnInputSchema,
-    },
-    (args) => toolHandlers.save_turn(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "update_session",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.update_session,
-      inputSchema: updateSessionInputSchema,
-    },
-    (args) => toolHandlers.update_session(args as Record<string, unknown>),
   );
 
   return server;

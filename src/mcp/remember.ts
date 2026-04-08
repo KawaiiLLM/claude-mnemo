@@ -2,14 +2,8 @@ import type { Database } from "bun:sqlite";
 
 import { createMemory, updateMemory } from "../db/memories";
 import { createObservation } from "../db/observations";
-import { getSession } from "../db/sessions";
-import {
-  getPendingTurns,
-  getTurn,
-  getTurnsForSession,
-  saveTurn,
-} from "../db/turns";
-import { updateSessionTool } from "./update-session";
+import { getSession, upsertSession } from "../db/sessions";
+import { getPendingTurns, getTurn, getTurnsForSession, saveTurn } from "../db/turns";
 
 type ToolTextResult = {
   content: Array<{
@@ -21,11 +15,7 @@ type ToolTextResult = {
 type RememberStatus = "skipped" | "undone" | "active" | "superseded" | "archived";
 
 const TURN_REMEMBER_STATUSES = ["skipped", "undone"] as const;
-const MEMORY_REMEMBER_STATUSES = [
-  "active",
-  "superseded",
-  "archived",
-] as const;
+const MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"] as const;
 
 export interface RememberToolInput {
   parent?: string;
@@ -35,32 +25,20 @@ export interface RememberToolInput {
   prompt_number?: number;
   title?: string;
   content?: string;
-  description?: string;
   insight?: string;
   reasoning?: string;
   application?: string;
   tags?: string[];
   status?: RememberStatus;
   next_steps?: string;
-  user_prompt?: string;
-  assistant_response?: string;
   files_read?: string[];
   files_modified?: string[];
   source_turn_id?: number;
-  created_at_epoch?: number;
-  updated_at_epoch?: number;
-  completed_at_epoch?: number;
-  expires_at_epoch?: number;
 }
 
 function textResult(text: string): ToolTextResult {
   return {
-    content: [
-      {
-        type: "text",
-        text,
-      },
-    ],
+    content: [{ type: "text", text }],
   };
 }
 
@@ -69,17 +47,17 @@ function parameterError(message: string): ToolTextResult {
 }
 
 function parseSessionId(value: string): number | null {
-  const match = /^S(\d+)$/.exec(value.trim());
+  const match = /^S(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
 function parseMemoryId(value: string): number | null {
-  const match = /^M(\d+)$/.exec(value.trim());
+  const match = /^M(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
 function parseTurnParent(value: string): { sessionId: number; promptNumber: number } | null {
-  const match = /^S(\d+)\/T(\d+)$/.exec(value.trim());
+  const match = /^S(\d+)\/T(\d+)$/i.exec(value.trim());
 
   if (!match) {
     return null;
@@ -91,15 +69,6 @@ function parseTurnParent(value: string): { sessionId: number; promptNumber: numb
   };
 }
 
-function resolveContent(input: Pick<RememberToolInput, "content" | "description">): string | null {
-  return input.content ?? input.description ?? null;
-}
-
-// Status conventions per route:
-// - turn remember: defaults to extracted/skipped by content; only pass status for "skipped" or "undone"
-// - observation remember: does not accept a status field
-// - session remember: does not accept a status field
-// - memory create/update: status is an explicit business field ("active", "superseded", "archived")
 function validateStatusForRoute(
   status: RememberStatus | undefined,
   allowedStatuses: readonly RememberStatus[] | null,
@@ -157,21 +126,20 @@ function handleTurnRemember(
   }
 
   const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
-  const content = input.status === "skipped" ? null : resolveContent(input);
+  const isSkipped = input.status === "skipped";
   const turn = saveTurn(db, {
     sessionId,
     promptNumber,
     status: input.status === "undone" ? "undone" : undefined,
-    userPrompt: input.user_prompt ?? null,
-    assistantResponse: input.assistant_response ?? null,
-    title: input.status === "skipped" ? null : input.title ?? null,
-    content,
-    description: content,
-    insight: input.status === "skipped" ? null : input.insight ?? null,
-    filesRead: input.status === "skipped" ? [] : input.files_read ?? [],
-    filesModified: input.status === "skipped" ? [] : input.files_modified ?? [],
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1000),
-    updatedAtEpoch: input.updated_at_epoch ?? null,
+    userPrompt: null,
+    assistantResponse: null,
+    title: isSkipped ? null : input.title ?? null,
+    content: isSkipped ? null : input.content ?? null,
+    insight: isSkipped ? null : input.insight ?? null,
+    filesRead: isSkipped ? [] : input.files_read ?? [],
+    filesModified: isSkipped ? [] : input.files_modified ?? [],
+    createdAtEpoch: Math.floor(Date.now() / 1000),
+    updatedAtEpoch: null,
     observations: [],
   });
 
@@ -203,15 +171,12 @@ function handleObservationRemember(
     turnId: turn.id,
     type: input.type ?? "discovery",
     title: input.title ?? "Untitled observation",
-    content: resolveContent(input),
-    description: resolveContent(input),
+    content: input.content ?? null,
     insight: input.insight ?? null,
-    narrative: input.insight ?? null,
     tags: input.tags ?? [],
-    concepts: input.tags ?? [],
     filesRead: input.files_read ?? [],
     filesModified: input.files_modified ?? [],
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1000),
+    createdAtEpoch: Math.floor(Date.now() / 1000),
   });
 
   return textResult(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
@@ -228,7 +193,7 @@ function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextRes
     return parameterError(statusError);
   }
 
-  if (!input.type || !input.scope || !input.title || !resolveContent(input)) {
+  if (!input.type || !input.scope || !input.title || !input.content) {
     return textResult("Memory creation requires type, scope, title, and content.");
   }
 
@@ -236,7 +201,7 @@ function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextRes
     type: input.type,
     scope: input.scope,
     title: input.title,
-    content: resolveContent(input)!,
+    content: input.content,
     reasoning: input.reasoning ?? null,
     application: input.application ?? null,
     tags: input.tags ?? [],
@@ -247,10 +212,9 @@ function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextRes
         ? input.status
         : "active",
     supersededBy: null,
-    expiresAtEpoch: input.expires_at_epoch ?? null,
     sourceTurnId: input.source_turn_id ?? null,
-    createdAtEpoch: input.created_at_epoch ?? Math.floor(Date.now() / 1000),
-    updatedAtEpoch: input.updated_at_epoch ?? null,
+    createdAtEpoch: Math.floor(Date.now() / 1000),
+    updatedAtEpoch: null,
   });
 
   return textResult(`Created memory M${memory.id}.`);
@@ -275,7 +239,7 @@ function handleMemoryUpdate(
     type: input.type,
     scope: input.scope,
     title: input.title,
-    content: resolveContent(input) ?? undefined,
+    content: input.content,
     reasoning: input.reasoning,
     application: input.application,
     tags: input.tags,
@@ -285,9 +249,8 @@ function handleMemoryUpdate(
       input.status === "archived"
         ? input.status
         : undefined,
-    expiresAtEpoch: input.expires_at_epoch,
     sourceTurnId: input.source_turn_id,
-    updatedAtEpoch: input.updated_at_epoch,
+    updatedAtEpoch: Math.floor(Date.now() / 1000),
   });
 
   if (!memory) {
@@ -295,6 +258,38 @@ function handleMemoryUpdate(
   }
 
   return textResult(`Updated memory M${memory.id}.`);
+}
+
+function handleSessionRemember(
+  db: Database,
+  sessionId: number,
+  input: RememberToolInput,
+): ToolTextResult {
+  const statusError = validateStatusForRoute(input.status, null, "session remember");
+
+  if (statusError) {
+    return parameterError(statusError);
+  }
+
+  const session = getSession(db, sessionId);
+
+  if (!session) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+
+  upsertSession(db, {
+    contentSessionId: session.contentSessionId,
+    project: session.project,
+    title: input.title ?? session.title,
+    content: input.content ?? session.content,
+    insight: input.insight ?? session.insight,
+    nextSteps: input.next_steps ?? session.nextSteps,
+    createdAtEpoch: session.createdAtEpoch,
+    updatedAtEpoch: Math.floor(Date.now() / 1000),
+    completedAtEpoch: session.completedAtEpoch,
+  });
+
+  return textResult(`Updated session ${sessionId}.`);
 }
 
 export function rememberTool(
@@ -321,28 +316,7 @@ export function rememberTool(
     const sessionId = parseSessionId(input.id);
 
     if (sessionId !== null) {
-      const statusError = validateStatusForRoute(input.status, null, "session remember");
-
-      if (statusError) {
-        return parameterError(statusError);
-      }
-
-      const session = getSession(db, sessionId);
-
-      if (!session) {
-        return textResult(`Session ${sessionId} not found.`);
-      }
-
-      return updateSessionTool(db, {
-        session_id: sessionId,
-        title: input.title,
-        content: resolveContent(input) ?? undefined,
-        description: resolveContent(input) ?? undefined,
-        insight: input.insight,
-        next_steps: input.next_steps,
-        updated_at_epoch: input.updated_at_epoch,
-        completed_at_epoch: input.completed_at_epoch,
-      });
+      return handleSessionRemember(db, sessionId, input);
     }
 
     const memoryId = parseMemoryId(input.id);

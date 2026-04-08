@@ -16,7 +16,7 @@ import {
   formatTurnExpanded,
 } from "../../src/mcp/format";
 
-const startedAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
+const createdAtEpoch = Math.floor(Date.UTC(2026, 3, 5, 14, 30) / 1000);
 
 describe("MCP format renderer", () => {
   test("formats collapsed lines with list structure, stats, and status", () => {
@@ -24,8 +24,8 @@ describe("MCP format renderer", () => {
       id: 142,
       title: "Auth refactor",
       project: "claude-mnemo",
-      startedAtEpoch,
-      description: "Fix race + add tests",
+      createdAtEpoch,
+      content: "Fix race + add tests",
       turnCount: 3,
       observationCount: 8,
     };
@@ -33,7 +33,7 @@ describe("MCP format renderer", () => {
       id: 1,
       promptNumber: 1,
       title: "Diagnose auth",
-      description: "Refresh overlap diagnosed",
+      content: "Refresh overlap diagnosed",
       observationCount: 2,
       toolCallCount: 4,
       filesReadCount: 1,
@@ -44,7 +44,7 @@ describe("MCP format renderer", () => {
       id: 7,
       type: "bugfix",
       title: "Added mutex",
-      description: "Guards refresh",
+      content: "Guards refresh",
     };
 
     expect(formatSessionCollapsed(session)).toBe(
@@ -88,8 +88,8 @@ describe("MCP format renderer", () => {
       id: 9,
       title: "Empty stats",
       project: "claude-mnemo",
-      startedAtEpoch,
-      description: "Collapsed description stays visible",
+      createdAtEpoch,
+      content: "Collapsed description stays visible",
       turnCount: 0,
       observationCount: 0,
     };
@@ -97,7 +97,7 @@ describe("MCP format renderer", () => {
       id: 2,
       promptNumber: 2,
       title: "No stats",
-      description: "Collapsed description stays visible",
+      content: "Collapsed description stays visible",
       observationCount: 0,
       toolCallCount: 0,
       filesReadCount: 0,
@@ -125,8 +125,8 @@ describe("MCP format renderer", () => {
       id: 142,
       title: "Auth refactor",
       project: "claude-mnemo",
-      startedAtEpoch,
-      description: "Fix race + add tests",
+      createdAtEpoch,
+      content: "Fix race + add tests",
       insight: ["prompt cache preserved", "per-turn extraction is resilient"],
       nextSteps: "verify startup migration",
       turnCount: 3,
@@ -143,7 +143,7 @@ describe("MCP format renderer", () => {
       status: "extracted",
       promptPreview: "Why am I getting 401 errors?",
       responsePreview: "I found a race condition in refresh logic.",
-      description: "Refresh overlap diagnosed",
+      content: "Refresh overlap diagnosed",
       insight: ["concurrent refreshes collide"],
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts", "tests/auth.test.ts"],
@@ -152,10 +152,9 @@ describe("MCP format renderer", () => {
       id: 7,
       type: "bugfix",
       title: "Added mutex",
-      description: "Guards refresh",
-      narrative: "Serialized token refresh work with a shared promise.",
-      facts: ["mutex added", "retry path preserved"],
-      concepts: ["problem-solution", "trade-off"],
+      content: "Guards refresh",
+      insight: "Serialized token refresh work with a shared promise.",
+      tags: ["problem-solution", "trade-off"],
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts"],
     };
@@ -195,11 +194,8 @@ describe("MCP format renderer", () => {
       [
         "- [O7] 🔴 Added mutex",
         "  - desc: Guards refresh",
-        "  - narrative: Serialized token refresh work with a shared promise.",
-        "  - facts:",
-        "    - mutex added",
-        "    - retry path preserved",
-        "  - concepts: problem-solution, trade-off",
+        "  - insight: Serialized token refresh work with a shared promise.",
+        "  - tags: problem-solution, trade-off",
         "  - files: 📖 src/auth.ts ✏️ src/auth.ts",
       ].join("\n"),
     );
@@ -221,8 +217,8 @@ describe("MCP format renderer", () => {
         id: 142,
         title: "Auth refactor",
         project: "claude-mnemo",
-        startedAtEpoch,
-        description: "Fix race + add tests",
+        createdAtEpoch,
+        content: "Fix race + add tests",
         nextSteps: "verify startup migration",
         turns: [
           {
@@ -265,13 +261,13 @@ describe("MCP format renderer", () => {
       reasoning: "Mocks hide locking and transaction behavior.",
       application: "When validating persistence or concurrency changes.",
       tags: ["testing", "database"],
-      createdAtEpoch: startedAtEpoch,
+      createdAtEpoch: createdAtEpoch,
       sourceCount: 1,
       source: {
         sessionId: 142,
         promptNumber: 3,
         title: "Add concurrency coverage",
-        createdAtEpoch: startedAtEpoch,
+        createdAtEpoch: createdAtEpoch,
       },
     };
 

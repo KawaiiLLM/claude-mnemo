@@ -20,9 +20,9 @@ describe("recall-powered extraction context", () => {
       contentSessionId: "session-prompt-test",
       project: "/test/project",
       title: "Prompt test session",
-      description: "Testing extraction context",
+      content: "Testing extraction context",
       insight: null,
-      startedAtEpoch: 100,
+      createdAtEpoch: 100,
       updatedAtEpoch: 110,
       completedAtEpoch: null,
     }).id;
@@ -35,7 +35,7 @@ describe("recall-powered extraction context", () => {
   test("preserves session headers and expanded turns for Mnemosyne", () => {
     db.query(
       `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, assistant_response, title, description, created_at_epoch
+        session_id, prompt_number, status, user_prompt, assistant_response, title, content, created_at_epoch
       ) VALUES (?, 1, 'pending', ?, 'Added mutex to token refresh', 'Fix auth race', 'Serialized refresh', 120)`,
     ).run(sessionId, "Fix auth bug");
     const turnId = getTurn(db, sessionId, 1)!.id;
@@ -44,21 +44,19 @@ describe("recall-powered extraction context", () => {
         turn_id,
         type,
         title,
-        description,
-        narrative,
-        facts,
-        concepts,
+        content,
+        insight,
+        tags,
         files_read,
         files_modified,
         created_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       turnId,
       "bugfix",
       "Mutex added",
       "Refresh is serialized",
       "A shared promise now serializes refresh work.",
-      JSON.stringify(["mutex added", "test added"]),
       JSON.stringify(["problem-solution"]),
       JSON.stringify(["src/auth.ts"]),
       JSON.stringify(["src/auth.ts", "tests/auth.test.ts"]),
@@ -66,7 +64,7 @@ describe("recall-powered extraction context", () => {
     );
 
     const context = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: sessionId,
       depth: "expanded",
     });
@@ -92,7 +90,7 @@ describe("recall-powered extraction context", () => {
       ) VALUES (?, 1, 'pending', ?, 120)`,
     ).run(sessionId, longPrompt);
     const context = recallMemory(db, {
-      scope: "turns",
+      view: "turns",
       session: sessionId,
       depth: "expanded",
     });
@@ -115,7 +113,6 @@ describe("buildMnemosynePrompt", () => {
 
     expect(prompt).toContain("Primary write tool is remember");
     expect(prompt).toContain('call remember({ parent: "S{id}", status: "undone" })');
-    expect(prompt).toContain("Use save_turn and update_session only for compatibility");
     expect(prompt).toContain(
       "Do NOT re-process [extracted], [skipped], or [undone] turns",
     );
@@ -131,20 +128,16 @@ describe("buildMnemosynePrompt", () => {
   test("keeps field quality and concept/type separation guidance", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("content or description: concise outcome, not a restatement of the user prompt");
+    expect(prompt).toContain("content: concise outcome, not a restatement of the user prompt");
     expect(prompt).toContain("insight: explain what was done, how it works, and why it matters");
     expect(prompt).toContain("tags: independent, verifiable labels for retrieval");
     expect(prompt).toContain("files_read/files_modified: only files that materially informed or changed the result");
-    expect(prompt).not.toContain("narrative:");
-    expect(prompt).not.toContain("facts:");
-    expect(prompt).not.toContain("concepts (from fixed vocabulary)");
   });
 
-  test("keeps update_session, private-tag exclusion, and tool-call examples", () => {
+  test("keeps private-tag exclusion and tool-call examples", () => {
     const prompt = buildMnemosynePrompt("test context");
 
     expect(prompt).toContain('Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.');
-    expect(prompt).toContain("Use update_session only as a compatibility fallback for legacy callers.");
     expect(prompt).toContain(
       "Include next_steps when the session has a clear trajectory or planned follow-up.",
     );

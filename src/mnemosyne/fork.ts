@@ -16,8 +16,6 @@ import {
   recallInputShape,
   rememberInputShape,
   replayInputShape,
-  saveTurnInputShape,
-  updateSessionInputShape,
 } from "../mcp/definitions";
 import {
   createDatabaseBackedHandlers,
@@ -106,9 +104,6 @@ function createMnemoSdkServer(
     recall: partialHandlers.recall ?? missingHandler("recall"),
     replay: partialHandlers.replay ?? missingHandler("replay"),
     remember: partialHandlers.remember ?? missingHandler("remember"),
-    save_turn: partialHandlers.save_turn ?? missingHandler("save_turn"),
-    update_session:
-      partialHandlers.update_session ?? missingHandler("update_session"),
   };
 
   return deps.createSdkMcpServerImpl({
@@ -120,18 +115,6 @@ function createMnemoSdkServer(
         MNEMO_TOOL_DESCRIPTIONS.remember,
         rememberInputShape,
         async (args) => handlers.remember(args as Record<string, unknown>),
-      ),
-      deps.toolImpl(
-        "save_turn",
-        MNEMO_TOOL_DESCRIPTIONS.save_turn,
-        saveTurnInputShape,
-        async (args) => handlers.save_turn(args as Record<string, unknown>),
-      ),
-      deps.toolImpl(
-        "update_session",
-        MNEMO_TOOL_DESCRIPTIONS.update_session,
-        updateSessionInputShape,
-        async (args) => handlers.update_session(args as Record<string, unknown>),
       ),
       deps.toolImpl(
         "recall",

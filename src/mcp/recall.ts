@@ -10,7 +10,7 @@ import {
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
-import { createLogger } from "../shared/logger";
+
 import {
   formatMemoryCollapsed,
   formatMemoryExpanded,
@@ -27,11 +27,11 @@ import {
   type FormattedTurn,
 } from "./format";
 
-export type RecallScope = "sessions" | "turns" | "observations" | "memories";
+export type RecallView = "sessions" | "turns" | "observations" | "memories";
 export type SelectorInput = number | number[] | string;
 
 export interface RecallInput {
-  scope?: RecallScope;
+  view?: RecallView;
   id?: string;
   session?: SelectorInput;
   turn?: SelectorInput;
@@ -43,12 +43,9 @@ export interface RecallInput {
   before?: number;
   time?: string;
   depth?: "collapsed" | "expanded" | "full";
-  observation?: number;
+  limit?: number;
   expandTurns?: number[];
-  around?: string;
   project?: string;
-  fromEpoch?: number;
-  toEpoch?: number;
 }
 
 interface ParsedTimeRange {
@@ -62,7 +59,7 @@ type RoutedRecallId =
   | { kind: "observation"; observationId: number }
   | { kind: "memory"; memoryId: number };
 
-const log = createLogger("MCP");
+
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -82,61 +79,19 @@ function formatParameterError(message: string): string {
 
 function normalizeRecallInput(input: RecallInput): RecallInput {
   const normalized: RecallInput = { ...input };
-  const legacyFields: string[] = [];
-  const hasObservationSelectors =
-    normalized.obs !== undefined || normalized.observation !== undefined;
-  const hasSearchOrTimeFilters =
-    normalized.type !== undefined ||
-    normalized.file !== undefined ||
-    normalized.query !== undefined ||
-    normalized.project !== undefined ||
-    normalized.time !== undefined ||
-    normalized.after !== undefined ||
-    normalized.before !== undefined ||
-    normalized.fromEpoch !== undefined ||
-    normalized.toEpoch !== undefined;
+  const hasObservationSelectors = normalized.obs !== undefined;
 
-  if (normalized.observation !== undefined && normalized.obs === undefined) {
-    normalized.obs = normalized.observation;
-    legacyFields.push("observation");
-  }
-
-  if (normalized.fromEpoch !== undefined && normalized.after === undefined) {
-    normalized.after = normalized.fromEpoch;
-    legacyFields.push("from_epoch");
-  }
-
-  if (normalized.toEpoch !== undefined && normalized.before === undefined) {
-    normalized.before = normalized.toEpoch;
-    legacyFields.push("to_epoch");
-  }
-
-  if (normalized.expandTurns !== undefined) {
-    legacyFields.push("expand_turns");
-  }
-
-  if (normalized.around !== undefined) {
-    legacyFields.push("around");
-  }
-
-  if (normalized.scope === undefined && normalized.id === undefined) {
-    legacyFields.push("scope");
-
+  if (normalized.view === undefined && normalized.id === undefined) {
     if (hasObservationSelectors) {
-      normalized.scope = "observations";
+      normalized.view = "observations";
     } else if (normalized.session !== undefined && normalized.turn !== undefined) {
-      normalized.scope = "turns";
+      normalized.view = "turns";
       normalized.depth ??= "expanded";
     } else if (normalized.session !== undefined) {
-      normalized.scope = "turns";
+      normalized.view = "turns";
+    } else if (!hasUnscopedSearchFilters(normalized)) {
+      normalized.view = "sessions";
     }
-  }
-
-  if (legacyFields.length > 0) {
-    log.warn("legacy recall parameters normalized", {
-      legacyFields,
-      normalizedScope: normalized.scope ?? "legacy",
-    });
   }
 
   return normalized;
@@ -304,10 +259,10 @@ function mergeTimeRanges(
     return { error: parsedTime.error };
   }
 
-  const lowerBounds = [input.after, input.fromEpoch, parsedTime.range?.after].filter(
+  const lowerBounds = [input.after, parsedTime.range?.after].filter(
     (value): value is number => value !== undefined,
   );
-  const upperBounds = [input.before, input.toEpoch, parsedTime.range?.before].filter(
+  const upperBounds = [input.before, parsedTime.range?.before].filter(
     (value): value is number => value !== undefined,
   );
 
@@ -341,9 +296,7 @@ function hasUnscopedSearchFilters(input: RecallInput): boolean {
     input.project !== undefined ||
     input.time !== undefined ||
     input.after !== undefined ||
-    input.before !== undefined ||
-    input.fromEpoch !== undefined ||
-    input.toEpoch !== undefined
+    input.before !== undefined
   );
 }
 
@@ -359,8 +312,8 @@ function buildSessionView(
     id: session.id,
     title: session.title,
     project: session.project,
-    startedAtEpoch: session.startedAtEpoch,
-    description: session.description,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount: turns.length,
@@ -422,8 +375,8 @@ export function buildSessionSummary(
     id: session.id,
     title: session.title,
     project: session.project,
-    startedAtEpoch: session.startedAtEpoch,
-    description: session.description,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount,
@@ -445,7 +398,7 @@ export function buildCollapsedTurnsForSession(
     id: turn.id,
     promptNumber: turn.promptNumber,
     title: turn.title,
-    description: turn.description,
+    content: turn.content,
     observationCount: observationCounts.get(turn.id) ?? 0,
     toolCallCount: turn.toolCallCount,
     filesReadCount: turn.filesRead.length,
@@ -472,8 +425,8 @@ export function buildFormattedSession(
     id: session.id,
     title: session.title,
     project: session.project,
-    startedAtEpoch: session.startedAtEpoch,
-    description: session.description,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount: turns.length,
@@ -501,7 +454,7 @@ function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
     id: turn.id,
     promptNumber: turn.promptNumber,
     title: turn.title,
-    description: turn.description,
+    content: turn.content,
     observationCount: observations.length,
     toolCallCount: turn.toolCallCount,
     filesReadCount: turn.filesRead.length,
@@ -516,10 +469,9 @@ function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
       id: observation.id,
       type: observation.type,
       title: observation.title,
-      description: observation.description,
-      narrative: observation.narrative,
-      facts: observation.facts,
-      concepts: observation.concepts,
+      content: observation.content,
+      insight: observation.insight,
+      tags: observation.tags,
       filesRead: observation.filesRead,
       filesModified: observation.filesModified,
     })),
@@ -565,16 +517,15 @@ function selectSearchResults(
   before?: number,
 ): SearchMemoryResult[] {
   return searchMemory(db, {
-    scope: input.scope,
+    scope: input.view,
     query: input.query,
     project: input.project,
     type: input.type,
     file: input.file,
     after,
     before,
-    fromEpoch: input.fromEpoch,
-    toEpoch: input.toEpoch,
-    limit: 200,
+    limit:
+      input.limit ?? (input.view === "memories" ? 200 : input.view === "sessions" ? 1000 : 20),
   });
 }
 
@@ -745,10 +696,9 @@ function renderObservationScope(
         id: observation.id,
         type: observation.type,
         title: observation.title,
-        description: observation.description,
-        narrative: observation.narrative,
-        facts: observation.facts,
-        concepts: observation.concepts,
+        content: observation.content,
+        insight: observation.insight,
+        tags: observation.tags,
         filesRead: observation.filesRead,
         filesModified: observation.filesModified,
       };
@@ -805,10 +755,9 @@ function renderObservationScope(
           id: observation.id,
           type: observation.type,
           title: observation.title,
-          description: observation.description,
-          narrative: observation.narrative,
-          facts: observation.facts,
-          concepts: observation.concepts,
+          content: observation.content,
+          insight: observation.insight,
+          tags: observation.tags,
           filesRead: observation.filesRead,
           filesModified: observation.filesModified,
         };
@@ -900,10 +849,9 @@ function renderObservationDetailById(db: Database, observationId: number): strin
     id: observation.id,
     type: observation.type,
     title: observation.title,
-    description: observation.description,
-    narrative: observation.narrative,
-    facts: observation.facts,
-    concepts: observation.concepts,
+    content: observation.content,
+    insight: observation.insight,
+    tags: observation.tags,
     filesRead: observation.filesRead,
     filesModified: observation.filesModified,
   });
@@ -940,118 +888,12 @@ function renderRoutedId(db: Database, id: string): string {
   return renderMemoryDetailById(db, routed.memoryId);
 }
 
-function legacyRecallMemory(db: Database, input: RecallInput): string {
-  if (input.observation !== undefined) {
-    const observation = getObservation(db, input.observation);
-    if (!observation) {
-      return "Observation not found.";
-    }
-
-    return formatObservationExpanded({
-      id: observation.id,
-      type: observation.type,
-      title: observation.title,
-      description: observation.description,
-      narrative: observation.narrative,
-      facts: observation.facts,
-      concepts: observation.concepts,
-      filesRead: observation.filesRead,
-      filesModified: observation.filesModified,
-    });
-  }
-
-  if (input.session !== undefined && input.turn !== undefined) {
-    const sessionId = typeof input.session === "number" ? input.session : null;
-    if (sessionId === null) {
-      return formatParameterError("turn requires session; use recall(session=142, turn=3).");
-    }
-
-    const turn = getTurn(db, sessionId, input.turn as number);
-    if (!turn) {
-      return "Turn not found.";
-    }
-
-    const turnView = buildTurnView(db, turn);
-    return [
-      formatTurnExpanded(turnView, { sessionId }),
-      ...turnView.observations!.map((observation) =>
-        formatObservationCollapsed(observation, {
-          indent: "  ",
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-        }),
-      ),
-    ].join("\n");
-  }
-
-  if (input.session !== undefined) {
-    const sessionId = typeof input.session === "number" ? input.session : null;
-    if (sessionId === null) {
-      return formatParameterError("session selector requires a numeric id in legacy mode.");
-    }
-
-    const session = getSession(db, sessionId);
-    if (!session) {
-      return "Session not found.";
-    }
-
-    return renderSession(db, session, input.depth ?? "collapsed");
-  }
-
-  if (input.around) {
-    const sessions = getRecentSessions(db, { limit: 1000 }).sort(
-      (left, right) => left.startedAtEpoch - right.startedAtEpoch,
-    );
-
-    if (sessions.length === 0) {
-      return "Anchor session not found.";
-    }
-
-    const anchorId = Number(input.around.replace(/^S/i, ""));
-    let anchorIndex = /^S\d+$/i.test(input.around)
-      ? sessions.findIndex((session) => session.id === anchorId)
-      : -1;
-
-    if (anchorIndex === -1) {
-      const dateEpoch = parseUtcDate(input.around);
-      if (dateEpoch !== null) {
-        anchorIndex = sessions.findIndex(
-          (session) => session.startedAtEpoch >= dateEpoch,
-        );
-        if (anchorIndex === -1) {
-          anchorIndex = sessions.length - 1;
-        }
-      }
-    }
-
-    if (anchorIndex === -1) {
-      return "Anchor session not found.";
-    }
-
-    const startIndex = Math.max(0, anchorIndex - (input.before ?? 0));
-    const endIndex = Math.min(sessions.length, anchorIndex + (input.after ?? 0) + 1);
-
-    return sessions
-      .slice(startIndex, endIndex)
-      .map((session) => renderSession(db, session, "collapsed"))
-      .join("\n");
-  }
-
-  const results = getRecentSessions(db, { limit: 20 });
-  return results.map((session) => renderSession(db, session, "collapsed")).join("\n");
-}
-
-function shouldUseLegacyPath(input: RecallInput): boolean {
-  return input.scope === undefined && input.id === undefined;
-}
-
 function hasIdSelectorConflict(input: RecallInput): boolean {
   return (
-    input.scope !== undefined ||
+    input.view !== undefined ||
     input.session !== undefined ||
     input.turn !== undefined ||
     input.obs !== undefined ||
-    input.observation !== undefined ||
     input.query !== undefined ||
     input.type !== undefined ||
     input.file !== undefined ||
@@ -1059,10 +901,8 @@ function hasIdSelectorConflict(input: RecallInput): boolean {
     input.before !== undefined ||
     input.time !== undefined ||
     input.expandTurns !== undefined ||
-    input.around !== undefined ||
     input.project !== undefined ||
-    input.fromEpoch !== undefined ||
-    input.toEpoch !== undefined
+    input.limit !== undefined
   );
 }
 
@@ -1098,9 +938,9 @@ function formatMixedSearchResult(db: Database, result: SearchMemoryResult): stri
   ) {
     const turn = getTurnById(db, result.turnId);
     const promptNumber = turn?.promptNumber ?? "?";
-    return `- [O${result.observationId}] ${result.type ?? "observation"}: ${
-      result.title ?? "Untitled"
-    } | S${result.sessionId}/T${promptNumber}`;
+      return `- [O${result.observationId}] ${result.type ?? "observation"}: ${
+        result.title ?? "Untitled"
+      } | S${result.sessionId}/T${promptNumber}`;
   }
 
   return `- [${result.layer}] ${result.title ?? "Untitled"}`;
@@ -1112,14 +952,14 @@ export function recallMemory(db: Database, input: RecallInput): string {
   if (normalizedInput.id) {
     if (hasIdSelectorConflict(normalizedInput)) {
       return formatParameterError(
-        "id cannot be combined with scope, session, turn, obs, or search filters.",
+        "id cannot be combined with view, session, turn, obs, or search filters.",
       );
     }
 
     return renderRoutedId(db, normalizedInput.id);
   }
 
-  if (normalizedInput.scope === undefined && hasUnscopedSearchFilters(normalizedInput)) {
+  if (normalizedInput.view === undefined && hasUnscopedSearchFilters(normalizedInput)) {
     const timeRange = mergeTimeRanges(normalizedInput);
     if (timeRange.error) {
       return formatParameterError(timeRange.error);
@@ -1137,10 +977,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
       results,
       normalizedInput.depth ?? "collapsed",
     );
-  }
-
-  if (shouldUseLegacyPath(normalizedInput)) {
-    return legacyRecallMemory(db, normalizedInput);
   }
 
   const depth = normalizedInput.depth ?? "collapsed";
@@ -1161,7 +997,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
   return renderScopedMemory(
     db,
-    normalizedInput as RecallInput & { scope: RecallScope },
+    normalizedInput as RecallInput & { view: RecallView },
     depth,
     timeRange.after,
     timeRange.before,
@@ -1174,11 +1010,11 @@ function renderSearchResults(
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded" | "full",
 ): string {
-  if (input.scope === undefined) {
+  if (input.view === undefined) {
     return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
   }
 
-  if (input.scope === "memories") {
+  if (input.view === "memories") {
     return renderMemoryScope(
       db,
       results
@@ -1188,7 +1024,7 @@ function renderSearchResults(
     );
   }
 
-  if (input.scope === "sessions") {
+  if (input.view === "sessions") {
     const sessions = results
       .filter(
         (result): result is SearchMemoryResult & { sessionId: number } =>
@@ -1202,7 +1038,7 @@ function renderSearchResults(
     return sessions.map((session) => renderSession(db, session, depth)).join("\n");
   }
 
-  if (input.scope === "turns") {
+  if (input.view === "turns") {
     const turns = results
       .map((result) => getTurnById(db, result.turnId ?? -1))
       .filter((turn): turn is TurnRecord => turn !== null);
@@ -1231,19 +1067,19 @@ function renderSearchResults(
 
 function renderScopedMemory(
   db: Database,
-  input: Required<Pick<RecallInput, "scope">> & RecallInput,
+  input: Required<Pick<RecallInput, "view">> & RecallInput,
   depth: "collapsed" | "expanded" | "full",
   after?: number,
   before?: number,
 ): string {
-  if (input.scope === "memories") {
+  if (input.view === "memories") {
     const project = input.project ?? resolveDefaultProject(db);
     const results = searchMemory(db, {
       scope: "memories",
       project,
       after,
       before,
-      limit: 200,
+      limit: input.limit ?? 200,
     });
 
     return renderMemoryScope(
@@ -1258,7 +1094,7 @@ function renderScopedMemory(
   const sessionSelector = parseSelectorValue(input.session, "session");
   const turnSelector = parseSelectorValue(input.turn, "turn");
   const observationSelector = parseSelectorValue(
-    input.obs ?? input.observation,
+    input.obs,
     "observation",
   );
 
@@ -1278,9 +1114,9 @@ function renderScopedMemory(
   const turnNumbers = turnSelector.values;
   const observationIds = observationSelector.values;
 
-  if (input.scope === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
+  if (input.view === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
     return formatParameterError(
-      'turn requires session; use recall(scope="turns", session=142, turn=3).',
+      'turn requires session; use recall(view="turns", session=142, turn=3).',
     );
   }
 
@@ -1330,7 +1166,7 @@ function renderScopedMemory(
     }
   }
 
-  if (input.scope === "sessions") {
+  if (input.view === "sessions") {
     const candidateSessions = sessionIds.length > 0
       ? sessionIds
           .map((sessionId) => getSession(db, sessionId))
@@ -1338,7 +1174,7 @@ function renderScopedMemory(
             (session): session is NonNullable<ReturnType<typeof getSession>> =>
               session !== null,
           )
-      : getRecentSessions(db, { limit: 1000 });
+      : getRecentSessions(db, { limit: input.limit ?? 1000 });
 
     const observationSessionIds = new Set<number>();
     if (observationIds.length > 0) {
@@ -1355,10 +1191,10 @@ function renderScopedMemory(
     }
 
     const filtered = candidateSessions.filter((session) => {
-      if (after !== undefined && session.startedAtEpoch < after) {
+      if (after !== undefined && session.createdAtEpoch < after) {
         return false;
       }
-      if (before !== undefined && session.startedAtEpoch > before) {
+      if (before !== undefined && session.createdAtEpoch > before) {
         return false;
       }
       if (
@@ -1381,9 +1217,9 @@ function renderScopedMemory(
       .join("\n");
   }
 
-  if (input.scope === "turns") {
+  if (input.view === "turns") {
     if (input.turn !== undefined && sessionIds.length === 0) {
-      return formatParameterError("turn requires session; use recall(scope=\"turns\", session=142, turn=3).");
+      return formatParameterError('turn requires session; use recall(view="turns", session=142, turn=3).');
     }
 
     const sessions = sessionIds.length > 0
@@ -1393,7 +1229,7 @@ function renderScopedMemory(
             (session): session is NonNullable<ReturnType<typeof getSession>> =>
               session !== null,
           )
-      : getRecentSessions(db, { limit: 1000 });
+      : getRecentSessions(db, { limit: input.limit ?? 1000 });
 
     const turns: TurnRecord[] = [];
     for (const session of sessions) {
@@ -1455,7 +1291,7 @@ function renderScopedMemory(
           (session): session is NonNullable<ReturnType<typeof getSession>> =>
             session !== null,
         )
-    : getRecentSessions(db, { limit: 1000 });
+    : getRecentSessions(db, { limit: input.limit ?? 1000 });
   const turnIds = new Set<number>();
   const observations: Array<{ sessionId: number; turnId: number; observationId: number }> = [];
 
@@ -1485,7 +1321,7 @@ function renderScopedMemory(
     .map((turnId) => getTurnById(db, turnId))
     .filter((turn): turn is TurnRecord => turn !== null);
 
-  if (input.scope === "observations") {
+  if (input.view === "observations") {
     return renderObservationScope(
       db,
       observations,
