@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { basename, dirname } from "node:path";
 
@@ -166,9 +166,8 @@ function moveAgentSession(cwd: string, sessionId: string): void {
   try {
     renameSync(srcPath, destPath);
   } catch {
-    // Cross-device move: copy then delete
-    const content = Bun.file(srcPath).text();
-    Bun.write(destPath, content);
+    // Cross-device move: sync copy then delete
+    copyFileSync(srcPath, destPath);
     unlinkSync(srcPath);
   }
 }

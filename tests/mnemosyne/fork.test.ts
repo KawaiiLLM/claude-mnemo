@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeDatabase } from "../../src/db/schema";
+import { resolveAgentSessionPath } from "../../src/shared/paths";
 
 import { forkMnemosyne, resolveClaudeCodeExecutablePath } from "../../src/mnemosyne/fork";
 
@@ -193,5 +197,94 @@ describe("forkMnemosyne", () => {
     ]);
     expect(options.resume).toBeUndefined();
     expect(options.forkSession).toBeUndefined();
+  });
+
+  test("pins model to claude-sonnet-4-6", async () => {
+    let capturedQueryParams: Record<string, unknown> | null = null;
+    const queryImpl = mock((params: Record<string, unknown>) => {
+      capturedQueryParams = params;
+
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "result",
+            session_id: "model-test",
+            num_turns: 0,
+            usage: {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+            duration_ms: 0,
+            total_cost_usd: 0,
+          };
+        },
+      };
+    });
+
+    await forkMnemosyne(
+      { prompt: "test" },
+      {
+        queryImpl: queryImpl as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query,
+        resolveClaudeCodeExecutablePathImpl: () => "/usr/local/bin/claude",
+      },
+    );
+
+    const options = (capturedQueryParams as { options: Record<string, unknown> }).options;
+    expect(options.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("moves agent session JSONL to ~/.claude-mnemo/sessions/", async () => {
+    db = createDatabase(":memory:");
+    initializeDatabase(db);
+
+    const testCwd = "/tmp/mnemo-move-test-project";
+    const testSessionId = "move-test-" + Date.now();
+
+    // Create source JSONL at the path resolveTranscriptPath would compute
+    const { resolveTranscriptPath } = await import("../../src/shared/paths");
+    const srcPath = resolveTranscriptPath(testCwd, testSessionId);
+    mkdirSync(join(srcPath, ".."), { recursive: true });
+    writeFileSync(srcPath, '{"type":"test-payload"}\n');
+
+    const queryImpl = mock(() => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "result",
+          session_id: testSessionId,
+          num_turns: 1,
+          usage: {
+            input_tokens: 5,
+            output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+          duration_ms: 100,
+          total_cost_usd: 0,
+        };
+      },
+    }));
+
+    await forkMnemosyne(
+      {
+        prompt: "test",
+        cwd: testCwd,
+        database: db,
+      },
+      {
+        queryImpl: queryImpl as unknown as typeof import("@anthropic-ai/claude-agent-sdk").query,
+        resolveClaudeCodeExecutablePathImpl: () => "/usr/local/bin/claude",
+      },
+    );
+
+    const destPath = resolveAgentSessionPath(testSessionId);
+
+    expect(existsSync(destPath)).toBe(true);
+    expect(readFileSync(destPath, "utf-8")).toBe('{"type":"test-payload"}\n');
+    expect(existsSync(srcPath)).toBe(false);
+
+    // Clean up
+    try { require("node:fs").unlinkSync(destPath); } catch {}
   });
 });
