@@ -33,6 +33,7 @@ export interface TurnRecord {
   id: number;
   sessionId: number;
   promptNumber: number;
+  contentPromptId: string | null;
   status: string;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -50,6 +51,7 @@ interface TurnRow {
   id: number;
   sessionId: number;
   promptNumber: number;
+  contentPromptId: string | null;
   status: string;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -68,6 +70,7 @@ const TURN_SELECT = `
     id,
     session_id AS sessionId,
     prompt_number AS promptNumber,
+    content_prompt_id AS contentPromptId,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -390,11 +393,13 @@ export function updateTurnBackfill(
   turnId: number,
   assistantResponse: string,
   toolCallCount: number,
+  contentPromptId?: string | null,
 ): void {
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
-         tool_call_count = ?
+         tool_call_count = ?,
+         content_prompt_id = COALESCE(content_prompt_id, ?)
      WHERE id = ?`,
-  ).run(assistantResponse, toolCallCount, turnId);
+  ).run(assistantResponse, toolCallCount, contentPromptId ?? null, turnId);
 }

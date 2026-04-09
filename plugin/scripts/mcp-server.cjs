@@ -7455,6 +7455,7 @@ __export(schema_exports, {
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionProjectIndex(db);
+  ensureTurnPromptIdIndex(db);
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -7471,6 +7472,15 @@ function ensureSessionProjectIndex(db) {
         ON sessions(project, started_at_epoch DESC)
     `);
   }
+}
+function ensureTurnPromptIdIndex(db) {
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    return;
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+      ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+  `);
 }
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
@@ -7521,6 +7531,10 @@ function migrateSchema(db) {
   if (!hasColumn(db, "turns", "tool_call_count")) {
     db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
   }
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN content_prompt_id TEXT");
+  }
+  ensureTurnPromptIdIndex(db);
   if (!hasColumn(db, "turns", "content")) {
     db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
   }
@@ -7626,6 +7640,7 @@ var init_schema = __esm({
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
+    content_prompt_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -31445,6 +31460,7 @@ var TURN_SELECT = `
     id,
     session_id AS sessionId,
     prompt_number AS promptNumber,
+    content_prompt_id AS contentPromptId,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -33088,10 +33104,25 @@ function getContentBlocks(entry) {
   return Array.isArray(entry.content) ? entry.content : [];
 }
 function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
   return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
 }
 function isCountedUserPrompt(entry) {
-  return entry.role === "user" && extractUserPrompt(entry) !== "";
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>");
+}
+function isRealUserPrompt(entry) {
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (typeof entry.content === "string" && isKnownSystemInjectedContent(entry.content)) {
+    return false;
+  }
+  return extractUserPrompt(entry) !== "";
 }
 function extractAssistantParts(entry) {
   const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
@@ -33132,18 +33163,42 @@ function readAllTranscriptEntries(transcriptPath) {
   if (rawTranscript.trim() === "") {
     return [];
   }
-  return rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => !entry.isApiErrorMessage);
+  return rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    isSidechain: Boolean(raw.isSidechain),
+    isApiErrorMessage: Boolean(raw.isApiErrorMessage)
+  };
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
 }
 function parseReplayTranscript(transcriptPath) {
   const turns = [];
   let promptNumber = 0;
   let currentTurn = null;
+  let currentPromptId = null;
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
       currentTurn = {
         promptNumber,
+        promptId: entry.promptId ?? null,
         userPrompt,
         assistantText: "",
         toolCalls: [],
@@ -33254,7 +33309,8 @@ function replayMemory(db, input) {
       )
     ).join("\n");
   }
-  const resolvedTurn = transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ?? null;
+  const dbTurn = session ? getTurn(db, session.id, input.turn) : null;
+  const resolvedTurn = (dbTurn?.contentPromptId ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId) : void 0) ?? transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ?? null;
   if (!resolvedTurn) {
     return "Turn not found.";
   }

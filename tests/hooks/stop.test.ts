@@ -237,6 +237,73 @@ describe("handleStopHook", () => {
     expect(forkMnemosyne).not.toHaveBeenCalled();
   });
 
+  test("backfills content_prompt_id from nested transcript entries before async extraction", async () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Draft approach",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Draft response" }],
+        },
+      },
+      {
+        type: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Investigate logs",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Replay-compatible response" }],
+        },
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'pending', 'Draft approach', 120)`,
+    ).run(sessionId);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 2, 'pending', 'Investigate logs', 130)`,
+    ).run(sessionId);
+
+    const handler = createStopHandler({
+      db,
+      forkMnemosyne: mock(async () => {}),
+      stderr: { write: mock(() => true) },
+      now: () => 500,
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBe("p1");
+    expect(getTurn(db, sessionId, 2)?.contentPromptId).toBe("p2");
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
   test("handles missing transcript by falling back without crashing", async () => {
     db.query(
       `INSERT INTO turns (

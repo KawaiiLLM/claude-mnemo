@@ -255,4 +255,68 @@ describe("handleSessionInitHook", () => {
     expect(thirdTurn?.promptNumber).toBe(3);
     expect(thirdTurn?.userPrompt).toBe("Third tracked prompt");
   });
+
+  test("counts only real user prompts in nested Claude JSONL transcripts", async () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "First real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+      {
+        type: "user",
+        promptId: "task-1",
+        message: {
+          role: "user",
+          content: "<task-notification>subagent finished</task-notification>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Second real prompt",
+        },
+      },
+    ]);
+    transcriptDirectories.push(transcript.directory);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 4000,
+      updatedAtEpoch: 4000,
+      completedAtEpoch: null,
+    });
+
+    const handler = createSessionInitHandler({
+      db,
+      now: () => 4001,
+    });
+
+    await handler(
+      createInput({
+        prompt: "Third real prompt",
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(getTurn(db, session.id, 3)?.userPrompt).toBe("Third real prompt");
+  });
 });

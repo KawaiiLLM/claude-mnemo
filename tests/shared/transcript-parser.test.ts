@@ -273,4 +273,56 @@ describe("parseTranscript", () => {
     expect(countUserPromptsInTranscript(missingPath)).toBe(0);
     expect(countUserPromptsInTranscript(emptyPath)).toBe(0);
   });
+
+  test("parses nested Claude JSONL entries and ignores task notifications", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "First real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+      {
+        type: "user",
+        promptId: "task-1",
+        message: {
+          role: "user",
+          content: "<task-notification>subagent finished</task-notification>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "Second real prompt" }],
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Second answer" }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(2);
+    expect(parseReplayTranscript(transcript.path).map((turn) => turn.userPrompt)).toEqual([
+      "First real prompt",
+      "Second real prompt",
+    ]);
+  });
 });

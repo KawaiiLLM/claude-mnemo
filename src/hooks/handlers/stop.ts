@@ -40,17 +40,21 @@ function detectUndoPromptNumbers(
   db: Database,
   sessionDbId: number,
   transcriptPath?: string,
-  transcriptTurnsByPromptNumber?: Map<number, ParsedReplayTurn>,
+  transcriptTurns?: ParsedReplayTurn[],
 ): number[] {
   if (!transcriptPath) {
     return [];
   }
 
-  const replayTurnsByPromptNumber =
-    transcriptTurnsByPromptNumber ??
-    new Map(
-      parseReplayTranscript(transcriptPath).map((turn) => [turn.promptNumber, turn]),
-    );
+  const replayTurns = transcriptTurns ?? parseReplayTranscript(transcriptPath);
+  const replayTurnsByPromptNumber = new Map(
+    replayTurns.map((turn) => [turn.promptNumber, turn]),
+  );
+  const replayTurnsByPromptId = new Map(
+    replayTurns
+      .filter((turn) => turn.promptId)
+      .map((turn) => [turn.promptId as string, turn]),
+  );
 
   return getTurnsForSession(db, sessionDbId)
     .filter(
@@ -59,7 +63,12 @@ function detectUndoPromptNumbers(
         turn.userPrompt,
     )
     .filter((turn) => {
-      const transcriptTurn = replayTurnsByPromptNumber.get(turn.promptNumber);
+      const transcriptTurnByPromptId = turn.contentPromptId
+        ? replayTurnsByPromptId.get(turn.contentPromptId)
+        : undefined;
+      const transcriptTurn =
+        transcriptTurnByPromptId ??
+        replayTurnsByPromptNumber.get(turn.promptNumber);
 
       if (!transcriptTurn) {
         return false;
@@ -108,13 +117,8 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
 
     recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
 
-    const transcriptTurnsByPromptNumber = input.transcriptPath
-      ? new Map(
-          parseReplayTranscript(input.transcriptPath).map((turn) => [
-            turn.promptNumber,
-            turn,
-          ]),
-        )
+    const transcriptTurns = input.transcriptPath
+      ? parseReplayTranscript(input.transcriptPath)
       : undefined;
 
     backfillFromTranscript(
@@ -124,14 +128,14 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       ),
       input.transcriptPath,
       input.lastAssistantMessage,
-      transcriptTurnsByPromptNumber,
+      transcriptTurns,
     );
 
     const stalePromptNumbers = detectUndoPromptNumbers(
       dependencies.db,
       session.id,
       input.transcriptPath,
-      transcriptTurnsByPromptNumber,
+      transcriptTurns,
     );
 
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);

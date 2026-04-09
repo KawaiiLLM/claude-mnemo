@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 
 import { getSession } from "../db/sessions";
-import { getTurnsForSession } from "../db/turns";
+import { getTurn, getTurnsForSession } from "../db/turns";
 import {
   parseReplayTranscript,
 } from "../shared/transcript-parser";
@@ -121,7 +121,11 @@ export function replayMemory(db: Database, input: ReplayInput): string {
       .join("\n");
   }
 
+  const dbTurn = session ? getTurn(db, session.id, input.turn) : null;
   const resolvedTurn =
+    (dbTurn?.contentPromptId
+      ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId)
+      : undefined) ??
     transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ??
     null;
 

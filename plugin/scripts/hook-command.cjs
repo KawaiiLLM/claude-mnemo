@@ -685,6 +685,7 @@ var SCHEMA_SQL = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
+    content_prompt_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -766,6 +767,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionProjectIndex(db);
+  ensureTurnPromptIdIndex(db);
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -782,6 +784,15 @@ function ensureSessionProjectIndex(db) {
         ON sessions(project, started_at_epoch DESC)
     `);
   }
+}
+function ensureTurnPromptIdIndex(db) {
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    return;
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+      ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+  `);
 }
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
@@ -832,6 +843,10 @@ function migrateSchema(db) {
   if (!hasColumn(db, "turns", "tool_call_count")) {
     db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
   }
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN content_prompt_id TEXT");
+  }
+  ensureTurnPromptIdIndex(db);
   if (!hasColumn(db, "turns", "content")) {
     db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
   }
@@ -35927,6 +35942,7 @@ var TURN_SELECT = `
     id,
     session_id AS sessionId,
     prompt_number AS promptNumber,
+    content_prompt_id AS contentPromptId,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -36143,13 +36159,14 @@ function markTurnsStale(db, sessionId, promptNumbers) {
        AND status IN ('extracted', 'skipped')`
   ).run(now, sessionId, ...promptNumbers);
 }
-function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount) {
+function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId) {
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
-         tool_call_count = ?
+         tool_call_count = ?,
+         content_prompt_id = COALESCE(content_prompt_id, ?)
      WHERE id = ?`
-  ).run(assistantResponse, toolCallCount, turnId);
+  ).run(assistantResponse, toolCallCount, contentPromptId ?? null, turnId);
 }
 
 // src/mcp/format.ts
@@ -37620,10 +37637,25 @@ function getContentBlocks(entry) {
   return Array.isArray(entry.content) ? entry.content : [];
 }
 function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
   return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
 }
 function isCountedUserPrompt(entry) {
-  return entry.role === "user" && extractUserPrompt(entry) !== "";
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>");
+}
+function isRealUserPrompt(entry) {
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (typeof entry.content === "string" && isKnownSystemInjectedContent(entry.content)) {
+    return false;
+  }
+  return extractUserPrompt(entry) !== "";
 }
 function extractAssistantParts(entry) {
   const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
@@ -37664,18 +37696,42 @@ function readAllTranscriptEntries(transcriptPath) {
   if (rawTranscript.trim() === "") {
     return [];
   }
-  return rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => !entry.isApiErrorMessage);
+  return rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    isSidechain: Boolean(raw.isSidechain),
+    isApiErrorMessage: Boolean(raw.isApiErrorMessage)
+  };
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
 }
 function parseReplayTranscript(transcriptPath) {
   const turns = [];
   let promptNumber = 0;
   let currentTurn = null;
+  let currentPromptId = null;
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
       currentTurn = {
         promptNumber,
+        promptId: entry.promptId ?? null,
         userPrompt,
         assistantText: "",
         toolCalls: [],
@@ -37719,9 +37775,21 @@ ${assistantText}` : assistantText;
   }));
 }
 function countUserPromptsInTranscript(transcriptPath) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
   let count = 0;
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
       count += 1;
     }
   }
@@ -37794,7 +37862,8 @@ function replayMemory(db, input) {
       )
     ).join("\n");
   }
-  const resolvedTurn = transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ?? null;
+  const dbTurn = session ? getTurn(db, session.id, input.turn) : null;
+  const resolvedTurn = (dbTurn?.contentPromptId ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId) : void 0) ?? transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ?? null;
   if (!resolvedTurn) {
     return "Turn not found.";
   }
@@ -38182,31 +38251,37 @@ Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })`;
 }
 
 // src/hooks/backfill.ts
-function buildReplayTurnLookup(transcriptTurns) {
-  return new Map(transcriptTurns.map((turn) => [turn.promptNumber, turn]));
-}
-function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurnsByPromptNumber) {
+function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurns) {
   if (pendingTurns.length === 0) {
     return;
   }
-  const replayTurnsByPromptNumber = transcriptTurnsByPromptNumber ?? buildReplayTurnLookup(
-    transcriptPath ? parseReplayTranscript(transcriptPath) : []
-  );
+  const replayTurns = transcriptTurns ?? (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
   const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
+  const consumed = /* @__PURE__ */ new Set();
   for (const pendingTurn of pendingTurns) {
     if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
       continue;
     }
-    const transcriptTurn = replayTurnsByPromptNumber.get(
-      pendingTurn.promptNumber
+    let matchIndex = replayTurns.findIndex(
+      (turn, index) => !consumed.has(index) && turn.userPrompt === pendingTurn.userPrompt
     );
+    if (matchIndex < 0) {
+      matchIndex = replayTurns.findIndex(
+        (turn, index) => !consumed.has(index) && turn.promptNumber === pendingTurn.promptNumber
+      );
+    }
+    const transcriptTurn = matchIndex >= 0 ? replayTurns[matchIndex] : void 0;
     const assistantResponse = pendingTurn.promptNumber === lastPendingPromptNumber && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
+    if (matchIndex >= 0) {
+      consumed.add(matchIndex);
+    }
     updateTurnBackfill(
       db,
       pendingTurn.id,
       assistantResponse,
-      toolCallCount
+      toolCallCount,
+      transcriptTurn?.promptId
     );
   }
 }
@@ -38456,17 +38531,22 @@ function buildStopPrompt(db, sessionDbId) {
     })
   );
 }
-function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurnsByPromptNumber) {
+function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurns) {
   if (!transcriptPath) {
     return [];
   }
-  const replayTurnsByPromptNumber = transcriptTurnsByPromptNumber ?? new Map(
-    parseReplayTranscript(transcriptPath).map((turn) => [turn.promptNumber, turn])
+  const replayTurns = transcriptTurns ?? parseReplayTranscript(transcriptPath);
+  const replayTurnsByPromptNumber = new Map(
+    replayTurns.map((turn) => [turn.promptNumber, turn])
+  );
+  const replayTurnsByPromptId = new Map(
+    replayTurns.filter((turn) => turn.promptId).map((turn) => [turn.promptId, turn])
   );
   return getTurnsForSession(db, sessionDbId).filter(
     (turn) => (turn.status === "extracted" || turn.status === "skipped") && turn.userPrompt
   ).filter((turn) => {
-    const transcriptTurn = replayTurnsByPromptNumber.get(turn.promptNumber);
+    const transcriptTurnByPromptId = turn.contentPromptId ? replayTurnsByPromptId.get(turn.contentPromptId) : void 0;
+    const transcriptTurn = transcriptTurnByPromptId ?? replayTurnsByPromptNumber.get(turn.promptNumber);
     if (!transcriptTurn) {
       return false;
     }
@@ -38501,12 +38581,7 @@ function createStopHandler(dependencies) {
     }
     const epoch = now();
     recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
-    const transcriptTurnsByPromptNumber = input.transcriptPath ? new Map(
-      parseReplayTranscript(input.transcriptPath).map((turn) => [
-        turn.promptNumber,
-        turn
-      ])
-    ) : void 0;
+    const transcriptTurns = input.transcriptPath ? parseReplayTranscript(input.transcriptPath) : void 0;
     backfillFromTranscript(
       dependencies.db,
       getPendingTurns(dependencies.db, session.id).filter(
@@ -38514,13 +38589,13 @@ function createStopHandler(dependencies) {
       ),
       input.transcriptPath,
       input.lastAssistantMessage,
-      transcriptTurnsByPromptNumber
+      transcriptTurns
     );
     const stalePromptNumbers = detectUndoPromptNumbers(
       dependencies.db,
       session.id,
       input.transcriptPath,
-      transcriptTurnsByPromptNumber
+      transcriptTurns
     );
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
     const prompt = buildStopPrompt(dependencies.db, session.id);

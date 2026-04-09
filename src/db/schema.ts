@@ -21,6 +21,7 @@ const SCHEMA_SQL = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
+    content_prompt_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -103,6 +104,7 @@ const SCHEMA_SQL = `
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureSessionProjectIndex(db);
+  ensureTurnPromptIdIndex(db);
 }
 
 function ensureSessionProjectIndex(db: Database): void {
@@ -121,6 +123,17 @@ function ensureSessionProjectIndex(db: Database): void {
         ON sessions(project, started_at_epoch DESC)
     `);
   }
+}
+
+function ensureTurnPromptIdIndex(db: Database): void {
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    return;
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_prompt_id
+      ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
+  `);
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {
@@ -201,6 +214,12 @@ export function migrateSchema(db: Database): boolean {
   if (!hasColumn(db, "turns", "tool_call_count")) {
     db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
   }
+
+  if (!hasColumn(db, "turns", "content_prompt_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN content_prompt_id TEXT");
+  }
+
+  ensureTurnPromptIdIndex(db);
 
   if (!hasColumn(db, "turns", "content")) {
     db.exec("ALTER TABLE turns ADD COLUMN content TEXT");

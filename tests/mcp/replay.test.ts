@@ -136,6 +136,93 @@ describe("replayMemory", () => {
     expect(output).not.toContain("[Tool 1] Read");
   });
 
+  test("uses content_prompt_id to replay the correct turn when prompt numbering drifts", () => {
+    const driftedTranscript = writeTranscript([
+      {
+        type: "user",
+        promptId: "real-1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "First real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+      {
+        type: "user",
+        promptId: "task-1",
+        message: {
+          role: "user",
+          content: "<task-notification>subagent finished</task-notification>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "real-2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Second real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", name: "Read", input: { file_path: "src/app.ts" } },
+            { type: "text", text: "Second answer" },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", content: "app.ts contents" }],
+        },
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch,
+        content_prompt_id
+      ) VALUES (?, ?, 'extracted', ?, ?, ?, ?)`,
+    ).run(
+      sessionId,
+      2,
+      "Second real prompt",
+      "Second answer",
+      200,
+      "real-2",
+    );
+
+    const output = replayMemory(db, {
+      session: sessionId,
+      turn: 2,
+      transcriptPath: driftedTranscript.path,
+    });
+
+    expect(output).toContain('prompt: "Second real prompt"');
+    expect(output).toContain('response: "Second answer"');
+    expect(output).toContain("[Tool 1] Read");
+    expect(output).not.toContain("First real prompt");
+
+    rmSync(driftedTranscript.directory, { recursive: true, force: true });
+  });
+
   test("truncates tool results unless full mode is enabled", () => {
     const truncated = replayMemory(db, {
       session: sessionId,

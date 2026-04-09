@@ -6,39 +6,43 @@ import {
   type ParsedReplayTurn,
 } from "../shared/transcript-parser";
 
-function buildReplayTurnLookup(
-  transcriptTurns: ParsedReplayTurn[],
-): Map<number, ParsedReplayTurn> {
-  return new Map(transcriptTurns.map((turn) => [turn.promptNumber, turn]));
-}
-
 export function backfillFromTranscript(
   db: Database,
   pendingTurns: TurnRecord[],
   transcriptPath?: string,
   lastAssistantMessage?: string,
-  transcriptTurnsByPromptNumber?: Map<number, ParsedReplayTurn>,
+  transcriptTurns?: ParsedReplayTurn[],
 ): void {
   if (pendingTurns.length === 0) {
     return;
   }
 
-  const replayTurnsByPromptNumber =
-    transcriptTurnsByPromptNumber ??
-    buildReplayTurnLookup(
-      transcriptPath ? parseReplayTranscript(transcriptPath) : [],
-    );
+  const replayTurns =
+    transcriptTurns ??
+    (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
   const lastPendingPromptNumber =
     pendingTurns[pendingTurns.length - 1]?.promptNumber;
+  const consumed = new Set<number>();
 
   for (const pendingTurn of pendingTurns) {
     if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
       continue;
     }
 
-    const transcriptTurn = replayTurnsByPromptNumber.get(
-      pendingTurn.promptNumber,
+    let matchIndex = replayTurns.findIndex(
+      (turn, index) =>
+        !consumed.has(index) && turn.userPrompt === pendingTurn.userPrompt,
     );
+
+    if (matchIndex < 0) {
+      matchIndex = replayTurns.findIndex(
+        (turn, index) =>
+          !consumed.has(index) &&
+          turn.promptNumber === pendingTurn.promptNumber,
+      );
+    }
+
+    const transcriptTurn = matchIndex >= 0 ? replayTurns[matchIndex] : undefined;
     const assistantResponse =
       pendingTurn.promptNumber === lastPendingPromptNumber &&
       lastAssistantMessage !== undefined
@@ -46,11 +50,16 @@ export function backfillFromTranscript(
         : transcriptTurn?.assistantText ?? "";
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
 
+    if (matchIndex >= 0) {
+      consumed.add(matchIndex);
+    }
+
     updateTurnBackfill(
       db,
       pendingTurn.id,
       assistantResponse,
       toolCallCount,
+      transcriptTurn?.promptId,
     );
   }
 }

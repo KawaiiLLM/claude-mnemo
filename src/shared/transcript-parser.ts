@@ -9,8 +9,11 @@ interface TranscriptContentBlock {
 }
 
 interface TranscriptEntry {
+  type?: string;
   role?: string;
-  content?: TranscriptContentBlock[];
+  content?: TranscriptContentBlock[] | string;
+  promptId?: string;
+  permissionMode?: string;
   isSidechain?: boolean;
   isApiErrorMessage?: boolean;
 }
@@ -33,10 +36,22 @@ export interface ParsedTurn {
 
 export interface ParsedReplayTurn {
   promptNumber: number;
+  promptId: string | null;
   userPrompt: string;
   assistantText: string;
   toolCalls: ReplayToolCall[];
   isSidechain: boolean;
+}
+
+interface RawTranscriptEntry {
+  type?: unknown;
+  role?: unknown;
+  content?: unknown;
+  message?: unknown;
+  promptId?: unknown;
+  permissionMode?: unknown;
+  isSidechain?: unknown;
+  isApiErrorMessage?: unknown;
 }
 
 function normalizeAssistantText(text: string): string {
@@ -51,6 +66,10 @@ function getContentBlocks(entry: TranscriptEntry): TranscriptContentBlock[] {
 }
 
 function extractUserPrompt(entry: TranscriptEntry): string {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+
   return getContentBlocks(entry)
     .filter((block) => block.type === "text")
     .map((block) => block.text ?? "")
@@ -59,7 +78,27 @@ function extractUserPrompt(entry: TranscriptEntry): string {
 }
 
 function isCountedUserPrompt(entry: TranscriptEntry): boolean {
-  return entry.role === "user" && extractUserPrompt(entry) !== "";
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+
+function isKnownSystemInjectedContent(content: string): boolean {
+  return (
+    content.startsWith("<task-notification>") ||
+    content.startsWith("<local-command-") ||
+    content.startsWith("<command-name>")
+  );
+}
+
+function isRealUserPrompt(entry: TranscriptEntry): boolean {
+  if (entry.permissionMode) {
+    return true;
+  }
+
+  if (typeof entry.content === "string" && isKnownSystemInjectedContent(entry.content)) {
+    return false;
+  }
+
+  return extractUserPrompt(entry) !== "";
 }
 
 function extractAssistantParts(entry: TranscriptEntry): {
@@ -133,20 +172,67 @@ export function readAllTranscriptEntries(transcriptPath: string): TranscriptEntr
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as TranscriptEntry)
+    .map((line) => normalizeEntry(JSON.parse(line) as RawTranscriptEntry))
     .filter((entry) => !entry.isApiErrorMessage);
+}
+
+function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
+  const message =
+    raw.message && typeof raw.message === "object"
+      ? (raw.message as { role?: unknown; content?: unknown })
+      : undefined;
+
+  return {
+    type: typeof raw.type === "string" ? raw.type : undefined,
+    role:
+      typeof message?.role === "string"
+        ? message.role
+        : typeof raw.role === "string"
+          ? raw.role
+          : typeof raw.type === "string"
+            ? raw.type
+            : undefined,
+    content:
+      typeof message?.content === "string" || Array.isArray(message?.content)
+        ? message.content
+        : typeof raw.content === "string" || Array.isArray(raw.content)
+          ? raw.content
+          : undefined,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : undefined,
+    permissionMode:
+      typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
+    isSidechain: Boolean(raw.isSidechain),
+    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+  };
+}
+
+function startsNewTurn(
+  entry: TranscriptEntry,
+  currentPromptId: string | null,
+): boolean {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+
+  return extractUserPrompt(entry) !== "";
 }
 
 export function parseTranscript(transcriptPath: string): ParsedTurn[] {
   const turns: ParsedTurn[] = [];
   let promptNumber = 0;
   let currentTurn: ParsedTurn | null = null;
+  let currentPromptId: string | null = null;
 
   for (const entry of readTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
 
       promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
       currentTurn = {
         promptNumber,
         userPrompt,
@@ -182,14 +268,17 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
   const turns: ParsedReplayTurn[] = [];
   let promptNumber = 0;
   let currentTurn: ParsedReplayTurn | null = null;
+  let currentPromptId: string | null = null;
 
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
 
       promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
       currentTurn = {
         promptNumber,
+        promptId: entry.promptId ?? null,
         userPrompt,
         assistantText: "",
         toolCalls: [],
@@ -245,10 +334,25 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
 }
 
 export function countUserPromptsInTranscript(transcriptPath: string): number {
+  const seenPromptIds = new Set<string>();
   let count = 0;
 
   for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (isCountedUserPrompt(entry)) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+
+    if (extractUserPrompt(entry) !== "") {
       count += 1;
     }
   }
