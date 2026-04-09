@@ -36749,30 +36749,6 @@ function renderNode(node, options) {
       return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, options) : formatToolCallExpandedWithMode(node.value, options);
   }
 }
-function formatSessionCollapsed(session) {
-  return renderNode({ type: "session", value: session }, { depth: "collapsed", mode: "legacy" });
-}
-function formatSessionExpanded(session) {
-  return renderNode({ type: "session", value: session }, { depth: "expanded", mode: "legacy" });
-}
-function formatTurnCollapsed(turn, options = {}) {
-  return renderNode({ type: "turn", value: turn }, { depth: "collapsed", mode: "legacy", ...options });
-}
-function formatTurnExpanded(turn, options = {}) {
-  return renderNode({ type: "turn", value: turn }, { depth: "expanded", mode: "legacy", ...options });
-}
-function formatMemoryCollapsed(memory) {
-  return renderNode({ type: "memory", value: memory }, { depth: "collapsed", mode: "legacy" });
-}
-function formatMemoryExpanded(memory) {
-  return renderNode({ type: "memory", value: memory }, { depth: "expanded", mode: "legacy" });
-}
-function formatObservationCollapsed(observation, options = {}) {
-  return renderNode({ type: "observation", value: observation }, { depth: "collapsed", mode: "legacy", ...options });
-}
-function formatObservationExpanded(observation, options = {}) {
-  return renderNode({ type: "observation", value: observation }, { depth: "expanded", mode: "legacy", ...options });
-}
 function sampleWithOmissions(items, isProtected = () => false) {
   if (items.length <= 50) {
     return { items: [...items], omittedCount: 0 };
@@ -36831,7 +36807,7 @@ function sampleWithOmissions(items, isProtected = () => false) {
   return { items: orderedItems, omittedCount };
 }
 
-// src/mcp/recall.ts
+// src/mcp/selectors.ts
 function expandNumericSelector(value) {
   if (value === "*") {
     return [];
@@ -36853,6 +36829,8 @@ function expandNumericSelector(value) {
   }
   return values;
 }
+
+// src/mcp/recall.ts
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -36920,6 +36898,13 @@ function parseUtcDate(value) {
 }
 function parseRoutedId(value) {
   const trimmed = value.trim();
+  const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
+  if (sessionObservationListMatch) {
+    return {
+      kind: "session-observation-list",
+      sessionId: Number(sessionObservationListMatch[1])
+    };
+  }
   const observationListMatch = /^S(\d+)\/T(\d+)\/O\*$/i.exec(trimmed);
   if (observationListMatch) {
     return {
@@ -37116,9 +37101,15 @@ function buildMemoryView(db, memory) {
   };
 }
 function renderSession(db, session, depth, turnSelector) {
-  const view = buildSessionView(db, session);
+  const view = buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const lines = [
-    depth === "collapsed" ? formatSessionCollapsed(view) : formatSessionExpanded(view)
+    renderNode(
+      { type: "session", value: view },
+      {
+        depth: depth === "collapsed" ? "collapsed" : "expanded",
+        mode: "unified"
+      }
+    )
   ];
   if (depth === "collapsed") {
     return lines.join("\n");
@@ -37136,29 +37127,15 @@ function renderSession(db, session, depth, turnSelector) {
       continue;
     }
     const turnView = buildTurnView(db, item);
-    const turnLines = formatTurnExpanded(turnView, { sessionId: session.id });
-    lines.push(turnLines);
-    const observations = turnView.observations ?? [];
-    if (depth === "expanded" || depth === "full") {
-      const observationSample = sampleWithOmissions(observations);
-      for (const observationItem of observationSample.items) {
-        if ("omittedCount" in observationItem) {
-          lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
-          continue;
-        }
-        lines.push(
-          depth === "full" ? formatObservationExpanded(observationItem, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turnView.promptNumber
-          }) : formatObservationCollapsed(observationItem, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turnView.promptNumber
-          })
-        );
+    const turnLines = renderNode(
+      { type: "turn", value: turnView },
+      {
+        depth: depth === "full" ? "expanded" : "collapsed",
+        mode: "unified",
+        sessionId: session.id
       }
-    }
+    );
+    lines.push(turnLines);
   }
   return lines.join("\n");
 }
@@ -37174,8 +37151,16 @@ function renderTurnScope(db, turns, depth) {
     (session) => grouped.has(session.id)
   );
   for (const session of sessions) {
-    const view = buildSessionView(db, session);
-    lines.push(formatSessionCollapsed(view));
+    const view = buildSessionSummary(db, session.id);
+    if (!view) {
+      continue;
+    }
+    lines.push(
+      renderNode(
+        { type: "session", value: view },
+        { depth: "collapsed", mode: "unified" }
+      )
+    );
     const sessionTurns = grouped.get(session.id) ?? [];
     const sampledTurns = sampleWithOmissions(
       sessionTurns,
@@ -37188,28 +37173,15 @@ function renderTurnScope(db, turns, depth) {
       }
       const turnView = buildTurnView(db, item);
       lines.push(
-        depth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
-      );
-      if (depth !== "collapsed") {
-        const observationSample = sampleWithOmissions(turnView.observations ?? []);
-        for (const observationItem of observationSample.items) {
-          if ("omittedCount" in observationItem) {
-            lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
-            continue;
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth,
+            mode: "unified",
+            sessionId: session.id
           }
-          lines.push(
-            depth === "full" ? formatObservationExpanded(observationItem, {
-              indent: "    ",
-              sessionId: session.id,
-              turnPromptNumber: turnView.promptNumber
-            }) : formatObservationCollapsed(observationItem, {
-              indent: "    ",
-              sessionId: session.id,
-              turnPromptNumber: turnView.promptNumber
-            })
-          );
-        }
-      }
+        )
+      );
     }
   }
   return lines.join("\n");
@@ -37247,7 +37219,13 @@ function renderObservationScope(db, observations, depth, includeParents) {
         filesModified: observation.filesModified
       };
       lines.push(
-        depth === "collapsed" ? formatObservationCollapsed(observationView) : formatObservationExpanded(observationView)
+        renderNode(
+          { type: "observation", value: observationView },
+          {
+            depth: depth === "collapsed" ? "collapsed" : "expanded",
+            mode: "unified"
+          }
+        )
       );
     }
     return lines.join("\n");
@@ -37256,8 +37234,16 @@ function renderObservationScope(db, observations, depth, includeParents) {
     (session) => grouped.has(session.id)
   );
   for (const session of sessions) {
-    const sessionView = buildSessionView(db, session);
-    lines.push(formatSessionCollapsed(sessionView));
+    const sessionView = buildSessionSummary(db, session.id);
+    if (!sessionView) {
+      continue;
+    }
+    lines.push(
+      renderNode(
+        { type: "session", value: sessionView },
+        { depth: "collapsed", mode: "unified" }
+      )
+    );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
     const turns = getTurnsForSession(db, session.id).filter(
       (turn) => turnMap.has(turn.id)
@@ -37265,7 +37251,14 @@ function renderObservationScope(db, observations, depth, includeParents) {
     for (const turn of turns) {
       const turnView = buildTurnView(db, turn);
       lines.push(
-        depth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth: "collapsed",
+            mode: "unified",
+            sessionId: session.id
+          }
+        )
       );
       const observationIds = turnMap.get(turn.id) ?? [];
       const sampledObservations = sampleWithOmissions(observationIds);
@@ -37290,15 +37283,16 @@ function renderObservationScope(db, observations, depth, includeParents) {
           filesModified: observation.filesModified
         };
         lines.push(
-          depth === "full" ? formatObservationExpanded(observationView, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turn.promptNumber
-          }) : formatObservationCollapsed(observationView, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turn.promptNumber
-          })
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified",
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber
+            }
+          )
         );
       }
     }
@@ -37309,7 +37303,13 @@ function renderMemoryScope(db, memoryIds, depth) {
   return memoryIds.map((memoryId) => getMemory(db, memoryId)).filter(
     (memory) => memory !== null
   ).map((memory) => buildMemoryView(db, memory)).map(
-    (memory) => depth === "collapsed" ? formatMemoryCollapsed(memory) : formatMemoryExpanded(memory)
+    (memory) => renderNode(
+      { type: "memory", value: memory },
+      {
+        depth: depth === "collapsed" ? "collapsed" : "expanded",
+        mode: "unified"
+      }
+    )
   ).join("\n");
 }
 function buildObservationView(observation) {
@@ -37334,7 +37334,13 @@ function renderObservationDetail(db, observationId, depth) {
     return "Observation not found.";
   }
   const view = buildObservationView(observation);
-  return depth === "collapsed" ? formatObservationCollapsed(view) : formatObservationExpanded(view);
+  return renderNode(
+    { type: "observation", value: view },
+    {
+      depth: depth === "collapsed" ? "collapsed" : "expanded",
+      mode: "unified"
+    }
+  );
 }
 function renderMemoryDetail(db, memoryId, depth) {
   const memory = getMemory(db, memoryId);
@@ -37342,7 +37348,13 @@ function renderMemoryDetail(db, memoryId, depth) {
     return "Memory not found.";
   }
   const view = buildMemoryView(db, memory);
-  return depth === "collapsed" ? formatMemoryCollapsed(view) : formatMemoryExpanded(view);
+  return renderNode(
+    { type: "memory", value: view },
+    {
+      depth: depth === "collapsed" ? "collapsed" : "expanded",
+      mode: "unified"
+    }
+  );
 }
 function listSessionIds(db, sessionIds, limit, after, before) {
   const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
@@ -37392,7 +37404,13 @@ function renderGroupedSearchResults(db, results, depth) {
       if (memory) {
         const view = buildMemoryView(db, memory);
         memoryLines.push(
-          depth === "collapsed" ? formatMemoryCollapsed(view) : formatMemoryExpanded(view)
+          renderNode(
+            { type: "memory", value: view },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified"
+            }
+          )
         );
       }
       continue;
@@ -37414,7 +37432,7 @@ function renderGroupedSearchResults(db, results, depth) {
       group.sessionHit = true;
       continue;
     }
-    if (result.turnId !== null) {
+    if (result.layer === "turn" && result.turnId !== null) {
       group.turnIds.add(result.turnId);
     }
     if (result.layer === "observation" && result.turnId !== null && result.observationId !== null) {
@@ -37432,15 +37450,30 @@ function renderGroupedSearchResults(db, results, depth) {
     if (group.sessionHit && group.turnIds.size === 0) {
       return renderSession(db, session, depth);
     }
-    const lines = [formatSessionCollapsed(buildSessionView(db, session))];
+    const lines = [
+      renderNode(
+        {
+          type: "session",
+          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session)
+        },
+        { depth: "collapsed", mode: "unified" }
+      )
+    ];
     const turns = getTurnsForSession(db, session.id).filter(
-      (turn) => group.turnIds.has(turn.id)
+      (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
     );
     for (const turn of turns) {
       const turnView = buildTurnView(db, turn);
       const turnDepth = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? "collapsed" : depth;
       lines.push(
-        turnDepth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth: turnDepth,
+            mode: "unified",
+            sessionId: session.id
+          }
+        )
       );
       const observationIds = group.observationIdsByTurnId.get(turn.id) ?? [];
       for (const observationId of observationIds) {
@@ -37450,15 +37483,16 @@ function renderGroupedSearchResults(db, results, depth) {
         }
         const observationView = buildObservationView(observation);
         lines.push(
-          depth === "full" ? formatObservationExpanded(observationView, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turn.promptNumber
-          }) : formatObservationCollapsed(observationView, {
-            indent: "    ",
-            sessionId: session.id,
-            turnPromptNumber: turn.promptNumber
-          })
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified",
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber
+            }
+          )
         );
       }
     }
@@ -37500,6 +37534,24 @@ function renderRoutedId(db, routed, depth, limit, after, before) {
       turnId: turn.id,
       observationId: observation.id
     }));
+    return renderObservationScope(db, observations, depth, true);
+  }
+  if (routed.kind === "session-observation-list") {
+    const observations = getTurnsForSession(db, routed.sessionId).flatMap(
+      (turn) => getObservationsForTurn(db, turn.id).filter((observation) => {
+        if (after !== void 0 && observation.createdAtEpoch < after) {
+          return false;
+        }
+        if (before !== void 0 && observation.createdAtEpoch > before) {
+          return false;
+        }
+        return true;
+      }).map((observation) => ({
+        sessionId: routed.sessionId,
+        turnId: turn.id,
+        observationId: observation.id
+      }))
+    ).slice(0, limit);
     return renderObservationScope(db, observations, depth, true);
   }
   if (routed.kind === "observation") {
@@ -37959,27 +38011,6 @@ function countUserPromptsInTranscript(transcriptPath) {
 }
 
 // src/mcp/replay.ts
-function expandNumericSelector2(value) {
-  if (value === "*") {
-    return [];
-  }
-  if (/^\d+$/.test(value)) {
-    return [Number(value)];
-  }
-  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
-  if (!rangeMatch) {
-    return null;
-  }
-  const start = Number(rangeMatch[1]);
-  const end = Number(rangeMatch[2]);
-  const lower = Math.min(start, end);
-  const upper = Math.max(start, end);
-  const values = [];
-  for (let current = lower; current <= upper; current += 1) {
-    values.push(current);
-  }
-  return values;
-}
 function parseReplayId(id) {
   const trimmed = id.trim();
   const toolMatch = /^S(\d+)\/T(\d+)\/Tool(\*|\d+)$/i.exec(trimmed);
@@ -37994,7 +38025,7 @@ function parseReplayId(id) {
   }
   const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
   if (turnMatch) {
-    const promptNumbers = expandNumericSelector2(turnMatch[2]);
+    const promptNumbers = expandNumericSelector(turnMatch[2]);
     if (promptNumbers === null) {
       return null;
     }
