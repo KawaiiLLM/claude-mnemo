@@ -108,83 +108,83 @@ describe("recall-powered extraction context", () => {
 });
 
 describe("buildMnemosynePrompt", () => {
-  test("documents workflow with stale re-evaluation", () => {
+  test("documents two-step workflow with batch efficiency", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("mentally identify every turn marked [pending] or [stale]");
-    expect(prompt).toContain("do not stop after handling one turn");
-    expect(prompt).toContain("Primary write tool is remember");
-    expect(prompt).toContain('remember({ parent: "S{id}", prompt_number: N, status: "undone" })');
+    expect(prompt).toContain("1. READ:");
+    expect(prompt).toContain("2. WRITE:");
+    expect(prompt).toContain("ALL remember() calls together in one response");
+    expect(prompt).toContain("Process ALL identified turns");
+    expect(prompt).toContain('status: "undone"');
     expect(prompt).toContain(
       "Do NOT re-process [extracted], [skipped], or [undone] turns",
     );
   });
 
-  test("forbids observer-self narration and records durable debugging evidence", () => {
+  test("forbids observer narration with good/bad examples", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("Do not describe the observer's own behavior");
-    expect(prompt).toContain("logs, queue state, DB rows, routing, request flow, or code-path inspection");
+    expect(prompt).toContain("Do not narrate your own process");
+    expect(prompt).toContain("logs, DB rows, request flow, code-path inspection");
+    // ✅/❌ contrast
+    expect(prompt).toContain("built, fixed, deployed, configured, discovered");
+    expect(prompt).toContain("observer narration");
   });
 
-  test("keeps field quality and concept/type separation guidance", () => {
+  test("declares constraints and efficiency guidance", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("content: concise outcome, not a restatement of the user prompt");
-    expect(prompt).toContain("insight: explain what was done, how it works, and why it matters");
-    expect(prompt).toContain("tags: independent, verifiable labels for retrieval");
-    expect(prompt).toContain("files_read/files_modified: only files that materially informed or changed the result");
+    expect(prompt).toContain("Tools: remember, recall, replay. All others denied.");
+    expect(prompt).toContain("Non-tool-call output is discarded by the system.");
+    expect(prompt).toContain("batch them");
+    expect(prompt).toContain("<private>...</private> must not be recorded");
   });
 
-  test("keeps private-tag exclusion and categorized examples", () => {
+  test("covers experience extraction fields", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain('Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.');
-    expect(prompt).toContain(
-      "Include next_steps when the session has a clear trajectory or planned follow-up.",
-    );
-    expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
+    expect(prompt).toContain('parent: "S{id}/T{n}"');
+    expect(prompt).toContain("type: bugfix | feature | refactor | change | discovery | decision");
+    expect(prompt).toContain("title, content, insight, tags, files_read, files_modified");
+    expect(prompt).toContain('remember({ id: "S{id}", title, content, insight, next_steps })');
+  });
+
+  test("covers memory types and exclusion rules", () => {
+    const prompt = buildMnemosynePrompt("test context");
+
+    expect(prompt).toContain("user:");
+    expect(prompt).toContain("feedback:");
+    expect(prompt).toContain("project:");
+    expect(prompt).toContain("reference:");
+    // What NOT to save (from CC)
+    expect(prompt).toContain("derivable from the codebase");
+    expect(prompt).toContain("git log is authoritative");
+    expect(prompt).toContain("the fix is in the code");
+    expect(prompt).toContain("CLAUDE.md");
+  });
+
+  test("includes compact examples for all categories", () => {
+    const prompt = buildMnemosynePrompt("test context");
+
     expect(prompt).toContain('remember({ parent: "S1", prompt_number: 2, title: "Fix auth race"');
     expect(prompt).toContain('remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added"');
-    expect(prompt).toContain('remember({ id: "S1", title: "Auth race fix + schema cleanup"');
+    expect(prompt).toContain('remember({ id: "S1", title: "Auth race fix"');
     expect(prompt).toContain('remember({ type: "feedback"');
-    expect(prompt).toContain('remember({ type: "project"');
-    expect(prompt).toContain('remember({ type: "reference"');
-    expect(prompt).toContain('remember({ type: "user"');
-    expect(prompt).not.toContain("observations: [");
-    expect(prompt).toContain('Skip example:');
+    expect(prompt).toContain('status: "skipped"');
   });
 
-  test("references recall and replay tools for additional context", () => {
+  test("dedup guidance present", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("Use recall() for context from past sessions");
-    expect(prompt).toContain("Use replay(session=<session_id>, turn=<N>)");
+    expect(prompt).toContain("recall() to check for duplicates");
+    expect(prompt).toContain("fewer, higher-signal observations");
   });
 
   test("keeps output discipline without duplicate prose-only rule", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt.match(/Never output prose/g)?.length).toBe(1);
-  });
-
-  test("guides two-layer extraction: observations and memories", () => {
-    const prompt = buildMnemosynePrompt("test context");
-
-    // Observation layer guidance
-    expect(prompt).toContain('parent: "S{id}/T{n}"');
-    expect(prompt).toContain("FACTS about what happened");
-
-    // Memory layer guidance
-    expect(prompt).toContain("BEHAVIORAL RULES that affect future work");
-    expect(prompt).toContain("WHEN TO CREATE MEMORIES");
-    expect(prompt).toContain("user:");
-    expect(prompt).toContain("feedback:");
-    expect(prompt).toContain("project:");
-    expect(prompt).toContain("reference:");
-
-    // Session summary guidance
-    expect(prompt).toContain("SESSION SUMMARY");
-    expect(prompt).toContain("the narrative");
+    expect(prompt).toContain("discarded by the system");
+    // No "Never output prose" — replaced by declarative constraint
+    expect(prompt).not.toContain("Never output prose");
   });
 });

@@ -676,6 +676,7 @@ var SCHEMA_SQL = `
     description TEXT,
     insight TEXT,
     next_steps TEXT,
+    last_compact_turn INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -839,6 +840,9 @@ function migrateSchema(db) {
   }
   if (!hasColumn(db, "sessions", "content")) {
     db.exec("ALTER TABLE sessions ADD COLUMN content TEXT");
+  }
+  if (!hasColumn(db, "sessions", "last_compact_turn")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN last_compact_turn INTEGER");
   }
   if (!hasColumn(db, "turns", "tool_call_count")) {
     db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
@@ -35859,6 +35863,7 @@ var SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    last_compact_turn AS lastCompactTurn,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -35873,16 +35878,18 @@ function upsertSession(db, input) {
         content,
         insight,
         next_steps,
+        last_compact_turn,
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
         content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
+        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
         created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -35894,6 +35901,7 @@ function upsertSession(db, input) {
         content,
         insight,
         next_steps AS nextSteps,
+        last_compact_turn AS lastCompactTurn,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -35904,6 +35912,7 @@ function upsertSession(db, input) {
     input.content ?? null,
     input.insight,
     input.nextSteps ?? null,
+    input.lastCompactTurn ?? null,
     input.createdAtEpoch,
     input.updatedAtEpoch,
     input.completedAtEpoch
@@ -35934,6 +35943,17 @@ function getRecentSessions(db, options = {}) {
   return db.query(
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
+}
+function updateCompactAnchor(db, sessionId) {
+  db.query(
+    `UPDATE sessions
+     SET last_compact_turn = (
+       SELECT MAX(prompt_number) FROM turns
+       WHERE session_id = ?
+         AND status NOT IN ('pending', 'stale', 'extracting_pending', 'extracting_stale')
+     )
+     WHERE id = ?`
+  ).run(sessionId, sessionId);
 }
 
 // src/db/turns.ts
@@ -36127,8 +36147,13 @@ function claimTurnsForExtraction(db, sessionId, now) {
        END,
        updated_at_epoch = ?
        WHERE session_id = ?
-         AND status IN ('pending', 'stale')`
-  ).run(epoch, sessionId).changes;
+         AND status IN ('pending', 'stale')
+         AND NOT EXISTS (
+           SELECT 1 FROM turns active
+           WHERE active.session_id = ?
+             AND active.status IN ('extracting_pending', 'extracting_stale')
+         )`
+  ).run(epoch, sessionId, sessionId).changes;
 }
 function recoverStalledExtractions(db, sessionId, maxAgeSeconds = 300, now) {
   const epoch = now ?? Math.floor(Date.now() / 1e3);
@@ -38158,19 +38183,67 @@ function normalizeHookInput(raw, platform = "claude-code") {
   }
 }
 
+// src/mnemosyne/context.ts
+function isActionableStatus(status) {
+  return status === "pending" || status === "stale" || status === "extracting_pending" || status === "extracting_stale";
+}
+function buildCollapsedTurnView(turn, observationCount) {
+  return {
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    content: turn.content,
+    observationCount,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status
+  };
+}
+function buildExtractionContext(db, sessionId) {
+  const sessionSummary = buildSessionSummary(db, sessionId);
+  if (!sessionSummary) {
+    return "";
+  }
+  const session = getSession(db, sessionId);
+  const anchor = session?.lastCompactTurn ?? 0;
+  const turns = getTurnsForSession(db, sessionId).filter(
+    (turn) => turn.promptNumber > anchor || isActionableStatus(turn.status)
+  );
+  const lines = [formatSessionExpanded(sessionSummary)];
+  for (const turn of turns) {
+    if (isActionableStatus(turn.status)) {
+      const view = buildTurnView(db, turn);
+      lines.push(formatTurnExpanded(view, { sessionId }));
+      for (const observation of view.observations ?? []) {
+        lines.push(
+          formatObservationCollapsed(observation, {
+            indent: "    ",
+            sessionId,
+            turnPromptNumber: turn.promptNumber
+          })
+        );
+      }
+      continue;
+    }
+    lines.push(
+      formatTurnCollapsed(
+        buildCollapsedTurnView(turn, getObservationsForTurn(db, turn.id).length),
+        { sessionId }
+      )
+    );
+  }
+  return lines.join("\n");
+}
+
 // src/mnemosyne/prompt.ts
 function buildMnemosynePrompt(context) {
   return `You are Mnemosyne, the memory guardian for Claude Code.
 
-The conversation context is embedded below.
 Your role is to extract structured memories for future retrieval.
 You are NOT the agent who did the work \u2014 you are observing and recording.
 Record what was learned, built, fixed, decided, deployed, or configured in the primary session.
 Do not describe the observer's own behavior such as analyzing, observing, recording, or storing findings.
-
-CONVERSATION CONTEXT
---------------------
-${context}
 
 WORKFLOW
 --------
@@ -38315,7 +38388,11 @@ Bad example (vague observer prose):
   remember({ parent: "S1", title: "Analyzed auth flow", content: "Recorded findings from investigation" })
 
 Skip example:
-  remember({ parent: "S1", prompt_number: 3, status: "skipped" })`;
+  remember({ parent: "S1", prompt_number: 3, status: "skipped" })
+
+CONVERSATION CONTEXT
+--------------------
+${context}`;
 }
 
 // src/hooks/backfill.ts
@@ -38356,13 +38433,7 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
 
 // src/hooks/handlers/compact.ts
 function buildPrompt(db, sessionDbId) {
-  return buildMnemosynePrompt(
-    recallMemory(db, {
-      view: "turns",
-      session: sessionDbId,
-      depth: "expanded"
-    })
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 function createCompactHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
@@ -38379,13 +38450,13 @@ function createCompactHandler(dependencies) {
     recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
-    const prompt = buildPrompt(dependencies.db, session.id);
     const claimedCount = claimTurnsForExtraction(
       dependencies.db,
       session.id,
       epoch
     );
     if (claimedCount > 0) {
+      const prompt = buildPrompt(dependencies.db, session.id);
       return {
         continue: true,
         asyncWork: async () => {
@@ -38394,6 +38465,7 @@ function createCompactHandler(dependencies) {
             prompt,
             database: dependencies.db
           });
+          updateCompactAnchor(dependencies.db, session.id);
         }
       };
     }
@@ -38591,13 +38663,7 @@ function createSessionInitHandler(dependencies) {
 
 // src/hooks/handlers/stop.ts
 function buildStopPrompt(db, sessionDbId) {
-  return buildMnemosynePrompt(
-    recallMemory(db, {
-      view: "turns",
-      session: sessionDbId,
-      depth: "expanded"
-    })
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurns) {
   if (!transcriptPath) {
@@ -38666,7 +38732,6 @@ function createStopHandler(dependencies) {
       transcriptTurns
     );
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
-    const prompt = buildStopPrompt(dependencies.db, session.id);
     const claimedCount = claimTurnsForExtraction(
       dependencies.db,
       session.id,
@@ -38685,6 +38750,7 @@ function createStopHandler(dependencies) {
     stderr.write(`Mnemosyne: ${claimedCount} turns queued for extraction
 `);
     if (claimedCount > 0) {
+      const prompt = buildStopPrompt(dependencies.db, session.id);
       return {
         continue: true,
         exitCode: HOOK_SUCCESS_EXIT_CODE,

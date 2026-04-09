@@ -219,7 +219,7 @@ export async function forkMnemosyne(
     options: {
       model: "claude-sonnet-4-6",
       cwd: input.cwd,
-      maxTurns: 15,
+      maxTurns: 5,
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
       pathToClaudeCodeExecutable,

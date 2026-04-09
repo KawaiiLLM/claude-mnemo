@@ -448,7 +448,7 @@ export function buildFormattedSession(
   };
 }
 
-function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
+export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
   const observations = getObservationsForTurn(db, turn.id);
   return {
     id: turn.id,

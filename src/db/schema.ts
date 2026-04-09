@@ -12,6 +12,7 @@ const SCHEMA_SQL = `
     description TEXT,
     insight TEXT,
     next_steps TEXT,
+    last_compact_turn INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -209,6 +210,10 @@ export function migrateSchema(db: Database): boolean {
 
   if (!hasColumn(db, "sessions", "content")) {
     db.exec("ALTER TABLE sessions ADD COLUMN content TEXT");
+  }
+
+  if (!hasColumn(db, "sessions", "last_compact_turn")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN last_compact_turn INTEGER");
   }
 
   if (!hasColumn(db, "turns", "tool_call_count")) {

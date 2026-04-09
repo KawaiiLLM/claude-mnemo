@@ -1,14 +1,14 @@
 import type { Database } from "bun:sqlite";
 
-import { getSessionByContentId } from "../../db/sessions";
+import { getSessionByContentId, updateCompactAnchor } from "../../db/sessions";
 import {
   claimTurnsForExtraction,
   getPendingTurns,
   recoverStalledExtractions,
 } from "../../db/turns";
+import { buildExtractionContext } from "../../mnemosyne/context";
 import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
-import { recallMemory } from "../../mcp/recall";
 import { backfillFromTranscript } from "../backfill";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -20,13 +20,7 @@ export interface CompactHandlerDependencies {
 }
 
 function buildPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(
-    recallMemory(db, {
-      view: "turns",
-      session: sessionDbId,
-      depth: "expanded",
-    }),
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 
 export function createCompactHandler(dependencies: CompactHandlerDependencies) {
@@ -54,7 +48,6 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
 
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
-    const prompt = buildPrompt(dependencies.db, session.id);
     const claimedCount = claimTurnsForExtraction(
       dependencies.db,
       session.id,
@@ -62,6 +55,8 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
     );
 
     if (claimedCount > 0) {
+      const prompt = buildPrompt(dependencies.db, session.id);
+
       return {
         continue: true,
         asyncWork: async () => {
@@ -70,6 +65,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
             prompt,
             database: dependencies.db,
           });
+          updateCompactAnchor(dependencies.db, session.id);
         },
       };
     }

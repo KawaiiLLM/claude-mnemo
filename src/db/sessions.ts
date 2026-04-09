@@ -10,6 +10,7 @@ export interface SessionRecord {
   content: string | null;
   insight: string | null;
   nextSteps: string | null;
+  lastCompactTurn: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -22,6 +23,7 @@ export interface UpsertSessionInput {
   content?: string | null;
   insight: string | null;
   nextSteps?: string | null;
+  lastCompactTurn?: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -41,6 +43,7 @@ const SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    last_compact_turn AS lastCompactTurn,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -53,7 +56,7 @@ export function upsertSession(
 ): SessionRecord {
   const session =
   db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number, number | null, number | null]>(`
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
@@ -61,16 +64,18 @@ export function upsertSession(
         content,
         insight,
         next_steps,
+        last_compact_turn,
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
         content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
+        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
         created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -82,6 +87,7 @@ export function upsertSession(
         content,
         insight,
         next_steps AS nextSteps,
+        last_compact_turn AS lastCompactTurn,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -93,6 +99,7 @@ export function upsertSession(
       input.content ?? null,
       input.insight,
       input.nextSteps ?? null,
+      input.lastCompactTurn ?? null,
       input.createdAtEpoch,
       input.updatedAtEpoch,
       input.completedAtEpoch,
@@ -149,4 +156,16 @@ export function getRecentSessions(
       `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`,
     )
     .all(...params, limit);
+}
+
+export function updateCompactAnchor(db: Database, sessionId: number): void {
+  db.query(
+    `UPDATE sessions
+     SET last_compact_turn = (
+       SELECT MAX(prompt_number) FROM turns
+       WHERE session_id = ?
+         AND status NOT IN ('pending', 'stale', 'extracting_pending', 'extracting_stale')
+     )
+     WHERE id = ?`,
+  ).run(sessionId, sessionId);
 }

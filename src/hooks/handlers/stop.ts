@@ -8,9 +8,9 @@ import {
   getTurnsForSession,
   markTurnsStale,
 } from "../../db/turns";
+import { buildExtractionContext } from "../../mnemosyne/context";
 import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
-import { recallMemory } from "../../mcp/recall";
 import {
   normalizeAssistantText,
   parseReplayTranscript,
@@ -28,13 +28,7 @@ export interface StopHandlerDependencies {
 }
 
 function buildStopPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(
-    recallMemory(db, {
-      view: "turns",
-      session: sessionDbId,
-      depth: "expanded",
-    }),
-  );
+  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
 }
 
 function detectUndoPromptNumbers(
@@ -141,7 +135,6 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
 
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
 
-    const prompt = buildStopPrompt(dependencies.db, session.id);
     const claimedCount = claimTurnsForExtraction(
       dependencies.db,
       session.id,
@@ -162,6 +155,8 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     stderr.write(`Mnemosyne: ${claimedCount} turns queued for extraction\n`);
 
     if (claimedCount > 0) {
+      const prompt = buildStopPrompt(dependencies.db, session.id);
+
       return {
         continue: true,
         exitCode: HOOK_SUCCESS_EXIT_CODE,

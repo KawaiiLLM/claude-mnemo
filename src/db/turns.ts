@@ -339,9 +339,14 @@ export function claimTurnsForExtraction(
        END,
        updated_at_epoch = ?
        WHERE session_id = ?
-         AND status IN ('pending', 'stale')`,
+         AND status IN ('pending', 'stale')
+         AND NOT EXISTS (
+           SELECT 1 FROM turns active
+           WHERE active.session_id = ?
+             AND active.status IN ('extracting_pending', 'extracting_stale')
+         )`,
     )
-    .run(epoch, sessionId).changes;
+    .run(epoch, sessionId, sessionId).changes;
 }
 
 export function recoverStalledExtractions(

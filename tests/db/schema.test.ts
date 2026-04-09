@@ -56,6 +56,7 @@ describe("initializeSchema", () => {
       "description",
       "insight",
       "next_steps",
+      "last_compact_turn",
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",

@@ -262,4 +262,38 @@ describe("handleCompactHook", () => {
 
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
   });
+
+  test("updates the compact anchor after async extraction succeeds", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'pending', 'Pending work', 120)`,
+    ).run(sessionId);
+
+    const forkMnemosyne = mock(async () => {
+      db.query(
+        `UPDATE turns
+         SET status = 'extracted', title = 'Processed turn', content = 'Processed content'
+         WHERE session_id = ? AND prompt_number = 1`,
+      ).run(sessionId);
+    });
+
+    const handler = createCompactHandler({ db, forkMnemosyne });
+    const result = await handler(createInput());
+
+    expect(typeof result.asyncWork).toBe("function");
+    expect(
+      db.query<{ lastCompactTurn: number | null }, [number]>(
+        "SELECT last_compact_turn AS lastCompactTurn FROM sessions WHERE id = ?",
+      ).get(sessionId)?.lastCompactTurn ?? null,
+    ).toBeNull();
+
+    await result.asyncWork?.();
+
+    expect(
+      db.query<{ lastCompactTurn: number | null }, [number]>(
+        "SELECT last_compact_turn AS lastCompactTurn FROM sessions WHERE id = ?",
+      ).get(sessionId)?.lastCompactTurn,
+    ).toBe(1);
+  });
 });

@@ -330,15 +330,10 @@ describe("turn queries", () => {
         session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
       ) VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 3, "extracting_pending", "Already claimed", 130, 140);
 
     saveTurn(db, {
       sessionId,
-      promptNumber: 4,
+      promptNumber: 3,
       userPrompt: "Already extracted",
       assistantResponse: "Done",
       title: "Extracted",
@@ -363,10 +358,6 @@ describe("turn queries", () => {
       updatedAtEpoch: 200,
     });
     expect(getTurn(db, sessionId, 3)).toMatchObject({
-      status: "extracting_pending",
-      updatedAtEpoch: 140,
-    });
-    expect(getTurn(db, sessionId, 4)).toMatchObject({
       status: "extracted",
       updatedAtEpoch: 160,
     });
@@ -393,6 +384,38 @@ describe("turn queries", () => {
     expect(getTurn(db, sessionId, 2)).toMatchObject({
       status: "extracting_stale",
       updatedAtEpoch: 200,
+    });
+  });
+
+  test("does not claim pending or stale turns when another extraction is already active in the session", () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 1, "pending", "Fresh pending turn", 100, null);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 3, "extracting_pending", "Already extracting elsewhere", 130, 140);
+
+    expect(claimTurnsForExtraction(db, sessionId, 200)).toBe(0);
+    expect(getTurn(db, sessionId, 1)).toMatchObject({
+      status: "pending",
+      updatedAtEpoch: null,
+    });
+    expect(getTurn(db, sessionId, 2)).toMatchObject({
+      status: "stale",
+      updatedAtEpoch: 120,
+    });
+    expect(getTurn(db, sessionId, 3)).toMatchObject({
+      status: "extracting_pending",
+      updatedAtEpoch: 140,
     });
   });
 
