@@ -5,10 +5,12 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  claimTurnsForExtraction,
   getPendingTurns,
   getTurn,
   getTurnsForSession,
   markTurnsStale,
+  recoverStalledExtractions,
   saveTurn,
 } from "../../src/db/turns";
 
@@ -288,6 +290,10 @@ describe("turn queries", () => {
       "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (?, ?, ?, ?)",
     ).run(sessionId, 5, "pending", 500);
 
+    db.query(
+      "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, updated_at_epoch) VALUES (?, ?, ?, ?, ?)",
+    ).run(sessionId, 4, "extracting_pending", 450, 470);
+
     saveTurn(db, {
       sessionId,
       promptNumber: 6,
@@ -310,6 +316,130 @@ describe("turn queries", () => {
     expect(pendingTurns.map((turn) => [turn.promptNumber, turn.status])).toEqual([
       [5, "pending"],
       [6, "stale"],
+    ]);
+  });
+
+  test("claims pending and stale turns with dual extracting statuses", () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 1, "pending", "First pending turn", 100, null);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 3, "extracting_pending", "Already claimed", 130, 140);
+
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 4,
+      userPrompt: "Already extracted",
+      assistantResponse: "Done",
+      title: "Extracted",
+      content: "Existing extraction",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 150,
+      updatedAtEpoch: 160,
+      observations: [],
+    });
+
+    const claimedCount = claimTurnsForExtraction(db, sessionId, 200);
+
+    expect(claimedCount).toBe(2);
+    expect(getTurn(db, sessionId, 1)).toMatchObject({
+      status: "extracting_pending",
+      updatedAtEpoch: 200,
+    });
+    expect(getTurn(db, sessionId, 2)).toMatchObject({
+      status: "extracting_stale",
+      updatedAtEpoch: 200,
+    });
+    expect(getTurn(db, sessionId, 3)).toMatchObject({
+      status: "extracting_pending",
+      updatedAtEpoch: 140,
+    });
+    expect(getTurn(db, sessionId, 4)).toMatchObject({
+      status: "extracted",
+      updatedAtEpoch: 160,
+    });
+  });
+
+  test("does not double-claim rows that are already extracting", () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 1, "pending", "First pending turn", 100, null);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
+
+    expect(claimTurnsForExtraction(db, sessionId, 200)).toBe(2);
+    expect(claimTurnsForExtraction(db, sessionId, 250)).toBe(0);
+    expect(getTurn(db, sessionId, 1)).toMatchObject({
+      status: "extracting_pending",
+      updatedAtEpoch: 200,
+    });
+    expect(getTurn(db, sessionId, 2)).toMatchObject({
+      status: "extracting_stale",
+      updatedAtEpoch: 200,
+    });
+  });
+
+  test("recovers only stalled extraction locks and restores the original status", () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 1, "extracting_pending", "Old pending claim", 100, 100);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 2, "extracting_stale", "Old stale claim", 110, 120);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 3, "extracting_pending", "Recent pending claim", 130, 350);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(sessionId, 4, "extracting_stale", "Recent stale claim", 140, 360);
+
+    recoverStalledExtractions(db, sessionId, 60, 400);
+
+    expect(getTurn(db, sessionId, 1)).toMatchObject({
+      status: "pending",
+      updatedAtEpoch: 400,
+    });
+    expect(getTurn(db, sessionId, 2)).toMatchObject({
+      status: "stale",
+      updatedAtEpoch: 400,
+    });
+    expect(getTurn(db, sessionId, 3)).toMatchObject({
+      status: "extracting_pending",
+      updatedAtEpoch: 350,
+    });
+    expect(getTurn(db, sessionId, 4)).toMatchObject({
+      status: "extracting_stale",
+      updatedAtEpoch: 360,
+    });
+
+    expect(getPendingTurns(db, sessionId).map((turn) => [turn.promptNumber, turn.status])).toEqual([
+      [1, "pending"],
+      [2, "stale"],
     ]);
   });
 });

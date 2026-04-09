@@ -320,6 +320,49 @@ export function getPendingTurns(
     .filter((turn): turn is TurnRecord => turn !== null);
 }
 
+export function claimTurnsForExtraction(
+  db: Database,
+  sessionId: number,
+  now?: number,
+): number {
+  const epoch = now ?? Math.floor(Date.now() / 1000);
+
+  return db
+    .query(
+      `UPDATE turns
+       SET status = CASE status
+         WHEN 'pending' THEN 'extracting_pending'
+         WHEN 'stale' THEN 'extracting_stale'
+       END,
+       updated_at_epoch = ?
+       WHERE session_id = ?
+         AND status IN ('pending', 'stale')`,
+    )
+    .run(epoch, sessionId).changes;
+}
+
+export function recoverStalledExtractions(
+  db: Database,
+  sessionId: number,
+  maxAgeSeconds = 300,
+  now?: number,
+): void {
+  const epoch = now ?? Math.floor(Date.now() / 1000);
+  const cutoff = epoch - maxAgeSeconds;
+
+  db.query(
+    `UPDATE turns
+     SET status = CASE status
+       WHEN 'extracting_pending' THEN 'pending'
+       WHEN 'extracting_stale' THEN 'stale'
+     END,
+     updated_at_epoch = ?
+     WHERE session_id = ?
+       AND status IN ('extracting_pending', 'extracting_stale')
+       AND updated_at_epoch < ?`,
+  ).run(epoch, sessionId, cutoff);
+}
+
 export function markTurnsStale(
   db: Database,
   sessionId: number,
