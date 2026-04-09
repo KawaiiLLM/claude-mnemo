@@ -217,8 +217,20 @@ function truncateText(
   }`;
 }
 
+function formatDisplayStatus(status?: string | null): string | null | undefined {
+  switch (status) {
+    case "extracting_pending":
+      return "pending";
+    case "extracting_stale":
+      return "stale";
+    default:
+      return status;
+  }
+}
+
 function formatStatus(status?: string | null): string {
-  return status ? ` [${status}]` : "";
+  const displayStatus = formatDisplayStatus(status);
+  return displayStatus ? ` [${displayStatus}]` : "";
 }
 
 function isObservationExpanded(observation: FormattedObservation): boolean {
