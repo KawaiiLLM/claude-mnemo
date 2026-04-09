@@ -81,7 +81,7 @@ describe("recall-powered extraction context", () => {
     expect(prompt).not.toContain("A shared promise now serializes refresh work.");
   });
 
-  test("uses replay hints with the simplified id syntax in the embedded context", () => {
+  test("uses unified truncation without embedding replay hints in the context", () => {
     const longPrompt = "x".repeat(260);
     db.query(
       `INSERT INTO turns (
@@ -94,7 +94,8 @@ describe("recall-powered extraction context", () => {
     });
 
     expect(context).toContain('[T1] "');
-    expect(context).toContain('replay(id="S1/T1", depth="expanded")');
+    expect(context).toContain("...");
+    expect(context).not.toContain('replay(id="S1/T1", depth="expanded")');
     expect(context).not.toContain("replay(session=");
   });
 

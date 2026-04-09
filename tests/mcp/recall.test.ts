@@ -300,6 +300,8 @@ describe("recallMemory", () => {
 
     expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
     expect(sessionOutput).toContain("[T1] Diagnose auth race");
+    expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
+    expect(sessionOutput).not.toContain("[O1] 🔴 Auth mutex");
 
     expect(turnOutput).toContain(`[T1] Diagnose auth race`);
     expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
@@ -335,6 +337,9 @@ describe("recallMemory", () => {
     expect(observationsOutput).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
     expect(observationsOutput).toContain("[T1] Diagnose auth race");
+    expect(observationsOutput).toContain(
+      "insight: Serialized refresh work with a shared promise.",
+    );
     expect(recallMemory(db, { id: `S${authSessionId}/T1/O${authObservationId}` })).toContain(
       "invalid id selector",
     );

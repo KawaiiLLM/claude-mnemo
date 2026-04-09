@@ -12,14 +12,7 @@ import {
 } from "../db/turns";
 
 import {
-  formatMemoryCollapsed,
-  formatMemoryExpanded,
-  formatObservationCollapsed,
-  formatObservationExpanded,
-  formatSessionCollapsed,
-  formatSessionExpanded,
-  formatTurnCollapsed,
-  formatTurnExpanded,
+  renderNode,
   sampleWithOmissions,
   type FormattedMemory,
   type FormattedObservation,
@@ -508,9 +501,13 @@ function renderSession(
 ): string {
   const view = buildSessionView(db, session);
   const lines = [
-    depth === "collapsed"
-      ? formatSessionCollapsed(view)
-      : formatSessionExpanded(view),
+    renderNode(
+      { type: "session", value: view },
+      {
+        depth: depth === "collapsed" ? "collapsed" : "expanded",
+        mode: "unified",
+      },
+    ),
   ];
 
   if (depth === "collapsed") {
@@ -532,33 +529,15 @@ function renderSession(
     }
 
     const turnView = buildTurnView(db, item);
-    const turnLines = formatTurnExpanded(turnView, { sessionId: session.id });
+    const turnLines = renderNode(
+      { type: "turn", value: turnView },
+      {
+        depth: depth === "full" ? "expanded" : "collapsed",
+        mode: "unified",
+        sessionId: session.id,
+      },
+    );
     lines.push(turnLines);
-
-    const observations = turnView.observations ?? [];
-    if (depth === "expanded" || depth === "full") {
-      const observationSample = sampleWithOmissions(observations);
-      for (const observationItem of observationSample.items) {
-        if ("omittedCount" in observationItem) {
-          lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
-          continue;
-        }
-
-        lines.push(
-          depth === "full"
-            ? formatObservationExpanded(observationItem, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turnView.promptNumber,
-              })
-            : formatObservationCollapsed(observationItem, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turnView.promptNumber,
-              }),
-        );
-      }
-    }
   }
 
   return lines.join("\n");
@@ -583,7 +562,12 @@ function renderTurnScope(
 
   for (const session of sessions) {
     const view = buildSessionView(db, session);
-    lines.push(formatSessionCollapsed(view));
+    lines.push(
+      renderNode(
+        { type: "session", value: view },
+        { depth: "collapsed", mode: "unified" },
+      ),
+    );
 
     const sessionTurns = grouped.get(session.id) ?? [];
     const sampledTurns = sampleWithOmissions(sessionTurns, (turn) =>
@@ -598,34 +582,15 @@ function renderTurnScope(
 
       const turnView = buildTurnView(db, item);
       lines.push(
-        depth === "collapsed"
-          ? formatTurnCollapsed(turnView, { sessionId: session.id })
-          : formatTurnExpanded(turnView, { sessionId: session.id }),
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth,
+            mode: "unified",
+            sessionId: session.id,
+          },
+        ),
       );
-
-      if (depth !== "collapsed") {
-        const observationSample = sampleWithOmissions(turnView.observations ?? []);
-        for (const observationItem of observationSample.items) {
-          if ("omittedCount" in observationItem) {
-            lines.push(`    - ... ${observationItem.omittedCount} omitted ...`);
-            continue;
-          }
-
-          lines.push(
-            depth === "full"
-              ? formatObservationExpanded(observationItem, {
-                  indent: "    ",
-                  sessionId: session.id,
-                  turnPromptNumber: turnView.promptNumber,
-                })
-              : formatObservationCollapsed(observationItem, {
-                  indent: "    ",
-                  sessionId: session.id,
-                  turnPromptNumber: turnView.promptNumber,
-                }),
-          );
-        }
-      }
     }
   }
 
@@ -675,9 +640,13 @@ function renderObservationScope(
       };
 
       lines.push(
-        depth === "collapsed"
-          ? formatObservationCollapsed(observationView)
-          : formatObservationExpanded(observationView),
+        renderNode(
+          { type: "observation", value: observationView },
+          {
+            depth: depth === "collapsed" ? "collapsed" : "expanded",
+            mode: "unified",
+          },
+        ),
       );
     }
 
@@ -690,7 +659,12 @@ function renderObservationScope(
 
   for (const session of sessions) {
     const sessionView = buildSessionView(db, session);
-    lines.push(formatSessionCollapsed(sessionView));
+    lines.push(
+      renderNode(
+        { type: "session", value: sessionView },
+        { depth: "collapsed", mode: "unified" },
+      ),
+    );
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
     const turns = getTurnsForSession(db, session.id).filter((turn) =>
       turnMap.has(turn.id),
@@ -699,9 +673,14 @@ function renderObservationScope(
     for (const turn of turns) {
       const turnView = buildTurnView(db, turn);
       lines.push(
-        depth === "collapsed"
-          ? formatTurnCollapsed(turnView, { sessionId: session.id })
-          : formatTurnExpanded(turnView, { sessionId: session.id }),
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth: "collapsed",
+            mode: "unified",
+            sessionId: session.id,
+          },
+        ),
       );
 
       const observationIds = turnMap.get(turn.id) ?? [];
@@ -734,17 +713,16 @@ function renderObservationScope(
         };
 
         lines.push(
-          depth === "full"
-            ? formatObservationExpanded(observationView, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turn.promptNumber,
-              })
-            : formatObservationCollapsed(observationView, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turn.promptNumber,
-              }),
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified",
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber,
+            },
+          ),
         );
       }
     }
@@ -765,9 +743,13 @@ function renderMemoryScope(
     )
     .map((memory) => buildMemoryView(db, memory))
     .map((memory) =>
-      depth === "collapsed"
-        ? formatMemoryCollapsed(memory)
-        : formatMemoryExpanded(memory),
+      renderNode(
+        { type: "memory", value: memory },
+        {
+          depth: depth === "collapsed" ? "collapsed" : "expanded",
+          mode: "unified",
+        },
+      ),
     )
     .join("\n");
 }
@@ -817,9 +799,13 @@ function renderObservationDetail(
   }
 
   const view = buildObservationView(observation);
-  return depth === "collapsed"
-    ? formatObservationCollapsed(view)
-    : formatObservationExpanded(view);
+  return renderNode(
+    { type: "observation", value: view },
+    {
+      depth: depth === "collapsed" ? "collapsed" : "expanded",
+      mode: "unified",
+    },
+  );
 }
 
 function renderMemoryDetail(
@@ -833,9 +819,13 @@ function renderMemoryDetail(
   }
 
   const view = buildMemoryView(db, memory);
-  return depth === "collapsed"
-    ? formatMemoryCollapsed(view)
-    : formatMemoryExpanded(view);
+  return renderNode(
+    { type: "memory", value: view },
+    {
+      depth: depth === "collapsed" ? "collapsed" : "expanded",
+      mode: "unified",
+    },
+  );
 }
 
 function listSessionIds(
@@ -927,9 +917,13 @@ function renderGroupedSearchResults(
       if (memory) {
         const view = buildMemoryView(db, memory);
         memoryLines.push(
-          depth === "collapsed"
-            ? formatMemoryCollapsed(view)
-            : formatMemoryExpanded(view),
+          renderNode(
+            { type: "memory", value: view },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified",
+            },
+          ),
         );
       }
       continue;
@@ -977,7 +971,12 @@ function renderGroupedSearchResults(
       return renderSession(db, session, depth);
     }
 
-    const lines = [formatSessionCollapsed(buildSessionView(db, session))];
+    const lines = [
+      renderNode(
+        { type: "session", value: buildSessionView(db, session) },
+        { depth: "collapsed", mode: "unified" },
+      ),
+    ];
     const turns = getTurnsForSession(db, session.id).filter((turn) =>
       group.turnIds.has(turn.id),
     );
@@ -990,9 +989,14 @@ function renderGroupedSearchResults(
           : depth;
 
       lines.push(
-        turnDepth === "collapsed"
-          ? formatTurnCollapsed(turnView, { sessionId: session.id })
-          : formatTurnExpanded(turnView, { sessionId: session.id }),
+        renderNode(
+          { type: "turn", value: turnView },
+          {
+            depth: turnDepth,
+            mode: "unified",
+            sessionId: session.id,
+          },
+        ),
       );
 
       const observationIds = group.observationIdsByTurnId.get(turn.id) ?? [];
@@ -1004,17 +1008,16 @@ function renderGroupedSearchResults(
 
         const observationView = buildObservationView(observation);
         lines.push(
-          depth === "full"
-            ? formatObservationExpanded(observationView, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turn.promptNumber,
-              })
-            : formatObservationCollapsed(observationView, {
-                indent: "    ",
-                sessionId: session.id,
-                turnPromptNumber: turn.promptNumber,
-              }),
+          renderNode(
+            { type: "observation", value: observationView },
+            {
+              depth: depth === "collapsed" ? "collapsed" : "expanded",
+              mode: "unified",
+              indent: "    ",
+              sessionId: session.id,
+              turnPromptNumber: turn.promptNumber,
+            },
+          ),
         );
       }
     }
