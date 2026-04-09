@@ -27,25 +27,12 @@ import {
   type FormattedTurn,
 } from "./format";
 
-export type RecallView = "sessions" | "turns" | "observations" | "memories";
-export type SelectorInput = number | number[] | string;
-
 export interface RecallInput {
-  view?: RecallView;
   id?: string;
-  session?: SelectorInput;
-  turn?: SelectorInput;
-  obs?: SelectorInput;
   query?: string;
-  type?: string;
-  file?: string;
-  after?: number;
-  before?: number;
   time?: string;
   depth?: "collapsed" | "expanded" | "full";
   limit?: number;
-  expandTurns?: number[];
-  project?: string;
 }
 
 interface ParsedTimeRange {
@@ -53,13 +40,48 @@ interface ParsedTimeRange {
   before?: number;
 }
 
+interface QueryFilters {
+  text?: string;
+  type?: string;
+  file?: string;
+  project?: string;
+  tag?: string;
+}
+
 type RoutedRecallId =
-  | { kind: "session"; sessionId: number }
-  | { kind: "turn"; sessionId: number; promptNumber: number }
+  | { kind: "sessions"; sessionIds?: number[] }
+  | { kind: "turns"; sessionId: number; promptNumbers?: number[] }
+  | { kind: "observation-list"; sessionId: number; promptNumber: number }
   | { kind: "observation"; observationId: number }
+  | { kind: "memories"; memoryIds?: number[] }
   | { kind: "memory"; memoryId: number };
 
+function expandNumericSelector(value: string): number[] | null {
+  if (value === "*") {
+    return [];
+  }
 
+  if (/^\d+$/.test(value)) {
+    return [Number(value)];
+  }
+
+  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
+  if (!rangeMatch) {
+    return null;
+  }
+
+  const start = Number(rangeMatch[1]);
+  const end = Number(rangeMatch[2]);
+  const lower = Math.min(start, end);
+  const upper = Math.max(start, end);
+  const values: number[] = [];
+
+  for (let current = lower; current <= upper; current += 1) {
+    values.push(current);
+  }
+
+  return values;
+}
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -75,70 +97,6 @@ function splitInsight(insight: string | null): string[] {
 
 function formatParameterError(message: string): string {
   return `Parameter error: ${message}`;
-}
-
-function normalizeRecallInput(input: RecallInput): RecallInput {
-  const normalized: RecallInput = { ...input };
-  const hasObservationSelectors = normalized.obs !== undefined;
-
-  if (normalized.view === undefined && normalized.id === undefined) {
-    if (hasObservationSelectors) {
-      normalized.view = "observations";
-    } else if (normalized.session !== undefined && normalized.turn !== undefined) {
-      normalized.view = "turns";
-      normalized.depth ??= "expanded";
-    } else if (normalized.session !== undefined) {
-      normalized.view = "turns";
-    } else if (!hasUnscopedSearchFilters(normalized)) {
-      normalized.view = "sessions";
-    }
-  }
-
-  return normalized;
-}
-
-function parseSelectorValue(
-  value: SelectorInput | undefined,
-  label: string,
-): { values: number[]; error?: string } {
-  if (value === undefined) {
-    return { values: [] };
-  }
-
-  if (typeof value === "number") {
-    return { values: [value] };
-  }
-
-  if (Array.isArray(value)) {
-    return { values: [...new Set(value)].sort((left, right) => left - right) };
-  }
-
-  const trimmed = value.trim();
-
-  if (!trimmed) {
-    return { values: [] };
-  }
-
-  const rangeMatch = trimmed.match(/^(\d+)\.\.(\d+)$/);
-  if (rangeMatch) {
-    const start = Number(rangeMatch[1]);
-    const end = Number(rangeMatch[2]);
-    const lower = Math.min(start, end);
-    const upper = Math.max(start, end);
-    const values: number[] = [];
-
-    for (let index = lower; index <= upper; index += 1) {
-      values.push(index);
-    }
-
-    return { values };
-  }
-
-  if (/^\d+$/.test(trimmed)) {
-    return { values: [Number(trimmed)] };
-  }
-
-  return { values: [], error: `invalid ${label} selector "${value}"` };
 }
 
 function parseTimeInput(time: string | undefined): {
@@ -215,20 +173,26 @@ function parseUtcDate(value: string): number | null {
 function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
 
-  const turnMatch = /^S(\d+)\/T(\d+)$/i.exec(trimmed);
-  if (turnMatch) {
+  const observationListMatch = /^S(\d+)\/T(\d+)\/O\*$/i.exec(trimmed);
+  if (observationListMatch) {
     return {
-      kind: "turn",
-      sessionId: Number(turnMatch[1]),
-      promptNumber: Number(turnMatch[2]),
+      kind: "observation-list",
+      sessionId: Number(observationListMatch[1]),
+      promptNumber: Number(observationListMatch[2]),
     };
   }
 
-  const sessionMatch = /^S(\d+)$/i.exec(trimmed);
-  if (sessionMatch) {
+  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (turnMatch) {
+    const promptNumbers = expandNumericSelector(turnMatch[2]!);
+    if (promptNumbers === null) {
+      return null;
+    }
+
     return {
-      kind: "session",
-      sessionId: Number(sessionMatch[1]),
+      kind: "turns",
+      sessionId: Number(turnMatch[1]),
+      promptNumbers,
     };
   }
 
@@ -237,6 +201,32 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     return {
       kind: "observation",
       observationId: Number(observationMatch[1]),
+    };
+  }
+
+  const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (sessionMatch) {
+    const sessionIds = expandNumericSelector(sessionMatch[1]!);
+    if (sessionIds === null) {
+      return null;
+    }
+
+    return {
+      kind: "sessions",
+      sessionIds,
+    };
+  }
+
+  const memoryListMatch = /^M(\*|\d+\.\.\d+)$/i.exec(trimmed);
+  if (memoryListMatch) {
+    const memoryIds = expandNumericSelector(memoryListMatch[1]!);
+    if (memoryIds === null) {
+      return null;
+    }
+
+    return {
+      kind: "memories",
+      memoryIds,
     };
   }
 
@@ -251,53 +241,53 @@ function parseRoutedId(value: string): RoutedRecallId | null {
   return null;
 }
 
-function mergeTimeRanges(
-  input: RecallInput,
+function resolveTimeRange(
+  time: string | undefined,
 ): { after?: number; before?: number; error?: string } {
-  const parsedTime = parseTimeInput(input.time);
+  const parsedTime = parseTimeInput(time);
   if (parsedTime.error) {
     return { error: parsedTime.error };
   }
 
-  const lowerBounds = [input.after, parsedTime.range?.after].filter(
-    (value): value is number => value !== undefined,
-  );
-  const upperBounds = [input.before, parsedTime.range?.before].filter(
-    (value): value is number => value !== undefined,
-  );
+  return {
+    after: parsedTime.range?.after,
+    before: parsedTime.range?.before,
+  };
+}
 
-  const after = lowerBounds.length > 0 ? Math.max(...lowerBounds) : undefined;
-  const before = upperBounds.length > 0 ? Math.min(...upperBounds) : undefined;
-
-  if (after !== undefined && before !== undefined && after > before) {
-    return { error: "time filters do not overlap." };
+function parseQueryFilters(query: string | undefined): QueryFilters {
+  if (!query) {
+    return {};
   }
 
-  return { after, before };
-}
+  const filters: QueryFilters = {};
+  const textTerms: string[] = [];
 
-function resolveDefaultProject(db: Database): string | undefined {
-  const projects = db
-    .query<{ project: string }, []>(
-      "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project ASC LIMIT 2",
-    )
-    .all()
-    .map((row) => row.project)
-    .filter(Boolean);
+  for (const token of query.trim().split(/\s+/).filter(Boolean)) {
+    if (token.startsWith("type:")) {
+      filters.type = token.slice("type:".length);
+      continue;
+    }
+    if (token.startsWith("file:")) {
+      filters.file = token.slice("file:".length);
+      continue;
+    }
+    if (token.startsWith("project:")) {
+      filters.project = token.slice("project:".length);
+      continue;
+    }
+    if (token.startsWith("tag:")) {
+      filters.tag = token.slice("tag:".length);
+      continue;
+    }
+    textTerms.push(token);
+  }
 
-  return projects.length === 1 ? projects[0] : undefined;
-}
+  if (textTerms.length > 0) {
+    filters.text = textTerms.join(" ");
+  }
 
-function hasUnscopedSearchFilters(input: RecallInput): boolean {
-  return (
-    input.query !== undefined ||
-    input.type !== undefined ||
-    input.file !== undefined ||
-    input.project !== undefined ||
-    input.time !== undefined ||
-    input.after !== undefined ||
-    input.before !== undefined
-  );
+  return filters;
 }
 
 function buildSessionView(
@@ -508,25 +498,6 @@ function buildMemoryView(
           }
         : null,
   };
-}
-
-function selectSearchResults(
-  db: Database,
-  input: RecallInput,
-  after?: number,
-  before?: number,
-): SearchMemoryResult[] {
-  return searchMemory(db, {
-    scope: input.view,
-    query: input.query,
-    project: input.project,
-    type: input.type,
-    file: input.file,
-    after,
-    before,
-    limit:
-      input.limit ?? (input.view === "memories" ? 200 : input.view === "sessions" ? 1000 : 20),
-  });
 }
 
 function renderSession(
@@ -801,51 +772,10 @@ function renderMemoryScope(
     .join("\n");
 }
 
-function renderSessionDetailById(db: Database, sessionId: number): string {
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return "Session not found.";
-  }
-
-  const lines = [formatSessionExpanded(buildSessionView(db, session))];
-
-  for (const turn of buildCollapsedTurnsForSession(db, session.id)) {
-    lines.push(formatTurnCollapsed(turn, { sessionId: session.id }));
-  }
-
-  return lines.join("\n");
-}
-
-function renderTurnDetailById(
-  db: Database,
-  sessionId: number,
-  promptNumber: number,
-): string {
-  const turn = getTurn(db, sessionId, promptNumber);
-  if (!turn) {
-    return "Turn not found.";
-  }
-
-  const turnView = buildTurnView(db, turn);
-  return [
-    formatTurnExpanded(turnView, { sessionId }),
-    ...(turnView.observations ?? []).map((observation) =>
-      formatObservationCollapsed(observation, {
-        indent: "  ",
-        sessionId,
-        turnPromptNumber: turn.promptNumber,
-      }),
-    ),
-  ].join("\n");
-}
-
-function renderObservationDetailById(db: Database, observationId: number): string {
-  const observation = getObservation(db, observationId);
-  if (!observation) {
-    return "Observation not found.";
-  }
-
-  return formatObservationExpanded({
+function buildObservationView(
+  observation: NonNullable<ReturnType<typeof getObservation>>,
+): FormattedObservation {
+  return {
     id: observation.id,
     type: observation.type,
     title: observation.title,
@@ -854,481 +784,404 @@ function renderObservationDetailById(db: Database, observationId: number): strin
     tags: observation.tags,
     filesRead: observation.filesRead,
     filesModified: observation.filesModified,
-  });
+  };
 }
 
-function renderMemoryDetailById(db: Database, memoryId: number): string {
+function renderSessionDetail(
+  db: Database,
+  sessionId: number,
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  const session = getSession(db, sessionId);
+  return session ? renderSession(db, session, depth) : "Session not found.";
+}
+
+function renderTurnDetail(
+  db: Database,
+  sessionId: number,
+  promptNumber: number,
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  const turn = getTurn(db, sessionId, promptNumber);
+  return turn ? renderTurnScope(db, [turn], depth) : "Turn not found.";
+}
+
+function renderObservationDetail(
+  db: Database,
+  observationId: number,
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  const observation = getObservation(db, observationId);
+  if (!observation) {
+    return "Observation not found.";
+  }
+
+  const view = buildObservationView(observation);
+  return depth === "collapsed"
+    ? formatObservationCollapsed(view)
+    : formatObservationExpanded(view);
+}
+
+function renderMemoryDetail(
+  db: Database,
+  memoryId: number,
+  depth: "collapsed" | "expanded" | "full",
+): string {
   const memory = getMemory(db, memoryId);
   if (!memory) {
     return "Memory not found.";
   }
 
-  return formatMemoryExpanded(buildMemoryView(db, memory));
+  const view = buildMemoryView(db, memory);
+  return depth === "collapsed"
+    ? formatMemoryCollapsed(view)
+    : formatMemoryExpanded(view);
 }
 
-function renderRoutedId(db: Database, id: string): string {
-  const routed = parseRoutedId(id);
-
-  if (!routed) {
-    return formatParameterError(`invalid id selector "${id}"`);
-  }
-
-  if (routed.kind === "session") {
-    return renderSessionDetailById(db, routed.sessionId);
-  }
-
-  if (routed.kind === "turn") {
-    return renderTurnDetailById(db, routed.sessionId, routed.promptNumber);
-  }
-
-  if (routed.kind === "observation") {
-    return renderObservationDetailById(db, routed.observationId);
-  }
-
-  return renderMemoryDetailById(db, routed.memoryId);
-}
-
-function hasIdSelectorConflict(input: RecallInput): boolean {
-  return (
-    input.view !== undefined ||
-    input.session !== undefined ||
-    input.turn !== undefined ||
-    input.obs !== undefined ||
-    input.query !== undefined ||
-    input.type !== undefined ||
-    input.file !== undefined ||
-    input.after !== undefined ||
-    input.before !== undefined ||
-    input.time !== undefined ||
-    input.expandTurns !== undefined ||
-    input.project !== undefined ||
-    input.limit !== undefined
-  );
-}
-
-function firstLine(value: string): string {
-  return value.split("\n")[0] ?? value;
-}
-
-function formatMixedSearchResult(db: Database, result: SearchMemoryResult): string {
-  if (result.layer === "memory") {
-    const memory = getMemory(db, result.sourceId);
-    return memory ? formatMemoryCollapsed(buildMemoryView(db, memory)) : `- [M${result.sourceId}]`;
-  }
-
-  if (result.layer === "session" && result.sessionId !== null) {
-    const session = buildSessionSummary(db, result.sessionId);
-    return session ? firstLine(formatSessionCollapsed(session)) : `- [S${result.sessionId}]`;
-  }
-
-  if (result.layer === "turn" && result.turnId !== null) {
-    const turn = getTurnById(db, result.turnId);
-    if (!turn) {
-      return `- [T?] ${result.title ?? "Untitled"}`;
-    }
-
-    return `- [T${turn.promptNumber}] ${turn.title ?? "Untitled"} | S${turn.sessionId}`;
-  }
-
-  if (
-    result.layer === "observation" &&
-    result.observationId !== null &&
-    result.turnId !== null &&
-    result.sessionId !== null
-  ) {
-    const turn = getTurnById(db, result.turnId);
-    const promptNumber = turn?.promptNumber ?? "?";
-      return `- [O${result.observationId}] ${result.type ?? "observation"}: ${
-        result.title ?? "Untitled"
-      } | S${result.sessionId}/T${promptNumber}`;
-  }
-
-  return `- [${result.layer}] ${result.title ?? "Untitled"}`;
-}
-
-export function recallMemory(db: Database, input: RecallInput): string {
-  const normalizedInput = normalizeRecallInput(input);
-
-  if (normalizedInput.id) {
-    if (hasIdSelectorConflict(normalizedInput)) {
-      return formatParameterError(
-        "id cannot be combined with view, session, turn, obs, or search filters.",
-      );
-    }
-
-    return renderRoutedId(db, normalizedInput.id);
-  }
-
-  if (normalizedInput.view === undefined && hasUnscopedSearchFilters(normalizedInput)) {
-    const timeRange = mergeTimeRanges(normalizedInput);
-    if (timeRange.error) {
-      return formatParameterError(timeRange.error);
-    }
-
-    const results = selectSearchResults(
-      db,
-      normalizedInput,
-      timeRange.after,
-      timeRange.before,
-    );
-    return renderSearchResults(
-      db,
-      normalizedInput,
-      results,
-      normalizedInput.depth ?? "collapsed",
-    );
-  }
-
-  const depth = normalizedInput.depth ?? "collapsed";
-  const timeRange = mergeTimeRanges(normalizedInput);
-  if (timeRange.error) {
-    return formatParameterError(timeRange.error);
-  }
-
-  if (normalizedInput.query || normalizedInput.type || normalizedInput.file) {
-    const results = selectSearchResults(
-      db,
-      normalizedInput,
-      timeRange.after,
-      timeRange.before,
-    );
-    return renderSearchResults(db, normalizedInput, results, depth);
-  }
-
-  return renderScopedMemory(
-    db,
-    normalizedInput as RecallInput & { view: RecallView },
-    depth,
-    timeRange.after,
-    timeRange.before,
-  );
-}
-
-function renderSearchResults(
+function listSessionIds(
   db: Database,
-  input: RecallInput,
-  results: SearchMemoryResult[],
-  depth: "collapsed" | "expanded" | "full",
-): string {
-  if (input.view === undefined) {
-    return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
-  }
-
-  if (input.view === "memories") {
-    return renderMemoryScope(
-      db,
-      results
-        .filter((result) => result.layer === "memory")
-        .map((result) => result.sourceId),
-      depth,
-    );
-  }
-
-  if (input.view === "sessions") {
-    const sessions = results
-      .filter(
-        (result): result is SearchMemoryResult & { sessionId: number } =>
-          result.sessionId !== null,
-      )
-      .map((result) => getSession(db, result.sessionId))
-      .filter(
-        (session): session is NonNullable<ReturnType<typeof getSession>> =>
-          session !== null,
-      );
-    return sessions.map((session) => renderSession(db, session, depth)).join("\n");
-  }
-
-  if (input.view === "turns") {
-    const turns = results
-      .map((result) => getTurnById(db, result.turnId ?? -1))
-      .filter((turn): turn is TurnRecord => turn !== null);
-    return renderTurnScope(db, turns, depth);
-  }
-
-  const observations = results
-    .filter(
-      (result): result is SearchMemoryResult & {
-        sessionId: number;
-        turnId: number;
-        observationId: number;
-      } =>
-        result.sessionId !== null &&
-        result.turnId !== null &&
-        result.observationId !== null,
-    )
-    .map((result) => ({
-      sessionId: result.sessionId,
-      turnId: result.turnId,
-      observationId: result.observationId,
-    }));
-  const includeParents = Boolean(input.session !== undefined || input.turn !== undefined);
-  return renderObservationScope(db, observations, depth, includeParents);
-}
-
-function renderScopedMemory(
-  db: Database,
-  input: Required<Pick<RecallInput, "view">> & RecallInput,
-  depth: "collapsed" | "expanded" | "full",
+  sessionIds: number[] | undefined,
+  limit: number,
   after?: number,
   before?: number,
-): string {
-  if (input.view === "memories") {
-    const project = input.project ?? resolveDefaultProject(db);
-    const results = searchMemory(db, {
-      scope: "memories",
-      project,
-      after,
-      before,
-      limit: input.limit ?? 200,
-    });
-
-    return renderMemoryScope(
-      db,
-      results
-        .filter((result) => result.layer === "memory")
-        .map((result) => result.sourceId),
-      depth,
-    );
-  }
-
-  const sessionSelector = parseSelectorValue(input.session, "session");
-  const turnSelector = parseSelectorValue(input.turn, "turn");
-  const observationSelector = parseSelectorValue(
-    input.obs,
-    "observation",
-  );
-
-  if (sessionSelector.error) {
-    return formatParameterError(sessionSelector.error);
-  }
-
-  if (turnSelector.error) {
-    return formatParameterError(turnSelector.error);
-  }
-
-  if (observationSelector.error) {
-    return formatParameterError(observationSelector.error);
-  }
-
-  const sessionIds = sessionSelector.values;
-  const turnNumbers = turnSelector.values;
-  const observationIds = observationSelector.values;
-
-  if (input.view === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
-    return formatParameterError(
-      'turn requires session; use recall(view="turns", session=142, turn=3).',
-    );
-  }
-
-  if (sessionIds.length > 0 && turnNumbers.length > 0) {
-    for (const sessionId of sessionIds) {
-      const turns = getTurnsForSession(db, sessionId);
-      const promptNumbers = new Set(turns.map((turn) => turn.promptNumber));
-      for (const promptNumber of turnNumbers) {
-        if (!promptNumbers.has(promptNumber)) {
-          return formatParameterError(
-            `turn ${promptNumber} does not belong to session ${sessionId}.`,
-          );
-        }
-      }
-    }
-  }
-
-  if (sessionIds.length > 0 && observationIds.length > 0) {
-    const sessionSet = new Set(sessionIds);
-    for (const observationId of observationIds) {
-      const observation = getObservation(db, observationId);
-      if (!observation) {
-        continue;
-      }
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn || !sessionSet.has(turn.sessionId)) {
-        return formatParameterError(
-          `observation ${observationId} does not belong to session ${sessionIds.join(", ")}.`,
-        );
-      }
-    }
-  }
-
-  if (sessionIds.length > 0 && turnNumbers.length > 0 && observationIds.length > 0) {
-    const turnSet = new Set(turnNumbers);
-    for (const observationId of observationIds) {
-      const observation = getObservation(db, observationId);
-      if (!observation) {
-        continue;
-      }
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn || !turnSet.has(turn.promptNumber)) {
-        return formatParameterError(
-          `observation ${observationId} does not belong to turn ${turnNumbers.join(", ")}.`,
-        );
-      }
-    }
-  }
-
-  if (input.view === "sessions") {
-    const candidateSessions = sessionIds.length > 0
-      ? sessionIds
-          .map((sessionId) => getSession(db, sessionId))
-          .filter(
-            (session): session is NonNullable<ReturnType<typeof getSession>> =>
-              session !== null,
-          )
-      : getRecentSessions(db, { limit: input.limit ?? 1000 });
-
-    const observationSessionIds = new Set<number>();
-    if (observationIds.length > 0) {
-      for (const observationId of observationIds) {
-        const observation = getObservation(db, observationId);
-        if (!observation) {
-          continue;
-        }
-        const turn = getTurnById(db, observation.turnId);
-        if (turn) {
-          observationSessionIds.add(turn.sessionId);
-        }
-      }
-    }
-
-    const filtered = candidateSessions.filter((session) => {
-      if (after !== undefined && session.createdAtEpoch < after) {
-        return false;
-      }
-      if (before !== undefined && session.createdAtEpoch > before) {
-        return false;
-      }
-      if (
-        turnNumbers.length > 0 &&
-        !getTurnsForSession(db, session.id).some((turn) =>
-          turnNumbers.includes(turn.promptNumber),
-        )
-      ) {
-        return false;
-      }
-      if (observationIds.length > 0 && !observationSessionIds.has(session.id)) {
-        return false;
-      }
-      return true;
-    });
-
-    const turnSelector = turnNumbers.length > 0 ? new Set(turnNumbers) : undefined;
-    return filtered
-      .map((session) => renderSession(db, session, depth, turnSelector))
-      .join("\n");
-  }
-
-  if (input.view === "turns") {
-    if (input.turn !== undefined && sessionIds.length === 0) {
-      return formatParameterError('turn requires session; use recall(view="turns", session=142, turn=3).');
-    }
-
-    const sessions = sessionIds.length > 0
-      ? sessionIds
-          .map((sessionId) => getSession(db, sessionId))
-          .filter(
-            (session): session is NonNullable<ReturnType<typeof getSession>> =>
-              session !== null,
-          )
-      : getRecentSessions(db, { limit: input.limit ?? 1000 });
-
-    const turns: TurnRecord[] = [];
-    for (const session of sessions) {
-      turns.push(
-        ...getTurnsForSession(db, session.id).filter((turn) => {
-          if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
-            return false;
-          }
-          if (after !== undefined && turn.createdAtEpoch < after) {
-            return false;
-          }
-          if (before !== undefined && turn.createdAtEpoch > before) {
-            return false;
-          }
-          return true;
-        }),
-      );
-    }
-
-    if (observationIds.length > 0) {
-      const observationTurnIds = new Set<number>();
-      for (const observationId of observationIds) {
-        const observation = getObservation(db, observationId);
-        if (!observation) {
-          continue;
-        }
-        observationTurnIds.add(observation.turnId);
-      }
-      return renderTurnScope(db, turns.filter((turn) => observationTurnIds.has(turn.id)), depth);
-    }
-
-    return renderTurnScope(db, turns, depth);
-  }
-
-  if (observationIds.length > 0) {
-    const observations = observationIds
-      .map((observationId) => getObservation(db, observationId))
-      .filter(
-        (observation): observation is NonNullable<ReturnType<typeof getObservation>> =>
-          observation !== null,
-      )
-      .map((observation) => ({
-        sessionId: getTurnById(db, observation.turnId)?.sessionId ?? 0,
-        turnId: observation.turnId,
-        observationId: observation.id,
-      }));
-    return renderObservationScope(
-      db,
-      observations,
-      depth,
-      sessionIds.length > 0 || turnNumbers.length > 0,
-    );
-  }
-
-  const sessions = sessionIds.length > 0
+): number[] {
+  const sessions = sessionIds && sessionIds.length > 0
     ? sessionIds
         .map((sessionId) => getSession(db, sessionId))
         .filter(
           (session): session is NonNullable<ReturnType<typeof getSession>> =>
             session !== null,
         )
-    : getRecentSessions(db, { limit: input.limit ?? 1000 });
-  const turnIds = new Set<number>();
-  const observations: Array<{ sessionId: number; turnId: number; observationId: number }> = [];
+    : getRecentSessions(db, { limit });
 
-  for (const session of sessions) {
-    for (const turn of getTurnsForSession(db, session.id)) {
-      if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
-        continue;
+  return sessions
+    .filter((session) => {
+      if (after !== undefined && session.createdAtEpoch < after) {
+        return false;
       }
-      if (after !== undefined && turn.createdAtEpoch < after) {
-        continue;
+      if (before !== undefined && session.createdAtEpoch > before) {
+        return false;
       }
-      if (before !== undefined && turn.createdAtEpoch > before) {
-        continue;
+      return true;
+    })
+    .map((session) => session.id);
+}
+
+function applyTurnSelector(
+  db: Database,
+  sessionId: number,
+  promptNumbers?: number[],
+): TurnRecord[] {
+  const turns = getTurnsForSession(db, sessionId);
+  if (!promptNumbers || promptNumbers.length === 0) {
+    return turns;
+  }
+
+  const selected = new Set(promptNumbers);
+  return turns.filter((turn) => selected.has(turn.promptNumber));
+}
+
+function filterResultsByTag(
+  db: Database,
+  results: SearchMemoryResult[],
+  tag: string | undefined,
+): SearchMemoryResult[] {
+  if (!tag) {
+    return results;
+  }
+
+  return results.filter((result) => {
+    if (result.layer === "observation" && result.observationId !== null) {
+      const observation = getObservation(db, result.observationId);
+      return observation?.tags.includes(tag) ?? false;
+    }
+
+    if (result.layer === "memory") {
+      const memory = getMemory(db, result.sourceId);
+      return memory?.tags.includes(tag) ?? false;
+    }
+
+    return false;
+  });
+}
+
+function renderGroupedSearchResults(
+  db: Database,
+  results: SearchMemoryResult[],
+  depth: "collapsed" | "expanded" | "full",
+): string {
+  const memoryLines: string[] = [];
+  const sessionGroups = new Map<
+    number,
+    {
+      sessionHit: boolean;
+      turnIds: Set<number>;
+      observationIdsByTurnId: Map<number, number[]>;
+    }
+  >();
+  const sessionOrder: number[] = [];
+
+  for (const result of results) {
+    if (result.layer === "memory") {
+      const memory = getMemory(db, result.sourceId);
+      if (memory) {
+        const view = buildMemoryView(db, memory);
+        memoryLines.push(
+          depth === "collapsed"
+            ? formatMemoryCollapsed(view)
+            : formatMemoryExpanded(view),
+        );
       }
-      turnIds.add(turn.id);
-      for (const observation of getObservationsForTurn(db, turn.id)) {
-        observations.push({
-          sessionId: session.id,
-          turnId: turn.id,
-          observationId: observation.id,
-        });
-      }
+      continue;
+    }
+
+    if (result.sessionId === null) {
+      continue;
+    }
+
+    let group = sessionGroups.get(result.sessionId);
+    if (!group) {
+      group = {
+        sessionHit: false,
+        turnIds: new Set<number>(),
+        observationIdsByTurnId: new Map<number, number[]>(),
+      };
+      sessionGroups.set(result.sessionId, group);
+      sessionOrder.push(result.sessionId);
+    }
+
+    if (result.layer === "session") {
+      group.sessionHit = true;
+      continue;
+    }
+
+    if (result.turnId !== null) {
+      group.turnIds.add(result.turnId);
+    }
+
+    if (result.layer === "observation" && result.turnId !== null && result.observationId !== null) {
+      const observationIds = group.observationIdsByTurnId.get(result.turnId) ?? [];
+      observationIds.push(result.observationId);
+      group.observationIdsByTurnId.set(result.turnId, observationIds);
     }
   }
 
-  const turnRecords = [...turnIds]
-    .map((turnId) => getTurnById(db, turnId))
-    .filter((turn): turn is TurnRecord => turn !== null);
+  const sessionLines = sessionOrder.map((sessionId) => {
+    const session = getSession(db, sessionId);
+    const group = sessionGroups.get(sessionId);
+    if (!session || !group) {
+      return "";
+    }
 
-  if (input.view === "observations") {
-    return renderObservationScope(
+    if (group.sessionHit && group.turnIds.size === 0) {
+      return renderSession(db, session, depth);
+    }
+
+    const lines = [formatSessionCollapsed(buildSessionView(db, session))];
+    const turns = getTurnsForSession(db, session.id).filter((turn) =>
+      group.turnIds.has(turn.id),
+    );
+
+    for (const turn of turns) {
+      const turnView = buildTurnView(db, turn);
+      const turnDepth =
+        group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
+          ? "collapsed"
+          : depth;
+
+      lines.push(
+        turnDepth === "collapsed"
+          ? formatTurnCollapsed(turnView, { sessionId: session.id })
+          : formatTurnExpanded(turnView, { sessionId: session.id }),
+      );
+
+      const observationIds = group.observationIdsByTurnId.get(turn.id) ?? [];
+      for (const observationId of observationIds) {
+        const observation = getObservation(db, observationId);
+        if (!observation) {
+          continue;
+        }
+
+        const observationView = buildObservationView(observation);
+        lines.push(
+          depth === "full"
+            ? formatObservationExpanded(observationView, {
+                indent: "    ",
+                sessionId: session.id,
+                turnPromptNumber: turn.promptNumber,
+              })
+            : formatObservationCollapsed(observationView, {
+                indent: "    ",
+                sessionId: session.id,
+                turnPromptNumber: turn.promptNumber,
+              }),
+        );
+      }
+    }
+
+    return lines.join("\n");
+  });
+
+  return [...memoryLines, ...sessionLines.filter(Boolean)].join("\n");
+}
+
+function renderRoutedId(
+  db: Database,
+  routed: RoutedRecallId,
+  depth: "collapsed" | "expanded" | "full",
+  limit: number,
+  after?: number,
+  before?: number,
+): string {
+  if (routed.kind === "sessions") {
+    return listSessionIds(db, routed.sessionIds, limit, after, before)
+      .map((sessionId) => renderSessionDetail(db, sessionId, depth))
+      .join("\n");
+  }
+
+  if (routed.kind === "turns") {
+    const turns = applyTurnSelector(db, routed.sessionId, routed.promptNumbers).filter((turn) => {
+      if (after !== undefined && turn.createdAtEpoch < after) {
+        return false;
+      }
+      if (before !== undefined && turn.createdAtEpoch > before) {
+        return false;
+      }
+      return true;
+    });
+    return renderTurnScope(db, turns.slice(0, limit), depth);
+  }
+
+  if (routed.kind === "observation-list") {
+    const turn = getTurn(db, routed.sessionId, routed.promptNumber);
+    if (!turn) {
+      return "Turn not found.";
+    }
+
+    const observations = getObservationsForTurn(db, turn.id)
+      .filter((observation) => {
+        if (after !== undefined && observation.createdAtEpoch < after) {
+          return false;
+        }
+        if (before !== undefined && observation.createdAtEpoch > before) {
+          return false;
+        }
+        return true;
+      })
+      .slice(0, limit)
+      .map((observation) => ({
+        sessionId: routed.sessionId,
+        turnId: turn.id,
+        observationId: observation.id,
+      }));
+
+    return renderObservationScope(db, observations, depth, true);
+  }
+
+  if (routed.kind === "observation") {
+    return renderObservationDetail(db, routed.observationId, depth);
+  }
+
+  if (routed.kind === "memories") {
+    const memoryIds = routed.memoryIds && routed.memoryIds.length > 0
+      ? routed.memoryIds
+      : searchMemory(db, { scope: "memories", limit, after, before }).map((result) => result.sourceId);
+    return renderMemoryScope(db, memoryIds.slice(0, limit), depth);
+  }
+
+  return routed.kind === "memory"
+    ? renderMemoryDetail(db, routed.memoryId, depth)
+    : "";
+}
+
+function renderSessionList(
+  db: Database,
+  depth: "collapsed" | "expanded" | "full",
+  limit: number,
+  after?: number,
+  before?: number,
+): string {
+  return listSessionIds(db, undefined, limit, after, before)
+    .map((sessionId) => renderSessionDetail(db, sessionId, depth))
+    .join("\n");
+}
+
+function searchQueryResults(
+  db: Database,
+  filters: QueryFilters,
+  limit: number,
+  after?: number,
+  before?: number,
+): SearchMemoryResult[] {
+  if (
+    filters.tag &&
+    !filters.text &&
+    !filters.type &&
+    !filters.file &&
+    !filters.project
+  ) {
+    return [
+      ...searchMemory(db, {
+        scope: "observations",
+        after,
+        before,
+        limit,
+      }),
+      ...searchMemory(db, {
+        scope: "memories",
+        after,
+        before,
+        limit,
+      }),
+    ];
+  }
+
+  return searchMemory(db, {
+    query: filters.text,
+    type: filters.type,
+    file: filters.file,
+    project: filters.project,
+    after,
+    before,
+    limit,
+  });
+}
+
+export function recallMemory(db: Database, input: RecallInput): string {
+  const depth = input.depth ?? "collapsed";
+  const limit = input.limit ?? 50;
+  const timeRange = resolveTimeRange(input.time);
+
+  if (timeRange.error) {
+    return formatParameterError(timeRange.error);
+  }
+
+  if (input.id) {
+    const routed = parseRoutedId(input.id);
+    if (!routed) {
+      return formatParameterError(`invalid id selector "${input.id}"`);
+    }
+
+    return renderRoutedId(
       db,
-      observations,
+      routed,
       depth,
-      sessionIds.length > 0 || turnNumbers.length > 0,
+      limit,
+      timeRange.after,
+      timeRange.before,
     );
   }
 
-  return renderTurnScope(db, turnRecords, depth);
+  if (input.query) {
+    const filters = parseQueryFilters(input.query);
+    const results = filterResultsByTag(
+      db,
+      searchQueryResults(db, filters, limit, timeRange.after, timeRange.before),
+      filters.tag,
+    ).slice(0, limit);
+
+    return renderGroupedSearchResults(db, results, depth);
+  }
+
+  return renderSessionList(db, depth, limit, timeRange.after, timeRange.before);
 }

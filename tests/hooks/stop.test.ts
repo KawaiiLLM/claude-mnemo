@@ -204,7 +204,7 @@ describe("handleStopHook", () => {
     expect(prompt).toContain("Stop hook coverage");
     expect(prompt).toContain("[T1] Draft approach");
     expect(prompt).toContain("[stale]");
-    expect(prompt).toContain("[T2] Untitled");
+    expect(prompt).toContain('[T2] "Investigate logs"');
     expect(prompt).toContain("[pending]");
     expect(stderrWrite).toHaveBeenCalled();
 
@@ -517,7 +517,7 @@ describe("handleStopHook", () => {
     await result.asyncWork?.();
 
     const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
-    expect(prompt).toContain("[T1] Untitled");
+    expect(prompt).toContain('[T1] "Recovered pending turn"');
     expect(prompt).toContain("[pending]");
 
     rmSync(transcript.directory, { recursive: true, force: true });

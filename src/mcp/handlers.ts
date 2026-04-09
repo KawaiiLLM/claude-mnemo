@@ -40,7 +40,7 @@ export function createStubHandler(toolName: string): ToolHandler {
 
 export function createDatabaseBackedHandlers(
   database?: Database,
-  options: CreateDatabaseBackedHandlersOptions = {},
+  _options: CreateDatabaseBackedHandlersOptions = {},
 ): Partial<MnemoToolHandlers> {
   if (!database) {
     return {};
@@ -50,36 +50,20 @@ export function createDatabaseBackedHandlers(
     recall: (args) =>
       textResult(
         recallMemory(database, {
-          view: args.view as "sessions" | "turns" | "observations" | "memories" | undefined,
           id: args.id as string | undefined,
           query: args.query as string | undefined,
-          session: args.session as number | number[] | string | undefined,
-          turn: args.turn as number | number[] | string | undefined,
-          obs: (args.obs as number | number[] | string | undefined) ?? undefined,
           time: args.time as string | undefined,
           depth: args.depth as "collapsed" | "expanded" | "full" | undefined,
           limit: args.limit as number | undefined,
-          expandTurns:
-            (args.expand_turns as number[] | undefined) ??
-            (args.expandTurns as number[] | undefined),
-          before: args.before as number | undefined,
-          after: args.after as number | undefined,
-          file: args.file as string | undefined,
-          type: args.type as string | undefined,
-          project:
-            (args.project as string | undefined) ?? options.defaultProject,
         }),
       ),
     replay: (args) =>
       textResult(
         replayMemory(database, {
-          session: args.session as number,
-          turn: args.turn as number | undefined,
-          tool: args.tool as number | undefined,
-          full: args.full as boolean | undefined,
-          transcriptPath: args.transcript_path as string | undefined,
+          id: args.id as string | undefined,
+          depth: args.depth as "collapsed" | "expanded" | "full" | undefined,
         }),
-    ),
+      ),
     remember: (args) =>
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
   };

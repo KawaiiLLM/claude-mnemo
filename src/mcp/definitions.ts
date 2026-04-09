@@ -1,11 +1,5 @@
 import { z } from "zod";
 
-const selectorShape = z.union([
-  z.number().int(),
-  z.array(z.number().int()),
-  z.string(),
-]);
-
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store.",
   replay: "Replay raw transcript content from the source JSONL.",
@@ -13,29 +7,16 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
 } as const;
 
 export const recallInputShape = {
-  view: z.enum(["sessions", "turns", "observations", "memories"]).optional(),
   id: z.string().optional(),
-  session: selectorShape.optional(),
-  turn: selectorShape.optional(),
-  obs: selectorShape.optional(),
   query: z.string().optional(),
-  type: z.string().optional(),
-  file: z.string().optional(),
-  after: z.number().int().nonnegative().optional(),
-  before: z.number().int().nonnegative().optional(),
   time: z.string().optional(),
   depth: z.enum(["collapsed", "expanded", "full"]).optional(),
   limit: z.number().int().positive().optional(),
-  expand_turns: z.array(z.number().int()).optional(),
-  project: z.string().optional(),
 };
 
 export const replayInputShape = {
-  session: z.number().int(),
-  turn: z.number().int().optional(),
-  tool: z.number().int().positive().optional(),
-  full: z.boolean().optional(),
-  transcript_path: z.string().optional(),
+  id: z.string(),
+  depth: z.enum(["collapsed", "expanded", "full"]).optional(),
 };
 
 export const rememberInputShape = {
@@ -59,8 +40,8 @@ export const rememberInputShape = {
   source_turn_id: z.number().int().positive().optional(),
 };
 
-export const recallInputSchema = z.object(recallInputShape);
-export const replayInputSchema = z.object(replayInputShape);
+export const recallInputSchema = z.object(recallInputShape).strict();
+export const replayInputSchema = z.object(replayInputShape).strict();
 export const rememberInputSchema = z.object(rememberInputShape);
 
 export const MNEMO_ALLOWED_TOOLS = [

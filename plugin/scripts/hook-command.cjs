@@ -34,7 +34,7 @@ __export(hook_command_exports, {
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 
 // src/shared/hook-constants.ts
 var HOOK_SUCCESS_EXIT_CODE = 0;
@@ -936,7 +936,7 @@ function initializeDatabase(db) {
 // src/mnemosyne/fork.ts
 var import_node_fs4 = require("node:fs");
 var import_node_child_process = require("node:child_process");
-var import_node_path3 = require("node:path");
+var import_node_path4 = require("node:path");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
@@ -35509,39 +35509,21 @@ function date6(params) {
 config2(en_default3());
 
 // src/mcp/definitions.ts
-var selectorShape = external_exports.union([
-  external_exports.number().int(),
-  external_exports.array(external_exports.number().int()),
-  external_exports.string()
-]);
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store.",
   replay: "Replay raw transcript content from the source JSONL.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool."
 };
 var recallInputShape = {
-  view: external_exports.enum(["sessions", "turns", "observations", "memories"]).optional(),
   id: external_exports.string().optional(),
-  session: selectorShape.optional(),
-  turn: selectorShape.optional(),
-  obs: selectorShape.optional(),
   query: external_exports.string().optional(),
-  type: external_exports.string().optional(),
-  file: external_exports.string().optional(),
-  after: external_exports.number().int().nonnegative().optional(),
-  before: external_exports.number().int().nonnegative().optional(),
   time: external_exports.string().optional(),
   depth: external_exports.enum(["collapsed", "expanded", "full"]).optional(),
-  limit: external_exports.number().int().positive().optional(),
-  expand_turns: external_exports.array(external_exports.number().int()).optional(),
-  project: external_exports.string().optional()
+  limit: external_exports.number().int().positive().optional()
 };
 var replayInputShape = {
-  session: external_exports.number().int(),
-  turn: external_exports.number().int().optional(),
-  tool: external_exports.number().int().positive().optional(),
-  full: external_exports.boolean().optional(),
-  transcript_path: external_exports.string().optional()
+  id: external_exports.string(),
+  depth: external_exports.enum(["collapsed", "expanded", "full"]).optional()
 };
 var rememberInputShape = {
   parent: external_exports.string().optional(),
@@ -35561,8 +35543,8 @@ var rememberInputShape = {
   files_modified: external_exports.array(external_exports.string()).optional(),
   source_turn_id: external_exports.number().int().positive().optional()
 };
-var recallInputSchema = external_exports.object(recallInputShape);
-var replayInputSchema = external_exports.object(replayInputShape);
+var recallInputSchema = external_exports.object(recallInputShape).strict();
+var replayInputSchema = external_exports.object(replayInputShape).strict();
 var rememberInputSchema = external_exports.object(rememberInputShape);
 var MNEMO_ALLOWED_TOOLS = [
   "mcp__mnemo__remember",
@@ -36203,8 +36185,13 @@ var TYPE_EMOJI = {
   discovery: "\u{1F535}",
   decision: "\u2696\uFE0F"
 };
-var FIELD_TRUNCATION_LIMIT = 200;
 var FIELD_TRUNCATION_SUFFIX = "...";
+var LEGACY_TRUNCATION_LIMIT = 200;
+var UNIFIED_TRUNCATION_LIMITS = {
+  collapsed: 120,
+  expanded: 300,
+  full: 1e3
+};
 function formatEpoch(epoch) {
   const date7 = new Date(epoch * 1e3);
   const year = date7.getUTCFullYear();
@@ -36284,19 +36271,31 @@ function joinHint(sessionId, turnPromptNumber) {
     return "";
   }
   if (sessionId === void 0) {
-    return `replay(turn=${turnPromptNumber})`;
+    return "";
   }
   if (turnPromptNumber === void 0) {
-    return `replay(session=${sessionId})`;
+    return `replay(id="S${sessionId}", depth="expanded")`;
   }
-  return `replay(session=${sessionId}, turn=${turnPromptNumber})`;
+  return `replay(id="S${sessionId}/T${turnPromptNumber}", depth="expanded")`;
 }
-function truncateText(text, sessionId, turnPromptNumber) {
-  if (text.length <= FIELD_TRUNCATION_LIMIT) {
+function resolveTruncationLimit(depth, mode) {
+  if (mode === "legacy") {
+    return LEGACY_TRUNCATION_LIMIT;
+  }
+  return UNIFIED_TRUNCATION_LIMITS[depth];
+}
+function truncateText(text, {
+  depth,
+  mode = "legacy",
+  sessionId,
+  turnPromptNumber
+}) {
+  const limit = resolveTruncationLimit(depth, mode);
+  if (text.length <= limit) {
     return text;
   }
-  const hint = joinHint(sessionId, turnPromptNumber);
-  return `${text.slice(0, FIELD_TRUNCATION_LIMIT)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
+  const hint = mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
+  return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
 }
 function formatDisplayStatus(status) {
   switch (status) {
@@ -36312,59 +36311,237 @@ function formatStatus(status) {
   const displayStatus = formatDisplayStatus(status);
   return displayStatus ? ` [${displayStatus}]` : "";
 }
-function formatSessionCollapsed(session) {
+function extractKeyParam(name, input) {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const record3 = input;
+  const valueForKey = (...keys) => {
+    for (const key of keys) {
+      const value = record3[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        return value;
+      }
+    }
+    return null;
+  };
+  switch (name) {
+    case "Edit":
+    case "Read":
+    case "Write":
+    case "Glob":
+      return valueForKey("file_path", "path");
+    case "Bash":
+      return valueForKey("command");
+    case "Grep": {
+      const pattern = valueForKey("pattern");
+      const path = valueForKey("path");
+      if (pattern && path) {
+        return `${pattern} ${path}`;
+      }
+      return pattern ?? path;
+    }
+    case "Agent":
+      return valueForKey("description");
+    default:
+      for (const value of Object.values(record3)) {
+        if (typeof value === "string" && value.trim() !== "") {
+          return value;
+        }
+      }
+      return null;
+  }
+}
+function formatSessionCollapsedWithMode(session, mode) {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
     `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
   ];
   if (session.content) {
-    lines.push(`  - desc: ${truncateText(session.content, session.id)}`);
+    lines.push(
+      `  - desc: ${truncateText(session.content, {
+        depth: "collapsed",
+        mode,
+        sessionId: session.id
+      })}`
+    );
   }
   return lines.join("\n");
 }
-function formatSessionExpanded(session) {
-  const lines = [formatSessionCollapsed(session)];
+function formatSessionExpandedWithMode(session, mode) {
+  const lines = [formatSessionCollapsedWithMode(session, mode)];
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map((line) => truncateText(line, session.id))
+      session.insight.map(
+        (line) => truncateText(line, {
+          depth: "expanded",
+          mode,
+          sessionId: session.id
+        })
+      )
     );
   }
   if (session.nextSteps) {
     lines.push("  - next_steps:");
-    lines.push(`    - ${truncateText(session.nextSteps, session.id)}`);
-  }
-  return lines.join("\n");
-}
-function formatTurnLabel(turn, { indent = "  ", sessionId } = {}) {
-  const prefix = sessionId === void 0 ? `${indent}- [T${turn.promptNumber}]` : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
-  const stats = formatTurnStats(turn);
-  const statsSegment = stats ? ` | ${stats}` : "";
-  return `${prefix} ${turn.title ?? "Untitled"}${statsSegment}${formatStatus(turn.status)}`;
-}
-function formatTurnCollapsed(turn, options = {}) {
-  const { indent = "  " } = options;
-  const lines = [formatTurnLabel(turn, options)];
-  if (turn.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, options.sessionId, turn.promptNumber)}`
+      `    - ${truncateText(session.nextSteps, {
+        depth: "expanded",
+        mode,
+        sessionId: session.id
+      })}`
     );
   }
   return lines.join("\n");
 }
-function formatTurnExpanded(turn, options = {}) {
-  const { indent = "  " } = options;
+function formatTurnLabel(turn, {
+  indent = "  ",
+  sessionId,
+  mode = "legacy",
+  depth = "collapsed"
+} = {}) {
+  const prefix = sessionId === void 0 ? `${indent}- [T${turn.promptNumber}]` : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
+  const stats = formatTurnStats(turn);
+  const statsSegment = stats ? ` | ${stats}` : "";
+  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
+  const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
+    depth,
+    mode,
+    sessionId,
+    turnPromptNumber: turn.promptNumber
+  })}"` : truncateText(rawTitle, {
+    depth,
+    mode,
+    sessionId,
+    turnPromptNumber: turn.promptNumber
+  });
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
+}
+function formatTurnCollapsedWithMode(turn, options = {}) {
+  const { indent = "  ", mode = "legacy" } = options;
+  const lines = [
+    formatTurnLabel(turn, {
+      ...options,
+      mode,
+      depth: "collapsed"
+    })
+  ];
+  if (turn.content) {
+    lines.push(
+      `${indent}  - desc: ${truncateText(turn.content, {
+        depth: "collapsed",
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: turn.promptNumber
+      })}`
+    );
+  }
+  return lines.join("\n");
+}
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed" } = {}) {
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam ? ` ${truncateText(keyParam, { depth, mode })}` : "";
+  return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
+}
+function formatToolCallCollapsedWithMode(toolCall, options = {}) {
+  return formatToolCallLabel(toolCall, {
+    ...options,
+    mode: options.mode,
+    depth: "collapsed"
+  });
+}
+function formatToolCallExpandedWithMode(toolCall, options = {}) {
+  const { indent = "    ", mode = "unified", depth = "expanded" } = options;
   const detailIndent = `${indent}  `;
-  const lines = [formatTurnCollapsed(turn, options)];
+  const lines = [
+    formatToolCallLabel(toolCall, {
+      ...options,
+      mode,
+      depth: depth === "full" ? "full" : "expanded"
+    })
+  ];
+  if (toolCall.input !== void 0) {
+    lines.push(
+      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
+        depth,
+        mode
+      })}`
+    );
+  }
+  if (toolCall.result) {
+    lines.push(
+      `${detailIndent}- out: ${truncateText(toolCall.result, {
+        depth,
+        mode
+      })}`
+    );
+  }
+  return lines.join("\n");
+}
+function renderTurnChildren(turn, depth, options = {}) {
+  if (depth === "collapsed") {
+    return "";
+  }
+  const { indent = "  ", sessionId, mode = "legacy" } = options;
+  const childIndent = `${indent}  `;
+  const childDepth = depth === "full" ? "full" : "expanded";
+  const childLines = [];
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations) {
+      childLines.push(
+        childDepth === "full" ? formatObservationExpandedWithMode(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: "full"
+        }) : formatObservationCollapsedWithMode(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode
+        })
+      );
+    }
+    return childLines.join("\n");
+  }
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls) {
+      childLines.push(
+        formatToolCallExpandedWithMode(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: childDepth
+        })
+      );
+    }
+  }
+  return childLines.join("\n");
+}
+function formatTurnExpandedWithMode(turn, options = {}) {
+  const {
+    indent = "  ",
+    mode = "legacy",
+    depth = "expanded",
+    includeChildren = mode === "unified"
+  } = options;
+  const detailIndent = `${indent}  `;
+  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
     lines.push(
       `${detailIndent}- prompt: "${truncateText(
         turn.promptPreview,
-        options.sessionId,
-        turn.promptNumber
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber
+        }
       )}"`
     );
   }
@@ -36372,8 +36549,12 @@ function formatTurnExpanded(turn, options = {}) {
     lines.push(
       `${detailIndent}- response: "${truncateText(
         turn.responsePreview,
-        options.sessionId,
-        turn.promptNumber
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber
+        }
       )}"`
     );
   }
@@ -36383,9 +36564,41 @@ function formatTurnExpanded(turn, options = {}) {
       lines,
       `${detailIndent}  `,
       turn.insight.map(
-        (line) => truncateText(line, options.sessionId, turn.promptNumber)
+        (line) => truncateText(line, {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber
+        })
       )
     );
+  }
+  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(
+      `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: turn.promptNumber
+      })}`
+    );
+  }
+  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(
+      `${detailIndent}- files_modified: ${truncateText(
+        turn.filesModified.join(", "),
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber
+        }
+      )}`
+    );
+  }
+  const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
+  if (childBlock) {
+    lines.push(childBlock);
   }
   return lines.join("\n");
 }
@@ -36403,20 +36616,40 @@ function formatMemoryLabel(memory, { includeSourceCount = true } = {}) {
   }
   return parts.join(" | ");
 }
-function formatMemoryCollapsed(memory) {
+function formatMemoryCollapsedWithMode(memory, mode) {
   return formatMemoryLabel(memory);
 }
-function formatMemoryExpanded(memory) {
+function formatMemoryExpandedWithMode(memory, mode) {
   const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
-  lines.push(`  - content: ${memory.content}`);
+  lines.push(
+    `  - content: ${truncateText(memory.content, {
+      depth: "expanded",
+      mode
+    })}`
+  );
   if (memory.reasoning) {
-    lines.push(`  - reasoning: ${memory.reasoning}`);
+    lines.push(
+      `  - reasoning: ${truncateText(memory.reasoning, {
+        depth: "expanded",
+        mode
+      })}`
+    );
   }
   if (memory.application) {
-    lines.push(`  - application: ${memory.application}`);
+    lines.push(
+      `  - application: ${truncateText(memory.application, {
+        depth: "expanded",
+        mode
+      })}`
+    );
   }
   if (memory.tags && memory.tags.length > 0) {
-    lines.push(`  - tags: [${memory.tags.join(", ")}]`);
+    lines.push(
+      `  - tags: [${truncateText(memory.tags.join(", "), {
+        depth: "expanded",
+        mode
+      })}]`
+    );
   }
   if (memory.source) {
     lines.push(
@@ -36425,30 +36658,38 @@ function formatMemoryExpanded(memory) {
   }
   return lines.join("\n");
 }
-function formatObservationCollapsed(observation, options = {}) {
-  const { indent = "" } = options;
+function formatObservationCollapsedWithMode(observation, options = {}) {
+  const { indent = "", mode = "legacy" } = options;
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(
         observation.content,
-        options.sessionId,
-        options.turnPromptNumber
+        {
+          depth: "collapsed",
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber
+        }
       )}`
     );
   }
   return lines.join("\n");
 }
-function formatObservationExpanded(observation, options = {}) {
-  const { indent = "" } = options;
+function formatObservationExpandedWithMode(observation, options = {}) {
+  const { indent = "", mode = "legacy", depth = "expanded" } = options;
   const detailIndent = `${indent}  `;
-  const lines = [formatObservationCollapsed(observation, options)];
+  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
   if (observation.insight) {
     lines.push(
       `${detailIndent}- insight: ${truncateText(
         observation.insight,
-        options.sessionId,
-        options.turnPromptNumber
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber
+        }
       )}`
     );
   }
@@ -36456,8 +36697,12 @@ function formatObservationExpanded(observation, options = {}) {
     lines.push(
       `${detailIndent}- tags: ${truncateText(
         observation.tags.join(", "),
-        options.sessionId,
-        options.turnPromptNumber
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber
+        }
       )}`
     );
   }
@@ -36465,21 +36710,68 @@ function formatObservationExpanded(observation, options = {}) {
   if (observation.filesRead && observation.filesRead.length > 0) {
     filesParts.push(`\u{1F4D6} ${truncateText(
       observation.filesRead.join(", "),
-      options.sessionId,
-      options.turnPromptNumber
+      {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: options.turnPromptNumber
+      }
     )}`);
   }
   if (observation.filesModified && observation.filesModified.length > 0) {
     filesParts.push(`\u270F\uFE0F ${truncateText(
       observation.filesModified.join(", "),
-      options.sessionId,
-      options.turnPromptNumber
+      {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: options.turnPromptNumber
+      }
     )}`);
   }
   if (filesParts.length > 0) {
     lines.push(`${detailIndent}- files: ${filesParts.join(" ")}`);
   }
   return lines.join("\n");
+}
+function renderNode(node, options) {
+  const mode = options.mode ?? "unified";
+  switch (node.type) {
+    case "session":
+      return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode) : formatSessionExpandedWithMode(node.value, mode);
+    case "turn":
+      return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, options) : formatTurnExpandedWithMode(node.value, options);
+    case "observation":
+      return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, options) : formatObservationExpandedWithMode(node.value, options);
+    case "memory":
+      return options.depth === "collapsed" ? formatMemoryCollapsedWithMode(node.value, mode) : formatMemoryExpandedWithMode(node.value, mode);
+    case "toolCall":
+      return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, options) : formatToolCallExpandedWithMode(node.value, options);
+  }
+}
+function formatSessionCollapsed(session) {
+  return renderNode({ type: "session", value: session }, { depth: "collapsed", mode: "legacy" });
+}
+function formatSessionExpanded(session) {
+  return renderNode({ type: "session", value: session }, { depth: "expanded", mode: "legacy" });
+}
+function formatTurnCollapsed(turn, options = {}) {
+  return renderNode({ type: "turn", value: turn }, { depth: "collapsed", mode: "legacy", ...options });
+}
+function formatTurnExpanded(turn, options = {}) {
+  return renderNode({ type: "turn", value: turn }, { depth: "expanded", mode: "legacy", ...options });
+}
+function formatMemoryCollapsed(memory) {
+  return renderNode({ type: "memory", value: memory }, { depth: "collapsed", mode: "legacy" });
+}
+function formatMemoryExpanded(memory) {
+  return renderNode({ type: "memory", value: memory }, { depth: "expanded", mode: "legacy" });
+}
+function formatObservationCollapsed(observation, options = {}) {
+  return renderNode({ type: "observation", value: observation }, { depth: "collapsed", mode: "legacy", ...options });
+}
+function formatObservationExpanded(observation, options = {}) {
+  return renderNode({ type: "observation", value: observation }, { depth: "expanded", mode: "legacy", ...options });
 }
 function sampleWithOmissions(items, isProtected = () => false) {
   if (items.length <= 50) {
@@ -36540,6 +36832,27 @@ function sampleWithOmissions(items, isProtected = () => false) {
 }
 
 // src/mcp/recall.ts
+function expandNumericSelector(value) {
+  if (value === "*") {
+    return [];
+  }
+  if (/^\d+$/.test(value)) {
+    return [Number(value)];
+  }
+  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
+  if (!rangeMatch) {
+    return null;
+  }
+  const start = Number(rangeMatch[1]);
+  const end = Number(rangeMatch[2]);
+  const lower = Math.min(start, end);
+  const upper = Math.max(start, end);
+  const values = [];
+  for (let current = lower; current <= upper; current += 1) {
+    values.push(current);
+  }
+  return values;
+}
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -36548,54 +36861,6 @@ function splitInsight(insight) {
 }
 function formatParameterError(message) {
   return `Parameter error: ${message}`;
-}
-function normalizeRecallInput(input) {
-  const normalized = { ...input };
-  const hasObservationSelectors = normalized.obs !== void 0;
-  if (normalized.view === void 0 && normalized.id === void 0) {
-    if (hasObservationSelectors) {
-      normalized.view = "observations";
-    } else if (normalized.session !== void 0 && normalized.turn !== void 0) {
-      normalized.view = "turns";
-      normalized.depth ??= "expanded";
-    } else if (normalized.session !== void 0) {
-      normalized.view = "turns";
-    } else if (!hasUnscopedSearchFilters(normalized)) {
-      normalized.view = "sessions";
-    }
-  }
-  return normalized;
-}
-function parseSelectorValue(value, label) {
-  if (value === void 0) {
-    return { values: [] };
-  }
-  if (typeof value === "number") {
-    return { values: [value] };
-  }
-  if (Array.isArray(value)) {
-    return { values: [...new Set(value)].sort((left, right) => left - right) };
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return { values: [] };
-  }
-  const rangeMatch = trimmed.match(/^(\d+)\.\.(\d+)$/);
-  if (rangeMatch) {
-    const start = Number(rangeMatch[1]);
-    const end = Number(rangeMatch[2]);
-    const lower = Math.min(start, end);
-    const upper = Math.max(start, end);
-    const values = [];
-    for (let index = lower; index <= upper; index += 1) {
-      values.push(index);
-    }
-    return { values };
-  }
-  if (/^\d+$/.test(trimmed)) {
-    return { values: [Number(trimmed)] };
-  }
-  return { values: [], error: `invalid ${label} selector "${value}"` };
 }
 function parseTimeInput(time5) {
   if (!time5) {
@@ -36655,19 +36920,24 @@ function parseUtcDate(value) {
 }
 function parseRoutedId(value) {
   const trimmed = value.trim();
-  const turnMatch = /^S(\d+)\/T(\d+)$/i.exec(trimmed);
-  if (turnMatch) {
+  const observationListMatch = /^S(\d+)\/T(\d+)\/O\*$/i.exec(trimmed);
+  if (observationListMatch) {
     return {
-      kind: "turn",
-      sessionId: Number(turnMatch[1]),
-      promptNumber: Number(turnMatch[2])
+      kind: "observation-list",
+      sessionId: Number(observationListMatch[1]),
+      promptNumber: Number(observationListMatch[2])
     };
   }
-  const sessionMatch = /^S(\d+)$/i.exec(trimmed);
-  if (sessionMatch) {
+  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (turnMatch) {
+    const promptNumbers = expandNumericSelector(turnMatch[2]);
+    if (promptNumbers === null) {
+      return null;
+    }
     return {
-      kind: "session",
-      sessionId: Number(sessionMatch[1])
+      kind: "turns",
+      sessionId: Number(turnMatch[1]),
+      promptNumbers
     };
   }
   const observationMatch = /^O(\d+)$/i.exec(trimmed);
@@ -36675,6 +36945,28 @@ function parseRoutedId(value) {
     return {
       kind: "observation",
       observationId: Number(observationMatch[1])
+    };
+  }
+  const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (sessionMatch) {
+    const sessionIds = expandNumericSelector(sessionMatch[1]);
+    if (sessionIds === null) {
+      return null;
+    }
+    return {
+      kind: "sessions",
+      sessionIds
+    };
+  }
+  const memoryListMatch = /^M(\*|\d+\.\.\d+)$/i.exec(trimmed);
+  if (memoryListMatch) {
+    const memoryIds = expandNumericSelector(memoryListMatch[1]);
+    if (memoryIds === null) {
+      return null;
+    }
+    return {
+      kind: "memories",
+      memoryIds
     };
   }
   const memoryMatch = /^M(\d+)$/i.exec(trimmed);
@@ -36686,32 +36978,45 @@ function parseRoutedId(value) {
   }
   return null;
 }
-function mergeTimeRanges(input) {
-  const parsedTime = parseTimeInput(input.time);
+function resolveTimeRange(time5) {
+  const parsedTime = parseTimeInput(time5);
   if (parsedTime.error) {
     return { error: parsedTime.error };
   }
-  const lowerBounds = [input.after, parsedTime.range?.after].filter(
-    (value) => value !== void 0
-  );
-  const upperBounds = [input.before, parsedTime.range?.before].filter(
-    (value) => value !== void 0
-  );
-  const after = lowerBounds.length > 0 ? Math.max(...lowerBounds) : void 0;
-  const before = upperBounds.length > 0 ? Math.min(...upperBounds) : void 0;
-  if (after !== void 0 && before !== void 0 && after > before) {
-    return { error: "time filters do not overlap." };
+  return {
+    after: parsedTime.range?.after,
+    before: parsedTime.range?.before
+  };
+}
+function parseQueryFilters(query2) {
+  if (!query2) {
+    return {};
   }
-  return { after, before };
-}
-function resolveDefaultProject(db) {
-  const projects = db.query(
-    "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project ASC LIMIT 2"
-  ).all().map((row) => row.project).filter(Boolean);
-  return projects.length === 1 ? projects[0] : void 0;
-}
-function hasUnscopedSearchFilters(input) {
-  return input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.project !== void 0 || input.time !== void 0 || input.after !== void 0 || input.before !== void 0;
+  const filters = {};
+  const textTerms = [];
+  for (const token of query2.trim().split(/\s+/).filter(Boolean)) {
+    if (token.startsWith("type:")) {
+      filters.type = token.slice("type:".length);
+      continue;
+    }
+    if (token.startsWith("file:")) {
+      filters.file = token.slice("file:".length);
+      continue;
+    }
+    if (token.startsWith("project:")) {
+      filters.project = token.slice("project:".length);
+      continue;
+    }
+    if (token.startsWith("tag:")) {
+      filters.tag = token.slice("tag:".length);
+      continue;
+    }
+    textTerms.push(token);
+  }
+  if (textTerms.length > 0) {
+    filters.text = textTerms.join(" ");
+  }
+  return filters;
 }
 function buildSessionView(db, session) {
   const turns = getTurnsForSession(db, session.id).map(
@@ -36732,19 +37037,6 @@ function buildSessionView(db, session) {
     ),
     turns
   };
-}
-function getObservationCountByTurnId(db, turnIds) {
-  if (turnIds.length === 0) {
-    return /* @__PURE__ */ new Map();
-  }
-  const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT turn_id AS turnId, COUNT(*) AS count
-       FROM observations
-       WHERE turn_id IN (${placeholders})
-       GROUP BY turn_id`
-  ).all(...turnIds);
-  return new Map(rows.map((row) => [row.turnId, row.count]));
 }
 function buildSessionSummary(db, sessionId) {
   const session = getSession(db, sessionId);
@@ -36771,24 +37063,6 @@ function buildSessionSummary(db, sessionId) {
     turnCount,
     observationCount
   };
-}
-function buildCollapsedTurnsForSession(db, sessionId) {
-  const turns = getTurnsForSession(db, sessionId);
-  const observationCounts = getObservationCountByTurnId(
-    db,
-    turns.map((turn) => turn.id)
-  );
-  return turns.map((turn) => ({
-    id: turn.id,
-    promptNumber: turn.promptNumber,
-    title: turn.title,
-    content: turn.content,
-    observationCount: observationCounts.get(turn.id) ?? 0,
-    toolCallCount: turn.toolCallCount,
-    filesReadCount: turn.filesRead.length,
-    filesModifiedCount: turn.filesModified.length,
-    status: turn.status
-  }));
 }
 function buildTurnView(db, turn) {
   const observations = getObservationsForTurn(db, turn.id);
@@ -36840,18 +37114,6 @@ function buildMemoryView(db, memory) {
       createdAtEpoch: sourceTurn.createdAtEpoch
     } : null
   };
-}
-function selectSearchResults(db, input, after, before) {
-  return searchMemory(db, {
-    scope: input.view,
-    query: input.query,
-    project: input.project,
-    type: input.type,
-    file: input.file,
-    after,
-    before,
-    limit: input.limit ?? (input.view === "memories" ? 200 : input.view === "sessions" ? 1e3 : 20)
-  });
 }
 function renderSession(db, session, depth, turnSelector) {
   const view = buildSessionView(db, session);
@@ -37050,40 +37312,8 @@ function renderMemoryScope(db, memoryIds, depth) {
     (memory) => depth === "collapsed" ? formatMemoryCollapsed(memory) : formatMemoryExpanded(memory)
   ).join("\n");
 }
-function renderSessionDetailById(db, sessionId) {
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return "Session not found.";
-  }
-  const lines = [formatSessionExpanded(buildSessionView(db, session))];
-  for (const turn of buildCollapsedTurnsForSession(db, session.id)) {
-    lines.push(formatTurnCollapsed(turn, { sessionId: session.id }));
-  }
-  return lines.join("\n");
-}
-function renderTurnDetailById(db, sessionId, promptNumber) {
-  const turn = getTurn(db, sessionId, promptNumber);
-  if (!turn) {
-    return "Turn not found.";
-  }
-  const turnView = buildTurnView(db, turn);
-  return [
-    formatTurnExpanded(turnView, { sessionId }),
-    ...(turnView.observations ?? []).map(
-      (observation) => formatObservationCollapsed(observation, {
-        indent: "  ",
-        sessionId,
-        turnPromptNumber: turn.promptNumber
-      })
-    )
-  ].join("\n");
-}
-function renderObservationDetailById(db, observationId) {
-  const observation = getObservation(db, observationId);
-  if (!observation) {
-    return "Observation not found.";
-  }
-  return formatObservationExpanded({
+function buildObservationView(observation) {
+  return {
     id: observation.id,
     type: observation.type,
     title: observation.title,
@@ -37092,350 +37322,256 @@ function renderObservationDetailById(db, observationId) {
     tags: observation.tags,
     filesRead: observation.filesRead,
     filesModified: observation.filesModified
-  });
+  };
 }
-function renderMemoryDetailById(db, memoryId) {
+function renderSessionDetail(db, sessionId, depth) {
+  const session = getSession(db, sessionId);
+  return session ? renderSession(db, session, depth) : "Session not found.";
+}
+function renderObservationDetail(db, observationId, depth) {
+  const observation = getObservation(db, observationId);
+  if (!observation) {
+    return "Observation not found.";
+  }
+  const view = buildObservationView(observation);
+  return depth === "collapsed" ? formatObservationCollapsed(view) : formatObservationExpanded(view);
+}
+function renderMemoryDetail(db, memoryId, depth) {
   const memory = getMemory(db, memoryId);
   if (!memory) {
     return "Memory not found.";
   }
-  return formatMemoryExpanded(buildMemoryView(db, memory));
+  const view = buildMemoryView(db, memory);
+  return depth === "collapsed" ? formatMemoryCollapsed(view) : formatMemoryExpanded(view);
 }
-function renderRoutedId(db, id) {
-  const routed = parseRoutedId(id);
-  if (!routed) {
-    return formatParameterError(`invalid id selector "${id}"`);
-  }
-  if (routed.kind === "session") {
-    return renderSessionDetailById(db, routed.sessionId);
-  }
-  if (routed.kind === "turn") {
-    return renderTurnDetailById(db, routed.sessionId, routed.promptNumber);
-  }
-  if (routed.kind === "observation") {
-    return renderObservationDetailById(db, routed.observationId);
-  }
-  return renderMemoryDetailById(db, routed.memoryId);
-}
-function hasIdSelectorConflict(input) {
-  return input.view !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.project !== void 0 || input.limit !== void 0;
-}
-function firstLine(value) {
-  return value.split("\n")[0] ?? value;
-}
-function formatMixedSearchResult(db, result) {
-  if (result.layer === "memory") {
-    const memory = getMemory(db, result.sourceId);
-    return memory ? formatMemoryCollapsed(buildMemoryView(db, memory)) : `- [M${result.sourceId}]`;
-  }
-  if (result.layer === "session" && result.sessionId !== null) {
-    const session = buildSessionSummary(db, result.sessionId);
-    return session ? firstLine(formatSessionCollapsed(session)) : `- [S${result.sessionId}]`;
-  }
-  if (result.layer === "turn" && result.turnId !== null) {
-    const turn = getTurnById(db, result.turnId);
-    if (!turn) {
-      return `- [T?] ${result.title ?? "Untitled"}`;
+function listSessionIds(db, sessionIds, limit, after, before) {
+  const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
+  ) : getRecentSessions(db, { limit });
+  return sessions.filter((session) => {
+    if (after !== void 0 && session.createdAtEpoch < after) {
+      return false;
     }
-    return `- [T${turn.promptNumber}] ${turn.title ?? "Untitled"} | S${turn.sessionId}`;
-  }
-  if (result.layer === "observation" && result.observationId !== null && result.turnId !== null && result.sessionId !== null) {
-    const turn = getTurnById(db, result.turnId);
-    const promptNumber = turn?.promptNumber ?? "?";
-    return `- [O${result.observationId}] ${result.type ?? "observation"}: ${result.title ?? "Untitled"} | S${result.sessionId}/T${promptNumber}`;
-  }
-  return `- [${result.layer}] ${result.title ?? "Untitled"}`;
+    if (before !== void 0 && session.createdAtEpoch > before) {
+      return false;
+    }
+    return true;
+  }).map((session) => session.id);
 }
-function recallMemory(db, input) {
-  const normalizedInput = normalizeRecallInput(input);
-  if (normalizedInput.id) {
-    if (hasIdSelectorConflict(normalizedInput)) {
-      return formatParameterError(
-        "id cannot be combined with view, session, turn, obs, or search filters."
+function applyTurnSelector(db, sessionId, promptNumbers) {
+  const turns = getTurnsForSession(db, sessionId);
+  if (!promptNumbers || promptNumbers.length === 0) {
+    return turns;
+  }
+  const selected = new Set(promptNumbers);
+  return turns.filter((turn) => selected.has(turn.promptNumber));
+}
+function filterResultsByTag(db, results, tag) {
+  if (!tag) {
+    return results;
+  }
+  return results.filter((result) => {
+    if (result.layer === "observation" && result.observationId !== null) {
+      const observation = getObservation(db, result.observationId);
+      return observation?.tags.includes(tag) ?? false;
+    }
+    if (result.layer === "memory") {
+      const memory = getMemory(db, result.sourceId);
+      return memory?.tags.includes(tag) ?? false;
+    }
+    return false;
+  });
+}
+function renderGroupedSearchResults(db, results, depth) {
+  const memoryLines = [];
+  const sessionGroups = /* @__PURE__ */ new Map();
+  const sessionOrder = [];
+  for (const result of results) {
+    if (result.layer === "memory") {
+      const memory = getMemory(db, result.sourceId);
+      if (memory) {
+        const view = buildMemoryView(db, memory);
+        memoryLines.push(
+          depth === "collapsed" ? formatMemoryCollapsed(view) : formatMemoryExpanded(view)
+        );
+      }
+      continue;
+    }
+    if (result.sessionId === null) {
+      continue;
+    }
+    let group = sessionGroups.get(result.sessionId);
+    if (!group) {
+      group = {
+        sessionHit: false,
+        turnIds: /* @__PURE__ */ new Set(),
+        observationIdsByTurnId: /* @__PURE__ */ new Map()
+      };
+      sessionGroups.set(result.sessionId, group);
+      sessionOrder.push(result.sessionId);
+    }
+    if (result.layer === "session") {
+      group.sessionHit = true;
+      continue;
+    }
+    if (result.turnId !== null) {
+      group.turnIds.add(result.turnId);
+    }
+    if (result.layer === "observation" && result.turnId !== null && result.observationId !== null) {
+      const observationIds = group.observationIdsByTurnId.get(result.turnId) ?? [];
+      observationIds.push(result.observationId);
+      group.observationIdsByTurnId.set(result.turnId, observationIds);
+    }
+  }
+  const sessionLines = sessionOrder.map((sessionId) => {
+    const session = getSession(db, sessionId);
+    const group = sessionGroups.get(sessionId);
+    if (!session || !group) {
+      return "";
+    }
+    if (group.sessionHit && group.turnIds.size === 0) {
+      return renderSession(db, session, depth);
+    }
+    const lines = [formatSessionCollapsed(buildSessionView(db, session))];
+    const turns = getTurnsForSession(db, session.id).filter(
+      (turn) => group.turnIds.has(turn.id)
+    );
+    for (const turn of turns) {
+      const turnView = buildTurnView(db, turn);
+      const turnDepth = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? "collapsed" : depth;
+      lines.push(
+        turnDepth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
       );
-    }
-    return renderRoutedId(db, normalizedInput.id);
-  }
-  if (normalizedInput.view === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
-    const timeRange2 = mergeTimeRanges(normalizedInput);
-    if (timeRange2.error) {
-      return formatParameterError(timeRange2.error);
-    }
-    const results = selectSearchResults(
-      db,
-      normalizedInput,
-      timeRange2.after,
-      timeRange2.before
-    );
-    return renderSearchResults(
-      db,
-      normalizedInput,
-      results,
-      normalizedInput.depth ?? "collapsed"
-    );
-  }
-  const depth = normalizedInput.depth ?? "collapsed";
-  const timeRange = mergeTimeRanges(normalizedInput);
-  if (timeRange.error) {
-    return formatParameterError(timeRange.error);
-  }
-  if (normalizedInput.query || normalizedInput.type || normalizedInput.file) {
-    const results = selectSearchResults(
-      db,
-      normalizedInput,
-      timeRange.after,
-      timeRange.before
-    );
-    return renderSearchResults(db, normalizedInput, results, depth);
-  }
-  return renderScopedMemory(
-    db,
-    normalizedInput,
-    depth,
-    timeRange.after,
-    timeRange.before
-  );
-}
-function renderSearchResults(db, input, results, depth) {
-  if (input.view === void 0) {
-    return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
-  }
-  if (input.view === "memories") {
-    return renderMemoryScope(
-      db,
-      results.filter((result) => result.layer === "memory").map((result) => result.sourceId),
-      depth
-    );
-  }
-  if (input.view === "sessions") {
-    const sessions = results.filter(
-      (result) => result.sessionId !== null
-    ).map((result) => getSession(db, result.sessionId)).filter(
-      (session) => session !== null
-    );
-    return sessions.map((session) => renderSession(db, session, depth)).join("\n");
-  }
-  if (input.view === "turns") {
-    const turns = results.map((result) => getTurnById(db, result.turnId ?? -1)).filter((turn) => turn !== null);
-    return renderTurnScope(db, turns, depth);
-  }
-  const observations = results.filter(
-    (result) => result.sessionId !== null && result.turnId !== null && result.observationId !== null
-  ).map((result) => ({
-    sessionId: result.sessionId,
-    turnId: result.turnId,
-    observationId: result.observationId
-  }));
-  const includeParents = Boolean(input.session !== void 0 || input.turn !== void 0);
-  return renderObservationScope(db, observations, depth, includeParents);
-}
-function renderScopedMemory(db, input, depth, after, before) {
-  if (input.view === "memories") {
-    const project = input.project ?? resolveDefaultProject(db);
-    const results = searchMemory(db, {
-      scope: "memories",
-      project,
-      after,
-      before,
-      limit: input.limit ?? 200
-    });
-    return renderMemoryScope(
-      db,
-      results.filter((result) => result.layer === "memory").map((result) => result.sourceId),
-      depth
-    );
-  }
-  const sessionSelector = parseSelectorValue(input.session, "session");
-  const turnSelector = parseSelectorValue(input.turn, "turn");
-  const observationSelector = parseSelectorValue(
-    input.obs,
-    "observation"
-  );
-  if (sessionSelector.error) {
-    return formatParameterError(sessionSelector.error);
-  }
-  if (turnSelector.error) {
-    return formatParameterError(turnSelector.error);
-  }
-  if (observationSelector.error) {
-    return formatParameterError(observationSelector.error);
-  }
-  const sessionIds = sessionSelector.values;
-  const turnNumbers = turnSelector.values;
-  const observationIds = observationSelector.values;
-  if (input.view === "turns" && turnNumbers.length > 0 && sessionIds.length === 0) {
-    return formatParameterError(
-      'turn requires session; use recall(view="turns", session=142, turn=3).'
-    );
-  }
-  if (sessionIds.length > 0 && turnNumbers.length > 0) {
-    for (const sessionId of sessionIds) {
-      const turns = getTurnsForSession(db, sessionId);
-      const promptNumbers = new Set(turns.map((turn) => turn.promptNumber));
-      for (const promptNumber of turnNumbers) {
-        if (!promptNumbers.has(promptNumber)) {
-          return formatParameterError(
-            `turn ${promptNumber} does not belong to session ${sessionId}.`
-          );
-        }
-      }
-    }
-  }
-  if (sessionIds.length > 0 && observationIds.length > 0) {
-    const sessionSet = new Set(sessionIds);
-    for (const observationId of observationIds) {
-      const observation = getObservation(db, observationId);
-      if (!observation) {
-        continue;
-      }
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn || !sessionSet.has(turn.sessionId)) {
-        return formatParameterError(
-          `observation ${observationId} does not belong to session ${sessionIds.join(", ")}.`
-        );
-      }
-    }
-  }
-  if (sessionIds.length > 0 && turnNumbers.length > 0 && observationIds.length > 0) {
-    const turnSet = new Set(turnNumbers);
-    for (const observationId of observationIds) {
-      const observation = getObservation(db, observationId);
-      if (!observation) {
-        continue;
-      }
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn || !turnSet.has(turn.promptNumber)) {
-        return formatParameterError(
-          `observation ${observationId} does not belong to turn ${turnNumbers.join(", ")}.`
-        );
-      }
-    }
-  }
-  if (input.view === "sessions") {
-    const candidateSessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
-      (session) => session !== null
-    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
-    const observationSessionIds = /* @__PURE__ */ new Set();
-    if (observationIds.length > 0) {
+      const observationIds = group.observationIdsByTurnId.get(turn.id) ?? [];
       for (const observationId of observationIds) {
         const observation = getObservation(db, observationId);
         if (!observation) {
           continue;
         }
-        const turn = getTurnById(db, observation.turnId);
-        if (turn) {
-          observationSessionIds.add(turn.sessionId);
-        }
+        const observationView = buildObservationView(observation);
+        lines.push(
+          depth === "full" ? formatObservationExpanded(observationView, {
+            indent: "    ",
+            sessionId: session.id,
+            turnPromptNumber: turn.promptNumber
+          }) : formatObservationCollapsed(observationView, {
+            indent: "    ",
+            sessionId: session.id,
+            turnPromptNumber: turn.promptNumber
+          })
+        );
       }
     }
-    const filtered = candidateSessions.filter((session) => {
-      if (after !== void 0 && session.createdAtEpoch < after) {
+    return lines.join("\n");
+  });
+  return [...memoryLines, ...sessionLines.filter(Boolean)].join("\n");
+}
+function renderRoutedId(db, routed, depth, limit, after, before) {
+  if (routed.kind === "sessions") {
+    return listSessionIds(db, routed.sessionIds, limit, after, before).map((sessionId) => renderSessionDetail(db, sessionId, depth)).join("\n");
+  }
+  if (routed.kind === "turns") {
+    const turns = applyTurnSelector(db, routed.sessionId, routed.promptNumbers).filter((turn) => {
+      if (after !== void 0 && turn.createdAtEpoch < after) {
         return false;
       }
-      if (before !== void 0 && session.createdAtEpoch > before) {
-        return false;
-      }
-      if (turnNumbers.length > 0 && !getTurnsForSession(db, session.id).some(
-        (turn) => turnNumbers.includes(turn.promptNumber)
-      )) {
-        return false;
-      }
-      if (observationIds.length > 0 && !observationSessionIds.has(session.id)) {
+      if (before !== void 0 && turn.createdAtEpoch > before) {
         return false;
       }
       return true;
     });
-    const turnSelector2 = turnNumbers.length > 0 ? new Set(turnNumbers) : void 0;
-    return filtered.map((session) => renderSession(db, session, depth, turnSelector2)).join("\n");
+    return renderTurnScope(db, turns.slice(0, limit), depth);
   }
-  if (input.view === "turns") {
-    if (input.turn !== void 0 && sessionIds.length === 0) {
-      return formatParameterError('turn requires session; use recall(view="turns", session=142, turn=3).');
+  if (routed.kind === "observation-list") {
+    const turn = getTurn(db, routed.sessionId, routed.promptNumber);
+    if (!turn) {
+      return "Turn not found.";
     }
-    const sessions2 = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
-      (session) => session !== null
-    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
-    const turns = [];
-    for (const session of sessions2) {
-      turns.push(
-        ...getTurnsForSession(db, session.id).filter((turn) => {
-          if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
-            return false;
-          }
-          if (after !== void 0 && turn.createdAtEpoch < after) {
-            return false;
-          }
-          if (before !== void 0 && turn.createdAtEpoch > before) {
-            return false;
-          }
-          return true;
-        })
-      );
-    }
-    if (observationIds.length > 0) {
-      const observationTurnIds = /* @__PURE__ */ new Set();
-      for (const observationId of observationIds) {
-        const observation = getObservation(db, observationId);
-        if (!observation) {
-          continue;
-        }
-        observationTurnIds.add(observation.turnId);
+    const observations = getObservationsForTurn(db, turn.id).filter((observation) => {
+      if (after !== void 0 && observation.createdAtEpoch < after) {
+        return false;
       }
-      return renderTurnScope(db, turns.filter((turn) => observationTurnIds.has(turn.id)), depth);
-    }
-    return renderTurnScope(db, turns, depth);
-  }
-  if (observationIds.length > 0) {
-    const observations2 = observationIds.map((observationId) => getObservation(db, observationId)).filter(
-      (observation) => observation !== null
-    ).map((observation) => ({
-      sessionId: getTurnById(db, observation.turnId)?.sessionId ?? 0,
-      turnId: observation.turnId,
+      if (before !== void 0 && observation.createdAtEpoch > before) {
+        return false;
+      }
+      return true;
+    }).slice(0, limit).map((observation) => ({
+      sessionId: routed.sessionId,
+      turnId: turn.id,
       observationId: observation.id
     }));
-    return renderObservationScope(
-      db,
-      observations2,
-      depth,
-      sessionIds.length > 0 || turnNumbers.length > 0
-    );
+    return renderObservationScope(db, observations, depth, true);
   }
-  const sessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
-    (session) => session !== null
-  ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
-  const turnIds = /* @__PURE__ */ new Set();
-  const observations = [];
-  for (const session of sessions) {
-    for (const turn of getTurnsForSession(db, session.id)) {
-      if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
-        continue;
-      }
-      if (after !== void 0 && turn.createdAtEpoch < after) {
-        continue;
-      }
-      if (before !== void 0 && turn.createdAtEpoch > before) {
-        continue;
-      }
-      turnIds.add(turn.id);
-      for (const observation of getObservationsForTurn(db, turn.id)) {
-        observations.push({
-          sessionId: session.id,
-          turnId: turn.id,
-          observationId: observation.id
-        });
-      }
+  if (routed.kind === "observation") {
+    return renderObservationDetail(db, routed.observationId, depth);
+  }
+  if (routed.kind === "memories") {
+    const memoryIds = routed.memoryIds && routed.memoryIds.length > 0 ? routed.memoryIds : searchMemory(db, { scope: "memories", limit, after, before }).map((result) => result.sourceId);
+    return renderMemoryScope(db, memoryIds.slice(0, limit), depth);
+  }
+  return routed.kind === "memory" ? renderMemoryDetail(db, routed.memoryId, depth) : "";
+}
+function renderSessionList(db, depth, limit, after, before) {
+  return listSessionIds(db, void 0, limit, after, before).map((sessionId) => renderSessionDetail(db, sessionId, depth)).join("\n");
+}
+function searchQueryResults(db, filters, limit, after, before) {
+  if (filters.tag && !filters.text && !filters.type && !filters.file && !filters.project) {
+    return [
+      ...searchMemory(db, {
+        scope: "observations",
+        after,
+        before,
+        limit
+      }),
+      ...searchMemory(db, {
+        scope: "memories",
+        after,
+        before,
+        limit
+      })
+    ];
+  }
+  return searchMemory(db, {
+    query: filters.text,
+    type: filters.type,
+    file: filters.file,
+    project: filters.project,
+    after,
+    before,
+    limit
+  });
+}
+function recallMemory(db, input) {
+  const depth = input.depth ?? "collapsed";
+  const limit = input.limit ?? 50;
+  const timeRange = resolveTimeRange(input.time);
+  if (timeRange.error) {
+    return formatParameterError(timeRange.error);
+  }
+  if (input.id) {
+    const routed = parseRoutedId(input.id);
+    if (!routed) {
+      return formatParameterError(`invalid id selector "${input.id}"`);
     }
-  }
-  const turnRecords = [...turnIds].map((turnId) => getTurnById(db, turnId)).filter((turn) => turn !== null);
-  if (input.view === "observations") {
-    return renderObservationScope(
+    return renderRoutedId(
       db,
-      observations,
+      routed,
       depth,
-      sessionIds.length > 0 || turnNumbers.length > 0
+      limit,
+      timeRange.after,
+      timeRange.before
     );
   }
-  return renderTurnScope(db, turnRecords, depth);
+  if (input.query) {
+    const filters = parseQueryFilters(input.query);
+    const results = filterResultsByTag(
+      db,
+      searchQueryResults(db, filters, limit, timeRange.after, timeRange.before),
+      filters.tag
+    ).slice(0, limit);
+    return renderGroupedSearchResults(db, results, depth);
+  }
+  return renderSessionList(db, depth, limit, timeRange.after, timeRange.before);
 }
 
 // src/mcp/remember.ts
@@ -37651,6 +37787,7 @@ function rememberTool(db, input) {
 }
 
 // src/mcp/replay.ts
+var import_node_path3 = require("node:path");
 var import_node_fs3 = require("node:fs");
 
 // src/shared/transcript-parser.ts
@@ -37822,89 +37959,271 @@ function countUserPromptsInTranscript(transcriptPath) {
 }
 
 // src/mcp/replay.ts
-var TOOL_RESULT_PREVIEW_LIMIT = 500;
-function truncate(text, full = false) {
-  if (full || text.length <= TOOL_RESULT_PREVIEW_LIMIT) {
-    return text;
+function expandNumericSelector2(value) {
+  if (value === "*") {
+    return [];
   }
-  return `${text.slice(0, TOOL_RESULT_PREVIEW_LIMIT)}...`;
+  if (/^\d+$/.test(value)) {
+    return [Number(value)];
+  }
+  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
+  if (!rangeMatch) {
+    return null;
+  }
+  const start = Number(rangeMatch[1]);
+  const end = Number(rangeMatch[2]);
+  const lower = Math.min(start, end);
+  const upper = Math.max(start, end);
+  const values = [];
+  for (let current = lower; current <= upper; current += 1) {
+    values.push(current);
+  }
+  return values;
 }
-function resolveReplayTranscriptPath(db, input) {
-  if (input.transcriptPath) {
-    return input.transcriptPath;
+function parseReplayId(id) {
+  const trimmed = id.trim();
+  const toolMatch = /^S(\d+)\/T(\d+)\/Tool(\*|\d+)$/i.exec(trimmed);
+  if (toolMatch) {
+    const toolNumbers = toolMatch[3] === "*" ? [] : [Number(toolMatch[3])];
+    return {
+      kind: "tools",
+      sessionId: Number(toolMatch[1]),
+      promptNumber: Number(toolMatch[2]),
+      toolNumbers
+    };
   }
-  const session = getSession(db, input.session);
+  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (turnMatch) {
+    const promptNumbers = expandNumericSelector2(turnMatch[2]);
+    if (promptNumbers === null) {
+      return null;
+    }
+    return {
+      kind: "turns",
+      sessionId: Number(turnMatch[1]),
+      promptNumbers
+    };
+  }
+  const sessionMatch = /^S(\d+)$/i.exec(trimmed);
+  if (sessionMatch) {
+    return {
+      kind: "session",
+      sessionId: Number(sessionMatch[1])
+    };
+  }
+  return null;
+}
+function formatParameterError2(message) {
+  return `Parameter error: ${message}`;
+}
+function resolveReplayTranscriptPath(db, sessionId, transcriptPath) {
+  if (transcriptPath) {
+    return transcriptPath;
+  }
+  const session = getSession(db, sessionId);
   if (!session) {
     return null;
   }
   return resolveTranscriptPath(session.project, session.contentSessionId);
 }
-function formatToolBlock(index, toolCall, full = false) {
-  return [
-    `[Tool ${index}] ${toolCall.name}`,
-    `input: ${JSON.stringify(toolCall.input)}`,
-    `result: ${truncate(toolCall.result, full)}`
-  ].join("\n");
+function buildToolCalls(turn) {
+  return turn.toolCalls.map((toolCall) => ({
+    name: toolCall.name,
+    input: toolCall.input,
+    result: toolCall.result
+  }));
 }
-function formatTurnOverviewLine(promptNumber, userPrompt, toolCallCount, status) {
-  const statusPrefix = status === "undone" ? "\u23EA " : "";
-  const stats = toolCallCount > 0 ? ` | \u{1F527}${toolCallCount}` : "";
-  return `- [T${promptNumber}] ${statusPrefix}${userPrompt}${stats}`;
+function buildReplaySessionView(sessionId, transcriptPath, transcriptTurns, db) {
+  const session = getSession(db, sessionId);
+  if (session) {
+    return {
+      id: session.id,
+      title: session.title,
+      project: session.project,
+      createdAtEpoch: session.createdAtEpoch,
+      content: session.content,
+      insight: [],
+      nextSteps: session.nextSteps,
+      turnCount: transcriptTurns.length
+    };
+  }
+  return {
+    id: sessionId,
+    title: "Untitled",
+    project: (0, import_node_path3.dirname)((0, import_node_path3.dirname)(transcriptPath)),
+    createdAtEpoch: Math.floor(Date.now() / 1e3),
+    content: `Transcript: ${(0, import_node_path3.basename)(transcriptPath)}`,
+    turnCount: transcriptTurns.length
+  };
 }
-function formatTurnDetail(turn, promptNumber, status, full = false) {
-  const header = status === "undone" ? `[T${promptNumber}][undone] #${promptNumber}` : `[T${promptNumber}] #${promptNumber}`;
+function buildReplayTurnView(promptNumber, transcriptTurn, dbTurn) {
+  return {
+    id: dbTurn?.id ?? promptNumber,
+    promptNumber,
+    title: dbTurn?.title ?? null,
+    createdAtEpoch: dbTurn?.createdAtEpoch ?? null,
+    content: dbTurn?.content ?? null,
+    observationCount: 0,
+    toolCallCount: transcriptTurn.toolCalls.length,
+    filesReadCount: dbTurn?.filesRead.length ?? 0,
+    filesModifiedCount: dbTurn?.filesModified.length ?? 0,
+    status: dbTurn?.status,
+    promptPreview: transcriptTurn.userPrompt,
+    responsePreview: transcriptTurn.assistantText,
+    insight: dbTurn?.insight ? dbTurn.insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, "")) : [],
+    filesRead: dbTurn?.filesRead ?? [],
+    filesModified: dbTurn?.filesModified ?? [],
+    toolCalls: buildToolCalls(transcriptTurn)
+  };
+}
+function findReplayTurn(dbTurns, transcriptTurns, promptNumber) {
+  const dbTurn = dbTurns.find((turn) => turn.promptNumber === promptNumber) ?? null;
+  const transcriptTurn = (dbTurn?.contentPromptId ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId) : void 0) ?? transcriptTurns.find((candidate) => candidate.promptNumber === promptNumber) ?? null;
+  if (!transcriptTurn) {
+    return null;
+  }
+  return { transcriptTurn, dbTurn };
+}
+function matchDbTurn(transcriptTurn, dbTurns) {
+  return (transcriptTurn.promptId ? dbTurns.find((candidate) => candidate.contentPromptId === transcriptTurn.promptId) : void 0) ?? dbTurns.find((candidate) => candidate.promptNumber === transcriptTurn.promptNumber) ?? null;
+}
+function renderReplaySession(session, turns, depth) {
   const lines = [
-    header,
-    `prompt: "${turn.userPrompt}"`,
-    `response: "${turn.assistantText}"`
+    renderNode(
+      { type: "session", value: session },
+      { depth: depth === "collapsed" ? "collapsed" : "expanded", mode: "unified" }
+    )
   ];
-  turn.toolCalls.forEach((toolCall, index) => {
-    lines.push(formatToolBlock(index + 1, toolCall, full));
-  });
+  for (const turn of turns) {
+    lines.push(
+      renderNode(
+        { type: "turn", value: turn },
+        {
+          depth: depth === "full" ? "full" : "collapsed",
+          mode: "unified",
+          sessionId: session.id
+        }
+      )
+    );
+  }
+  return lines.join("\n");
+}
+function renderReplayTurns(session, turns, depth) {
+  const lines = [
+    renderNode(
+      { type: "session", value: session },
+      { depth: "collapsed", mode: "unified" }
+    )
+  ];
+  for (const turn of turns) {
+    lines.push(
+      renderNode(
+        { type: "turn", value: turn },
+        {
+          depth,
+          mode: "unified",
+          sessionId: session.id
+        }
+      )
+    );
+  }
+  return lines.join("\n");
+}
+function renderReplayTools(session, turn, toolCalls, depth) {
+  const lines = [
+    renderNode(
+      { type: "session", value: session },
+      { depth: "collapsed", mode: "unified" }
+    ),
+    renderNode(
+      { type: "turn", value: turn },
+      {
+        depth: "collapsed",
+        mode: "unified",
+        sessionId: session.id
+      }
+    )
+  ];
+  for (const toolCall of toolCalls) {
+    lines.push(
+      renderNode(
+        { type: "toolCall", value: toolCall },
+        {
+          depth,
+          mode: "unified",
+          indent: "    ",
+          sessionId: session.id,
+          turnPromptNumber: turn.promptNumber
+        }
+      )
+    );
+  }
   return lines.join("\n");
 }
 function replayMemory(db, input) {
-  const transcriptPath = resolveReplayTranscriptPath(db, input);
+  if (!input.id?.trim()) {
+    return formatParameterError2(
+      'replay() requires id like "S1", "S1/T2", or "S1/T2/Tool3".'
+    );
+  }
+  const routed = parseReplayId(input.id);
+  if (!routed) {
+    return formatParameterError2(`invalid replay id "${input.id}"`);
+  }
+  const transcriptPath = resolveReplayTranscriptPath(
+    db,
+    routed.sessionId,
+    input.transcriptPath
+  );
   if (!transcriptPath || !(0, import_node_fs3.existsSync)(transcriptPath)) {
     return "Transcript not found.";
   }
   const transcriptTurns = parseReplayTranscript(transcriptPath);
-  const session = getSession(db, input.session);
-  const dbTurns = session ? getTurnsForSession(db, session.id) : [];
-  const statusByPromptNumber = new Map(
-    dbTurns.map((turn) => [turn.promptNumber, turn.status])
+  const dbSession = getSession(db, routed.sessionId);
+  const dbTurns = dbSession ? getTurnsForSession(db, dbSession.id) : [];
+  const depth = input.depth ?? "collapsed";
+  const sessionView = buildReplaySessionView(
+    routed.sessionId,
+    transcriptPath,
+    transcriptTurns,
+    db
   );
-  const toolCallCountByPromptNumber = new Map(
-    transcriptTurns.map((turn) => [turn.promptNumber, turn.toolCalls.length])
-  );
-  if (input.turn === void 0) {
-    return transcriptTurns.map(
-      (turn) => formatTurnOverviewLine(
-        turn.promptNumber,
-        turn.userPrompt,
-        toolCallCountByPromptNumber.get(turn.promptNumber) ?? 0,
-        statusByPromptNumber.get(turn.promptNumber)
-      )
-    ).join("\n");
+  if (routed.kind === "session") {
+    const turnViews = transcriptTurns.map(
+      (turn) => buildReplayTurnView(turn.promptNumber, turn, matchDbTurn(turn, dbTurns))
+    );
+    return renderReplaySession(sessionView, turnViews, depth);
   }
-  const dbTurn = session ? getTurn(db, session.id, input.turn) : null;
-  const resolvedTurn = (dbTurn?.contentPromptId ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId) : void 0) ?? transcriptTurns.find((candidate) => candidate.promptNumber === input.turn) ?? null;
-  if (!resolvedTurn) {
+  const promptNumbers = routed.kind === "turns" ? routed.promptNumbers : [routed.promptNumber];
+  const selectedTurns = promptNumbers && promptNumbers.length > 0 ? promptNumbers.map((promptNumber) => findReplayTurn(dbTurns, transcriptTurns, promptNumber)).filter(
+    (turn) => turn !== null
+  ) : transcriptTurns.map((turn) => ({
+    transcriptTurn: turn,
+    dbTurn: matchDbTurn(turn, dbTurns)
+  }));
+  if (selectedTurns.length === 0) {
     return "Turn not found.";
   }
-  if (input.tool !== void 0) {
-    const toolCall = resolvedTurn.toolCalls[input.tool - 1];
-    if (!toolCall) {
-      return "Tool call not found.";
-    }
-    return formatToolBlock(input.tool, toolCall, input.full);
+  if (routed.kind === "turns") {
+    return renderReplayTurns(
+      sessionView,
+      selectedTurns.map(
+        ({ transcriptTurn: transcriptTurn2, dbTurn: dbTurn2 }) => buildReplayTurnView(transcriptTurn2.promptNumber, transcriptTurn2, dbTurn2)
+      ),
+      depth
+    );
   }
-  return formatTurnDetail(
-    resolvedTurn,
-    input.turn,
-    statusByPromptNumber.get(input.turn),
-    input.full
+  const { transcriptTurn, dbTurn } = selectedTurns[0];
+  const turnView = buildReplayTurnView(
+    transcriptTurn.promptNumber,
+    transcriptTurn,
+    dbTurn
   );
+  const toolCalls = routed.toolNumbers && routed.toolNumbers.length > 0 ? routed.toolNumbers.map((toolNumber) => turnView.toolCalls?.[toolNumber - 1] ?? null).filter((toolCall) => toolCall !== null) : turnView.toolCalls ?? [];
+  if (toolCalls.length === 0) {
+    return "Tool call not found.";
+  }
+  return renderReplayTools(sessionView, turnView, toolCalls, depth);
 }
 
 // src/mcp/handlers.ts
@@ -37918,37 +38237,24 @@ function textResult2(text) {
     ]
   };
 }
-function createDatabaseBackedHandlers(database, options = {}) {
+function createDatabaseBackedHandlers(database, _options = {}) {
   if (!database) {
     return {};
   }
   return {
     recall: (args) => textResult2(
       recallMemory(database, {
-        view: args.view,
         id: args.id,
         query: args.query,
-        session: args.session,
-        turn: args.turn,
-        obs: args.obs ?? void 0,
         time: args.time,
         depth: args.depth,
-        limit: args.limit,
-        expandTurns: args.expand_turns ?? args.expandTurns,
-        before: args.before,
-        after: args.after,
-        file: args.file,
-        type: args.type,
-        project: args.project ?? options.defaultProject
+        limit: args.limit
       })
     ),
     replay: (args) => textResult2(
       replayMemory(database, {
-        session: args.session,
-        turn: args.turn,
-        tool: args.tool,
-        full: args.full,
-        transcriptPath: args.transcript_path
+        id: args.id,
+        depth: args.depth
       })
     ),
     remember: (args) => rememberTool(database, args)
@@ -38047,7 +38353,7 @@ function moveAgentSession(cwd2, sessionId, deps = defaultMoveDeps) {
   if (!deps.existsSync(srcPath)) {
     return;
   }
-  deps.mkdirSync((0, import_node_path3.dirname)(destPath), { recursive: true });
+  deps.mkdirSync((0, import_node_path4.dirname)(destPath), { recursive: true });
   try {
     deps.renameSync(srcPath, destPath);
   } catch (error49) {
@@ -38187,6 +38493,7 @@ function normalizeHookInput(raw, platform = "claude-code") {
 }
 
 // src/mnemosyne/context.ts
+var import_node_fs5 = require("node:fs");
 function isActionableStatus(status) {
   return status === "pending" || status === "stale" || status === "extracting_pending" || status === "extracting_stale";
 }
@@ -38200,44 +38507,122 @@ function buildCollapsedTurnView(turn, observationCount) {
     toolCallCount: turn.toolCallCount,
     filesReadCount: turn.filesRead.length,
     filesModifiedCount: turn.filesModified.length,
-    status: turn.status
+    status: turn.status,
+    promptPreview: turn.userPrompt
   };
 }
-function buildExtractionContext(db, sessionId) {
+function buildToolCalls2(turn) {
+  if (!turn) {
+    return [];
+  }
+  return turn.toolCalls.map((toolCall) => ({
+    name: toolCall.name,
+    input: toolCall.input,
+    result: toolCall.result
+  }));
+}
+function buildActionableTurnView(turn, transcriptTurn) {
+  return {
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    content: turn.content,
+    observationCount: 0,
+    toolCallCount: transcriptTurn?.toolCalls.length ?? turn.toolCallCount ?? 0,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status,
+    promptPreview: turn.userPrompt,
+    responsePreview: turn.assistantResponse,
+    insight: turn.insight ? turn.insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, "")) : [],
+    filesRead: turn.filesRead,
+    filesModified: turn.filesModified,
+    toolCalls: buildToolCalls2(transcriptTurn)
+  };
+}
+function resolveReplayTurns(session) {
+  const transcriptPath = resolveTranscriptPath(
+    session.project,
+    session.contentSessionId
+  );
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+    return [];
+  }
+  return parseReplayTranscript(transcriptPath);
+}
+function buildExtractionContextFromReplayTurns(db, sessionId, replayTurns) {
   const sessionSummary = buildSessionSummary(db, sessionId);
   if (!sessionSummary) {
     return "";
   }
   const session = getSession(db, sessionId);
-  const anchor = session?.lastCompactTurn ?? 0;
+  if (!session) {
+    return "";
+  }
+  const replayByPromptId = new Map(
+    replayTurns.filter((turn) => turn.promptId).map((turn) => [turn.promptId, turn])
+  );
+  const replayByPromptNumber = new Map(
+    replayTurns.map((turn) => [turn.promptNumber, turn])
+  );
+  const anchor = session.lastCompactTurn ?? 0;
   const turns = getTurnsForSession(db, sessionId).filter(
     (turn) => turn.promptNumber > anchor || isActionableStatus(turn.status)
   );
   const lines = [];
   for (const turn of turns) {
     if (isActionableStatus(turn.status)) {
-      const view = buildTurnView(db, turn);
-      lines.push(formatTurnExpanded(view, { sessionId }));
-      for (const observation of view.observations ?? []) {
-        lines.push(
-          formatObservationCollapsed(observation, {
-            indent: "    ",
-            sessionId,
-            turnPromptNumber: turn.promptNumber
-          })
-        );
-      }
+      const transcriptTurn = (turn.contentPromptId ? replayByPromptId.get(turn.contentPromptId) : void 0) ?? replayByPromptNumber.get(turn.promptNumber);
+      lines.push(
+        renderNode(
+          {
+            type: "turn",
+            value: buildActionableTurnView(turn, transcriptTurn)
+          },
+          {
+            depth: "expanded",
+            mode: "unified",
+            sessionId
+          }
+        )
+      );
       continue;
     }
     lines.push(
-      formatTurnCollapsed(
-        buildCollapsedTurnView(turn, getObservationsForTurn(db, turn.id).length),
-        { sessionId }
+      renderNode(
+        {
+          type: "turn",
+          value: buildCollapsedTurnView(
+            turn,
+            getObservationsForTurn(db, turn.id).length
+          )
+        },
+        {
+          depth: "collapsed",
+          mode: "unified",
+          sessionId
+        }
       )
     );
   }
-  lines.push(formatSessionExpanded(sessionSummary));
+  lines.push(
+    renderNode(
+      { type: "session", value: sessionSummary },
+      { depth: "expanded", mode: "unified" }
+    )
+  );
   return lines.join("\n");
+}
+function buildExtractionContext(db, sessionId) {
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return "";
+  }
+  return buildExtractionContextFromReplayTurns(
+    db,
+    sessionId,
+    resolveReplayTurns(session)
+  );
 }
 
 // src/mnemosyne/prompt.ts
@@ -38390,6 +38775,12 @@ function createCompactHandler(dependencies) {
 
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
+function splitInsight2(insight) {
+  if (!insight) {
+    return [];
+  }
+  return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
 function buildHeader(db) {
   const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
   const observationCount = db.query("SELECT COUNT(*) AS count FROM observations").get()?.count ?? 0;
@@ -38402,23 +38793,118 @@ function buildHeader(db) {
     "  - [Tx] title | \u{1F4A1}n \u{1F4D6}n \u270F\uFE0Fn \u{1F527}n",
     "  - [Ox] \u{1F535} title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)'
+    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")'
   ].join("\n");
 }
 function resolvePrimarySessionRecord(db, input, recentSessions) {
   const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
   return currentSession ?? recentSessions[0] ?? null;
 }
+function buildSessionMetricMap(db, sessionIds) {
+  if (sessionIds.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const placeholders = sessionIds.map(() => "?").join(", ");
+  const metrics = /* @__PURE__ */ new Map();
+  for (const sessionId of sessionIds) {
+    metrics.set(sessionId, { turnCount: 0, observationCount: 0 });
+  }
+  const turnRows = db.query(
+    `SELECT session_id AS sessionId, COUNT(*) AS count
+       FROM turns
+       WHERE session_id IN (${placeholders})
+       GROUP BY session_id`
+  ).all(...sessionIds);
+  for (const row of turnRows) {
+    const metric = metrics.get(row.sessionId);
+    if (metric) {
+      metric.turnCount = row.count;
+    }
+  }
+  const observationRows = db.query(
+    `SELECT t.session_id AS sessionId, COUNT(*) AS count
+       FROM observations o
+       JOIN turns t ON t.id = o.turn_id
+       WHERE t.session_id IN (${placeholders})
+       GROUP BY t.session_id`
+  ).all(...sessionIds);
+  for (const row of observationRows) {
+    const metric = metrics.get(row.sessionId);
+    if (metric) {
+      metric.observationCount = row.count;
+    }
+  }
+  return metrics;
+}
+function buildSessionView2(session, metrics) {
+  return {
+    id: session.id,
+    title: session.title,
+    project: session.project,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
+    insight: splitInsight2(session.insight),
+    nextSteps: session.nextSteps,
+    turnCount: metrics?.turnCount ?? 0,
+    observationCount: metrics?.observationCount ?? 0
+  };
+}
+function getObservationCountByTurnId(db, turnIds) {
+  if (turnIds.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT turn_id AS turnId, COUNT(*) AS count
+       FROM observations
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`
+  ).all(...turnIds);
+  return new Map(rows.map((row) => [row.turnId, row.count]));
+}
+function buildCollapsedTurnViews(db, sessionId) {
+  const turns = getTurnsForSession(db, sessionId);
+  const observationCounts = getObservationCountByTurnId(
+    db,
+    turns.map((turn) => turn.id)
+  );
+  return turns.map((turn) => ({
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    content: turn.content,
+    observationCount: observationCounts.get(turn.id) ?? 0,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status
+  }));
+}
 function buildCurrentSessionOutput(session, turns) {
-  const lines = [formatSessionExpanded(session)];
+  const lines = [
+    renderNode(
+      { type: "session", value: session },
+      { depth: "expanded", mode: "legacy" }
+    )
+  ];
   for (const turn of turns) {
-    lines.push(formatTurnCollapsed(turn));
+    lines.push(
+      renderNode(
+        { type: "turn", value: turn },
+        { depth: "collapsed", mode: "legacy" }
+      )
+    );
   }
   return lines.join("\n");
 }
-function buildRecentSessionsOutput(db, recentSessions, primarySessionId) {
+function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessionId) {
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
-  return others.map((session) => buildSessionSummary(db, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
+  return others.map((session) => buildSessionView2(session, sessionMetrics.get(session.id))).map(
+    (session) => renderNode(
+      { type: "session", value: session },
+      { depth: "collapsed", mode: "legacy" }
+    )
+  );
 }
 function buildMemoryView2(memory) {
   return {
@@ -38476,7 +38962,12 @@ function buildMemoriesOutput(db, projectScope) {
   return [
     "## Memories",
     "",
-    ...memories.map((memory) => formatMemoryCollapsed(buildMemoryView2(memory)))
+    ...memories.map(
+      (memory) => renderNode(
+        { type: "memory", value: buildMemoryView2(memory) },
+        { depth: "collapsed", mode: "legacy" }
+      )
+    )
   ];
 }
 function buildContextOutput(db, input) {
@@ -38489,18 +38980,22 @@ function buildContextOutput(db, input) {
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  const primarySession = buildSessionSummary(db, primarySessionRecord.id);
-  if (!primarySession) {
-    return EMPTY_CONTEXT_FALLBACK;
-  }
-  const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
+  const sessionIds = Array.from(
+    /* @__PURE__ */ new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id])
+  );
+  const sessionMetrics = buildSessionMetricMap(db, sessionIds);
+  const primarySession = buildSessionView2(
+    primarySessionRecord,
+    sessionMetrics.get(primarySessionRecord.id)
+  );
+  const primaryTurns = buildCollapsedTurnViews(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
     db,
     primarySessionRecord.project
   );
   const recentSessionOutputs = buildRecentSessionsOutput(
-    db,
     recentSessions,
+    sessionMetrics,
     primarySessionRecord.id
   );
   return [
@@ -38699,7 +39194,7 @@ function getDefaultHandlers() {
   return defaultHandlers;
 }
 function readJsonFromStdin() {
-  const input = (0, import_node_fs5.readFileSync)(0, "utf8").trim();
+  const input = (0, import_node_fs6.readFileSync)(0, "utf8").trim();
   if (input === "") {
     return {};
   }

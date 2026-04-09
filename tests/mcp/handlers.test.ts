@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { createMemory } from "../../src/db/memories";
 import { initializeDatabase } from "../../src/db/schema";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
+import { replayInputSchema } from "../../src/mcp/definitions";
 
 describe("database-backed MCP handlers", () => {
   let db: Database;
@@ -50,16 +51,40 @@ describe("database-backed MCP handlers", () => {
     db.close();
   });
 
-  test("passes the caller-provided default project into memory recall", async () => {
+  test("routes simplified recall args without legacy scope fields", async () => {
     const handlers = createDatabaseBackedHandlers(db, {
       defaultProject: "claude-mnemo",
     });
 
     const result = await handlers.recall?.({
-      view: "memories",
+      id: "M1",
     });
 
     expect(result?.content[0]?.text).toContain("Auth mutex policy");
-    expect(result?.content[0]?.text).not.toContain("Other project note");
+  });
+
+  test("routes simplified replay args through the replay handler", async () => {
+    const handlers = createDatabaseBackedHandlers(db);
+
+    const result = await handlers.replay?.({
+      id: "S1",
+      depth: "collapsed",
+    });
+
+    expect(result?.content[0]?.text).toBe("Transcript not found.");
+  });
+
+  test("replay schema only accepts id and optional depth", () => {
+    expect(replayInputSchema.parse({ id: "S1/T2", depth: "full" })).toEqual({
+      id: "S1/T2",
+      depth: "full",
+    });
+
+    expect(() =>
+      replayInputSchema.parse({
+        id: "S1",
+        session: 1,
+      }),
+    ).toThrow();
   });
 });

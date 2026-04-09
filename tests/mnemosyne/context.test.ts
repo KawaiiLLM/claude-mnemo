@@ -4,7 +4,10 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { buildExtractionContext } from "../../src/mnemosyne/context";
+import {
+  buildExtractionContext,
+  buildExtractionContextFromReplayTurns,
+} from "../../src/mnemosyne/context";
 
 describe("buildExtractionContext", () => {
   let db: Database;
@@ -81,7 +84,24 @@ describe("buildExtractionContext", () => {
       131,
     );
 
-    const context = buildExtractionContext(db, sessionId);
+    db.query("UPDATE turns SET content_prompt_id = ? WHERE id = ?").run("p-2", turnId);
+
+    const context = buildExtractionContextFromReplayTurns(db, sessionId, [
+      {
+        promptNumber: 2,
+        promptId: "p-2",
+        userPrompt: "Pending work",
+        assistantText: "Fresh response",
+        toolCalls: [
+          {
+            name: "Read",
+            input: { file_path: "src/app.ts" },
+            result: "app.ts contents",
+          },
+        ],
+        isSidechain: false,
+      },
+    ]);
 
     expect(context).toContain(`[S${sessionId}][T1] Settled turn [extracted]`);
     expect(context).not.toContain('prompt: "Already done"');
@@ -90,8 +110,9 @@ describe("buildExtractionContext", () => {
     expect(context).toContain('prompt: "Pending work"');
     expect(context).toContain('response: "Fresh response"');
     expect(context).toContain("- actionable insight");
-    expect(context).toContain("[O");
-    expect(context).toContain("Existing observation");
+    expect(context).toContain("- 🔧 Read src/app.ts");
+    expect(context).toContain('- out: app.ts contents');
+    expect(context).not.toContain("Existing observation");
     expect(context).toContain(`[S${sessionId}] Extraction context session`);
     expect(context.indexOf(`[S${sessionId}][T1] Settled turn [extracted]`)).toBeLessThan(
       context.indexOf(`[S${sessionId}] Extraction context session`),

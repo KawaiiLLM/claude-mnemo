@@ -6,6 +6,7 @@ import { createMemory } from "../../src/db/memories";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
+import * as formatModule from "../../src/mcp/format";
 import * as recallModule from "../../src/mcp/recall";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
@@ -257,7 +258,7 @@ describe("handleContextHook", () => {
     emptyDb.close();
   });
 
-  test("queries recent sessions once and uses shared session formatting for the current session wrapper", async () => {
+  test("queries recent sessions once and renders through shared nodes without recall summary helpers", async () => {
     const singleSessionDb = createDatabase(":memory:");
     initializeSchema(singleSessionDb);
 
@@ -275,6 +276,7 @@ describe("handleContextHook", () => {
     const getRecentSessionsSpy = spyOn(sessionsModule, "getRecentSessions");
     const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
     const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
+    const renderNodeSpy = spyOn(formatModule, "renderNode");
     const handler = createContextHandler({
       db: singleSessionDb,
     });
@@ -286,20 +288,18 @@ describe("handleContextHook", () => {
     );
 
     expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
-    expect(buildSessionSummarySpy).toHaveBeenCalledTimes(1);
-    expect(buildSessionSummarySpy).toHaveBeenCalledWith(
-      singleSessionDb,
-      singleSession.id,
-    );
-    expect(buildCollapsedTurnsSpy).toHaveBeenCalledTimes(1);
-    expect(buildCollapsedTurnsSpy).toHaveBeenCalledWith(
-      singleSessionDb,
-      singleSession.id,
+    expect(buildSessionSummarySpy).not.toHaveBeenCalled();
+    expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
+    expect(renderNodeSpy).toHaveBeenCalledTimes(1);
+    expect(renderNodeSpy).toHaveBeenCalledWith(
+      { type: "session", value: expect.objectContaining({ id: singleSession.id }) },
+      { depth: "expanded", mode: "legacy" },
     );
 
     getRecentSessionsSpy.mockRestore();
     buildSessionSummarySpy.mockRestore();
     buildCollapsedTurnsSpy.mockRestore();
+    renderNodeSpy.mockRestore();
     singleSessionDb.close();
   });
 
@@ -525,6 +525,7 @@ describe("handleContextHook", () => {
     });
     const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
     const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
+    const renderNodeSpy = spyOn(formatModule, "renderNode");
 
     const result = await handler(
       createInput({
@@ -539,7 +540,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools");
     expect(output).toContain("Format:");
     expect(output).toContain(
-      'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)',
+      'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")',
     );
     expect(output).toContain("## Current Session");
     expect(output).toContain("## Memories");
@@ -611,19 +612,29 @@ describe("handleContextHook", () => {
     expect(output.indexOf("- [S3] Anchored session")).toBeLessThan(
       output.indexOf("- [S1] Most recent session"),
     );
-    expect(buildSessionSummarySpy).toHaveBeenCalledTimes(5);
-    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(
-      1,
-      db,
-      currentSessionId,
+    expect(buildSessionSummarySpy).not.toHaveBeenCalled();
+    expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
+    expect(renderNodeSpy).toHaveBeenCalledWith(
+      { type: "session", value: expect.objectContaining({ id: currentSessionId }) },
+      { depth: "expanded", mode: "legacy" },
     );
-    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(2, db, 1);
-    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(3, db, 2);
-    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(4, db, 4);
-    expect(buildSessionSummarySpy).toHaveBeenNthCalledWith(5, db, 5);
-    expect(buildCollapsedTurnsSpy).toHaveBeenCalledTimes(1);
-    expect(buildCollapsedTurnsSpy).toHaveBeenCalledWith(db, currentSessionId);
+    expect(renderNodeSpy).toHaveBeenCalledWith(
+      { type: "session", value: expect.objectContaining({ id: 1 }) },
+      { depth: "collapsed", mode: "legacy" },
+    );
+    expect(renderNodeSpy).toHaveBeenCalledWith(
+      { type: "turn", value: expect.objectContaining({ promptNumber: 2 }) },
+      { depth: "collapsed", mode: "legacy" },
+    );
+    expect(renderNodeSpy).toHaveBeenCalledWith(
+      {
+        type: "memory",
+        value: expect.objectContaining({ title: "Use real DB tests" }),
+      },
+      { depth: "collapsed", mode: "legacy" },
+    );
     buildSessionSummarySpy.mockRestore();
     buildCollapsedTurnsSpy.mockRestore();
+    renderNodeSpy.mockRestore();
   });
 });

@@ -99,41 +99,43 @@ describe("replayMemory", () => {
 
   test("shows turn overview for a session", () => {
     const output = replayMemory(db, {
-      session: sessionId,
+      id: `S${sessionId}`,
       transcriptPath,
     });
 
-    expect(output).toContain("- [T1] Why am I getting 401 errors? | 🔧2");
-    expect(output).toContain("- [T2] Fix it and add coverage | 🔧1");
-    expect(output).not.toContain("#1");
+    expect(output).toContain("- [S1] Replay session");
+    expect(output).toContain('- [S1][T1] "Why am I getting 401 errors?" | 🔧2');
+    expect(output).toContain('- [S1][T2] "Fix it and add coverage" | 🔧1');
   });
 
   test("shows a full QA transcript for a specific turn", () => {
     const output = replayMemory(db, {
-      session: sessionId,
-      turn: 1,
+      id: `S${sessionId}/T1`,
+      depth: "expanded",
       transcriptPath,
     });
 
     expect(output).toContain('prompt: "Why am I getting 401 errors?"');
     expect(output).toContain('response: "I investigated the auth flow.');
-    expect(output).toContain("[Tool 1] Read");
-    expect(output).toContain("[Tool 2] Bash");
-    expect(output).toContain("result: auth.ts contents");
+    expect(output).toContain("- [S1] Replay session");
+    expect(output).toContain("- 🔧 Read src/auth.ts");
+    expect(output).toContain("- 🔧 Bash npm test -- auth");
+    expect(output).toContain('- out: auth.ts contents');
   });
 
   test("shows a single tool call by index", () => {
     const output = replayMemory(db, {
-      session: sessionId,
-      turn: 1,
-      tool: 2,
+      id: `S${sessionId}/T1/Tool2`,
+      depth: "expanded",
       transcriptPath,
     });
 
-    expect(output).toContain("[Tool 2] Bash");
-    expect(output).toContain('input: {"command":"npm test -- auth"}');
-    expect(output).toContain("result: test output: ok");
-    expect(output).not.toContain("[Tool 1] Read");
+    expect(output).toContain("- [S1] Replay session");
+    expect(output).toContain("- [S1][T1] \"Why am I getting 401 errors?\" | 🔧2");
+    expect(output).toContain("- 🔧 Bash npm test -- auth");
+    expect(output).toContain('- in: {"command":"npm test -- auth"}');
+    expect(output).toContain("- out: test output: ok");
+    expect(output).not.toContain("- 🔧 Read src/auth.ts");
   });
 
   test("uses content_prompt_id to replay the correct turn when prompt numbering drifts", () => {
@@ -210,14 +212,14 @@ describe("replayMemory", () => {
     );
 
     const output = replayMemory(db, {
-      session: sessionId,
-      turn: 2,
+      id: `S${sessionId}/T2`,
+      depth: "expanded",
       transcriptPath: driftedTranscript.path,
     });
 
     expect(output).toContain('prompt: "Second real prompt"');
     expect(output).toContain('response: "Second answer"');
-    expect(output).toContain("[Tool 1] Read");
+    expect(output).toContain("- 🔧 Read src/app.ts");
     expect(output).not.toContain("First real prompt");
 
     rmSync(driftedTranscript.directory, { recursive: true, force: true });
@@ -225,20 +227,17 @@ describe("replayMemory", () => {
 
   test("truncates tool results unless full mode is enabled", () => {
     const truncated = replayMemory(db, {
-      session: sessionId,
-      turn: 2,
-      tool: 1,
+      id: `S${sessionId}/T2/Tool1`,
+      depth: "expanded",
       transcriptPath,
     });
     const full = replayMemory(db, {
-      session: sessionId,
-      turn: 2,
-      tool: 1,
-      full: true,
+      id: `S${sessionId}/T2/Tool1`,
+      depth: "full",
       transcriptPath,
     });
 
-    expect(truncated).toContain("result: ");
+    expect(truncated).toContain("- out: ");
     expect(truncated).toContain("...");
     expect(full).not.toContain("...");
     expect(full).toContain("x".repeat(600));
@@ -246,7 +245,7 @@ describe("replayMemory", () => {
 
   test("returns a graceful error when the transcript is missing", () => {
     const output = replayMemory(db, {
-      session: sessionId,
+      id: `S${sessionId}`,
       transcriptPath: join(transcriptDirectory, "missing.jsonl"),
     });
 
@@ -309,13 +308,12 @@ describe("replayMemory", () => {
     );
 
     const output = replayMemory(db, {
-      session: sessionId,
+      id: `S${sessionId}`,
       transcriptPath: transcript.path,
     });
 
-    expect(output).toContain("- [T1] ⏪ Draft approach");
-    expect(output).toContain("- [T2] Ship the final fix");
-    expect(output).not.toContain("[undone]");
+    expect(output).toContain('- [S1][T1] "Draft approach" [undone]');
+    expect(output).toContain('- [S1][T2] "Ship the final fix" [pending]');
     expect(output).not.toContain("#1");
 
     rmSync(transcript.directory, { recursive: true, force: true });
@@ -377,12 +375,12 @@ describe("replayMemory", () => {
     );
 
     const output = replayMemory(db, {
-      session: sessionId,
-      turn: 1,
+      id: `S${sessionId}/T1`,
+      depth: "expanded",
       transcriptPath: transcript.path,
     });
 
-    expect(output).toContain('[T1][undone] #1');
+    expect(output).toContain('- [S1][T1] "Draft approach" [undone]');
     expect(output).toContain('prompt: "Draft approach"');
     expect(output).toContain('response: "Old draft response"');
 
@@ -451,15 +449,63 @@ describe("replayMemory", () => {
     ).run(sessionId, 3, "repeat", "latest response", 130);
 
     const output = replayMemory(db, {
-      session: sessionId,
-      turn: 3,
+      id: `S${sessionId}/T3`,
+      depth: "expanded",
       transcriptPath: transcript.path,
     });
 
-    expect(output).toContain('[T3] #3');
+    expect(output).toContain('- [S1][T3] "repeat" [pending]');
     expect(output).toContain('response: "latest response"');
     expect(output).not.toContain('response: "kept response"');
 
     rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
+  test("renders all turns in a selected turn range", () => {
+    const output = replayMemory(db, {
+      id: `S${sessionId}/T1..2`,
+      depth: "expanded",
+      transcriptPath,
+    });
+
+    expect(output).toContain("- [S1] Replay session");
+    expect(output).toContain('- [S1][T1] "Why am I getting 401 errors?" | 🔧2');
+    expect(output).toContain('- [S1][T2] "Fix it and add coverage" | 🔧1');
+    expect(output).toContain('prompt: "Why am I getting 401 errors?"');
+    expect(output).toContain('prompt: "Fix it and add coverage"');
+  });
+
+  test("renders all tool calls for a turn when using Tool*", () => {
+    const output = replayMemory(db, {
+      id: `S${sessionId}/T1/Tool*`,
+      depth: "expanded",
+      transcriptPath,
+    });
+
+    expect(output).toContain("- [S1] Replay session");
+    expect(output).toContain('- [S1][T1] "Why am I getting 401 errors?" | 🔧2');
+    expect(output).toContain("- 🔧 Read src/auth.ts");
+    expect(output).toContain("- 🔧 Bash npm test -- auth");
+    expect(output).toContain('- out: auth.ts contents');
+    expect(output).toContain("- out: test output: ok");
+  });
+
+  test("rejects legacy replay parameters", () => {
+    expect(
+      replayMemory(db, {
+        // @ts-expect-error exercising removed public API
+        session: sessionId,
+        transcriptPath,
+      }),
+    ).toBe('Parameter error: replay() requires id like "S1", "S1/T2", or "S1/T2/Tool3".');
+  });
+
+  test("rejects invalid replay ids", () => {
+    expect(
+      replayMemory(db, {
+        id: "S1/Tool2",
+        transcriptPath,
+      }),
+    ).toBe('Parameter error: invalid replay id "S1/Tool2"');
   });
 });

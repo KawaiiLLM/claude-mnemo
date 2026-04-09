@@ -64,8 +64,7 @@ describe("recall-powered extraction context", () => {
     );
 
     const context = recallMemory(db, {
-      view: "turns",
-      session: sessionId,
+      id: `S${sessionId}/T*`,
       depth: "expanded",
     });
     const prompt = buildMnemosynePrompt(context);
@@ -82,7 +81,7 @@ describe("recall-powered extraction context", () => {
     expect(prompt).not.toContain("A shared promise now serializes refresh work.");
   });
 
-  test("uses recall truncation and replay hints in the embedded context", () => {
+  test("uses replay hints with the simplified id syntax in the embedded context", () => {
     const longPrompt = "x".repeat(260);
     db.query(
       `INSERT INTO turns (
@@ -90,13 +89,13 @@ describe("recall-powered extraction context", () => {
       ) VALUES (?, 1, 'pending', ?, 120)`,
     ).run(sessionId, longPrompt);
     const context = recallMemory(db, {
-      view: "turns",
-      session: sessionId,
+      id: `S${sessionId}/T*`,
       depth: "expanded",
     });
 
-    expect(context).toContain("[T1] Untitled");
-    expect(context).toContain("replay(session=");
+    expect(context).toContain('[T1] "');
+    expect(context).toContain('replay(id="S1/T1", depth="expanded")');
+    expect(context).not.toContain("replay(session=");
   });
 
   test("buildMnemosynePrompt still wraps the provided context", () => {

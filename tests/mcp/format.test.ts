@@ -249,7 +249,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
-      "[use replay(session=142, turn=9) for full content]",
+      '[use replay(id="S142/T9", depth="expanded") for full content]',
     );
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
       "p".repeat(200),

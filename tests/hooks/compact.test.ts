@@ -137,7 +137,7 @@ describe("handleCompactHook", () => {
     expect(prompt).toContain(`[S${sessionId}] Compact session`);
     expect(prompt).toContain("/Users/zhaoqixuan/Projects/claude-mnemo");
     expect(prompt).toContain("Compact hook coverage");
-    expect(prompt).toContain("[T1] Untitled");
+    expect(prompt).toContain('[T1] "Compact pending work"');
 
     rmSync(transcript.directory, { recursive: true, force: true });
   });
@@ -196,7 +196,7 @@ describe("handleCompactHook", () => {
     await result.asyncWork?.();
 
     const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
-    expect(prompt).toContain("[T1] Untitled");
+    expect(prompt).toContain('[T1] "Recovered pending work"');
     expect(prompt).toContain("[pending]");
 
     rmSync(transcript.directory, { recursive: true, force: true });

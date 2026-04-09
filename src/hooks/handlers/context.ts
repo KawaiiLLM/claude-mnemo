@@ -6,18 +6,12 @@ import {
   getSessionByContentId,
   type SessionRecord,
 } from "../../db/sessions";
-import {
-  buildCollapsedTurnsForSession,
-  buildSessionSummary,
-} from "../../mcp/recall";
-import {
-  formatSessionCollapsed,
-  formatSessionExpanded,
-  formatMemoryCollapsed,
-  formatTurnCollapsed,
-  type FormattedMemory,
-  type FormattedSession,
-  type FormattedTurn,
+import { getTurnsForSession } from "../../db/turns";
+import * as formatModule from "../../mcp/format";
+import type {
+  FormattedMemory,
+  FormattedSession,
+  FormattedTurn,
 } from "../../mcp/format";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -26,6 +20,18 @@ export interface ContextHandlerDependencies {
 }
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
+
+function splitInsight(insight: string | null): string[] {
+  if (!insight) {
+    return [];
+  }
+
+  return insight
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^-+\s*/, ""));
+}
 
 function buildHeader(db: Database): string {
   const sessionCount =
@@ -44,7 +50,7 @@ function buildHeader(db: Database): string {
     "  - [Tx] title | 💡n 📖n ✏️n 🔧n",
     "  - [Ox] 🔵 title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)',
+    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")',
   ].join("\n");
 }
 
@@ -60,30 +66,156 @@ function resolvePrimarySessionRecord(
   return currentSession ?? recentSessions[0] ?? null;
 }
 
+function buildSessionMetricMap(
+  db: Database,
+  sessionIds: number[],
+): Map<number, { turnCount: number; observationCount: number }> {
+  if (sessionIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = sessionIds.map(() => "?").join(", ");
+  const metrics = new Map<number, { turnCount: number; observationCount: number }>();
+
+  for (const sessionId of sessionIds) {
+    metrics.set(sessionId, { turnCount: 0, observationCount: 0 });
+  }
+
+  const turnRows = db
+    .query<{ sessionId: number; count: number }, number[]>(
+      `SELECT session_id AS sessionId, COUNT(*) AS count
+       FROM turns
+       WHERE session_id IN (${placeholders})
+       GROUP BY session_id`,
+    )
+    .all(...sessionIds);
+
+  for (const row of turnRows) {
+    const metric = metrics.get(row.sessionId);
+    if (metric) {
+      metric.turnCount = row.count;
+    }
+  }
+
+  const observationRows = db
+    .query<{ sessionId: number; count: number }, number[]>(
+      `SELECT t.session_id AS sessionId, COUNT(*) AS count
+       FROM observations o
+       JOIN turns t ON t.id = o.turn_id
+       WHERE t.session_id IN (${placeholders})
+       GROUP BY t.session_id`,
+    )
+    .all(...sessionIds);
+
+  for (const row of observationRows) {
+    const metric = metrics.get(row.sessionId);
+    if (metric) {
+      metric.observationCount = row.count;
+    }
+  }
+
+  return metrics;
+}
+
+function buildSessionView(
+  session: SessionRecord,
+  metrics: { turnCount: number; observationCount: number } | undefined,
+): FormattedSession {
+  return {
+    id: session.id,
+    title: session.title,
+    project: session.project,
+    createdAtEpoch: session.createdAtEpoch,
+    content: session.content,
+    insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    turnCount: metrics?.turnCount ?? 0,
+    observationCount: metrics?.observationCount ?? 0,
+  };
+}
+
+function getObservationCountByTurnId(
+  db: Database,
+  turnIds: number[],
+): Map<number, number> {
+  if (turnIds.length === 0) {
+    return new Map();
+  }
+
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db
+    .query<{ turnId: number; count: number }, number[]>(
+      `SELECT turn_id AS turnId, COUNT(*) AS count
+       FROM observations
+       WHERE turn_id IN (${placeholders})
+       GROUP BY turn_id`,
+    )
+    .all(...turnIds);
+
+  return new Map(rows.map((row) => [row.turnId, row.count]));
+}
+
+function buildCollapsedTurnViews(
+  db: Database,
+  sessionId: number,
+): FormattedTurn[] {
+  const turns = getTurnsForSession(db, sessionId);
+  const observationCounts = getObservationCountByTurnId(
+    db,
+    turns.map((turn) => turn.id),
+  );
+
+  return turns.map((turn) => ({
+    id: turn.id,
+    promptNumber: turn.promptNumber,
+    title: turn.title,
+    content: turn.content,
+    observationCount: observationCounts.get(turn.id) ?? 0,
+    toolCallCount: turn.toolCallCount,
+    filesReadCount: turn.filesRead.length,
+    filesModifiedCount: turn.filesModified.length,
+    status: turn.status,
+  }));
+}
+
 function buildCurrentSessionOutput(
   session: FormattedSession,
   turns: FormattedTurn[],
 ): string {
-  const lines = [formatSessionExpanded(session)];
+  const lines = [
+    formatModule.renderNode(
+      { type: "session", value: session },
+      { depth: "expanded", mode: "legacy" },
+    ),
+  ];
 
   for (const turn of turns) {
-    lines.push(formatTurnCollapsed(turn));
+    lines.push(
+      formatModule.renderNode(
+        { type: "turn", value: turn },
+        { depth: "collapsed", mode: "legacy" },
+      ),
+    );
   }
 
   return lines.join("\n");
 }
 
 function buildRecentSessionsOutput(
-  db: Database,
   recentSessions: SessionRecord[],
+  sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
   primarySessionId: number,
 ): string[] {
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
 
   return others
-    .map((session) => buildSessionSummary(db, session.id))
-    .filter((session): session is FormattedSession => session !== null)
-    .map((session) => formatSessionCollapsed(session));
+    .map((session) => buildSessionView(session, sessionMetrics.get(session.id)))
+    .map((session) =>
+      formatModule.renderNode(
+        { type: "session", value: session },
+        { depth: "collapsed", mode: "legacy" },
+      ),
+    );
 }
 
 function buildMemoryView(memory: MemoryRecord): FormattedMemory {
@@ -158,7 +290,12 @@ function buildMemoriesOutput(
   return [
     "## Memories",
     "",
-    ...memories.map((memory) => formatMemoryCollapsed(buildMemoryView(memory))),
+    ...memories.map((memory) =>
+      formatModule.renderNode(
+        { type: "memory", value: buildMemoryView(memory) },
+        { depth: "collapsed", mode: "legacy" },
+      ),
+    ),
   ];
 }
 
@@ -174,19 +311,23 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     return EMPTY_CONTEXT_FALLBACK;
   }
 
-  const primarySession = buildSessionSummary(db, primarySessionRecord.id);
-  if (!primarySession) {
-    return EMPTY_CONTEXT_FALLBACK;
-  }
-  const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
+  const sessionIds = Array.from(
+    new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id]),
+  );
+  const sessionMetrics = buildSessionMetricMap(db, sessionIds);
+  const primarySession = buildSessionView(
+    primarySessionRecord,
+    sessionMetrics.get(primarySessionRecord.id),
+  );
+  const primaryTurns = buildCollapsedTurnViews(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
     db,
     primarySessionRecord.project,
   );
 
   const recentSessionOutputs = buildRecentSessionsOutput(
-    db,
     recentSessions,
+    sessionMetrics,
     primarySessionRecord.id,
   );
 

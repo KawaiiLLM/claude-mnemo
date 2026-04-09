@@ -206,22 +206,22 @@ describe("claude-mnemo smoke test", () => {
     expect(getTurn(db, session.id, 1)?.status).toBe("extracted");
     expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
 
-    const recallSessions = recallMemory(db, { view: "sessions" });
+    const recallSessions = recallMemory(db, {});
     const recallSessionTree = recallMemory(db, {
-      view: "turns",
-      session: session.id,
+      id: `S${session.id}/T*`,
       depth: "expanded",
     });
     const recallTurn = recallMemory(db, {
-      view: "observations",
-      session: session.id,
-      turn: 2,
+      id: `S${session.id}/T2/O*`,
       depth: "expanded",
     });
-    const legacyRecall = recallMemory(db, { session: session.id });
+    const legacyRecall = recallMemory(db, {
+      id: `S${session.id}`,
+      depth: "expanded",
+    });
     const replayTurn = replayMemory(db, {
-      session: session.id,
-      turn: 2,
+      id: `S${session.id}/T2`,
+      depth: "expanded",
       transcriptPath,
     });
 
@@ -231,6 +231,7 @@ describe("claude-mnemo smoke test", () => {
     expect(recallTurn).toContain("[O2] 🔴 Mutex added");
     expect(legacyRecall).toContain("[T1] Diagnose auth");
     expect(replayTurn).toContain('prompt: "Fix it and add tests"');
-    expect(replayTurn).toContain("[Tool 1] Edit");
+    expect(replayTurn).toContain("- [S1] Auth race fix");
+    expect(replayTurn).toContain("- 🔧 Edit src/auth.ts");
   });
 });

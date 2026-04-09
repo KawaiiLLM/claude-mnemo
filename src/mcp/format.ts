@@ -7,8 +7,18 @@ export const TYPE_EMOJI: Record<string, string> = {
   decision: "⚖️",
 };
 
-const FIELD_TRUNCATION_LIMIT = 200;
 const FIELD_TRUNCATION_SUFFIX = "...";
+
+const LEGACY_TRUNCATION_LIMIT = 200;
+const UNIFIED_TRUNCATION_LIMITS = {
+  collapsed: 120,
+  expanded: 300,
+  full: 1000,
+} as const;
+
+export type RenderDepth = "collapsed" | "expanded" | "full";
+
+type RenderMode = "legacy" | "unified";
 
 export interface FormattedObservation {
   id: number;
@@ -26,6 +36,13 @@ export interface FormattedMemorySource {
   promptNumber: number;
   title: string | null;
   createdAtEpoch: number;
+}
+
+export interface FormattedToolCall {
+  name: string;
+  keyParam?: string | null;
+  input?: unknown;
+  result?: string | null;
 }
 
 export interface FormattedMemory {
@@ -53,6 +70,7 @@ export interface FormattedTurn {
   id: number;
   promptNumber: number;
   title: string | null;
+  createdAtEpoch?: number | null;
   content?: string | null;
   observationCount?: number | null;
   toolCallCount?: number | null;
@@ -65,6 +83,7 @@ export interface FormattedTurn {
   filesRead?: string[];
   filesModified?: string[];
   observations?: FormattedObservation[];
+  toolCalls?: FormattedToolCall[];
 }
 
 export interface FormattedSession {
@@ -84,6 +103,28 @@ interface TurnFormatOptions {
   indent?: string;
   sessionId?: number;
 }
+
+interface ToolCallFormatOptions {
+  indent?: string;
+  sessionId?: number;
+  turnPromptNumber?: number;
+}
+
+interface RenderNodeOptions {
+  depth: RenderDepth;
+  indent?: string;
+  sessionId?: number;
+  turnPromptNumber?: number;
+  mode?: RenderMode;
+  includeChildren?: boolean;
+}
+
+type RenderNode =
+  | { type: "session"; value: FormattedSession }
+  | { type: "turn"; value: FormattedTurn }
+  | { type: "observation"; value: FormattedObservation }
+  | { type: "memory"; value: FormattedMemory }
+  | { type: "toolCall"; value: FormattedToolCall };
 
 export interface OmissionResult<T> {
   items: Array<T | { omittedCount: number }>;
@@ -191,28 +232,51 @@ function joinHint(sessionId: number | undefined, turnPromptNumber: number | unde
   }
 
   if (sessionId === undefined) {
-    return `replay(turn=${turnPromptNumber})`;
+    return "";
   }
 
   if (turnPromptNumber === undefined) {
-    return `replay(session=${sessionId})`;
+    return `replay(id="S${sessionId}", depth="expanded")`;
   }
 
-  return `replay(session=${sessionId}, turn=${turnPromptNumber})`;
+  return `replay(id="S${sessionId}/T${turnPromptNumber}", depth="expanded")`;
+}
+
+function resolveTruncationLimit(
+  depth: RenderDepth,
+  mode: RenderMode,
+): number {
+  if (mode === "legacy") {
+    return LEGACY_TRUNCATION_LIMIT;
+  }
+
+  return UNIFIED_TRUNCATION_LIMITS[depth];
 }
 
 function truncateText(
   text: string,
-  sessionId?: number,
-  turnPromptNumber?: number,
+  {
+    depth,
+    mode = "legacy",
+    sessionId,
+    turnPromptNumber,
+  }: {
+    depth: RenderDepth;
+    mode?: RenderMode;
+    sessionId?: number;
+    turnPromptNumber?: number;
+  },
 ): string {
-  if (text.length <= FIELD_TRUNCATION_LIMIT) {
+  const limit = resolveTruncationLimit(depth, mode);
+
+  if (text.length <= limit) {
     return text;
   }
 
-  const hint = joinHint(sessionId, turnPromptNumber);
+  const hint =
+    mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
 
-  return `${text.slice(0, FIELD_TRUNCATION_LIMIT)}${FIELD_TRUNCATION_SUFFIX}${
+  return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${
     hint ? ` [use ${hint} for full content]` : ""
   }`;
 }
@@ -233,6 +297,51 @@ function formatStatus(status?: string | null): string {
   return displayStatus ? ` [${displayStatus}]` : "";
 }
 
+export function extractKeyParam(name: string, input: unknown): string | null {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+
+  const record = input as Record<string, unknown>;
+  const valueForKey = (...keys: string[]) => {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        return value;
+      }
+    }
+
+    return null;
+  };
+
+  switch (name) {
+    case "Edit":
+    case "Read":
+    case "Write":
+    case "Glob":
+      return valueForKey("file_path", "path");
+    case "Bash":
+      return valueForKey("command");
+    case "Grep": {
+      const pattern = valueForKey("pattern");
+      const path = valueForKey("path");
+      if (pattern && path) {
+        return `${pattern} ${path}`;
+      }
+      return pattern ?? path;
+    }
+    case "Agent":
+      return valueForKey("description");
+    default:
+      for (const value of Object.values(record)) {
+        if (typeof value === "string" && value.trim() !== "") {
+          return value;
+        }
+      }
+      return null;
+  }
+}
+
 function isObservationExpanded(observation: FormattedObservation): boolean {
   return Boolean(
     observation.insight ||
@@ -247,11 +356,15 @@ function isTurnExpanded(turn: FormattedTurn): boolean {
     turn.promptPreview ||
       turn.responsePreview ||
       (turn.insight && turn.insight.length > 0) ||
-      (turn.observations && turn.observations.length > 0),
+      (turn.observations && turn.observations.length > 0) ||
+      (turn.toolCalls && turn.toolCalls.length > 0),
   );
 }
 
-export function formatSessionCollapsed(session: FormattedSession): string {
+function formatSessionCollapsedWithMode(
+  session: FormattedSession,
+  mode: RenderMode,
+): string {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -259,27 +372,48 @@ export function formatSessionCollapsed(session: FormattedSession): string {
   ];
 
   if (session.content) {
-    lines.push(`  - desc: ${truncateText(session.content, session.id)}`);
+    lines.push(
+      `  - desc: ${truncateText(session.content, {
+        depth: "collapsed",
+        mode,
+        sessionId: session.id,
+      })}`,
+    );
   }
 
   return lines.join("\n");
 }
 
-export function formatSessionExpanded(session: FormattedSession): string {
-  const lines = [formatSessionCollapsed(session)];
+function formatSessionExpandedWithMode(
+  session: FormattedSession,
+  mode: RenderMode,
+): string {
+  const lines = [formatSessionCollapsedWithMode(session, mode)];
 
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map((line) => truncateText(line, session.id)),
+      session.insight.map((line) =>
+        truncateText(line, {
+          depth: "expanded",
+          mode,
+          sessionId: session.id,
+        }),
+      ),
     );
   }
 
   if (session.nextSteps) {
     lines.push("  - next_steps:");
-    lines.push(`    - ${truncateText(session.nextSteps, session.id)}`);
+    lines.push(
+      `    - ${truncateText(session.nextSteps, {
+        depth: "expanded",
+        mode,
+        sessionId: session.id,
+      })}`,
+    );
   }
 
   return lines.join("\n");
@@ -287,7 +421,12 @@ export function formatSessionExpanded(session: FormattedSession): string {
 
 function formatTurnLabel(
   turn: FormattedTurn,
-  { indent = "  ", sessionId }: TurnFormatOptions = {},
+  {
+    indent = "  ",
+    sessionId,
+    mode = "legacy",
+    depth = "collapsed",
+  }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
   const prefix =
     sessionId === undefined
@@ -295,40 +434,194 @@ function formatTurnLabel(
       : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
+  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
+  const title =
+    turn.title === null && turn.promptPreview
+      ? `"${truncateText(turn.promptPreview, {
+          depth,
+          mode,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+        })}"`
+      : truncateText(rawTitle, {
+          depth,
+          mode,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+        });
 
-  return `${prefix} ${turn.title ?? "Untitled"}${statsSegment}${formatStatus(turn.status)}`;
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
 }
 
-export function formatTurnCollapsed(
+function formatTurnCollapsedWithMode(
   turn: FormattedTurn,
-  options: TurnFormatOptions = {},
+  options: TurnFormatOptions & { mode?: RenderMode } = {},
 ): string {
-  const { indent = "  " } = options;
-  const lines = [formatTurnLabel(turn, options)];
+  const { indent = "  ", mode = "legacy" } = options;
+  const lines = [
+    formatTurnLabel(turn, {
+      ...options,
+      mode,
+      depth: "collapsed",
+    }),
+  ];
 
   if (turn.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, options.sessionId, turn.promptNumber)}`,
+      `${indent}  - desc: ${truncateText(turn.content, {
+        depth: "collapsed",
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: turn.promptNumber,
+      })}`,
     );
   }
 
   return lines.join("\n");
 }
 
-export function formatTurnExpanded(
-  turn: FormattedTurn,
-  options: TurnFormatOptions = {},
+function formatToolCallLabel(
+  toolCall: FormattedToolCall,
+  { indent = "    ", mode = "unified", depth = "collapsed" }: ToolCallFormatOptions & {
+    mode?: RenderMode;
+    depth?: RenderDepth;
+  } = {},
 ): string {
-  const { indent = "  " } = options;
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam
+    ? ` ${truncateText(keyParam, { depth, mode })}`
+    : "";
+
+  return `${indent}- 🔧 ${toolCall.name}${suffix}`;
+}
+
+function formatToolCallCollapsedWithMode(
+  toolCall: FormattedToolCall,
+  options: ToolCallFormatOptions & { mode?: RenderMode } = {},
+): string {
+  return formatToolCallLabel(toolCall, {
+    ...options,
+    mode: options.mode,
+    depth: "collapsed",
+  });
+}
+
+function formatToolCallExpandedWithMode(
+  toolCall: FormattedToolCall,
+  options: ToolCallFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
+): string {
+  const { indent = "    ", mode = "unified", depth = "expanded" } = options;
   const detailIndent = `${indent}  `;
-  const lines = [formatTurnCollapsed(turn, options)];
+  const lines = [
+    formatToolCallLabel(toolCall, {
+      ...options,
+      mode,
+      depth: depth === "full" ? "full" : "expanded",
+    }),
+  ];
+
+  if (toolCall.input !== undefined) {
+    lines.push(
+      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
+        depth,
+        mode,
+      })}`,
+    );
+  }
+
+  if (toolCall.result) {
+    lines.push(
+      `${detailIndent}- out: ${truncateText(toolCall.result, {
+        depth,
+        mode,
+      })}`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function renderTurnChildren(
+  turn: FormattedTurn,
+  depth: RenderDepth,
+  options: TurnFormatOptions & { mode?: RenderMode } = {},
+): string {
+  if (depth === "collapsed") {
+    return "";
+  }
+
+  const { indent = "  ", sessionId, mode = "legacy" } = options;
+  const childIndent = `${indent}  `;
+  const childDepth = depth === "full" ? "full" : "expanded";
+  const childLines: string[] = [];
+
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations) {
+      childLines.push(
+        childDepth === "full"
+          ? formatObservationExpandedWithMode(observation, {
+              indent: childIndent,
+              sessionId,
+              turnPromptNumber: turn.promptNumber,
+              mode,
+              depth: "full",
+            })
+          : formatObservationCollapsedWithMode(observation, {
+              indent: childIndent,
+              sessionId,
+              turnPromptNumber: turn.promptNumber,
+              mode,
+            }),
+      );
+    }
+
+    return childLines.join("\n");
+  }
+
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls) {
+      childLines.push(
+        formatToolCallExpandedWithMode(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: childDepth,
+        }),
+      );
+    }
+  }
+
+  return childLines.join("\n");
+}
+
+function formatTurnExpandedWithMode(
+  turn: FormattedTurn,
+  options: TurnFormatOptions & {
+    mode?: RenderMode;
+    depth?: RenderDepth;
+    includeChildren?: boolean;
+  } = {},
+): string {
+  const {
+    indent = "  ",
+    mode = "legacy",
+    depth = "expanded",
+    includeChildren = mode === "unified",
+  } = options;
+  const detailIndent = `${indent}  `;
+  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
 
   if (turn.promptPreview) {
     lines.push(
       `${detailIndent}- prompt: "${truncateText(
         turn.promptPreview,
-        options.sessionId,
-        turn.promptNumber,
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber,
+        },
       )}"`,
     );
   }
@@ -337,8 +630,12 @@ export function formatTurnExpanded(
     lines.push(
       `${detailIndent}- response: "${truncateText(
         turn.responsePreview,
-        options.sessionId,
-        turn.promptNumber,
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber,
+        },
       )}"`,
     );
   }
@@ -349,9 +646,46 @@ export function formatTurnExpanded(
       lines,
       `${detailIndent}  `,
       turn.insight.map((line) =>
-        truncateText(line, options.sessionId, turn.promptNumber),
+        truncateText(line, {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber,
+        }),
       ),
     );
+  }
+
+  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(
+      `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: turn.promptNumber,
+      })}`,
+    );
+  }
+
+  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(
+      `${detailIndent}- files_modified: ${truncateText(
+        turn.filesModified.join(", "),
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: turn.promptNumber,
+        },
+      )}`,
+    );
+  }
+
+  const childBlock = includeChildren
+    ? renderTurnChildren(turn, depth, { ...options, mode })
+    : "";
+  if (childBlock) {
+    lines.push(childBlock);
   }
 
   return lines.join("\n");
@@ -383,25 +717,51 @@ function formatMemoryLabel(
   return parts.join(" | ");
 }
 
-export function formatMemoryCollapsed(memory: FormattedMemory): string {
+function formatMemoryCollapsedWithMode(
+  memory: FormattedMemory,
+  mode: RenderMode,
+): string {
   return formatMemoryLabel(memory);
 }
 
-export function formatMemoryExpanded(memory: FormattedMemory): string {
+function formatMemoryExpandedWithMode(
+  memory: FormattedMemory,
+  mode: RenderMode,
+): string {
   const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
 
-  lines.push(`  - content: ${memory.content}`);
+  lines.push(
+    `  - content: ${truncateText(memory.content, {
+      depth: "expanded",
+      mode,
+    })}`,
+  );
 
   if (memory.reasoning) {
-    lines.push(`  - reasoning: ${memory.reasoning}`);
+    lines.push(
+      `  - reasoning: ${truncateText(memory.reasoning, {
+        depth: "expanded",
+        mode,
+      })}`,
+    );
   }
 
   if (memory.application) {
-    lines.push(`  - application: ${memory.application}`);
+    lines.push(
+      `  - application: ${truncateText(memory.application, {
+        depth: "expanded",
+        mode,
+      })}`,
+    );
   }
 
   if (memory.tags && memory.tags.length > 0) {
-    lines.push(`  - tags: [${memory.tags.join(", ")}]`);
+    lines.push(
+      `  - tags: [${truncateText(memory.tags.join(", "), {
+        depth: "expanded",
+        mode,
+      })}]`,
+    );
   }
 
   if (memory.source) {
@@ -415,19 +775,23 @@ export function formatMemoryExpanded(memory: FormattedMemory): string {
   return lines.join("\n");
 }
 
-export function formatObservationCollapsed(
+function formatObservationCollapsedWithMode(
   observation: FormattedObservation,
-  options: ObservationFormatOptions = {},
+  options: ObservationFormatOptions & { mode?: RenderMode } = {},
 ): string {
-  const { indent = "" } = options;
+  const { indent = "", mode = "legacy" } = options;
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(
         observation.content,
-        options.sessionId,
-        options.turnPromptNumber,
+        {
+          depth: "collapsed",
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber,
+        },
       )}`,
     );
   }
@@ -435,20 +799,24 @@ export function formatObservationCollapsed(
   return lines.join("\n");
 }
 
-export function formatObservationExpanded(
+function formatObservationExpandedWithMode(
   observation: FormattedObservation,
-  options: ObservationFormatOptions = {},
+  options: ObservationFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
-  const { indent = "" } = options;
+  const { indent = "", mode = "legacy", depth = "expanded" } = options;
   const detailIndent = `${indent}  `;
-  const lines = [formatObservationCollapsed(observation, options)];
+  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
 
   if (observation.insight) {
     lines.push(
       `${detailIndent}- insight: ${truncateText(
         observation.insight,
-        options.sessionId,
-        options.turnPromptNumber,
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber,
+        },
       )}`,
     );
   }
@@ -457,8 +825,12 @@ export function formatObservationExpanded(
     lines.push(
       `${detailIndent}- tags: ${truncateText(
         observation.tags.join(", "),
-        options.sessionId,
-        options.turnPromptNumber,
+        {
+          depth,
+          mode,
+          sessionId: options.sessionId,
+          turnPromptNumber: options.turnPromptNumber,
+        },
       )}`,
     );
   }
@@ -468,16 +840,24 @@ export function formatObservationExpanded(
   if (observation.filesRead && observation.filesRead.length > 0) {
     filesParts.push(`📖 ${truncateText(
       observation.filesRead.join(", "),
-      options.sessionId,
-      options.turnPromptNumber,
+      {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: options.turnPromptNumber,
+      },
     )}`);
   }
 
   if (observation.filesModified && observation.filesModified.length > 0) {
     filesParts.push(`✏️ ${truncateText(
       observation.filesModified.join(", "),
-      options.sessionId,
-      options.turnPromptNumber,
+      {
+        depth,
+        mode,
+        sessionId: options.sessionId,
+        turnPromptNumber: options.turnPromptNumber,
+      },
     )}`);
   }
 
@@ -486,6 +866,77 @@ export function formatObservationExpanded(
   }
 
   return lines.join("\n");
+}
+
+export function renderNode(node: RenderNode, options: RenderNodeOptions): string {
+  const mode = options.mode ?? "unified";
+
+  switch (node.type) {
+    case "session":
+      return options.depth === "collapsed"
+        ? formatSessionCollapsedWithMode(node.value, mode)
+        : formatSessionExpandedWithMode(node.value, mode);
+    case "turn":
+      return options.depth === "collapsed"
+        ? formatTurnCollapsedWithMode(node.value, options)
+        : formatTurnExpandedWithMode(node.value, options);
+    case "observation":
+      return options.depth === "collapsed"
+        ? formatObservationCollapsedWithMode(node.value, options)
+        : formatObservationExpandedWithMode(node.value, options);
+    case "memory":
+      return options.depth === "collapsed"
+        ? formatMemoryCollapsedWithMode(node.value, mode)
+        : formatMemoryExpandedWithMode(node.value, mode);
+    case "toolCall":
+      return options.depth === "collapsed"
+        ? formatToolCallCollapsedWithMode(node.value, options)
+        : formatToolCallExpandedWithMode(node.value, options);
+  }
+}
+
+export function formatSessionCollapsed(session: FormattedSession): string {
+  return renderNode({ type: "session", value: session }, { depth: "collapsed", mode: "legacy" });
+}
+
+export function formatSessionExpanded(session: FormattedSession): string {
+  return renderNode({ type: "session", value: session }, { depth: "expanded", mode: "legacy" });
+}
+
+export function formatTurnCollapsed(
+  turn: FormattedTurn,
+  options: TurnFormatOptions = {},
+): string {
+  return renderNode({ type: "turn", value: turn }, { depth: "collapsed", mode: "legacy", ...options });
+}
+
+export function formatTurnExpanded(
+  turn: FormattedTurn,
+  options: TurnFormatOptions = {},
+): string {
+  return renderNode({ type: "turn", value: turn }, { depth: "expanded", mode: "legacy", ...options });
+}
+
+export function formatMemoryCollapsed(memory: FormattedMemory): string {
+  return renderNode({ type: "memory", value: memory }, { depth: "collapsed", mode: "legacy" });
+}
+
+export function formatMemoryExpanded(memory: FormattedMemory): string {
+  return renderNode({ type: "memory", value: memory }, { depth: "expanded", mode: "legacy" });
+}
+
+export function formatObservationCollapsed(
+  observation: FormattedObservation,
+  options: ObservationFormatOptions = {},
+): string {
+  return renderNode({ type: "observation", value: observation }, { depth: "collapsed", mode: "legacy", ...options });
+}
+
+export function formatObservationExpanded(
+  observation: FormattedObservation,
+  options: ObservationFormatOptions = {},
+): string {
+  return renderNode({ type: "observation", value: observation }, { depth: "expanded", mode: "legacy", ...options });
 }
 
 export function sampleWithOmissions<T>(

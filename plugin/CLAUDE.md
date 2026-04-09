@@ -7,6 +7,6 @@ Use these tools before re-reading old transcripts manually:
 
 Preferred workflow:
 1. Call `recall()` for recent memory.
-2. Narrow with `recall(query=...)`, `recall(session=...)`, or filters.
+2. Narrow with `recall(id=...)`, `recall(query=...)`, or `time=...`.
 3. Call `replay(...)` only when you need exact historical transcript detail.
 </claude-mnemo-context>
