@@ -2,7 +2,9 @@ import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import {
+  claimTurnsForExtraction,
   getPendingTurns,
+  recoverStalledExtractions,
   getTurnsForSession,
   markTurnsStale,
 } from "../../db/turns";
@@ -102,6 +104,10 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       };
     }
 
+    const epoch = now();
+
+    recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
+
     const transcriptTurnsByPromptNumber = input.transcriptPath
       ? new Map(
           parseReplayTranscript(input.transcriptPath).map((turn) => [
@@ -130,15 +136,12 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
 
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
 
-    const pendingTurns = getPendingTurns(dependencies.db, session.id);
-
-    if (pendingTurns.length > 0) {
-      await dependencies.forkMnemosyne({
-        cwd: input.cwd,
-        prompt: buildStopPrompt(dependencies.db, session.id),
-        database: dependencies.db,
-      });
-    }
+    const prompt = buildStopPrompt(dependencies.db, session.id);
+    const claimedCount = claimTurnsForExtraction(
+      dependencies.db,
+      session.id,
+      epoch,
+    );
 
     upsertSession(dependencies.db, {
       contentSessionId: session.contentSessionId,
@@ -147,13 +150,25 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       content: session.content,
       insight: session.insight,
       createdAtEpoch: session.createdAtEpoch,
-      updatedAtEpoch: now(),
-      completedAtEpoch: now(),
+      updatedAtEpoch: epoch,
+      completedAtEpoch: epoch,
     });
 
-    stderr.write(
-      `Mnemosyne: ${pendingTurns.length} turns queued for extraction\n`,
-    );
+    stderr.write(`Mnemosyne: ${claimedCount} turns queued for extraction\n`);
+
+    if (claimedCount > 0) {
+      return {
+        continue: true,
+        exitCode: HOOK_SUCCESS_EXIT_CODE,
+        asyncWork: async () => {
+          await dependencies.forkMnemosyne({
+            cwd: input.cwd,
+            prompt,
+            database: dependencies.db,
+          });
+        },
+      };
+    }
 
     return {
       continue: true,
