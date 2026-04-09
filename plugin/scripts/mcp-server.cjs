@@ -6818,10 +6818,10 @@ function mapSearchRow(row) {
   };
 }
 function resolveEpochRange(options) {
-  const lowerBounds = [options.after, options.fromEpoch].filter(
+  const lowerBounds = [options.after].filter(
     (value) => value !== void 0
   );
-  const upperBounds = [options.before, options.toEpoch].filter(
+  const upperBounds = [options.before].filter(
     (value) => value !== void 0
   );
   return {
@@ -7323,7 +7323,7 @@ function queryMemoriesByScope(db, options, query) {
 }
 function searchMemory(db, options) {
   const query = buildSafeFtsQuery(options.query);
-  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.after !== void 0 || options.before !== void 0 || options.fromEpoch !== void 0 || options.toEpoch !== void 0;
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.after !== void 0 || options.before !== void 0;
   if (!query && !hasFilters) {
     if (options.scope === "memories") {
       return queryRecentMemories(db, options);
@@ -31724,8 +31724,19 @@ function truncateText(text, sessionId, turnPromptNumber) {
   const hint = joinHint(sessionId, turnPromptNumber);
   return `${text.slice(0, FIELD_TRUNCATION_LIMIT)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
 }
+function formatDisplayStatus(status) {
+  switch (status) {
+    case "extracting_pending":
+      return "pending";
+    case "extracting_stale":
+      return "stale";
+    default:
+      return status;
+  }
+}
 function formatStatus(status) {
-  return status ? ` [${status}]` : "";
+  const displayStatus = formatDisplayStatus(status);
+  return displayStatus ? ` [${displayStatus}]` : "";
 }
 function formatSessionCollapsed(session) {
   const stats = formatSessionStats(session);

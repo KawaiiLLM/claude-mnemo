@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { getSession, getSessionByContentId } from "../../src/db/sessions";
-import { getPendingTurns, getTurn } from "../../src/db/turns";
+import { getPendingTurns, getTurn, getTurnsForSession } from "../../src/db/turns";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
@@ -58,7 +58,12 @@ describe("claude-mnemo smoke test", () => {
       if (!match) return;
       const session = getSession(db, Number(match[1]))!;
 
-      for (const turn of getPendingTurns(db, session.id).filter((candidate) => candidate.assistantResponse)) {
+      for (const turn of getTurnsForSession(db, session.id).filter(
+        (candidate) =>
+          (candidate.status === "extracting_pending" ||
+            candidate.status === "extracting_stale") &&
+          candidate.assistantResponse,
+      )) {
         rememberTool(db, {
           parent: `S${session.id}`,
           prompt_number: turn.promptNumber,
@@ -181,7 +186,7 @@ describe("claude-mnemo smoke test", () => {
     expect(getTurn(db, session.id, 1)?.status).toBe("pending");
     expect(getTurn(db, session.id, 2)?.status).toBe("pending");
 
-    await stopHandler({
+    const stopResult = await stopHandler({
       eventName: "Stop",
       sessionId: "session-e2e",
       cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
@@ -191,9 +196,15 @@ describe("claude-mnemo smoke test", () => {
       raw: {},
     });
 
+    expect(typeof stopResult.asyncWork).toBe("function");
+    expect(getTurn(db, session.id, 1)?.status).toBe("extracting_pending");
+    expect(getTurn(db, session.id, 2)?.status).toBe("extracting_pending");
+    expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
+
+    await stopResult.asyncWork?.();
+
     expect(getTurn(db, session.id, 1)?.status).toBe("extracted");
     expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
-    expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 
     const recallSessions = recallMemory(db, { view: "sessions" });
     const recallSessionTree = recallMemory(db, {

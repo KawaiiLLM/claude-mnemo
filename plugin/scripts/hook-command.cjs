@@ -90,20 +90,20 @@ function ensureParentDirectory(databasePath) {
     (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
-function configureDatabase(db2) {
-  db2.exec("PRAGMA journal_mode = WAL;");
-  db2.exec("PRAGMA synchronous = NORMAL;");
-  db2.exec("PRAGMA foreign_keys = ON;");
-  db2.exec("PRAGMA mmap_size = 268435456;");
-  db2.exec("PRAGMA cache_size = 10000;");
-  db2.exec("PRAGMA busy_timeout = 5000;");
+function configureDatabase(db) {
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA synchronous = NORMAL;");
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA mmap_size = 268435456;");
+  db.exec("PRAGMA cache_size = 10000;");
+  db.exec("PRAGMA busy_timeout = 5000;");
 }
 function createDatabase(path) {
   const databasePath = resolveDatabasePath2(path);
   ensureParentDirectory(databasePath);
-  const db2 = new import_bun_sqlite.Database(databasePath);
-  configureDatabase(db2);
-  return db2;
+  const db = new import_bun_sqlite.Database(databasePath);
+  configureDatabase(db);
+  return db;
 }
 
 // src/db/search.ts
@@ -121,10 +121,10 @@ function mapSearchRow(row) {
   };
 }
 function resolveEpochRange(options) {
-  const lowerBounds = [options.after, options.fromEpoch].filter(
+  const lowerBounds = [options.after].filter(
     (value) => value !== void 0
   );
-  const upperBounds = [options.before, options.toEpoch].filter(
+  const upperBounds = [options.before].filter(
     (value) => value !== void 0
   );
   return {
@@ -187,18 +187,18 @@ function buildSafeFtsQuery(query2) {
   }
   return terms.join(" AND ");
 }
-function indexFtsRecord(db2, layer, sourceId, title, content, extra) {
-  db2.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
+function indexFtsRecord(db, layer, sourceId, title, content, extra) {
+  db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
     layer,
     sourceId
   );
-  db2.query(
+  db.query(
     "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES (?, ?, ?, ?, ?)"
   ).run(layer, sourceId, title, content, extra);
 }
-function indexSessionToFTS(db2, session) {
+function indexSessionToFTS(db, session) {
   indexFtsRecord(
-    db2,
+    db,
     "session",
     session.id,
     session.title,
@@ -206,9 +206,9 @@ function indexSessionToFTS(db2, session) {
     session.insight ?? ""
   );
 }
-function indexTurnToFTS(db2, turn) {
+function indexTurnToFTS(db, turn) {
   indexFtsRecord(
-    db2,
+    db,
     "turn",
     turn.id,
     turn.title,
@@ -216,9 +216,9 @@ function indexTurnToFTS(db2, turn) {
     turn.insight ?? ""
   );
 }
-function indexObservationToFTS(db2, observation) {
+function indexObservationToFTS(db, observation) {
   indexFtsRecord(
-    db2,
+    db,
     "observation",
     observation.id,
     observation.title,
@@ -226,9 +226,9 @@ function indexObservationToFTS(db2, observation) {
     [observation.insight ?? "", ...observation.tags].filter(Boolean).join("\n")
   );
 }
-function indexMemoryToFTS(db2, memory) {
+function indexMemoryToFTS(db, memory) {
   indexFtsRecord(
-    db2,
+    db,
     "memory",
     memory.id,
     memory.title,
@@ -236,9 +236,9 @@ function indexMemoryToFTS(db2, memory) {
     [memory.reasoning ?? "", memory.application ?? "", ...memory.tags].filter(Boolean).join("\n")
   );
 }
-function rebuildSearchIndex(db2) {
-  db2.exec("DELETE FROM memory_fts");
-  const sessionRows = db2.query(
+function rebuildSearchIndex(db) {
+  db.exec("DELETE FROM memory_fts");
+  const sessionRows = db.query(
     `
         SELECT
           id,
@@ -249,9 +249,9 @@ function rebuildSearchIndex(db2) {
       `
   ).all();
   for (const session of sessionRows) {
-    indexSessionToFTS(db2, session);
+    indexSessionToFTS(db, session);
   }
-  const turnRows = db2.query(
+  const turnRows = db.query(
     `
         SELECT
           id,
@@ -263,9 +263,9 @@ function rebuildSearchIndex(db2) {
       `
   ).all();
   for (const turn of turnRows) {
-    indexTurnToFTS(db2, turn);
+    indexTurnToFTS(db, turn);
   }
-  const observationRows = db2.query(
+  const observationRows = db.query(
     `
         SELECT
           id,
@@ -277,7 +277,7 @@ function rebuildSearchIndex(db2) {
       `
   ).all();
   for (const observation of observationRows) {
-    indexObservationToFTS(db2, {
+    indexObservationToFTS(db, {
       id: observation.id,
       title: observation.title,
       content: observation.content,
@@ -285,7 +285,7 @@ function rebuildSearchIndex(db2) {
       tags: observation.tags ? JSON.parse(observation.tags) : []
     });
   }
-  const memoryRows = db2.query(
+  const memoryRows = db.query(
     `
         SELECT
           id,
@@ -298,19 +298,19 @@ function rebuildSearchIndex(db2) {
       `
   ).all();
   for (const memory of memoryRows) {
-    indexMemoryToFTS(db2, {
+    indexMemoryToFTS(db, {
       ...memory,
       tags: memory.tags ? JSON.parse(memory.tags) : []
     });
   }
 }
-function queryRows(db2, sql, params) {
-  return db2.query(sql).all(...params).map(mapSearchRow);
+function queryRows(db, sql, params) {
+  return db.query(sql).all(...params).map(mapSearchRow);
 }
-function queryRecentSessions(db2, options) {
+function queryRecentSessions(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'session' AS layer,
@@ -334,10 +334,10 @@ function queryRecentSessions(db2, options) {
     [...projectClause.params, options.limit ?? 20]
   );
 }
-function queryRecentTurns(db2, options) {
+function queryRecentTurns(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'turn' AS layer,
@@ -362,10 +362,10 @@ function queryRecentTurns(db2, options) {
     [...projectClause.params, options.limit ?? 20]
   );
 }
-function queryRecentObservations(db2, options) {
+function queryRecentObservations(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'observation' AS layer,
@@ -391,14 +391,14 @@ function queryRecentObservations(db2, options) {
     [...projectClause.params, options.limit ?? 20]
   );
 }
-function queryRecentMemories(db2, options) {
+function queryRecentMemories(db, options) {
   const scopeClause = buildMemoryScopeClause(options.project);
   const dateClause = buildDateClause(
     "COALESCE(m.updated_at_epoch, m.created_at_epoch)",
     options
   );
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'memory' AS layer,
@@ -422,7 +422,7 @@ function queryRecentMemories(db2, options) {
     [...scopeClause.params, ...dateClause.params, options.limit ?? 20]
   );
 }
-function querySessionsByScope(db2, options, query2) {
+function querySessionsByScope(db, options, query2) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
   const whereClauses = [projectClause.clause, dateClause.clause];
@@ -464,7 +464,7 @@ function querySessionsByScope(db2, options, query2) {
     params.push(`%${options.file}%`, `%${options.file}%`, `%${options.file}%`, `%${options.file}%`);
   }
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'session' AS layer,
@@ -489,7 +489,7 @@ function querySessionsByScope(db2, options, query2) {
     [...params, options.limit ?? 20]
   );
 }
-function queryTurnsByScope(db2, options, query2) {
+function queryTurnsByScope(db, options, query2) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
@@ -511,7 +511,7 @@ function queryTurnsByScope(db2, options, query2) {
     params.push(options.type);
   }
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'turn' AS layer,
@@ -537,7 +537,7 @@ function queryTurnsByScope(db2, options, query2) {
     [...params, options.limit ?? 20]
   );
 }
-function queryObservationsByScope(db2, options, query2) {
+function queryObservationsByScope(db, options, query2) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("o.created_at_epoch", options);
   const fileClause = buildFileClause("o.files_read", "o.files_modified", options.file);
@@ -552,7 +552,7 @@ function queryObservationsByScope(db2, options, query2) {
     params.push(options.type);
   }
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'observation' AS layer,
@@ -579,7 +579,7 @@ function queryObservationsByScope(db2, options, query2) {
     [...params, options.limit ?? 20]
   );
 }
-function queryMemoriesByScope(db2, options, query2) {
+function queryMemoriesByScope(db, options, query2) {
   if (options.file) {
     return [];
   }
@@ -599,7 +599,7 @@ function queryMemoriesByScope(db2, options, query2) {
     params.push(options.type);
   }
   return queryRows(
-    db2,
+    db,
     `
       SELECT
         'memory' AS layer,
@@ -624,45 +624,45 @@ function queryMemoriesByScope(db2, options, query2) {
     [...params, options.limit ?? 20]
   );
 }
-function searchMemory(db2, options) {
+function searchMemory(db, options) {
   const query2 = buildSafeFtsQuery(options.query);
-  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.after !== void 0 || options.before !== void 0 || options.fromEpoch !== void 0 || options.toEpoch !== void 0;
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.after !== void 0 || options.before !== void 0;
   if (!query2 && !hasFilters) {
     if (options.scope === "memories") {
-      return queryRecentMemories(db2, options);
+      return queryRecentMemories(db, options);
     }
     if (!options.scope || options.scope === "sessions") {
-      return queryRecentSessions(db2, options);
+      return queryRecentSessions(db, options);
     }
     if (options.scope === "turns") {
-      return queryRecentTurns(db2, options);
+      return queryRecentTurns(db, options);
     }
-    return queryRecentObservations(db2, options);
+    return queryRecentObservations(db, options);
   }
   if (!options.scope) {
     const results = [];
     if (!options.type && !options.file) {
-      results.push(...querySessionsByScope(db2, options, query2));
+      results.push(...querySessionsByScope(db, options, query2));
     }
     if (!options.type) {
-      results.push(...queryTurnsByScope(db2, options, query2));
+      results.push(...queryTurnsByScope(db, options, query2));
     }
-    results.push(...queryObservationsByScope(db2, options, query2));
+    results.push(...queryObservationsByScope(db, options, query2));
     if (!options.file) {
-      results.push(...queryMemoriesByScope(db2, options, query2));
+      results.push(...queryMemoriesByScope(db, options, query2));
     }
     return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
   }
   if (options.scope === "sessions") {
-    return querySessionsByScope(db2, options, query2);
+    return querySessionsByScope(db, options, query2);
   }
   if (options.scope === "turns") {
-    return queryTurnsByScope(db2, options, query2);
+    return queryTurnsByScope(db, options, query2);
   }
   if (options.scope === "memories") {
-    return queryMemoriesByScope(db2, options, query2);
+    return queryMemoriesByScope(db, options, query2);
   }
-  return queryObservationsByScope(db2, options, query2);
+  return queryObservationsByScope(db, options, query2);
 }
 
 // src/db/schema.ts
@@ -763,36 +763,36 @@ var SCHEMA_SQL = `
     extra
   );
 `;
-function initializeSchema(db2) {
-  db2.exec(SCHEMA_SQL);
-  ensureSessionProjectIndex(db2);
+function initializeSchema(db) {
+  db.exec(SCHEMA_SQL);
+  ensureSessionProjectIndex(db);
 }
-function ensureSessionProjectIndex(db2) {
-  if (hasColumn(db2, "sessions", "created_at_epoch")) {
-    db2.exec(`
+function ensureSessionProjectIndex(db) {
+  if (hasColumn(db, "sessions", "created_at_epoch")) {
+    db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_project_created_at
         ON sessions(project, created_at_epoch DESC)
     `);
-    db2.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
     return;
   }
-  if (hasColumn(db2, "sessions", "started_at_epoch")) {
-    db2.exec(`
+  if (hasColumn(db, "sessions", "started_at_epoch")) {
+    db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sessions_project_started_at
         ON sessions(project, started_at_epoch DESC)
     `);
   }
 }
-function hasColumn(db2, table, column) {
-  const rows = db2.query(`SELECT name FROM pragma_table_info('${table}')`).all();
+function hasColumn(db, table, column) {
+  const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
   return rows.some((row) => row.name === column);
 }
-function hasRow(db2, sql, params = []) {
-  return db2.query(
+function hasRow(db, sql, params = []) {
+  return db.query(
     `SELECT EXISTS(${sql}) AS hasRows`
   ).get(...params)?.hasRows === 1;
 }
-function shouldRebuildSearchIndex(db2) {
+function shouldRebuildSearchIndex(db) {
   const sourceLayers = [
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
@@ -800,9 +800,9 @@ function shouldRebuildSearchIndex(db2) {
     { table: "memories", layer: "memory" }
   ];
   const hasAnySourceRows = sourceLayers.some(
-    ({ table }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`)
+    ({ table }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`)
   );
-  const hasAnyFtsRows = hasRow(db2, "SELECT 1 FROM memory_fts LIMIT 1");
+  const hasAnyFtsRows = hasRow(db, "SELECT 1 FROM memory_fts LIMIT 1");
   if (!hasAnySourceRows && !hasAnyFtsRows) {
     return false;
   }
@@ -810,45 +810,45 @@ function shouldRebuildSearchIndex(db2) {
     return true;
   }
   const indexedLayers = new Set(
-    db2.query("SELECT DISTINCT layer FROM memory_fts").all().map((row) => row.layer)
+    db.query("SELECT DISTINCT layer FROM memory_fts").all().map((row) => row.layer)
   );
   return sourceLayers.some(
-    ({ table, layer }) => hasRow(db2, `SELECT 1 FROM ${table} LIMIT 1`) && !indexedLayers.has(layer)
+    ({ table, layer }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) && !indexedLayers.has(layer)
   );
 }
-function migrateSchema(db2) {
+function migrateSchema(db) {
   let searchIndexNeedsRebuild = false;
-  if (hasColumn(db2, "sessions", "started_at_epoch") && !hasColumn(db2, "sessions", "created_at_epoch")) {
-    db2.exec("ALTER TABLE sessions RENAME COLUMN started_at_epoch TO created_at_epoch");
-    db2.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
-    ensureSessionProjectIndex(db2);
+  if (hasColumn(db, "sessions", "started_at_epoch") && !hasColumn(db, "sessions", "created_at_epoch")) {
+    db.exec("ALTER TABLE sessions RENAME COLUMN started_at_epoch TO created_at_epoch");
+    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
+    ensureSessionProjectIndex(db);
   }
-  if (!hasColumn(db2, "sessions", "next_steps")) {
-    db2.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
+  if (!hasColumn(db, "sessions", "next_steps")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
   }
-  if (!hasColumn(db2, "sessions", "content")) {
-    db2.exec("ALTER TABLE sessions ADD COLUMN content TEXT");
+  if (!hasColumn(db, "sessions", "content")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN content TEXT");
   }
-  if (!hasColumn(db2, "turns", "tool_call_count")) {
-    db2.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
+  if (!hasColumn(db, "turns", "tool_call_count")) {
+    db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
   }
-  if (!hasColumn(db2, "turns", "content")) {
-    db2.exec("ALTER TABLE turns ADD COLUMN content TEXT");
+  if (!hasColumn(db, "turns", "content")) {
+    db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
   }
-  if (!hasColumn(db2, "observations", "content")) {
-    db2.exec("ALTER TABLE observations ADD COLUMN content TEXT");
+  if (!hasColumn(db, "observations", "content")) {
+    db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
-  if (!hasColumn(db2, "observations", "insight")) {
-    db2.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
+  if (!hasColumn(db, "observations", "insight")) {
+    db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
-  if (!hasColumn(db2, "observations", "tags")) {
-    db2.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
+  if (!hasColumn(db, "observations", "tags")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
   if (hasRow(
-    db2,
+    db,
     "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
-    db2.exec(`
+    db.exec(`
       UPDATE sessions
       SET content = COALESCE(content, description)
       WHERE content IS NULL AND description IS NOT NULL
@@ -856,10 +856,10 @@ function migrateSchema(db2) {
     searchIndexNeedsRebuild = true;
   }
   if (hasRow(
-    db2,
+    db,
     "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
-    db2.exec(`
+    db.exec(`
       UPDATE turns
       SET content = COALESCE(content, description)
       WHERE content IS NULL AND description IS NOT NULL
@@ -867,7 +867,7 @@ function migrateSchema(db2) {
     searchIndexNeedsRebuild = true;
   }
   if (hasRow(
-    db2,
+    db,
     `
         SELECT 1 FROM observations
         WHERE
@@ -877,7 +877,7 @@ function migrateSchema(db2) {
         LIMIT 1
       `
   )) {
-    db2.exec(`
+    db.exec(`
       UPDATE observations
       SET
         content = COALESCE(content, description),
@@ -890,10 +890,10 @@ function migrateSchema(db2) {
     `);
     searchIndexNeedsRebuild = true;
   }
-  const ftsColumns = db2.query("SELECT name FROM pragma_table_info('memory_fts')").all().map((row) => row.name);
+  const ftsColumns = db.query("SELECT name FROM pragma_table_info('memory_fts')").all().map((row) => row.name);
   if (ftsColumns.length > 0 && !ftsColumns.includes("content")) {
-    db2.exec("DROP TABLE IF EXISTS memory_fts");
-    db2.exec(`
+    db.exec("DROP TABLE IF EXISTS memory_fts");
+    db.exec(`
       CREATE VIRTUAL TABLE memory_fts USING fts5(
         layer,
         source_id,
@@ -906,11 +906,11 @@ function migrateSchema(db2) {
   }
   return searchIndexNeedsRebuild;
 }
-function initializeDatabase(db2) {
-  initializeSchema(db2);
-  const migrationNeedsRebuild = migrateSchema(db2);
-  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db2)) {
-    rebuildSearchIndex(db2);
+function initializeDatabase(db) {
+  initializeSchema(db);
+  const migrationNeedsRebuild = migrateSchema(db);
+  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db)) {
+    rebuildSearchIndex(db);
   }
 }
 
@@ -35591,12 +35591,12 @@ function mapMemoryRow(row) {
     tags: parseJsonArray2(row.tags)
   };
 }
-function getMemory(db2, id) {
+function getMemory(db, id) {
   return mapMemoryRow(
-    db2.query(`${MEMORY_SELECT} WHERE id = ?`).get(id) ?? null
+    db.query(`${MEMORY_SELECT} WHERE id = ?`).get(id) ?? null
   );
 }
-function listMemories(db2, options = {}) {
+function listMemories(db, options = {}) {
   const clauses = [];
   const params = [];
   if (options.scope) {
@@ -35613,13 +35613,13 @@ function listMemories(db2, options = {}) {
   }
   const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
   const boundParams = [...params, options.limit ?? 50];
-  return db2.query(
+  return db.query(
     `${MEMORY_SELECT}${whereClause} ORDER BY COALESCE(updated_at_epoch, created_at_epoch) DESC, id DESC LIMIT ?`
   ).all(...boundParams).map((row) => mapMemoryRow(row)).filter((record3) => record3 !== null);
 }
-function createMemory(db2, input) {
+function createMemory(db, input) {
   const created = mapMemoryRow(
-    db2.query(
+    db.query(
       `
           INSERT INTO memories (
             type,
@@ -35671,19 +35671,19 @@ function createMemory(db2, input) {
   if (!created) {
     throw new Error("Failed to create memory.");
   }
-  indexMemoryToFTS(db2, created);
+  indexMemoryToFTS(db, created);
   return created;
 }
-function updateMemory(db2, id, input) {
-  db2.exec("BEGIN IMMEDIATE");
+function updateMemory(db, id, input) {
+  db.exec("BEGIN IMMEDIATE");
   try {
-    const existing = getMemory(db2, id);
+    const existing = getMemory(db, id);
     if (!existing) {
-      db2.exec("ROLLBACK");
+      db.exec("ROLLBACK");
       return null;
     }
     const updated = mapMemoryRow(
-      db2.query(
+      db.query(
         `
             UPDATE memories
             SET
@@ -35735,11 +35735,11 @@ function updateMemory(db2, id, input) {
     if (!updated) {
       throw new Error("Failed to update memory.");
     }
-    indexMemoryToFTS(db2, updated);
-    db2.exec("COMMIT");
+    indexMemoryToFTS(db, updated);
+    db.exec("COMMIT");
     return updated;
   } catch (error49) {
-    db2.exec("ROLLBACK");
+    db.exec("ROLLBACK");
     throw error49;
   }
 }
@@ -35779,8 +35779,8 @@ function mapObservationRow(row) {
     filesModified: parseJsonArray3(row.filesModified)
   };
 }
-function createObservation(db2, input) {
-  const inserted = db2.query(
+function createObservation(db, input) {
+  const inserted = db.query(
     `
         INSERT INTO observations (
           turn_id,
@@ -35820,17 +35820,17 @@ function createObservation(db2, input) {
   if (!observation) {
     throw new Error("Failed to create observation.");
   }
-  indexObservationToFTS(db2, observation);
+  indexObservationToFTS(db, observation);
   return observation;
 }
-function getObservationsForTurn(db2, turnId) {
-  return db2.query(
+function getObservationsForTurn(db, turnId) {
+  return db.query(
     `${OBSERVATION_SELECT} WHERE turn_id = ? ORDER BY id ASC`
   ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
-function getObservation(db2, observationId) {
+function getObservation(db, observationId) {
   return mapObservationRow(
-    db2.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
   );
 }
 
@@ -35849,8 +35849,8 @@ var SESSION_SELECT = `
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
-function upsertSession(db2, input) {
-  const session = db2.query(`
+function upsertSession(db, input) {
+  const session = db.query(`
       INSERT INTO sessions (
         content_session_id,
         project,
@@ -35896,18 +35896,18 @@ function upsertSession(db2, input) {
   if (!session) {
     throw new Error("Failed to upsert session.");
   }
-  indexSessionToFTS(db2, session);
+  indexSessionToFTS(db, session);
   return session;
 }
-function getSession(db2, id) {
-  return db2.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
+function getSession(db, id) {
+  return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
-function getSessionByContentId(db2, contentSessionId) {
-  return db2.query(
+function getSessionByContentId(db, contentSessionId) {
+  return db.query(
     `${SESSION_SELECT} WHERE content_session_id = ?`
   ).get(contentSessionId) ?? null;
 }
-function getRecentSessions(db2, options = {}) {
+function getRecentSessions(db, options = {}) {
   const clauses = [];
   const params = [];
   if (options.project) {
@@ -35916,7 +35916,7 @@ function getRecentSessions(db2, options = {}) {
   }
   const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
   const limit = options.limit ?? 20;
-  return db2.query(
+  return db.query(
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
 }
@@ -35964,32 +35964,32 @@ function hasExtractedContent(input) {
     input.title || input.content || input.insight || input.observations.length > 0
   );
 }
-function deleteObservationFts(db2, turnId) {
-  const observationIds = db2.query(
+function deleteObservationFts(db, turnId) {
+  const observationIds = db.query(
     "SELECT id FROM observations WHERE turn_id = ? ORDER BY id"
   ).all(turnId).map((row) => row.id);
-  const deleteObservationFtsStatement = db2.query(
+  const deleteObservationFtsStatement = db.query(
     "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
   );
   for (const observationId of observationIds) {
     deleteObservationFtsStatement.run(observationId);
   }
 }
-function saveTurn(db2, input) {
+function saveTurn(db, input) {
   const status = input.status === "undone" ? "undone" : hasExtractedContent(input) ? "extracted" : "skipped";
-  db2.exec("BEGIN");
+  db.exec("BEGIN");
   try {
-    const existingTurn = getTurn(db2, input.sessionId, input.promptNumber);
+    const existingTurn = getTurn(db, input.sessionId, input.promptNumber);
     const filesRead = stringifyArray(input.filesRead);
     const filesModified = stringifyArray(input.filesModified);
     let turnId;
     if (existingTurn) {
-      deleteObservationFts(db2, existingTurn.id);
-      db2.query(
+      deleteObservationFts(db, existingTurn.id);
+      db.query(
         "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
       ).run(existingTurn.id);
-      db2.query("DELETE FROM observations WHERE turn_id = ?").run(existingTurn.id);
-      db2.query(
+      db.query("DELETE FROM observations WHERE turn_id = ?").run(existingTurn.id);
+      db.query(
         `UPDATE turns
          SET status = ?,
              user_prompt = COALESCE(?, user_prompt),
@@ -36017,7 +36017,7 @@ function saveTurn(db2, input) {
       );
       turnId = existingTurn.id;
     } else {
-      const insertedTurn = db2.query(`
+      const insertedTurn = db.query(`
           INSERT INTO turns (
             session_id,
             prompt_number,
@@ -36052,14 +36052,14 @@ function saveTurn(db2, input) {
       }
       turnId = insertedTurn.id;
     }
-    const turn = getTurn(db2, input.sessionId, input.promptNumber);
+    const turn = getTurn(db, input.sessionId, input.promptNumber);
     if (!turn) {
       throw new Error("Failed to reload saved turn.");
     }
     if (status === "extracted") {
-      indexTurnToFTS(db2, turn);
+      indexTurnToFTS(db, turn);
       for (const observation of input.observations) {
-        createObservation(db2, {
+        createObservation(db, {
           turnId,
           type: observation.type,
           title: observation.title,
@@ -36072,42 +36072,70 @@ function saveTurn(db2, input) {
         });
       }
     }
-    db2.exec("COMMIT");
+    db.exec("COMMIT");
     return turn;
   } catch (error49) {
-    db2.exec("ROLLBACK");
+    db.exec("ROLLBACK");
     throw error49;
   }
 }
-function getTurn(db2, sessionId, promptNumber) {
+function getTurn(db, sessionId, promptNumber) {
   return mapTurnRow(
-    db2.query(
+    db.query(
       `${TURN_SELECT} WHERE session_id = ? AND prompt_number = ?`
     ).get(sessionId, promptNumber) ?? null
   );
 }
-function getTurnById(db2, turnId) {
+function getTurnById(db, turnId) {
   return mapTurnRow(
-    db2.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
+    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
   );
 }
-function getTurnsForSession(db2, sessionId) {
-  return db2.query(
+function getTurnsForSession(db, sessionId) {
+  return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
-function getPendingTurns(db2, sessionId) {
-  return db2.query(
+function getPendingTurns(db, sessionId) {
+  return db.query(
     `${TURN_SELECT} WHERE session_id = ? AND status IN ('pending', 'stale') ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
-function markTurnsStale(db2, sessionId, promptNumbers) {
+function claimTurnsForExtraction(db, sessionId, now) {
+  const epoch = now ?? Math.floor(Date.now() / 1e3);
+  return db.query(
+    `UPDATE turns
+       SET status = CASE status
+         WHEN 'pending' THEN 'extracting_pending'
+         WHEN 'stale' THEN 'extracting_stale'
+       END,
+       updated_at_epoch = ?
+       WHERE session_id = ?
+         AND status IN ('pending', 'stale')`
+  ).run(epoch, sessionId).changes;
+}
+function recoverStalledExtractions(db, sessionId, maxAgeSeconds = 300, now) {
+  const epoch = now ?? Math.floor(Date.now() / 1e3);
+  const cutoff = epoch - maxAgeSeconds;
+  db.query(
+    `UPDATE turns
+     SET status = CASE status
+       WHEN 'extracting_pending' THEN 'pending'
+       WHEN 'extracting_stale' THEN 'stale'
+     END,
+     updated_at_epoch = ?
+     WHERE session_id = ?
+       AND status IN ('extracting_pending', 'extracting_stale')
+       AND updated_at_epoch < ?`
+  ).run(epoch, sessionId, cutoff);
+}
+function markTurnsStale(db, sessionId, promptNumbers) {
   if (promptNumbers.length === 0) {
     return;
   }
   const placeholders = promptNumbers.map(() => "?").join(", ");
   const now = Math.floor(Date.now() / 1e3);
-  db2.query(
+  db.query(
     `UPDATE turns
      SET status = 'stale', updated_at_epoch = ?
      WHERE session_id = ?
@@ -36115,8 +36143,8 @@ function markTurnsStale(db2, sessionId, promptNumbers) {
        AND status IN ('extracted', 'skipped')`
   ).run(now, sessionId, ...promptNumbers);
 }
-function updateTurnBackfill(db2, turnId, assistantResponse, toolCallCount) {
-  db2.query(
+function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount) {
+  db.query(
     `UPDATE turns
      SET assistant_response = ?,
          tool_call_count = ?
@@ -36228,8 +36256,19 @@ function truncateText(text, sessionId, turnPromptNumber) {
   const hint = joinHint(sessionId, turnPromptNumber);
   return `${text.slice(0, FIELD_TRUNCATION_LIMIT)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
 }
+function formatDisplayStatus(status) {
+  switch (status) {
+    case "extracting_pending":
+      return "pending";
+    case "extracting_stale":
+      return "stale";
+    default:
+      return status;
+  }
+}
 function formatStatus(status) {
-  return status ? ` [${status}]` : "";
+  const displayStatus = formatDisplayStatus(status);
+  return displayStatus ? ` [${displayStatus}]` : "";
 }
 function formatSessionCollapsed(session) {
   const stats = formatSessionStats(session);
@@ -36623,8 +36662,8 @@ function mergeTimeRanges(input) {
   }
   return { after, before };
 }
-function resolveDefaultProject(db2) {
-  const projects = db2.query(
+function resolveDefaultProject(db) {
+  const projects = db.query(
     "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL ORDER BY project ASC LIMIT 2"
   ).all().map((row) => row.project).filter(Boolean);
   return projects.length === 1 ? projects[0] : void 0;
@@ -36632,9 +36671,9 @@ function resolveDefaultProject(db2) {
 function hasUnscopedSearchFilters(input) {
   return input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.project !== void 0 || input.time !== void 0 || input.after !== void 0 || input.before !== void 0;
 }
-function buildSessionView(db2, session) {
-  const turns = getTurnsForSession(db2, session.id).map(
-    (turn) => buildTurnView(db2, turn)
+function buildSessionView(db, session) {
+  const turns = getTurnsForSession(db, session.id).map(
+    (turn) => buildTurnView(db, turn)
   );
   return {
     id: session.id,
@@ -36652,12 +36691,12 @@ function buildSessionView(db2, session) {
     turns
   };
 }
-function getObservationCountByTurnId(db2, turnIds) {
+function getObservationCountByTurnId(db, turnIds) {
   if (turnIds.length === 0) {
     return /* @__PURE__ */ new Map();
   }
   const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db2.query(
+  const rows = db.query(
     `SELECT turn_id AS turnId, COUNT(*) AS count
        FROM observations
        WHERE turn_id IN (${placeholders})
@@ -36665,15 +36704,15 @@ function getObservationCountByTurnId(db2, turnIds) {
   ).all(...turnIds);
   return new Map(rows.map((row) => [row.turnId, row.count]));
 }
-function buildSessionSummary(db2, sessionId) {
-  const session = getSession(db2, sessionId);
+function buildSessionSummary(db, sessionId) {
+  const session = getSession(db, sessionId);
   if (!session) {
     return null;
   }
-  const turnCount = db2.query(
+  const turnCount = db.query(
     "SELECT COUNT(*) AS count FROM turns WHERE session_id = ?"
   ).get(session.id)?.count ?? 0;
-  const observationCount = db2.query(
+  const observationCount = db.query(
     `SELECT COUNT(*) AS count
          FROM observations o
          JOIN turns t ON t.id = o.turn_id
@@ -36691,10 +36730,10 @@ function buildSessionSummary(db2, sessionId) {
     observationCount
   };
 }
-function buildCollapsedTurnsForSession(db2, sessionId) {
-  const turns = getTurnsForSession(db2, sessionId);
+function buildCollapsedTurnsForSession(db, sessionId) {
+  const turns = getTurnsForSession(db, sessionId);
   const observationCounts = getObservationCountByTurnId(
-    db2,
+    db,
     turns.map((turn) => turn.id)
   );
   return turns.map((turn) => ({
@@ -36709,8 +36748,8 @@ function buildCollapsedTurnsForSession(db2, sessionId) {
     status: turn.status
   }));
 }
-function buildTurnView(db2, turn) {
-  const observations = getObservationsForTurn(db2, turn.id);
+function buildTurnView(db, turn) {
+  const observations = getObservationsForTurn(db, turn.id);
   return {
     id: turn.id,
     promptNumber: turn.promptNumber,
@@ -36738,8 +36777,8 @@ function buildTurnView(db2, turn) {
     }))
   };
 }
-function buildMemoryView(db2, memory) {
-  const sourceTurn = memory.sourceTurnId !== null ? getTurnById(db2, memory.sourceTurnId) : null;
+function buildMemoryView(db, memory) {
+  const sourceTurn = memory.sourceTurnId !== null ? getTurnById(db, memory.sourceTurnId) : null;
   return {
     id: memory.id,
     type: memory.type,
@@ -36760,8 +36799,8 @@ function buildMemoryView(db2, memory) {
     } : null
   };
 }
-function selectSearchResults(db2, input, after, before) {
-  return searchMemory(db2, {
+function selectSearchResults(db, input, after, before) {
+  return searchMemory(db, {
     scope: input.view,
     query: input.query,
     project: input.project,
@@ -36772,15 +36811,15 @@ function selectSearchResults(db2, input, after, before) {
     limit: input.limit ?? (input.view === "memories" ? 200 : input.view === "sessions" ? 1e3 : 20)
   });
 }
-function renderSession(db2, session, depth, turnSelector) {
-  const view = buildSessionView(db2, session);
+function renderSession(db, session, depth, turnSelector) {
+  const view = buildSessionView(db, session);
   const lines = [
     depth === "collapsed" ? formatSessionCollapsed(view) : formatSessionExpanded(view)
   ];
   if (depth === "collapsed") {
     return lines.join("\n");
   }
-  const turns = getTurnsForSession(db2, session.id).filter(
+  const turns = getTurnsForSession(db, session.id).filter(
     (turn) => turnSelector ? turnSelector.has(turn.promptNumber) : true
   );
   const sampledTurns = sampleWithOmissions(
@@ -36792,7 +36831,7 @@ function renderSession(db2, session, depth, turnSelector) {
       lines.push(`  - ... ${item.omittedCount} omitted ...`);
       continue;
     }
-    const turnView = buildTurnView(db2, item);
+    const turnView = buildTurnView(db, item);
     const turnLines = formatTurnExpanded(turnView, { sessionId: session.id });
     lines.push(turnLines);
     const observations = turnView.observations ?? [];
@@ -36819,7 +36858,7 @@ function renderSession(db2, session, depth, turnSelector) {
   }
   return lines.join("\n");
 }
-function renderTurnScope(db2, turns, depth) {
+function renderTurnScope(db, turns, depth) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -36827,11 +36866,11 @@ function renderTurnScope(db2, turns, depth) {
     list.push(turn);
     grouped.set(turn.sessionId, list);
   }
-  const sessions = getRecentSessions(db2, { limit: 1e3 }).filter(
+  const sessions = getRecentSessions(db, { limit: 1e3 }).filter(
     (session) => grouped.has(session.id)
   );
   for (const session of sessions) {
-    const view = buildSessionView(db2, session);
+    const view = buildSessionView(db, session);
     lines.push(formatSessionCollapsed(view));
     const sessionTurns = grouped.get(session.id) ?? [];
     const sampledTurns = sampleWithOmissions(
@@ -36843,7 +36882,7 @@ function renderTurnScope(db2, turns, depth) {
         lines.push(`  - ... ${item.omittedCount} omitted ...`);
         continue;
       }
-      const turnView = buildTurnView(db2, item);
+      const turnView = buildTurnView(db, item);
       lines.push(
         depth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
       );
@@ -36871,7 +36910,7 @@ function renderTurnScope(db2, turns, depth) {
   }
   return lines.join("\n");
 }
-function renderObservationScope(db2, observations, depth, includeParents) {
+function renderObservationScope(db, observations, depth, includeParents) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -36889,7 +36928,7 @@ function renderObservationScope(db2, observations, depth, includeParents) {
         continue;
       }
       const row = entry;
-      const observation = getObservation(db2, row.observationId);
+      const observation = getObservation(db, row.observationId);
       if (!observation) {
         continue;
       }
@@ -36909,18 +36948,18 @@ function renderObservationScope(db2, observations, depth, includeParents) {
     }
     return lines.join("\n");
   }
-  const sessions = getRecentSessions(db2, { limit: 1e3 }).filter(
+  const sessions = getRecentSessions(db, { limit: 1e3 }).filter(
     (session) => grouped.has(session.id)
   );
   for (const session of sessions) {
-    const sessionView = buildSessionView(db2, session);
+    const sessionView = buildSessionView(db, session);
     lines.push(formatSessionCollapsed(sessionView));
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
-    const turns = getTurnsForSession(db2, session.id).filter(
+    const turns = getTurnsForSession(db, session.id).filter(
       (turn) => turnMap.has(turn.id)
     );
     for (const turn of turns) {
-      const turnView = buildTurnView(db2, turn);
+      const turnView = buildTurnView(db, turn);
       lines.push(
         depth === "collapsed" ? formatTurnCollapsed(turnView, { sessionId: session.id }) : formatTurnExpanded(turnView, { sessionId: session.id })
       );
@@ -36932,7 +36971,7 @@ function renderObservationScope(db2, observations, depth, includeParents) {
           continue;
         }
         const observationId = observationEntry;
-        const observation = getObservation(db2, observationId);
+        const observation = getObservation(db, observationId);
         if (!observation) {
           continue;
         }
@@ -36962,30 +37001,30 @@ function renderObservationScope(db2, observations, depth, includeParents) {
   }
   return lines.join("\n");
 }
-function renderMemoryScope(db2, memoryIds, depth) {
-  return memoryIds.map((memoryId) => getMemory(db2, memoryId)).filter(
+function renderMemoryScope(db, memoryIds, depth) {
+  return memoryIds.map((memoryId) => getMemory(db, memoryId)).filter(
     (memory) => memory !== null
-  ).map((memory) => buildMemoryView(db2, memory)).map(
+  ).map((memory) => buildMemoryView(db, memory)).map(
     (memory) => depth === "collapsed" ? formatMemoryCollapsed(memory) : formatMemoryExpanded(memory)
   ).join("\n");
 }
-function renderSessionDetailById(db2, sessionId) {
-  const session = getSession(db2, sessionId);
+function renderSessionDetailById(db, sessionId) {
+  const session = getSession(db, sessionId);
   if (!session) {
     return "Session not found.";
   }
-  const lines = [formatSessionExpanded(buildSessionView(db2, session))];
-  for (const turn of buildCollapsedTurnsForSession(db2, session.id)) {
+  const lines = [formatSessionExpanded(buildSessionView(db, session))];
+  for (const turn of buildCollapsedTurnsForSession(db, session.id)) {
     lines.push(formatTurnCollapsed(turn, { sessionId: session.id }));
   }
   return lines.join("\n");
 }
-function renderTurnDetailById(db2, sessionId, promptNumber) {
-  const turn = getTurn(db2, sessionId, promptNumber);
+function renderTurnDetailById(db, sessionId, promptNumber) {
+  const turn = getTurn(db, sessionId, promptNumber);
   if (!turn) {
     return "Turn not found.";
   }
-  const turnView = buildTurnView(db2, turn);
+  const turnView = buildTurnView(db, turn);
   return [
     formatTurnExpanded(turnView, { sessionId }),
     ...(turnView.observations ?? []).map(
@@ -36997,8 +37036,8 @@ function renderTurnDetailById(db2, sessionId, promptNumber) {
     )
   ].join("\n");
 }
-function renderObservationDetailById(db2, observationId) {
-  const observation = getObservation(db2, observationId);
+function renderObservationDetailById(db, observationId) {
+  const observation = getObservation(db, observationId);
   if (!observation) {
     return "Observation not found.";
   }
@@ -37013,28 +37052,28 @@ function renderObservationDetailById(db2, observationId) {
     filesModified: observation.filesModified
   });
 }
-function renderMemoryDetailById(db2, memoryId) {
-  const memory = getMemory(db2, memoryId);
+function renderMemoryDetailById(db, memoryId) {
+  const memory = getMemory(db, memoryId);
   if (!memory) {
     return "Memory not found.";
   }
-  return formatMemoryExpanded(buildMemoryView(db2, memory));
+  return formatMemoryExpanded(buildMemoryView(db, memory));
 }
-function renderRoutedId(db2, id) {
+function renderRoutedId(db, id) {
   const routed = parseRoutedId(id);
   if (!routed) {
     return formatParameterError(`invalid id selector "${id}"`);
   }
   if (routed.kind === "session") {
-    return renderSessionDetailById(db2, routed.sessionId);
+    return renderSessionDetailById(db, routed.sessionId);
   }
   if (routed.kind === "turn") {
-    return renderTurnDetailById(db2, routed.sessionId, routed.promptNumber);
+    return renderTurnDetailById(db, routed.sessionId, routed.promptNumber);
   }
   if (routed.kind === "observation") {
-    return renderObservationDetailById(db2, routed.observationId);
+    return renderObservationDetailById(db, routed.observationId);
   }
-  return renderMemoryDetailById(db2, routed.memoryId);
+  return renderMemoryDetailById(db, routed.memoryId);
 }
 function hasIdSelectorConflict(input) {
   return input.view !== void 0 || input.session !== void 0 || input.turn !== void 0 || input.obs !== void 0 || input.query !== void 0 || input.type !== void 0 || input.file !== void 0 || input.after !== void 0 || input.before !== void 0 || input.time !== void 0 || input.expandTurns !== void 0 || input.project !== void 0 || input.limit !== void 0;
@@ -37042,30 +37081,30 @@ function hasIdSelectorConflict(input) {
 function firstLine(value) {
   return value.split("\n")[0] ?? value;
 }
-function formatMixedSearchResult(db2, result) {
+function formatMixedSearchResult(db, result) {
   if (result.layer === "memory") {
-    const memory = getMemory(db2, result.sourceId);
-    return memory ? formatMemoryCollapsed(buildMemoryView(db2, memory)) : `- [M${result.sourceId}]`;
+    const memory = getMemory(db, result.sourceId);
+    return memory ? formatMemoryCollapsed(buildMemoryView(db, memory)) : `- [M${result.sourceId}]`;
   }
   if (result.layer === "session" && result.sessionId !== null) {
-    const session = buildSessionSummary(db2, result.sessionId);
+    const session = buildSessionSummary(db, result.sessionId);
     return session ? firstLine(formatSessionCollapsed(session)) : `- [S${result.sessionId}]`;
   }
   if (result.layer === "turn" && result.turnId !== null) {
-    const turn = getTurnById(db2, result.turnId);
+    const turn = getTurnById(db, result.turnId);
     if (!turn) {
       return `- [T?] ${result.title ?? "Untitled"}`;
     }
     return `- [T${turn.promptNumber}] ${turn.title ?? "Untitled"} | S${turn.sessionId}`;
   }
   if (result.layer === "observation" && result.observationId !== null && result.turnId !== null && result.sessionId !== null) {
-    const turn = getTurnById(db2, result.turnId);
+    const turn = getTurnById(db, result.turnId);
     const promptNumber = turn?.promptNumber ?? "?";
     return `- [O${result.observationId}] ${result.type ?? "observation"}: ${result.title ?? "Untitled"} | S${result.sessionId}/T${promptNumber}`;
   }
   return `- [${result.layer}] ${result.title ?? "Untitled"}`;
 }
-function recallMemory(db2, input) {
+function recallMemory(db, input) {
   const normalizedInput = normalizeRecallInput(input);
   if (normalizedInput.id) {
     if (hasIdSelectorConflict(normalizedInput)) {
@@ -37073,7 +37112,7 @@ function recallMemory(db2, input) {
         "id cannot be combined with view, session, turn, obs, or search filters."
       );
     }
-    return renderRoutedId(db2, normalizedInput.id);
+    return renderRoutedId(db, normalizedInput.id);
   }
   if (normalizedInput.view === void 0 && hasUnscopedSearchFilters(normalizedInput)) {
     const timeRange2 = mergeTimeRanges(normalizedInput);
@@ -37081,13 +37120,13 @@ function recallMemory(db2, input) {
       return formatParameterError(timeRange2.error);
     }
     const results = selectSearchResults(
-      db2,
+      db,
       normalizedInput,
       timeRange2.after,
       timeRange2.before
     );
     return renderSearchResults(
-      db2,
+      db,
       normalizedInput,
       results,
       normalizedInput.depth ?? "collapsed"
@@ -37100,28 +37139,28 @@ function recallMemory(db2, input) {
   }
   if (normalizedInput.query || normalizedInput.type || normalizedInput.file) {
     const results = selectSearchResults(
-      db2,
+      db,
       normalizedInput,
       timeRange.after,
       timeRange.before
     );
-    return renderSearchResults(db2, normalizedInput, results, depth);
+    return renderSearchResults(db, normalizedInput, results, depth);
   }
   return renderScopedMemory(
-    db2,
+    db,
     normalizedInput,
     depth,
     timeRange.after,
     timeRange.before
   );
 }
-function renderSearchResults(db2, input, results, depth) {
+function renderSearchResults(db, input, results, depth) {
   if (input.view === void 0) {
-    return results.map((result) => formatMixedSearchResult(db2, result)).join("\n");
+    return results.map((result) => formatMixedSearchResult(db, result)).join("\n");
   }
   if (input.view === "memories") {
     return renderMemoryScope(
-      db2,
+      db,
       results.filter((result) => result.layer === "memory").map((result) => result.sourceId),
       depth
     );
@@ -37129,14 +37168,14 @@ function renderSearchResults(db2, input, results, depth) {
   if (input.view === "sessions") {
     const sessions = results.filter(
       (result) => result.sessionId !== null
-    ).map((result) => getSession(db2, result.sessionId)).filter(
+    ).map((result) => getSession(db, result.sessionId)).filter(
       (session) => session !== null
     );
-    return sessions.map((session) => renderSession(db2, session, depth)).join("\n");
+    return sessions.map((session) => renderSession(db, session, depth)).join("\n");
   }
   if (input.view === "turns") {
-    const turns = results.map((result) => getTurnById(db2, result.turnId ?? -1)).filter((turn) => turn !== null);
-    return renderTurnScope(db2, turns, depth);
+    const turns = results.map((result) => getTurnById(db, result.turnId ?? -1)).filter((turn) => turn !== null);
+    return renderTurnScope(db, turns, depth);
   }
   const observations = results.filter(
     (result) => result.sessionId !== null && result.turnId !== null && result.observationId !== null
@@ -37146,12 +37185,12 @@ function renderSearchResults(db2, input, results, depth) {
     observationId: result.observationId
   }));
   const includeParents = Boolean(input.session !== void 0 || input.turn !== void 0);
-  return renderObservationScope(db2, observations, depth, includeParents);
+  return renderObservationScope(db, observations, depth, includeParents);
 }
-function renderScopedMemory(db2, input, depth, after, before) {
+function renderScopedMemory(db, input, depth, after, before) {
   if (input.view === "memories") {
-    const project = input.project ?? resolveDefaultProject(db2);
-    const results = searchMemory(db2, {
+    const project = input.project ?? resolveDefaultProject(db);
+    const results = searchMemory(db, {
       scope: "memories",
       project,
       after,
@@ -37159,7 +37198,7 @@ function renderScopedMemory(db2, input, depth, after, before) {
       limit: input.limit ?? 200
     });
     return renderMemoryScope(
-      db2,
+      db,
       results.filter((result) => result.layer === "memory").map((result) => result.sourceId),
       depth
     );
@@ -37189,7 +37228,7 @@ function renderScopedMemory(db2, input, depth, after, before) {
   }
   if (sessionIds.length > 0 && turnNumbers.length > 0) {
     for (const sessionId of sessionIds) {
-      const turns = getTurnsForSession(db2, sessionId);
+      const turns = getTurnsForSession(db, sessionId);
       const promptNumbers = new Set(turns.map((turn) => turn.promptNumber));
       for (const promptNumber of turnNumbers) {
         if (!promptNumbers.has(promptNumber)) {
@@ -37203,11 +37242,11 @@ function renderScopedMemory(db2, input, depth, after, before) {
   if (sessionIds.length > 0 && observationIds.length > 0) {
     const sessionSet = new Set(sessionIds);
     for (const observationId of observationIds) {
-      const observation = getObservation(db2, observationId);
+      const observation = getObservation(db, observationId);
       if (!observation) {
         continue;
       }
-      const turn = getTurnById(db2, observation.turnId);
+      const turn = getTurnById(db, observation.turnId);
       if (!turn || !sessionSet.has(turn.sessionId)) {
         return formatParameterError(
           `observation ${observationId} does not belong to session ${sessionIds.join(", ")}.`
@@ -37218,11 +37257,11 @@ function renderScopedMemory(db2, input, depth, after, before) {
   if (sessionIds.length > 0 && turnNumbers.length > 0 && observationIds.length > 0) {
     const turnSet = new Set(turnNumbers);
     for (const observationId of observationIds) {
-      const observation = getObservation(db2, observationId);
+      const observation = getObservation(db, observationId);
       if (!observation) {
         continue;
       }
-      const turn = getTurnById(db2, observation.turnId);
+      const turn = getTurnById(db, observation.turnId);
       if (!turn || !turnSet.has(turn.promptNumber)) {
         return formatParameterError(
           `observation ${observationId} does not belong to turn ${turnNumbers.join(", ")}.`
@@ -37231,17 +37270,17 @@ function renderScopedMemory(db2, input, depth, after, before) {
     }
   }
   if (input.view === "sessions") {
-    const candidateSessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db2, sessionId)).filter(
+    const candidateSessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
       (session) => session !== null
-    ) : getRecentSessions(db2, { limit: input.limit ?? 1e3 });
+    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
     const observationSessionIds = /* @__PURE__ */ new Set();
     if (observationIds.length > 0) {
       for (const observationId of observationIds) {
-        const observation = getObservation(db2, observationId);
+        const observation = getObservation(db, observationId);
         if (!observation) {
           continue;
         }
-        const turn = getTurnById(db2, observation.turnId);
+        const turn = getTurnById(db, observation.turnId);
         if (turn) {
           observationSessionIds.add(turn.sessionId);
         }
@@ -37254,7 +37293,7 @@ function renderScopedMemory(db2, input, depth, after, before) {
       if (before !== void 0 && session.createdAtEpoch > before) {
         return false;
       }
-      if (turnNumbers.length > 0 && !getTurnsForSession(db2, session.id).some(
+      if (turnNumbers.length > 0 && !getTurnsForSession(db, session.id).some(
         (turn) => turnNumbers.includes(turn.promptNumber)
       )) {
         return false;
@@ -37265,19 +37304,19 @@ function renderScopedMemory(db2, input, depth, after, before) {
       return true;
     });
     const turnSelector2 = turnNumbers.length > 0 ? new Set(turnNumbers) : void 0;
-    return filtered.map((session) => renderSession(db2, session, depth, turnSelector2)).join("\n");
+    return filtered.map((session) => renderSession(db, session, depth, turnSelector2)).join("\n");
   }
   if (input.view === "turns") {
     if (input.turn !== void 0 && sessionIds.length === 0) {
       return formatParameterError('turn requires session; use recall(view="turns", session=142, turn=3).');
     }
-    const sessions2 = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db2, sessionId)).filter(
+    const sessions2 = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
       (session) => session !== null
-    ) : getRecentSessions(db2, { limit: input.limit ?? 1e3 });
+    ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
     const turns = [];
     for (const session of sessions2) {
       turns.push(
-        ...getTurnsForSession(db2, session.id).filter((turn) => {
+        ...getTurnsForSession(db, session.id).filter((turn) => {
           if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
             return false;
           }
@@ -37294,38 +37333,38 @@ function renderScopedMemory(db2, input, depth, after, before) {
     if (observationIds.length > 0) {
       const observationTurnIds = /* @__PURE__ */ new Set();
       for (const observationId of observationIds) {
-        const observation = getObservation(db2, observationId);
+        const observation = getObservation(db, observationId);
         if (!observation) {
           continue;
         }
         observationTurnIds.add(observation.turnId);
       }
-      return renderTurnScope(db2, turns.filter((turn) => observationTurnIds.has(turn.id)), depth);
+      return renderTurnScope(db, turns.filter((turn) => observationTurnIds.has(turn.id)), depth);
     }
-    return renderTurnScope(db2, turns, depth);
+    return renderTurnScope(db, turns, depth);
   }
   if (observationIds.length > 0) {
-    const observations2 = observationIds.map((observationId) => getObservation(db2, observationId)).filter(
+    const observations2 = observationIds.map((observationId) => getObservation(db, observationId)).filter(
       (observation) => observation !== null
     ).map((observation) => ({
-      sessionId: getTurnById(db2, observation.turnId)?.sessionId ?? 0,
+      sessionId: getTurnById(db, observation.turnId)?.sessionId ?? 0,
       turnId: observation.turnId,
       observationId: observation.id
     }));
     return renderObservationScope(
-      db2,
+      db,
       observations2,
       depth,
       sessionIds.length > 0 || turnNumbers.length > 0
     );
   }
-  const sessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db2, sessionId)).filter(
+  const sessions = sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
     (session) => session !== null
-  ) : getRecentSessions(db2, { limit: input.limit ?? 1e3 });
+  ) : getRecentSessions(db, { limit: input.limit ?? 1e3 });
   const turnIds = /* @__PURE__ */ new Set();
   const observations = [];
   for (const session of sessions) {
-    for (const turn of getTurnsForSession(db2, session.id)) {
+    for (const turn of getTurnsForSession(db, session.id)) {
       if (turnNumbers.length > 0 && !turnNumbers.includes(turn.promptNumber)) {
         continue;
       }
@@ -37336,7 +37375,7 @@ function renderScopedMemory(db2, input, depth, after, before) {
         continue;
       }
       turnIds.add(turn.id);
-      for (const observation of getObservationsForTurn(db2, turn.id)) {
+      for (const observation of getObservationsForTurn(db, turn.id)) {
         observations.push({
           sessionId: session.id,
           turnId: turn.id,
@@ -37345,16 +37384,16 @@ function renderScopedMemory(db2, input, depth, after, before) {
       }
     }
   }
-  const turnRecords = [...turnIds].map((turnId) => getTurnById(db2, turnId)).filter((turn) => turn !== null);
+  const turnRecords = [...turnIds].map((turnId) => getTurnById(db, turnId)).filter((turn) => turn !== null);
   if (input.view === "observations") {
     return renderObservationScope(
-      db2,
+      db,
       observations,
       depth,
       sessionIds.length > 0 || turnNumbers.length > 0
     );
   }
-  return renderTurnScope(db2, turnRecords, depth);
+  return renderTurnScope(db, turnRecords, depth);
 }
 
 // src/mcp/remember.ts
@@ -37399,18 +37438,18 @@ function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   }
   return null;
 }
-function resolveNextPromptNumber(db2, sessionId) {
-  const pendingTurns = getPendingTurns(db2, sessionId);
+function resolveNextPromptNumber(db, sessionId) {
+  const pendingTurns = getPendingTurns(db, sessionId);
   if (pendingTurns.length > 0) {
     return pendingTurns[0].promptNumber;
   }
-  const existingTurns = getTurnsForSession(db2, sessionId);
+  const existingTurns = getTurnsForSession(db, sessionId);
   if (existingTurns.length === 0) {
     return 1;
   }
   return Math.max(...existingTurns.map((turn) => turn.promptNumber)) + 1;
 }
-function handleTurnRemember(db2, sessionId, input) {
+function handleTurnRemember(db, sessionId, input) {
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -37419,12 +37458,12 @@ function handleTurnRemember(db2, sessionId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (!getSession(db2, sessionId)) {
+  if (!getSession(db, sessionId)) {
     return textResult(`Session ${sessionId} not found.`);
   }
-  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db2, sessionId);
+  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
   const isSkipped = input.status === "skipped";
-  const turn = saveTurn(db2, {
+  const turn = saveTurn(db, {
     sessionId,
     promptNumber,
     status: input.status === "undone" ? "undone" : void 0,
@@ -37441,7 +37480,7 @@ function handleTurnRemember(db2, sessionId, input) {
   });
   return textResult(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
 }
-function handleObservationRemember(db2, parent, input) {
+function handleObservationRemember(db, parent, input) {
   const statusError = validateStatusForRoute(
     input.status,
     null,
@@ -37450,11 +37489,11 @@ function handleObservationRemember(db2, parent, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  const turn = getTurn(db2, parent.sessionId, parent.promptNumber);
+  const turn = getTurn(db, parent.sessionId, parent.promptNumber);
   if (!turn) {
     return textResult(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
   }
-  const observation = createObservation(db2, {
+  const observation = createObservation(db, {
     turnId: turn.id,
     type: input.type ?? "discovery",
     title: input.title ?? "Untitled observation",
@@ -37467,7 +37506,7 @@ function handleObservationRemember(db2, parent, input) {
   });
   return textResult(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
 }
-function handleMemoryCreate(db2, input) {
+function handleMemoryCreate(db, input) {
   const statusError = validateStatusForRoute(
     input.status,
     MEMORY_REMEMBER_STATUSES,
@@ -37479,7 +37518,7 @@ function handleMemoryCreate(db2, input) {
   if (!input.type || !input.scope || !input.title || !input.content) {
     return textResult("Memory creation requires type, scope, title, and content.");
   }
-  const memory = createMemory(db2, {
+  const memory = createMemory(db, {
     type: input.type,
     scope: input.scope,
     title: input.title,
@@ -37495,7 +37534,7 @@ function handleMemoryCreate(db2, input) {
   });
   return textResult(`Created memory M${memory.id}.`);
 }
-function handleMemoryUpdate(db2, memoryId, input) {
+function handleMemoryUpdate(db, memoryId, input) {
   const statusError = validateStatusForRoute(
     input.status,
     MEMORY_REMEMBER_STATUSES,
@@ -37504,7 +37543,7 @@ function handleMemoryUpdate(db2, memoryId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  const memory = updateMemory(db2, memoryId, {
+  const memory = updateMemory(db, memoryId, {
     type: input.type,
     scope: input.scope,
     title: input.title,
@@ -37521,16 +37560,16 @@ function handleMemoryUpdate(db2, memoryId, input) {
   }
   return textResult(`Updated memory M${memory.id}.`);
 }
-function handleSessionRemember(db2, sessionId, input) {
+function handleSessionRemember(db, sessionId, input) {
   const statusError = validateStatusForRoute(input.status, null, "session remember");
   if (statusError) {
     return parameterError(statusError);
   }
-  const session = getSession(db2, sessionId);
+  const session = getSession(db, sessionId);
   if (!session) {
     return textResult(`Session ${sessionId} not found.`);
   }
-  upsertSession(db2, {
+  upsertSession(db, {
     contentSessionId: session.contentSessionId,
     project: session.project,
     title: input.title ?? session.title,
@@ -37543,30 +37582,30 @@ function handleSessionRemember(db2, sessionId, input) {
   });
   return textResult(`Updated session ${sessionId}.`);
 }
-function rememberTool(db2, input) {
+function rememberTool(db, input) {
   if (input.parent) {
     const turnParent = parseTurnParent(input.parent);
     if (turnParent) {
-      return handleObservationRemember(db2, turnParent, input);
+      return handleObservationRemember(db, turnParent, input);
     }
     const sessionId = parseSessionId(input.parent);
     if (sessionId !== null) {
-      return handleTurnRemember(db2, sessionId, input);
+      return handleTurnRemember(db, sessionId, input);
     }
     return textResult(`Unsupported parent selector: ${input.parent}`);
   }
   if (input.id) {
     const sessionId = parseSessionId(input.id);
     if (sessionId !== null) {
-      return handleSessionRemember(db2, sessionId, input);
+      return handleSessionRemember(db, sessionId, input);
     }
     const memoryId = parseMemoryId(input.id);
     if (memoryId !== null) {
-      return handleMemoryUpdate(db2, memoryId, input);
+      return handleMemoryUpdate(db, memoryId, input);
     }
     return textResult(`Unsupported id selector: ${input.id}`);
   }
-  return handleMemoryCreate(db2, input);
+  return handleMemoryCreate(db, input);
 }
 
 // src/mcp/replay.ts
@@ -37697,11 +37736,11 @@ function truncate(text, full = false) {
   }
   return `${text.slice(0, TOOL_RESULT_PREVIEW_LIMIT)}...`;
 }
-function resolveReplayTranscriptPath(db2, input) {
+function resolveReplayTranscriptPath(db, input) {
   if (input.transcriptPath) {
     return input.transcriptPath;
   }
-  const session = getSession(db2, input.session);
+  const session = getSession(db, input.session);
   if (!session) {
     return null;
   }
@@ -37731,14 +37770,14 @@ function formatTurnDetail(turn, promptNumber, status, full = false) {
   });
   return lines.join("\n");
 }
-function replayMemory(db2, input) {
-  const transcriptPath = resolveReplayTranscriptPath(db2, input);
+function replayMemory(db, input) {
+  const transcriptPath = resolveReplayTranscriptPath(db, input);
   if (!transcriptPath || !(0, import_node_fs3.existsSync)(transcriptPath)) {
     return "Transcript not found.";
   }
   const transcriptTurns = parseReplayTranscript(transcriptPath);
-  const session = getSession(db2, input.session);
-  const dbTurns = session ? getTurnsForSession(db2, session.id) : [];
+  const session = getSession(db, input.session);
+  const dbTurns = session ? getTurnsForSession(db, session.id) : [];
   const statusByPromptNumber = new Map(
     dbTurns.map((turn) => [turn.promptNumber, turn.status])
   );
@@ -38146,7 +38185,7 @@ Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })`;
 function buildReplayTurnLookup(transcriptTurns) {
   return new Map(transcriptTurns.map((turn) => [turn.promptNumber, turn]));
 }
-function backfillFromTranscript(db2, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurnsByPromptNumber) {
+function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurnsByPromptNumber) {
   if (pendingTurns.length === 0) {
     return;
   }
@@ -38164,7 +38203,7 @@ function backfillFromTranscript(db2, pendingTurns, transcriptPath, lastAssistant
     const assistantResponse = pendingTurn.promptNumber === lastPendingPromptNumber && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
     updateTurnBackfill(
-      db2,
+      db,
       pendingTurn.id,
       assistantResponse,
       toolCallCount
@@ -38173,9 +38212,9 @@ function backfillFromTranscript(db2, pendingTurns, transcriptPath, lastAssistant
 }
 
 // src/hooks/handlers/compact.ts
-function buildPrompt(db2, sessionDbId) {
+function buildPrompt(db, sessionDbId) {
   return buildMnemosynePrompt(
-    recallMemory(db2, {
+    recallMemory(db, {
       view: "turns",
       session: sessionDbId,
       depth: "expanded"
@@ -38183,6 +38222,7 @@ function buildPrompt(db2, sessionDbId) {
   );
 }
 function createCompactHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   return async function handleCompactHook(input) {
     if (!input.sessionId) {
       return { continue: true };
@@ -38192,14 +38232,27 @@ function createCompactHandler(dependencies) {
       return { continue: true };
     }
     const transcriptPath = input.transcriptPath || (input.cwd ? resolveTranscriptPath(input.cwd, input.sessionId) : void 0);
+    const epoch = now();
+    recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
-    if (pendingTurns.length > 0) {
-      await dependencies.forkMnemosyne({
-        cwd: input.cwd,
-        prompt: buildPrompt(dependencies.db, session.id),
-        database: dependencies.db
-      });
+    const prompt = buildPrompt(dependencies.db, session.id);
+    const claimedCount = claimTurnsForExtraction(
+      dependencies.db,
+      session.id,
+      epoch
+    );
+    if (claimedCount > 0) {
+      return {
+        continue: true,
+        asyncWork: async () => {
+          await dependencies.forkMnemosyne({
+            cwd: input.cwd,
+            prompt,
+            database: dependencies.db
+          });
+        }
+      };
     }
     return {
       continue: true
@@ -38210,9 +38263,9 @@ function createCompactHandler(dependencies) {
 // src/hooks/handlers/context.ts
 var import_node_path4 = require("node:path");
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
-function buildHeader(db2) {
-  const sessionCount = db2.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
-  const observationCount = db2.query("SELECT COUNT(*) AS count FROM observations").get()?.count ?? 0;
+function buildHeader(db) {
+  const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
+  const observationCount = db.query("SELECT COUNT(*) AS count FROM observations").get()?.count ?? 0;
   return [
     `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations`,
     "Types: \u{1F534}bugfix \u{1F7E3}feature \u{1F504}refactor \u2705change \u{1F535}discovery \u2696\uFE0Fdecision",
@@ -38225,8 +38278,8 @@ function buildHeader(db2) {
     'Expand: recall(scope="turns", session=x, turn=y) | Raw: replay(session=x, turn=y)'
   ].join("\n");
 }
-function resolvePrimarySessionRecord(db2, input, recentSessions) {
-  const currentSession = input.sessionId ? getSessionByContentId(db2, input.sessionId) : null;
+function resolvePrimarySessionRecord(db, input, recentSessions) {
+  const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
   return currentSession ?? recentSessions[0] ?? null;
 }
 function buildCurrentSessionOutput(session, turns) {
@@ -38236,9 +38289,9 @@ function buildCurrentSessionOutput(session, turns) {
   }
   return lines.join("\n");
 }
-function buildRecentSessionsOutput(db2, recentSessions, primarySessionId) {
+function buildRecentSessionsOutput(db, recentSessions, primarySessionId) {
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
-  return others.map((session) => buildSessionSummary(db2, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
+  return others.map((session) => buildSessionSummary(db, session.id)).filter((session) => session !== null).map((session) => formatSessionCollapsed(session));
 }
 function buildMemoryView2(memory) {
   return {
@@ -38277,14 +38330,14 @@ function mergeMemoryLists(...memoryLists) {
     return right.id - left.id;
   }).slice(0, 50);
 }
-function buildMemoriesOutput(db2, projectScope) {
+function buildMemoriesOutput(db, projectScope) {
   const memories = mergeMemoryLists(
-    listMemories(db2, {
+    listMemories(db, {
       scope: "global",
       status: "active",
       limit: 50
     }),
-    projectScope ? listMemories(db2, {
+    projectScope ? listMemories(db, {
       scope: projectScope,
       status: "active",
       limit: 50
@@ -38299,32 +38352,32 @@ function buildMemoriesOutput(db2, projectScope) {
     ...memories.map((memory) => formatMemoryCollapsed(buildMemoryView2(memory)))
   ];
 }
-function buildContextOutput(db2, input) {
-  const recentSessions = getRecentSessions(db2, { limit: 5 });
+function buildContextOutput(db, input) {
+  const recentSessions = getRecentSessions(db, { limit: 5 });
   const primarySessionRecord = resolvePrimarySessionRecord(
-    db2,
+    db,
     input,
     recentSessions
   );
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  const primarySession = buildSessionSummary(db2, primarySessionRecord.id);
+  const primarySession = buildSessionSummary(db, primarySessionRecord.id);
   if (!primarySession) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  const primaryTurns = buildCollapsedTurnsForSession(db2, primarySessionRecord.id);
+  const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
-    db2,
+    db,
     (0, import_node_path4.basename)(primarySessionRecord.project)
   );
   const recentSessionOutputs = buildRecentSessionsOutput(
-    db2,
+    db,
     recentSessions,
     primarySessionRecord.id
   );
   return [
-    buildHeader(db2),
+    buildHeader(db),
     "",
     ...memories,
     ...memories.length > 0 ? [""] : [],
@@ -38347,8 +38400,8 @@ function createContextHandler(dependencies) {
 }
 
 // src/hooks/handlers/session-init.ts
-function createPendingTurn(db2, sessionId, promptNumber, prompt, createdAtEpoch) {
-  db2.query(
+function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch) {
+  db.query(
     `INSERT INTO turns (
       session_id,
       prompt_number,
@@ -38394,23 +38447,23 @@ function createSessionInitHandler(dependencies) {
 }
 
 // src/hooks/handlers/stop.ts
-function buildStopPrompt(db2, sessionDbId) {
+function buildStopPrompt(db, sessionDbId) {
   return buildMnemosynePrompt(
-    recallMemory(db2, {
+    recallMemory(db, {
       view: "turns",
       session: sessionDbId,
       depth: "expanded"
     })
   );
 }
-function detectUndoPromptNumbers(db2, sessionDbId, transcriptPath, transcriptTurnsByPromptNumber) {
+function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurnsByPromptNumber) {
   if (!transcriptPath) {
     return [];
   }
   const replayTurnsByPromptNumber = transcriptTurnsByPromptNumber ?? new Map(
     parseReplayTranscript(transcriptPath).map((turn) => [turn.promptNumber, turn])
   );
-  return getTurnsForSession(db2, sessionDbId).filter(
+  return getTurnsForSession(db, sessionDbId).filter(
     (turn) => (turn.status === "extracted" || turn.status === "skipped") && turn.userPrompt
   ).filter((turn) => {
     const transcriptTurn = replayTurnsByPromptNumber.get(turn.promptNumber);
@@ -38446,6 +38499,8 @@ function createStopHandler(dependencies) {
         exitCode: HOOK_SUCCESS_EXIT_CODE
       };
     }
+    const epoch = now();
+    recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
     const transcriptTurnsByPromptNumber = input.transcriptPath ? new Map(
       parseReplayTranscript(input.transcriptPath).map((turn) => [
         turn.promptNumber,
@@ -38468,14 +38523,12 @@ function createStopHandler(dependencies) {
       transcriptTurnsByPromptNumber
     );
     markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
-    const pendingTurns = getPendingTurns(dependencies.db, session.id);
-    if (pendingTurns.length > 0) {
-      await dependencies.forkMnemosyne({
-        cwd: input.cwd,
-        prompt: buildStopPrompt(dependencies.db, session.id),
-        database: dependencies.db
-      });
-    }
+    const prompt = buildStopPrompt(dependencies.db, session.id);
+    const claimedCount = claimTurnsForExtraction(
+      dependencies.db,
+      session.id,
+      epoch
+    );
     upsertSession(dependencies.db, {
       contentSessionId: session.contentSessionId,
       project: session.project,
@@ -38483,13 +38536,24 @@ function createStopHandler(dependencies) {
       content: session.content,
       insight: session.insight,
       createdAtEpoch: session.createdAtEpoch,
-      updatedAtEpoch: now(),
-      completedAtEpoch: now()
+      updatedAtEpoch: epoch,
+      completedAtEpoch: epoch
     });
-    stderr.write(
-      `Mnemosyne: ${pendingTurns.length} turns queued for extraction
-`
-    );
+    stderr.write(`Mnemosyne: ${claimedCount} turns queued for extraction
+`);
+    if (claimedCount > 0) {
+      return {
+        continue: true,
+        exitCode: HOOK_SUCCESS_EXIT_CODE,
+        asyncWork: async () => {
+          await dependencies.forkMnemosyne({
+            cwd: input.cwd,
+            prompt,
+            database: dependencies.db
+          });
+        }
+      };
+    }
     return {
       continue: true,
       exitCode: HOOK_SUCCESS_EXIT_CODE
@@ -38498,17 +38562,24 @@ function createStopHandler(dependencies) {
 }
 
 // src/hooks/hook-command.ts
-var db = createDatabase();
-initializeDatabase(db);
-var HANDLERS = {
-  SessionStart: createContextHandler({ db }),
-  PreCompact: createCompactHandler({ db, forkMnemosyne }),
-  UserPromptSubmit: createSessionInitHandler({ db }),
-  Stop: createStopHandler({
-    db,
-    forkMnemosyne
-  })
-};
+var defaultHandlers;
+function getDefaultHandlers() {
+  if (defaultHandlers) {
+    return defaultHandlers;
+  }
+  const db = createDatabase();
+  initializeDatabase(db);
+  defaultHandlers = {
+    SessionStart: createContextHandler({ db }),
+    PreCompact: createCompactHandler({ db, forkMnemosyne }),
+    UserPromptSubmit: createSessionInitHandler({ db }),
+    Stop: createStopHandler({
+      db,
+      forkMnemosyne
+    })
+  };
+  return defaultHandlers;
+}
 function readJsonFromStdin() {
   const input = (0, import_node_fs5.readFileSync)(0, "utf8").trim();
   if (input === "") {
@@ -38530,7 +38601,7 @@ function eventNameFromCommandArgument(arg) {
       return void 0;
   }
 }
-function writeHookResult(result) {
+function writeHookResult(result, stdout = process.stdout) {
   const output = {
     continue: result.continue
   };
@@ -38541,30 +38612,42 @@ function writeHookResult(result) {
     output.hookSpecificOutput = result.hookSpecificOutput;
   }
   if (Object.keys(output).length > 1 || output.continue !== true) {
-    process.stdout.write(JSON.stringify(output));
+    stdout.write(JSON.stringify(output));
   }
 }
-async function runHookCommand() {
-  if (process.env.CLAUDE_CODE_ENTRYPOINT === "sdk-ts") {
+async function runHookCommand(dependencies = {}) {
+  const env = dependencies.env ?? process.env;
+  const argv = dependencies.argv ?? process.argv;
+  const stdout = dependencies.stdout ?? process.stdout;
+  const stderr = dependencies.stderr ?? process.stderr;
+  const readJson = dependencies.readJsonFromStdin ?? readJsonFromStdin;
+  const normalizeInput = dependencies.normalizeHookInputImpl ?? normalizeHookInput;
+  if (env.CLAUDE_CODE_ENTRYPOINT === "sdk-ts") {
     return HOOK_SUCCESS_EXIT_CODE;
   }
   try {
-    const rawInput = readJsonFromStdin();
-    const eventNameOverride = eventNameFromCommandArgument(process.argv[2]);
+    const rawInput = readJson();
+    const eventNameOverride = eventNameFromCommandArgument(argv[2]);
     if (eventNameOverride && !("event_name" in rawInput) && !("hook_event_name" in rawInput)) {
       rawInput.event_name = eventNameOverride;
     }
-    const normalizedInput = normalizeHookInput(rawInput);
-    const handler = HANDLERS[normalizedInput.eventName];
+    const normalizedInput = normalizeInput(rawInput);
+    const handler = (dependencies.handlers ?? getDefaultHandlers())[normalizedInput.eventName];
     if (!handler) {
       return HOOK_SUCCESS_EXIT_CODE;
     }
     const result = await handler(normalizedInput);
-    writeHookResult(result);
+    if (result.asyncWork) {
+      stdout.write(`${JSON.stringify({ async: true })}
+`);
+      await result.asyncWork();
+      return HOOK_SUCCESS_EXIT_CODE;
+    }
+    writeHookResult(result, stdout);
     return result.exitCode ?? HOOK_SUCCESS_EXIT_CODE;
   } catch (error49) {
     const message = error49 instanceof Error ? error49.message : "Unknown hook failure";
-    process.stderr.write(`[HOOK] ${message}
+    stderr.write(`[HOOK] ${message}
 `);
     return HOOK_NON_BLOCKING_EXIT_CODE;
   }
