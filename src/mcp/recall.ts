@@ -19,6 +19,7 @@ import {
   type FormattedSession,
   type FormattedTurn,
 } from "./format";
+import { expandNumericSelector } from "./selectors";
 
 export interface RecallInput {
   id?: string;
@@ -44,37 +45,11 @@ interface QueryFilters {
 type RoutedRecallId =
   | { kind: "sessions"; sessionIds?: number[] }
   | { kind: "turns"; sessionId: number; promptNumbers?: number[] }
+  | { kind: "session-observation-list"; sessionId: number }
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
   | { kind: "observation"; observationId: number }
   | { kind: "memories"; memoryIds?: number[] }
   | { kind: "memory"; memoryId: number };
-
-function expandNumericSelector(value: string): number[] | null {
-  if (value === "*") {
-    return [];
-  }
-
-  if (/^\d+$/.test(value)) {
-    return [Number(value)];
-  }
-
-  const rangeMatch = /^(\d+)\.\.(\d+)$/i.exec(value);
-  if (!rangeMatch) {
-    return null;
-  }
-
-  const start = Number(rangeMatch[1]);
-  const end = Number(rangeMatch[2]);
-  const lower = Math.min(start, end);
-  const upper = Math.max(start, end);
-  const values: number[] = [];
-
-  for (let current = lower; current <= upper; current += 1) {
-    values.push(current);
-  }
-
-  return values;
-}
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -165,6 +140,14 @@ function parseUtcDate(value: string): number | null {
 
 function parseRoutedId(value: string): RoutedRecallId | null {
   const trimmed = value.trim();
+
+  const sessionObservationListMatch = /^S(\d+)\/T\*\/O\*$/i.exec(trimmed);
+  if (sessionObservationListMatch) {
+    return {
+      kind: "session-observation-list",
+      sessionId: Number(sessionObservationListMatch[1]),
+    };
+  }
 
   const observationListMatch = /^S(\d+)\/T(\d+)\/O\*$/i.exec(trimmed);
   if (observationListMatch) {
@@ -561,7 +544,10 @@ function renderTurnScope(
   );
 
   for (const session of sessions) {
-    const view = buildSessionView(db, session);
+    const view = buildSessionSummary(db, session.id);
+    if (!view) {
+      continue;
+    }
     lines.push(
       renderNode(
         { type: "session", value: view },
@@ -658,7 +644,10 @@ function renderObservationScope(
   );
 
   for (const session of sessions) {
-    const sessionView = buildSessionView(db, session);
+    const sessionView = buildSessionSummary(db, session.id);
+    if (!sessionView) {
+      continue;
+    }
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
@@ -949,7 +938,7 @@ function renderGroupedSearchResults(
       continue;
     }
 
-    if (result.turnId !== null) {
+    if (result.layer === "turn" && result.turnId !== null) {
       group.turnIds.add(result.turnId);
     }
 
@@ -973,12 +962,16 @@ function renderGroupedSearchResults(
 
     const lines = [
       renderNode(
-        { type: "session", value: buildSessionView(db, session) },
+        {
+          type: "session",
+          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session),
+        },
         { depth: "collapsed", mode: "unified" },
       ),
     ];
-    const turns = getTurnsForSession(db, session.id).filter((turn) =>
-      group.turnIds.has(turn.id),
+    const turns = getTurnsForSession(db, session.id).filter(
+      (turn) =>
+        group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id),
     );
 
     for (const turn of turns) {
@@ -1077,6 +1070,30 @@ function renderRoutedId(
         turnId: turn.id,
         observationId: observation.id,
       }));
+
+    return renderObservationScope(db, observations, depth, true);
+  }
+
+  if (routed.kind === "session-observation-list") {
+    const observations = getTurnsForSession(db, routed.sessionId)
+      .flatMap((turn) =>
+        getObservationsForTurn(db, turn.id)
+          .filter((observation) => {
+            if (after !== undefined && observation.createdAtEpoch < after) {
+              return false;
+            }
+            if (before !== undefined && observation.createdAtEpoch > before) {
+              return false;
+            }
+            return true;
+          })
+          .map((observation) => ({
+            sessionId: routed.sessionId,
+            turnId: turn.id,
+            observationId: observation.id,
+          })),
+      )
+      .slice(0, limit);
 
     return renderObservationScope(db, observations, depth, true);
   }

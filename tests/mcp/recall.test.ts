@@ -328,6 +328,11 @@ describe("recallMemory", () => {
       id: `S${authSessionId}/T1/O*`,
       depth: "expanded",
     });
+    const sessionObservationsOutput = recallMemory(db, {
+      id: `S${floodSessionId}/T*/O*`,
+      depth: "collapsed",
+      limit: 60,
+    });
 
     expect(turnsOutput).toContain(`[S${bigSessionId}] Large timeline`);
     expect(turnsOutput).toContain("[T12] Turn 12");
@@ -340,6 +345,9 @@ describe("recallMemory", () => {
     expect(observationsOutput).toContain(
       "insight: Serialized refresh work with a shared promise.",
     );
+    expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
+    expect(sessionObservationsOutput).toContain("[T1] Observation flood");
+    expect(sessionObservationsOutput).toContain("[O");
     expect(recallMemory(db, { id: `S${authSessionId}/T1/O${authObservationId}` })).toContain(
       "invalid id selector",
     );
@@ -365,6 +373,8 @@ describe("recallMemory", () => {
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
     expect(typeQuery).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
+    expect(typeQuery).toContain("desc: Guards refresh");
+    expect(typeQuery).not.toContain('prompt: "Why am I getting 401 errors?"');
     expect(typeQuery).not.toContain(`[M${projectMemoryId}]`);
 
     expect(projectScopedQuery).toContain("Auth race fix");
