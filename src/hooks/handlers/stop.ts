@@ -12,7 +12,6 @@ import { buildExtractionContext } from "../../mnemosyne/context";
 import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
 import {
-  normalizeAssistantText,
   parseReplayTranscript,
   type ParsedReplayTurn,
 } from "../../shared/transcript-parser";
@@ -69,11 +68,7 @@ function detectUndoPromptNumbers(
         return false;
       }
 
-      if (transcriptTurn.isSidechain) {
-        return true;
-      }
-
-      return transcriptTurn.assistantText !== normalizeAssistantText(turn.assistantResponse ?? "");
+      return transcriptTurn.isSidechain;
     })
     .map((turn) => turn.promptNumber);
 }

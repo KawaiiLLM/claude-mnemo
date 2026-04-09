@@ -38009,19 +38009,22 @@ function createMnemoSdkServer(database, defaultProject, deps) {
         "remember",
         MNEMO_TOOL_DESCRIPTIONS.remember,
         rememberInputShape,
-        async (args) => handlers.remember(args)
+        async (args) => handlers.remember(args),
+        { alwaysLoad: true }
       ),
       deps.toolImpl(
         "recall",
         MNEMO_TOOL_DESCRIPTIONS.recall,
         recallInputShape,
-        async (args) => handlers.recall(args)
+        async (args) => handlers.recall(args),
+        { alwaysLoad: true }
       ),
       deps.toolImpl(
         "replay",
         MNEMO_TOOL_DESCRIPTIONS.replay,
         replayInputShape,
-        async (args) => handlers.replay(args)
+        async (args) => handlers.replay(args),
+        { alwaysLoad: true }
       )
     ]
   });
@@ -38594,10 +38597,7 @@ function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurn
     if (!transcriptTurn) {
       return false;
     }
-    if (transcriptTurn.isSidechain) {
-      return true;
-    }
-    return transcriptTurn.assistantText !== normalizeAssistantText(turn.assistantResponse ?? "");
+    return transcriptTurn.isSidechain;
   }).map((turn) => turn.promptNumber);
 }
 function createStopHandler(dependencies) {
