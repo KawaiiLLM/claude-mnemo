@@ -39,8 +39,6 @@ export interface SearchMemoryOptions {
   file?: string;
   after?: number;
   before?: number;
-  fromEpoch?: number;
-  toEpoch?: number;
   limit?: number;
 }
 
@@ -96,10 +94,10 @@ function resolveEpochRange(options: SearchMemoryOptions): {
   after?: number;
   before?: number;
 } {
-  const lowerBounds = [options.after, options.fromEpoch].filter(
+  const lowerBounds = [options.after].filter(
     (value): value is number => value !== undefined,
   );
-  const upperBounds = [options.before, options.toEpoch].filter(
+  const upperBounds = [options.before].filter(
     (value): value is number => value !== undefined,
   );
 
@@ -755,9 +753,7 @@ export function searchMemory(
     Boolean(options.type) ||
     Boolean(options.file) ||
     options.after !== undefined ||
-    options.before !== undefined ||
-    options.fromEpoch !== undefined ||
-    options.toEpoch !== undefined;
+    options.before !== undefined;
 
   if (!query && !hasFilters) {
     if (options.scope === "memories") {

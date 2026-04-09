@@ -40,7 +40,7 @@ function insertTurn(
   },
 ): number {
   const turn = db
-    .query<{ id: number }, [number, number, string, string, string, string, string | null, string | null, string | null, string, string, number, number | null]>(`
+    .query<{ id: number }, [number, number, string, string, string, string, string | null, string, string, number, number, number | null]>(`
       INSERT INTO turns (
         session_id,
         prompt_number,
@@ -48,7 +48,7 @@ function insertTurn(
         user_prompt,
         assistant_response,
         title,
-        description,
+        content,
         insight,
         files_read,
         files_modified,
@@ -64,7 +64,7 @@ function insertTurn(
       input.userPrompt,
       input.assistantResponse,
       input.title,
-      input.description,
+      input.content,
       JSON.stringify(input.filesRead ?? []),
       JSON.stringify(input.filesModified ?? []),
       input.toolCallCount,
@@ -86,9 +86,8 @@ function insertObservation(
     type: string;
     title: string;
     content: string;
-    narrative?: string;
-    facts?: string[];
-    concepts?: string[];
+    insight?: string;
+    tags?: string[];
     filesRead?: string[];
     filesModified?: string[];
     createdAtEpoch: number;
@@ -99,22 +98,20 @@ function insertObservation(
       turn_id,
       type,
       title,
-      description,
-      narrative,
-      facts,
-      concepts,
+      content,
+      insight,
+      tags,
       files_read,
       files_modified,
       created_at_epoch
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     turnId,
     input.type,
     input.title,
-    input.description,
-    input.narrative ?? null,
-    JSON.stringify(input.facts ?? []),
-    JSON.stringify(input.concepts ?? []),
+    input.content,
+    input.insight ?? null,
+    JSON.stringify(input.tags ?? []),
     JSON.stringify(input.filesRead ?? []),
     JSON.stringify(input.filesModified ?? []),
     input.createdAtEpoch,
