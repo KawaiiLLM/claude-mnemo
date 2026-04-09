@@ -85,7 +85,10 @@ function writeHookResult(
   }
 
   if (result.hookSpecificOutput !== undefined) {
-    output.hookSpecificOutput = result.hookSpecificOutput;
+    output.hookSpecificOutput = {
+      hookEventName: "SessionStart",
+      additionalContext: result.hookSpecificOutput,
+    };
   }
 
   if (Object.keys(output).length > 1 || output.continue !== true) {

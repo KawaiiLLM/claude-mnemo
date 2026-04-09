@@ -38728,7 +38728,10 @@ function writeHookResult(result, stdout = process.stdout) {
     output.suppressOutput = result.suppressOutput;
   }
   if (result.hookSpecificOutput !== void 0) {
-    output.hookSpecificOutput = result.hookSpecificOutput;
+    output.hookSpecificOutput = {
+      hookEventName: "SessionStart",
+      additionalContext: result.hookSpecificOutput
+    };
   }
   if (Object.keys(output).length > 1 || output.continue !== true) {
     stdout.write(JSON.stringify(output));
