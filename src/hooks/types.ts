@@ -25,6 +25,7 @@ export interface HookResult {
   suppressOutput?: boolean;
   hookSpecificOutput?: string;
   exitCode?: number;
+  asyncWork?: () => Promise<void>;
 }
 
 export interface HookHandler {
