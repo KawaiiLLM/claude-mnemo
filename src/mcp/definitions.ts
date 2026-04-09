@@ -43,7 +43,7 @@ export const rememberInputShape = {
   id: z.string().optional(),
   type: z.string().optional(),
   scope: z.string().optional(),
-  prompt_number: z.number().int().positive().optional(),
+  prompt_number: z.union([z.number(), z.string().regex(/^\d+$/).transform(Number)]).pipe(z.number().int().positive()).optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: z.string().optional(),

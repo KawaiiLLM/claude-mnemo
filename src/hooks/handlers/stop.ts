@@ -12,6 +12,7 @@ import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
 import { recallMemory } from "../../mcp/recall";
 import {
+  normalizeAssistantText,
   parseReplayTranscript,
   type ParsedReplayTurn,
 } from "../../shared/transcript-parser";
@@ -78,7 +79,7 @@ function detectUndoPromptNumbers(
         return true;
       }
 
-      return transcriptTurn.assistantText !== (turn.assistantResponse ?? "");
+      return transcriptTurn.assistantText !== normalizeAssistantText(turn.assistantResponse ?? "");
     })
     .map((turn) => turn.promptNumber);
 }

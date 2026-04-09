@@ -31086,7 +31086,7 @@ var rememberInputShape = {
   id: external_exports3.string().optional(),
   type: external_exports3.string().optional(),
   scope: external_exports3.string().optional(),
-  prompt_number: external_exports3.number().int().positive().optional(),
+  prompt_number: external_exports3.union([external_exports3.number(), external_exports3.string().regex(/^\d+$/).transform(Number)]).pipe(external_exports3.number().int().positive()).optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
   insight: external_exports3.string().optional(),

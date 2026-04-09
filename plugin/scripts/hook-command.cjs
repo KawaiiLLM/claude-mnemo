@@ -35544,7 +35544,7 @@ var rememberInputShape = {
   id: external_exports.string().optional(),
   type: external_exports.string().optional(),
   scope: external_exports.string().optional(),
-  prompt_number: external_exports.number().int().positive().optional(),
+  prompt_number: external_exports.union([external_exports.number(), external_exports.string().regex(/^\d+$/).transform(Number)]).pipe(external_exports.number().int().positive()).optional(),
   title: external_exports.string().optional(),
   content: external_exports.string().optional(),
   insight: external_exports.string().optional(),
@@ -38172,12 +38172,20 @@ CONVERSATION CONTEXT
 --------------------
 ${context}
 
+WORKFLOW
+--------
+Before emitting any tool calls, mentally identify every turn marked [pending] or [stale].
+Use recall() or replay() first if any turn was truncated and you need full content.
+Then process ALL of them \u2014 do not stop after handling one turn:
+  - [pending] turns: extract observations (see HOW TO EXTRACT below)
+  - [stale] turns (user undid or context changed):
+    \u2022 If the turn is part of an undone branch (sidechain): remember({ parent: "S{id}", prompt_number: N, status: "undone" })
+    \u2022 If the turn is still valid with changed context: re-extract normally
+  - Trivial/empty turns: remember({ parent: "S{id}", prompt_number: N, status: "skipped" })
+  - Then update the session summary if the session's direction changed.
+
 Rules:
-- Process turns marked [pending] \u2014 extract observations from their content above
-- Re-evaluate turns marked [stale] \u2014 user undid changes:
-  - If the turn is part of an undone branch (sidechain), call remember({ parent: "S{id}", status: "undone" }) (no title/content/observations)
-  - If the turn is still valid with changed context, re-extract normally
-- Do NOT re-process [extracted], [skipped], or [undone] turns
+- Do NOT re-process [extracted], [skipped], or [undone] turns.
 - Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.
 - Include next_steps when the session has a clear trajectory or planned follow-up.
 - Primary write tool is remember.
@@ -38613,7 +38621,7 @@ function detectUndoPromptNumbers(db, sessionDbId, transcriptPath, transcriptTurn
     if (transcriptTurn.isSidechain) {
       return true;
     }
-    return transcriptTurn.assistantText !== (turn.assistantResponse ?? "");
+    return transcriptTurn.assistantText !== normalizeAssistantText(turn.assistantResponse ?? "");
   }).map((turn) => turn.promptNumber);
 }
 function createStopHandler(dependencies) {

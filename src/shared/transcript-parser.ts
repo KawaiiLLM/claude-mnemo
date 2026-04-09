@@ -54,7 +54,7 @@ interface RawTranscriptEntry {
   isApiErrorMessage?: unknown;
 }
 
-function normalizeAssistantText(text: string): string {
+export function normalizeAssistantText(text: string): string {
   return text
     .replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "")
     .replace(/\n{3,}/g, "\n\n")

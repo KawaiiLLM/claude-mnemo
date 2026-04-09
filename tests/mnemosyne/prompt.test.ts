@@ -108,11 +108,13 @@ describe("recall-powered extraction context", () => {
 });
 
 describe("buildMnemosynePrompt", () => {
-  test("documents stale re-evaluation and explicit undone handling", () => {
+  test("documents workflow with stale re-evaluation", () => {
     const prompt = buildMnemosynePrompt("test context");
 
+    expect(prompt).toContain("mentally identify every turn marked [pending] or [stale]");
+    expect(prompt).toContain("do not stop after handling one turn");
     expect(prompt).toContain("Primary write tool is remember");
-    expect(prompt).toContain('call remember({ parent: "S{id}", status: "undone" })');
+    expect(prompt).toContain('remember({ parent: "S{id}", prompt_number: N, status: "undone" })');
     expect(prompt).toContain(
       "Do NOT re-process [extracted], [skipped], or [undone] turns",
     );
