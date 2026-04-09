@@ -7733,7 +7733,6 @@ __export(server_exports, {
   startMcpServer: () => startMcpServer
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_path3 = require("node:path");
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -33413,7 +33412,7 @@ function createMcpServer(options = {}) {
   );
   const mergedHandlers = {
     ...createDatabaseBackedHandlers(options.database, {
-      defaultProject: (0, import_node_path3.basename)(process.cwd())
+      defaultProject: process.cwd()
     }),
     ...options.handlers
   };

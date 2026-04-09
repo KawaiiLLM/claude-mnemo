@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { basename, dirname } from "node:path";
+import { dirname } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
@@ -206,7 +206,7 @@ export async function forkMnemosyne(
     ? {
         mnemo: createMnemoSdkServer(
           input.database,
-          basename(input.cwd ?? process.cwd()),
+          input.cwd ?? process.cwd(),
           {
             createSdkMcpServerImpl,
             toolImpl,

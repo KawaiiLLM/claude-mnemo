@@ -1,5 +1,4 @@
 import type { Database } from "bun:sqlite";
-import { basename } from "node:path";
 
 import { listMemories, type MemoryRecord } from "../../db/memories";
 import {
@@ -182,7 +181,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
     db,
-    basename(primarySessionRecord.project),
+    primarySessionRecord.project,
   );
 
   const recentSessionOutputs = buildRecentSessionsOutput(

@@ -38067,7 +38067,7 @@ async function forkMnemosyne(input, deps = {}) {
   const mcpServers = input.database ? {
     mnemo: createMnemoSdkServer(
       input.database,
-      (0, import_node_path3.basename)(input.cwd ?? process.cwd()),
+      input.cwd ?? process.cwd(),
       {
         createSdkMcpServerImpl,
         toolImpl
@@ -38303,9 +38303,9 @@ remember({ id: "S1", title: "Auth race fix", content: "Fixing token refresh race
 remember({ type: "feedback", scope: "project", title: "No DB mocks", content: "Integration tests must hit real DB", reasoning: "Mock divergence masked broken migration", application: "Default to real DB in test setup" })
 remember({ parent: "S1", prompt_number: 3, status: "skipped" })
 
-CONVERSATION CONTEXT
---------------------
-${context}`;
+<conversation_context>
+${context}
+</conversation_context>`;
 }
 
 // src/hooks/backfill.ts
@@ -38389,7 +38389,6 @@ function createCompactHandler(dependencies) {
 }
 
 // src/hooks/handlers/context.ts
-var import_node_path4 = require("node:path");
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
 function buildHeader(db) {
   const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
@@ -38497,7 +38496,7 @@ function buildContextOutput(db, input) {
   const primaryTurns = buildCollapsedTurnsForSession(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
     db,
-    (0, import_node_path4.basename)(primarySessionRecord.project)
+    primarySessionRecord.project
   );
   const recentSessionOutputs = buildRecentSessionsOutput(
     db,

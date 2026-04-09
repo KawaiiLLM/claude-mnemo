@@ -408,6 +408,7 @@ describe("handleStopHook", () => {
         type: "user",
         promptId: "real-2",
         permissionMode: "default",
+        isSidechain: true,
         message: {
           role: "user",
           content: "Second real prompt",
@@ -415,6 +416,7 @@ describe("handleStopHook", () => {
       },
       {
         type: "assistant",
+        isSidechain: true,
         message: {
           role: "assistant",
           content: [{ type: "text", text: "Second answer changed after undo" }],

@@ -102,8 +102,9 @@ describe("recall-powered extraction context", () => {
   test("buildMnemosynePrompt still wraps the provided context", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain("CONVERSATION CONTEXT");
+    expect(prompt).toContain("<conversation_context>");
     expect(prompt).toContain("test context");
+    expect(prompt).toContain("</conversation_context>");
   });
 });
 

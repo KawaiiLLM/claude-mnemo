@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { basename } from "node:path";
+
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -52,7 +52,7 @@ export function createMcpServer(
 
   const mergedHandlers = {
     ...createDatabaseBackedHandlers(options.database, {
-      defaultProject: basename(process.cwd()),
+      defaultProject: process.cwd(),
     }),
     ...options.handlers,
   };

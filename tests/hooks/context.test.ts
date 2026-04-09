@@ -205,7 +205,7 @@ describe("handleContextHook", () => {
 
     createMemory(db, {
       type: "project",
-      scope: "claude-mnemo",
+      scope: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Auth mutex policy",
       content: "Refresh token work must be serialized with a mutex.",
       reasoning: null,
@@ -325,7 +325,7 @@ describe("handleContextHook", () => {
     for (let index = 0; index < 35; index += 1) {
       createMemory(db, {
         type: "feedback",
-        scope: "claude-mnemo",
+        scope: "/Users/zhaoqixuan/Projects/claude-mnemo",
         title: `Project memory ${index + 1}`,
         content: `Project memory content ${index + 1}`,
         reasoning: null,
@@ -551,7 +551,7 @@ describe("handleContextHook", () => {
       `[M1] feedback/global: Use real DB tests | 1970-01-01`,
     );
     expect(output).toContain(
-      `[M2] project/claude-mnemo: Auth mutex policy | 1970-01-01`,
+      `[M2] project//Users/zhaoqixuan/Projects/claude-mnemo: Auth mutex policy | 1970-01-01`,
     );
     expect(output).not.toContain("Other project note");
     expect(output).toContain(

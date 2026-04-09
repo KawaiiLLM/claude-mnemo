@@ -60,7 +60,7 @@ remember({ id: "S1", title: "Auth race fix", content: "Fixing token refresh race
 remember({ type: "feedback", scope: "project", title: "No DB mocks", content: "Integration tests must hit real DB", reasoning: "Mock divergence masked broken migration", application: "Default to real DB in test setup" })
 remember({ parent: "S1", prompt_number: 3, status: "skipped" })
 
-CONVERSATION CONTEXT
---------------------
-${context}`;
+<conversation_context>
+${context}
+</conversation_context>`;
 }

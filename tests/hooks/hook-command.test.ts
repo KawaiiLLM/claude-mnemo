@@ -102,7 +102,10 @@ describe("runHookCommand", () => {
       JSON.stringify({
         continue: false,
         suppressOutput: true,
-        hookSpecificOutput: "sync-result",
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext: "sync-result",
+        },
       }),
     ]);
   });
