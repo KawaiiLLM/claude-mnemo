@@ -134,7 +134,7 @@ describe("buildMnemosynePrompt", () => {
     expect(prompt).toContain("files_read/files_modified: only files that materially informed or changed the result");
   });
 
-  test("keeps private-tag exclusion and tool-call examples", () => {
+  test("keeps private-tag exclusion and categorized examples", () => {
     const prompt = buildMnemosynePrompt("test context");
 
     expect(prompt).toContain('Prefer remember({ id: "S{id}", ... }) when the session summary needs updating.');
@@ -142,10 +142,15 @@ describe("buildMnemosynePrompt", () => {
       "Include next_steps when the session has a clear trajectory or planned follow-up.",
     );
     expect(prompt).toContain("Content inside <private>...</private> tags must NOT be recorded.");
-    expect(prompt).toContain('Good example: remember({ parent: "S1"');
-    expect(prompt).toContain('Good example: remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added", content: "Serialized refresh work", insight: "Concurrent refreshes no longer overlap", tags: ["concurrency", "auth"], files_read: ["src/auth.ts"], files_modified: ["src/auth.ts", "tests/auth.test.ts"] })');
+    expect(prompt).toContain('remember({ parent: "S1", prompt_number: 2, title: "Fix auth race"');
+    expect(prompt).toContain('remember({ parent: "S1/T2", type: "bugfix", title: "Mutex added"');
+    expect(prompt).toContain('remember({ id: "S1", title: "Auth race fix + schema cleanup"');
+    expect(prompt).toContain('remember({ type: "feedback"');
+    expect(prompt).toContain('remember({ type: "project"');
+    expect(prompt).toContain('remember({ type: "reference"');
+    expect(prompt).toContain('remember({ type: "user"');
     expect(prompt).not.toContain("observations: [");
-    expect(prompt).toContain('Skip example: remember({ parent: "S1", prompt_number: 3, status: "skipped" })');
+    expect(prompt).toContain('Skip example:');
   });
 
   test("references recall and replay tools for additional context", () => {
@@ -161,12 +166,23 @@ describe("buildMnemosynePrompt", () => {
     expect(prompt.match(/Never output prose/g)?.length).toBe(1);
   });
 
-  test("guides remember as the primary write path", () => {
+  test("guides two-layer extraction: observations and memories", () => {
     const prompt = buildMnemosynePrompt("test context");
 
-    expect(prompt).toContain('remember({ parent: "S{id}"');
-    expect(prompt).toContain('remember({ parent: "S{id}/T{n}"');
-    expect(prompt).toContain('remember({ type: "feedback", scope: "global"');
-    expect(prompt).toContain('remember({ id: "S1"');
+    // Observation layer guidance
+    expect(prompt).toContain('parent: "S{id}/T{n}"');
+    expect(prompt).toContain("FACTS about what happened");
+
+    // Memory layer guidance
+    expect(prompt).toContain("BEHAVIORAL RULES that affect future work");
+    expect(prompt).toContain("WHEN TO CREATE MEMORIES");
+    expect(prompt).toContain("user:");
+    expect(prompt).toContain("feedback:");
+    expect(prompt).toContain("project:");
+    expect(prompt).toContain("reference:");
+
+    // Session summary guidance
+    expect(prompt).toContain("SESSION SUMMARY");
+    expect(prompt).toContain("the narrative");
   });
 });
