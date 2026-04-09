@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
-import { getPendingTurns } from "../../db/turns";
+import {
+  claimTurnsForExtraction,
+  getPendingTurns,
+  recoverStalledExtractions,
+} from "../../db/turns";
 import { forkMnemosyne } from "../../mnemosyne/fork";
 import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
 import { recallMemory } from "../../mcp/recall";
@@ -12,6 +16,7 @@ import type { HookResult, NormalizedHookInput } from "../types";
 export interface CompactHandlerDependencies {
   db: Database;
   forkMnemosyne: typeof forkMnemosyne;
+  now?: () => number;
 }
 
 function buildPrompt(db: Database, sessionDbId: number): string {
@@ -25,6 +30,8 @@ function buildPrompt(db: Database, sessionDbId: number): string {
 }
 
 export function createCompactHandler(dependencies: CompactHandlerDependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
+
   return async function handleCompactHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
@@ -41,15 +48,30 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
     const transcriptPath =
       input.transcriptPath ||
       (input.cwd ? resolveTranscriptPath(input.cwd, input.sessionId) : undefined);
+    const epoch = now();
+
+    recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
+
     const pendingTurns = getPendingTurns(dependencies.db, session.id);
     backfillFromTranscript(dependencies.db, pendingTurns, transcriptPath);
+    const prompt = buildPrompt(dependencies.db, session.id);
+    const claimedCount = claimTurnsForExtraction(
+      dependencies.db,
+      session.id,
+      epoch,
+    );
 
-    if (pendingTurns.length > 0) {
-      await dependencies.forkMnemosyne({
-        cwd: input.cwd,
-        prompt: buildPrompt(dependencies.db, session.id),
-        database: dependencies.db,
-      });
+    if (claimedCount > 0) {
+      return {
+        continue: true,
+        asyncWork: async () => {
+          await dependencies.forkMnemosyne({
+            cwd: input.cwd,
+            prompt,
+            database: dependencies.db,
+          });
+        },
+      };
     }
 
     return {

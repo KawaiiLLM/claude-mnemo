@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurn } from "../../src/db/turns";
+import { getPendingTurns, getTurn } from "../../src/db/turns";
 import { createCompactHandler } from "../../src/hooks/handlers/compact";
 import type { NormalizedHookInput } from "../../src/hooks/types";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -60,46 +60,37 @@ describe("handleCompactHook", () => {
     db.close();
   });
 
-  test("waits for Mnemosyne to finish before returning", async () => {
+  test("returns asyncWork when it claims turns and defers fork until asyncWork runs", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
       ) VALUES (?, 1, 'pending', 'Pending work', 120)`,
     ).run(sessionId);
 
-    let releaseFork!: () => void;
-    const forkMnemosyne = mock(
-      () =>
-        new Promise<void>((resolve) => {
-          releaseFork = resolve;
-        }),
-    );
+    const forkMnemosyne = mock(async () => {});
     const handler = createCompactHandler({
       db,
       forkMnemosyne,
-    } as any);
+    });
 
-    let settled = false;
-    const handlerPromise = handler(
+    const result = await handler(
       createInput({
         transcriptPath: "/tmp/session.jsonl",
       }),
-    ).then(() => {
-      settled = true;
-    });
+    );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    expect(result.continue).toBe(true);
+    expect(typeof result.asyncWork).toBe("function");
+    expect(forkMnemosyne).not.toHaveBeenCalled();
+    expect(getTurn(db, sessionId, 1)?.status).toBe("extracting_pending");
+    expect(getPendingTurns(db, sessionId)).toEqual([]);
 
-    expect(settled).toBe(false);
+    await result.asyncWork?.();
 
-    releaseFork();
-    await handlerPromise;
-
-    expect(settled).toBe(true);
+    expect(forkMnemosyne).toHaveBeenCalledTimes(1);
   });
 
-  test("backfills assistant responses and tool counts without an extractor dependency", async () => {
+  test("backfills assistant responses and tool counts before async extraction runs", async () => {
     const transcript = writeTranscript([
       {
         role: "user",
@@ -124,19 +115,24 @@ describe("handleCompactHook", () => {
     const handler = createCompactHandler({
       db,
       forkMnemosyne,
-    } as any);
+    });
 
-    await handler(
+    const result = await handler(
       createInput({
         transcriptPath: transcript.path,
       }),
     );
 
     const turn = getTurn(db, sessionId, 1)!;
-    const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
 
     expect(turn.assistantResponse).toBe("Compact response");
     expect(turn.toolCallCount).toBe(1);
+    expect(typeof result.asyncWork).toBe("function");
+    expect(forkMnemosyne).not.toHaveBeenCalled();
+
+    await result.asyncWork?.();
+
+    const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
     expect(prompt).toContain(`[S${sessionId}] Compact session`);
     expect(prompt).toContain("/Users/zhaoqixuan/Projects/claude-mnemo");
@@ -146,67 +142,84 @@ describe("handleCompactHook", () => {
     rmSync(transcript.directory, { recursive: true, force: true });
   });
 
-  test("leaves stale turns with existing responses untouched", async () => {
+  test("recovered turns are backfilled before they are claimed again", async () => {
     const transcript = writeTranscript([
       {
         role: "user",
-        content: [{ type: "text", text: "Already handled" }],
+        content: [{ type: "text", text: "Recovered pending work" }],
       },
       {
         role: "assistant",
         content: [
-          { type: "tool_use", name: "Read", input: { file_path: "src/stale.ts" } },
-          { type: "text", text: "Transcript response" },
-        ],
-      },
-      {
-        role: "user",
-        content: [{ type: "text", text: "Needs backfill" }],
-      },
-      {
-        role: "assistant",
-        content: [
-          { type: "tool_use", name: "Read", input: { file_path: "src/pending.ts" } },
-          { type: "text", text: "Pending response" },
+          {
+            type: "tool_use",
+            name: "Read",
+            input: { file_path: "src/recovered.ts" },
+          },
+          { type: "text", text: "Recovered response" },
         ],
       },
     ]);
 
     db.query(
       `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
-      ) VALUES (?, 1, 'stale', 'Already handled', 'Keep me', 120)`,
-    ).run(sessionId);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch
-      ) VALUES (?, 2, 'pending', 'Needs backfill', 130)`,
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        created_at_epoch,
+        updated_at_epoch
+      ) VALUES (?, 1, 'extracting_pending', 'Recovered pending work', 120, 100)`,
     ).run(sessionId);
 
     const forkMnemosyne = mock(async () => {});
     const handler = createCompactHandler({
       db,
       forkMnemosyne,
+      now: () => 500,
     });
 
-    await handler(
+    const result = await handler(
       createInput({
         transcriptPath: transcript.path,
       }),
     );
 
-    const staleTurn = getTurn(db, sessionId, 1)!;
-    const pendingTurn = getTurn(db, sessionId, 2)!;
+    const recoveredTurn = getTurn(db, sessionId, 1)!;
 
-    expect(staleTurn.assistantResponse).toBe("Keep me");
-    expect(staleTurn.toolCallCount).toBeNull();
-    expect(pendingTurn.assistantResponse).toBe("Pending response");
-    expect(pendingTurn.toolCallCount).toBe(1);
+    expect(typeof result.asyncWork).toBe("function");
+    expect(recoveredTurn.assistantResponse).toBe("Recovered response");
+    expect(recoveredTurn.toolCallCount).toBe(1);
+    expect(recoveredTurn.status).toBe("extracting_pending");
+    expect(getPendingTurns(db, sessionId)).toEqual([]);
+
+    await result.asyncWork?.();
+
+    const prompt = String(forkMnemosyne.mock.calls[0]?.[0]?.prompt);
+    expect(prompt).toContain("[T1] Untitled");
+    expect(prompt).toContain("[pending]");
 
     rmSync(transcript.directory, { recursive: true, force: true });
   });
 
-  test("calls forkMnemosyne for pending turns", async () => {
+  test("does not return asyncWork when there is nothing to claim", async () => {
+    const forkMnemosyne = mock(async () => {});
+    const handler = createCompactHandler({
+      db,
+      forkMnemosyne,
+      now: () => 500,
+    });
+
+    const result = await handler(createInput());
+
+    expect(result).toEqual({
+      continue: true,
+    });
+    expect(result.asyncWork).toBeUndefined();
+    expect(forkMnemosyne).not.toHaveBeenCalled();
+  });
+
+  test("claiming turns prevents duplicate compact extraction", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
@@ -226,11 +239,26 @@ describe("handleCompactHook", () => {
 
     const handler = createCompactHandler({ db, forkMnemosyne });
 
-    await handler(
+    const firstResult = await handler(
       createInput({
         transcriptPath: "/tmp/missing.jsonl",
       }),
     );
+    const secondResult = await handler(
+      createInput({
+        transcriptPath: "/tmp/missing.jsonl",
+      }),
+    );
+
+    expect(typeof firstResult.asyncWork).toBe("function");
+    expect(secondResult).toEqual({
+      continue: true,
+    });
+    expect(secondResult.asyncWork).toBeUndefined();
+    expect(getPendingTurns(db, sessionId)).toEqual([]);
+    expect(forkMnemosyne).not.toHaveBeenCalled();
+
+    await firstResult.asyncWork?.();
 
     expect(forkMnemosyne).toHaveBeenCalledTimes(1);
   });
