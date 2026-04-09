@@ -482,7 +482,7 @@ function renderSession(
   depth: "collapsed" | "expanded" | "full",
   turnSelector?: Set<number>,
 ): string {
-  const view = buildSessionView(db, session);
+  const view = buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
