@@ -378,6 +378,88 @@ describe("handleStopHook", () => {
     rmSync(transcript.directory, { recursive: true, force: true });
   });
 
+  test("prefers content_prompt_id over positional matching when detecting undo", async () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "real-1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "First real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+      {
+        type: "user",
+        promptId: "task-1",
+        message: {
+          role: "user",
+          content: "<task-notification>subagent finished</task-notification>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "real-2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Second real prompt",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Second answer changed after undo" }],
+        },
+      },
+    ]);
+
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        content_prompt_id,
+        status,
+        user_prompt,
+        assistant_response,
+        created_at_epoch
+      ) VALUES (?, ?, ?, 'extracted', ?, ?, ?)`,
+    ).run(
+      sessionId,
+      2,
+      "real-2",
+      "Second real prompt",
+      "Old persisted answer",
+      120,
+    );
+
+    const handler = createStopHandler({
+      db,
+      forkMnemosyne: mock(async () => {}),
+      stderr: { write: mock(() => true) },
+      now: () => 500,
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(getTurn(db, sessionId, 2)?.status).toBe("extracting_stale");
+
+    rmSync(transcript.directory, { recursive: true, force: true });
+  });
+
   test("recovered stalled turns are backfilled before they are claimed again", async () => {
     const transcript = writeTranscript([
       {

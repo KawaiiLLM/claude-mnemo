@@ -320,9 +320,63 @@ describe("parseTranscript", () => {
     directories.push(transcript.directory);
 
     expect(countUserPromptsInTranscript(transcript.path)).toBe(2);
-    expect(parseReplayTranscript(transcript.path).map((turn) => turn.userPrompt)).toEqual([
-      "First real prompt",
-      "Second real prompt",
+    expect(parseReplayTranscript(transcript.path)).toEqual([
+      expect.objectContaining({
+        promptNumber: 1,
+        promptId: "p1",
+        userPrompt: "First real prompt",
+      }),
+      expect.objectContaining({
+        promptNumber: 2,
+        promptId: "p2",
+        userPrompt: "Second real prompt",
+      }),
+    ]);
+  });
+
+  test("ignores local-command and command-name injected entries when counting promptId turns", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "First real prompt",
+        },
+      },
+      {
+        type: "user",
+        promptId: "cmd-1",
+        message: {
+          role: "user",
+          content: "<local-command-run>npm test</local-command-run>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "cmd-2",
+        message: {
+          role: "user",
+          content: "<command-name>/help</command-name>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Second real prompt",
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(2);
+    expect(parseReplayTranscript(transcript.path).map((turn) => turn.promptId)).toEqual([
+      "p1",
+      "p2",
     ]);
   });
 });
