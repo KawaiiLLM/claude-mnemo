@@ -51,7 +51,7 @@ export function buildExtractionContext(db: Database, sessionId: number): string 
     (turn) => turn.promptNumber > anchor || isActionableStatus(turn.status),
   );
 
-  const lines = [formatSessionExpanded(sessionSummary)];
+  const lines: string[] = [];
 
   for (const turn of turns) {
     if (isActionableStatus(turn.status)) {
@@ -78,6 +78,8 @@ export function buildExtractionContext(db: Database, sessionId: number): string 
       ),
     );
   }
+
+  lines.push(formatSessionExpanded(sessionSummary));
 
   return lines.join("\n");
 }

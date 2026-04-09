@@ -83,7 +83,6 @@ describe("buildExtractionContext", () => {
 
     const context = buildExtractionContext(db, sessionId);
 
-    expect(context).toContain(`[S${sessionId}] Extraction context session`);
     expect(context).toContain(`[S${sessionId}][T1] Settled turn [extracted]`);
     expect(context).not.toContain('prompt: "Already done"');
     expect(context).toContain(`[S${sessionId}][T2] Actionable turn`);
@@ -93,6 +92,10 @@ describe("buildExtractionContext", () => {
     expect(context).toContain("- actionable insight");
     expect(context).toContain("[O");
     expect(context).toContain("Existing observation");
+    expect(context).toContain(`[S${sessionId}] Extraction context session`);
+    expect(context.indexOf(`[S${sessionId}][T1] Settled turn [extracted]`)).toBeLessThan(
+      context.indexOf(`[S${sessionId}] Extraction context session`),
+    );
   });
 
   test("filters out turns at or before the compact anchor unless they are actionable", () => {
