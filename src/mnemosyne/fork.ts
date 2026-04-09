@@ -115,21 +115,18 @@ function createMnemoSdkServer(
         MNEMO_TOOL_DESCRIPTIONS.remember,
         rememberInputShape,
         async (args) => handlers.remember(args as Record<string, unknown>),
-        { alwaysLoad: true },
       ),
       deps.toolImpl(
         "recall",
         MNEMO_TOOL_DESCRIPTIONS.recall,
         recallInputShape,
         async (args) => handlers.recall(args as Record<string, unknown>),
-        { alwaysLoad: true },
       ),
       deps.toolImpl(
         "replay",
         MNEMO_TOOL_DESCRIPTIONS.replay,
         replayInputShape,
         async (args) => handlers.replay(args as Record<string, unknown>),
-        { alwaysLoad: true },
       ),
     ],
   });
@@ -226,7 +223,10 @@ export async function forkMnemosyne(
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
       pathToClaudeCodeExecutable,
-      env: buildIsolatedEnv(),
+      env: {
+        ...buildIsolatedEnv(),
+        ENABLE_TOOL_SEARCH: "false",
+      },
     },
   });
 

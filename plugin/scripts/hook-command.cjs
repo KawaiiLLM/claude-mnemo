@@ -38009,22 +38009,19 @@ function createMnemoSdkServer(database, defaultProject, deps) {
         "remember",
         MNEMO_TOOL_DESCRIPTIONS.remember,
         rememberInputShape,
-        async (args) => handlers.remember(args),
-        { alwaysLoad: true }
+        async (args) => handlers.remember(args)
       ),
       deps.toolImpl(
         "recall",
         MNEMO_TOOL_DESCRIPTIONS.recall,
         recallInputShape,
-        async (args) => handlers.recall(args),
-        { alwaysLoad: true }
+        async (args) => handlers.recall(args)
       ),
       deps.toolImpl(
         "replay",
         MNEMO_TOOL_DESCRIPTIONS.replay,
         replayInputShape,
-        async (args) => handlers.replay(args),
-        { alwaysLoad: true }
+        async (args) => handlers.replay(args)
       )
     ]
   });
@@ -38086,7 +38083,10 @@ async function forkMnemosyne(input, deps = {}) {
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
       pathToClaudeCodeExecutable,
-      env: buildIsolatedEnv()
+      env: {
+        ...buildIsolatedEnv(),
+        ENABLE_TOOL_SEARCH: "false"
+      }
     }
   });
   let result = null;
