@@ -1,27 +1,37 @@
 # Claude-Mnemo
 
-Structured memory system for Claude Code. Automatically extracts, stores, and retrieves durable observations from every conversation — so future sessions start with context, not from scratch.
+Structured memory system for Claude Code. Captures every tool call in real time, extracts durable observations and turn summaries via a background agent, and feeds them back into future sessions — so conversations start with context, not from scratch.
 
 ## How It Works
 
-Claude-Mnemo hooks into four points of the Claude Code lifecycle:
+Claude-Mnemo hooks into five points of the Claude Code lifecycle:
 
 | Hook | Trigger | What it does |
 |------|---------|--------------|
-| **UserPromptSubmit** | Every user message | Initializes or resumes the session in the database |
-| **Stop** | Agent finishes | Forks Mnemosyne (the observer agent) to extract structured observations from the conversation |
-| **PreCompact** | Context compaction | Backfills pending turns before the transcript is compressed |
-| **SessionStart** | Session begins/resumes | Injects recent memory context so the agent has continuity |
+| **SessionStart** | Session begins / resumes / clears / post-compact | Injects recent session summaries, turn highlights, and active memories into context |
+| **UserPromptSubmit** | Every user message | Creates (or resumes) the session + a new turn row in SQLite |
+| **PostToolUse** | Every tool call | Writes a raw observation (tool_name + input + result), enqueues it for extraction, wakes the worker |
+| **Stop** | Agent finishes a turn | Backfills the assistant response + tool counts, enqueues a turn-stop job |
+| **PreCompact** | Main agent is about to compact | Synchronously flushes the worker queue for this session and pushes a final session summary |
 
-At the core is **Mnemosyne**, an observer agent built on the Claude Agent SDK. It reads the conversation transcript and extracts a three-layer data model:
+Extraction does not run inside the hook process. Hooks write to SQLite and return; a **long-lived worker** (Bun HTTP server on `127.0.0.1:37778`) picks up the work asynchronously, sends it to **Mnemosyne** (an isolated Claude Agent SDK query session), and writes the extracted titles, content, insights, tags, and types back into the same database.
+
+### Data Model
 
 ```
-Session (one per conversation)  →  [S12]
-  Turn (one per QA round)       →  [T2]
-    Observation (notable event) →  [O7]
+Session  [S12]        one per conversation
+  Turn     [T3]        one per user prompt (promptNumber scoped to session)
+    Observation [O87]   one per tool call
+Memory   [M4]         durable cross-session knowledge
 ```
 
-Observations are typed: 🔴 bugfix, 🟣 feature, 🔄 refactor, ✅ change, 🔵 discovery, ⚖️ decision.
+Turns carry a type tag: 🔴 bugfix · 🟣 feature · 🔄 refactor · ✅ change · 🔵 discovery · ⚖️ decision.
+
+Memories are the durable layer — user feedback, project decisions, gotchas, and patterns — with `scope` either `global` or an absolute project path.
+
+### Queue + Crash Safety
+
+All pending extraction work lives in a single `pending_queue` table keyed by a monotonic `seq` (AUTOINCREMENT). Hooks write to `pending_queue` inside the same SQLite transaction as the observation or turn-stop update, so a crashed worker or killed hook never drops work — the next worker boot resumes from the queue in FIFO order.
 
 ## Installation
 
@@ -32,8 +42,7 @@ In Claude Code, add the marketplace and install:
 /plugin install claude-mnemo
 ```
 
-Bun is the only runtime dependency — `bun-runner.js` auto-installs it if missing.
-Marketplace and source installs ship with prebuilt `plugin/scripts/*.cjs` entrypoints, so hooks and MCP can run without a post-install build.
+Bun is the only runtime dependency — `bun-runner.js` auto-installs it if missing. Marketplace and source installs ship with prebuilt `plugin/scripts/*.cjs` entrypoints, so hooks, MCP, and the worker run without a post-install build.
 
 ### From Source
 
@@ -54,59 +63,83 @@ For contributors, `npm run build` refreshes the committed release artifacts in `
 
 ## Usage
 
-Once installed, Claude-Mnemo works automatically. No manual invocation needed — hooks fire on every session.
+Once installed, Claude-Mnemo works automatically — hooks fire on every session, the worker extracts in the background, and `SessionStart` injects context on the next launch.
 
-### Recall: Structured Memory Search
+Two skills expose the read and write paths to the main agent:
 
-Browse and drill into past work through the `recall` MCP tool:
+### `mnemo-recall` — Reading Past Work
 
-```
-recall(scope="sessions")                                        → recent sessions
-recall(scope="sessions", query="auth race")                     → full-text search
-recall(scope="turns", session=12)                               → turns in a session
-recall(scope="turns", session=12, depth="expanded")             → session turns with prompt/response
-recall(scope="observations", session=12, turn=2)                → observations for a turn
-recall(scope="observations", obs=7)                             → full detail for one observation
-recall(scope="observations", type="bugfix", file="src/auth.ts") → filter by type and file
-```
+Auto-loaded when the user asks questions like *"did we already do this?"*, *"how did we fix X last time?"*, or *"show me the exact tool calls from last Thursday"*. Documents the full `recall` + `replay` API.
 
-Observation IDs are global SQLite row IDs. Use `[O7]` directly in follow-up `recall(scope="observations", obs=7)` calls.
-
-Legacy aliases like `observation`, `from_epoch`, `to_epoch`, `expand_turns`, and `around` still resolve during migration, but `scope`-based calls are the canonical API.
-
-### Replay: Raw Transcript Playback
-
-When exact wording matters, use `replay`:
+Quick reference:
 
 ```
-replay(session=12)                → turn overview
-replay(session=12, turn=2)        → full prompt + response + tool calls
-replay(session=12, turn=2, full=true) → no truncation
+recall()                                            # recent sessions
+recall(query="auth race")                           # FTS across all layers
+recall(query="type:bugfix file:src/auth.ts")        # typed filters
+recall(time="-7d")                                  # relative time window
+recall(id="S12")                                    # session summary
+recall(id="S12/T3")                                 # turn by promptNumber
+recall(id="S12/T3..7", depth="expanded")            # turn range with content
+recall(id="S12/T3/O*")                              # observations in a turn
+recall(id="O87", depth="expanded")                  # specific observation
+recall(id="M*")                                     # all active memories
+
+replay(id="S12")                                    # transcript turn overview
+replay(id="S12/T3", depth="expanded")               # exact prompt + response + tool I/O
+replay(id="S12/T3/Tool2", depth="full")             # single tool call, untruncated
 ```
 
-### SessionStart Context
+- **Selectors**: `S*` / `S12` / `S5..10` (sessions), `S12/T*` / `S12/T3..7` (turns by promptNumber), `S12/T3/O*` (observation list), `O7` (single observation, global id), `M*` / `M4` / `M1..20` (memories, global id).
+- **Query prefixes**: `type:` / `file:` / `project:` / `tag:` (memory-only). Free words become an FTS phrase.
+- **Time**: `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range).
+- **Depth**: `collapsed` (default) / `expanded` / `full`. `full` on `replay` disables tool-result truncation.
 
-On every session start, Claude-Mnemo injects a graduated-depth summary:
+### `mnemo-remember` — Writing Durable Memory
 
-- **Current session** — fully expanded, last 3 turns with observations
-- **Next 2 recent sessions** — collapsed headers with up to 5 turns each
-- **Last 2 sessions** — header only
+Auto-loaded when the user says *"remember this"*, *"save as feedback"*, or when the agent notices a non-obvious fact worth preserving. Only documents `remember` for **memory creation** — turn / observation / session records are managed automatically by the worker and are not main-agent concerns.
+
+```
+remember({
+  type: "feedback",
+  scope: "global",
+  title: "Prefer terse commit messages",
+  content: "User prefers 1-2 sentence commit bodies focused on why, not what.",
+  reasoning: "Corrected me twice when I wrote long commits.",
+  application: "Apply when drafting any git commit message.",
+  tags: ["git", "style"]
+})
+```
+
+Required: `type`, `scope`, `title`, `content`. Optional: `reasoning`, `application`, `tags`, `source` (e.g. `"T5"` to link back to the triggering turn), `status` (defaults to `active`).
+
+Common types: `feedback` / `decision` / `pattern` / `gotcha` / `lesson` / `context`. Free-form string — not an enum.
+
+### SessionStart Context Injection
+
+On every session start, `SessionStart` injects:
+
+- A header with session and observation counts plus the type legend
+- A graduated view: current session expanded, recent sessions collapsed
+- Active memories for the current project scope (plus all `global`-scoped memories)
+- Expansion hints pointing to `recall(id="Sx/Ty", depth="expanded")` for drill-down
 
 ## Project Structure
 
 ```
 src/
-├── db/            # SQLite schema, sessions, turns, observations, FTS5
-├── hooks/         # Hook handlers (session-init, stop, compact, context)
-├── mcp/           # MCP server, recall, replay, format renderer
-├── mnemosyne/     # Observer agent prompt and fork logic
+├── db/            # SQLite schema, sessions, turns, observations, memories, pending_queue, FTS5
+├── hooks/         # Hook handlers (session-init, post-tool-use, stop, compact, context)
+├── mcp/           # MCP server — recall, replay, remember, format renderer, selectors
+├── worker/        # Long-lived Bun worker — HTTP server, queue loop, agent sessions, processors
+├── mnemosyne/     # env isolation helpers for Mnemosyne subprocess
 ├── shared/        # Transcript parser, logger, paths, constants
 └── utils/         # Hashing, token estimation, worktree detection
 
 plugin/            # Built artifacts installed into Claude Code
 ├── hooks/         # hooks.json (lifecycle bindings)
-├── scripts/       # bun-runner.js, hook-command.cjs, mcp-server.cjs
-├── skills/        # /mnemo skill for interactive memory search
+├── scripts/       # bun-runner.js, hook-command.cjs, mcp-server.cjs, worker.cjs
+├── skills/        # mnemo-recall + mnemo-remember
 └── CLAUDE.md      # Plugin-level instructions injected into context
 
 tests/             # Mirrors src/ structure
@@ -120,7 +153,7 @@ docs/              # Design specs and implementation plans
 bun test
 
 # Run a specific test file
-bun test tests/mcp/format.test.ts
+bun test tests/shared/transcript-parser.test.ts
 
 # Type check
 npm run typecheck
@@ -129,24 +162,27 @@ npm run typecheck
 npm run build
 ```
 
-### Data Model
+### Database
 
-The SQLite database lives at `~/.claude-mnemo/claude-mnemo.db` with three core tables:
+SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 
-| Table | Key fields | Purpose |
-|-------|-----------|---------|
-| `sessions` | `content_session_id`, `title`, `description`, `insight`, `next_steps` | One row per conversation |
-| `turns` | `session_id`, `prompt_number`, `user_prompt`, `assistant_response`, `tool_call_count` | One row per QA round |
-| `observations` | `turn_id`, `type`, `title`, `narrative`, `facts`, `concepts` | Notable events within a turn |
-
-Full-text search is powered by an FTS5 virtual table (`memory_fts`) indexing across all three layers.
+| Table | Purpose |
+|-------|---------|
+| `sessions` | One row per conversation. Fields: `title`, `content`, `insight`, `next_steps`, `project`, timestamps. |
+| `turns` | One row per user prompt. Fields: `user_prompt`, `assistant_response`, `title`, `content`, `insight`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count`, `status` (`active` → `extracted` / `skipped` / `undone`). |
+| `observations` | One row per tool call. Fields: `tool_name`, `tool_input`, `tool_result`, `title`, `content`, `status` (`pending` → `extracted` / `skipped`). |
+| `memories` | Durable cross-session knowledge. Fields: `type`, `scope`, `title`, `content`, `reasoning`, `application`, `tags`, `source_turn_id`, `status`. |
+| `pending_queue` | FIFO extraction queue. Fields: `seq` (monotonic), `kind` (`obs` / `turn-stop`), `target_id`, `session_db_id`, `claimed_at_epoch`. |
+| `memory_fts` | FTS5 virtual table indexing sessions / turns / observations / memories. |
 
 ### Architecture Decisions
 
-- **Bun runtime** — hooks and MCP server run under Bun for native SQLite and fast startup. A `bun-runner.js` shim auto-installs Bun if missing.
+- **Worker-backed extraction** — a long-lived Bun worker (`src/worker/server.ts`, port 37778) owns the Mnemosyne query sessions. Hooks never block on the LLM; they write to SQLite + `pending_queue` and fire-and-forget a `/wake` request. Replaces the old fork-per-hook model.
+- **Per-session processing lock** — within one session, observation and turn-stop jobs run strictly serially through a chained-Promise lock in `src/worker/agent-session.ts`. Different sessions process in parallel.
+- **Synchronous `/compact`** — PreCompact is the one hook that waits. It drains the session's queue and pushes a final summary prompt before returning, so the main agent's compact anchor is accurate.
+- **UUID-based transcript dedup** — resume / `--continue` append the full history again; the parser dedupes by `entry.uuid` before computing turn boundaries, so tool call counts don't inflate on resumed sessions.
+- **Bun runtime** — hooks, MCP server, and worker all run under Bun for native SQLite and fast startup. `bun-runner.js` shim auto-installs Bun if missing and strips `ANTHROPIC_API_KEY` / `CLAUDECODE` from the Mnemosyne subprocess environment.
 - **esbuild bundling** — TypeScript source is bundled to CJS for Node.js compatibility in the plugin environment.
-- **Replay-compatible backfill** — a single `parseReplayTranscript` pass handles both Stop and PreCompact, ensuring consistent turn numbering even with sidechain (undo) history.
-- **Observer isolation** — Mnemosyne runs as a forked Claude Agent SDK process, separate from the main conversation agent. It reads the transcript but never interferes with the user's session.
 
 ## License
 

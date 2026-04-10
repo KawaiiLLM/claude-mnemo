@@ -96,17 +96,16 @@ export async function notifyWorkerWake(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  void (async () => {
-    try {
-      await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-        method: "POST",
-        body: "{}",
-        signal: createAbortSignal(WAKE_TIMEOUT_MS),
-      });
-    } catch {
-      spawnWorkerProcess(deps, env);
-    }
-  })();
+
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS),
+    });
+  } catch {
+    spawnWorkerProcess(deps, env);
+  }
 }
 
 async function waitForWorkerReadiness(

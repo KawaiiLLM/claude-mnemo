@@ -646,17 +646,15 @@ function spawnWorkerProcess(deps = {}, env = process.env) {
 }
 async function notifyWorkerWake(deps = {}, env = process.env) {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  void (async () => {
-    try {
-      await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-        method: "POST",
-        body: "{}",
-        signal: createAbortSignal(WAKE_TIMEOUT_MS)
-      });
-    } catch {
-      spawnWorkerProcess(deps, env);
-    }
-  })();
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS)
+    });
+  } catch {
+    spawnWorkerProcess(deps, env);
+  }
 }
 async function waitForWorkerReadiness(deps = {}) {
   const fetchImpl = deps.fetchImpl ?? fetch;

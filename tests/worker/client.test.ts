@@ -39,18 +39,12 @@ describe("worker client", () => {
     ]);
   });
 
-  test("notifyWorkerWake returns before a slow health probe resolves", async () => {
-    let resolveHealth!: (value: Response) => void;
-    const healthProbe = new Promise<Response>((resolve) => {
-      resolveHealth = resolve;
+  test("notifyWorkerWake waits for wake request success before resolving", async () => {
+    let resolveWake!: (value: Response) => void;
+    const wakeRequest = new Promise<Response>((resolve) => {
+      resolveWake = resolve;
     });
-    const fetchImpl = mock(async (input: string | URL) => {
-      if (String(input).endsWith("/health")) {
-        return healthProbe;
-      }
-
-      return new Response(null, { status: 200 });
-    });
+    const fetchImpl = mock(async () => wakeRequest);
     const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
 
     const wakePromise = notifyWorkerWake(
@@ -70,20 +64,20 @@ describe("worker client", () => {
     });
 
     await Promise.resolve();
-    expect(settled).toBe(true);
+    expect(settled).toBe(false);
 
-    resolveHealth(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    resolveWake(new Response(null, { status: 200 }));
     await wakePromise;
+    expect(settled).toBe(true);
+    expect(spawnImpl).not.toHaveBeenCalled();
   });
 
-  test("notifyWorkerWake swallows wake fetch failures and spawns the worker", async () => {
-    const fetchImpl = mock(async (input: string | URL) => {
-      if (String(input).endsWith("/health")) {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-
-      throw new Error("wake failed");
+  test("notifyWorkerWake spawns the worker before resolving when wake fails", async () => {
+    let rejectWake!: (error: unknown) => void;
+    const wakeRequest = new Promise<Response>((_, reject) => {
+      rejectWake = reject;
     });
+    const fetchImpl = mock(async () => wakeRequest);
     const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
 
     const wakePromise = notifyWorkerWake(
@@ -97,8 +91,7 @@ describe("worker client", () => {
       } as NodeJS.ProcessEnv,
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    rejectWake(new Error("wake failed"));
     await wakePromise;
 
     expect(spawnImpl).toHaveBeenCalledTimes(1);
