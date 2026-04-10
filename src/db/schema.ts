@@ -9,7 +9,6 @@ const SCHEMA_SQL = `
     project TEXT NOT NULL,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
@@ -28,7 +27,6 @@ const SCHEMA_SQL = `
     assistant_response TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     type TEXT,
     tags TEXT,
@@ -47,17 +45,8 @@ const SCHEMA_SQL = `
     tool_input TEXT,
     tool_result TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
-    type TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
-    insight TEXT,
-    narrative TEXT,
-    facts TEXT,
-    tags TEXT,
-    concepts TEXT,
-    files_read TEXT,
-    files_modified TEXT,
     created_at_epoch INTEGER NOT NULL
   );
 
@@ -86,9 +75,6 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_observations_turn_id
     ON observations(turn_id);
-
-  CREATE INDEX IF NOT EXISTS idx_observations_type
-    ON observations(type);
 
   CREATE TABLE IF NOT EXISTS pending_queue (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,6 +256,8 @@ export function migrateSchema(db: Database): boolean {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
 
+  db.exec("DROP INDEX IF EXISTS idx_observations_type");
+
   if (!hasColumn(db, "observations", "insight")) {
     db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
@@ -314,6 +302,7 @@ export function migrateSchema(db: Database): boolean {
   `);
 
   if (
+    hasColumn(db, "sessions", "description") &&
     hasRow(
       db,
       "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1",
@@ -328,6 +317,7 @@ export function migrateSchema(db: Database): boolean {
   }
 
   if (
+    hasColumn(db, "turns", "description") &&
     hasRow(
       db,
       "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1",
@@ -342,6 +332,11 @@ export function migrateSchema(db: Database): boolean {
   }
 
   if (
+    hasColumn(db, "observations", "description") &&
+    hasColumn(db, "observations", "insight") &&
+    hasColumn(db, "observations", "narrative") &&
+    hasColumn(db, "observations", "tags") &&
+    hasColumn(db, "observations", "concepts") &&
     hasRow(
       db,
       `

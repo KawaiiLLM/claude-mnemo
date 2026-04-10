@@ -8,13 +8,8 @@ export interface ObservationInput {
   toolInput?: string | null;
   toolResult?: string | null;
   status?: "pending" | "extracted" | "skipped";
-  type?: string | null;
   title?: string | null;
   content?: string | null;
-  insight?: string | null;
-  tags?: string[];
-  filesRead?: string[];
-  filesModified?: string[];
 }
 
 export interface SaveTurnInput {
@@ -282,13 +277,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
           toolInput: observation.toolInput ?? null,
           toolResult: observation.toolResult ?? null,
           status: observation.status ?? "extracted",
-          type: observation.type,
           title: observation.title ?? null,
           content: observation.content ?? null,
-          insight: observation.insight ?? null,
-          tags: observation.tags ?? [],
-          filesRead: observation.filesRead ?? [],
-          filesModified: observation.filesModified ?? [],
           createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch,
         });
       }

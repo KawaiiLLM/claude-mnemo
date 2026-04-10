@@ -9,13 +9,8 @@ export interface ObservationRecord {
   toolInput: string | null;
   toolResult: string | null;
   status: "pending" | "extracted" | "skipped";
-  type: string | null;
   title: string | null;
   content: string | null;
-  insight: string | null;
-  tags: string[];
-  filesRead: string[];
-  filesModified: string[];
   createdAtEpoch: number;
 }
 
@@ -25,13 +20,8 @@ export interface CreateObservationInput {
   toolInput?: string | null;
   toolResult?: string | null;
   status?: "pending" | "extracted" | "skipped";
-  type?: string | null;
   title?: string | null;
   content?: string | null;
-  insight?: string | null;
-  tags?: string[];
-  filesRead?: string[];
-  filesModified?: string[];
   createdAtEpoch: number;
 }
 
@@ -42,13 +32,8 @@ interface ObservationRow {
   toolInput: string | null;
   toolResult: string | null;
   status: "pending" | "extracted" | "skipped";
-  type: string | null;
   title: string | null;
   content: string | null;
-  insight: string | null;
-  tags: string | null;
-  filesRead: string | null;
-  filesModified: string | null;
   createdAtEpoch: number;
 }
 
@@ -60,40 +45,18 @@ const OBSERVATION_SELECT = `
     tool_input AS toolInput,
     tool_result AS toolResult,
     status,
-    type,
     title,
     content,
-    insight,
-    tags,
-    files_read AS filesRead,
-    files_modified AS filesModified,
     created_at_epoch AS createdAtEpoch
   FROM observations
 `;
-
-function parseJsonArray(value: string | null): string[] {
-  if (!value) {
-    return [];
-  }
-
-  return JSON.parse(value) as string[];
-}
-
-function stringifyJsonArray(values: string[]): string {
-  return JSON.stringify(values);
-}
 
 function mapObservationRow(row: ObservationRow | null): ObservationRecord | null {
   if (!row) {
     return null;
   }
 
-  return {
-    ...row,
-    tags: parseJsonArray(row.tags),
-    filesRead: parseJsonArray(row.filesRead),
-    filesModified: parseJsonArray(row.filesModified),
-  };
+  return row;
 }
 
 export function createObservation(
@@ -111,11 +74,6 @@ export function createObservation(
         "pending" | "extracted" | "skipped",
         string | null,
         string | null,
-        string | null,
-        string | null,
-        string,
-        string,
-        string,
         number,
       ]
     >(
@@ -126,15 +84,10 @@ export function createObservation(
           tool_input,
           tool_result,
           status,
-          type,
           title,
           content,
-          insight,
-          tags,
-          files_read,
-          files_modified,
           created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING
           id,
           turn_id AS turnId,
@@ -142,13 +95,8 @@ export function createObservation(
           tool_input AS toolInput,
           tool_result AS toolResult,
           status,
-          type,
           title,
           content,
-          insight,
-          tags,
-          files_read AS filesRead,
-          files_modified AS filesModified,
           created_at_epoch AS createdAtEpoch
       `,
     )
@@ -158,13 +106,8 @@ export function createObservation(
       input.toolInput ?? null,
       input.toolResult ?? null,
       input.status ?? "pending",
-      input.type ?? null,
       input.title ?? null,
       input.content ?? null,
-      input.insight ?? null,
-      stringifyJsonArray(input.tags ?? []),
-      stringifyJsonArray(input.filesRead ?? []),
-      stringifyJsonArray(input.filesModified ?? []),
       input.createdAtEpoch,
     );
 
@@ -218,13 +161,8 @@ export function updateObservation(
             tool_input AS toolInput,
             tool_result AS toolResult,
             status,
-            type,
             title,
             content,
-            insight,
-            tags,
-            files_read AS filesRead,
-            files_modified AS filesModified,
             created_at_epoch AS createdAtEpoch
         `,
       )

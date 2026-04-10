@@ -443,18 +443,10 @@ function querySessionsByScope(db, options, query2) {
         SELECT 1
         FROM turns t
         WHERE t.session_id = s.id
-          AND (
-            t.type = ?
-            OR EXISTS (
-              SELECT 1
-              FROM observations o
-              WHERE o.turn_id = t.id
-                AND o.type = ?
-            )
-          )
+          AND t.type = ?
       )`
     );
-    params.push(options.type, options.type);
+    params.push(options.type);
   }
   if (options.file) {
     whereClauses.push(
@@ -504,15 +496,8 @@ function queryTurnsByScope(db, options, query2) {
     params.push(query2);
   }
   if (options.type) {
-    whereClauses.push(
-      `(t.type = ? OR EXISTS (
-        SELECT 1
-        FROM observations o
-        WHERE o.turn_id = t.id
-          AND o.type = ?
-      ))`
-    );
-    params.push(options.type, options.type);
+    whereClauses.push("t.type = ?");
+    params.push(options.type);
   }
   return queryRows(
     db,
@@ -554,8 +539,7 @@ function queryObservationsByScope(db, options, query2) {
     params.push(query2);
   }
   if (options.type) {
-    whereClauses.push("o.type = ?");
-    params.push(options.type);
+    return [];
   }
   return queryRows(
     db,
@@ -997,7 +981,6 @@ var SCHEMA_SQL = `
     project TEXT NOT NULL,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
@@ -1016,7 +999,6 @@ var SCHEMA_SQL = `
     assistant_response TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     type TEXT,
     tags TEXT,
@@ -1035,17 +1017,8 @@ var SCHEMA_SQL = `
     tool_input TEXT,
     tool_result TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
-    type TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
-    insight TEXT,
-    narrative TEXT,
-    facts TEXT,
-    tags TEXT,
-    concepts TEXT,
-    files_read TEXT,
-    files_modified TEXT,
     created_at_epoch INTEGER NOT NULL
   );
 
@@ -1074,9 +1047,6 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_observations_turn_id
     ON observations(turn_id);
-
-  CREATE INDEX IF NOT EXISTS idx_observations_type
-    ON observations(type);
 
   CREATE TABLE IF NOT EXISTS pending_queue (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1211,6 +1181,7 @@ function migrateSchema(db) {
   if (!hasColumn(db, "observations", "content")) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
+  db.exec("DROP INDEX IF EXISTS idx_observations_type");
   if (!hasColumn(db, "observations", "insight")) {
     db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
@@ -1247,7 +1218,7 @@ function migrateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_pending_queue_session
       ON pending_queue(session_db_id, seq)
   `);
-  if (hasRow(
+  if (hasColumn(db, "sessions", "description") && hasRow(
     db,
     "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
@@ -1258,7 +1229,7 @@ function migrateSchema(db) {
     `);
     searchIndexNeedsRebuild = true;
   }
-  if (hasRow(
+  if (hasColumn(db, "turns", "description") && hasRow(
     db,
     "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
@@ -1269,7 +1240,7 @@ function migrateSchema(db) {
     `);
     searchIndexNeedsRebuild = true;
   }
-  if (hasRow(
+  if (hasColumn(db, "observations", "description") && hasColumn(db, "observations", "insight") && hasColumn(db, "observations", "narrative") && hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts") && hasRow(
     db,
     `
         SELECT 1 FROM observations
@@ -1326,32 +1297,16 @@ var OBSERVATION_SELECT = `
     tool_input AS toolInput,
     tool_result AS toolResult,
     status,
-    type,
     title,
     content,
-    insight,
-    tags,
-    files_read AS filesRead,
-    files_modified AS filesModified,
     created_at_epoch AS createdAtEpoch
   FROM observations
 `;
-function parseJsonArray2(value) {
-  if (!value) {
-    return [];
-  }
-  return JSON.parse(value);
-}
 function mapObservationRow(row) {
   if (!row) {
     return null;
   }
-  return {
-    ...row,
-    tags: parseJsonArray2(row.tags),
-    filesRead: parseJsonArray2(row.filesRead),
-    filesModified: parseJsonArray2(row.filesModified)
-  };
+  return row;
 }
 function updateObservation(db, observationId, input) {
   const existing = getObservation(db, observationId);
@@ -1374,13 +1329,8 @@ function updateObservation(db, observationId, input) {
             tool_input AS toolInput,
             tool_result AS toolResult,
             status,
-            type,
             title,
             content,
-            insight,
-            tags,
-            files_read AS filesRead,
-            files_modified AS filesModified,
             created_at_epoch AS createdAtEpoch
         `
     ).get(
@@ -1438,7 +1388,7 @@ var TURN_SELECT = `
 function stringifyArray(values) {
   return JSON.stringify(values);
 }
-function parseJsonArray3(value) {
+function parseJsonArray2(value) {
   if (!value) {
     return [];
   }
@@ -1450,9 +1400,9 @@ function mapTurnRow(row) {
   }
   return {
     ...row,
-    tags: parseJsonArray3(row.tags),
-    filesRead: parseJsonArray3(row.filesRead),
-    filesModified: parseJsonArray3(row.filesModified)
+    tags: parseJsonArray2(row.tags),
+    filesRead: parseJsonArray2(row.filesRead),
+    filesModified: parseJsonArray2(row.filesModified)
   };
 }
 function getTurn(db, sessionId, promptNumber) {
@@ -36436,7 +36386,7 @@ var MEMORY_SELECT = `
     updated_at_epoch AS updatedAtEpoch
   FROM memories
 `;
-function parseJsonArray4(value) {
+function parseJsonArray3(value) {
   if (!value) {
     return [];
   }
@@ -36454,7 +36404,7 @@ function mapMemoryRow(row) {
   }
   return {
     ...row,
-    tags: parseJsonArray4(row.tags)
+    tags: parseJsonArray3(row.tags)
   };
 }
 function getMemory(db, id) {
@@ -36590,14 +36540,6 @@ function updateMemory(db, id, input) {
 }
 
 // src/mcp/format.ts
-var TYPE_EMOJI = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F"
-};
 var FIELD_TRUNCATION_SUFFIX = "...";
 var LEGACY_TRUNCATION_LIMIT = 200;
 var UNIFIED_TRUNCATION_LIMITS = {
@@ -36618,9 +36560,6 @@ function formatSourceCount(value) {
     return "";
   }
   return `${count} source${count === 1 ? "" : "s"}`;
-}
-function typeEmoji(type) {
-  return TYPE_EMOJI[type] ?? type;
 }
 function normalizeCount(value) {
   if (!value || value < 0) {
@@ -36710,19 +36649,8 @@ function truncateText(text, {
   const hint = mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
   return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
 }
-function formatDisplayStatus(status) {
-  switch (status) {
-    case "extracting_pending":
-      return "pending";
-    case "extracting_stale":
-      return "stale";
-    default:
-      return status;
-  }
-}
 function formatStatus(status) {
-  const displayStatus = formatDisplayStatus(status);
-  return displayStatus ? ` [${displayStatus}]` : "";
+  return status ? ` [${status}]` : "";
 }
 function extractKeyParam(name, input) {
   if (!input || typeof input !== "object") {
@@ -37016,7 +36944,7 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   return lines.join("\n");
 }
 function formatObservationLabel(observation, { indent = "" } = {}) {
-  return `${indent}- [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`;
+  return `${indent}- [O${observation.id}] ${observation.title}`;
 }
 function formatMemoryLabel(memory, { includeSourceCount = true } = {}) {
   const parts = [
@@ -37090,61 +37018,8 @@ function formatObservationCollapsedWithMode(observation, options = {}) {
   return lines.join("\n");
 }
 function formatObservationExpandedWithMode(observation, options = {}) {
-  const { indent = "", mode = "legacy", depth = "expanded" } = options;
-  const detailIndent = `${indent}  `;
+  const mode = options.mode ?? "legacy";
   const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
-  if (observation.insight) {
-    lines.push(
-      `${detailIndent}- insight: ${truncateText(
-        observation.insight,
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber
-        }
-      )}`
-    );
-  }
-  if (observation.tags && observation.tags.length > 0) {
-    lines.push(
-      `${detailIndent}- tags: ${truncateText(
-        observation.tags.join(", "),
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber
-        }
-      )}`
-    );
-  }
-  const filesParts = [];
-  if (observation.filesRead && observation.filesRead.length > 0) {
-    filesParts.push(`\u{1F4D6} ${truncateText(
-      observation.filesRead.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber
-      }
-    )}`);
-  }
-  if (observation.filesModified && observation.filesModified.length > 0) {
-    filesParts.push(`\u270F\uFE0F ${truncateText(
-      observation.filesModified.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber
-      }
-    )}`);
-  }
-  if (filesParts.length > 0) {
-    lines.push(`${detailIndent}- files: ${filesParts.join(" ")}`);
-  }
   return lines.join("\n");
 }
 function renderNode(node, options) {
@@ -37481,13 +37356,8 @@ function buildTurnView(db, turn) {
     filesModified: turn.filesModified,
     observations: observations.map((observation) => ({
       id: observation.id,
-      type: observation.type ?? "discovery",
       title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-      content: observation.content,
-      insight: observation.insight,
-      tags: observation.tags,
-      filesRead: observation.filesRead,
-      filesModified: observation.filesModified
+      content: observation.content
     }))
   };
 }
@@ -37532,7 +37402,7 @@ function renderSession(db, session, depth, turnSelector) {
   );
   const sampledTurns = sampleWithOmissions(
     turns,
-    (turn) => turn.status === "pending" || turn.status === "stale"
+    (turn) => turn.status === "active"
   );
   for (const item of sampledTurns.items) {
     if ("omittedCount" in item) {
@@ -37577,7 +37447,7 @@ function renderTurnScope(db, turns, depth) {
     const sessionTurns = grouped.get(session.id) ?? [];
     const sampledTurns = sampleWithOmissions(
       sessionTurns,
-      (turn) => turn.status === "pending" || turn.status === "stale"
+      (turn) => turn.status === "active"
     );
     for (const item of sampledTurns.items) {
       if ("omittedCount" in item) {
@@ -37623,13 +37493,8 @@ function renderObservationScope(db, observations, depth, includeParents) {
       }
       const observationView = {
         id: observation.id,
-        type: observation.type ?? "discovery",
         title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-        content: observation.content,
-        insight: observation.insight,
-        tags: observation.tags,
-        filesRead: observation.filesRead,
-        filesModified: observation.filesModified
+        content: observation.content
       };
       lines.push(
         renderNode(
@@ -37687,13 +37552,8 @@ function renderObservationScope(db, observations, depth, includeParents) {
         }
         const observationView = {
           id: observation.id,
-          type: observation.type ?? "discovery",
           title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-          content: observation.content,
-          insight: observation.insight,
-          tags: observation.tags,
-          filesRead: observation.filesRead,
-          filesModified: observation.filesModified
+          content: observation.content
         };
         lines.push(
           renderNode(
@@ -37728,13 +37588,8 @@ function renderMemoryScope(db, memoryIds, depth) {
 function buildObservationView(observation) {
   return {
     id: observation.id,
-    type: observation.type ?? "discovery",
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-    content: observation.content,
-    insight: observation.insight,
-    tags: observation.tags,
-    filesRead: observation.filesRead,
-    filesModified: observation.filesModified
+    content: observation.content
   };
 }
 function renderSessionDetail(db, sessionId, depth) {
@@ -37796,10 +37651,6 @@ function filterResultsByTag(db, results, tag) {
     return results;
   }
   return results.filter((result) => {
-    if (result.layer === "observation" && result.observationId !== null) {
-      const observation = getObservation(db, result.observationId);
-      return observation?.tags.includes(tag) ?? false;
-    }
     if (result.layer === "memory") {
       const memory = getMemory(db, result.sourceId);
       return memory?.tags.includes(tag) ?? false;

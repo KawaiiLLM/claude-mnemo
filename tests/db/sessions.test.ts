@@ -7,6 +7,7 @@ import {
   getRecentSessions,
   getSession,
   getSessionByContentId,
+  updateCompactAnchor,
   upsertSession,
 } from "../../src/db/sessions";
 
@@ -175,5 +176,31 @@ describe("session queries", () => {
 
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.contentSessionId).toBe("content-6");
+  });
+
+  test("updateCompactAnchor ignores active turns and anchors on the latest finalized turn", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "content-9",
+      project: "claude-mnemo",
+      title: "Anchor test",
+      content: "Anchor content",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES
+        (?, 1, 'extracted', 'first', 110),
+        (?, 2, 'undone', 'second', 120),
+        (?, 3, 'active', 'third', 130)`,
+    ).run(session.id, session.id, session.id);
+
+    updateCompactAnchor(db, session.id);
+
+    expect(getSession(db, session.id)?.lastCompactTurn).toBe(2);
   });
 });

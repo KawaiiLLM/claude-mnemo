@@ -58,28 +58,19 @@ describe("recallMemory", () => {
       title: "Diagnose auth race",
       content: "Refresh overlap diagnosed",
       insight: "- concurrent refreshes collide",
+      type: "bugfix",
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts", "tests/auth.test.ts"],
       createdAtEpoch: 86_630,
       updatedAtEpoch: 86_640,
       observations: [
         {
-          type: "bugfix",
           title: "Auth mutex",
           content: "Guards refresh",
-          insight: "Serialized refresh work with a shared promise.",
-          tags: ["mutex", "race-resolved"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
         },
         {
-          type: "decision",
           title: "Add regression test",
           content: "Protects overlap path",
-          insight: "Regression coverage now checks parallel refresh calls.",
-          tags: ["promise-all", "regression-test"],
-          filesRead: ["tests/auth.test.ts"],
-          filesModified: ["tests/auth.test.ts"],
         },
       ],
     });
@@ -231,13 +222,8 @@ describe("recallMemory", () => {
       createdAtEpoch: 259_210,
       updatedAtEpoch: 259_220,
       observations: Array.from({ length: 60 }, (_, index) => ({
-        type: "discovery",
         title: `Observation ${index + 1}`,
         content: `Description ${index + 1}`,
-        insight: null,
-        tags: [],
-        filesRead: [],
-        filesModified: [],
       })),
     });
 
@@ -301,16 +287,14 @@ describe("recallMemory", () => {
     expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
     expect(sessionOutput).toContain("[T1] Diagnose auth race");
     expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
-    expect(sessionOutput).not.toContain("[O1] 🔴 Auth mutex");
+    expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
     expect(turnOutput).toContain(`[T1] Diagnose auth race`);
     expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
-    expect(turnOutput).toContain("[O1] 🔴 Auth mutex");
+    expect(turnOutput).toContain("[O1] Auth mutex");
 
-    expect(observationOutput).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
-    expect(observationOutput).toContain(
-      "insight: Serialized refresh work with a shared promise.",
-    );
+    expect(observationOutput).toContain(`[O${authObservationId}] Auth mutex`);
+    expect(observationOutput).toContain("desc: Guards refresh");
 
     expect(memoryOutput).toContain(
       `[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`,
@@ -339,12 +323,9 @@ describe("recallMemory", () => {
     expect(turnsOutput).toContain("[T20] Turn 20");
     expect(turnsOutput).not.toContain("[T10] Turn 10");
 
-    expect(observationsOutput).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
+    expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
     expect(observationsOutput).toContain("[T1] Diagnose auth race");
-    expect(observationsOutput).toContain(
-      "insight: Serialized refresh work with a shared promise.",
-    );
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
     expect(sessionObservationsOutput).toContain("[T1] Observation flood");
     expect(sessionObservationsOutput).toContain("[O");
@@ -372,8 +353,6 @@ describe("recallMemory", () => {
     });
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(typeQuery).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
-    expect(typeQuery).toContain("desc: Guards refresh");
     expect(typeQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
     expect(typeQuery).not.toContain(`[M${projectMemoryId}]`);
 

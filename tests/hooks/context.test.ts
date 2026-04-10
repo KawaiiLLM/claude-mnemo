@@ -84,37 +84,25 @@ function insertObservation(
   db: Database,
   turnId: number,
   input: {
-    type: string;
+    toolName?: string;
     title: string;
     content: string;
-    insight?: string;
-    tags?: string[];
-    filesRead?: string[];
-    filesModified?: string[];
     createdAtEpoch: number;
   },
 ): void {
   db.query(
     `INSERT INTO observations (
       turn_id,
-      type,
+      tool_name,
       title,
       content,
-      insight,
-      tags,
-      files_read,
-      files_modified,
       created_at_epoch
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?)`,
   ).run(
     turnId,
-    input.type,
+    input.toolName ?? null,
     input.title,
     input.content,
-    input.insight ?? null,
-    JSON.stringify(input.tags ?? []),
-    JSON.stringify(input.filesRead ?? []),
-    JSON.stringify(input.filesModified ?? []),
     input.createdAtEpoch,
   );
 }
@@ -400,7 +388,7 @@ describe("handleContextHook", () => {
     }
 
     insertObservation(db, turn2.id, {
-      type: "discovery",
+      toolName: "Read",
       title: "Parallel requests share a refresh race",
       content: "Logs confirmed the race window under load.",
       createdAtEpoch: 321,
@@ -435,28 +423,28 @@ describe("handleContextHook", () => {
     });
 
     insertObservation(db, turn4, {
-      type: "discovery",
+      toolName: "Read",
       title: "Parallel refreshes share one race window",
       content: "Timing confirmed the overlap under concurrent requests.",
       createdAtEpoch: 341,
     });
 
     insertObservation(db, turn4, {
-      type: "decision",
+      toolName: "TodoWrite",
       title: "Use a mutex instead of a queue",
       content: "The simpler guard keeps the common path fast.",
       createdAtEpoch: 342,
     });
 
     insertObservation(db, turn4, {
-      type: "bugfix",
+      toolName: "Edit",
       title: "Mutex patch applied",
       content: "The shared refresh path is now serialized.",
       createdAtEpoch: 343,
     });
 
     insertObservation(db, turn4, {
-      type: "feature",
+      toolName: "Write",
       title: "Follow-up regression kept",
       content: "The regression test still exercises the race.",
       createdAtEpoch: 344,

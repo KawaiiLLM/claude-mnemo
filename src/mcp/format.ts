@@ -22,13 +22,8 @@ type RenderMode = "legacy" | "unified";
 
 export interface FormattedObservation {
   id: number;
-  type: string;
   title: string;
   content?: string | null;
-  insight?: string | null;
-  tags?: string[];
-  filesRead?: string[];
-  filesModified?: string[];
 }
 
 export interface FormattedMemorySource {
@@ -148,10 +143,6 @@ function formatSourceCount(value?: number | null): string {
   }
 
   return `${count} source${count === 1 ? "" : "s"}`;
-}
-
-function typeEmoji(type: string): string {
-  return TYPE_EMOJI[type] ?? type;
 }
 
 function normalizeCount(value?: number | null): number {
@@ -281,20 +272,8 @@ function truncateText(
   }`;
 }
 
-function formatDisplayStatus(status?: string | null): string | null | undefined {
-  switch (status) {
-    case "extracting_pending":
-      return "pending";
-    case "extracting_stale":
-      return "stale";
-    default:
-      return status;
-  }
-}
-
 function formatStatus(status?: string | null): string {
-  const displayStatus = formatDisplayStatus(status);
-  return displayStatus ? ` [${displayStatus}]` : "";
+  return status ? ` [${status}]` : "";
 }
 
 export function extractKeyParam(name: string, input: unknown): string | null {
@@ -343,12 +322,7 @@ export function extractKeyParam(name: string, input: unknown): string | null {
 }
 
 function isObservationExpanded(observation: FormattedObservation): boolean {
-  return Boolean(
-    observation.insight ||
-      (observation.tags && observation.tags.length > 0) ||
-      (observation.filesRead && observation.filesRead.length > 0) ||
-      (observation.filesModified && observation.filesModified.length > 0),
-  );
+  return false;
 }
 
 function isTurnExpanded(turn: FormattedTurn): boolean {
@@ -695,7 +669,7 @@ function formatObservationLabel(
   observation: FormattedObservation,
   { indent = "" }: ObservationFormatOptions = {},
 ): string {
-  return `${indent}- [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`;
+  return `${indent}- [O${observation.id}] ${observation.title}`;
 }
 
 function formatMemoryLabel(
@@ -803,67 +777,8 @@ function formatObservationExpandedWithMode(
   observation: FormattedObservation,
   options: ObservationFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
-  const { indent = "", mode = "legacy", depth = "expanded" } = options;
-  const detailIndent = `${indent}  `;
+  const mode = options.mode ?? "legacy";
   const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
-
-  if (observation.insight) {
-    lines.push(
-      `${detailIndent}- insight: ${truncateText(
-        observation.insight,
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber,
-        },
-      )}`,
-    );
-  }
-
-  if (observation.tags && observation.tags.length > 0) {
-    lines.push(
-      `${detailIndent}- tags: ${truncateText(
-        observation.tags.join(", "),
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber,
-        },
-      )}`,
-    );
-  }
-
-  const filesParts: string[] = [];
-
-  if (observation.filesRead && observation.filesRead.length > 0) {
-    filesParts.push(`📖 ${truncateText(
-      observation.filesRead.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber,
-      },
-    )}`);
-  }
-
-  if (observation.filesModified && observation.filesModified.length > 0) {
-    filesParts.push(`✏️ ${truncateText(
-      observation.filesModified.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber,
-      },
-    )}`);
-  }
-
-  if (filesParts.length > 0) {
-    lines.push(`${detailIndent}- files: ${filesParts.join(" ")}`);
-  }
 
   return lines.join("\n");
 }

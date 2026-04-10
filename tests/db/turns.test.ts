@@ -104,10 +104,6 @@ describe("turn queries", () => {
 
     expect(observation.title).toBe("Read auth module");
     expect(observation.content).toBe("Inspected refresh handling.");
-    expect(observation.insight).toBeNull();
-    expect(observation.tags).toEqual([]);
-    expect(observation.filesRead).toEqual([]);
-    expect(observation.filesModified).toEqual([]);
   });
 
   test("rolls back the turn when observation insert fails", () => {
@@ -126,11 +122,8 @@ describe("turn queries", () => {
         updatedAtEpoch: null,
         observations: [
           {
-            type: "bugfix",
             title: Symbol("invalid") as unknown as string,
             content: "Invalid observation",
-            filesRead: [],
-            filesModified: [],
           },
         ],
       });
@@ -181,13 +174,8 @@ describe("turn queries", () => {
       updatedAtEpoch: 510,
       observations: [
         {
-          type: "change",
           title: "Temporary edit",
           content: "Applied an experimental change",
-          insight: "This branch was later abandoned.",
-          tags: ["trade-off"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
         },
       ],
     });

@@ -524,18 +524,10 @@ function querySessionsByScope(
         SELECT 1
         FROM turns t
         WHERE t.session_id = s.id
-          AND (
-            t.type = ?
-            OR EXISTS (
-              SELECT 1
-              FROM observations o
-              WHERE o.turn_id = t.id
-                AND o.type = ?
-            )
-          )
+          AND t.type = ?
       )`,
     );
-    params.push(options.type, options.type);
+    params.push(options.type);
   }
 
   if (options.file) {
@@ -594,15 +586,8 @@ function queryTurnsByScope(
   }
 
   if (options.type) {
-    whereClauses.push(
-      `(t.type = ? OR EXISTS (
-        SELECT 1
-        FROM observations o
-        WHERE o.turn_id = t.id
-          AND o.type = ?
-      ))`,
-    );
-    params.push(options.type, options.type);
+    whereClauses.push("t.type = ?");
+    params.push(options.type);
   }
 
   return queryRows(
@@ -653,8 +638,7 @@ function queryObservationsByScope(
   }
 
   if (options.type) {
-    whereClauses.push("o.type = ?");
-    params.push(options.type);
+    return [];
   }
 
   return queryRows(

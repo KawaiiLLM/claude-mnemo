@@ -210,7 +210,6 @@ var SCHEMA_SQL = `
     project TEXT NOT NULL,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
@@ -229,7 +228,6 @@ var SCHEMA_SQL = `
     assistant_response TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
     insight TEXT,
     type TEXT,
     tags TEXT,
@@ -248,17 +246,8 @@ var SCHEMA_SQL = `
     tool_input TEXT,
     tool_result TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
-    type TEXT,
     title TEXT,
     content TEXT,
-    description TEXT,
-    insight TEXT,
-    narrative TEXT,
-    facts TEXT,
-    tags TEXT,
-    concepts TEXT,
-    files_read TEXT,
-    files_modified TEXT,
     created_at_epoch INTEGER NOT NULL
   );
 
@@ -287,9 +276,6 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_observations_turn_id
     ON observations(turn_id);
-
-  CREATE INDEX IF NOT EXISTS idx_observations_type
-    ON observations(type);
 
   CREATE TABLE IF NOT EXISTS pending_queue (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -424,6 +410,7 @@ function migrateSchema(db) {
   if (!hasColumn(db, "observations", "content")) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
+  db.exec("DROP INDEX IF EXISTS idx_observations_type");
   if (!hasColumn(db, "observations", "insight")) {
     db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
@@ -460,7 +447,7 @@ function migrateSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_pending_queue_session
       ON pending_queue(session_db_id, seq)
   `);
-  if (hasRow(
+  if (hasColumn(db, "sessions", "description") && hasRow(
     db,
     "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
@@ -471,7 +458,7 @@ function migrateSchema(db) {
     `);
     searchIndexNeedsRebuild = true;
   }
-  if (hasRow(
+  if (hasColumn(db, "turns", "description") && hasRow(
     db,
     "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
   )) {
@@ -482,7 +469,7 @@ function migrateSchema(db) {
     `);
     searchIndexNeedsRebuild = true;
   }
-  if (hasRow(
+  if (hasColumn(db, "observations", "description") && hasColumn(db, "observations", "insight") && hasColumn(db, "observations", "narrative") && hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts") && hasRow(
     db,
     `
         SELECT 1 FROM observations
@@ -924,14 +911,6 @@ function getTurnsForSession(db, sessionId) {
 }
 
 // src/mcp/format.ts
-var TYPE_EMOJI = {
-  bugfix: "\u{1F534}",
-  feature: "\u{1F7E3}",
-  refactor: "\u{1F504}",
-  change: "\u2705",
-  discovery: "\u{1F535}",
-  decision: "\u2696\uFE0F"
-};
 var FIELD_TRUNCATION_SUFFIX = "...";
 var LEGACY_TRUNCATION_LIMIT = 200;
 var UNIFIED_TRUNCATION_LIMITS = {
@@ -952,9 +931,6 @@ function formatSourceCount(value) {
     return "";
   }
   return `${count} source${count === 1 ? "" : "s"}`;
-}
-function typeEmoji(type) {
-  return TYPE_EMOJI[type] ?? type;
 }
 function normalizeCount(value) {
   if (!value || value < 0) {
@@ -1044,19 +1020,8 @@ function truncateText(text, {
   const hint = mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
   return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
 }
-function formatDisplayStatus(status) {
-  switch (status) {
-    case "extracting_pending":
-      return "pending";
-    case "extracting_stale":
-      return "stale";
-    default:
-      return status;
-  }
-}
 function formatStatus(status) {
-  const displayStatus = formatDisplayStatus(status);
-  return displayStatus ? ` [${displayStatus}]` : "";
+  return status ? ` [${status}]` : "";
 }
 function extractKeyParam(name, input) {
   if (!input || typeof input !== "object") {
@@ -1350,7 +1315,7 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   return lines.join("\n");
 }
 function formatObservationLabel(observation, { indent = "" } = {}) {
-  return `${indent}- [O${observation.id}] ${typeEmoji(observation.type)} ${observation.title}`;
+  return `${indent}- [O${observation.id}] ${observation.title}`;
 }
 function formatMemoryLabel(memory, { includeSourceCount = true } = {}) {
   const parts = [
@@ -1424,61 +1389,8 @@ function formatObservationCollapsedWithMode(observation, options = {}) {
   return lines.join("\n");
 }
 function formatObservationExpandedWithMode(observation, options = {}) {
-  const { indent = "", mode = "legacy", depth = "expanded" } = options;
-  const detailIndent = `${indent}  `;
+  const mode = options.mode ?? "legacy";
   const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
-  if (observation.insight) {
-    lines.push(
-      `${detailIndent}- insight: ${truncateText(
-        observation.insight,
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber
-        }
-      )}`
-    );
-  }
-  if (observation.tags && observation.tags.length > 0) {
-    lines.push(
-      `${detailIndent}- tags: ${truncateText(
-        observation.tags.join(", "),
-        {
-          depth,
-          mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber
-        }
-      )}`
-    );
-  }
-  const filesParts = [];
-  if (observation.filesRead && observation.filesRead.length > 0) {
-    filesParts.push(`\u{1F4D6} ${truncateText(
-      observation.filesRead.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber
-      }
-    )}`);
-  }
-  if (observation.filesModified && observation.filesModified.length > 0) {
-    filesParts.push(`\u270F\uFE0F ${truncateText(
-      observation.filesModified.join(", "),
-      {
-        depth,
-        mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: options.turnPromptNumber
-      }
-    )}`);
-  }
-  if (filesParts.length > 0) {
-    lines.push(`${detailIndent}- files: ${filesParts.join(" ")}`);
-  }
   return lines.join("\n");
 }
 function renderNode(node, options) {

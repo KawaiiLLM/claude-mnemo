@@ -164,7 +164,7 @@ export function updateCompactAnchor(db: Database, sessionId: number): void {
      SET last_compact_turn = (
        SELECT MAX(prompt_number) FROM turns
        WHERE session_id = ?
-         AND status NOT IN ('pending', 'stale', 'extracting_pending', 'extracting_stale')
+         AND status != 'active'
      )
      WHERE id = ?`,
   ).run(sessionId, sessionId);

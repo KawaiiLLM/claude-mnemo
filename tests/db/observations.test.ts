@@ -86,10 +86,6 @@ describe("observation round trips", () => {
     expect(loaded?.status).toBe("pending");
     expect(loaded?.title).toBeNull();
     expect(loaded?.content).toBeNull();
-    expect(loaded?.insight).toBeNull();
-    expect(loaded?.tags).toEqual([]);
-    expect(loaded?.filesRead).toEqual([]);
-    expect(loaded?.filesModified).toEqual([]);
     expect(pendingFtsRow).toBeNull();
     expect(extracted?.status).toBe("extracted");
     expect(extractedFtsRow).toEqual({ layer: "observation", sourceId: created.id });

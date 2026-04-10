@@ -42,7 +42,6 @@ describe("MCP format renderer", () => {
     };
     const observation: FormattedObservation = {
       id: 7,
-      type: "bugfix",
       title: "Added mutex",
       content: "Guards refresh",
     };
@@ -70,14 +69,14 @@ describe("MCP format renderer", () => {
 
     expect(formatObservationCollapsed(observation)).toBe(
       [
-        "- [O7] 🔴 Added mutex",
+        "- [O7] Added mutex",
         "  - desc: Guards refresh",
       ].join("\n"),
     );
 
     expect(formatObservationCollapsed(observation, { indent: "    " })).toBe(
       [
-        "    - [O7] 🔴 Added mutex",
+        "    - [O7] Added mutex",
         "      - desc: Guards refresh",
       ].join("\n"),
     );
@@ -120,52 +119,24 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("maps transient extraction statuses to user-visible turn labels", () => {
-    const pendingTurn: FormattedTurn = {
+  test("renders current turn statuses directly", () => {
+    const activeTurn: FormattedTurn = {
       id: 3,
       promptNumber: 3,
-      title: "Pending turn",
-      status: "pending",
+      title: "Active turn",
+      status: "active",
     };
-    const staleTurn: FormattedTurn = {
+    const undoneTurn: FormattedTurn = {
       id: 4,
       promptNumber: 4,
-      title: "Stale turn",
-      status: "stale",
-    };
-    const extractingPendingTurn: FormattedTurn = {
-      id: 5,
-      promptNumber: 5,
-      title: "Claimed pending turn",
-      status: "extracting_pending",
-      promptPreview: "Pending extraction prompt",
-    };
-    const extractingStaleTurn: FormattedTurn = {
-      id: 6,
-      promptNumber: 6,
-      title: "Claimed stale turn",
-      status: "extracting_stale",
-      responsePreview: "Stale extraction response",
+      title: "Undone turn",
+      status: "undone",
     };
 
-    expect(formatTurnCollapsed(pendingTurn)).toContain("[pending]");
-    expect(formatTurnCollapsed(staleTurn)).toContain("[stale]");
-
-    const collapsedPending = formatTurnCollapsed(extractingPendingTurn);
-    expect(collapsedPending).toContain("[pending]");
-    expect(collapsedPending).not.toContain("[extracting_pending]");
-
-    const expandedPending = formatTurnExpanded(extractingPendingTurn);
-    expect(expandedPending).toContain("[pending]");
-    expect(expandedPending).not.toContain("[extracting_pending]");
-
-    const collapsedStale = formatTurnCollapsed(extractingStaleTurn);
-    expect(collapsedStale).toContain("[stale]");
-    expect(collapsedStale).not.toContain("[extracting_stale]");
-
-    const expandedStale = formatTurnExpanded(extractingStaleTurn);
-    expect(expandedStale).toContain("[stale]");
-    expect(expandedStale).not.toContain("[extracting_stale]");
+    expect(formatTurnCollapsed(activeTurn)).toContain("[active]");
+    expect(formatTurnExpanded(activeTurn)).toContain("[active]");
+    expect(formatTurnCollapsed(undoneTurn)).toContain("[undone]");
+    expect(formatTurnExpanded(undoneTurn)).toContain("[undone]");
   });
 
   test("renders expanded lines with detail blocks and truncation", () => {
@@ -198,13 +169,8 @@ describe("MCP format renderer", () => {
     };
     const observation: FormattedObservation = {
       id: 7,
-      type: "bugfix",
       title: "Added mutex",
       content: "Guards refresh",
-      insight: "Serialized token refresh work with a shared promise.",
-      tags: ["problem-solution", "trade-off"],
-      filesRead: ["src/auth.ts"],
-      filesModified: ["src/auth.ts"],
     };
     const longTurn: FormattedTurn = {
       id: 9,
@@ -240,11 +206,8 @@ describe("MCP format renderer", () => {
 
     expect(formatObservationExpanded(observation)).toBe(
       [
-        "- [O7] 🔴 Added mutex",
+        "- [O7] Added mutex",
         "  - desc: Guards refresh",
-        "  - insight: Serialized token refresh work with a shared promise.",
-        "  - tags: problem-solution, trade-off",
-        "  - files: 📖 src/auth.ts ✏️ src/auth.ts",
       ].join("\n"),
     );
 
@@ -278,7 +241,6 @@ describe("MCP format renderer", () => {
             observations: [
               {
                 id: 7,
-                type: "bugfix",
                 title: "Mutex added",
               },
             ],
@@ -294,7 +256,7 @@ describe("MCP format renderer", () => {
         "  - next_steps:",
         "    - verify startup migration",
         "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
-        "    - [O7] 🔴 Mutex added",
+        "    - [O7] Mutex added",
       ].join("\n"),
     );
   });

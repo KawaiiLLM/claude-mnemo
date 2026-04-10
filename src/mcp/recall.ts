@@ -433,13 +433,8 @@ export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
     filesModified: turn.filesModified,
     observations: observations.map((observation) => ({
       id: observation.id,
-      type: observation.type ?? "discovery",
       title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
       content: observation.content,
-      insight: observation.insight,
-      tags: observation.tags,
-      filesRead: observation.filesRead,
-      filesModified: observation.filesModified,
     })),
   };
 }
@@ -502,7 +497,7 @@ function renderSession(
   );
 
   const sampledTurns = sampleWithOmissions(turns, (turn) =>
-    turn.status === "pending" || turn.status === "stale",
+    turn.status === "active",
   );
 
   for (const item of sampledTurns.items) {
@@ -557,7 +552,7 @@ function renderTurnScope(
 
     const sessionTurns = grouped.get(session.id) ?? [];
     const sampledTurns = sampleWithOmissions(sessionTurns, (turn) =>
-      turn.status === "pending" || turn.status === "stale",
+      turn.status === "active",
     );
 
     for (const item of sampledTurns.items) {
@@ -616,13 +611,8 @@ function renderObservationScope(
 
       const observationView: FormattedObservation = {
         id: observation.id,
-        type: observation.type ?? "discovery",
         title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
         content: observation.content,
-        insight: observation.insight,
-        tags: observation.tags,
-        filesRead: observation.filesRead,
-        filesModified: observation.filesModified,
       };
 
       lines.push(
@@ -692,13 +682,8 @@ function renderObservationScope(
 
         const observationView: FormattedObservation = {
           id: observation.id,
-          type: observation.type ?? "discovery",
           title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
           content: observation.content,
-          insight: observation.insight,
-          tags: observation.tags,
-          filesRead: observation.filesRead,
-          filesModified: observation.filesModified,
         };
 
         lines.push(
@@ -748,13 +733,8 @@ function buildObservationView(
 ): FormattedObservation {
   return {
     id: observation.id,
-    type: observation.type ?? "discovery",
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content,
-    insight: observation.insight,
-    tags: observation.tags,
-    filesRead: observation.filesRead,
-    filesModified: observation.filesModified,
   };
 }
 
@@ -870,11 +850,6 @@ function filterResultsByTag(
   }
 
   return results.filter((result) => {
-    if (result.layer === "observation" && result.observationId !== null) {
-      const observation = getObservation(db, result.observationId);
-      return observation?.tags.includes(tag) ?? false;
-    }
-
     if (result.layer === "memory") {
       const memory = getMemory(db, result.sourceId);
       return memory?.tags.includes(tag) ?? false;
