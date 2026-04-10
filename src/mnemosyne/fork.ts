@@ -89,12 +89,15 @@ export function resolveClaudeCodeExecutablePath(
   return deps.findOnPath() ?? undefined;
 }
 
-function createMnemoSdkServer(
+export function createMnemoSdkServer(
   database: Database,
   defaultProject: string | undefined,
   deps: {
     createSdkMcpServerImpl: typeof createSdkMcpServer;
     toolImpl: typeof tool;
+  } = {
+    createSdkMcpServerImpl: createSdkMcpServer,
+    toolImpl: tool,
   },
 ) {
   const partialHandlers = createDatabaseBackedHandlers(database, {

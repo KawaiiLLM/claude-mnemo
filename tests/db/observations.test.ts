@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createObservation, getObservation } from "../../src/db/observations";
+import {
+  createObservation,
+  getObservation,
+  updateObservation,
+} from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { saveTurn } from "../../src/db/turns";
@@ -48,32 +52,46 @@ describe("observation round trips", () => {
     db.close();
   });
 
-  test("round-trips the new observation columns and FTS payload", () => {
+  test("round-trips simplified observation data and only indexes extracted observations", () => {
     const created = createObservation(db, {
       turnId,
-      type: "discovery",
-      title: "New observation columns",
-      content: "Observation content",
-      insight: "Observation insight",
-      tags: ["auth", "cache"],
-      filesRead: ["src/observations.ts"],
-      filesModified: ["src/observations.ts"],
+      toolName: "Read",
+      toolInput: '{"file_path":"src/observations.ts"}',
+      toolResult: "file contents",
+      status: "pending",
       createdAtEpoch: 140,
     });
 
     const loaded = getObservation(db, created.id);
-    const ftsRow = db
+    const pendingFtsRow = db
+      .query<{ layer: string; sourceId: number }, [number]>(
+        "SELECT layer, source_id AS sourceId FROM memory_fts WHERE layer = 'observation' AND source_id = ?",
+      )
+      .get(created.id);
+    const extracted = updateObservation(db, created.id, {
+      title: "New observation columns",
+      content: "Observation content",
+      status: "extracted",
+    });
+    const extractedFtsRow = db
       .query<{ layer: string; sourceId: number }, [number]>(
         "SELECT layer, source_id AS sourceId FROM memory_fts WHERE layer = 'observation' AND source_id = ?",
       )
       .get(created.id);
 
     expect(loaded).not.toBeNull();
-    expect(loaded?.content).toBe("Observation content");
-    expect(loaded?.insight).toBe("Observation insight");
-    expect(loaded?.tags).toEqual(["auth", "cache"]);
-    expect(loaded?.filesRead).toEqual(["src/observations.ts"]);
-    expect(loaded?.filesModified).toEqual(["src/observations.ts"]);
-    expect(ftsRow).toEqual({ layer: "observation", sourceId: created.id });
+    expect(loaded?.toolName).toBe("Read");
+    expect(loaded?.toolInput).toBe('{"file_path":"src/observations.ts"}');
+    expect(loaded?.toolResult).toBe("file contents");
+    expect(loaded?.status).toBe("pending");
+    expect(loaded?.title).toBeNull();
+    expect(loaded?.content).toBeNull();
+    expect(loaded?.insight).toBeNull();
+    expect(loaded?.tags).toEqual([]);
+    expect(loaded?.filesRead).toEqual([]);
+    expect(loaded?.filesModified).toEqual([]);
+    expect(pendingFtsRow).toBeNull();
+    expect(extracted?.status).toBe("extracted");
+    expect(extractedFtsRow).toEqual({ layer: "observation", sourceId: created.id });
   });
 });

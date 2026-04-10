@@ -23,13 +23,15 @@ const SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
     title TEXT,
     content TEXT,
     description TEXT,
     insight TEXT,
+    type TEXT,
+    tags TEXT,
     files_read TEXT,
     files_modified TEXT,
     tool_call_count INTEGER,
@@ -41,8 +43,12 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    type TEXT NOT NULL,
-    title TEXT NOT NULL,
+    tool_name TEXT,
+    tool_input TEXT,
+    tool_result TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    type TEXT,
+    title TEXT,
     content TEXT,
     description TEXT,
     insight TEXT,
@@ -83,6 +89,21 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_observations_type
     ON observations(type);
+
+  CREATE TABLE IF NOT EXISTS pending_queue (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    session_db_id INTEGER NOT NULL,
+    claimed_at_epoch INTEGER,
+    enqueued_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_unclaimed
+    ON pending_queue(seq) WHERE claimed_at_epoch IS NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_session
+    ON pending_queue(session_db_id, seq);
 
   CREATE INDEX IF NOT EXISTS idx_memories_scope
     ON memories(scope);
@@ -230,6 +251,21 @@ export function migrateSchema(db: Database): boolean {
     db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
   }
 
+  if (!hasColumn(db, "turns", "type")) {
+    db.exec("ALTER TABLE turns ADD COLUMN type TEXT");
+  }
+
+  if (!hasColumn(db, "turns", "tags")) {
+    db.exec("ALTER TABLE turns ADD COLUMN tags TEXT");
+  }
+
+  if (
+    hasColumn(db, "turns", "status") &&
+    hasRow(db, "SELECT 1 FROM turns WHERE status = 'pending' LIMIT 1")
+  ) {
+    db.exec("UPDATE turns SET status = 'active' WHERE status = 'pending'");
+  }
+
   if (!hasColumn(db, "observations", "content")) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
@@ -241,6 +277,41 @@ export function migrateSchema(db: Database): boolean {
   if (!hasColumn(db, "observations", "tags")) {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
+
+  if (!hasColumn(db, "observations", "tool_name")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_name TEXT");
+  }
+
+  if (!hasColumn(db, "observations", "tool_input")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_input TEXT");
+  }
+
+  if (!hasColumn(db, "observations", "tool_result")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_result TEXT");
+  }
+
+  if (!hasColumn(db, "observations", "status")) {
+    db.exec("ALTER TABLE observations ADD COLUMN status TEXT DEFAULT 'pending'");
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_queue (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      session_db_id INTEGER NOT NULL,
+      claimed_at_epoch INTEGER,
+      enqueued_at_epoch INTEGER NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_queue_unclaimed
+      ON pending_queue(seq) WHERE claimed_at_epoch IS NULL
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_queue_session
+      ON pending_queue(session_db_id, seq)
+  `);
 
   if (
     hasRow(

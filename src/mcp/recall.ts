@@ -433,8 +433,8 @@ export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
     filesModified: turn.filesModified,
     observations: observations.map((observation) => ({
       id: observation.id,
-      type: observation.type,
-      title: observation.title,
+      type: observation.type ?? "discovery",
+      title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
       content: observation.content,
       insight: observation.insight,
       tags: observation.tags,
@@ -616,8 +616,8 @@ function renderObservationScope(
 
       const observationView: FormattedObservation = {
         id: observation.id,
-        type: observation.type,
-        title: observation.title,
+        type: observation.type ?? "discovery",
+        title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
         content: observation.content,
         insight: observation.insight,
         tags: observation.tags,
@@ -692,8 +692,8 @@ function renderObservationScope(
 
         const observationView: FormattedObservation = {
           id: observation.id,
-          type: observation.type,
-          title: observation.title,
+          type: observation.type ?? "discovery",
+          title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
           content: observation.content,
           insight: observation.insight,
           tags: observation.tags,
@@ -748,8 +748,8 @@ function buildObservationView(
 ): FormattedObservation {
   return {
     id: observation.id,
-    type: observation.type,
-    title: observation.title,
+    type: observation.type ?? "discovery",
+    title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content,
     insight: observation.insight,
     tags: observation.tags,

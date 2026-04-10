@@ -1,9 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 import { createMemory, updateMemory } from "../db/memories";
-import { createObservation } from "../db/observations";
+import { updateObservation } from "../db/observations";
 import { getSession, upsertSession } from "../db/sessions";
-import { getPendingTurns, getTurn, getTurnsForSession, saveTurn } from "../db/turns";
+import { getTurnById, updateTurnById } from "../db/turns";
 
 type ToolTextResult = {
   content: Array<{
@@ -12,17 +12,30 @@ type ToolTextResult = {
   }>;
 };
 
-type RememberStatus = "skipped" | "undone" | "active" | "superseded" | "archived";
+type RememberStatus =
+  | "pending"
+  | "extracted"
+  | "skipped"
+  | "undone"
+  | "active"
+  | "superseded"
+  | "archived";
 
-const TURN_REMEMBER_STATUSES = ["skipped", "undone"] as const;
+type ObservationStatus = "pending" | "extracted" | "skipped";
+type TurnStatus = "active" | "extracted" | "skipped" | "undone";
+
+const TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"] as const;
+const OBSERVATION_REMEMBER_STATUSES = [
+  "pending",
+  "extracted",
+  "skipped",
+] as const;
 const MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"] as const;
 
 export interface RememberToolInput {
-  parent?: string;
   id?: string;
   type?: string;
   scope?: string;
-  prompt_number?: number;
   title?: string;
   content?: string;
   insight?: string;
@@ -31,9 +44,7 @@ export interface RememberToolInput {
   tags?: string[];
   status?: RememberStatus;
   next_steps?: string;
-  files_read?: string[];
-  files_modified?: string[];
-  source_turn_id?: number;
+  source?: string;
 }
 
 function textResult(text: string): ToolTextResult {
@@ -51,27 +62,32 @@ function parseSessionId(value: string): number | null {
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
+function parseTurnId(value: string): number | null {
+  const match = /^T(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1]!, 10) : null;
+}
+
+function parseObservationId(value: string): number | null {
+  const match = /^O(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1]!, 10) : null;
+}
+
 function parseMemoryId(value: string): number | null {
   const match = /^M(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
-function parseTurnParent(value: string): { sessionId: number; promptNumber: number } | null {
-  const match = /^S(\d+)\/T(\d+)$/i.exec(value.trim());
-
-  if (!match) {
-    return null;
+function parseTurnSource(value: string | undefined): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
   }
 
-  return {
-    sessionId: Number.parseInt(match[1]!, 10),
-    promptNumber: Number.parseInt(match[2]!, 10),
-  };
+  return parseTurnId(value);
 }
 
 function validateStatusForRoute(
-  status: RememberStatus | undefined,
-  allowedStatuses: readonly RememberStatus[] | null,
+  status: string | undefined,
+  allowedStatuses: readonly string[] | null,
   routeLabel: string,
 ): string | null {
   if (status === undefined) {
@@ -90,25 +106,35 @@ function validateStatusForRoute(
   return null;
 }
 
-function resolveNextPromptNumber(db: Database, sessionId: number): number {
-  const pendingTurns = getPendingTurns(db, sessionId);
-
-  if (pendingTurns.length > 0) {
-    return pendingTurns[0]!.promptNumber;
+function deriveTurnStatus(input: RememberToolInput): TurnStatus {
+  if (input.status === "undone") {
+    return "undone";
   }
 
-  const existingTurns = getTurnsForSession(db, sessionId);
-
-  if (existingTurns.length === 0) {
-    return 1;
+  if (input.status === "skipped") {
+    return "skipped";
   }
 
-  return Math.max(...existingTurns.map((turn) => turn.promptNumber)) + 1;
+  if (input.status === "active") {
+    return "active";
+  }
+
+  return input.title || input.content || input.insight || input.type || (input.tags?.length ?? 0) > 0
+    ? "extracted"
+    : "skipped";
+}
+
+function deriveObservationStatus(input: RememberToolInput): ObservationStatus {
+  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
+    return input.status;
+  }
+
+  return input.title || input.content ? "extracted" : "skipped";
 }
 
 function handleTurnRemember(
   db: Database,
-  sessionId: number,
+  turnId: number,
   input: RememberToolInput,
 ): ToolTextResult {
   const statusError = validateStatusForRoute(
@@ -121,39 +147,31 @@ function handleTurnRemember(
     return parameterError(statusError);
   }
 
-  if (!getSession(db, sessionId)) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-
-  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
-  const isSkipped = input.status === "skipped";
-  const turn = saveTurn(db, {
-    sessionId,
-    promptNumber,
-    status: input.status === "undone" ? "undone" : undefined,
-    userPrompt: null,
-    assistantResponse: null,
-    title: isSkipped ? null : input.title ?? null,
-    content: isSkipped ? null : input.content ?? null,
-    insight: isSkipped ? null : input.insight ?? null,
-    filesRead: isSkipped ? [] : input.files_read ?? [],
-    filesModified: isSkipped ? [] : input.files_modified ?? [],
-    createdAtEpoch: Math.floor(Date.now() / 1000),
-    updatedAtEpoch: null,
-    observations: [],
+  const turn = updateTurnById(db, turnId, {
+    status: deriveTurnStatus(input),
+    title: input.title ?? null,
+    content: input.content ?? null,
+    insight: input.insight ?? null,
+    type: input.type ?? null,
+    tags: input.tags ?? [],
+    updatedAtEpoch: Math.floor(Date.now() / 1000),
   });
 
-  return textResult(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
+  if (!turn) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+
+  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
 }
 
 function handleObservationRemember(
   db: Database,
-  parent: { sessionId: number; promptNumber: number },
+  observationId: number,
   input: RememberToolInput,
 ): ToolTextResult {
   const statusError = validateStatusForRoute(
     input.status,
-    null,
+    OBSERVATION_REMEMBER_STATUSES,
     "observation remember",
   );
 
@@ -161,25 +179,32 @@ function handleObservationRemember(
     return parameterError(statusError);
   }
 
-  const turn = getTurn(db, parent.sessionId, parent.promptNumber);
-
-  if (!turn) {
-    return textResult(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
+  if (
+    input.type !== undefined ||
+    input.scope !== undefined ||
+    input.insight !== undefined ||
+    input.reasoning !== undefined ||
+    input.application !== undefined ||
+    input.tags !== undefined ||
+    input.next_steps !== undefined ||
+    input.source !== undefined
+  ) {
+    return parameterError(
+      "observation remember only accepts title, content, and status.",
+    );
   }
 
-  const observation = createObservation(db, {
-    turnId: turn.id,
-    type: input.type ?? "discovery",
-    title: input.title ?? "Untitled observation",
-    content: input.content ?? null,
-    insight: input.insight ?? null,
-    tags: input.tags ?? [],
-    filesRead: input.files_read ?? [],
-    filesModified: input.files_modified ?? [],
-    createdAtEpoch: Math.floor(Date.now() / 1000),
+  const observation = updateObservation(db, observationId, {
+    title: input.title,
+    content: input.content,
+    status: deriveObservationStatus(input),
   });
 
-  return textResult(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
+  if (!observation) {
+    return textResult(`Observation O${observationId} not found.`);
+  }
+
+  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
 }
 
 function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextResult {
@@ -197,6 +222,12 @@ function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextRes
     return textResult("Memory creation requires type, scope, title, and content.");
   }
 
+  const sourceTurnId = parseTurnSource(input.source);
+
+  if (input.source !== undefined && sourceTurnId === null) {
+    return parameterError('source must be a turn id like "T12".');
+  }
+
   const memory = createMemory(db, {
     type: input.type,
     scope: input.scope,
@@ -212,7 +243,7 @@ function handleMemoryCreate(db: Database, input: RememberToolInput): ToolTextRes
         ? input.status
         : "active",
     supersededBy: null,
-    sourceTurnId: input.source_turn_id ?? null,
+    sourceTurnId: sourceTurnId ?? null,
     createdAtEpoch: Math.floor(Date.now() / 1000),
     updatedAtEpoch: null,
   });
@@ -235,6 +266,12 @@ function handleMemoryUpdate(
     return parameterError(statusError);
   }
 
+  const sourceTurnId = parseTurnSource(input.source);
+
+  if (input.source !== undefined && sourceTurnId === null) {
+    return parameterError('source must be a turn id like "T12".');
+  }
+
   const memory = updateMemory(db, memoryId, {
     type: input.type,
     scope: input.scope,
@@ -249,7 +286,7 @@ function handleMemoryUpdate(
       input.status === "archived"
         ? input.status
         : undefined,
-    sourceTurnId: input.source_turn_id,
+    ...(sourceTurnId !== undefined ? { sourceTurnId } : {}),
     updatedAtEpoch: Math.floor(Date.now() / 1000),
   });
 
@@ -296,37 +333,33 @@ export function rememberTool(
   db: Database,
   input: RememberToolInput,
 ): ToolTextResult {
-  if (input.parent) {
-    const turnParent = parseTurnParent(input.parent);
-
-    if (turnParent) {
-      return handleObservationRemember(db, turnParent, input);
-    }
-
-    const sessionId = parseSessionId(input.parent);
-
-    if (sessionId !== null) {
-      return handleTurnRemember(db, sessionId, input);
-    }
-
-    return textResult(`Unsupported parent selector: ${input.parent}`);
+  if (!input.id) {
+    return handleMemoryCreate(db, input);
   }
 
-  if (input.id) {
-    const sessionId = parseSessionId(input.id);
+  const observationId = parseObservationId(input.id);
 
-    if (sessionId !== null) {
-      return handleSessionRemember(db, sessionId, input);
-    }
-
-    const memoryId = parseMemoryId(input.id);
-
-    if (memoryId !== null) {
-      return handleMemoryUpdate(db, memoryId, input);
-    }
-
-    return textResult(`Unsupported id selector: ${input.id}`);
+  if (observationId !== null) {
+    return handleObservationRemember(db, observationId, input);
   }
 
-  return handleMemoryCreate(db, input);
+  const turnId = parseTurnId(input.id);
+
+  if (turnId !== null) {
+    return handleTurnRemember(db, turnId, input);
+  }
+
+  const sessionId = parseSessionId(input.id);
+
+  if (sessionId !== null) {
+    return handleSessionRemember(db, sessionId, input);
+  }
+
+  const memoryId = parseMemoryId(input.id);
+
+  if (memoryId !== null) {
+    return handleMemoryUpdate(db, memoryId, input);
+  }
+
+  return textResult(`Unsupported id selector: ${input.id}`);
 }

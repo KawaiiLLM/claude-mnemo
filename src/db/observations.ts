@@ -5,8 +5,12 @@ import { indexObservationToFTS } from "./search";
 export interface ObservationRecord {
   id: number;
   turnId: number;
-  type: string;
-  title: string;
+  toolName: string | null;
+  toolInput: string | null;
+  toolResult: string | null;
+  status: "pending" | "extracted" | "skipped";
+  type: string | null;
+  title: string | null;
   content: string | null;
   insight: string | null;
   tags: string[];
@@ -17,8 +21,12 @@ export interface ObservationRecord {
 
 export interface CreateObservationInput {
   turnId: number;
-  type: string;
-  title: string;
+  toolName?: string | null;
+  toolInput?: string | null;
+  toolResult?: string | null;
+  status?: "pending" | "extracted" | "skipped";
+  type?: string | null;
+  title?: string | null;
   content?: string | null;
   insight?: string | null;
   tags?: string[];
@@ -30,8 +38,12 @@ export interface CreateObservationInput {
 interface ObservationRow {
   id: number;
   turnId: number;
-  type: string;
-  title: string;
+  toolName: string | null;
+  toolInput: string | null;
+  toolResult: string | null;
+  status: "pending" | "extracted" | "skipped";
+  type: string | null;
+  title: string | null;
   content: string | null;
   insight: string | null;
   tags: string | null;
@@ -44,6 +56,10 @@ const OBSERVATION_SELECT = `
   SELECT
     id,
     turn_id AS turnId,
+    tool_name AS toolName,
+    tool_input AS toolInput,
+    tool_result AS toolResult,
+    status,
     type,
     title,
     content,
@@ -87,11 +103,29 @@ export function createObservation(
   const inserted = db
     .query<
       ObservationRow,
-      [number, string, string, string | null, string | null, string, string, string, number]
+      [
+        number,
+        string | null,
+        string | null,
+        string | null,
+        "pending" | "extracted" | "skipped",
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string,
+        string,
+        string,
+        number,
+      ]
     >(
       `
         INSERT INTO observations (
           turn_id,
+          tool_name,
+          tool_input,
+          tool_result,
+          status,
           type,
           title,
           content,
@@ -100,10 +134,14 @@ export function createObservation(
           files_read,
           files_modified,
           created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING
           id,
           turn_id AS turnId,
+          tool_name AS toolName,
+          tool_input AS toolInput,
+          tool_result AS toolResult,
+          status,
           type,
           title,
           content,
@@ -116,8 +154,12 @@ export function createObservation(
     )
     .get(
       input.turnId,
-      input.type,
-      input.title,
+      input.toolName ?? null,
+      input.toolInput ?? null,
+      input.toolResult ?? null,
+      input.status ?? "pending",
+      input.type ?? null,
+      input.title ?? null,
       input.content ?? null,
       input.insight ?? null,
       stringifyJsonArray(input.tags ?? []),
@@ -132,9 +174,81 @@ export function createObservation(
     throw new Error("Failed to create observation.");
   }
 
-  indexObservationToFTS(db, observation);
+  if (observation.status === "extracted") {
+    indexObservationToFTS(db, observation);
+  }
 
   return observation;
+}
+
+export interface UpdateObservationInput {
+  title?: string;
+  content?: string | null;
+  status?: "pending" | "extracted" | "skipped";
+}
+
+export function updateObservation(
+  db: Database,
+  observationId: number,
+  input: UpdateObservationInput,
+): ObservationRecord | null {
+  const existing = getObservation(db, observationId);
+
+  if (!existing) {
+    return null;
+  }
+
+  const updated = mapObservationRow(
+    db
+      .query<
+        ObservationRow,
+        [string | null, string | null, "pending" | "extracted" | "skipped", number]
+      >(
+        `
+          UPDATE observations
+          SET
+            title = ?,
+            content = ?,
+            status = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            turn_id AS turnId,
+            tool_name AS toolName,
+            tool_input AS toolInput,
+            tool_result AS toolResult,
+            status,
+            type,
+            title,
+            content,
+            insight,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            created_at_epoch AS createdAtEpoch
+        `,
+      )
+      .get(
+        input.title ?? existing.title,
+        input.content ?? existing.content,
+        input.status ?? existing.status,
+        observationId,
+      ) ?? null,
+  );
+
+  if (!updated) {
+    return null;
+  }
+
+  if (updated.status === "extracted") {
+    indexObservationToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?",
+    ).run(observationId);
+  }
+
+  return updated;
 }
 
 export function getObservationsForTurn(

@@ -24,6 +24,10 @@ const builds = [
     entryPoint: join(projectRoot, "src", "mcp", "server.ts"),
     outputFile: join(pluginScriptsDirectory, "mcp-server.cjs"),
   },
+  {
+    entryPoint: join(projectRoot, "src", "worker", "server.ts"),
+    outputFile: join(pluginScriptsDirectory, "worker.cjs"),
+  },
 ];
 
 mkdirSync(pluginScriptsDirectory, { recursive: true });

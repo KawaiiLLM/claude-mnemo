@@ -39,7 +39,7 @@ describe("worker client", () => {
     ]);
   });
 
-  test("notifyWorkerWake spawns the worker when wake request fails", async () => {
+  test("notifyWorkerWake probes health before spawning an unreachable worker", async () => {
     const fetchImpl = mock(async () => {
       throw new Error("connection refused");
     });
@@ -57,7 +57,35 @@ describe("worker client", () => {
     );
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
     expect(spawnImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("notifyWorkerWake posts /wake when the worker is already healthy", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      return new Response(null, { status: 200 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    await notifyWorkerWake(
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: () => true,
+      },
+      {
+        CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root",
+      } as NodeJS.ProcessEnv,
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
+    expect(String(fetchImpl.mock.calls[1]?.[0])).toEndWith("/wake");
+    expect(spawnImpl).not.toHaveBeenCalled();
   });
 
   test("notifyWorkerCompact waits for readiness after spawning a missing worker", async () => {

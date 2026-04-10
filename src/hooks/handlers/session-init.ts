@@ -24,7 +24,7 @@ function createPendingTurn(
       status,
       user_prompt,
       created_at_epoch
-    ) VALUES (?, ?, 'pending', ?, ?)`,
+    ) VALUES (?, ?, 'active', ?, ?)`,
   ).run(sessionId, promptNumber, prompt, createdAtEpoch);
 }
 

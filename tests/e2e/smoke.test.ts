@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { getSession, getSessionByContentId } from "../../src/db/sessions";
-import { getPendingTurns, getTurn, getTurnsForSession } from "../../src/db/turns";
+import { getObservation } from "../../src/db/observations";
+import { getSessionByContentId } from "../../src/db/sessions";
+import { getTurn, getTurnById } from "../../src/db/turns";
+import { createPostToolUseHandler } from "../../src/hooks/handlers/post-tool-use";
 import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
@@ -47,79 +49,26 @@ describe("claude-mnemo smoke test", () => {
     rmSync(transcriptDirectory, { recursive: true, force: true });
   });
 
-  test("walks the full memory lifecycle", async () => {
-    const forkMnemosyne = async ({
-      prompt,
-    }: {
-      prompt: string;
-      cwd?: string;
-    }) => {
-      const match = prompt.match(/\[S(\d+)\]/);
-      if (!match) return;
-      const session = getSession(db, Number(match[1]))!;
-
-      for (const turn of getTurnsForSession(db, session.id).filter(
-        (candidate) =>
-          (candidate.status === "extracting_pending" ||
-            candidate.status === "extracting_stale") &&
-          candidate.assistantResponse,
-      )) {
-        rememberTool(db, {
-          parent: `S${session.id}`,
-          prompt_number: turn.promptNumber,
-          title: turn.promptNumber === 1 ? "Diagnose auth" : "Fix auth race",
-          content:
-            turn.promptNumber === 1
-              ? "Captured the race condition in auth refresh"
-              : "Implemented mutex and regression coverage",
-          insight:
-            turn.promptNumber === 1
-              ? "- refresh races under parallel load"
-              : "- mutex stabilizes refresh flow",
-          files_read: ["src/auth.ts"],
-          files_modified:
-            turn.promptNumber === 1 ? [] : ["src/auth.ts", "tests/auth.test.ts"],
-        });
-
-        rememberTool(db, {
-          parent: `S${session.id}/T${turn.promptNumber}`,
-          type: turn.promptNumber === 1 ? "discovery" : "bugfix",
-          title: turn.promptNumber === 1 ? "Race confirmed" : "Mutex added",
-          content:
-            turn.promptNumber === 1
-              ? "Parallel refresh collides"
-              : "Refresh is serialized",
-          insight:
-            turn.promptNumber === 1
-              ? "Concurrent 401 handling reproduced the auth race."
-              : "A shared promise now serializes refresh work.",
-          tags: turn.promptNumber === 1 ? ["gotcha"] : ["problem-solution"],
-          files_read: ["src/auth.ts"],
-          files_modified:
-            turn.promptNumber === 1 ? [] : ["src/auth.ts", "tests/auth.test.ts"],
-        });
-      }
-
-      rememberTool(db, {
-        id: `S${session.id}`,
-        title: "Auth race fix",
-        content: "Diagnosed and fixed the refresh race",
-        insight: "- durable memory extracted",
-      });
-    };
-
+  test("walks the queue-backed memory lifecycle", async () => {
     const sessionInitHandler = createSessionInitHandler({
       db,
-      forkMnemosyne,
       now: (() => {
         let time = 100;
         return () => ++time;
       })(),
     });
+    const postToolUseHandler = createPostToolUseHandler({
+      db,
+      workerClientDeps: {
+        fetchImpl: async () => new Response(null, { status: 200 }),
+      },
+      now: () => 250,
+    });
     const stopHandler = createStopHandler({
       db,
-      forkMnemosyne,
-      stderr: { write: () => true },
+      workerClientDeps: {
+        fetchImpl: async () => new Response(null, { status: 200 }),
+      },
       now: () => 300,
     });
 
@@ -134,7 +83,7 @@ describe("claude-mnemo smoke test", () => {
     });
 
     const sessionAfterFirstPrompt = getSessionByContentId(db, "session-e2e")!;
-    expect(getTurn(db, sessionAfterFirstPrompt.id, 1)?.status).toBe("pending");
+    expect(getTurn(db, sessionAfterFirstPrompt.id, 1)?.status).toBe("active");
 
     appendFileSync(
       transcriptPath,
@@ -183,8 +132,30 @@ describe("claude-mnemo smoke test", () => {
     );
 
     const session = getSessionByContentId(db, "session-e2e")!;
-    expect(getTurn(db, session.id, 1)?.status).toBe("pending");
-    expect(getTurn(db, session.id, 2)?.status).toBe("pending");
+    expect(getTurn(db, session.id, 1)?.status).toBe("active");
+    expect(getTurn(db, session.id, 2)?.status).toBe("active");
+
+    await postToolUseHandler({
+      eventName: "PostToolUse",
+      sessionId: "session-e2e",
+      cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      toolName: "Read",
+      toolInput: { file_path: "src/auth.ts" },
+      toolResponse: "auth.ts contents",
+      stopHookActive: false,
+      raw: {},
+    });
+
+    await postToolUseHandler({
+      eventName: "PostToolUse",
+      sessionId: "session-e2e",
+      cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      toolName: "Edit",
+      toolInput: { file_path: "src/auth.ts" },
+      toolResponse: "edit applied",
+      stopHookActive: false,
+      raw: {},
+    });
 
     const stopResult = await stopHandler({
       eventName: "Stop",
@@ -196,15 +167,56 @@ describe("claude-mnemo smoke test", () => {
       raw: {},
     });
 
-    expect(typeof stopResult.asyncWork).toBe("function");
-    expect(getTurn(db, session.id, 1)?.status).toBe("extracting_pending");
-    expect(getTurn(db, session.id, 2)?.status).toBe("extracting_pending");
+    expect(stopResult).toEqual({
+      continue: true,
+      exitCode: 0,
+    });
+    expect(getTurn(db, session.id, 1)?.status).toBe("active");
+    expect(getTurn(db, session.id, 2)?.status).toBe("active");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 
-    await stopResult.asyncWork?.();
+    const firstTurnId = getTurn(db, session.id, 1)!.id;
+    const secondTurnId = getTurn(db, session.id, 2)!.id;
 
-    expect(getTurn(db, session.id, 1)?.status).toBe("extracted");
-    expect(getTurn(db, session.id, 2)?.status).toBe("extracted");
+    rememberTool(db, {
+      id: `T${firstTurnId}`,
+      title: "Diagnose auth",
+      content: "Captured the race condition in auth refresh",
+      insight: "- refresh races under parallel load",
+      type: "discovery",
+      tags: ["gotcha"],
+    });
+    rememberTool(db, {
+      id: "O1",
+      title: "Race confirmed",
+      content: "Parallel refresh collides",
+      status: "extracted",
+    });
+    rememberTool(db, {
+      id: `T${secondTurnId}`,
+      title: "Fix auth race",
+      content: "Implemented mutex and regression coverage",
+      insight: "- mutex stabilizes refresh flow",
+      type: "bugfix",
+      tags: ["problem-solution"],
+    });
+    rememberTool(db, {
+      id: "O2",
+      title: "Mutex added",
+      content: "Refresh is serialized",
+      status: "extracted",
+    });
+    rememberTool(db, {
+      id: `S${session.id}`,
+      title: "Auth race fix",
+      content: "Diagnosed and fixed the refresh race",
+      insight: "- durable memory extracted",
+    });
+
+    expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");
+    expect(getTurnById(db, secondTurnId)?.status).toBe("extracted");
+    expect(getObservation(db, 1)?.status).toBe("extracted");
+    expect(getObservation(db, 2)?.status).toBe("extracted");
 
     const recallSessions = recallMemory(db, {});
     const recallSessionTree = recallMemory(db, {
@@ -213,10 +225,6 @@ describe("claude-mnemo smoke test", () => {
     });
     const recallTurn = recallMemory(db, {
       id: `S${session.id}/T2/O*`,
-      depth: "expanded",
-    });
-    const legacyRecall = recallMemory(db, {
-      id: `S${session.id}`,
       depth: "expanded",
     });
     const replayTurn = replayMemory(db, {
@@ -228,8 +236,7 @@ describe("claude-mnemo smoke test", () => {
     expect(recallSessions).toContain("[S1] Auth race fix");
     expect(recallSessionTree).toContain("[T1] Diagnose auth");
     expect(recallSessionTree).toContain("[T2] Fix auth race");
-    expect(recallTurn).toContain("[O2] 🔴 Mutex added");
-    expect(legacyRecall).toContain("[T1] Diagnose auth");
+    expect(recallTurn).toContain("[O2] 🔵 Mutex added");
     expect(replayTurn).toContain('prompt: "Fix it and add tests"');
     expect(replayTurn).toContain("- [S1] Auth race fix");
     expect(replayTurn).toContain("- 🔧 Edit src/auth.ts");

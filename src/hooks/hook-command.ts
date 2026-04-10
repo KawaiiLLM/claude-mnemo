@@ -6,10 +6,10 @@ import {
 } from "../shared/hook-constants";
 import { createDatabase } from "../db/database";
 import { initializeDatabase } from "../db/schema";
-import { forkMnemosyne } from "../mnemosyne/fork";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import { createContextHandler } from "./handlers/context";
+import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
 import type { HookHandler, HookResult } from "./types";
@@ -36,11 +36,11 @@ function getDefaultHandlers(): Record<string, HookHandler> {
 
   defaultHandlers = {
     SessionStart: createContextHandler({ db }),
-    PreCompact: createCompactHandler({ db, forkMnemosyne }),
+    PostToolUse: createPostToolUseHandler({ db }),
+    PreCompact: createCompactHandler({ db }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({
       db,
-      forkMnemosyne,
     }),
   };
 
@@ -61,6 +61,8 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
   switch (arg) {
     case "context":
       return "SessionStart";
+    case "tool-use":
+      return "PostToolUse";
     case "compact":
       return "PreCompact";
     case "session-init":

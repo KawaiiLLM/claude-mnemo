@@ -4,8 +4,10 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { createMemory } from "../../src/db/memories";
 import {
+  createObservation,
   getObservation,
   getObservationsForTurn,
+  updateObservation,
 } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { searchMemory } from "../../src/db/search";
@@ -50,22 +52,12 @@ describe("observation queries and search", () => {
       updatedAtEpoch: 150,
       observations: [
         {
-          type: "discovery",
           title: "Missing lock",
           content: "No mutex around refresh",
-          insight: "Refresh code lacked any guard against overlap.",
-          tags: ["gotcha"],
-          filesRead: ["src/auth.ts"],
-          filesModified: [],
         },
         {
-          type: "decision",
           title: "Add retry",
           content: "Protect retries",
-          insight: "A retry path reduces transient auth failures.",
-          tags: ["trade-off"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
         },
       ],
     });
@@ -104,13 +96,8 @@ describe("observation queries and search", () => {
       updatedAtEpoch: 240,
       observations: [
         {
-          type: "discovery",
           title: "Race reproduced",
           content: "Concurrent refreshes collide",
-          insight: "The race appears when multiple 401 responses refresh together.",
-          tags: ["problem-solution"],
-          filesRead: ["src/auth.ts"],
-          filesModified: [],
         },
       ],
     });
@@ -233,7 +220,7 @@ describe("observation queries and search", () => {
     expect(results[0]?.project).toBe("claude-mnemo");
   });
 
-  test("filters by observation type, file, and date range", () => {
+  test("only returns extracted observations in search and exposes simplified observation data", () => {
     const session = upsertSession(db, {
       contentSessionId: "session-filter",
       project: "claude-mnemo",
@@ -245,7 +232,7 @@ describe("observation queries and search", () => {
       completedAtEpoch: null,
     });
 
-    saveTurn(db, {
+    const turn = saveTurn(db, {
       sessionId: session.id,
       promptNumber: 1,
       userPrompt: "Apply auth fix",
@@ -257,31 +244,31 @@ describe("observation queries and search", () => {
       filesModified: ["src/auth.ts"],
       createdAtEpoch: 410,
       updatedAtEpoch: 420,
-      observations: [
-        {
-          type: "bugfix",
-          title: "Auth mutex",
-          content: "Adds the mutex",
-          insight: "The mutex now guards token refresh work.",
-          tags: ["problem-solution"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
-        },
-        {
-          type: "decision",
-          title: "Document follow-up",
-          content: "Write migration note",
-          insight: "A follow-up note documents remaining cleanup.",
-          tags: ["pattern"],
-          filesRead: ["docs/design.md"],
-          filesModified: ["docs/design.md"],
-        },
-      ],
+      observations: [],
+    });
+    const pendingObservation = createObservation(db, {
+      turnId: turn.id,
+      toolName: "Read",
+      toolInput: '{"file_path":"src/auth.ts"}',
+      toolResult: "file contents",
+      createdAtEpoch: 425,
+    });
+    const extractedObservation = createObservation(db, {
+      turnId: turn.id,
+      toolName: "Read",
+      toolInput: '{"file_path":"src/auth.ts"}',
+      toolResult: "file contents",
+      createdAtEpoch: 426,
+    });
+    updateObservation(db, extractedObservation.id, {
+      title: "Auth mutex",
+      content: "Adds the mutex",
+      status: "extracted",
     });
 
     const results = searchMemory(db, {
-      type: "bugfix",
-      file: "src/auth.ts",
+      scope: "observations",
+      query: "mutex",
       after: 405,
       before: 430,
     });
@@ -289,6 +276,11 @@ describe("observation queries and search", () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.layer).toBe("observation");
     expect(results[0]?.title).toBe("Auth mutex");
+    expect(results[0]?.type).toBeNull();
+    expect(results[0]?.filesRead).toEqual([]);
+    expect(results[0]?.filesModified).toEqual([]);
+    expect(results[0]?.observationId).toBe(extractedObservation.id);
+    expect(results[0]?.observationId).not.toBe(pendingObservation.id);
   });
 
   test("returns recent sessions when no query is provided", () => {

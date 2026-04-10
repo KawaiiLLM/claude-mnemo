@@ -56,7 +56,7 @@ describe("handleSessionInitHook", () => {
     db.close();
   });
 
-  test("first prompt creates session and pending turn without extraction", async () => {
+  test("first prompt creates session and active turn without extraction", async () => {
     const handler = createSessionInitHandler({
       db,
     });
@@ -75,11 +75,11 @@ describe("handleSessionInitHook", () => {
       suppressOutput: true,
     });
     expect(session?.project).toBe("/Users/zhaoqixuan/Projects/claude-mnemo");
-    expect(turn?.status).toBe("pending");
+    expect(turn?.status).toBe("active");
     expect(turn?.userPrompt).toBe("Diagnose the auth race");
   });
 
-  test("second prompt only inserts another pending turn", async () => {
+  test("second prompt only inserts another active turn", async () => {
     const transcript = writeTranscript([
       { role: "user", content: [{ type: "text", text: "Diagnose the auth race" }] },
     ]);
@@ -107,8 +107,8 @@ describe("handleSessionInitHook", () => {
     const secondTurn = getTurn(db, session.id, 2)!;
 
     expect(firstTurn.assistantResponse).toBeNull();
-    expect(firstTurn.status).toBe("pending");
-    expect(secondTurn.status).toBe("pending");
+    expect(firstTurn.status).toBe("active");
+    expect(secondTurn.status).toBe("active");
   });
 
   test("does not do any transcript work even when previous turn is already extracted", async () => {

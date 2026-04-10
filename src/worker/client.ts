@@ -97,16 +97,16 @@ export async function notifyWorkerWake(
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
-  try {
-    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-      method: "POST",
-      body: "{}",
-      signal: createAbortSignal(WAKE_TIMEOUT_MS),
-    });
-    return;
-  } catch {
+  if (!(await isWorkerHealthy(fetchImpl, HOOK_HEALTH_TIMEOUT_MS))) {
     spawnWorkerProcess(deps, env);
+    return;
   }
+
+  await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+    method: "POST",
+    body: "{}",
+    signal: createAbortSignal(WAKE_TIMEOUT_MS),
+  });
 }
 
 async function waitForWorkerReadiness(

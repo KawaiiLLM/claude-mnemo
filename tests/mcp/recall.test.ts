@@ -374,7 +374,7 @@ describe("recallMemory", () => {
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
     expect(typeQuery).toContain(`[O${authObservationId}] 🔴 Auth mutex`);
     expect(typeQuery).toContain("desc: Guards refresh");
-    expect(typeQuery).not.toContain('prompt: "Why am I getting 401 errors?"');
+    expect(typeQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
     expect(typeQuery).not.toContain(`[M${projectMemoryId}]`);
 
     expect(projectScopedQuery).toContain("Auth race fix");

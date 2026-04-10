@@ -1,93 +1,93 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
-import {
-  claimTurnsForExtraction,
-  getPendingTurns,
-  recoverStalledExtractions,
-  getTurnsForSession,
-  markTurnsStale,
-} from "../../db/turns";
-import { buildExtractionContext } from "../../mnemosyne/context";
-import { forkMnemosyne } from "../../mnemosyne/fork";
-import { buildMnemosynePrompt } from "../../mnemosyne/prompt";
-import {
-  parseReplayTranscript,
-  type ParsedReplayTurn,
-} from "../../shared/transcript-parser";
+import { enqueueQueueItem } from "../../db/pending-queue";
+import { stripPrivateTags } from "../../shared/tag-stripping";
+import { extractAssistantResponse } from "../../shared/transcript-parser";
+import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
-import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface StopHandlerDependencies {
   db: Database;
-  forkMnemosyne: typeof forkMnemosyne;
-  stderr?: Pick<NodeJS.WriteStream, "write">;
   now?: () => number;
+  workerClientDeps?: WorkerClientDeps;
+  workerEnv?: NodeJS.ProcessEnv;
 }
 
-function buildStopPrompt(db: Database, sessionDbId: number): string {
-  return buildMnemosynePrompt(buildExtractionContext(db, sessionDbId));
-}
-
-function detectUndoPromptNumbers(
+function getLatestTurn(
   db: Database,
   sessionDbId: number,
-  transcriptPath?: string,
-  transcriptTurns?: ParsedReplayTurn[],
-): number[] {
-  if (!transcriptPath) {
-    return [];
-  }
-
-  const replayTurns = transcriptTurns ?? parseReplayTranscript(transcriptPath);
-  const replayTurnsByPromptNumber = new Map(
-    replayTurns.map((turn) => [turn.promptNumber, turn]),
-  );
-  const replayTurnsByPromptId = new Map(
-    replayTurns
-      .filter((turn) => turn.promptId)
-      .map((turn) => [turn.promptId as string, turn]),
-  );
-
-  return getTurnsForSession(db, sessionDbId)
-    .filter(
-      (turn) =>
-        (turn.status === "extracted" || turn.status === "skipped") &&
-        turn.userPrompt,
+): { id: number; promptNumber: number } | null {
+  const row = db
+    .query<{ id: number; promptNumber: number }, [number]>(
+      `
+        SELECT id, prompt_number AS promptNumber
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY prompt_number DESC
+        LIMIT 1
+      `,
     )
-    .filter((turn) => {
-      const transcriptTurnByPromptId = turn.contentPromptId
-        ? replayTurnsByPromptId.get(turn.contentPromptId)
-        : undefined;
-      const transcriptTurn =
-        transcriptTurnByPromptId ??
-        replayTurnsByPromptNumber.get(turn.promptNumber);
+    .get(sessionDbId);
 
-      if (!transcriptTurn) {
-        return false;
-      }
+  return row ?? null;
+}
 
-      return transcriptTurn.isSidechain;
-    })
-    .map((turn) => turn.promptNumber);
+function getOrphanTurns(
+  db: Database,
+  sessionDbId: number,
+  currentTurnId: number,
+): Array<{ id: number; promptNumber: number; userPrompt: string | null }> {
+  return db
+    .query<
+      { id: number; promptNumber: number; userPrompt: string | null },
+      [number, number]
+    >(
+      `
+        SELECT
+          t.id,
+          t.prompt_number AS promptNumber,
+          t.user_prompt AS userPrompt
+        FROM turns t
+        WHERE t.session_id = ?
+          AND t.status = 'active'
+          AND t.id < ?
+          AND t.assistant_response IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pending_queue q
+            WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+          )
+        ORDER BY t.prompt_number ASC
+      `,
+    )
+    .all(sessionDbId, currentTurnId);
+}
+
+function hasTurnStopTask(db: Database, turnId: number): boolean {
+  return (
+    db
+      .query<{ existsRow: number }, [number]>(
+        `
+          SELECT EXISTS(
+            SELECT 1
+            FROM pending_queue
+            WHERE kind = 'turn-stop' AND target_id = ?
+          ) AS existsRow
+        `,
+      )
+      .get(turnId)?.existsRow === 1
+  );
 }
 
 export function createStopHandler(dependencies: StopHandlerDependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
-  const stderr = dependencies.stderr ?? process.stderr;
 
   return async function handleStopHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
-    if (input.stopHookActive) {
-      return {
-        continue: true,
-        exitCode: HOOK_SUCCESS_EXIT_CODE,
-      };
-    }
-
-    if (!input.sessionId) {
+    if (input.stopHookActive || !input.sessionId) {
       return {
         continue: true,
         exitCode: HOOK_SUCCESS_EXIT_CODE,
@@ -95,7 +95,6 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     }
 
     const session = getSessionByContentId(dependencies.db, input.sessionId);
-
     if (!session) {
       return {
         continue: true,
@@ -103,38 +102,71 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       };
     }
 
+    const turn = getLatestTurn(dependencies.db, session.id);
+    if (!turn) {
+      return {
+        continue: true,
+        exitCode: HOOK_SUCCESS_EXIT_CODE,
+      };
+    }
+
     const epoch = now();
+    const assistantResponse =
+      input.lastAssistantMessage !== undefined
+        ? stripPrivateTags(input.lastAssistantMessage)
+        : null;
+    const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
 
-    recoverStalledExtractions(dependencies.db, session.id, 300, epoch);
+    dependencies.db.transaction(() => {
+      for (const orphanTurn of orphanTurns) {
+        const orphanAssistantResponse =
+          input.transcriptPath && orphanTurn.userPrompt
+            ? extractAssistantResponse(
+                input.transcriptPath,
+                orphanTurn.userPrompt,
+                orphanTurn.promptNumber,
+              )
+            : "";
 
-    const transcriptTurns = input.transcriptPath
-      ? parseReplayTranscript(input.transcriptPath)
-      : undefined;
+        dependencies.db
+          .query<unknown, [string, number, number]>(
+            `
+              UPDATE turns
+              SET assistant_response = ?,
+                  updated_at_epoch = ?
+              WHERE id = ?
+            `,
+          )
+          .run(orphanAssistantResponse, epoch, orphanTurn.id);
 
-    backfillFromTranscript(
-      dependencies.db,
-      getPendingTurns(dependencies.db, session.id).filter(
-        (turn) => turn.status === "pending",
-      ),
-      input.transcriptPath,
-      input.lastAssistantMessage,
-      transcriptTurns,
-    );
+        enqueueQueueItem(dependencies.db, {
+          kind: "turn-stop",
+          targetId: orphanTurn.id,
+          sessionDbId: session.id,
+          enqueuedAtEpoch: epoch,
+        });
+      }
 
-    const stalePromptNumbers = detectUndoPromptNumbers(
-      dependencies.db,
-      session.id,
-      input.transcriptPath,
-      transcriptTurns,
-    );
+      dependencies.db
+        .query<unknown, [string | null, number, number]>(
+          `
+            UPDATE turns
+            SET assistant_response = COALESCE(?, assistant_response),
+                updated_at_epoch = ?
+            WHERE id = ?
+          `,
+        )
+        .run(assistantResponse, epoch, turn.id);
 
-    markTurnsStale(dependencies.db, session.id, stalePromptNumbers);
-
-    const claimedCount = claimTurnsForExtraction(
-      dependencies.db,
-      session.id,
-      epoch,
-    );
+      if (!hasTurnStopTask(dependencies.db, turn.id)) {
+        enqueueQueueItem(dependencies.db, {
+          kind: "turn-stop",
+          targetId: turn.id,
+          sessionDbId: session.id,
+          enqueuedAtEpoch: epoch,
+        });
+      }
+    })();
 
     upsertSession(dependencies.db, {
       contentSessionId: session.contentSessionId,
@@ -142,28 +174,16 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       title: session.title,
       content: session.content,
       insight: session.insight,
+      nextSteps: session.nextSteps,
       createdAtEpoch: session.createdAtEpoch,
       updatedAtEpoch: epoch,
       completedAtEpoch: epoch,
     });
 
-    stderr.write(`Mnemosyne: ${claimedCount} turns queued for extraction\n`);
-
-    if (claimedCount > 0) {
-      const prompt = buildStopPrompt(dependencies.db, session.id);
-
-      return {
-        continue: true,
-        exitCode: HOOK_SUCCESS_EXIT_CODE,
-        asyncWork: async () => {
-          await dependencies.forkMnemosyne({
-            cwd: input.cwd,
-            prompt,
-            database: dependencies.db,
-          });
-        },
-      };
-    }
+    await notifyWorkerWake(
+      dependencies.workerClientDeps,
+      dependencies.workerEnv,
+    );
 
     return {
       continue: true,

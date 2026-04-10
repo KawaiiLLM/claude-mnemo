@@ -36,6 +36,7 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("turns");
     expect(tableNames).toContain("observations");
     expect(tableNames).toContain("memories");
+    expect(tableNames).toContain("pending_queue");
     expect(tableNames).toContain("memory_fts");
   });
 
@@ -139,31 +140,76 @@ describe("initializeSchema", () => {
     expect(turnColumns).toContain("files_modified");
   });
 
-  test("creates the memory indexes and content-based observation columns", () => {
+  test("allows worker-style observations with only tool payload and pending status", () => {
     initializeDatabase(db);
 
-    const observationColumns = db
-      .query<{ name: string }, []>("PRAGMA table_info(observations)")
+    const sessionId = db
+      .query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('schema-session', 'claude-mnemo', 1) RETURNING id",
+      )
+      .get()!.id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (?, 1, 'active', 2) RETURNING id",
+      )
+      .get(sessionId)!.id;
+
+    db.query(
+      `
+        INSERT INTO observations (
+          turn_id,
+          tool_name,
+          tool_input,
+          tool_result,
+          created_at_epoch
+        ) VALUES (?, ?, ?, ?, ?)
+      `,
+    ).run(turnId, "Read", '{"file_path":"src/auth.ts"}', "file contents", 3);
+
+    const inserted = db
+      .query<
+        { toolName: string | null; status: string; title: string | null },
+        []
+      >(
+        `
+          SELECT
+            tool_name AS toolName,
+            status,
+            title
+          FROM observations
+        `,
+      )
+      .get()!;
+
+    expect(inserted.toolName).toBe("Read");
+    expect(inserted.status).toBe("pending");
+    expect(inserted.title).toBeNull();
+  });
+
+  test("creates the worker queue table with FIFO and claim columns", () => {
+    initializeSchema(db);
+
+    const queueColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(pending_queue)")
       .all()
       .map((row) => row.name);
-    const memoryIndexes = db
+    const queueIndexes = db
       .query<{ name: string }, []>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memories'",
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'pending_queue'",
       )
       .all()
       .map((row) => row.name);
-    const ftsColumns = db
-      .query<{ name: string }, []>("PRAGMA table_info(memory_fts)")
-      .all()
-      .map((row) => row.name);
 
-    expect(observationColumns).toContain("content");
-    expect(observationColumns).toContain("insight");
-    expect(observationColumns).toContain("tags");
-    expect(memoryIndexes).toContain("idx_memories_scope");
-    expect(memoryIndexes).toContain("idx_memories_type");
-    expect(memoryIndexes).toContain("idx_memories_status");
-    expect(ftsColumns).toContain("content");
+    expect(queueColumns).toEqual([
+      "seq",
+      "kind",
+      "target_id",
+      "session_db_id",
+      "claimed_at_epoch",
+      "enqueued_at_epoch",
+    ]);
+    expect(queueIndexes).toContain("idx_pending_queue_unclaimed");
+    expect(queueIndexes).toContain("idx_pending_queue_session");
   });
 
   test("skips rebuilding the search index when the database is empty", () => {

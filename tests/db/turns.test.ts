@@ -5,14 +5,11 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
-  claimTurnsForExtraction,
-  getPendingTurns,
   getTurn,
   getTurnsForSession,
-  markTurnsStale,
-  recoverStalledExtractions,
   saveTurn,
 } from "../../src/db/turns";
+import { getObservationsForTurn } from "../../src/db/observations";
 
 describe("turn queries", () => {
   let db: Database;
@@ -53,22 +50,12 @@ describe("turn queries", () => {
       updatedAtEpoch: 120,
       observations: [
         {
-          type: "bugfix",
           title: "Added mutex",
           content: "Serialized refresh calls",
-          insight: "Refresh requests now wait on a shared promise.",
-          tags: ["problem-solution", "trade-off"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
         },
         {
-          type: "discovery",
           title: "Found overlap",
           content: "Parallel requests collided",
-          insight: "Concurrent 401 handling triggered duplicate refresh work.",
-          tags: ["gotcha"],
-          filesRead: ["tests/auth.test.ts"],
-          filesModified: [],
         },
       ],
     });
@@ -92,6 +79,37 @@ describe("turn queries", () => {
     expect(ftsCount).toBe(3);
   });
 
+  test("allows simplified observation payloads without legacy metadata", () => {
+    const turn = saveTurn(db, {
+      sessionId,
+      promptNumber: 4,
+      userPrompt: "Inspect auth flow",
+      assistantResponse: "Read the file.",
+      title: "Inspect auth flow",
+      content: "Captured a lightweight observation",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 400,
+      updatedAtEpoch: null,
+      observations: [
+        {
+          title: "Read auth module",
+          content: "Inspected refresh handling.",
+        },
+      ],
+    });
+
+    const observation = getObservationsForTurn(db, turn.id)[0]!;
+
+    expect(observation.title).toBe("Read auth module");
+    expect(observation.content).toBe("Inspected refresh handling.");
+    expect(observation.insight).toBeNull();
+    expect(observation.tags).toEqual([]);
+    expect(observation.filesRead).toEqual([]);
+    expect(observation.filesModified).toEqual([]);
+  });
+
   test("rolls back the turn when observation insert fails", () => {
     expect(() => {
       saveTurn(db, {
@@ -109,7 +127,7 @@ describe("turn queries", () => {
         observations: [
           {
             type: "bugfix",
-            title: null as unknown as string,
+            title: Symbol("invalid") as unknown as string,
             content: "Invalid observation",
             filesRead: [],
             filesModified: [],
@@ -146,84 +164,6 @@ describe("turn queries", () => {
     expect(turn.status).toBe("skipped");
     expect(getTurnsForSession(db, sessionId)).toHaveLength(1);
     expect(ftsCount).toBe(0);
-  });
-
-  test("re-extracts stale turns by replacing observations and FTS rows", () => {
-    const firstSave = saveTurn(db, {
-      sessionId,
-      promptNumber: 4,
-      userPrompt: "Investigate auth race",
-      assistantResponse: "I found the cause.",
-      title: "Investigate auth",
-      content: "Initial extraction",
-      insight: "- first pass",
-      filesRead: ["src/auth.ts"],
-      filesModified: [],
-      createdAtEpoch: 400,
-      updatedAtEpoch: 410,
-      observations: [
-        {
-          type: "discovery",
-          title: "Initial finding",
-          content: "First observation",
-          insight: "Original extraction result.",
-          tags: ["what-changed"],
-          filesRead: ["src/auth.ts"],
-          filesModified: [],
-        },
-      ],
-    });
-
-    markTurnsStale(db, sessionId, [4]);
-
-    const secondSave = saveTurn(db, {
-      sessionId,
-      promptNumber: 4,
-      userPrompt: "Investigate auth race",
-      assistantResponse: "I found the cause and fixed it.",
-      title: "Fix auth race",
-      content: "Updated extraction",
-      insight: "- second pass",
-      filesRead: ["src/auth.ts", "tests/auth.test.ts"],
-      filesModified: ["src/auth.ts"],
-      createdAtEpoch: 400,
-      updatedAtEpoch: 430,
-      observations: [
-        {
-          type: "bugfix",
-          title: "Final fix",
-          content: "Updated observation",
-          insight: "Replaced the original observation with the final fix.",
-          tags: ["problem-solution"],
-          filesRead: ["src/auth.ts"],
-          filesModified: ["src/auth.ts"],
-        },
-        {
-          type: "decision",
-          title: "Added test",
-          content: "Protected regression",
-          insight: "Regression coverage now verifies concurrent refresh calls.",
-          tags: ["pattern"],
-          filesRead: ["tests/auth.test.ts"],
-          filesModified: ["tests/auth.test.ts"],
-        },
-      ],
-    });
-
-    const observationTitles = db
-      .query<{ title: string }, []>("SELECT title FROM observations ORDER BY id")
-      .all()
-      .map((row) => row.title);
-    const ftsCount = db
-      .query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM memory_fts WHERE layer IN ('turn', 'observation')",
-      )
-      .get().count;
-
-    expect(secondSave.id).toBe(firstSave.id);
-    expect(secondSave.status).toBe("extracted");
-    expect(observationTitles).toEqual(["Final fix", "Added test"]);
-    expect(ftsCount).toBe(3);
   });
 
   test("supports explicit undone status by clearing observations and FTS while retaining the turn row", () => {
@@ -285,184 +225,4 @@ describe("turn queries", () => {
     expect(ftsCount).toBe(0);
   });
 
-  test("marks turns stale and returns pending work in prompt order", () => {
-    db.query(
-      "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (?, ?, ?, ?)",
-    ).run(sessionId, 5, "pending", 500);
-
-    db.query(
-      "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch, updated_at_epoch) VALUES (?, ?, ?, ?, ?)",
-    ).run(sessionId, 4, "extracting_pending", 450, 470);
-
-    saveTurn(db, {
-      sessionId,
-      promptNumber: 6,
-      userPrompt: "Another turn",
-      assistantResponse: "Done",
-      title: "Another turn",
-      content: "Extracted turn",
-      insight: null,
-      filesRead: [],
-      filesModified: [],
-      createdAtEpoch: 600,
-      updatedAtEpoch: null,
-      observations: [],
-    });
-
-    markTurnsStale(db, sessionId, [6]);
-
-    const pendingTurns = getPendingTurns(db, sessionId);
-
-    expect(pendingTurns.map((turn) => [turn.promptNumber, turn.status])).toEqual([
-      [5, "pending"],
-      [6, "stale"],
-    ]);
-  });
-
-  test("claims pending and stale turns with dual extracting statuses", () => {
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 1, "pending", "First pending turn", 100, null);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
-
-    saveTurn(db, {
-      sessionId,
-      promptNumber: 3,
-      userPrompt: "Already extracted",
-      assistantResponse: "Done",
-      title: "Extracted",
-      content: "Existing extraction",
-      insight: null,
-      filesRead: [],
-      filesModified: [],
-      createdAtEpoch: 150,
-      updatedAtEpoch: 160,
-      observations: [],
-    });
-
-    const claimedCount = claimTurnsForExtraction(db, sessionId, 200);
-
-    expect(claimedCount).toBe(2);
-    expect(getTurn(db, sessionId, 1)).toMatchObject({
-      status: "extracting_pending",
-      updatedAtEpoch: 200,
-    });
-    expect(getTurn(db, sessionId, 2)).toMatchObject({
-      status: "extracting_stale",
-      updatedAtEpoch: 200,
-    });
-    expect(getTurn(db, sessionId, 3)).toMatchObject({
-      status: "extracted",
-      updatedAtEpoch: 160,
-    });
-  });
-
-  test("does not double-claim rows that are already extracting", () => {
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 1, "pending", "First pending turn", 100, null);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
-
-    expect(claimTurnsForExtraction(db, sessionId, 200)).toBe(2);
-    expect(claimTurnsForExtraction(db, sessionId, 250)).toBe(0);
-    expect(getTurn(db, sessionId, 1)).toMatchObject({
-      status: "extracting_pending",
-      updatedAtEpoch: 200,
-    });
-    expect(getTurn(db, sessionId, 2)).toMatchObject({
-      status: "extracting_stale",
-      updatedAtEpoch: 200,
-    });
-  });
-
-  test("does not claim pending or stale turns when another extraction is already active in the session", () => {
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 1, "pending", "Fresh pending turn", 100, null);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 2, "stale", "Needs re-evaluation", 110, 120);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 3, "extracting_pending", "Already extracting elsewhere", 130, 140);
-
-    expect(claimTurnsForExtraction(db, sessionId, 200)).toBe(0);
-    expect(getTurn(db, sessionId, 1)).toMatchObject({
-      status: "pending",
-      updatedAtEpoch: null,
-    });
-    expect(getTurn(db, sessionId, 2)).toMatchObject({
-      status: "stale",
-      updatedAtEpoch: 120,
-    });
-    expect(getTurn(db, sessionId, 3)).toMatchObject({
-      status: "extracting_pending",
-      updatedAtEpoch: 140,
-    });
-  });
-
-  test("recovers only stalled extraction locks and restores the original status", () => {
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 1, "extracting_pending", "Old pending claim", 100, 100);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 2, "extracting_stale", "Old stale claim", 110, 120);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 3, "extracting_pending", "Recent pending claim", 130, 350);
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, created_at_epoch, updated_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(sessionId, 4, "extracting_stale", "Recent stale claim", 140, 360);
-
-    recoverStalledExtractions(db, sessionId, 60, 400);
-
-    expect(getTurn(db, sessionId, 1)).toMatchObject({
-      status: "pending",
-      updatedAtEpoch: 400,
-    });
-    expect(getTurn(db, sessionId, 2)).toMatchObject({
-      status: "stale",
-      updatedAtEpoch: 400,
-    });
-    expect(getTurn(db, sessionId, 3)).toMatchObject({
-      status: "extracting_pending",
-      updatedAtEpoch: 350,
-    });
-    expect(getTurn(db, sessionId, 4)).toMatchObject({
-      status: "extracting_stale",
-      updatedAtEpoch: 360,
-    });
-
-    expect(getPendingTurns(db, sessionId).map((turn) => [turn.promptNumber, turn.status])).toEqual([
-      [1, "pending"],
-      [2, "stale"],
-    ]);
-  });
 });

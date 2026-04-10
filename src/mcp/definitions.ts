@@ -20,11 +20,9 @@ export const replayInputShape = {
 };
 
 export const rememberInputShape = {
-  parent: z.string().optional(),
   id: z.string().optional(),
   type: z.string().optional(),
   scope: z.string().optional(),
-  prompt_number: z.union([z.number(), z.string().regex(/^\d+$/).transform(Number)]).pipe(z.number().int().positive()).optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: z.string().optional(),
@@ -32,17 +30,23 @@ export const rememberInputShape = {
   application: z.string().optional(),
   tags: z.array(z.string()).optional(),
   status: z
-    .enum(["skipped", "undone", "active", "superseded", "archived"])
+    .enum([
+      "pending",
+      "extracted",
+      "skipped",
+      "undone",
+      "active",
+      "superseded",
+      "archived",
+    ])
     .optional(),
   next_steps: z.string().optional(),
-  files_read: z.array(z.string()).optional(),
-  files_modified: z.array(z.string()).optional(),
-  source_turn_id: z.number().int().positive().optional(),
+  source: z.string().optional(),
 };
 
 export const recallInputSchema = z.object(recallInputShape).strict();
 export const replayInputSchema = z.object(replayInputShape).strict();
-export const rememberInputSchema = z.object(rememberInputShape);
+export const rememberInputSchema = z.object(rememberInputShape).strict();
 
 export const MNEMO_ALLOWED_TOOLS = [
   "mcp__mnemo__remember",

@@ -61,6 +61,36 @@ function createRunner(handler: HookHandler) {
 }
 
 describe("runHookCommand", () => {
+  test("maps the tool-use command argument to PostToolUse", async () => {
+    const handler = mock(async () => ({
+      continue: true,
+      exitCode: 0,
+    }));
+    const normalized = mock(() => ({
+      ...createNormalizedInput(),
+      eventName: "PostToolUse" as const,
+    }));
+    const run = runHookCommand as unknown as (
+      dependencies?: TestHookCommandDependencies,
+    ) => Promise<number>;
+
+    const exitCode = await run({
+      env: {},
+      argv: ["bun", "hook-command.ts", "tool-use"],
+      stdout: { write: mock(() => true) },
+      stderr: { write: mock(() => true) },
+      readJsonFromStdin: () => ({}),
+      normalizeHookInputImpl: normalized,
+      handlers: {
+        PostToolUse: handler,
+      } as unknown as Record<string, HookHandler>,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(normalized).toHaveBeenCalled();
+    expect(handler).toHaveBeenCalled();
+  });
+
   test("writes only the async sentinel to stdout and awaits async work", async () => {
     const events: string[] = [];
     const asyncWork = mock(async () => {

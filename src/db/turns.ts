@@ -4,13 +4,17 @@ import { createObservation } from "./observations";
 import { indexTurnToFTS } from "./search";
 
 export interface ObservationInput {
-  type: string;
-  title: string;
+  toolName?: string | null;
+  toolInput?: string | null;
+  toolResult?: string | null;
+  status?: "pending" | "extracted" | "skipped";
+  type?: string | null;
+  title?: string | null;
   content?: string | null;
   insight?: string | null;
   tags?: string[];
-  filesRead: string[];
-  filesModified: string[];
+  filesRead?: string[];
+  filesModified?: string[];
 }
 
 export interface SaveTurnInput {
@@ -22,6 +26,8 @@ export interface SaveTurnInput {
   title: string | null;
   content?: string | null;
   insight: string | null;
+  type?: string | null;
+  tags?: string[];
   filesRead: string[];
   filesModified: string[];
   createdAtEpoch: number;
@@ -40,6 +46,8 @@ export interface TurnRecord {
   title: string | null;
   content: string | null;
   insight: string | null;
+  type: string | null;
+  tags: string[];
   filesRead: string[];
   filesModified: string[];
   toolCallCount: number | null;
@@ -58,6 +66,8 @@ interface TurnRow {
   title: string | null;
   content: string | null;
   insight: string | null;
+  type: string | null;
+  tags: string | null;
   filesRead: string | null;
   filesModified: string | null;
   toolCallCount: number | null;
@@ -77,6 +87,8 @@ const TURN_SELECT = `
     title,
     content,
     insight,
+    type,
+    tags,
     files_read AS filesRead,
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
@@ -104,6 +116,7 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
 
   return {
     ...row,
+    tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
   };
@@ -163,10 +176,12 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
          SET status = ?,
              user_prompt = COALESCE(?, user_prompt),
              assistant_response = COALESCE(?, assistant_response),
-             title = ?,
-             content = ?,
-             insight = ?,
-             files_read = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            tags = ?,
+            files_read = ?,
              files_modified = ?,
              created_at_epoch = ?,
              updated_at_epoch = ?
@@ -178,6 +193,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
         input.title,
         input.content ?? null,
         input.insight,
+        input.type ?? null,
+        stringifyArray(input.tags ?? []),
         filesRead,
         filesModified,
         input.createdAtEpoch,
@@ -190,20 +207,22 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       const insertedTurn = db
         .query<
           { id: number },
-          [
-            number,
-            number,
-            string,
-            string | null,
-            string | null,
-            string | null,
-            string | null,
-            string | null,
-            string,
-            string,
-            number,
-            number | null,
-          ]
+        [
+          number,
+          number,
+          string,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string,
+          string,
+          string,
+          number,
+          number | null,
+        ]
         >(`
           INSERT INTO turns (
             session_id,
@@ -214,11 +233,13 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
             title,
             content,
             insight,
-            files_read,
-            files_modified,
-            created_at_epoch,
-            updated_at_epoch
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            type,
+            tags,
+          files_read,
+          files_modified,
+          created_at_epoch,
+          updated_at_epoch
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           RETURNING id
         `)
         .get(
@@ -230,6 +251,8 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
           input.title,
           input.content ?? null,
           input.insight,
+          input.type ?? null,
+          stringifyArray(input.tags ?? []),
           filesRead,
           filesModified,
           input.createdAtEpoch,
@@ -255,13 +278,17 @@ export function saveTurn(db: Database, input: SaveTurnInput): TurnRecord {
       for (const observation of input.observations) {
         createObservation(db, {
           turnId,
+          toolName: observation.toolName ?? null,
+          toolInput: observation.toolInput ?? null,
+          toolResult: observation.toolResult ?? null,
+          status: observation.status ?? "extracted",
           type: observation.type,
-          title: observation.title,
+          title: observation.title ?? null,
           content: observation.content ?? null,
           insight: observation.insight ?? null,
           tags: observation.tags ?? [],
-          filesRead: observation.filesRead,
-          filesModified: observation.filesModified,
+          filesRead: observation.filesRead ?? [],
+          filesModified: observation.filesModified ?? [],
           createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch,
         });
       }
@@ -290,11 +317,119 @@ export function getTurn(
   );
 }
 
-export function getTurnById(db: Database, turnId: number): TurnRecord | null {
+export function getTurnById(
+  db: Database,
+  turnId: number,
+): TurnRecord | null {
   return mapTurnRow(
-    db.query<TurnRow, [number]>(`${TURN_SELECT} WHERE id = ?`).get(turnId) ??
-      null,
+    db.query<TurnRow, [number]>(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null,
   );
+}
+
+export interface UpdateTurnByIdInput {
+  status?: "active" | "extracted" | "skipped" | "undone";
+  title?: string | null;
+  content?: string | null;
+  insight?: string | null;
+  type?: string | null;
+  tags?: string[];
+  filesRead?: string[];
+  filesModified?: string[];
+  toolCallCount?: number | null;
+  updatedAtEpoch?: number | null;
+}
+
+export function updateTurnById(
+  db: Database,
+  turnId: number,
+  input: UpdateTurnByIdInput,
+): TurnRecord | null {
+  const existing = getTurnById(db, turnId);
+
+  if (!existing) {
+    return null;
+  }
+
+  const updated = mapTurnRow(
+    db
+      .query<
+        TurnRow,
+        [
+          string,
+          string | null,
+          string | null,
+          string | null,
+          string | null,
+          string,
+          string,
+          string,
+          number | null,
+          number | null,
+          number,
+        ]
+      >(
+        `
+          UPDATE turns
+          SET
+            status = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            tags = ?,
+            files_read = ?,
+            files_modified = ?,
+            tool_call_count = ?,
+            updated_at_epoch = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            session_id AS sessionId,
+            prompt_number AS promptNumber,
+            content_prompt_id AS contentPromptId,
+            status,
+            user_prompt AS userPrompt,
+            assistant_response AS assistantResponse,
+            title,
+            content,
+            insight,
+            type,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            tool_call_count AS toolCallCount,
+            created_at_epoch AS createdAtEpoch,
+            updated_at_epoch AS updatedAtEpoch
+        `,
+      )
+      .get(
+        input.status ?? existing.status,
+        input.title ?? existing.title,
+        input.content ?? existing.content,
+        input.insight ?? existing.insight,
+        input.type ?? existing.type,
+        stringifyArray(input.tags ?? existing.tags),
+        stringifyArray(input.filesRead ?? existing.filesRead),
+        stringifyArray(input.filesModified ?? existing.filesModified),
+        input.toolCallCount ?? existing.toolCallCount,
+        input.updatedAtEpoch ?? existing.updatedAtEpoch,
+        turnId,
+      ) ?? null,
+  );
+
+  if (!updated) {
+    return null;
+  }
+
+  if (updated.status === "extracted") {
+    indexTurnToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
+    ).run(turnId);
+  }
+
+  return updated;
 }
 
 export function getTurnsForSession(
@@ -308,89 +443,6 @@ export function getTurnsForSession(
     .all(sessionId)
     .map((row) => mapTurnRow(row))
     .filter((turn): turn is TurnRecord => turn !== null);
-}
-
-export function getPendingTurns(
-  db: Database,
-  sessionId: number,
-): TurnRecord[] {
-  return db
-    .query<TurnRow, [number]>(
-      `${TURN_SELECT} WHERE session_id = ? AND status IN ('pending', 'stale') ORDER BY prompt_number ASC`,
-    )
-    .all(sessionId)
-    .map((row) => mapTurnRow(row))
-    .filter((turn): turn is TurnRecord => turn !== null);
-}
-
-export function claimTurnsForExtraction(
-  db: Database,
-  sessionId: number,
-  now?: number,
-): number {
-  const epoch = now ?? Math.floor(Date.now() / 1000);
-
-  return db
-    .query(
-      `UPDATE turns
-       SET status = CASE status
-         WHEN 'pending' THEN 'extracting_pending'
-         WHEN 'stale' THEN 'extracting_stale'
-       END,
-       updated_at_epoch = ?
-       WHERE session_id = ?
-         AND status IN ('pending', 'stale')
-         AND NOT EXISTS (
-           SELECT 1 FROM turns active
-           WHERE active.session_id = ?
-             AND active.status IN ('extracting_pending', 'extracting_stale')
-         )`,
-    )
-    .run(epoch, sessionId, sessionId).changes;
-}
-
-export function recoverStalledExtractions(
-  db: Database,
-  sessionId: number,
-  maxAgeSeconds = 300,
-  now?: number,
-): void {
-  const epoch = now ?? Math.floor(Date.now() / 1000);
-  const cutoff = epoch - maxAgeSeconds;
-
-  db.query(
-    `UPDATE turns
-     SET status = CASE status
-       WHEN 'extracting_pending' THEN 'pending'
-       WHEN 'extracting_stale' THEN 'stale'
-     END,
-     updated_at_epoch = ?
-     WHERE session_id = ?
-       AND status IN ('extracting_pending', 'extracting_stale')
-       AND updated_at_epoch < ?`,
-  ).run(epoch, sessionId, cutoff);
-}
-
-export function markTurnsStale(
-  db: Database,
-  sessionId: number,
-  promptNumbers: number[],
-): void {
-  if (promptNumbers.length === 0) {
-    return;
-  }
-
-  const placeholders = promptNumbers.map(() => "?").join(", ");
-
-  const now = Math.floor(Date.now() / 1000);
-
-  db.query(
-    `UPDATE turns
-     SET status = 'stale', updated_at_epoch = ?
-     WHERE session_id = ?
-       AND prompt_number IN (${placeholders})
-       AND status IN ('extracted', 'skipped')`,
-  ).run(now, sessionId, ...promptNumbers);
 }
 
 export function updateTurnBackfill(

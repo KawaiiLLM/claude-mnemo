@@ -6920,7 +6920,7 @@ function indexObservationToFTS(db, observation) {
     observation.id,
     observation.title,
     observation.content,
-    [observation.insight ?? "", ...observation.tags].filter(Boolean).join("\n")
+    ""
   );
 }
 function indexMemoryToFTS(db, memory) {
@@ -6968,18 +6968,16 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          insight,
-          tags
+          status
         FROM observations
+        WHERE status = 'extracted'
       `
   ).all();
   for (const observation of observationRows) {
     indexObservationToFTS(db, {
       id: observation.id,
       title: observation.title,
-      content: observation.content,
-      insight: observation.insight,
-      tags: observation.tags ? JSON.parse(observation.tags) : []
+      content: observation.content
     });
   }
   const memoryRows = db.query(
@@ -7074,14 +7072,14 @@ function queryRecentObservations(db, options) {
         s.project AS project,
         o.title AS title,
         o.content AS content,
-        o.type AS type,
-        o.files_read AS filesRead,
-        o.files_modified AS filesModified,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
         o.created_at_epoch AS timestampEpoch
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
-      ${combineClauses([projectClause.clause])}
+      ${combineClauses(["o.status = 'extracted'", projectClause.clause])}
       ORDER BY o.created_at_epoch DESC
       LIMIT ?
     `,
@@ -7132,33 +7130,31 @@ function querySessionsByScope(db, options, query) {
     whereClauses.push(
       `EXISTS (
         SELECT 1
-        FROM observations o
-        JOIN turns t ON t.id = o.turn_id
+        FROM turns t
         WHERE t.session_id = s.id
-          AND o.type = ?
+          AND (
+            t.type = ?
+            OR EXISTS (
+              SELECT 1
+              FROM observations o
+              WHERE o.turn_id = t.id
+                AND o.type = ?
+            )
+          )
       )`
     );
-    params.push(options.type);
+    params.push(options.type, options.type);
   }
   if (options.file) {
     whereClauses.push(
-      `(
-        EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-        )
-        OR EXISTS (
-          SELECT 1
-          FROM observations o
-          JOIN turns t ON t.id = o.turn_id
-          WHERE t.session_id = s.id
-            AND (o.files_read LIKE ? OR o.files_modified LIKE ?)
-        )
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
       )`
     );
-    params.push(`%${options.file}%`, `%${options.file}%`, `%${options.file}%`, `%${options.file}%`);
+    params.push(`%${options.file}%`, `%${options.file}%`);
   }
   return queryRows(
     db,
@@ -7198,14 +7194,14 @@ function queryTurnsByScope(db, options, query) {
   }
   if (options.type) {
     whereClauses.push(
-      `EXISTS (
+      `(t.type = ? OR EXISTS (
         SELECT 1
         FROM observations o
         WHERE o.turn_id = t.id
           AND o.type = ?
-      )`
+      ))`
     );
-    params.push(options.type);
+    params.push(options.type, options.type);
   }
   return queryRows(
     db,
@@ -7235,11 +7231,13 @@ function queryTurnsByScope(db, options, query) {
   );
 }
 function queryObservationsByScope(db, options, query) {
+  if (options.file) {
+    return [];
+  }
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("o.created_at_epoch", options);
-  const fileClause = buildFileClause("o.files_read", "o.files_modified", options.file);
-  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
-  const params = [...projectClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["o.status = 'extracted'", projectClause.clause, dateClause.clause];
+  const params = [...projectClause.params, ...dateClause.params];
   if (query) {
     whereClauses.push("f.memory_fts MATCH ?");
     params.push(query);
@@ -7261,9 +7259,9 @@ function queryObservationsByScope(db, options, query) {
         s.project AS project,
         o.title AS title,
         o.content AS content,
-        o.type AS type,
-        o.files_read AS filesRead,
-        o.files_modified AS filesModified,
+        NULL AS type,
+        NULL AS filesRead,
+        NULL AS filesModified,
         o.created_at_epoch AS timestampEpoch
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
@@ -7338,12 +7336,10 @@ function searchMemory(db, options) {
   }
   if (!options.scope) {
     const results = [];
-    if (!options.type && !options.file) {
+    if (!options.file) {
       results.push(...querySessionsByScope(db, options, query));
     }
-    if (!options.type) {
-      results.push(...queryTurnsByScope(db, options, query));
-    }
+    results.push(...queryTurnsByScope(db, options, query));
     results.push(...queryObservationsByScope(db, options, query));
     if (!options.file) {
       results.push(...queryMemoriesByScope(db, options, query));
@@ -7387,7 +7383,7 @@ function resolveTranscriptPath(projectPath, sessionId) {
     `${sessionId}.jsonl`
   );
 }
-var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, SESSIONS_DIR;
+var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH, SESSIONS_DIR;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
     "use strict";
@@ -7395,6 +7391,8 @@ var init_paths = __esm({
     import_node_path = require("node:path");
     DATA_DIR = (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude-mnemo");
     DEFAULT_DB_PATH = (0, import_node_path.join)(DATA_DIR, "claude-mnemo.db");
+    WORKER_PID_PATH = (0, import_node_path.join)(DATA_DIR, "worker.pid");
+    WORKER_STARTING_PATH = (0, import_node_path.join)(DATA_DIR, "worker.starting");
     SESSIONS_DIR = (0, import_node_path.join)(DATA_DIR, "sessions");
   }
 });
@@ -7541,6 +7539,15 @@ function migrateSchema(db) {
   if (!hasColumn(db, "turns", "content")) {
     db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
   }
+  if (!hasColumn(db, "turns", "type")) {
+    db.exec("ALTER TABLE turns ADD COLUMN type TEXT");
+  }
+  if (!hasColumn(db, "turns", "tags")) {
+    db.exec("ALTER TABLE turns ADD COLUMN tags TEXT");
+  }
+  if (hasColumn(db, "turns", "status") && hasRow(db, "SELECT 1 FROM turns WHERE status = 'pending' LIMIT 1")) {
+    db.exec("UPDATE turns SET status = 'active' WHERE status = 'pending'");
+  }
   if (!hasColumn(db, "observations", "content")) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
@@ -7550,6 +7557,36 @@ function migrateSchema(db) {
   if (!hasColumn(db, "observations", "tags")) {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
+  if (!hasColumn(db, "observations", "tool_name")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_name TEXT");
+  }
+  if (!hasColumn(db, "observations", "tool_input")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_input TEXT");
+  }
+  if (!hasColumn(db, "observations", "tool_result")) {
+    db.exec("ALTER TABLE observations ADD COLUMN tool_result TEXT");
+  }
+  if (!hasColumn(db, "observations", "status")) {
+    db.exec("ALTER TABLE observations ADD COLUMN status TEXT DEFAULT 'pending'");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_queue (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      target_id INTEGER NOT NULL,
+      session_db_id INTEGER NOT NULL,
+      claimed_at_epoch INTEGER,
+      enqueued_at_epoch INTEGER NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_queue_unclaimed
+      ON pending_queue(seq) WHERE claimed_at_epoch IS NULL
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_queue_session
+      ON pending_queue(session_db_id, seq)
+  `);
   if (hasRow(
     db,
     "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
@@ -7645,13 +7682,15 @@ var init_schema = __esm({
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
     title TEXT,
     content TEXT,
     description TEXT,
     insight TEXT,
+    type TEXT,
+    tags TEXT,
     files_read TEXT,
     files_modified TEXT,
     tool_call_count INTEGER,
@@ -7663,8 +7702,12 @@ var init_schema = __esm({
   CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-    type TEXT NOT NULL,
-    title TEXT NOT NULL,
+    tool_name TEXT,
+    tool_input TEXT,
+    tool_result TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    type TEXT,
+    title TEXT,
     content TEXT,
     description TEXT,
     insight TEXT,
@@ -7705,6 +7748,21 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_observations_type
     ON observations(type);
+
+  CREATE TABLE IF NOT EXISTS pending_queue (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    session_db_id INTEGER NOT NULL,
+    claimed_at_epoch INTEGER,
+    enqueued_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_unclaimed
+    ON pending_queue(seq) WHERE claimed_at_epoch IS NULL;
+
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_session
+    ON pending_queue(session_db_id, seq);
 
   CREATE INDEX IF NOT EXISTS idx_memories_scope
     ON memories(scope);
@@ -31067,26 +31125,30 @@ var replayInputShape = {
   depth: external_exports3.enum(["collapsed", "expanded", "full"]).optional()
 };
 var rememberInputShape = {
-  parent: external_exports3.string().optional(),
   id: external_exports3.string().optional(),
   type: external_exports3.string().optional(),
   scope: external_exports3.string().optional(),
-  prompt_number: external_exports3.union([external_exports3.number(), external_exports3.string().regex(/^\d+$/).transform(Number)]).pipe(external_exports3.number().int().positive()).optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
   insight: external_exports3.string().optional(),
   reasoning: external_exports3.string().optional(),
   application: external_exports3.string().optional(),
   tags: external_exports3.array(external_exports3.string()).optional(),
-  status: external_exports3.enum(["skipped", "undone", "active", "superseded", "archived"]).optional(),
+  status: external_exports3.enum([
+    "pending",
+    "extracted",
+    "skipped",
+    "undone",
+    "active",
+    "superseded",
+    "archived"
+  ]).optional(),
   next_steps: external_exports3.string().optional(),
-  files_read: external_exports3.array(external_exports3.string()).optional(),
-  files_modified: external_exports3.array(external_exports3.string()).optional(),
-  source_turn_id: external_exports3.number().int().positive().optional()
+  source: external_exports3.string().optional()
 };
 var recallInputSchema = external_exports3.object(recallInputShape).strict();
 var replayInputSchema = external_exports3.object(replayInputShape).strict();
-var rememberInputSchema = external_exports3.object(rememberInputShape);
+var rememberInputSchema = external_exports3.object(rememberInputShape).strict();
 
 // src/db/memories.ts
 init_search();
@@ -31267,6 +31329,10 @@ var OBSERVATION_SELECT = `
   SELECT
     id,
     turn_id AS turnId,
+    tool_name AS toolName,
+    tool_input AS toolInput,
+    tool_result AS toolResult,
+    status,
     type,
     title,
     content,
@@ -31283,9 +31349,6 @@ function parseJsonArray3(value) {
   }
   return JSON.parse(value);
 }
-function stringifyJsonArray2(values) {
-  return JSON.stringify(values);
-}
 function mapObservationRow(row) {
   if (!row) {
     return null;
@@ -31297,49 +31360,54 @@ function mapObservationRow(row) {
     filesModified: parseJsonArray3(row.filesModified)
   };
 }
-function createObservation(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO observations (
-          turn_id,
-          type,
-          title,
-          content,
-          insight,
-          tags,
-          files_read,
-          files_modified,
-          created_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING
-          id,
-          turn_id AS turnId,
-          type,
-          title,
-          content,
-          insight,
-          tags,
-          files_read AS filesRead,
-          files_modified AS filesModified,
-          created_at_epoch AS createdAtEpoch
-      `
-  ).get(
-    input.turnId,
-    input.type,
-    input.title,
-    input.content ?? null,
-    input.insight ?? null,
-    stringifyJsonArray2(input.tags ?? []),
-    stringifyJsonArray2(input.filesRead ?? []),
-    stringifyJsonArray2(input.filesModified ?? []),
-    input.createdAtEpoch
-  );
-  const observation = mapObservationRow(inserted);
-  if (!observation) {
-    throw new Error("Failed to create observation.");
+function updateObservation(db, observationId, input) {
+  const existing = getObservation(db, observationId);
+  if (!existing) {
+    return null;
   }
-  indexObservationToFTS(db, observation);
-  return observation;
+  const updated = mapObservationRow(
+    db.query(
+      `
+          UPDATE observations
+          SET
+            title = ?,
+            content = ?,
+            status = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            turn_id AS turnId,
+            tool_name AS toolName,
+            tool_input AS toolInput,
+            tool_result AS toolResult,
+            status,
+            type,
+            title,
+            content,
+            insight,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            created_at_epoch AS createdAtEpoch
+        `
+    ).get(
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.status ?? existing.status,
+      observationId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  if (updated.status === "extracted") {
+    indexObservationToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
+    ).run(observationId);
+  }
+  return updated;
 }
 function getObservationsForTurn(db, turnId) {
   return db.query(
@@ -31457,6 +31525,8 @@ var TURN_SELECT = `
     title,
     content,
     insight,
+    type,
+    tags,
     files_read AS filesRead,
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
@@ -31479,129 +31549,10 @@ function mapTurnRow(row) {
   }
   return {
     ...row,
+    tags: parseJsonArray4(row.tags),
     filesRead: parseJsonArray4(row.filesRead),
     filesModified: parseJsonArray4(row.filesModified)
   };
-}
-function hasExtractedContent(input) {
-  return Boolean(
-    input.title || input.content || input.insight || input.observations.length > 0
-  );
-}
-function deleteObservationFts(db, turnId) {
-  const observationIds = db.query(
-    "SELECT id FROM observations WHERE turn_id = ? ORDER BY id"
-  ).all(turnId).map((row) => row.id);
-  const deleteObservationFtsStatement = db.query(
-    "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
-  );
-  for (const observationId of observationIds) {
-    deleteObservationFtsStatement.run(observationId);
-  }
-}
-function saveTurn(db, input) {
-  const status = input.status === "undone" ? "undone" : hasExtractedContent(input) ? "extracted" : "skipped";
-  db.exec("BEGIN");
-  try {
-    const existingTurn = getTurn(db, input.sessionId, input.promptNumber);
-    const filesRead = stringifyArray(input.filesRead);
-    const filesModified = stringifyArray(input.filesModified);
-    let turnId;
-    if (existingTurn) {
-      deleteObservationFts(db, existingTurn.id);
-      db.query(
-        "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
-      ).run(existingTurn.id);
-      db.query("DELETE FROM observations WHERE turn_id = ?").run(existingTurn.id);
-      db.query(
-        `UPDATE turns
-         SET status = ?,
-             user_prompt = COALESCE(?, user_prompt),
-             assistant_response = COALESCE(?, assistant_response),
-             title = ?,
-             content = ?,
-             insight = ?,
-             files_read = ?,
-             files_modified = ?,
-             created_at_epoch = ?,
-             updated_at_epoch = ?
-         WHERE id = ?`
-      ).run(
-        status,
-        input.userPrompt,
-        input.assistantResponse,
-        input.title,
-        input.content ?? null,
-        input.insight,
-        filesRead,
-        filesModified,
-        input.createdAtEpoch,
-        input.updatedAtEpoch,
-        existingTurn.id
-      );
-      turnId = existingTurn.id;
-    } else {
-      const insertedTurn = db.query(`
-          INSERT INTO turns (
-            session_id,
-            prompt_number,
-            status,
-            user_prompt,
-            assistant_response,
-            title,
-            content,
-            insight,
-            files_read,
-            files_modified,
-            created_at_epoch,
-            updated_at_epoch
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          RETURNING id
-        `).get(
-        input.sessionId,
-        input.promptNumber,
-        status,
-        input.userPrompt,
-        input.assistantResponse,
-        input.title,
-        input.content ?? null,
-        input.insight,
-        filesRead,
-        filesModified,
-        input.createdAtEpoch,
-        input.updatedAtEpoch
-      );
-      if (!insertedTurn) {
-        throw new Error("Failed to insert turn.");
-      }
-      turnId = insertedTurn.id;
-    }
-    const turn = getTurn(db, input.sessionId, input.promptNumber);
-    if (!turn) {
-      throw new Error("Failed to reload saved turn.");
-    }
-    if (status === "extracted") {
-      indexTurnToFTS(db, turn);
-      for (const observation of input.observations) {
-        createObservation(db, {
-          turnId,
-          type: observation.type,
-          title: observation.title,
-          content: observation.content ?? null,
-          insight: observation.insight ?? null,
-          tags: observation.tags ?? [],
-          filesRead: observation.filesRead,
-          filesModified: observation.filesModified,
-          createdAtEpoch: input.updatedAtEpoch ?? input.createdAtEpoch
-        });
-      }
-    }
-    db.exec("COMMIT");
-    return turn;
-  } catch (error48) {
-    db.exec("ROLLBACK");
-    throw error48;
-  }
 }
 function getTurn(db, sessionId, promptNumber) {
   return mapTurnRow(
@@ -31615,14 +31566,75 @@ function getTurnById(db, turnId) {
     db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
   );
 }
+function updateTurnById(db, turnId, input) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
+  }
+  const updated = mapTurnRow(
+    db.query(
+      `
+          UPDATE turns
+          SET
+            status = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            tags = ?,
+            files_read = ?,
+            files_modified = ?,
+            tool_call_count = ?,
+            updated_at_epoch = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            session_id AS sessionId,
+            prompt_number AS promptNumber,
+            content_prompt_id AS contentPromptId,
+            status,
+            user_prompt AS userPrompt,
+            assistant_response AS assistantResponse,
+            title,
+            content,
+            insight,
+            type,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            tool_call_count AS toolCallCount,
+            created_at_epoch AS createdAtEpoch,
+            updated_at_epoch AS updatedAtEpoch
+        `
+    ).get(
+      input.status ?? existing.status,
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.insight ?? existing.insight,
+      input.type ?? existing.type,
+      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(input.filesRead ?? existing.filesRead),
+      stringifyArray(input.filesModified ?? existing.filesModified),
+      input.toolCallCount ?? existing.toolCallCount,
+      input.updatedAtEpoch ?? existing.updatedAtEpoch,
+      turnId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  if (updated.status === "extracted") {
+    indexTurnToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
+    ).run(turnId);
+  }
+  return updated;
+}
 function getTurnsForSession(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
-  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
-}
-function getPendingTurns(db, sessionId) {
-  return db.query(
-    `${TURN_SELECT} WHERE session_id = ? AND status IN ('pending', 'stale') ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 
@@ -32518,8 +32530,8 @@ function buildTurnView(db, turn) {
     filesModified: turn.filesModified,
     observations: observations.map((observation) => ({
       id: observation.id,
-      type: observation.type,
-      title: observation.title,
+      type: observation.type ?? "discovery",
+      title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
       content: observation.content,
       insight: observation.insight,
       tags: observation.tags,
@@ -32660,8 +32672,8 @@ function renderObservationScope(db, observations, depth, includeParents) {
       }
       const observationView = {
         id: observation.id,
-        type: observation.type,
-        title: observation.title,
+        type: observation.type ?? "discovery",
+        title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
         content: observation.content,
         insight: observation.insight,
         tags: observation.tags,
@@ -32724,8 +32736,8 @@ function renderObservationScope(db, observations, depth, includeParents) {
         }
         const observationView = {
           id: observation.id,
-          type: observation.type,
-          title: observation.title,
+          type: observation.type ?? "discovery",
+          title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
           content: observation.content,
           insight: observation.insight,
           tags: observation.tags,
@@ -32765,8 +32777,8 @@ function renderMemoryScope(db, memoryIds, depth) {
 function buildObservationView(observation) {
   return {
     id: observation.id,
-    type: observation.type,
-    title: observation.title,
+    type: observation.type ?? "discovery",
+    title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content,
     insight: observation.insight,
     tags: observation.tags,
@@ -33077,7 +33089,12 @@ function recallMemory(db, input) {
 }
 
 // src/mcp/remember.ts
-var TURN_REMEMBER_STATUSES = ["skipped", "undone"];
+var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
+var OBSERVATION_REMEMBER_STATUSES = [
+  "pending",
+  "extracted",
+  "skipped"
+];
 var MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"];
 function textResult(text) {
   return {
@@ -33091,19 +33108,23 @@ function parseSessionId(value) {
   const match = /^S(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
+function parseTurnId(value) {
+  const match = /^T(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseObservationId(value) {
+  const match = /^O(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
 function parseMemoryId(value) {
   const match = /^M(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
-function parseTurnParent(value) {
-  const match = /^S(\d+)\/T(\d+)$/i.exec(value.trim());
-  if (!match) {
-    return null;
+function parseTurnSource(value) {
+  if (value === void 0) {
+    return void 0;
   }
-  return {
-    sessionId: Number.parseInt(match[1], 10),
-    promptNumber: Number.parseInt(match[2], 10)
-  };
+  return parseTurnId(value);
 }
 function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
@@ -33118,18 +33139,25 @@ function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   }
   return null;
 }
-function resolveNextPromptNumber(db, sessionId) {
-  const pendingTurns = getPendingTurns(db, sessionId);
-  if (pendingTurns.length > 0) {
-    return pendingTurns[0].promptNumber;
+function deriveTurnStatus(input) {
+  if (input.status === "undone") {
+    return "undone";
   }
-  const existingTurns = getTurnsForSession(db, sessionId);
-  if (existingTurns.length === 0) {
-    return 1;
+  if (input.status === "skipped") {
+    return "skipped";
   }
-  return Math.max(...existingTurns.map((turn) => turn.promptNumber)) + 1;
+  if (input.status === "active") {
+    return "active";
+  }
+  return input.title || input.content || input.insight || input.type || (input.tags?.length ?? 0) > 0 ? "extracted" : "skipped";
 }
-function handleTurnRemember(db, sessionId, input) {
+function deriveObservationStatus(input) {
+  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
+    return input.status;
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function handleTurnRemember(db, turnId, input) {
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -33138,53 +33166,43 @@ function handleTurnRemember(db, sessionId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (!getSession(db, sessionId)) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-  const promptNumber = input.prompt_number ?? resolveNextPromptNumber(db, sessionId);
-  const isSkipped = input.status === "skipped";
-  const turn = saveTurn(db, {
-    sessionId,
-    promptNumber,
-    status: input.status === "undone" ? "undone" : void 0,
-    userPrompt: null,
-    assistantResponse: null,
-    title: isSkipped ? null : input.title ?? null,
-    content: isSkipped ? null : input.content ?? null,
-    insight: isSkipped ? null : input.insight ?? null,
-    filesRead: isSkipped ? [] : input.files_read ?? [],
-    filesModified: isSkipped ? [] : input.files_modified ?? [],
-    createdAtEpoch: Math.floor(Date.now() / 1e3),
-    updatedAtEpoch: null,
-    observations: []
+  const turn = updateTurnById(db, turnId, {
+    status: deriveTurnStatus(input),
+    title: input.title ?? null,
+    content: input.content ?? null,
+    insight: input.insight ?? null,
+    type: input.type ?? null,
+    tags: input.tags ?? [],
+    updatedAtEpoch: Math.floor(Date.now() / 1e3)
   });
-  return textResult(`Saved turn #${turn.promptNumber} with status ${turn.status}.`);
+  if (!turn) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
 }
-function handleObservationRemember(db, parent, input) {
+function handleObservationRemember(db, observationId, input) {
   const statusError = validateStatusForRoute(
     input.status,
-    null,
+    OBSERVATION_REMEMBER_STATUSES,
     "observation remember"
   );
   if (statusError) {
     return parameterError(statusError);
   }
-  const turn = getTurn(db, parent.sessionId, parent.promptNumber);
-  if (!turn) {
-    return textResult(`Turn S${parent.sessionId}/T${parent.promptNumber} not found.`);
+  if (input.type !== void 0 || input.scope !== void 0 || input.insight !== void 0 || input.reasoning !== void 0 || input.application !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.source !== void 0) {
+    return parameterError(
+      "observation remember only accepts title, content, and status."
+    );
   }
-  const observation = createObservation(db, {
-    turnId: turn.id,
-    type: input.type ?? "discovery",
-    title: input.title ?? "Untitled observation",
-    content: input.content ?? null,
-    insight: input.insight ?? null,
-    tags: input.tags ?? [],
-    filesRead: input.files_read ?? [],
-    filesModified: input.files_modified ?? [],
-    createdAtEpoch: Math.floor(Date.now() / 1e3)
+  const observation = updateObservation(db, observationId, {
+    title: input.title,
+    content: input.content,
+    status: deriveObservationStatus(input)
   });
-  return textResult(`Saved observation O${observation.id} for S${parent.sessionId}/T${parent.promptNumber}.`);
+  if (!observation) {
+    return textResult(`Observation O${observationId} not found.`);
+  }
+  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
 }
 function handleMemoryCreate(db, input) {
   const statusError = validateStatusForRoute(
@@ -33198,6 +33216,10 @@ function handleMemoryCreate(db, input) {
   if (!input.type || !input.scope || !input.title || !input.content) {
     return textResult("Memory creation requires type, scope, title, and content.");
   }
+  const sourceTurnId = parseTurnSource(input.source);
+  if (input.source !== void 0 && sourceTurnId === null) {
+    return parameterError('source must be a turn id like "T12".');
+  }
   const memory = createMemory(db, {
     type: input.type,
     scope: input.scope,
@@ -33208,7 +33230,7 @@ function handleMemoryCreate(db, input) {
     tags: input.tags ?? [],
     status: input.status === "active" || input.status === "superseded" || input.status === "archived" ? input.status : "active",
     supersededBy: null,
-    sourceTurnId: input.source_turn_id ?? null,
+    sourceTurnId: sourceTurnId ?? null,
     createdAtEpoch: Math.floor(Date.now() / 1e3),
     updatedAtEpoch: null
   });
@@ -33223,6 +33245,10 @@ function handleMemoryUpdate(db, memoryId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
+  const sourceTurnId = parseTurnSource(input.source);
+  if (input.source !== void 0 && sourceTurnId === null) {
+    return parameterError('source must be a turn id like "T12".');
+  }
   const memory = updateMemory(db, memoryId, {
     type: input.type,
     scope: input.scope,
@@ -33232,7 +33258,7 @@ function handleMemoryUpdate(db, memoryId, input) {
     application: input.application,
     tags: input.tags,
     status: input.status === "active" || input.status === "superseded" || input.status === "archived" ? input.status : void 0,
-    sourceTurnId: input.source_turn_id,
+    ...sourceTurnId !== void 0 ? { sourceTurnId } : {},
     updatedAtEpoch: Math.floor(Date.now() / 1e3)
   });
   if (!memory) {
@@ -33263,29 +33289,26 @@ function handleSessionRemember(db, sessionId, input) {
   return textResult(`Updated session ${sessionId}.`);
 }
 function rememberTool(db, input) {
-  if (input.parent) {
-    const turnParent = parseTurnParent(input.parent);
-    if (turnParent) {
-      return handleObservationRemember(db, turnParent, input);
-    }
-    const sessionId = parseSessionId(input.parent);
-    if (sessionId !== null) {
-      return handleTurnRemember(db, sessionId, input);
-    }
-    return textResult(`Unsupported parent selector: ${input.parent}`);
+  if (!input.id) {
+    return handleMemoryCreate(db, input);
   }
-  if (input.id) {
-    const sessionId = parseSessionId(input.id);
-    if (sessionId !== null) {
-      return handleSessionRemember(db, sessionId, input);
-    }
-    const memoryId = parseMemoryId(input.id);
-    if (memoryId !== null) {
-      return handleMemoryUpdate(db, memoryId, input);
-    }
-    return textResult(`Unsupported id selector: ${input.id}`);
+  const observationId = parseObservationId(input.id);
+  if (observationId !== null) {
+    return handleObservationRemember(db, observationId, input);
   }
-  return handleMemoryCreate(db, input);
+  const turnId = parseTurnId(input.id);
+  if (turnId !== null) {
+    return handleTurnRemember(db, turnId, input);
+  }
+  const sessionId = parseSessionId(input.id);
+  if (sessionId !== null) {
+    return handleSessionRemember(db, sessionId, input);
+  }
+  const memoryId = parseMemoryId(input.id);
+  if (memoryId !== null) {
+    return handleMemoryUpdate(db, memoryId, input);
+  }
+  return textResult(`Unsupported id selector: ${input.id}`);
 }
 
 // src/mcp/replay.ts
