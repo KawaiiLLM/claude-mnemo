@@ -6,7 +6,6 @@ import type { Database } from "bun:sqlite";
 
 import {
   createSdkMcpServer,
-  query,
   tool,
 } from "@anthropic-ai/claude-agent-sdk";
 
@@ -22,35 +21,10 @@ import {
   type MnemoToolHandlers,
 } from "../mcp/handlers";
 import { resolveAgentSessionPath, resolveTranscriptPath } from "../shared/paths";
-import { buildIsolatedEnv } from "./env";
-
-export interface ForkMnemosyneInput {
-  prompt: string;
-  cwd?: string;
-  database?: Database;
-}
-
-export interface ForkMnemosyneResult {
-  sessionId: string;
-  numTurns: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadInputTokens: number;
-  cacheCreationInputTokens: number;
-  durationMs: number;
-  totalCostUsd: number;
-}
 
 interface ClaudeExecutableResolverDeps {
   existsSync: (path: string) => boolean;
   findOnPath: () => string | null;
-}
-
-interface ForkMnemosyneDeps {
-  queryImpl?: typeof query;
-  createSdkMcpServerImpl?: typeof createSdkMcpServer;
-  toolImpl?: typeof tool;
-  resolveClaudeCodeExecutablePathImpl?: typeof resolveClaudeCodeExecutablePath;
 }
 
 function findClaudeOnPath(): string | null {
@@ -192,67 +166,4 @@ export function moveAgentSession(
     deps.copyFileSync(srcPath, destPath);
     deps.unlinkSync(srcPath);
   }
-}
-
-export async function forkMnemosyne(
-  input: ForkMnemosyneInput,
-  deps: ForkMnemosyneDeps = {},
-): Promise<ForkMnemosyneResult | null> {
-  const pathResolver =
-    deps.resolveClaudeCodeExecutablePathImpl ?? resolveClaudeCodeExecutablePath;
-  const pathToClaudeCodeExecutable = pathResolver();
-  const queryImpl = deps.queryImpl ?? query;
-  const createSdkMcpServerImpl =
-    deps.createSdkMcpServerImpl ?? createSdkMcpServer;
-  const toolImpl = deps.toolImpl ?? tool;
-  const mcpServers = input.database
-    ? {
-        mnemo: createMnemoSdkServer(
-          input.database,
-          input.cwd ?? process.cwd(),
-          {
-            createSdkMcpServerImpl,
-            toolImpl,
-          },
-        ),
-      }
-    : undefined;
-  const execution = queryImpl({
-    prompt: input.prompt,
-    options: {
-      model: "claude-sonnet-4-6",
-      cwd: input.cwd,
-      maxTurns: 5,
-      allowedTools: [...MNEMO_ALLOWED_TOOLS],
-      mcpServers,
-      pathToClaudeCodeExecutable,
-      env: {
-        ...buildIsolatedEnv(),
-        ENABLE_TOOL_SEARCH: "false",
-      },
-    },
-  });
-
-  let result: ForkMnemosyneResult | null = null;
-
-  for await (const message of execution) {
-    if (message.type === "result") {
-      result = {
-        sessionId: message.session_id,
-        numTurns: message.num_turns,
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
-        cacheReadInputTokens: message.usage.cache_read_input_tokens,
-        cacheCreationInputTokens: message.usage.cache_creation_input_tokens,
-        durationMs: message.duration_ms,
-        totalCostUsd: "total_cost_usd" in message ? message.total_cost_usd : 0,
-      };
-    }
-  }
-
-  if (result) {
-    moveAgentSession(input.cwd ?? process.cwd(), result.sessionId);
-  }
-
-  return result;
 }

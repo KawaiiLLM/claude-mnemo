@@ -6,9 +6,10 @@ import { createMemory } from "../../src/db/memories";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurn, saveTurn } from "../../src/db/turns";
+import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
+import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("recallMemory", () => {
   let db: Database;

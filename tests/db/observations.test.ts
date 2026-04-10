@@ -9,7 +9,7 @@ import {
 } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { saveTurn } from "../../src/db/turns";
+import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("observation round trips", () => {
   let db: Database;

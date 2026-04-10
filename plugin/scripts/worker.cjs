@@ -1182,10 +1182,10 @@ function migrateSchema(db) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
   db.exec("DROP INDEX IF EXISTS idx_observations_type");
-  if (!hasColumn(db, "observations", "insight")) {
+  if (!hasColumn(db, "observations", "insight") && (hasColumn(db, "observations", "description") || hasColumn(db, "observations", "narrative"))) {
     db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
-  if (!hasColumn(db, "observations", "tags")) {
+  if (!hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts")) {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
   if (!hasColumn(db, "observations", "tool_name")) {
@@ -38397,20 +38397,6 @@ function createDatabaseBackedHandlers(database, _options = {}) {
   };
 }
 
-// src/mnemosyne/env.ts
-var BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
-function buildIsolatedEnv(sourceEnv = process.env) {
-  const isolatedEnv = {};
-  for (const [key, value] of Object.entries(sourceEnv)) {
-    if (BLOCKED_ENV_KEYS.has(key)) {
-      continue;
-    }
-    isolatedEnv[key] = value;
-  }
-  isolatedEnv.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
-  return isolatedEnv;
-}
-
 // src/mnemosyne/fork.ts
 function findClaudeOnPath() {
   const command = process.platform === "win32" ? "where" : "which";
@@ -38502,6 +38488,20 @@ function moveAgentSession(cwd2, sessionId, deps = defaultMoveDeps) {
     deps.copyFileSync(srcPath, destPath);
     deps.unlinkSync(srcPath);
   }
+}
+
+// src/mnemosyne/env.ts
+var BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
+function buildIsolatedEnv(sourceEnv = process.env) {
+  const isolatedEnv = {};
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (BLOCKED_ENV_KEYS.has(key)) {
+      continue;
+    }
+    isolatedEnv[key] = value;
+  }
+  isolatedEnv.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
+  return isolatedEnv;
 }
 
 // src/worker/query-session.ts

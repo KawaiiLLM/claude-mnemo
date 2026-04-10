@@ -7536,10 +7536,10 @@ function migrateSchema(db) {
     db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
   }
   db.exec("DROP INDEX IF EXISTS idx_observations_type");
-  if (!hasColumn(db, "observations", "insight")) {
+  if (!hasColumn(db, "observations", "insight") && (hasColumn(db, "observations", "description") || hasColumn(db, "observations", "narrative"))) {
     db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
   }
-  if (!hasColumn(db, "observations", "tags")) {
+  if (!hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts")) {
     db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
   }
   if (!hasColumn(db, "observations", "tool_name")) {

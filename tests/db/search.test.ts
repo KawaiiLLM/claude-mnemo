@@ -12,7 +12,8 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { searchMemory } from "../../src/db/search";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurn, saveTurn } from "../../src/db/turns";
+import { getTurn } from "../../src/db/turns";
+import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("observation queries and search", () => {
   let db: Database;

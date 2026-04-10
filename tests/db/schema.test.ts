@@ -206,6 +206,27 @@ describe("initializeSchema", () => {
     ]);
   });
 
+  test("initializeDatabase keeps fresh observations schema free of legacy insight and tags columns", () => {
+    initializeDatabase(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(observations)")
+      .all()
+      .map((row) => row.name);
+
+    expect(columns).toEqual([
+      "id",
+      "turn_id",
+      "tool_name",
+      "tool_input",
+      "tool_result",
+      "status",
+      "title",
+      "content",
+      "created_at_epoch",
+    ]);
+  });
+
   test("creates the worker queue table with FIFO and claim columns", () => {
     initializeSchema(db);
 

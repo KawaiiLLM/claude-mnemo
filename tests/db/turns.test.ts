@@ -7,9 +7,9 @@ import { upsertSession } from "../../src/db/sessions";
 import {
   getTurn,
   getTurnsForSession,
-  saveTurn,
 } from "../../src/db/turns";
 import { getObservationsForTurn } from "../../src/db/observations";
+import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("turn queries", () => {
   let db: Database;

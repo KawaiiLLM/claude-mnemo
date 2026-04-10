@@ -4,8 +4,8 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { saveTurn } from "../../src/db/turns";
 import { searchMemory } from "../../src/db/search";
+import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("searchMemory query escaping", () => {
   let db: Database;
