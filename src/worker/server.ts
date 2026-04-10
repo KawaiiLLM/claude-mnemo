@@ -379,18 +379,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await myTurn;
 
     const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
-
-    try {
-      await withTimeout(
-        item.kind === "obs"
-          ? processObsImpl(state, item.targetId)
-          : processTurnStopImpl(state, item.targetId),
-        timeoutMs,
-        `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`,
-      );
-    } finally {
+    const workPromise = Promise.resolve(
+      item.kind === "obs"
+        ? processObsImpl(state, item.targetId)
+        : processTurnStopImpl(state, item.targetId),
+    );
+    const completion = workPromise.finally(() => {
       release();
-    }
+    });
+    completion.catch(() => {});
+
+    await withTimeout(
+      workPromise,
+      timeoutMs,
+      `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`,
+    );
   }
 
   async function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
@@ -781,15 +784,32 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   core.recoverFromCrash();
 
-  const server = BunServeImpl({
-    port: WORKER_PORT,
-    fetch: createWorkerFetchHandler({
-      ...deps,
-      db,
-      scanAndDrainQueue: core.scanAndDrainQueue,
-      handleCompactImpl: core.handleCompact,
-    }, serverState),
-  });
+  let server: { stop(force?: boolean): void };
+  try {
+    server = BunServeImpl({
+      port: WORKER_PORT,
+      fetch: createWorkerFetchHandler(
+        {
+          ...deps,
+          db,
+          scanAndDrainQueue: core.scanAndDrainQueue,
+          handleCompactImpl: core.handleCompact,
+        },
+        serverState,
+      ),
+    });
+  } catch (error) {
+    try {
+      unlinkSyncImpl(startingPath);
+    } catch {}
+
+    if ((error as NodeJS.ErrnoException | undefined)?.code === "EADDRINUSE") {
+      process.exit(0);
+      return;
+    }
+
+    throw error;
+  }
 
   try {
     writeFileSyncImpl(pidPath, String(process.pid));

@@ -10,6 +10,7 @@ import {
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,
+  main,
 } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 
@@ -527,5 +528,117 @@ describe("worker server", () => {
     await stateCore.abortStalledSessions(2_000_000);
 
     expect(closed).toEqual([10]);
+  });
+
+  test("processClaimedItem keeps same-session work serialized after a timeout", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-timeout",
+      project: "/tmp/project-timeout",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started: number[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+
+    globalThis.setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: unknown[]) => {
+      if (typeof handler === "function") {
+        handler(...args);
+      }
+      return 0 as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout;
+
+    try {
+      const core = createWorkerCore({
+        db,
+        processObsImpl: async (_state, observationId) => {
+          started.push(observationId);
+          if (observationId === 1) {
+            await firstGate;
+          }
+        },
+      });
+
+      const first = core.processClaimedItem({
+        seq: 1,
+        kind: "obs",
+        targetId: 1,
+        sessionDbId: sessionId,
+        claimedAtEpoch: 1,
+        enqueuedAtEpoch: 1,
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const second = core.processClaimedItem({
+        seq: 2,
+        kind: "obs",
+        targetId: 2,
+        sessionDbId: sessionId,
+        claimedAtEpoch: 2,
+        enqueuedAtEpoch: 2,
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(started).toEqual([1]);
+
+      releaseFirst();
+      await Promise.all([first.catch(() => {}), second.catch(() => {})]);
+      expect(started).toEqual([1, 2]);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
+  test("main clears the starting marker and exits cleanly when Bun.serve fails with EADDRINUSE", async () => {
+    const writes: Array<{ path: string; value: string }> = [];
+    const unlinks: string[] = [];
+    const originalExit = process.exit;
+    const originalSetInterval = globalThis.setInterval;
+    const exitMock = mock((_code?: number) => undefined as never);
+
+    (process as typeof process & { exit: typeof process.exit }).exit = exitMock;
+    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+
+    try {
+      await main({
+        db: createDatabase(":memory:"),
+        BunServeImpl: mock(() => {
+          const error = new Error("bind failed") as NodeJS.ErrnoException;
+          error.code = "EADDRINUSE";
+          throw error;
+        }) as typeof Bun.serve,
+        pidPath: "/tmp/worker.pid",
+        startingPath: "/tmp/worker.starting",
+        existsSyncImpl: (path: string) =>
+          path !== "/tmp/worker.pid" && path !== "/tmp/worker.starting",
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: ((path: string, value: string) => {
+          writes.push({ path, value });
+        }) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: ((path: string) => {
+          unlinks.push(path);
+        }) as typeof import("node:fs").unlinkSync,
+      });
+
+      expect(exitMock).toHaveBeenCalledWith(0);
+      expect(writes).toEqual([{ path: "/tmp/worker.starting", value: String(process.pid) }]);
+      expect(unlinks).toContain("/tmp/worker.starting");
+      expect(unlinks).not.toContain("/tmp/worker.pid");
+    } finally {
+      (process as typeof process & { exit: typeof process.exit }).exit = originalExit;
+      globalThis.setInterval = originalSetInterval;
+    }
   });
 });

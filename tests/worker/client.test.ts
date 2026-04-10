@@ -39,39 +39,21 @@ describe("worker client", () => {
     ]);
   });
 
-  test("notifyWorkerWake probes health before spawning an unreachable worker", async () => {
-    const fetchImpl = mock(async () => {
-      throw new Error("connection refused");
+  test("notifyWorkerWake returns before a slow health probe resolves", async () => {
+    let resolveHealth!: (value: Response) => void;
+    const healthProbe = new Promise<Response>((resolve) => {
+      resolveHealth = resolve;
     });
-    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
-
-    await notifyWorkerWake(
-      {
-        fetchImpl,
-        spawnImpl,
-        existsSyncImpl: () => true,
-      },
-      {
-        CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root",
-      } as NodeJS.ProcessEnv,
-    );
-
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
-    expect(spawnImpl).toHaveBeenCalledTimes(1);
-  });
-
-  test("notifyWorkerWake posts /wake when the worker is already healthy", async () => {
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        return healthProbe;
       }
 
       return new Response(null, { status: 200 });
     });
     const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
 
-    await notifyWorkerWake(
+    const wakePromise = notifyWorkerWake(
       {
         fetchImpl,
         spawnImpl,
@@ -82,10 +64,44 @@ describe("worker client", () => {
       } as NodeJS.ProcessEnv,
     );
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toEndWith("/wake");
-    expect(spawnImpl).not.toHaveBeenCalled();
+    let settled = false;
+    void wakePromise.then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    expect(settled).toBe(true);
+
+    resolveHealth(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    await wakePromise;
+  });
+
+  test("notifyWorkerWake swallows wake fetch failures and spawns the worker", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      throw new Error("wake failed");
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    const wakePromise = notifyWorkerWake(
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: () => true,
+      },
+      {
+        CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root",
+      } as NodeJS.ProcessEnv,
+    );
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await wakePromise;
+
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
   });
 
   test("notifyWorkerCompact waits for readiness after spawning a missing worker", async () => {
