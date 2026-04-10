@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
@@ -8,10 +11,14 @@ import { backfillFromTranscript } from "../../src/hooks/backfill";
 
 describe("backfillFromTranscript", () => {
   const databases: Array<ReturnType<typeof createDatabase>> = [];
+  const directories: string[] = [];
 
   afterEach(() => {
     for (const db of databases.splice(0)) {
       db.close();
+    }
+    for (const directory of directories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
@@ -40,38 +47,63 @@ describe("backfillFromTranscript", () => {
     const pendingTurn = getTurn(db, session.id, 1);
     expect(pendingTurn).not.toBeNull();
 
-    backfillFromTranscript(
-      db,
-      [pendingTurn!],
-      undefined,
-      undefined,
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-backfill-"));
+    const transcriptPath = join(directory, "session.jsonl");
+    directories.push(directory);
+    writeFileSync(
+      transcriptPath,
       [
-        {
-          promptNumber: 1,
+        JSON.stringify({
+          uuid: "u1",
+          type: "user",
           promptId: "pid-A",
-          userPrompt: "Run the tool-heavy turn",
-          assistantText: "done",
-          isSidechain: false,
-          toolCalls: [
-            { name: "Read", input: { file_path: "a.ts" }, result: "a" },
-            { name: "Edit", input: { file_path: "a.ts" }, result: "b" },
-            { name: "Bash", input: { command: "npm test" }, result: "c" },
-          ],
-        },
-        {
-          promptNumber: 1,
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "Run the tool-heavy turn",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", name: "Read", input: { file_path: "a.ts" } },
+              { type: "tool_use", name: "Edit", input: { file_path: "a.ts" } },
+              { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+              { type: "text", text: "done" },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: "u1",
+          type: "user",
           promptId: "pid-A",
-          userPrompt: "Run the tool-heavy turn",
-          assistantText: "done",
-          isSidechain: false,
-          toolCalls: [
-            { name: "Read", input: { file_path: "a.ts" }, result: "a" },
-            { name: "Edit", input: { file_path: "a.ts" }, result: "b" },
-            { name: "Bash", input: { command: "npm test" }, result: "c" },
-          ],
-        },
-      ],
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "Run the tool-heavy turn",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", name: "Read", input: { file_path: "a.ts" } },
+              { type: "tool_use", name: "Edit", input: { file_path: "a.ts" } },
+              { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+              { type: "text", text: "done" },
+            ],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
     );
+
+    backfillFromTranscript(db, [pendingTurn!], transcriptPath);
 
     const updatedTurn = getTurn(db, session.id, 1);
     expect(updatedTurn?.toolCallCount).toBe(3);

@@ -392,6 +392,63 @@ describe("parseTranscript", () => {
     ]);
   });
 
+  test("ignores command-args, command-message, and stop-hook status entries even when they use different prompt ids", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "real prompt",
+        },
+      },
+      {
+        type: "user",
+        promptId: "derived-1",
+        message: {
+          role: "user",
+          content: "<command-args>foo bar</command-args>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "derived-2",
+        message: {
+          role: "user",
+          content: "<command-message>slash output</command-message>",
+        },
+      },
+      {
+        type: "user",
+        promptId: "derived-3",
+        message: {
+          role: "user",
+          content: "⏺ Ran 2 stop hooks in 120ms",
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const turns = parseReplayTranscript(transcript.path);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toEqual(
+      expect.objectContaining({
+        promptId: "p1",
+        userPrompt: "real prompt",
+      }),
+    );
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
+  });
+
   test("deduplicates replay-appended transcript entries by uuid", () => {
     const transcript = writeTranscript([
       makeEntry({
@@ -505,7 +562,7 @@ describe("parseTranscript", () => {
     ]);
   });
 
-  test("filters slash-command derived entries even when content is a text block array", () => {
+  test("filters slash-command derived entries even when content is a text block array and prompt ids differ", () => {
     const transcript = writeTranscript([
       makeEntry({
         uuid: "u1",
@@ -515,7 +572,7 @@ describe("parseTranscript", () => {
       }),
       makeEntry({
         uuid: "u2",
-        promptId: "p1",
+        promptId: "derived-1",
         message: {
           role: "user",
           content: [{ type: "text", text: "<command-args>foo bar</command-args>" }],
@@ -523,7 +580,7 @@ describe("parseTranscript", () => {
       }),
       makeEntry({
         uuid: "u3",
-        promptId: "p1",
+        promptId: "derived-2",
         message: {
           role: "user",
           content: [{ type: "text", text: "<command-message>slash output</command-message>" }],
@@ -531,7 +588,7 @@ describe("parseTranscript", () => {
       }),
       makeEntry({
         uuid: "u4",
-        promptId: "p1",
+        promptId: "derived-3",
         message: {
           role: "user",
           content: [{ type: "text", text: "⏺ Ran 2 stop hooks in 120ms" }],
@@ -557,5 +614,50 @@ describe("parseTranscript", () => {
         userPrompt: "real prompt",
       }),
     );
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
+  });
+
+  test("countUserPromptsInTranscript does not double-count repeated pid sequences after resume replay", () => {
+    const transcript = writeTranscript([
+      makeEntry({
+        uuid: "u1",
+        promptId: "A",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt A" },
+      }),
+      makeEntry({
+        uuid: "u2",
+        promptId: "B",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt B" },
+      }),
+      makeEntry({
+        uuid: "u3",
+        promptId: "C",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt C" },
+      }),
+      makeEntry({
+        uuid: "u1",
+        promptId: "A",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt A" },
+      }),
+      makeEntry({
+        uuid: "u2",
+        promptId: "B",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt B" },
+      }),
+      makeEntry({
+        uuid: "u3",
+        promptId: "C",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt C" },
+      }),
+    ]);
+    directories.push(transcript.directory);
+
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(3);
   });
 });

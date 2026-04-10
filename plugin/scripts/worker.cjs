@@ -758,16 +758,17 @@ function isCountedUserPrompt(entry) {
   return entry.role === "user" && isRealUserPrompt(entry);
 }
 function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>");
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
 }
 function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
   if (entry.permissionMode) {
     return true;
   }
-  if (typeof entry.content === "string" && isKnownSystemInjectedContent(entry.content)) {
+  if (isKnownSystemInjectedContent(promptText)) {
     return false;
   }
-  return extractUserPrompt(entry) !== "";
+  return promptText !== "";
 }
 function extractAssistantParts(entry) {
   const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({

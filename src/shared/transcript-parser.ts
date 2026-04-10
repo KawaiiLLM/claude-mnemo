@@ -87,20 +87,25 @@ function isKnownSystemInjectedContent(content: string): boolean {
   return (
     content.startsWith("<task-notification>") ||
     content.startsWith("<local-command-") ||
-    content.startsWith("<command-name>")
+    content.startsWith("<command-name>") ||
+    content.startsWith("<command-args>") ||
+    content.startsWith("<command-message>") ||
+    content.startsWith("⏺ Ran ")
   );
 }
 
 function isRealUserPrompt(entry: TranscriptEntry): boolean {
+  const promptText = extractUserPrompt(entry);
+
   if (entry.permissionMode) {
     return true;
   }
 
-  if (typeof entry.content === "string" && isKnownSystemInjectedContent(entry.content)) {
+  if (isKnownSystemInjectedContent(promptText)) {
     return false;
   }
 
-  return extractUserPrompt(entry) !== "";
+  return promptText !== "";
 }
 
 function extractAssistantParts(entry: TranscriptEntry): {
