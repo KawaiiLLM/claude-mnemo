@@ -39,17 +39,23 @@ function buildInitialObsPrompt(
   observationId: number,
   obsBlock: string,
 ): string {
-  return `<session id="S${sessionId}">
-  project: ${project}
-  user_request: ${firstUserPrompt ?? ""}
-</session>
-
+  const priorSessionBlock =
+    priorTitle || priorContent || priorInsight || priorNextSteps
+      ? `
 <prior_session>
   title: ${priorTitle ?? ""}
   content: ${priorContent ?? ""}
   insight: ${priorInsight ?? ""}
   next_steps: ${priorNextSteps ?? ""}
 </prior_session>
+`
+      : "";
+
+  return `<session id="S${sessionId}">
+  project: ${project}
+  user_request: ${firstUserPrompt ?? ""}
+</session>
+${priorSessionBlock}
 
 ${obsBlock}
 

@@ -93,6 +93,42 @@ describe("worker processors", () => {
     expect(prompt).toContain("next_steps: Ship it");
   });
 
+  test("processObs omits prior_session when the session has no prior summary", async () => {
+    db.query(
+      `
+        UPDATE sessions
+        SET title = NULL,
+            content = NULL,
+            insight = NULL,
+            next_steps = NULL
+        WHERE id = ?
+      `,
+    ).run(sessionId);
+
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+
+    await processors.processObs(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage,
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: false,
+        priorTitles: [],
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+      },
+      observationId,
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).not.toContain("<prior_session>");
+  });
+
   test("processObs skips already-finalized observations", async () => {
     db.query("UPDATE observations SET status = 'extracted' WHERE id = ?").run(observationId);
     const pushMessage = mock(async () => {});

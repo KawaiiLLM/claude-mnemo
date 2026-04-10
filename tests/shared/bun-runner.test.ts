@@ -70,4 +70,68 @@ describe("bun-runner hook stdin handling", () => {
       rmSync(configDir, { recursive: true, force: true });
     }
   });
+
+  test("returns false when settings file is missing", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "mnemo-bun-runner-"));
+    try {
+      expect(
+        isPluginDisabledInClaudeSettings({ CLAUDE_CONFIG_DIR: configDir }),
+      ).toBe(false);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns false when another plugin is disabled", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "mnemo-bun-runner-"));
+    try {
+      writeFileSync(
+        join(configDir, "settings.json"),
+        JSON.stringify({
+          enabledPlugins: {
+            "claude-mem@thedotmack": false,
+          },
+        }),
+      );
+
+      expect(
+        isPluginDisabledInClaudeSettings({ CLAUDE_CONFIG_DIR: configDir }),
+      ).toBe(false);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns false when claude-mnemo is explicitly enabled", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "mnemo-bun-runner-"));
+    try {
+      writeFileSync(
+        join(configDir, "settings.json"),
+        JSON.stringify({
+          enabledPlugins: {
+            "claude-mnemo@zhaoqixuan": true,
+          },
+        }),
+      );
+
+      expect(
+        isPluginDisabledInClaudeSettings({ CLAUDE_CONFIG_DIR: configDir }),
+      ).toBe(false);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns false when settings.json is malformed", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "mnemo-bun-runner-"));
+    try {
+      writeFileSync(join(configDir, "settings.json"), "{not-json");
+
+      expect(
+        isPluginDisabledInClaudeSettings({ CLAUDE_CONFIG_DIR: configDir }),
+      ).toBe(false);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
 });

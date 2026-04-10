@@ -213,13 +213,24 @@ function hasLegacySchema(db: Database): boolean {
     "files_read",
     "files_modified",
   ];
+  const observationsCurrentColumns = [
+    "tool_name",
+    "tool_input",
+    "tool_result",
+    "status",
+    "content",
+  ];
+  const hasLegacyObservationColumns = observationsLegacyColumns.some((column) =>
+    hasColumn(db, "observations", column),
+  );
+  const isMissingCurrentObservationColumns = observationsCurrentColumns.some(
+    (column) => !hasColumn(db, "observations", column),
+  );
 
   return (
     sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) ||
     turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) ||
-    observationsLegacyColumns.some((column) =>
-      hasColumn(db, "observations", column),
-    )
+    (hasLegacyObservationColumns && isMissingCurrentObservationColumns)
   );
 }
 
@@ -234,6 +245,7 @@ function resetSchema(db: Database): void {
 
 export function initializeDatabase(db: Database): void {
   if (hasLegacySchema(db)) {
+    console.warn("[claude-mnemo] legacy schema detected, resetting database");
     resetSchema(db);
   }
 

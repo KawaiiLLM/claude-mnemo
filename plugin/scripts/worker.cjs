@@ -1157,9 +1157,20 @@ function hasLegacySchema(db) {
     "files_read",
     "files_modified"
   ];
-  return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || observationsLegacyColumns.some(
+  const observationsCurrentColumns = [
+    "tool_name",
+    "tool_input",
+    "tool_result",
+    "status",
+    "content"
+  ];
+  const hasLegacyObservationColumns = observationsLegacyColumns.some(
     (column) => hasColumn(db, "observations", column)
   );
+  const isMissingCurrentObservationColumns = observationsCurrentColumns.some(
+    (column) => !hasColumn(db, "observations", column)
+  );
+  return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || hasLegacyObservationColumns && isMissingCurrentObservationColumns;
 }
 function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS pending_queue");
@@ -1171,6 +1182,7 @@ function resetSchema(db) {
 }
 function initializeDatabase(db) {
   if (hasLegacySchema(db)) {
+    console.warn("[claude-mnemo] legacy schema detected, resetting database");
     resetSchema(db);
   }
   initializeSchema(db);
@@ -1399,17 +1411,19 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
 </obs>`;
 }
 function buildInitialObsPrompt(sessionId, project, firstUserPrompt, priorTitle, priorContent, priorInsight, priorNextSteps, observationId, obsBlock) {
-  return `<session id="S${sessionId}">
-  project: ${project}
-  user_request: ${firstUserPrompt ?? ""}
-</session>
-
+  const priorSessionBlock = priorTitle || priorContent || priorInsight || priorNextSteps ? `
 <prior_session>
   title: ${priorTitle ?? ""}
   content: ${priorContent ?? ""}
   insight: ${priorInsight ?? ""}
   next_steps: ${priorNextSteps ?? ""}
 </prior_session>
+` : "";
+  return `<session id="S${sessionId}">
+  project: ${project}
+  user_request: ${firstUserPrompt ?? ""}
+</session>
+${priorSessionBlock}
 
 ${obsBlock}
 

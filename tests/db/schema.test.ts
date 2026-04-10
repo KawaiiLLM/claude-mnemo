@@ -315,6 +315,49 @@ describe("initializeSchema", () => {
     ).toBe(0);
   });
 
+  test("initializeDatabase warns before resetting a legacy schema", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        description TEXT,
+        started_at_epoch INTEGER NOT NULL
+      );
+    `);
+
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+
+    initializeDatabase(db);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain(
+      "legacy schema detected, resetting database",
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  test("initializeDatabase does not reset a current observations schema just because an extra tags column exists", () => {
+    initializeSchema(db);
+
+    db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
+    db.query(
+      `
+        INSERT INTO sessions (content_session_id, project, created_at_epoch)
+        VALUES ('keep-current-schema', 'claude-mnemo', 1)
+      `,
+    ).run();
+
+    initializeDatabase(db);
+
+    expect(
+      db
+        .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions")
+        .get().count,
+    ).toBe(1);
+  });
+
   test("creates the worker queue table with FIFO and claim columns", () => {
     initializeSchema(db);
 
