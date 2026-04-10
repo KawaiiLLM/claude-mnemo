@@ -85,13 +85,19 @@ export function shouldBufferStdinForScript(scriptPath) {
 
 // Early exit if plugin is disabled in Claude Code settings (#781).
 // Sync read + JSON parse — fastest possible check before spawning Bun.
-function isPluginDisabledInClaudeSettings() {
+export function isPluginDisabledInClaudeSettings(
+  env = process.env,
+  deps = {
+    existsSyncImpl: existsSync,
+    readFileSyncImpl: readFileSync,
+  },
+) {
   try {
-    const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+    const configDir = env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
     const settingsPath = join(configDir, 'settings.json');
-    if (!existsSync(settingsPath)) return false;
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
-    return settings?.enabledPlugins?.['claude-mem@thedotmack'] === false;
+    if (!deps.existsSyncImpl(settingsPath)) return false;
+    const settings = JSON.parse(deps.readFileSyncImpl(settingsPath, 'utf-8'));
+    return settings?.enabledPlugins?.['claude-mnemo@zhaoqixuan'] === false;
   } catch {
     return false;
   }

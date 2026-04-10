@@ -32,6 +32,10 @@ function buildInitialObsPrompt(
   sessionId: number,
   project: string,
   firstUserPrompt: string | null,
+  priorTitle: string | null,
+  priorContent: string | null,
+  priorInsight: string | null,
+  priorNextSteps: string | null,
   observationId: number,
   obsBlock: string,
 ): string {
@@ -39,6 +43,13 @@ function buildInitialObsPrompt(
   project: ${project}
   user_request: ${firstUserPrompt ?? ""}
 </session>
+
+<prior_session>
+  title: ${priorTitle ?? ""}
+  content: ${priorContent ?? ""}
+  insight: ${priorInsight ?? ""}
+  next_steps: ${priorNextSteps ?? ""}
+</prior_session>
 
 ${obsBlock}
 
@@ -243,6 +254,10 @@ export function createWorkerProcessors(db: Database) {
             session.id,
             session.project,
             firstTurn?.user_prompt ?? null,
+            session.title,
+            session.content,
+            session.insight,
+            session.nextSteps,
             observation.id,
             obsBlock,
           ),

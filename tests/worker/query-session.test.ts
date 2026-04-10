@@ -4,6 +4,10 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import {
+  moveAgentSession,
+  resolveClaudeCodeExecutablePath,
+} from "../../src/worker/agent-session";
 import { createWorkerQuerySession } from "../../src/worker/query-session";
 
 describe("worker query session", () => {
@@ -209,5 +213,10 @@ describe("worker query session", () => {
     expect(movedSessions).toEqual([
       { project: "/tmp/project", sessionId: "agent-session-1" },
     ]);
+  });
+
+  test("uses worker agent-session helpers from the worker module path", () => {
+    expect(typeof moveAgentSession).toBe("function");
+    expect(typeof resolveClaudeCodeExecutablePath).toBe("function");
   });
 });

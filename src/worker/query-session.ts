@@ -17,7 +17,7 @@ import {
   createMnemoSdkServer,
   moveAgentSession,
   resolveClaudeCodeExecutablePath,
-} from "../mnemosyne/fork";
+} from "./agent-session";
 import { getSession } from "../db/sessions";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 

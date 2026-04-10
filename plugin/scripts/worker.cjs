@@ -1143,147 +1143,38 @@ function shouldRebuildSearchIndex(db) {
     ({ table, layer }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`) && !indexedLayers.has(layer)
   );
 }
-function migrateSchema(db) {
-  let searchIndexNeedsRebuild = false;
-  if (hasColumn(db, "sessions", "started_at_epoch") && !hasColumn(db, "sessions", "created_at_epoch")) {
-    db.exec("ALTER TABLE sessions RENAME COLUMN started_at_epoch TO created_at_epoch");
-    db.exec("DROP INDEX IF EXISTS idx_sessions_project_started_at");
-    ensureSessionProjectIndex(db);
-  }
-  if (!hasColumn(db, "sessions", "next_steps")) {
-    db.exec("ALTER TABLE sessions ADD COLUMN next_steps TEXT");
-  }
-  if (!hasColumn(db, "sessions", "content")) {
-    db.exec("ALTER TABLE sessions ADD COLUMN content TEXT");
-  }
-  if (!hasColumn(db, "sessions", "last_compact_turn")) {
-    db.exec("ALTER TABLE sessions ADD COLUMN last_compact_turn INTEGER");
-  }
-  if (!hasColumn(db, "turns", "tool_call_count")) {
-    db.exec("ALTER TABLE turns ADD COLUMN tool_call_count INTEGER");
-  }
-  if (!hasColumn(db, "turns", "content_prompt_id")) {
-    db.exec("ALTER TABLE turns ADD COLUMN content_prompt_id TEXT");
-  }
-  ensureTurnPromptIdIndex(db);
-  if (!hasColumn(db, "turns", "content")) {
-    db.exec("ALTER TABLE turns ADD COLUMN content TEXT");
-  }
-  if (!hasColumn(db, "turns", "type")) {
-    db.exec("ALTER TABLE turns ADD COLUMN type TEXT");
-  }
-  if (!hasColumn(db, "turns", "tags")) {
-    db.exec("ALTER TABLE turns ADD COLUMN tags TEXT");
-  }
-  if (hasColumn(db, "turns", "status") && hasRow(db, "SELECT 1 FROM turns WHERE status = 'pending' LIMIT 1")) {
-    db.exec("UPDATE turns SET status = 'active' WHERE status = 'pending'");
-  }
-  if (!hasColumn(db, "observations", "content")) {
-    db.exec("ALTER TABLE observations ADD COLUMN content TEXT");
-  }
-  db.exec("DROP INDEX IF EXISTS idx_observations_type");
-  if (!hasColumn(db, "observations", "insight") && (hasColumn(db, "observations", "description") || hasColumn(db, "observations", "narrative"))) {
-    db.exec("ALTER TABLE observations ADD COLUMN insight TEXT");
-  }
-  if (!hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts")) {
-    db.exec("ALTER TABLE observations ADD COLUMN tags TEXT");
-  }
-  if (!hasColumn(db, "observations", "tool_name")) {
-    db.exec("ALTER TABLE observations ADD COLUMN tool_name TEXT");
-  }
-  if (!hasColumn(db, "observations", "tool_input")) {
-    db.exec("ALTER TABLE observations ADD COLUMN tool_input TEXT");
-  }
-  if (!hasColumn(db, "observations", "tool_result")) {
-    db.exec("ALTER TABLE observations ADD COLUMN tool_result TEXT");
-  }
-  if (!hasColumn(db, "observations", "status")) {
-    db.exec("ALTER TABLE observations ADD COLUMN status TEXT DEFAULT 'pending'");
-  }
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS pending_queue (
-      seq INTEGER PRIMARY KEY AUTOINCREMENT,
-      kind TEXT NOT NULL,
-      target_id INTEGER NOT NULL,
-      session_db_id INTEGER NOT NULL,
-      claimed_at_epoch INTEGER,
-      enqueued_at_epoch INTEGER NOT NULL
-    )
-  `);
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_pending_queue_unclaimed
-      ON pending_queue(seq) WHERE claimed_at_epoch IS NULL
-  `);
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_pending_queue_session
-      ON pending_queue(session_db_id, seq)
-  `);
-  if (hasColumn(db, "sessions", "description") && hasRow(
-    db,
-    "SELECT 1 FROM sessions WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
-  )) {
-    db.exec(`
-      UPDATE sessions
-      SET content = COALESCE(content, description)
-      WHERE content IS NULL AND description IS NOT NULL
-    `);
-    searchIndexNeedsRebuild = true;
-  }
-  if (hasColumn(db, "turns", "description") && hasRow(
-    db,
-    "SELECT 1 FROM turns WHERE content IS NULL AND description IS NOT NULL LIMIT 1"
-  )) {
-    db.exec(`
-      UPDATE turns
-      SET content = COALESCE(content, description)
-      WHERE content IS NULL AND description IS NOT NULL
-    `);
-    searchIndexNeedsRebuild = true;
-  }
-  if (hasColumn(db, "observations", "description") && hasColumn(db, "observations", "insight") && hasColumn(db, "observations", "narrative") && hasColumn(db, "observations", "tags") && hasColumn(db, "observations", "concepts") && hasRow(
-    db,
-    `
-        SELECT 1 FROM observations
-        WHERE
-          (content IS NULL AND description IS NOT NULL)
-          OR (insight IS NULL AND narrative IS NOT NULL)
-          OR (tags IS NULL AND concepts IS NOT NULL)
-        LIMIT 1
-      `
-  )) {
-    db.exec(`
-      UPDATE observations
-      SET
-        content = COALESCE(content, description),
-        insight = COALESCE(insight, narrative),
-        tags = COALESCE(tags, concepts)
-      WHERE
-        (content IS NULL AND description IS NOT NULL)
-        OR (insight IS NULL AND narrative IS NOT NULL)
-        OR (tags IS NULL AND concepts IS NOT NULL)
-    `);
-    searchIndexNeedsRebuild = true;
-  }
-  const ftsColumns = db.query("SELECT name FROM pragma_table_info('memory_fts')").all().map((row) => row.name);
-  if (ftsColumns.length > 0 && !ftsColumns.includes("content")) {
-    db.exec("DROP TABLE IF EXISTS memory_fts");
-    db.exec(`
-      CREATE VIRTUAL TABLE memory_fts USING fts5(
-        layer,
-        source_id,
-        title,
-        content,
-        extra
-      )
-    `);
-    searchIndexNeedsRebuild = true;
-  }
-  return searchIndexNeedsRebuild;
+function hasLegacySchema(db) {
+  const sessionsLegacyColumns = ["description", "started_at_epoch"];
+  const turnsLegacyColumns = ["description"];
+  const observationsLegacyColumns = [
+    "type",
+    "description",
+    "insight",
+    "narrative",
+    "facts",
+    "tags",
+    "concepts",
+    "files_read",
+    "files_modified"
+  ];
+  return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || observationsLegacyColumns.some(
+    (column) => hasColumn(db, "observations", column)
+  );
+}
+function resetSchema(db) {
+  db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS memories");
+  db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS turns");
+  db.exec("DROP TABLE IF EXISTS sessions");
+  db.exec("DROP TABLE IF EXISTS memory_fts");
 }
 function initializeDatabase(db) {
+  if (hasLegacySchema(db)) {
+    resetSchema(db);
+  }
   initializeSchema(db);
-  const migrationNeedsRebuild = migrateSchema(db);
-  if (migrationNeedsRebuild || shouldRebuildSearchIndex(db)) {
+  if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
 }
@@ -1507,11 +1398,18 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   out: ${truncateMiddle(toolResult, 500)}
 </obs>`;
 }
-function buildInitialObsPrompt(sessionId, project, firstUserPrompt, observationId, obsBlock) {
+function buildInitialObsPrompt(sessionId, project, firstUserPrompt, priorTitle, priorContent, priorInsight, priorNextSteps, observationId, obsBlock) {
   return `<session id="S${sessionId}">
   project: ${project}
   user_request: ${firstUserPrompt ?? ""}
 </session>
+
+<prior_session>
+  title: ${priorTitle ?? ""}
+  content: ${priorContent ?? ""}
+  insight: ${priorInsight ?? ""}
+  next_steps: ${priorNextSteps ?? ""}
+</prior_session>
 
 ${obsBlock}
 
@@ -1677,6 +1575,10 @@ function createWorkerProcessors(db) {
             session.id,
             session.project,
             firstTurn?.user_prompt ?? null,
+            session.title,
+            session.content,
+            session.insight,
+            session.nextSteps,
             observation.id,
             obsBlock
           )
@@ -36362,7 +36264,7 @@ var MNEMO_ALLOWED_TOOLS = [
   "mcp__mnemo__replay"
 ];
 
-// src/mnemosyne/fork.ts
+// src/worker/agent-session.ts
 var import_node_fs4 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 var import_node_path4 = require("node:path");
@@ -38397,7 +38299,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
   };
 }
 
-// src/mnemosyne/fork.ts
+// src/worker/agent-session.ts
 function findClaudeOnPath() {
   const command = process.platform === "win32" ? "where" : "which";
   const result = (0, import_node_child_process.spawnSync)(command, ["claude"], {

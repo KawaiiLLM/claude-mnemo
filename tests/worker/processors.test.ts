@@ -86,6 +86,11 @@ describe("worker processors", () => {
     expect(prompt).toContain(`<obs id="O${observationId}">`);
     expect(prompt).toContain("🔧 Read");
     expect(prompt).toContain('in: {"file_path":"src/auth.ts"}');
+    expect(prompt).toContain("<prior_session>");
+    expect(prompt).toContain("title: Auth race");
+    expect(prompt).toContain("content: Current summary");
+    expect(prompt).toContain("insight: - current insight");
+    expect(prompt).toContain("next_steps: Ship it");
   });
 
   test("processObs skips already-finalized observations", async () => {

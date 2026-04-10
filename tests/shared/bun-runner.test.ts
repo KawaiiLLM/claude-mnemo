@@ -1,9 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, test } from "bun:test";
 
 import {
   collectHookStdinFromStream,
+  isPluginDisabledInClaudeSettings,
   shouldBufferStdinForScript,
 } from "../../plugin/scripts/bun-runner.js";
 
@@ -43,5 +47,27 @@ describe("bun-runner hook stdin handling", () => {
     await expect(pending).rejects.toThrow(
       "Timed out waiting for complete hook JSON on stdin",
     );
+  });
+
+  test("detects claude-mnemo disable flag in Claude settings", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "mnemo-bun-runner-"));
+    try {
+      writeFileSync(
+        join(configDir, "settings.json"),
+        JSON.stringify({
+          enabledPlugins: {
+            "claude-mnemo@zhaoqixuan": false,
+          },
+        }),
+      );
+
+      expect(
+        isPluginDisabledInClaudeSettings(
+          { CLAUDE_CONFIG_DIR: configDir },
+        ),
+      ).toBe(true);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });

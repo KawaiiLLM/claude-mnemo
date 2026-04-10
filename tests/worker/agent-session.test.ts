@@ -4,7 +4,7 @@ import {
   moveAgentSession,
   resolveClaudeCodeExecutablePath,
   type MoveAgentSessionDeps,
-} from "../../src/mnemosyne/fork";
+} from "../../src/worker/agent-session";
 
 describe("resolveClaudeCodeExecutablePath", () => {
   test("prefers explicit CLAUDE_CODE_PATH when it exists", () => {

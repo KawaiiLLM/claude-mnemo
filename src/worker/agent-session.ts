@@ -162,7 +162,6 @@ export function moveAgentSession(
       throw error;
     }
 
-    // Cross-device move: sync copy then delete
     deps.copyFileSync(srcPath, destPath);
     deps.unlinkSync(srcPath);
   }

@@ -6,7 +6,6 @@ import { createMemory } from "../../src/db/memories";
 import {
   initializeDatabase,
   initializeSchema,
-  migrateSchema,
 } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import * as searchModule from "../../src/db/search";
@@ -225,6 +224,95 @@ describe("initializeSchema", () => {
       "content",
       "created_at_epoch",
     ]);
+  });
+
+  test("initializeDatabase drops legacy schema instead of migrating it in place", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        started_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        description TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER
+      );
+
+      CREATE TABLE observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id INTEGER NOT NULL,
+        type TEXT,
+        title TEXT,
+        description TEXT,
+        insight TEXT,
+        narrative TEXT,
+        facts TEXT,
+        tags TEXT,
+        concepts TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        created_at_epoch INTEGER NOT NULL
+      );
+    `);
+
+    db.query(
+      "INSERT INTO sessions (content_session_id, project, title, description, started_at_epoch) VALUES (?, ?, ?, ?, ?)",
+    ).run("legacy-session", "claude-mnemo", "Legacy", "Old desc", 1);
+
+    initializeDatabase(db);
+
+    const sessionColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => row.name);
+    const observationColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(observations)")
+      .all()
+      .map((row) => row.name);
+
+    expect(sessionColumns).toEqual([
+      "id",
+      "content_session_id",
+      "project",
+      "title",
+      "content",
+      "insight",
+      "next_steps",
+      "last_compact_turn",
+      "created_at_epoch",
+      "updated_at_epoch",
+      "completed_at_epoch",
+    ]);
+    expect(observationColumns).toEqual([
+      "id",
+      "turn_id",
+      "tool_name",
+      "tool_input",
+      "tool_result",
+      "status",
+      "title",
+      "content",
+      "created_at_epoch",
+    ]);
+    expect(
+      db
+        .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions")
+        .get().count,
+    ).toBe(0);
   });
 
   test("creates the worker queue table with FIFO and claim columns", () => {
