@@ -270,11 +270,6 @@ export function createWorkerProcessors(db: Database) {
         );
         state.initialized = true;
       }
-
-      const updatedObservation = getObservation(db, observation.id);
-      if (updatedObservation?.title) {
-        state.priorTitles.push(updatedObservation.title);
-      }
     },
 
     async processTurnStop(state: SessionState, turnId: number): Promise<void> {

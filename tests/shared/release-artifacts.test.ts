@@ -3,6 +3,20 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 describe("release artifacts", () => {
+  test("plugin manifest declares an author", () => {
+    const manifest = JSON.parse(
+      readFileSync("plugin/.claude-plugin/plugin.json", "utf8"),
+    ) as {
+      author?: {
+        name?: string;
+      };
+    };
+
+    expect(typeof manifest.author).toBe("object");
+    expect(typeof manifest.author?.name).toBe("string");
+    expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
+  });
+
   test("tracks built plugin entrypoints in git", () => {
     const result = spawnSync(
       "git",

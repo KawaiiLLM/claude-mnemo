@@ -1599,10 +1599,6 @@ function createWorkerProcessors(db) {
         );
         state.initialized = true;
       }
-      const updatedObservation = getObservation(db, observation.id);
-      if (updatedObservation?.title) {
-        state.priorTitles.push(updatedObservation.title);
-      }
     },
     async processTurnStop(state, turnId) {
       const turn = getTurnById(db, turnId);
@@ -38752,7 +38748,6 @@ function createWorkerCore(deps) {
       contentSessionId: null,
       project: null,
       initialized: false,
-      priorTitles: [],
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),

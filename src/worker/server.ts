@@ -49,7 +49,6 @@ export interface SessionState {
   contentSessionId: string | null;
   project: string | null;
   initialized: boolean;
-  priorTitles: string[];
   lastPushAt: number;
   lastMessageAt: number;
   lastActivity: number;
@@ -277,7 +276,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       contentSessionId: null,
       project: null,
       initialized: false,
-      priorTitles: [],
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
