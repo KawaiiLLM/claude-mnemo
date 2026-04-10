@@ -36,7 +36,6 @@ function buildInitialObsPrompt(
   priorContent: string | null,
   priorInsight: string | null,
   priorNextSteps: string | null,
-  observationId: number,
   obsBlock: string,
 ): string {
   const priorSessionBlock =
@@ -56,24 +55,16 @@ function buildInitialObsPrompt(
   user_request: ${firstUserPrompt ?? ""}
 </session>
 ${priorSessionBlock}
-
-${obsBlock}
-
-<instruction>
-Update this observation with remember({ id: "O${observationId}", title, content }).
-If this tool call is not worth recording, use remember({ id: "O${observationId}", status: "skipped" }).
-Do not update turns, sessions, or memories in this step.
-</instruction>`;
+${obsBlock}`;
 }
 
-function buildObsPrompt(observationId: number, toolName: string, toolInput: string | null, toolResult: string | null): string {
-  return `${buildObsBlock(observationId, toolName, toolInput, toolResult)}
-
-<instruction>
-Update this observation with remember({ id: "O${observationId}", title, content }).
-If this tool call is not worth recording, use remember({ id: "O${observationId}", status: "skipped" }).
-Do not update turns, sessions, or memories in this step.
-</instruction>`;
+function buildObsPrompt(
+  observationId: number,
+  toolName: string,
+  toolInput: string | null,
+  toolResult: string | null,
+): string {
+  return buildObsBlock(observationId, toolName, toolInput, toolResult);
 }
 
 function buildTurnStopPrompt(
@@ -89,10 +80,7 @@ function buildTurnStopPrompt(
   filesRead: string[],
   filesModified: string[],
 ): string {
-  return `You are Mnemosyne, observing a completed Claude Code turn.
-Use only remember(), recall(), replay(). Non-tool output is discarded.
-
-<turn id="T${turnId}">
+  return `<turn id="T${turnId}">
   prompt: ${truncateMiddle(prompt, 1000)}
   response: ${truncateMiddle(response, 1000)}
 </turn>
@@ -105,13 +93,7 @@ Use only remember(), recall(), replay(). Non-tool output is discarded.
   prior_next_steps: ${nextSteps ?? ""}
   files_read: ${filesRead.join(", ")}
   files_modified: ${filesModified.join(", ")}
-</session>
-
-<instruction>
-Extract this turn with remember({ id: "T${turnId}", title, content, insight, type, tags }).
-If the turn brought meaningful progress, also update the session with remember({ id: "S${sessionId}", title, content, insight, next_steps }).
-If the turn is trivial, use remember({ id: "T${turnId}", status: "skipped" }).
-</instruction>`;
+</session>`;
 }
 
 function safeJsonParse(value: string | null): Record<string, unknown> | null {
@@ -191,10 +173,7 @@ function buildSessionSummaryPrompt(
   insight: string | null,
   nextSteps: string | null,
 ): string {
-  return `You are Mnemosyne, finalizing a Claude Code session summary.
-Use only remember(). Non-tool output is discarded.
-
-<session id="S${sessionId}">
+  return `<session id="S${sessionId}">
   project: ${project}
   prior_title: ${title ?? ""}
   prior_content: ${content ?? ""}
@@ -203,8 +182,21 @@ Use only remember(). Non-tool output is discarded.
 </session>
 
 <instruction>
-Refresh the session summary only if it materially changed:
-remember({ id: "S${sessionId}", title, content, insight, next_steps }).
+Refresh the session summary ONLY if material change since prior_*: a new goal, a completed milestone, a reversed decision, or a newly discovered constraint. Small incremental work does NOT qualify.
+
+If updating, call:
+remember({ id: "S${sessionId}", title, content, insight, next_steps })
+
+Length budget (strict):
+- title: 20-50 chars, one line
+- content: 100-300 chars, what the session is about
+- insight: 2-5 bullet lines, each ≤50 chars, prefixed "- "
+- next_steps: 50-150 chars, what's pending
+- Total: <500 chars
+
+Do NOT mention file paths, tool counts, or code-level details. Those belong in turn records.
+
+If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
 }
 
@@ -264,7 +256,6 @@ export function createWorkerProcessors(db: Database) {
             session.content,
             session.insight,
             session.nextSteps,
-            observation.id,
             obsBlock,
           ),
         );

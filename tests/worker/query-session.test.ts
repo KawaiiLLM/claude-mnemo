@@ -219,4 +219,99 @@ describe("worker query session", () => {
     expect(typeof moveAgentSession).toBe("function");
     expect(typeof resolveClaudeCodeExecutablePath).toBe("function");
   });
+
+  test("defaults the system prompt to the hardened Mnemosyne rules", async () => {
+    let capturedSystemPrompt: string | undefined;
+    const queryImpl = mock(
+      (args: { options?: { systemPrompt?: string } }) => {
+        capturedSystemPrompt = args.options?.systemPrompt;
+        // eslint-disable-next-line @typescript-eslint/require-await
+        return (async function* () {
+          return;
+        })();
+      },
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        spawnImpl:
+          (mock(() => ({ pid: 1 })) as unknown) as typeof import("node:child_process").spawn,
+        isProcessAliveImpl: () => false,
+      },
+    );
+
+    expect(capturedSystemPrompt).toBeDefined();
+    const prompt = capturedSystemPrompt ?? "";
+
+    // Identity and lifetime anchors
+    expect(prompt).toContain("long-lived memory worker");
+    expect(prompt).toContain("Never revisit records from earlier messages");
+
+    // Section structure — if someone regresses the prompt back to a one-liner,
+    // these markers all disappear.
+    expect(prompt).toContain("## Tools");
+    expect(prompt).toContain("## Observation messages");
+    expect(prompt).toContain("## Turn messages");
+    expect(prompt).toContain("## Forbidden across all messages");
+
+    // Turn-type enum — the single most load-bearing string; if this drifts,
+    // `recall(query="type:bugfix")` silently stops matching new records.
+    expect(prompt).toContain(
+      "bugfix | feature | refactor | change | discovery | decision",
+    );
+
+    // Tool scope rules — obs path must explicitly forbid recall/replay, and
+    // the memory-creation boundary must be present.
+    expect(prompt).toContain(
+      "Never update T/S records, create memories, or call",
+    );
+    expect(prompt).toContain(
+      "Never call `remember()` without an `id` field",
+    );
+
+    await session.close();
+  });
+
+  test("respects a custom systemPrompt override instead of the default", async () => {
+    let capturedSystemPrompt: string | undefined;
+    const queryImpl = mock(
+      (args: { options?: { systemPrompt?: string } }) => {
+        capturedSystemPrompt = args.options?.systemPrompt;
+        // eslint-disable-next-line @typescript-eslint/require-await
+        return (async function* () {
+          return;
+        })();
+      },
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+        systemPrompt: "CUSTOM TEST PROMPT",
+      },
+      {
+        queryImpl: queryImpl as never,
+        spawnImpl:
+          (mock(() => ({ pid: 1 })) as unknown) as typeof import("node:child_process").spawn,
+        isProcessAliveImpl: () => false,
+      },
+    );
+
+    expect(capturedSystemPrompt).toBe("CUSTOM TEST PROMPT");
+    // Sanity: none of the default markers should leak through when overridden.
+    expect(capturedSystemPrompt).not.toContain("long-lived memory worker");
+    expect(capturedSystemPrompt).not.toContain("## Tools");
+
+    await session.close();
+  });
 });
