@@ -16,6 +16,7 @@ interface TranscriptEntry {
   permissionMode?: string;
   isSidechain?: boolean;
   isApiErrorMessage?: boolean;
+  uuid?: string;
 }
 
 export interface TranscriptToolCall {
@@ -52,6 +53,7 @@ interface RawTranscriptEntry {
   permissionMode?: unknown;
   isSidechain?: unknown;
   isApiErrorMessage?: unknown;
+  uuid?: unknown;
 }
 
 export function normalizeAssistantText(text: string): string {
@@ -168,12 +170,28 @@ export function readAllTranscriptEntries(transcriptPath: string): TranscriptEntr
     return [];
   }
 
-  return rawTranscript
+  const entries = rawTranscript
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => normalizeEntry(JSON.parse(line) as RawTranscriptEntry))
     .filter((entry) => !entry.isApiErrorMessage);
+
+  const seenUuids = new Set<string>();
+  const deduped: TranscriptEntry[] = [];
+
+  for (const entry of entries) {
+    if (entry.uuid) {
+      if (seenUuids.has(entry.uuid)) {
+        continue;
+      }
+      seenUuids.add(entry.uuid);
+    }
+
+    deduped.push(entry);
+  }
+
+  return deduped;
 }
 
 function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
@@ -199,6 +217,7 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
           ? raw.content
           : undefined,
     promptId: typeof raw.promptId === "string" ? raw.promptId : undefined,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : undefined,
     permissionMode:
       typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
     isSidechain: Boolean(raw.isSidechain),

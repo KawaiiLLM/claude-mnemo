@@ -33136,7 +33136,19 @@ function readAllTranscriptEntries(transcriptPath) {
   if (rawTranscript.trim() === "") {
     return [];
   }
-  return rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
+  const entries = rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
+  const seenUuids = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      if (seenUuids.has(entry.uuid)) {
+        continue;
+      }
+      seenUuids.add(entry.uuid);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
 }
 function normalizeEntry(raw) {
   const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
@@ -33145,6 +33157,7 @@ function normalizeEntry(raw) {
     role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
     content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
     isSidechain: Boolean(raw.isSidechain),
     isApiErrorMessage: Boolean(raw.isApiErrorMessage)

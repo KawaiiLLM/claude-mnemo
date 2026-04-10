@@ -22,6 +22,18 @@ function writeTranscript(lines: unknown[]): { directory: string; path: string } 
   return { directory, path };
 }
 
+function makeEntry(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "user",
+    role: "user",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "prompt" }],
+    },
+    ...overrides,
+  };
+}
+
 describe("parseTranscript", () => {
   const directories: string[] = [];
 
@@ -378,5 +390,172 @@ describe("parseTranscript", () => {
       "p1",
       "p2",
     ]);
+  });
+
+  test("deduplicates replay-appended transcript entries by uuid", () => {
+    const transcript = writeTranscript([
+      makeEntry({
+        uuid: "u1",
+        promptId: "p1",
+        permissionMode: "default",
+        message: { role: "user", content: "First prompt" },
+      }),
+      {
+        uuid: "u2",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+      makeEntry({
+        uuid: "u1",
+        promptId: "p1",
+        permissionMode: "default",
+        message: { role: "user", content: "First prompt" },
+      }),
+      {
+        uuid: "u2",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "First answer" }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(parseTranscript(transcript.path)).toEqual([
+      expect.objectContaining({
+        promptNumber: 1,
+        userPrompt: "First prompt",
+        assistantText: "First answer",
+      }),
+    ]);
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
+  });
+
+  test("treats a resumed transcript replay as the original turn sequence", () => {
+    const transcript = writeTranscript([
+      makeEntry({
+        uuid: "u1",
+        promptId: "A",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt A" },
+      }),
+      {
+        uuid: "u2",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer A" }],
+        },
+      },
+      makeEntry({
+        uuid: "u3",
+        promptId: "B",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt B" },
+      }),
+      {
+        uuid: "u4",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer B" }],
+        },
+      },
+      makeEntry({
+        uuid: "u1",
+        promptId: "A",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt A" },
+      }),
+      {
+        uuid: "u2",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer A" }],
+        },
+      },
+      makeEntry({
+        uuid: "u3",
+        promptId: "B",
+        permissionMode: "default",
+        message: { role: "user", content: "Prompt B" },
+      }),
+      {
+        uuid: "u4",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Answer B" }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const turns = parseTranscript(transcript.path);
+
+    expect(turns).toHaveLength(2);
+    expect(turns.map((turn) => [turn.promptNumber, turn.userPrompt])).toEqual([
+      [1, "Prompt A"],
+      [2, "Prompt B"],
+    ]);
+  });
+
+  test("filters slash-command derived entries even when content is a text block array", () => {
+    const transcript = writeTranscript([
+      makeEntry({
+        uuid: "u1",
+        promptId: "p1",
+        permissionMode: "default",
+        message: { role: "user", content: [{ type: "text", text: "real prompt" }] },
+      }),
+      makeEntry({
+        uuid: "u2",
+        promptId: "p1",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "<command-args>foo bar</command-args>" }],
+        },
+      }),
+      makeEntry({
+        uuid: "u3",
+        promptId: "p1",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "<command-message>slash output</command-message>" }],
+        },
+      }),
+      makeEntry({
+        uuid: "u4",
+        promptId: "p1",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "⏺ Ran 2 stop hooks in 120ms" }],
+        },
+      }),
+      {
+        uuid: "u5",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "answer" }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const turns = parseReplayTranscript(transcript.path);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toEqual(
+      expect.objectContaining({
+        promptId: "p1",
+        userPrompt: "real prompt",
+      }),
+    );
   });
 });
