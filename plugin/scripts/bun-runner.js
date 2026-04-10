@@ -79,6 +79,10 @@ function findBun() {
   return null;
 }
 
+export function shouldBufferStdinForScript(scriptPath) {
+  return scriptPath.endsWith('/hook-command.cjs') || scriptPath.endsWith('\\hook-command.cjs');
+}
+
 // Early exit if plugin is disabled in Claude Code settings (#781).
 // Sync read + JSON parse — fastest possible check before spawning Bun.
 function isPluginDisabledInClaudeSettings() {
@@ -97,80 +101,154 @@ if (isPluginDisabledInClaudeSettings()) {
   process.exit(0);
 }
 
-// Get args: node bun-runner.js <script> [args...]
-const args = process.argv.slice(2);
-
-if (args.length === 0) {
-  console.error('Usage: node bun-runner.js <script> [args...]');
-  process.exit(1);
-}
-
-// Fix broken script paths caused by empty CLAUDE_PLUGIN_ROOT (#1215)
-args[0] = fixBrokenScriptPath(args[0]);
-
-const bunPath = findBun();
-
-if (!bunPath) {
-  console.error('Error: Bun not found. Please install Bun: https://bun.sh');
-  console.error('After installation, restart your terminal.');
-  process.exit(1);
-}
-
-// Fix #646: Buffer stdin in Node.js before passing to Bun.
+// Fix #646: Buffer hook stdin in Node.js before passing to Bun.
 // On Linux, Bun's libuv calls fstat() on inherited pipe fds and crashes with
-// EINVAL when the pipe comes from Claude Code's hook system. By reading stdin
-// in Node.js first and writing it to a fresh pipe, Bun receives a normal pipe
-// that it can fstat() without errors.
-function collectStdin() {
-  return new Promise((resolve) => {
-    // If stdin is a TTY (interactive), there's no piped data to collect
-    if (process.stdin.isTTY) {
+// EINVAL when the pipe comes from Claude Code's hook system. Hooks receive a
+// single JSON payload, so we can safely buffer until we have a complete JSON
+// object and then replay it into Bun through a fresh pipe. MCP server traffic
+// is streaming JSON-RPC and must continue to use inherited stdio.
+export function collectHookStdinFromStream(
+  stdin = process.stdin,
+  { timeoutMs = 5000 } = {},
+) {
+  return new Promise((resolve, reject) => {
+    if (stdin.isTTY) {
       resolve(null);
       return;
     }
 
     const chunks = [];
-    process.stdin.on('data', (chunk) => chunks.push(chunk));
-    process.stdin.on('end', () => {
-      resolve(chunks.length > 0 ? Buffer.concat(chunks) : null);
-    });
-    process.stdin.on('error', () => {
-      // stdin may not be readable (e.g. already closed), treat as no data
-      resolve(null);
-    });
+    let settled = false;
 
-    // Safety: if no data arrives within 5s, proceed without stdin
-    setTimeout(() => {
-      process.stdin.removeAllListeners();
-      process.stdin.pause();
+    const cleanup = () => {
+      clearTimeout(timer);
+      stdin.removeListener('data', onData);
+      stdin.removeListener('end', onEnd);
+      stdin.removeListener('error', onError);
+    };
+
+    const bufferedText = () => Buffer.concat(chunks).toString('utf8').trim();
+
+    const tryResolveCompleteJson = () => {
+      const text = bufferedText();
+      if (text === '') {
+        return false;
+      }
+
+      try {
+        JSON.parse(text);
+        settled = true;
+        cleanup();
+        resolve(Buffer.from(text));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const onData = (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      tryResolveCompleteJson();
+    };
+
+    const onEnd = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
       resolve(chunks.length > 0 ? Buffer.concat(chunks) : null);
-    }, 5000);
+    };
+
+    const onError = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(null);
+    };
+
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      if (chunks.length === 0) {
+        settled = true;
+        cleanup();
+        resolve(null);
+        return;
+      }
+
+      if (tryResolveCompleteJson()) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      reject(new Error('Timed out waiting for complete hook JSON on stdin'));
+    }, timeoutMs);
+
+    stdin.on('data', onData);
+    stdin.on('end', onEnd);
+    stdin.on('error', onError);
   });
 }
 
-const stdinData = await collectStdin();
+export async function main(argv = process.argv.slice(2)) {
+  if (argv.length === 0) {
+    console.error('Usage: node bun-runner.js <script> [args...]');
+    return 1;
+  }
 
-// Spawn Bun with the provided script and args
-// Use spawn (not spawnSync) to properly handle stdio
-// Note: Don't use shell mode on Windows - it breaks paths with spaces in usernames
-// Use windowsHide to prevent a visible console window from spawning on Windows
-const child = spawn(bunPath, args, {
-  stdio: [stdinData ? 'pipe' : 'ignore', 'inherit', 'inherit'],
-  windowsHide: true,
-  env: process.env
-});
+  const args = [...argv];
+  args[0] = fixBrokenScriptPath(args[0]);
 
-// Write buffered stdin to child's pipe, then close it so the child sees EOF
-if (stdinData && child.stdin) {
-  child.stdin.write(stdinData);
-  child.stdin.end();
+  const bunPath = findBun();
+
+  if (!bunPath) {
+    console.error('Error: Bun not found. Please install Bun: https://bun.sh');
+    console.error('After installation, restart your terminal.');
+    return 1;
+  }
+
+  const stdinData = shouldBufferStdinForScript(args[0])
+    ? await collectHookStdinFromStream(process.stdin)
+    : null;
+
+  const child = spawn(bunPath, args, {
+    stdio: [
+      shouldBufferStdinForScript(args[0]) ? (stdinData ? 'pipe' : 'ignore') : 'inherit',
+      'inherit',
+      'inherit'
+    ],
+    windowsHide: true,
+    env: process.env
+  });
+
+  if (stdinData && child.stdin) {
+    child.stdin.write(stdinData);
+    child.stdin.end();
+  }
+
+  return await new Promise((resolve) => {
+    child.on('error', (err) => {
+      console.error(`Failed to start Bun: ${err.message}`);
+      resolve(1);
+    });
+
+    child.on('close', (code) => {
+      resolve(code || 0);
+    });
+  });
 }
 
-child.on('error', (err) => {
-  console.error(`Failed to start Bun: ${err.message}`);
-  process.exit(1);
-});
+const isDirectExecution =
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
 
-child.on('close', (code) => {
-  process.exit(code || 0);
-});
+if (isDirectExecution) {
+  const exitCode = await main();
+  process.exit(exitCode);
+}
