@@ -9,6 +9,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
+import { resolveTranscriptPath } from "../../src/shared/paths";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
 
 describe("recallMemory", () => {
@@ -303,6 +304,9 @@ describe("recallMemory", () => {
     });
 
     expect(sessionOutput).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(sessionOutput).toContain(
+      `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
+    );
     expect(sessionOutput).toContain("[T1] Diagnose auth race");
     expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
@@ -354,6 +358,16 @@ describe("recallMemory", () => {
     expect(shortOutput).not.toContain("p".repeat(120));
     expect(longOutput).toContain("p".repeat(120));
     expect(longOutput).toContain("r".repeat(120));
+  });
+
+  test("omits jsonlPath from collapsed session output", () => {
+    const output = recallMemory(db, {
+      id: `S${authSessionId}`,
+      depth: "collapsed",
+    });
+
+    expect(output).not.toContain(".jsonl");
+    expect(output).not.toContain("raw:");
   });
 
   test("supports wildcard and range ids with stable observation identity", () => {

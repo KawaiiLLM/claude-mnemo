@@ -10,6 +10,7 @@ import * as formatModule from "../../src/mcp/format";
 import * as recallModule from "../../src/mcp/recall";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
+import { resolveTranscriptPath } from "../../src/shared/paths";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -280,8 +281,17 @@ describe("handleContextHook", () => {
     expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
     expect(renderNodeSpy).toHaveBeenCalledTimes(1);
     expect(renderNodeSpy).toHaveBeenCalledWith(
-      { type: "session", value: expect.objectContaining({ id: singleSession.id }) },
-      { depth: "expanded", mode: "legacy" },
+      {
+        type: "session",
+        value: expect.objectContaining({
+          id: singleSession.id,
+          jsonlPath: resolveTranscriptPath(
+            "/Users/zhaoqixuan/Projects/claude-mnemo",
+            "single-session",
+          ),
+        }),
+      },
+      { depth: "expanded", truncate: 120, mode: "unified" },
     );
 
     getRecentSessionsSpy.mockRestore();
@@ -537,6 +547,9 @@ describe("handleContextHook", () => {
       `- [S3] Anchored session | 💬4 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
+      `  raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
+    );
+    expect(output).toContain(
       `[M1] feedback/global: Use real DB tests | 1970-01-01`,
     );
     expect(output).toContain(
@@ -566,8 +579,14 @@ describe("handleContextHook", () => {
     expect(output).toContain(
       `- [S1] Most recent session | 💬6 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
+    expect(output).not.toContain(
+      `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-newest")}`,
+    );
     expect(output).toContain(
-      "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long for the collapsed view.",
+      "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long...",
+    );
+    expect(output).toContain(
+      "[use mnemo-replay skill → read S1 for full content]",
     );
     expect(output).not.toContain("Recent turn 1");
     expect(output).not.toContain("Recent turn 2");
@@ -578,7 +597,7 @@ describe("handleContextHook", () => {
       `- [S2] Secondary session | 💬2 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
-      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible budget.",
+      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible bu...",
     );
 
     expect(output).toContain(
@@ -603,16 +622,25 @@ describe("handleContextHook", () => {
     expect(buildSessionSummarySpy).not.toHaveBeenCalled();
     expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
     expect(renderNodeSpy).toHaveBeenCalledWith(
-      { type: "session", value: expect.objectContaining({ id: currentSessionId }) },
-      { depth: "expanded", mode: "legacy" },
+      {
+        type: "session",
+        value: expect.objectContaining({
+          id: currentSessionId,
+          jsonlPath: resolveTranscriptPath(
+            "/Users/zhaoqixuan/Projects/claude-mnemo",
+            "session-context",
+          ),
+        }),
+      },
+      { depth: "expanded", truncate: 120, mode: "unified" },
     );
     expect(renderNodeSpy).toHaveBeenCalledWith(
       { type: "session", value: expect.objectContaining({ id: 1 }) },
-      { depth: "collapsed", mode: "legacy" },
+      { depth: "collapsed", truncate: 120, mode: "unified" },
     );
     expect(renderNodeSpy).toHaveBeenCalledWith(
       { type: "turn", value: expect.objectContaining({ promptNumber: 2 }) },
-      { depth: "collapsed", mode: "legacy" },
+      { depth: "collapsed", truncate: 120, mode: "unified" },
     );
     expect(renderNodeSpy).toHaveBeenCalledWith(
       {

@@ -88,6 +88,7 @@ export interface FormattedSession {
   nextSteps?: string | null;
   turnCount?: number | null;
   observationCount?: number | null;
+  jsonlPath?: string;
   turns?: FormattedTurn[];
 }
 
@@ -374,6 +375,10 @@ function formatSessionExpandedWithMode(
 ): string {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+
+  if (session.jsonlPath) {
+    lines.push(`  raw: ${session.jsonlPath}`);
+  }
 
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");

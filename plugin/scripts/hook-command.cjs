@@ -51,6 +51,18 @@ function resolveDatabasePath(explicitPath) {
   }
   return candidatePath;
 }
+function encodeProjectPath(projectPath) {
+  return projectPath.replace(/[/:\\]+/g, "-");
+}
+function resolveTranscriptPath(projectPath, sessionId) {
+  return (0, import_node_path.join)(
+    (0, import_node_os.homedir)(),
+    ".claude",
+    "projects",
+    encodeProjectPath(projectPath),
+    `${sessionId}.jsonl`
+  );
+}
 
 // src/db/database.ts
 function resolveDatabasePath2(path) {
@@ -987,6 +999,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
 function formatSessionExpandedWithMode(session, mode, truncate) {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  if (session.jsonlPath) {
+    lines.push(`  raw: ${session.jsonlPath}`);
+  }
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -1397,7 +1412,8 @@ function buildSessionView(session, metrics) {
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount: metrics?.turnCount ?? 0,
-    observationCount: metrics?.observationCount ?? 0
+    observationCount: metrics?.observationCount ?? 0,
+    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId)
   };
 }
 function getObservationCountByTurnId(db, turnIds) {
@@ -1435,14 +1451,14 @@ function buildCurrentSessionOutput(session, turns) {
   const lines = [
     renderNode(
       { type: "session", value: session },
-      { depth: "expanded", mode: "legacy" }
+      { depth: "expanded", truncate: 120, mode: "unified" }
     )
   ];
-  for (const turn of turns) {
+  for (const turn of turns.slice(0, 5)) {
     lines.push(
       renderNode(
         { type: "turn", value: turn },
-        { depth: "collapsed", mode: "legacy" }
+        { depth: "collapsed", truncate: 120, mode: "unified" }
       )
     );
   }
@@ -1453,7 +1469,7 @@ function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessio
   return others.map((session) => buildSessionView(session, sessionMetrics.get(session.id))).map(
     (session) => renderNode(
       { type: "session", value: session },
-      { depth: "collapsed", mode: "legacy" }
+      { depth: "collapsed", truncate: 120, mode: "unified" }
     )
   );
 }

@@ -10,6 +10,7 @@ import {
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
+import { resolveTranscriptPath } from "../shared/paths";
 
 import {
   DEFAULT_TRUNCATE,
@@ -293,6 +294,7 @@ function buildSessionView(
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0,
     ),
+    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
     turns,
   };
 }
@@ -353,6 +355,7 @@ export function buildSessionSummary(
     nextSteps: session.nextSteps,
     turnCount,
     observationCount,
+    jsonlPath: undefined,
   };
 }
 
@@ -406,6 +409,7 @@ export function buildFormattedSession(
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0,
     ),
+    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
     turns: turns.map((turn) =>
       expandTurns.includes(turn.promptNumber)
         ? turn
@@ -515,7 +519,9 @@ function renderSession(
   truncate?: number,
   turnSelector?: Set<number>,
 ): string {
-  const view = buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+  const view = depth === "expanded"
+    ? buildSessionView(db, session)
+    : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },

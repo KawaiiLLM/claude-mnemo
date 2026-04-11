@@ -13,6 +13,7 @@ import type {
   FormattedSession,
   FormattedTurn,
 } from "../../mcp/format";
+import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface ContextHandlerDependencies {
@@ -131,6 +132,7 @@ function buildSessionView(
     nextSteps: session.nextSteps,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
+    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
   };
 }
 
@@ -185,15 +187,15 @@ function buildCurrentSessionOutput(
   const lines = [
     formatModule.renderNode(
       { type: "session", value: session },
-      { depth: "expanded", mode: "legacy" },
+      { depth: "expanded", truncate: 120, mode: "unified" },
     ),
   ];
 
-  for (const turn of turns) {
+  for (const turn of turns.slice(0, 5)) {
     lines.push(
       formatModule.renderNode(
         { type: "turn", value: turn },
-        { depth: "collapsed", mode: "legacy" },
+        { depth: "collapsed", truncate: 120, mode: "unified" },
       ),
     );
   }
@@ -213,7 +215,7 @@ function buildRecentSessionsOutput(
     .map((session) =>
       formatModule.renderNode(
         { type: "session", value: session },
-        { depth: "collapsed", mode: "legacy" },
+        { depth: "collapsed", truncate: 120, mode: "unified" },
       ),
     );
 }

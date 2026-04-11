@@ -7355,6 +7355,18 @@ function resolveDatabasePath(explicitPath) {
   }
   return candidatePath;
 }
+function encodeProjectPath(projectPath) {
+  return projectPath.replace(/[/:\\]+/g, "-");
+}
+function resolveTranscriptPath(projectPath, sessionId) {
+  return (0, import_node_path.join)(
+    (0, import_node_os.homedir)(),
+    ".claude",
+    "projects",
+    encodeProjectPath(projectPath),
+    `${sessionId}.jsonl`
+  );
+}
 var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
@@ -31483,6 +31495,9 @@ function getTurnsForSession(db, sessionId) {
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 
+// src/mcp/recall.ts
+init_paths();
+
 // src/mcp/format.ts
 var FIELD_TRUNCATION_SUFFIX = "...";
 var DEFAULT_TRUNCATE = 200;
@@ -31650,6 +31665,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
 function formatSessionExpandedWithMode(session, mode, truncate) {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  if (session.jsonlPath) {
+    lines.push(`  raw: ${session.jsonlPath}`);
+  }
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -32203,6 +32221,7 @@ function buildSessionView(db, session) {
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0
     ),
+    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
     turns
   };
 }
@@ -32229,7 +32248,8 @@ function buildSessionSummary(db, sessionId) {
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
     turnCount,
-    observationCount
+    observationCount,
+    jsonlPath: void 0
   };
 }
 function buildTurnView(db, turn) {
@@ -32302,7 +32322,7 @@ function joinPage(header, body) {
 ${body}` : header;
 }
 function renderSession(db, session, depth, truncate, turnSelector) {
-  const view = buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+  const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
