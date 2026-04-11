@@ -1454,7 +1454,7 @@ function buildCurrentSessionOutput(session, turns) {
       { depth: "expanded", truncate: 120, mode: "unified" }
     )
   ];
-  for (const turn of turns.slice(0, 5)) {
+  for (const turn of turns.slice(-5)) {
     lines.push(
       renderNode(
         { type: "turn", value: turn },

@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getMemory } from "../db/memories";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
-import { getRecentSessions, getSession } from "../db/sessions";
+import { getSession } from "../db/sessions";
 import {
   getTurn,
   getTurnById,
@@ -46,8 +46,6 @@ interface QueryFilters {
 }
 
 const CHILD_PREVIEW_SIZE = 5;
-const SESSION_SCAN_LIMIT = 10_000;
-const SEARCH_SCAN_LIMIT = 5_000;
 
 type RoutedRecallId =
   | { kind: "sessions"; sessionIds?: number[] }
@@ -577,9 +575,12 @@ function renderTurnScope(
     grouped.set(turn.sessionId, list);
   }
 
-  const sessions = getRecentSessions(db, { limit: 1000 }).filter((session) =>
-    grouped.has(session.id),
-  );
+  const sessions = Array.from(grouped.keys())
+    .map((sessionId) => getSession(db, sessionId))
+    .filter(
+      (session): session is NonNullable<ReturnType<typeof getSession>> =>
+        session !== null,
+    );
 
   for (const session of sessions) {
     const view = buildSessionSummary(db, session.id);
@@ -660,9 +661,12 @@ function renderObservationScope(
     return lines.join("\n");
   }
 
-  const sessions = getRecentSessions(db, { limit: 1000 }).filter((session) =>
-    grouped.has(session.id),
-  );
+  const sessions = Array.from(grouped.keys())
+    .map((sessionId) => getSession(db, sessionId))
+    .filter(
+      (session): session is NonNullable<ReturnType<typeof getSession>> =>
+        session !== null,
+    );
 
   for (const session of sessions) {
     const sessionView = buildSessionSummary(db, session.id);
@@ -841,7 +845,18 @@ function listSessionIds(
           (session): session is NonNullable<ReturnType<typeof getSession>> =>
             session !== null,
         )
-    : getRecentSessions(db, { limit: SESSION_SCAN_LIMIT });
+    : db
+        .query<{ id: number; createdAtEpoch: number }, []>(
+          `SELECT id, created_at_epoch AS createdAtEpoch
+           FROM sessions
+           ORDER BY created_at_epoch DESC`,
+        )
+        .all()
+        .map((row) => getSession(db, row.id))
+        .filter(
+          (session): session is NonNullable<ReturnType<typeof getSession>> =>
+            session !== null,
+        );
 
   return sessions
     .filter((session) => {
@@ -1137,7 +1152,7 @@ function renderRoutedId(
       ? routed.memoryIds
       : searchMemory(
           db,
-          { scope: "memories", limit: SEARCH_SCAN_LIMIT, after, before },
+          { scope: "memories", after, before },
         ).map((result) => result.sourceId);
     const paged = paginateItems(memoryIds, page, pageSize);
     return joinPage(
@@ -1177,7 +1192,7 @@ function renderSessionList(
 function searchQueryResults(
   db: Database,
   filters: QueryFilters,
-  limit: number,
+  limit?: number,
   after?: number,
   before?: number,
 ): SearchMemoryResult[] {
@@ -1251,7 +1266,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       searchQueryResults(
         db,
         filters,
-        SEARCH_SCAN_LIMIT,
+        undefined,
         timeRange.after,
         timeRange.before,
       ),

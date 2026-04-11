@@ -377,11 +377,19 @@ function queryRows(
   return db.query<SearchRow, Array<string | number>>(sql).all(...params).map(mapSearchRow);
 }
 
+function applyLimit(sql: string, limit?: number): string {
+  return limit === undefined ? sql : `${sql}\n      LIMIT ?`;
+}
+
+function withLimit<T extends Array<string | number>>(params: T, limit?: number): Array<string | number> {
+  return limit === undefined ? params : [...params, limit];
+}
+
 function queryRecentSessions(db: Database, options: SearchMemoryOptions): SearchMemoryResult[] {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'session' AS layer,
         s.id AS sourceId,
@@ -399,9 +407,8 @@ function queryRecentSessions(db: Database, options: SearchMemoryOptions): Search
       FROM sessions s
       ${combineClauses([projectClause.clause])}
       ORDER BY s.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20],
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit),
   );
 }
 
@@ -409,7 +416,7 @@ function queryRecentTurns(db: Database, options: SearchMemoryOptions): SearchMem
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'turn' AS layer,
         t.id AS sourceId,
@@ -428,9 +435,8 @@ function queryRecentTurns(db: Database, options: SearchMemoryOptions): SearchMem
       JOIN sessions s ON s.id = t.session_id
       ${combineClauses([projectClause.clause])}
       ORDER BY t.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20],
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit),
   );
 }
 
@@ -441,7 +447,7 @@ function queryRecentObservations(
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'observation' AS layer,
         o.id AS sourceId,
@@ -461,9 +467,8 @@ function queryRecentObservations(
       JOIN sessions s ON s.id = t.session_id
       ${combineClauses(["o.status = 'extracted'", projectClause.clause])}
       ORDER BY o.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20],
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit),
   );
 }
 
@@ -479,7 +484,7 @@ function queryRecentMemories(
 
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'memory' AS layer,
         m.id AS sourceId,
@@ -497,9 +502,8 @@ function queryRecentMemories(
       FROM memories m
       ${combineClauses(["m.status = 'active'", scopeClause.clause, dateClause.clause])}
       ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-      LIMIT ?
-    `,
-    [...scopeClause.params, ...dateClause.params, options.limit ?? 20],
+    `, options.limit),
+    withLimit([...scopeClause.params, ...dateClause.params], options.limit),
   );
 }
 
@@ -544,7 +548,7 @@ function querySessionsByScope(
 
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'session' AS layer,
         s.id AS sourceId,
@@ -563,9 +567,8 @@ function querySessionsByScope(
       ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY s.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20],
+    `, options.limit),
+    withLimit(params, options.limit),
   );
 }
 
@@ -592,7 +595,7 @@ function queryTurnsByScope(
 
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'turn' AS layer,
         t.id AS sourceId,
@@ -612,9 +615,8 @@ function queryTurnsByScope(
       ${query ? "JOIN memory_fts f ON f.layer = 'turn' AND f.source_id = t.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY t.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20],
+    `, options.limit),
+    withLimit(params, options.limit),
   );
 }
 
@@ -643,7 +645,7 @@ function queryObservationsByScope(
 
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'observation' AS layer,
         o.id AS sourceId,
@@ -664,9 +666,8 @@ function queryObservationsByScope(
       ${query ? "JOIN memory_fts f ON f.layer = 'observation' AND f.source_id = o.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY o.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20],
+    `, options.limit),
+    withLimit(params, options.limit),
   );
 }
 
@@ -699,7 +700,7 @@ function queryMemoriesByScope(
 
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'memory' AS layer,
         m.id AS sourceId,
@@ -718,9 +719,8 @@ function queryMemoriesByScope(
       ${query ? "JOIN memory_fts f ON f.layer = 'memory' AND f.source_id = m.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20],
+    `, options.limit),
+    withLimit(params, options.limit),
   );
 }
 

@@ -191,7 +191,7 @@ function buildCurrentSessionOutput(
     ),
   ];
 
-  for (const turn of turns.slice(0, 5)) {
+  for (const turn of turns.slice(-5)) {
     lines.push(
       formatModule.renderNode(
         { type: "turn", value: turn },

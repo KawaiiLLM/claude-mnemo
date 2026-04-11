@@ -7002,11 +7002,18 @@ function rebuildSearchIndex(db) {
 function queryRows(db, sql, params) {
   return db.query(sql).all(...params).map(mapSearchRow);
 }
+function applyLimit(sql, limit) {
+  return limit === void 0 ? sql : `${sql}
+      LIMIT ?`;
+}
+function withLimit(params, limit) {
+  return limit === void 0 ? params : [...params, limit];
+}
 function queryRecentSessions(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'session' AS layer,
         s.id AS sourceId,
@@ -7024,16 +7031,15 @@ function queryRecentSessions(db, options) {
       FROM sessions s
       ${combineClauses([projectClause.clause])}
       ORDER BY s.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20]
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit)
   );
 }
 function queryRecentTurns(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'turn' AS layer,
         t.id AS sourceId,
@@ -7052,16 +7058,15 @@ function queryRecentTurns(db, options) {
       JOIN sessions s ON s.id = t.session_id
       ${combineClauses([projectClause.clause])}
       ORDER BY t.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20]
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit)
   );
 }
 function queryRecentObservations(db, options) {
   const projectClause = buildProjectClause(options.project);
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'observation' AS layer,
         o.id AS sourceId,
@@ -7081,9 +7086,8 @@ function queryRecentObservations(db, options) {
       JOIN sessions s ON s.id = t.session_id
       ${combineClauses(["o.status = 'extracted'", projectClause.clause])}
       ORDER BY o.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...projectClause.params, options.limit ?? 20]
+    `, options.limit),
+    withLimit([...projectClause.params], options.limit)
   );
 }
 function queryRecentMemories(db, options) {
@@ -7094,7 +7098,7 @@ function queryRecentMemories(db, options) {
   );
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'memory' AS layer,
         m.id AS sourceId,
@@ -7112,9 +7116,8 @@ function queryRecentMemories(db, options) {
       FROM memories m
       ${combineClauses(["m.status = 'active'", scopeClause.clause, dateClause.clause])}
       ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-      LIMIT ?
-    `,
-    [...scopeClause.params, ...dateClause.params, options.limit ?? 20]
+    `, options.limit),
+    withLimit([...scopeClause.params, ...dateClause.params], options.limit)
   );
 }
 function querySessionsByScope(db, options, query) {
@@ -7150,7 +7153,7 @@ function querySessionsByScope(db, options, query) {
   }
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'session' AS layer,
         s.id AS sourceId,
@@ -7169,9 +7172,8 @@ function querySessionsByScope(db, options, query) {
       ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY s.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20]
+    `, options.limit),
+    withLimit(params, options.limit)
   );
 }
 function queryTurnsByScope(db, options, query) {
@@ -7190,7 +7192,7 @@ function queryTurnsByScope(db, options, query) {
   }
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'turn' AS layer,
         t.id AS sourceId,
@@ -7210,9 +7212,8 @@ function queryTurnsByScope(db, options, query) {
       ${query ? "JOIN memory_fts f ON f.layer = 'turn' AND f.source_id = t.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY t.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20]
+    `, options.limit),
+    withLimit(params, options.limit)
   );
 }
 function queryObservationsByScope(db, options, query) {
@@ -7232,7 +7233,7 @@ function queryObservationsByScope(db, options, query) {
   }
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'observation' AS layer,
         o.id AS sourceId,
@@ -7253,9 +7254,8 @@ function queryObservationsByScope(db, options, query) {
       ${query ? "JOIN memory_fts f ON f.layer = 'observation' AND f.source_id = o.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY o.created_at_epoch DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20]
+    `, options.limit),
+    withLimit(params, options.limit)
   );
 }
 function queryMemoriesByScope(db, options, query) {
@@ -7279,7 +7279,7 @@ function queryMemoriesByScope(db, options, query) {
   }
   return queryRows(
     db,
-    `
+    applyLimit(`
       SELECT
         'memory' AS layer,
         m.id AS sourceId,
@@ -7298,9 +7298,8 @@ function queryMemoriesByScope(db, options, query) {
       ${query ? "JOIN memory_fts f ON f.layer = 'memory' AND f.source_id = m.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-      LIMIT ?
-    `,
-    [...params, options.limit ?? 20]
+    `, options.limit),
+    withLimit(params, options.limit)
   );
 }
 function searchMemory(db, options) {
@@ -31354,19 +31353,6 @@ function upsertSession(db, input) {
 function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
-function getRecentSessions(db, options = {}) {
-  const clauses = [];
-  const params = [];
-  if (options.project) {
-    clauses.push("project = ?");
-    params.push(options.project);
-  }
-  const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const limit = options.limit ?? 20;
-  return db.query(
-    `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
-  ).all(...params, limit);
-}
 
 // src/db/turns.ts
 init_search();
@@ -32030,8 +32016,6 @@ function expandNumericSelector(value) {
 
 // src/mcp/recall.ts
 var CHILD_PREVIEW_SIZE = 5;
-var SESSION_SCAN_LIMIT = 1e4;
-var SEARCH_SCAN_LIMIT = 5e3;
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -32366,8 +32350,8 @@ function renderTurnScope(db, turns, depth, truncate) {
     list.push(turn);
     grouped.set(turn.sessionId, list);
   }
-  const sessions = getRecentSessions(db, { limit: 1e3 }).filter(
-    (session) => grouped.has(session.id)
+  const sessions = Array.from(grouped.keys()).map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
   );
   for (const session of sessions) {
     const view = buildSessionSummary(db, session.id);
@@ -32433,8 +32417,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     }
     return lines.join("\n");
   }
-  const sessions = getRecentSessions(db, { limit: 1e3 }).filter(
-    (session) => grouped.has(session.id)
+  const sessions = Array.from(grouped.keys()).map((sessionId) => getSession(db, sessionId)).filter(
+    (session) => session !== null
   );
   for (const session of sessions) {
     const sessionView = buildSessionSummary(db, session.id);
@@ -32552,7 +32536,13 @@ function renderMemoryDetail(db, memoryId, depth, truncate) {
 function listSessionIds(db, sessionIds, after, before) {
   const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
     (session) => session !== null
-  ) : getRecentSessions(db, { limit: SESSION_SCAN_LIMIT });
+  ) : db.query(
+    `SELECT id, created_at_epoch AS createdAtEpoch
+           FROM sessions
+           ORDER BY created_at_epoch DESC`
+  ).all().map((row) => getSession(db, row.id)).filter(
+    (session) => session !== null
+  );
   return sessions.filter((session) => {
     if (after !== void 0 && session.createdAtEpoch < after) {
       return false;
@@ -32772,7 +32762,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
   if (routed.kind === "memories") {
     const memoryIds = routed.memoryIds && routed.memoryIds.length > 0 ? routed.memoryIds : searchMemory(
       db,
-      { scope: "memories", limit: SEARCH_SCAN_LIMIT, after, before }
+      { scope: "memories", after, before }
     ).map((result) => result.sourceId);
     const paged = paginateItems(memoryIds, page, pageSize);
     return joinPage(
@@ -32852,7 +32842,7 @@ function recallMemory(db, input) {
       searchQueryResults(
         db,
         filters,
-        SEARCH_SCAN_LIMIT,
+        void 0,
         timeRange.after,
         timeRange.before
       ),

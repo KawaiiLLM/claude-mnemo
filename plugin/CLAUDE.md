@@ -4,7 +4,7 @@ Claude-Mnemo is installed in this environment.
 Three-axis memory:
 - `recall` MCP tool — high-entropy semantic index (what / where)
 - `mnemo-replay` skill — raw JSONL + SQLite access (exact truth)
-- `mnemo-timeline` skill (when available) — temporal narrative of one session
+- `timeline` surface (when available) — temporal narrative of one session
 
 Preferred workflow:
 1. Call `recall()` to browse recent memory, or `recall(query=...)` / `recall(time=...)` to narrow.

@@ -432,6 +432,32 @@ describe("handleContextHook", () => {
       filesModified: ["src/auth.ts"],
     });
 
+    insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 5,
+      title: "Ship mutex",
+      content: "Land the mutex patch in the auth middleware.",
+      userPrompt: "Ship the mutex patch.",
+      assistantResponse: "The mutex patch is ready to land.",
+      toolCallCount: 1,
+      createdAtEpoch: 350,
+      filesRead: ["src/auth.ts"],
+      filesModified: ["src/auth.ts"],
+    });
+
+    insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 6,
+      title: "Close out session",
+      content: "Summarize the final state before stopping.",
+      userPrompt: "Close out the session.",
+      assistantResponse: "The session is ready to stop.",
+      toolCallCount: 1,
+      createdAtEpoch: 360,
+      filesRead: [],
+      filesModified: [],
+    });
+
     insertObservation(db, turn4, {
       toolName: "Read",
       title: "Parallel refreshes share one race window",
@@ -544,7 +570,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("## Memories");
     expect(output).toContain("## Recent Sessions");
     expect(output).toContain(
-      `- [S3] Anchored session | 💬4 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
+      `- [S3] Anchored session | 💬6 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
     expect(output).toContain(
       `  raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
@@ -564,9 +590,14 @@ describe("handleContextHook", () => {
     expect(output).toContain("  - next_steps:");
     expect(output).toContain("    - Implement the mutex fix before the next session begins.");
 
-    expect(output).toContain(`  - [T1] Prep cache | 🔧1`);
     expect(output).toContain(
       `  - [T2] Investigate timeout | 💡1 📖1 ✏️1 🔧2`,
+    );
+    expect(output).toContain(
+      `  - [T6] Close out session | 🔧1 [extracted]`,
+    );
+    expect(output).not.toContain(
+      `  - [T1] Prep cache | 🔧1 [extracted]`,
     );
     expect(output).toContain(
       `  - [T4] Document findings | 💡4 📖2 ✏️1 🔧4`,
