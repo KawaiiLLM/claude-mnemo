@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.worktrees/
 *.db
 *.db-wal
 *.db-shm
