@@ -246,6 +246,7 @@ var SCHEMA_SQL = `
     files_read TEXT,
     files_modified TEXT,
     tool_call_count INTEGER,
+    transcript_line_start INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -324,6 +325,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureTurnTranscriptLineStartColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -332,6 +334,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureTurnTranscriptLineStartColumn(db) {
+  if (hasColumn(db, "turns", "transcript_line_start")) {
+    return;
+  }
+  db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -476,6 +484,7 @@ function resolveEventName(raw) {
   ]);
   switch (eventName) {
     case "PostToolUse":
+    case "PostCompact":
     case "SessionStart":
     case "PreCompact":
     case "UserPromptSubmit":
@@ -794,6 +803,7 @@ var TURN_SELECT = `
     session_id AS sessionId,
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
+    transcript_line_start AS transcriptLineStart,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -1035,7 +1045,8 @@ function formatTurnLabel(turn, {
   depth = "collapsed",
   truncate
 } = {}) {
-  const prefix = sessionId === void 0 ? `${indent}- [T${turn.promptNumber}]` : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
+  const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
@@ -1356,7 +1367,7 @@ function buildHeader(db) {
     "Stats: \u{1F4AC}turns \u{1F4A1}observations \u{1F4D6}read \u270F\uFE0Fmodified \u{1F527}tools",
     "Format:",
     "  - [Sx] title | \u{1F4AC}n \u{1F4A1}n | yyyy-mm-dd | project",
-    "  - [Tx] title | \u{1F4A1}n \u{1F4D6}n \u270F\uFE0Fn \u{1F527}n",
+    "  - [Tx] or [Tx:Lz] title | \u{1F4A1}n \u{1F4D6}n \u270F\uFE0Fn \u{1F527}n",
     "  - [Ox] \u{1F535} title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
     'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)'
@@ -1438,6 +1449,7 @@ function buildCollapsedTurnViews(db, sessionId) {
   return turns.map((turn) => ({
     id: turn.id,
     promptNumber: turn.promptNumber,
+    transcriptLineStart: turn.transcriptLineStart,
     title: turn.title,
     content: turn.content,
     observationCount: observationCounts.get(turn.id) ?? 0,
@@ -1588,6 +1600,394 @@ function createContextHandler(dependencies) {
   };
 }
 
+// src/shared/transcript-parser.ts
+var import_node_fs3 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function readTranscriptEntries(transcriptPath) {
+  return readAllTranscriptEntries(transcriptPath).filter(
+    (entry) => !entry.isSidechain && !entry.isApiErrorMessage
+  );
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  const entries = [];
+  rawTranscript.split("\n").forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    const entry = normalizeEntry(JSON.parse(trimmedLine));
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: index + 1
+    });
+  });
+  const seenUuids = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      if (seenUuids.has(entry.uuid)) {
+        continue;
+      }
+      seenUuids.add(entry.uuid);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    isSidechain: Boolean(raw.isSidechain),
+    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseTranscript(transcriptPath) {
+  const turns = [];
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of readTranscriptEntries(transcriptPath)) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: []
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(...toolCalls);
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function parseReplayTranscript(transcriptPath) {
+  const turns = [];
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain)
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function countUserPromptsInTranscript(transcriptPath) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
+  let count = 0;
+  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
+      count += 1;
+    }
+  }
+  return count;
+}
+function extractAssistantResponse(transcriptPath, userPromptPrefix, promptNumber) {
+  const turns = parseTranscript(transcriptPath);
+  const turn = (promptNumber !== void 0 ? turns.find((candidate) => candidate.promptNumber === promptNumber) : void 0) ?? turns.find((candidate) => candidate.userPrompt.startsWith(userPromptPrefix));
+  return turn?.assistantText ?? "";
+}
+
+// src/hooks/handlers/post-compact.ts
+function getRawContentText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.filter((block) => {
+    return Boolean(block) && typeof block === "object";
+  }).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
+}
+function findLatestCompactBoundary(transcriptPath) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type === "system" && entry.subtype === "compact_boundary" && entry.uuid) {
+      return {
+        uuid: entry.uuid,
+        compactMetadata: entry.compactMetadata
+      };
+    }
+  }
+  return null;
+}
+function findSummaryWrapper(transcriptPath, boundaryUuid) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  const boundaryIndex = entries.findIndex(
+    (entry) => entry.type === "system" && entry.subtype === "compact_boundary" && entry.uuid === boundaryUuid
+  );
+  if (boundaryIndex === -1) {
+    return null;
+  }
+  const nextEntry = entries[boundaryIndex + 1];
+  if (!nextEntry || nextEntry.role !== "user" || nextEntry.parentUuid !== boundaryUuid || !nextEntry.promptId) {
+    return null;
+  }
+  const content = getRawContentText(nextEntry.content);
+  if (!content) {
+    return null;
+  }
+  return {
+    promptId: nextEntry.promptId,
+    lineNumber: nextEntry.lineNumber,
+    content
+  };
+}
+function resolvePromptNumber(transcriptPath, promptId) {
+  return parseReplayTranscript(transcriptPath).find((turn) => turn.promptId === promptId)?.promptNumber ?? null;
+}
+function resolvePreCompactTokens(input, boundary) {
+  const rawMetadata = input.raw.compact_metadata && typeof input.raw.compact_metadata === "object" ? input.raw.compact_metadata : null;
+  if (typeof rawMetadata?.preCompactTokenCount === "number") {
+    return rawMetadata.preCompactTokenCount;
+  }
+  if (typeof rawMetadata?.pre_tokens === "number") {
+    return rawMetadata.pre_tokens;
+  }
+  if (typeof boundary.compactMetadata?.preCompactTokenCount === "number") {
+    return boundary.compactMetadata.preCompactTokenCount;
+  }
+  if (typeof boundary.compactMetadata?.pre_tokens === "number") {
+    return boundary.compactMetadata.pre_tokens;
+  }
+  return null;
+}
+function resolveTrigger(input, boundary) {
+  if (input.trigger === "auto" || input.trigger === "manual") {
+    return input.trigger;
+  }
+  if (boundary.compactMetadata?.trigger === "auto" || boundary.compactMetadata?.trigger === "manual") {
+    return boundary.compactMetadata.trigger;
+  }
+  return "manual";
+}
+function createPostCompactHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  return async function handlePostCompactHook(input) {
+    if (!input.sessionId || !input.transcriptPath) {
+      return { continue: true };
+    }
+    const session = getSessionByContentId(dependencies.db, input.sessionId);
+    if (!session) {
+      return { continue: true };
+    }
+    const boundary = findLatestCompactBoundary(input.transcriptPath);
+    if (!boundary) {
+      return { continue: true };
+    }
+    const summaryWrapper = findSummaryWrapper(input.transcriptPath, boundary.uuid);
+    if (!summaryWrapper) {
+      return { continue: true };
+    }
+    const promptNumber = resolvePromptNumber(
+      input.transcriptPath,
+      summaryWrapper.promptId
+    );
+    if (promptNumber === null) {
+      return { continue: true };
+    }
+    const preCompactTokens = resolvePreCompactTokens(input, boundary);
+    const trigger = resolveTrigger(input, boundary);
+    const tags = [
+      `compact:pre_tokens=${preCompactTokens ?? 0}`,
+      `compact:trigger=${trigger}`
+    ];
+    dependencies.db.query(
+      `INSERT OR IGNORE INTO turns (
+          session_id,
+          prompt_number,
+          content_prompt_id,
+          status,
+          title,
+          content,
+          type,
+          transcript_line_start,
+          tags,
+          files_read,
+          files_modified,
+          tool_call_count,
+          created_at_epoch
+        ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+    ).run(
+      session.id,
+      promptNumber,
+      summaryWrapper.promptId,
+      "/compact",
+      summaryWrapper.content,
+      "compact",
+      summaryWrapper.lineNumber,
+      JSON.stringify(tags),
+      "[]",
+      "[]",
+      now()
+    );
+    return { continue: true };
+  };
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -1676,157 +2076,6 @@ function createPostToolUseHandler(dependencies) {
     );
     return { continue: true };
   };
-}
-
-// src/shared/transcript-parser.ts
-var import_node_fs3 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function readTranscriptEntries(transcriptPath) {
-  return readAllTranscriptEntries(transcriptPath).filter(
-    (entry) => !entry.isSidechain && !entry.isApiErrorMessage
-  );
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  const entries = rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
-  const seenUuids = /* @__PURE__ */ new Set();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
-        continue;
-      }
-      seenUuids.add(entry.uuid);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage)
-  };
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseTranscript(transcriptPath) {
-  const turns = [];
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of readTranscriptEntries(transcriptPath)) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: []
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(...toolCalls);
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-function countUserPromptsInTranscript(transcriptPath) {
-  const seenPromptIds = /* @__PURE__ */ new Set();
-  let count = 0;
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (!isCountedUserPrompt(entry)) {
-      continue;
-    }
-    if (entry.promptId) {
-      if (seenPromptIds.has(entry.promptId)) {
-        continue;
-      }
-      seenPromptIds.add(entry.promptId);
-      count += 1;
-      continue;
-    }
-    if (extractUserPrompt(entry) !== "") {
-      count += 1;
-    }
-  }
-  return count;
-}
-function extractAssistantResponse(transcriptPath, userPromptPrefix, promptNumber) {
-  const turns = parseTranscript(transcriptPath);
-  const turn = (promptNumber !== void 0 ? turns.find((candidate) => candidate.promptNumber === promptNumber) : void 0) ?? turns.find((candidate) => candidate.userPrompt.startsWith(userPromptPrefix));
-  return turn?.assistantText ?? "";
 }
 
 // src/hooks/handlers/session-init.ts
@@ -2049,6 +2298,7 @@ function getDefaultHandlers() {
   defaultHandlers = {
     SessionStart: createContextHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
+    PostCompact: createPostCompactHandler({ db }),
     PreCompact: createCompactHandler({ db }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({
@@ -2070,6 +2320,8 @@ function eventNameFromCommandArgument(arg) {
       return "SessionStart";
     case "tool-use":
       return "PostToolUse";
+    case "post-compact":
+      return "PostCompact";
     case "compact":
       return "PreCompact";
     case "session-init":
