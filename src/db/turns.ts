@@ -7,6 +7,7 @@ export interface TurnRecord {
   sessionId: number;
   promptNumber: number;
   contentPromptId: string | null;
+  transcriptLineStart: number | null;
   status: string;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -27,6 +28,7 @@ interface TurnRow {
   sessionId: number;
   promptNumber: number;
   contentPromptId: string | null;
+  transcriptLineStart: number | null;
   status: string;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -48,6 +50,7 @@ const TURN_SELECT = `
     session_id AS sessionId,
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
+    transcript_line_start AS transcriptLineStart,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -118,6 +121,7 @@ export interface UpdateTurnByIdInput {
   content?: string | null;
   insight?: string | null;
   type?: string | null;
+  transcriptLineStart?: number | null;
   tags?: string[];
   filesRead?: string[];
   filesModified?: string[];
@@ -146,6 +150,7 @@ export function updateTurnById(
           string | null,
           string | null,
           string | null,
+          number | null,
           string,
           string,
           string,
@@ -162,6 +167,7 @@ export function updateTurnById(
             content = ?,
             insight = ?,
             type = ?,
+            transcript_line_start = ?,
             tags = ?,
             files_read = ?,
             files_modified = ?,
@@ -180,6 +186,7 @@ export function updateTurnById(
             content,
             insight,
             type,
+            transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
             files_modified AS filesModified,
@@ -194,6 +201,7 @@ export function updateTurnById(
         input.content ?? existing.content,
         input.insight ?? existing.insight,
         input.type ?? existing.type,
+        input.transcriptLineStart ?? existing.transcriptLineStart,
         stringifyArray(input.tags ?? existing.tags),
         stringifyArray(input.filesRead ?? existing.filesRead),
         stringifyArray(input.filesModified ?? existing.filesModified),
@@ -237,12 +245,20 @@ export function updateTurnBackfill(
   assistantResponse: string,
   toolCallCount: number,
   contentPromptId?: string | null,
+  transcriptLineStart?: number | null,
 ): void {
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
          tool_call_count = ?,
-         content_prompt_id = COALESCE(content_prompt_id, ?)
+         content_prompt_id = COALESCE(content_prompt_id, ?),
+         transcript_line_start = COALESCE(?, transcript_line_start)
      WHERE id = ?`,
-  ).run(assistantResponse, toolCallCount, contentPromptId ?? null, turnId);
+  ).run(
+    assistantResponse,
+    toolCallCount,
+    contentPromptId ?? null,
+    transcriptLineStart ?? null,
+    turnId,
+  );
 }

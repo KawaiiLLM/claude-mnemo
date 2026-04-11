@@ -5,8 +5,10 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  getTurnById,
   getTurn,
   getTurnsForSession,
+  updateTurnById,
 } from "../../src/db/turns";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
@@ -211,6 +213,30 @@ describe("turn queries", () => {
     expect(secondSave.status).toBe("undone");
     expect(observationCount).toBe(0);
     expect(ftsCount).toBe(0);
+  });
+
+  test("updateTurnById can set transcriptLineStart", () => {
+    const turn = saveTurn(db, {
+      sessionId,
+      promptNumber: 6,
+      userPrompt: "Remember this prompt",
+      assistantResponse: "Initial answer",
+      title: "Remember this prompt",
+      content: "Stored content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 600,
+      updatedAtEpoch: 610,
+      observations: [],
+    });
+
+    const updated = updateTurnById(db, turn.id, {
+      transcriptLineStart: 7,
+    });
+
+    expect(updated?.transcriptLineStart).toBe(7);
+    expect(getTurnById(db, turn.id)?.transcriptLineStart).toBe(7);
   });
 
 });

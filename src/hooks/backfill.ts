@@ -60,6 +60,7 @@ export function backfillFromTranscript(
       assistantResponse,
       toolCallCount,
       transcriptTurn?.promptId,
+      transcriptTurn?.transcriptLineStart,
     );
   }
 }
