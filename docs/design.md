@@ -124,6 +124,26 @@ The worker persists the most recent agent session id in `sessions.last_agent_ses
 
 If the file is missing, the worker silently falls back to a fresh query session and overwrites the DB field when the next SDK session id is observed.
 
+### Debugging With Agent Transcripts
+
+The dedicated pseudo-project directory is also the first debugging surface for Mnemosyne behavior.
+
+Each transcript file contains:
+
+- every worker-pushed `<obs>`, `<turn>`, and standalone `<session>` block
+- every `remember()`, `recall()`, and `replay()` tool call with full input payloads
+- any assistant free-text response
+- SDK `queue-operation` records for input enqueue/dequeue timing
+
+This is the authoritative record for questions like:
+
+- did compact actually reach Mnemosyne?
+- what exact prompt did an observation or turn-stop use?
+- did Mnemosyne choose a status-only `remember()` update?
+- was the worker session resumed or started fresh?
+
+The README’s `Debugging Mnemosyne` section documents copy-paste `jq` queries for these investigations. The SDK-native jsonl path under `.claude/projects/<encodeProjectPath(~/.claude-mnemo)>/` is the canonical location.
+
 ### Queue Semantics
 
 `pending_queue` is the durable FIFO for async work:
@@ -252,7 +272,7 @@ Queue/processing state is not stored in business tables anymore. It lives in `pe
 
 `sessions.last_compact_turn` is the durable compact anchor.
 
-It is used to trim old finalized turns from Mnemosyne extraction context after a successful compact flush. The anchor only advances after compact processing succeeds.
+It is used to trim old finalized turns from Mnemosyne extraction context after a compact drain. The anchor advances after `drainSessionCompletely()` finalizes queued work, even if the subsequent session-summary prompt fails.
 
 ### Legacy Schema Policy
 

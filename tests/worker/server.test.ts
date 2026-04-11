@@ -379,6 +379,108 @@ describe("worker server", () => {
     ).toBe(1);
   });
 
+  test("handleCompact advances last_compact_turn to the latest finalized turn", async () => {
+    const compactSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-anchor",
+      project: "/tmp/project-anchor",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES
+        (?, 1, 'extracted', 'first',  110),
+        (?, 2, 'undone',    'second', 120),
+        (?, 3, 'active',    'third',  130)`,
+    ).run(compactSessionId, compactSessionId, compactSessionId);
+
+    const core = createWorkerCore({
+      db,
+      processObsImpl: async () => {},
+      processTurnStopImpl: async () => {},
+      pushSessionSummaryPromptImpl: async () => {},
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const before = db
+      .query<{ last_compact_turn: number | null }, [number]>(
+        "SELECT last_compact_turn FROM sessions WHERE id = ?",
+      )
+      .get(compactSessionId);
+    expect(before?.last_compact_turn).toBeNull();
+
+    await core.handleCompact(compactSessionId, null);
+
+    const after = db
+      .query<{ last_compact_turn: number | null }, [number]>(
+        "SELECT last_compact_turn FROM sessions WHERE id = ?",
+      )
+      .get(compactSessionId);
+    expect(after?.last_compact_turn).toBe(2);
+  });
+
+  test("handleCompact leaves last_compact_turn NULL when no turns have been finalized", async () => {
+    const freshSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-fresh-anchor",
+      project: "/tmp/project-fresh",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'only', 110)`,
+    ).run(freshSessionId);
+
+    const core = createWorkerCore({
+      db,
+      processObsImpl: async () => {},
+      processTurnStopImpl: async () => {},
+      pushSessionSummaryPromptImpl: async () => {},
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.handleCompact(freshSessionId, null);
+
+    const after = db
+      .query<{ last_compact_turn: number | null }, [number]>(
+        "SELECT last_compact_turn FROM sessions WHERE id = ?",
+      )
+      .get(freshSessionId);
+    expect(after?.last_compact_turn).toBeNull();
+  });
+
   test("createWorkerCore passes through the persisted agent session id and rewrites it when the SDK reports a new id", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-resume",

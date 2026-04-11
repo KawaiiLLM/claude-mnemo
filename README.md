@@ -185,6 +185,151 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 - **Bun runtime** — hooks, MCP server, and worker all run under Bun for native SQLite and fast startup. `bun-runner.js` shim auto-installs Bun if missing and strips `ANTHROPIC_API_KEY` / `CLAUDECODE` from the Mnemosyne subprocess environment.
 - **esbuild bundling** — TypeScript source is bundled to CJS for Node.js compatibility in the plugin environment.
 
+## Debugging Mnemosyne
+
+Worker-managed Mnemosyne query sessions leave behind full Claude Agent SDK transcripts. They are the first place to look when extraction quality, compact timing, or prompt drift looks wrong.
+
+### File Layout
+
+| Path | Purpose |
+|-------|---------|
+| `~/.claude-mnemo/claude-mnemo.db` | Structured runtime state: sessions, turns, observations, memories, pending queue |
+| `~/.claude/projects/<encodeProjectPath(~/.claude-mnemo)>/<agent-session-id>.jsonl` | Full Mnemosyne Claude Agent SDK transcript |
+| `~/.claude-mnemo/worker.pid` | Active worker PID while the worker is running |
+| `~/.claude-mnemo/worker.starting` | Transient singleton-acquisition marker |
+
+On a typical macOS install, the transcript directory resolves to:
+
+```text
+~/.claude/projects/-Users-<username>-.claude-mnemo/
+```
+
+Each jsonl file is an SDK-native transcript: every pushed `<obs>` / `<turn>` / `<session>` block, every `remember()` / `recall()` / `replay()` tool call, assistant free-text responses, and SDK `queue-operation` events.
+
+### Common `jq` Queries
+
+Set a target file first:
+
+```bash
+F=~/.claude/projects/-Users-<username>-.claude-mnemo/<agent-session-id>.jsonl
+```
+
+**What kinds of records did Mnemosyne process?**
+
+```bash
+jq -r '
+  def prompt_text:
+    if (.message.content | type) == "string" then .message.content
+    elif (.message.content | type) == "array" then
+      [.message.content[]? | if .type == "text" then .text else empty end] | join("\n")
+    else "" end;
+  select(.type == "user")
+  | prompt_text
+  | if test("<obs id=\"O") then "obs"
+    elif test("<turn id=\"T") then "turn"
+    elif test("^<session id=\"S") then "session"
+    else empty
+    end
+' "$F" | sort | uniq -c
+```
+
+The classifier is priority-ordered:
+- initial observation prompts contain a `<session>` header plus an `<obs>` body, and should count as `obs`
+- turn-stop prompts contain a `<turn>` block plus session context, and should count as `turn`
+- compact summary pushes are standalone `<session>` blocks, and should count as `session`
+
+**What did Mnemosyne `remember()`?**
+
+```bash
+jq -r '
+  select(.type == "assistant")
+  | .message.content[]?
+  | select(.type == "tool_use" and .name == "mcp__mnemo__remember")
+  | "\(.input.id // "-")\t\(.input.title // "[status-only]")"
+' "$F"
+```
+
+`[status-only]` means Mnemosyne updated a status field without extracting new content.
+
+**Did compact actually run for this session?**
+
+```bash
+jq -r '
+  def prompt_text:
+    if (.message.content | type) == "string" then .message.content
+    elif (.message.content | type) == "array" then
+      [.message.content[]? | if .type == "text" then .text else empty end] | join("\n")
+    else "" end;
+  select(.type == "user")
+  | prompt_text
+  | select(test("^<session id=\"S") and (test("<obs id=\"O") | not) and (test("<turn id=\"T") | not))
+' "$F"
+```
+
+If this prints a standalone `<session id="S...">` block with `prior_*` fields, compact reached Mnemosyne and asked for a summary refresh.
+
+**Did Mnemosyne emit any free-text responses?**
+
+```bash
+jq -r '
+  select(.type == "assistant")
+  | .message.content[]?
+  | select(.type == "text")
+  | .text
+' "$F"
+```
+
+These are rare. They usually indicate a diagnostic response like “no material change” rather than a tool call.
+
+**Show input-stream enqueue/dequeue timing**
+
+```bash
+jq -r '
+  select(.type == "queue-operation")
+  | "\(.timestamp)  \(.operation)"
+' "$F"
+```
+
+### Cross-Referencing With the Database
+
+The jsonl filename is the SDK agent session id. It is not the same as:
+- Claude Code’s `contentSessionId`
+- SQLite `sessions.id`
+
+The stable bridge is the `<session id="S<n>">` block embedded in worker prompts.
+
+**DB → jsonl**: find every Mnemosyne transcript that touched DB session `42`:
+
+```bash
+grep -Fl '<session id=\"S42\"' ~/.claude/projects/*-.claude-mnemo/*.jsonl
+```
+
+The escaped quotes matter because the block is JSON-encoded on disk. Multiple matches are expected when one DB session spans multiple worker query sessions.
+
+**jsonl → DB**: extract the first DB session id from the transcript:
+
+```bash
+jq -r '
+  def prompt_text:
+    if (.message.content | type) == "string" then .message.content
+    elif (.message.content | type) == "array" then
+      [.message.content[]? | if .type == "text" then .text else empty end] | join("\n")
+    else "" end;
+  select(.type == "user")
+  | prompt_text
+  | capture("<session id=\"S(?<n>[0-9]+)\"")
+  | .n
+' "$F" | head -1
+```
+
+Then query SQLite:
+
+```bash
+sqlite3 ~/.claude-mnemo/claude-mnemo.db \
+  "SELECT id, content_session_id, project, title, last_compact_turn
+   FROM sessions WHERE id = <n>;"
+```
+
 ## License
 
 MIT

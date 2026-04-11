@@ -737,6 +737,17 @@ function getRecentSessions(db, options = {}) {
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
 }
+function updateCompactAnchor(db, sessionId) {
+  db.query(
+    `UPDATE sessions
+     SET last_compact_turn = (
+       SELECT MAX(prompt_number) FROM turns
+       WHERE session_id = ?
+         AND status != 'active'
+     )
+     WHERE id = ?`
+  ).run(sessionId, sessionId);
+}
 function updateLastAgentSessionId(db, sessionId, agentSessionId) {
   db.query(
     `UPDATE sessions
@@ -38980,6 +38991,14 @@ function createWorkerCore(deps) {
         await drainSessionCompletely(sessionDbId);
       } catch (error49) {
         logger.error?.("drainSessionCompletely failed during compact", {
+          sessionDbId,
+          error: error49
+        });
+      }
+      try {
+        updateCompactAnchor(deps.db, sessionDbId);
+      } catch (error49) {
+        logger.error?.("updateCompactAnchor failed during compact", {
           sessionDbId,
           error: error49
         });

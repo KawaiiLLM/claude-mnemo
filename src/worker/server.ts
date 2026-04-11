@@ -12,7 +12,11 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../db/database";
-import { getSession, updateLastAgentSessionId } from "../db/sessions";
+import {
+  getSession,
+  updateCompactAnchor,
+  updateLastAgentSessionId,
+} from "../db/sessions";
 import { parseReplayTranscript } from "../shared/transcript-parser";
 import {
   claimNextItem,
@@ -508,6 +512,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await drainSessionCompletely(sessionDbId);
       } catch (error) {
         logger.error?.("drainSessionCompletely failed during compact", {
+          sessionDbId,
+          error,
+        });
+      }
+
+      try {
+        updateCompactAnchor(deps.db, sessionDbId);
+      } catch (error) {
+        logger.error?.("updateCompactAnchor failed during compact", {
           sessionDbId,
           error,
         });
