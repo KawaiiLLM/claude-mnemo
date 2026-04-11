@@ -911,7 +911,10 @@ function joinHint(sessionId, turnPromptNumber) {
   }
   return `mnemo-replay skill \u2192 read S${sessionId}/T${turnPromptNumber}`;
 }
-function resolveTruncationLimit(depth, mode) {
+function resolveTruncationLimit(depth, mode, truncate) {
+  if (truncate !== void 0) {
+    return Math.max(1, Math.min(2e3, truncate));
+  }
   if (mode === "legacy") {
     return LEGACY_TRUNCATION_LIMIT;
   }
@@ -921,9 +924,10 @@ function truncateText(text, {
   depth,
   mode = "legacy",
   sessionId,
-  turnPromptNumber
+  turnPromptNumber,
+  truncate
 }) {
-  const limit = resolveTruncationLimit(depth, mode);
+  const limit = resolveTruncationLimit(depth, mode, truncate);
   if (text.length <= limit) {
     return text;
   }
@@ -974,7 +978,7 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode) {
+function formatSessionCollapsedWithMode(session, mode, truncate) {
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -985,14 +989,15 @@ function formatSessionCollapsedWithMode(session, mode) {
       `  - desc: ${truncateText(session.content, {
         depth: "collapsed",
         mode,
-        sessionId: session.id
+        sessionId: session.id,
+        truncate
       })}`
     );
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode) {
-  const lines = [formatSessionCollapsedWithMode(session, mode)];
+function formatSessionExpandedWithMode(session, mode, truncate) {
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -1002,7 +1007,8 @@ function formatSessionExpandedWithMode(session, mode) {
         (line) => truncateText(line, {
           depth: "expanded",
           mode,
-          sessionId: session.id
+          sessionId: session.id,
+          truncate
         })
       )
     );
@@ -1013,7 +1019,8 @@ function formatSessionExpandedWithMode(session, mode) {
       `    - ${truncateText(session.nextSteps, {
         depth: "expanded",
         mode,
-        sessionId: session.id
+        sessionId: session.id,
+        truncate
       })}`
     );
   }
@@ -1023,7 +1030,8 @@ function formatTurnLabel(turn, {
   indent = "  ",
   sessionId,
   mode = "legacy",
-  depth = "collapsed"
+  depth = "collapsed",
+  truncate
 } = {}) {
   const prefix = sessionId === void 0 ? `${indent}- [T${turn.promptNumber}]` : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
   const stats = formatTurnStats(turn);
@@ -1033,12 +1041,14 @@ function formatTurnLabel(turn, {
     depth,
     mode,
     sessionId,
-    turnPromptNumber: turn.promptNumber
+    turnPromptNumber: turn.promptNumber,
+    truncate
   })}"` : truncateText(rawTitle, {
     depth,
     mode,
     sessionId,
-    turnPromptNumber: turn.promptNumber
+    turnPromptNumber: turn.promptNumber,
+    truncate
   });
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
 }
@@ -1057,15 +1067,16 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
         depth: "collapsed",
         mode,
         sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber
+        turnPromptNumber: turn.promptNumber,
+        truncate: options.truncate
       })}`
     );
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed" } = {}) {
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate } = {}) {
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam ? ` ${truncateText(keyParam, { depth, mode })}` : "";
+  const suffix = keyParam ? ` ${truncateText(keyParam, { depth, mode, truncate })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
 }
 function formatToolCallCollapsedWithMode(toolCall, options = {}) {
@@ -1076,20 +1087,22 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
   });
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", mode = "unified", depth = "expanded" } = options;
+  const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
   const detailIndent = `${indent}  `;
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
       mode,
-      depth: depth === "full" ? "full" : "expanded"
+      depth: depth === "full" ? "full" : "expanded",
+      truncate
     })
   ];
   if (toolCall.input !== void 0) {
     lines.push(
       `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
         depth,
-        mode
+        mode,
+        truncate
       })}`
     );
   }
@@ -1097,7 +1110,8 @@ function formatToolCallExpandedWithMode(toolCall, options = {}) {
     lines.push(
       `${detailIndent}- out: ${truncateText(toolCall.result, {
         depth,
-        mode
+        mode,
+        truncate
       })}`
     );
   }
@@ -1107,7 +1121,7 @@ function renderTurnChildren(turn, depth, options = {}) {
   if (depth === "collapsed") {
     return "";
   }
-  const { indent = "  ", sessionId, mode = "legacy" } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
   const childIndent = `${indent}  `;
   const childDepth = depth === "full" ? "full" : "expanded";
   const childLines = [];
@@ -1119,12 +1133,14 @@ function renderTurnChildren(turn, depth, options = {}) {
           sessionId,
           turnPromptNumber: turn.promptNumber,
           mode,
-          depth: "full"
+          depth: "full",
+          truncate
         }) : formatObservationCollapsedWithMode(observation, {
           indent: childIndent,
           sessionId,
           turnPromptNumber: turn.promptNumber,
-          mode
+          mode,
+          truncate
         })
       );
     }
@@ -1138,7 +1154,8 @@ function renderTurnChildren(turn, depth, options = {}) {
           sessionId,
           turnPromptNumber: turn.promptNumber,
           mode,
-          depth: childDepth
+          depth: childDepth,
+          truncate
         })
       );
     }
@@ -1162,7 +1179,8 @@ function formatTurnExpandedWithMode(turn, options = {}) {
           depth,
           mode,
           sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber
+          turnPromptNumber: turn.promptNumber,
+          truncate: options.truncate
         }
       )}"`
     );
@@ -1175,7 +1193,8 @@ function formatTurnExpandedWithMode(turn, options = {}) {
           depth,
           mode,
           sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber
+          turnPromptNumber: turn.promptNumber,
+          truncate: options.truncate
         }
       )}"`
     );
@@ -1190,7 +1209,8 @@ function formatTurnExpandedWithMode(turn, options = {}) {
           depth,
           mode,
           sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber
+          turnPromptNumber: turn.promptNumber,
+          truncate: options.truncate
         })
       )
     );
@@ -1201,7 +1221,8 @@ function formatTurnExpandedWithMode(turn, options = {}) {
         depth,
         mode,
         sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber
+        turnPromptNumber: turn.promptNumber,
+        truncate: options.truncate
       })}`
     );
   }
@@ -1213,7 +1234,8 @@ function formatTurnExpandedWithMode(turn, options = {}) {
           depth,
           mode,
           sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber
+          turnPromptNumber: turn.promptNumber,
+          truncate: options.truncate
         }
       )}`
     );
@@ -1241,19 +1263,21 @@ function formatMemoryLabel(memory, { includeSourceCount = true } = {}) {
 function formatMemoryCollapsedWithMode(memory, mode) {
   return formatMemoryLabel(memory);
 }
-function formatMemoryExpandedWithMode(memory, mode) {
+function formatMemoryExpandedWithMode(memory, mode, truncate) {
   const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
   lines.push(
     `  - content: ${truncateText(memory.content, {
       depth: "expanded",
-      mode
+      mode,
+      truncate
     })}`
   );
   if (memory.reasoning) {
     lines.push(
       `  - reasoning: ${truncateText(memory.reasoning, {
         depth: "expanded",
-        mode
+        mode,
+        truncate
       })}`
     );
   }
@@ -1261,7 +1285,8 @@ function formatMemoryExpandedWithMode(memory, mode) {
     lines.push(
       `  - application: ${truncateText(memory.application, {
         depth: "expanded",
-        mode
+        mode,
+        truncate
       })}`
     );
   }
@@ -1269,7 +1294,8 @@ function formatMemoryExpandedWithMode(memory, mode) {
     lines.push(
       `  - tags: [${truncateText(memory.tags.join(", "), {
         depth: "expanded",
-        mode
+        mode,
+        truncate
       })}]`
     );
   }
@@ -1291,7 +1317,8 @@ function formatObservationCollapsedWithMode(observation, options = {}) {
           depth: "collapsed",
           mode,
           sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber
+          turnPromptNumber: options.turnPromptNumber,
+          truncate: options.truncate
         }
       )}`
     );
@@ -1307,13 +1334,13 @@ function renderNode(node, options) {
   const mode = options.mode ?? "unified";
   switch (node.type) {
     case "session":
-      return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode) : formatSessionExpandedWithMode(node.value, mode);
+      return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, options.truncate) : formatSessionExpandedWithMode(node.value, mode, options.truncate);
     case "turn":
       return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, options) : formatTurnExpandedWithMode(node.value, options);
     case "observation":
       return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, options) : formatObservationExpandedWithMode(node.value, options);
     case "memory":
-      return options.depth === "collapsed" ? formatMemoryCollapsedWithMode(node.value, mode) : formatMemoryExpandedWithMode(node.value, mode);
+      return options.depth === "collapsed" ? formatMemoryCollapsedWithMode(node.value, mode) : formatMemoryExpandedWithMode(node.value, mode, options.truncate);
     case "toolCall":
       return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, options) : formatToolCallExpandedWithMode(node.value, options);
   }

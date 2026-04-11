@@ -269,6 +269,19 @@ describe("recallMemory", () => {
     expect(filteredOutput).not.toContain(`[S${baselineSessionId}] Auth baseline`);
   });
 
+  test("applies page offsets to routed turn lists", () => {
+    const output = recallMemory(db, {
+      id: `S${bigSessionId}/T11..20`,
+      page: 2,
+      pageSize: 3,
+    });
+
+    expect(output).toContain("[T14] Turn 14");
+    expect(output).toContain("[T16] Turn 16");
+    expect(output).not.toContain("[T13] Turn 13");
+    expect(output).not.toContain("[T17] Turn 17");
+  });
+
   test("routes simplified ids for session, turn, observation, and memory detail", () => {
     const sessionOutput = recallMemory(db, {
       id: `S${authSessionId}`,
@@ -305,6 +318,40 @@ describe("recallMemory", () => {
     expect(memoryOutput).toContain(
       "content: Refresh token work must be serialized with a mutex.",
     );
+  });
+
+  test("honors truncate when expanding a turn", () => {
+    saveTurn(db, {
+      sessionId: authSessionId,
+      promptNumber: 99,
+      userPrompt: "p".repeat(300),
+      assistantResponse: "r".repeat(300),
+      title: "Long turn",
+      content: "c".repeat(300),
+      insight: null,
+      type: "change",
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 90_000,
+      updatedAtEpoch: 90_001,
+      observations: [],
+    });
+
+    const shortOutput = recallMemory(db, {
+      id: `S${authSessionId}/T99`,
+      depth: "expanded",
+      truncate: 40,
+    });
+    const longOutput = recallMemory(db, {
+      id: `S${authSessionId}/T99`,
+      depth: "expanded",
+      truncate: 2000,
+    });
+
+    expect(shortOutput).toContain("p".repeat(40));
+    expect(shortOutput).not.toContain("p".repeat(120));
+    expect(longOutput).toContain("p".repeat(120));
+    expect(longOutput).toContain("r".repeat(120));
   });
 
   test("supports wildcard and range ids with stable observation identity", () => {

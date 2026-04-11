@@ -477,6 +477,7 @@ function renderSession(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
   turnSelector?: Set<number>,
 ): string {
   const view = buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
@@ -486,6 +487,7 @@ function renderSession(
       {
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
+        truncate,
       },
     ),
   ];
@@ -515,6 +517,7 @@ function renderSession(
         depth: depth === "full" ? "expanded" : "collapsed",
         mode: "unified",
         sessionId: session.id,
+        truncate,
       },
     );
     lines.push(turnLines);
@@ -527,6 +530,7 @@ function renderTurnScope(
   db: Database,
   turns: TurnRecord[],
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -548,7 +552,7 @@ function renderTurnScope(
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified" },
+        { depth: "collapsed", mode: "unified", truncate },
       ),
     );
 
@@ -571,6 +575,7 @@ function renderTurnScope(
             depth,
             mode: "unified",
             sessionId: session.id,
+            truncate,
           },
         ),
       );
@@ -585,6 +590,7 @@ function renderObservationScope(
   observations: Array<{ sessionId: number; turnId: number; observationId: number }>,
   depth: "collapsed" | "expanded" | "full",
   includeParents: boolean,
+  truncate?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -623,6 +629,7 @@ function renderObservationScope(
           {
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
+            truncate,
           },
         ),
       );
@@ -643,7 +650,7 @@ function renderObservationScope(
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified" },
+        { depth: "collapsed", mode: "unified", truncate },
       ),
     );
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
@@ -660,6 +667,7 @@ function renderObservationScope(
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
+            truncate,
           },
         ),
       );
@@ -697,6 +705,7 @@ function renderObservationScope(
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
+              truncate,
             },
           ),
         );
@@ -711,6 +720,7 @@ function renderMemoryScope(
   db: Database,
   memoryIds: number[],
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   return memoryIds
     .map((memoryId) => getMemory(db, memoryId))
@@ -724,6 +734,7 @@ function renderMemoryScope(
         {
           depth: depth === "collapsed" ? "collapsed" : "expanded",
           mode: "unified",
+          truncate,
         },
       ),
     )
@@ -744,9 +755,10 @@ function renderSessionDetail(
   db: Database,
   sessionId: number,
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth) : "Session not found.";
+  return session ? renderSession(db, session, depth, truncate) : "Session not found.";
 }
 
 function renderTurnDetail(
@@ -754,15 +766,17 @@ function renderTurnDetail(
   sessionId: number,
   promptNumber: number,
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const turn = getTurn(db, sessionId, promptNumber);
-  return turn ? renderTurnScope(db, [turn], depth) : "Turn not found.";
+  return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
 }
 
 function renderObservationDetail(
   db: Database,
   observationId: number,
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const observation = getObservation(db, observationId);
   if (!observation) {
@@ -775,6 +789,7 @@ function renderObservationDetail(
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
+      truncate,
     },
   );
 }
@@ -783,6 +798,7 @@ function renderMemoryDetail(
   db: Database,
   memoryId: number,
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const memory = getMemory(db, memoryId);
   if (!memory) {
@@ -795,6 +811,7 @@ function renderMemoryDetail(
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
+      truncate,
     },
   );
 }
@@ -865,6 +882,7 @@ function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded" | "full",
+  truncate?: number,
 ): string {
   const memoryLines: string[] = [];
   const sessionGroups = new Map<
@@ -888,6 +906,7 @@ function renderGroupedSearchResults(
             {
               depth: depth === "collapsed" ? "collapsed" : "expanded",
               mode: "unified",
+              truncate,
             },
           ),
         );
@@ -934,7 +953,7 @@ function renderGroupedSearchResults(
     }
 
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth);
+      return renderSession(db, session, depth, truncate);
     }
 
     const lines = [
@@ -943,7 +962,7 @@ function renderGroupedSearchResults(
           type: "session",
           value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session),
         },
-        { depth: "collapsed", mode: "unified" },
+        { depth: "collapsed", mode: "unified", truncate },
       ),
     ];
     const turns = getTurnsForSession(db, session.id).filter(
@@ -965,6 +984,7 @@ function renderGroupedSearchResults(
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
+            truncate,
           },
         ),
       );
@@ -986,6 +1006,7 @@ function renderGroupedSearchResults(
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
+              truncate,
             },
           ),
         );
@@ -1002,13 +1023,18 @@ function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
   depth: "collapsed" | "expanded" | "full",
+  page: number,
   limit: number,
+  truncate?: number,
   after?: number,
   before?: number,
 ): string {
+  const offset = (page - 1) * limit;
+
   if (routed.kind === "sessions") {
     return listSessionIds(db, routed.sessionIds, limit, after, before)
-      .map((sessionId) => renderSessionDetail(db, sessionId, depth))
+      .slice(offset, offset + limit)
+      .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
       .join("\n");
   }
 
@@ -1022,7 +1048,7 @@ function renderRoutedId(
       }
       return true;
     });
-    return renderTurnScope(db, turns.slice(0, limit), depth);
+    return renderTurnScope(db, turns.slice(offset, offset + limit), depth, truncate);
   }
 
   if (routed.kind === "observation-list") {
@@ -1041,14 +1067,14 @@ function renderRoutedId(
         }
         return true;
       })
-      .slice(0, limit)
+      .slice(offset, offset + limit)
       .map((observation) => ({
         sessionId: routed.sessionId,
         turnId: turn.id,
         observationId: observation.id,
       }));
 
-    return renderObservationScope(db, observations, depth, true);
+    return renderObservationScope(db, observations, depth, true, truncate);
   }
 
   if (routed.kind === "session-observation-list") {
@@ -1070,36 +1096,40 @@ function renderRoutedId(
             observationId: observation.id,
           })),
       )
-      .slice(0, limit);
+      .slice(offset, offset + limit);
 
-    return renderObservationScope(db, observations, depth, true);
+    return renderObservationScope(db, observations, depth, true, truncate);
   }
 
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth);
+    return renderObservationDetail(db, routed.observationId, depth, truncate);
   }
 
   if (routed.kind === "memories") {
     const memoryIds = routed.memoryIds && routed.memoryIds.length > 0
       ? routed.memoryIds
       : searchMemory(db, { scope: "memories", limit, after, before }).map((result) => result.sourceId);
-    return renderMemoryScope(db, memoryIds.slice(0, limit), depth);
+    return renderMemoryScope(db, memoryIds.slice(offset, offset + limit), depth, truncate);
   }
 
   return routed.kind === "memory"
-    ? renderMemoryDetail(db, routed.memoryId, depth)
+    ? renderMemoryDetail(db, routed.memoryId, depth, truncate)
     : "";
 }
 
 function renderSessionList(
   db: Database,
   depth: "collapsed" | "expanded" | "full",
+  page: number,
   limit: number,
+  truncate?: number,
   after?: number,
   before?: number,
 ): string {
+  const offset = (page - 1) * limit;
   return listSessionIds(db, undefined, limit, after, before)
-    .map((sessionId) => renderSessionDetail(db, sessionId, depth))
+    .slice(offset, offset + limit)
+    .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
     .join("\n");
 }
 
@@ -1147,6 +1177,8 @@ function searchQueryResults(
 export function recallMemory(db: Database, input: RecallInput): string {
   const depth = input.depth ?? "collapsed";
   const limit = input.pageSize ?? 50;
+  const page = Math.max(1, input.page ?? 1);
+  const truncate = input.truncate;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1163,7 +1195,9 @@ export function recallMemory(db: Database, input: RecallInput): string {
       db,
       routed,
       depth,
+      page,
       limit,
+      truncate,
       timeRange.after,
       timeRange.before,
     );
@@ -1175,10 +1209,10 @@ export function recallMemory(db: Database, input: RecallInput): string {
       db,
       searchQueryResults(db, filters, limit, timeRange.after, timeRange.before),
       filters.tag,
-    ).slice(0, limit);
+    ).slice((page - 1) * limit, (page - 1) * limit + limit);
 
-    return renderGroupedSearchResults(db, results, depth);
+    return renderGroupedSearchResults(db, results, depth, truncate);
   }
 
-  return renderSessionList(db, depth, limit, timeRange.after, timeRange.before);
+  return renderSessionList(db, depth, page, limit, truncate, timeRange.after, timeRange.before);
 }
