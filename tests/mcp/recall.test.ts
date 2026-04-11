@@ -436,6 +436,35 @@ describe("recallMemory", () => {
     expect(timeScopedQuery).toContain("Auth");
   });
 
+  test("does not cap query totals before pagination", () => {
+    for (let index = 1; index <= 5001; index += 1) {
+      createMemory(db, {
+        type: "project",
+        scope: "claude-mnemo",
+        title: `Overflow memory ${index}`,
+        content: `overflowprobe entry ${index}`,
+        reasoning: null,
+        application: null,
+        tags: [],
+        createdAtEpoch: 300_000 + index,
+        updatedAtEpoch: null,
+        sourceTurnId: null,
+        status: "active",
+        supersededBy: null,
+        expiresAtEpoch: null,
+      });
+    }
+
+    const output = recallMemory(db, {
+      query: "overflowprobe",
+      page: 101,
+      pageSize: 50,
+    });
+
+    expect(output).toContain("page 101 / 101 (total 5001)");
+    expect(output).toContain("Overflow memory 1");
+  });
+
   test("supports memory listing through simplified ids", () => {
     const output = recallMemory(db, {
       id: "M*",

@@ -1359,7 +1359,7 @@ function buildHeader(db) {
     "  - [Tx] title | \u{1F4A1}n \u{1F4D6}n \u270F\uFE0Fn \u{1F527}n",
     "  - [Ox] \u{1F535} title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(id="Sx/Ty", depth="expanded")'
+    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)'
   ].join("\n");
 }
 function resolvePrimarySessionRecord(db, input, recentSessions) {
