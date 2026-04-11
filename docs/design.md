@@ -14,10 +14,10 @@ The current architecture has four core pieces:
    - A local worker drains that queue and runs the memory agent
 3. **Isolated Mnemosyne query sessions**
    - The worker opens isolated Claude SDK sessions
-   - Mnemosyne writes only through `remember` and reads through `recall` / `replay`
-4. **Structured retrieval**
+   - Mnemosyne writes only through `remember` and reads through `recall`
+4. **Structured + raw retrieval**
    - `recall` renders the SQLite memory tree
-   - `replay` renders raw transcript detail from Claude JSONL files
+   - `mnemo-replay` skill points the main agent at raw Claude JSONL and SQLite when byte-accurate reads are needed
 
 This is no longer the old “hook directly forks Mnemosyne” design. Extraction is now worker-driven, queue-backed, and crash-recoverable.
 
@@ -35,7 +35,7 @@ This is no longer the old “hook directly forks Mnemosyne” design. Extraction
 
 3. **Raw transcript remains authoritative**
    - Full conversation history stays in Claude JSONL files.
-   - `replay` is the raw-history path.
+   - `mnemo-replay` is the raw-history path.
    - `recall` is the structured-memory path.
 
 4. **Single write tool**
@@ -131,7 +131,7 @@ The dedicated pseudo-project directory is also the first debugging surface for M
 Each transcript file contains:
 
 - every worker-pushed `<obs>`, `<turn>`, and standalone `<session>` block
-- every `remember()`, `recall()`, and `replay()` tool call with full input payloads
+- every `remember()` and `recall()` tool call with full input payloads
 - any assistant free-text response
 - SDK `queue-operation` records for input enqueue/dequeue timing
 
@@ -313,11 +313,25 @@ Observations are indexed only when their status becomes `extracted`.
 
 ## Public Tool Surface
 
-The runtime exposes exactly three MCP tools:
+### Tool surface
 
-- `recall`
-- `replay`
-- `remember`
+Claude-Mnemo exposes two structured MCP tools plus a raw-access skill:
+
+1. `remember` — the single routed write tool for sessions, turns, observations, and memories.
+2. `recall` — the semantic read index. It is paginated (`page` + `pageSize`), truncated (`truncate`, default 200, max 2000), and depth-controlled (`collapsed` / `expanded`).
+3. `mnemo-replay` skill — not a tool; a skill that points the main agent at the raw JSONL transcript and the SQLite database for byte-accurate reads.
+
+A fourth surface, `timeline`, is a separate temporal read path that lands independently and does not change the write path or the raw skill contract.
+
+**Three axes of read access**:
+
+| Axis | Surface | Answers |
+|---|---|---|
+| Content | `recall` | What happened? What changed? Which record should I inspect next? |
+| Temporal | `timeline` | How did this session unfold over time? |
+| Raw | `mnemo-replay` skill | What were the exact transcript bytes and raw tool payloads? |
+
+The structured tools are the only read surfaces available to Mnemosyne's extraction agent. Raw transcript access is a main-agent concern.
 
 ### `recall`
 
@@ -328,8 +342,10 @@ Public input:
   id?: string;
   query?: string;
   time?: string;
-  depth?: "collapsed" | "expanded" | "full";
-  limit?: number;
+  depth?: "collapsed" | "expanded";
+  page?: number;
+  pageSize?: number;
+  truncate?: number;
 }
 ```
 
@@ -351,34 +367,11 @@ Semantics:
 - `id` is the structured selector path
 - `query` is FTS-backed search
 - `time` is day-level filtering
-- `depth` controls rendering depth
-- `limit` limits result count
+- `depth` is `collapsed` or `expanded`
+- `page` / `pageSize` paginate the target level
+- `truncate` caps field rendering uniformly
 
-### `replay`
-
-Public input:
-
-```ts
-{
-  id: string;
-  depth?: "collapsed" | "expanded" | "full";
-}
-```
-
-Examples:
-
-```text
-replay(id="S12")
-replay(id="S12/T3")
-replay(id="S12/T2..4")
-replay(id="S12/T3/Tool2")
-replay(id="S12/T3/Tool*")
-```
-
-`replay` is the raw transcript path. It combines:
-
-- JSONL transcript content
-- DB metadata when available (`title`, status, parent shells)
+When exact wording or full tool output matters, `recall` hands off to the `mnemo-replay` skill via the expanded session `raw:` path.
 
 ### `remember`
 
@@ -409,9 +402,8 @@ The worker opens isolated Claude SDK query sessions and injects an in-process SD
 
 - `remember`
 - `recall`
-- `replay`
 
-Allowed tools are restricted to those three.
+Allowed tools are restricted to those two.
 
 ### Observation Processing
 
@@ -576,16 +568,23 @@ That count follows replay semantics:
 Current rendering is unified across:
 
 - `recall`
-- `replay`
 - SessionStart context
-- extraction context shells
+- future temporal surfaces such as `timeline`
 
 The shared renderer produces:
 
 - collapsed node shells
 - expanded node bodies
-- tool-call shells/details
 - grouped search results
+- consistent truncation hints that hand off to `mnemo-replay` for raw reads
+
+Current rendering rules:
+
+- `depth` is only `collapsed` or `expanded`
+- `page` / `pageSize` paginate the target level
+- child collections use a fixed 5-item preview with a `+N more` marker
+- `truncate` is a single global cap per rendered field (default 200, max 2000)
+- there is no `depth="full"` path and no hidden `limit` sampling mode
 
 Observation identity is global:
 
@@ -637,5 +636,5 @@ The current system is instead:
    - But correctness now depends heavily on Claude transcript shape assumptions
 
 4. **Unified rendering**
-   - Consistent output between `recall`, `replay`, and hook context
+   - Consistent output between `recall`, hook context, and future read surfaces
    - But selector semantics are stricter than older compatibility forms

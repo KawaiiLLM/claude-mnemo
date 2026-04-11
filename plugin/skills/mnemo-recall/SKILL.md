@@ -5,28 +5,29 @@ description: Search and read structured memory from past sessions in this projec
 
 # Mnemo Recall
 
-Read past work across sessions. Two tools:
+`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, observation summaries, and durable memories. For exact prompts, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
 
-- `recall` — structured search over sessions / turns / observations / memories
-- `replay` — raw transcript content from the source JSONL (exact prompts, responses, tool I/O)
+**Three axes of read access**:
+- `recall` — content index: what happened, where, and what to inspect next
+- `timeline` — temporal narrative: how a single session unfolded
+- `mnemo-replay` skill — raw truth: direct JSONL and SQLite reads
 
-**Rule of thumb**: start broad, drill into detail. Never fetch full turns or tool calls without narrowing the selector first — the default `collapsed` depth is 5-10× cheaper.
+**Rule of thumb**: start broad, then narrow. `collapsed` is the cheap browsing mode. Use `expanded` only once you have a target. If a `recall` result is good enough, stop there.
 
 ## When to Use
 
-Use when the user asks about PREVIOUS sessions (not the current one):
+Use when the user asks about PREVIOUS sessions rather than the current turn:
 
 - "Did we already solve this?"
 - "How did we fix X last time?"
 - "What happened in last week's work?"
-- "Show me the exact tool calls for the auth refactor"
 - "What do we already know about this project?"
 
-Also use *proactively* before answering anything that depends on earlier decisions — you may already have the answer in memory.
+Also use it proactively before answering questions that may already be covered by prior work.
 
 ## Data Model
 
-```
+```text
 Session  [S12]   one per Claude Code conversation
   Turn     [T3]   one per user prompt (promptNumber-scoped to session)
     Observation [O87]   one per tool call
@@ -36,16 +37,16 @@ Memory   [M4]   durable cross-session knowledge
 Output IDs map directly to selectors:
 
 - `[S12]` → `recall(id="S12")`
-- `[S12/T3]` → `recall(id="S12/T3")` (turn = session-scoped promptNumber)
-- `[O87]` → `recall(id="O87")` (observation = global DB id)
-- `[M4]` → `recall(id="M4")` (memory = global DB id)
+- `[S12/T3]` → `recall(id="S12/T3")`
+- `[O87]` → `recall(id="O87")`
+- `[M4]` → `recall(id="M4")`
 
 ## Progressive Workflow
 
 ### Step 1 — Browse or search
 
-```
-recall()                                        # recent sessions (collapsed)
+```text
+recall()                                        # recent sessions
 recall(query="auth race")                       # FTS across all layers
 recall(query="type:bugfix file:src/auth.ts")    # typed filters
 recall(query="tag:feedback")                    # memory tag filter
@@ -53,137 +54,114 @@ recall(time="-7d")                              # last 7 days
 recall(id="M*")                                 # all active memories
 ```
 
-Returns a list of sessions / turns / observations / memories with titles only (~30-80 tokens each).
+These return paginated, collapsed results by default. Use `page` to move through large result sets.
 
 ### Step 2 — Drill into a session
 
+```text
+recall(id="S12")                                # session summary + collapsed turn preview
+recall(id="S12/T*")                             # all turns in a session
+recall(id="S12/T3..7")                          # turn range
+recall(id="S12", depth="expanded")              # session content + raw transcript path
 ```
-recall(id="S12")                                # session summary + collapsed turn list
-recall(id="S12/T*")                             # all turns in session, collapsed
-recall(id="S12/T3..7")                          # turns 3-7 only
-recall(id="S12", depth="expanded")              # session + turn content inline
-```
+
+At expanded session depth, the output includes a `raw:` path pointing at the source JSONL. That is the handoff point to `mnemo-replay` when exact bytes matter.
 
 ### Step 3 — Turn detail and observations
 
-```
-recall(id="S12/T3", depth="expanded")           # single turn with prompt + response + files
-recall(id="S12/T3/O*")                          # all observations for one turn
-recall(id="S12/T*/O*")                          # all observations across a session
-recall(id="O87", depth="expanded")              # single observation, full content
-```
-
-### Step 4 — Raw transcript (when exact wording matters)
-
-```
-replay(id="S12")                                # turn overview from transcript
-replay(id="S12/T3", depth="expanded")           # full QA: user prompt + assistant response + tool calls
-replay(id="S12/T3", depth="full")               # same, no truncation on tool I/O
-replay(id="S12/T3/Tool2", depth="expanded")     # single tool call detail
-replay(id="S12/T3/Tool*", depth="full")         # every tool in that turn, untruncated
+```text
+recall(id="S12/T3", depth="expanded")           # one turn with prompt + response + file lists
+recall(id="S12/T3/O*")                          # observations for one turn
+recall(id="S12/T*/O*")                          # observations across the session
+recall(id="O87", depth="expanded")              # one observation with full stored fields
 ```
 
-Prefer `recall` when the structured title/content is enough. Switch to `replay` only when:
+### Step 4 — Escalate only when needed
 
-- You need the exact user prompt wording
-- The observation was truncated and you need the full tool result
-- The recall output references a tool call by position (e.g. "the second Edit") and you need its args
+If a field is truncated, raise `truncate` first:
+
+```text
+recall(id="S12/T3", depth="expanded", truncate=2000)
+```
+
+If the result still is not enough, or you need exact wording / full tool output, switch to the `mnemo-replay` skill. There is no unlimited `recall` mode.
 
 ## `recall` Parameter Reference
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `id` | string | Selector. Wildcards (`*`), ranges (`5..10`), and paths (`S12/T3/O*`) supported. See *Selector Grammar* below. |
-| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:` / `tag:`. Space-separated tokens, ANDed. |
-| `time` | string | `-7d` / `-2w` (relative), `2026-04-01` (single UTC day), `2026-04-01..2026-04-07` (inclusive UTC range). |
-| `depth` | string | `collapsed` (default) / `expanded` / `full`. |
-| `limit` | number | Max results. Default `50`. |
+| `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
+| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:` / `tag:`. Tokens are ANDed. |
+| `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
+| `depth` | string | `collapsed` (default) or `expanded`. |
+| `page` | number | 1-indexed page number for the target level. Default `1`. |
+| `pageSize` | number | Item count for the target level page. |
+| `truncate` | number | Character cap per rendered field. Default `200`, max `2000`. |
 
-Omit `id` **and** `query` to get recent sessions.
+Omit both `id` and `query` to get recent sessions.
+
+Child collections are always shown as a fixed preview with a `+N more` hint. To inspect more children, narrow the selector to that child level.
 
 ### Selector Grammar
 
 | Form | Meaning |
 |---|---|
 | `S*` / `S12` / `S5..10` | Sessions |
-| `S12/T*` / `S12/T3` / `S12/T3..7` | Turns in a session (promptNumber) |
+| `S12/T*` / `S12/T3` / `S12/T3..7` | Turns in a session |
 | `S12/T3/O*` | Observations for one turn |
 | `S12/T*/O*` | Observations for an entire session |
 | `O87` | Single observation (global DB id) |
 | `M*` / `M4` / `M1..20` | Memories |
 
-Turn IDs in `S12/T3` are **session-scoped promptNumbers**, not global DB ids. Use the form exactly as it appears in output headers.
+Turn IDs are session-scoped prompt numbers, not global DB ids.
 
 ### Query Filters
 
 | Prefix | Applies to | Notes |
 |---|---|---|
-| `type:bugfix` | turns, observations, memories | Matches the `type` field. Turn types: `bugfix` / `feature` / `refactor` / `change` / `discovery` / `decision`. |
+| `type:bugfix` | turns, observations, memories | Matches stored type tags. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
-| `project:/abs/path` | sessions, turns, observations | Exact match against `session.project` (absolute path). |
-| `tag:foo` | memories only | Post-filter; ignores non-memory results. Combine with text terms to narrow. |
+| `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
+| `tag:foo` | memories only | Post-filter on memory tags. |
 
-Free words become an FTS phrase (each word is quoted and ANDed). Example: `query="token refresh"` → matches rows containing both "token" AND "refresh".
-
-## `replay` Parameter Reference
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `id` | string | Required. `S12` / `S12/T3` / `S12/T3..7` / `S12/T3/Tool2` / `S12/T3/Tool*`. |
-| `depth` | string | `collapsed` (default) / `expanded` / `full`. `full` disables truncation on tool results — use only when you need the exact payload. |
-
-`replay` reads the original JSONL transcript from disk, so it's accurate to the byte. It works even for turns that were never fully extracted.
+Free words become an FTS query over indexed text.
 
 ## Depth Guidance
 
 | Depth | Use when |
 |---|---|
-| `collapsed` | Browsing / listing. Titles + counts only. Default. |
-| `expanded` | You have a specific target (one session, turn, or observation) and need content. |
-| `full` | Rare. Only for `replay` when you need untruncated tool I/O. |
+| `collapsed` | Browsing and list navigation. |
+| `expanded` | You have a specific target and need stored fields inline. |
 
-Do NOT pass `depth="full"` on a multi-turn `recall` — it expands every nested record and blows context.
+There is no `full` depth anymore.
 
 ## Common Patterns
 
 **"Did we already fix the auth race?"**
-```
+```text
 recall(query="auth race")
 # → sees [S12/T3] "Fixed auth mutex"
 recall(id="S12/T3", depth="expanded")
-# → reads the turn content + insight
 ```
 
 **"Show me the exact edit to login.ts last Thursday"**
-```
+```text
 recall(query="file:src/login.ts", time="2026-04-03")
 # → picks out [S8/T2]
-replay(id="S8/T2", depth="expanded")
-# → exact user prompt, assistant response, edit diff
+recall(id="S8", depth="expanded")
+# → session shows raw: /Users/...jsonl
+# → switch to mnemo-replay for exact transcript bytes
 ```
 
 **"What feedback has the user given about testing?"**
-```
+```text
 recall(query="tag:feedback testing")
-# → list of M-level memories tagged feedback containing "testing"
 recall(id="M4", depth="expanded")
-# → full memory content + reasoning + application
 ```
-
-**"What are we working on this week?"**
-```
-recall(time="-7d")
-# → recent sessions
-```
-
-## Undone Turns
-
-Turns reverted via sidechain appear with `[undone]` markers in `replay` output. They represent abandoned work — treat them as historical, not current state. The main `recall` path filters most undone turns out of rollups, but `replay` is faithful to the transcript and shows everything.
 
 ## Guidance
 
-- Prefer `recall` for structured navigation and FTS — it's cheaper and deduped.
-- Prefer `replay` when exact wording, tool arguments, or untruncated results matter.
-- Narrow with `id` / `query` / `time` **before** raising `depth`.
-- Use `project:<path>` to scope to the current repo when the user's question is project-local.
-- Omit parameters you don't need — defaults are tuned for browsing.
+- Prefer `recall` for search, browsing, and structured answers.
+- Narrow with `id`, `query`, or `time` before raising `depth`, `pageSize`, or `truncate`.
+- Use `project:<path>` when the question is project-local.
+- When `recall` shows a `raw:` path or a truncation hint, that is your signal to switch to `mnemo-replay`.
