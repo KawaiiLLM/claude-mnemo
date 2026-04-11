@@ -3,7 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import {
+  getSession,
+  updateLastAgentSessionId,
+  upsertSession,
+} from "../../src/db/sessions";
 import {
   checkForIdleWorkerShutdown,
   acquireWorkerSingleton,
@@ -373,6 +377,71 @@ describe("worker server", () => {
         )
         .get(otherSessionId)?.count,
     ).toBe(1);
+  });
+
+  test("createWorkerCore passes through the persisted agent session id and rewrites it when the SDK reports a new id", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-resume",
+      project: "/tmp/project-resume",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    updateLastAgentSessionId(db, sessionId, "persisted-agent-session");
+
+    const createWorkerQuerySessionCalls: unknown[][] = [];
+    const core = createWorkerCore({
+      db,
+      processObsImpl: async (state, observationId) => {
+        await state.pushMessage(`obs:${observationId}`);
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        createWorkerQuerySessionCalls.push(args);
+        const deps =
+          (args.length === 2 ? args[1] : args[3]) as
+            | {
+                onMessage?: (message: { session_id?: string }) => void;
+              }
+            | undefined;
+
+        return {
+          sessionId: "fresh-agent-session",
+          queryPid: 1234,
+          async sendPrompt() {
+            deps?.onMessage?.({ session_id: "fresh-agent-session" });
+            return {
+              session_id: "fresh-agent-session",
+            };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.processClaimedItem({
+      seq: 1,
+      kind: "obs",
+      targetId: 1,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 1,
+      enqueuedAtEpoch: 1,
+    });
+
+    expect(createWorkerQuerySessionCalls).toHaveLength(1);
+    expect(createWorkerQuerySessionCalls[0]?.[0]).toMatchObject({
+      db,
+      sessionDbId: sessionId,
+      contentSessionId: "worker-session-resume",
+      project: "/tmp/project-resume",
+      resumeAgentSessionId: "persisted-agent-session",
+    });
+    expect(getSession(db, sessionId)?.lastAgentSessionId).toBe(
+      "fresh-agent-session",
+    );
   });
 
   test("abortStalledSessions closes only sessions with an overdue in-flight request", async () => {

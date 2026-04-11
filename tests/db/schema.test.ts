@@ -56,6 +56,7 @@ describe("initializeSchema", () => {
       "insight",
       "next_steps",
       "last_compact_turn",
+      "last_agent_session_id",
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
@@ -293,6 +294,7 @@ describe("initializeSchema", () => {
       "insight",
       "next_steps",
       "last_compact_turn",
+      "last_agent_session_id",
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
@@ -356,6 +358,60 @@ describe("initializeSchema", () => {
         .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions")
         .get().count,
     ).toBe(1);
+  });
+
+  test("initializeSchema adds last_agent_session_id to an existing sessions table without resetting data", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        next_steps TEXT,
+        last_compact_turn INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+    `);
+    db.query(
+      `
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          title,
+          created_at_epoch
+        ) VALUES (?, ?, ?, ?)
+      `,
+    ).run("existing-session", "claude-mnemo", "Existing", 1);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => row.name);
+    const session = db
+      .query<
+        { contentSessionId: string; lastAgentSessionId: string | null },
+        []
+      >(
+        `
+          SELECT
+            content_session_id AS contentSessionId,
+            last_agent_session_id AS lastAgentSessionId
+          FROM sessions
+        `,
+      )
+      .get();
+
+    expect(columns).toContain("last_agent_session_id");
+    expect(session).toEqual({
+      contentSessionId: "existing-session",
+      lastAgentSessionId: null,
+    });
   });
 
   test("creates the worker queue table with FIFO and claim columns", () => {

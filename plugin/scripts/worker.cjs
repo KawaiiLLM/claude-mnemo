@@ -42,9 +42,9 @@ __export(server_exports, {
   shutdownGracefully: () => shutdownGracefully
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var import_node_os2 = require("node:os");
-var import_node_path5 = require("node:path");
+var import_node_path4 = require("node:path");
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -68,7 +68,6 @@ function resolveDatabasePath(explicitPath) {
 function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\]+/g, "-");
 }
-var SESSIONS_DIR = (0, import_node_path.join)(DATA_DIR, "sessions");
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
     (0, import_node_os.homedir)(),
@@ -77,9 +76,6 @@ function resolveTranscriptPath(projectPath, sessionId) {
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
   );
-}
-function resolveAgentSessionPath(sessionId) {
-  return (0, import_node_path.join)(SESSIONS_DIR, `${sessionId}.jsonl`);
 }
 
 // src/db/database.ts
@@ -664,6 +660,7 @@ var SESSION_SELECT = `
     insight,
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
+    last_agent_session_id AS lastAgentSessionId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -702,6 +699,7 @@ function upsertSession(db, input) {
         insight,
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
+        last_agent_session_id AS lastAgentSessionId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -738,6 +736,13 @@ function getRecentSessions(db, options = {}) {
   return db.query(
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
+}
+function updateLastAgentSessionId(db, sessionId, agentSessionId) {
+  db.query(
+    `UPDATE sessions
+     SET last_agent_session_id = ?
+     WHERE id = ?`
+  ).run(agentSessionId, sessionId);
 }
 
 // src/shared/transcript-parser.ts
@@ -998,6 +1003,7 @@ var SCHEMA_SQL = `
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
+    last_agent_session_id TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -1096,8 +1102,15 @@ var SCHEMA_SQL = `
 `;
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+}
+function ensureSessionLastAgentSessionIdColumn(db) {
+  if (hasColumn(db, "sessions", "last_agent_session_id")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -1656,8 +1669,9 @@ function createWorkerProcessors(db) {
 
 // src/worker/query-session.ts
 var import_node_child_process2 = require("node:child_process");
+var import_node_fs5 = require("node:fs");
 
-// node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+// ../../node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
 var import_url = require("url");
 var import_events = require("events");
@@ -22459,7 +22473,7 @@ function query({
   return queryInstance;
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
   $brand: () => $brand,
@@ -22700,7 +22714,7 @@ __export(external_exports, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/core/index.js
+// ../../node_modules/zod/v4/core/index.js
 var core_exports2 = {};
 __export(core_exports2, {
   $ZodAny: () => $ZodAny,
@@ -22978,7 +22992,7 @@ __export(core_exports2, {
   version: () => version2
 });
 
-// node_modules/zod/v4/core/core.js
+// ../../node_modules/zod/v4/core/core.js
 var NEVER2 = Object.freeze({
   status: "aborted"
 });
@@ -23053,7 +23067,7 @@ function config2(newConfig) {
   return globalConfig2;
 }
 
-// node_modules/zod/v4/core/util.js
+// ../../node_modules/zod/v4/core/util.js
 var util_exports = {};
 __export(util_exports, {
   BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES2,
@@ -23732,7 +23746,7 @@ var Class2 = class {
   }
 };
 
-// node_modules/zod/v4/core/errors.js
+// ../../node_modules/zod/v4/core/errors.js
 var initializer3 = (inst, def) => {
   inst.name = "$ZodError";
   Object.defineProperty(inst, "_zod", {
@@ -23868,7 +23882,7 @@ function prettifyError(error49) {
   return lines.join("\n");
 }
 
-// node_modules/zod/v4/core/parse.js
+// ../../node_modules/zod/v4/core/parse.js
 var _parse2 = (_Err) => (schema, value, _ctx, _params) => {
   const ctx = _ctx ? Object.assign(_ctx, { async: false }) : { async: false };
   const result = schema._zod.run({ value, issues: [] }, ctx);
@@ -23956,7 +23970,7 @@ var _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
 };
 var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError2);
 
-// node_modules/zod/v4/core/regexes.js
+// ../../node_modules/zod/v4/core/regexes.js
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base642,
@@ -24113,7 +24127,7 @@ var sha512_hex = /^[0-9a-fA-F]{128}$/;
 var sha512_base64 = /* @__PURE__ */ fixedBase64(86, "==");
 var sha512_base64url = /* @__PURE__ */ fixedBase64url(86);
 
-// node_modules/zod/v4/core/checks.js
+// ../../node_modules/zod/v4/core/checks.js
 var $ZodCheck2 = /* @__PURE__ */ $constructor2("$ZodCheck", (inst, def) => {
   var _a2;
   inst._zod ?? (inst._zod = {});
@@ -24661,7 +24675,7 @@ var $ZodCheckOverwrite2 = /* @__PURE__ */ $constructor2("$ZodCheckOverwrite", (i
   };
 });
 
-// node_modules/zod/v4/core/doc.js
+// ../../node_modules/zod/v4/core/doc.js
 var Doc2 = class {
   constructor(args = []) {
     this.content = [];
@@ -24697,14 +24711,14 @@ var Doc2 = class {
   }
 };
 
-// node_modules/zod/v4/core/versions.js
+// ../../node_modules/zod/v4/core/versions.js
 var version2 = {
   major: 4,
   minor: 3,
   patch: 6
 };
 
-// node_modules/zod/v4/core/schemas.js
+// ../../node_modules/zod/v4/core/schemas.js
 var $ZodType2 = /* @__PURE__ */ $constructor2("$ZodType", (inst, def) => {
   var _a2;
   inst ?? (inst = {});
@@ -26675,7 +26689,7 @@ function handleRefineResult2(result, payload, input, inst) {
   }
 }
 
-// node_modules/zod/v4/locales/index.js
+// ../../node_modules/zod/v4/locales/index.js
 var locales_exports = {};
 __export(locales_exports, {
   ar: () => ar_default,
@@ -26729,7 +26743,7 @@ __export(locales_exports, {
   zhTW: () => zh_TW_default
 });
 
-// node_modules/zod/v4/locales/ar.js
+// ../../node_modules/zod/v4/locales/ar.js
 var error2 = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0641", verb: "\u0623\u0646 \u064A\u062D\u0648\u064A" },
@@ -26836,7 +26850,7 @@ function ar_default() {
   };
 }
 
-// node_modules/zod/v4/locales/az.js
+// ../../node_modules/zod/v4/locales/az.js
 var error3 = () => {
   const Sizable = {
     string: { unit: "simvol", verb: "olmal\u0131d\u0131r" },
@@ -26942,7 +26956,7 @@ function az_default() {
   };
 }
 
-// node_modules/zod/v4/locales/be.js
+// ../../node_modules/zod/v4/locales/be.js
 function getBelarusianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -27099,7 +27113,7 @@ function be_default() {
   };
 }
 
-// node_modules/zod/v4/locales/bg.js
+// ../../node_modules/zod/v4/locales/bg.js
 var error5 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0430", verb: "\u0434\u0430 \u0441\u044A\u0434\u044A\u0440\u0436\u0430" },
@@ -27220,7 +27234,7 @@ function bg_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ca.js
+// ../../node_modules/zod/v4/locales/ca.js
 var error6 = () => {
   const Sizable = {
     string: { unit: "car\xE0cters", verb: "contenir" },
@@ -27329,7 +27343,7 @@ function ca_default() {
   };
 }
 
-// node_modules/zod/v4/locales/cs.js
+// ../../node_modules/zod/v4/locales/cs.js
 var error7 = () => {
   const Sizable = {
     string: { unit: "znak\u016F", verb: "m\xEDt" },
@@ -27441,7 +27455,7 @@ function cs_default() {
   };
 }
 
-// node_modules/zod/v4/locales/da.js
+// ../../node_modules/zod/v4/locales/da.js
 var error8 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "havde" },
@@ -27557,7 +27571,7 @@ function da_default() {
   };
 }
 
-// node_modules/zod/v4/locales/de.js
+// ../../node_modules/zod/v4/locales/de.js
 var error9 = () => {
   const Sizable = {
     string: { unit: "Zeichen", verb: "zu haben" },
@@ -27666,7 +27680,7 @@ function de_default() {
   };
 }
 
-// node_modules/zod/v4/locales/en.js
+// ../../node_modules/zod/v4/locales/en.js
 var error10 = () => {
   const Sizable = {
     string: { unit: "characters", verb: "to have" },
@@ -27775,7 +27789,7 @@ function en_default3() {
   };
 }
 
-// node_modules/zod/v4/locales/eo.js
+// ../../node_modules/zod/v4/locales/eo.js
 var error11 = () => {
   const Sizable = {
     string: { unit: "karaktrojn", verb: "havi" },
@@ -27885,7 +27899,7 @@ function eo_default() {
   };
 }
 
-// node_modules/zod/v4/locales/es.js
+// ../../node_modules/zod/v4/locales/es.js
 var error12 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "tener" },
@@ -28018,7 +28032,7 @@ function es_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fa.js
+// ../../node_modules/zod/v4/locales/fa.js
 var error13 = () => {
   const Sizable = {
     string: { unit: "\u06A9\u0627\u0631\u0627\u06A9\u062A\u0631", verb: "\u062F\u0627\u0634\u062A\u0647 \u0628\u0627\u0634\u062F" },
@@ -28133,7 +28147,7 @@ function fa_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fi.js
+// ../../node_modules/zod/v4/locales/fi.js
 var error14 = () => {
   const Sizable = {
     string: { unit: "merkki\xE4", subject: "merkkijonon" },
@@ -28246,7 +28260,7 @@ function fi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr.js
+// ../../node_modules/zod/v4/locales/fr.js
 var error15 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -28355,7 +28369,7 @@ function fr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr-CA.js
+// ../../node_modules/zod/v4/locales/fr-CA.js
 var error16 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -28463,7 +28477,7 @@ function fr_CA_default() {
   };
 }
 
-// node_modules/zod/v4/locales/he.js
+// ../../node_modules/zod/v4/locales/he.js
 var error17 = () => {
   const TypeNames = {
     string: { label: "\u05DE\u05D7\u05E8\u05D5\u05D6\u05EA", gender: "f" },
@@ -28658,7 +28672,7 @@ function he_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hu.js
+// ../../node_modules/zod/v4/locales/hu.js
 var error18 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "legyen" },
@@ -28767,7 +28781,7 @@ function hu_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hy.js
+// ../../node_modules/zod/v4/locales/hy.js
 function getArmenianPlural(count, one, many) {
   return Math.abs(count) === 1 ? one : many;
 }
@@ -28915,7 +28929,7 @@ function hy_default() {
   };
 }
 
-// node_modules/zod/v4/locales/id.js
+// ../../node_modules/zod/v4/locales/id.js
 var error20 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "memiliki" },
@@ -29022,7 +29036,7 @@ function id_default() {
   };
 }
 
-// node_modules/zod/v4/locales/is.js
+// ../../node_modules/zod/v4/locales/is.js
 var error21 = () => {
   const Sizable = {
     string: { unit: "stafi", verb: "a\xF0 hafa" },
@@ -29132,7 +29146,7 @@ function is_default() {
   };
 }
 
-// node_modules/zod/v4/locales/it.js
+// ../../node_modules/zod/v4/locales/it.js
 var error22 = () => {
   const Sizable = {
     string: { unit: "caratteri", verb: "avere" },
@@ -29241,7 +29255,7 @@ function it_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ja.js
+// ../../node_modules/zod/v4/locales/ja.js
 var error23 = () => {
   const Sizable = {
     string: { unit: "\u6587\u5B57", verb: "\u3067\u3042\u308B" },
@@ -29349,7 +29363,7 @@ function ja_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ka.js
+// ../../node_modules/zod/v4/locales/ka.js
 var error24 = () => {
   const Sizable = {
     string: { unit: "\u10E1\u10D8\u10DB\u10D1\u10DD\u10DA\u10DD", verb: "\u10E3\u10DC\u10D3\u10D0 \u10E8\u10D4\u10D8\u10EA\u10D0\u10D5\u10D3\u10D4\u10E1" },
@@ -29462,7 +29476,7 @@ function ka_default() {
   };
 }
 
-// node_modules/zod/v4/locales/km.js
+// ../../node_modules/zod/v4/locales/km.js
 var error25 = () => {
   const Sizable = {
     string: { unit: "\u178F\u17BD\u17A2\u1780\u17D2\u179F\u179A", verb: "\u1782\u17BD\u179A\u1798\u17B6\u1793" },
@@ -29573,12 +29587,12 @@ function km_default() {
   };
 }
 
-// node_modules/zod/v4/locales/kh.js
+// ../../node_modules/zod/v4/locales/kh.js
 function kh_default() {
   return km_default();
 }
 
-// node_modules/zod/v4/locales/ko.js
+// ../../node_modules/zod/v4/locales/ko.js
 var error26 = () => {
   const Sizable = {
     string: { unit: "\uBB38\uC790", verb: "to have" },
@@ -29690,7 +29704,7 @@ function ko_default() {
   };
 }
 
-// node_modules/zod/v4/locales/lt.js
+// ../../node_modules/zod/v4/locales/lt.js
 var capitalizeFirstCharacter = (text) => {
   return text.charAt(0).toUpperCase() + text.slice(1);
 };
@@ -29894,7 +29908,7 @@ function lt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/mk.js
+// ../../node_modules/zod/v4/locales/mk.js
 var error28 = () => {
   const Sizable = {
     string: { unit: "\u0437\u043D\u0430\u0446\u0438", verb: "\u0434\u0430 \u0438\u043C\u0430\u0430\u0442" },
@@ -30004,7 +30018,7 @@ function mk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ms.js
+// ../../node_modules/zod/v4/locales/ms.js
 var error29 = () => {
   const Sizable = {
     string: { unit: "aksara", verb: "mempunyai" },
@@ -30112,7 +30126,7 @@ function ms_default() {
   };
 }
 
-// node_modules/zod/v4/locales/nl.js
+// ../../node_modules/zod/v4/locales/nl.js
 var error30 = () => {
   const Sizable = {
     string: { unit: "tekens", verb: "heeft" },
@@ -30223,7 +30237,7 @@ function nl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/no.js
+// ../../node_modules/zod/v4/locales/no.js
 var error31 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "\xE5 ha" },
@@ -30332,7 +30346,7 @@ function no_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ota.js
+// ../../node_modules/zod/v4/locales/ota.js
 var error32 = () => {
   const Sizable = {
     string: { unit: "harf", verb: "olmal\u0131d\u0131r" },
@@ -30442,7 +30456,7 @@ function ota_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ps.js
+// ../../node_modules/zod/v4/locales/ps.js
 var error33 = () => {
   const Sizable = {
     string: { unit: "\u062A\u0648\u06A9\u064A", verb: "\u0648\u0644\u0631\u064A" },
@@ -30557,7 +30571,7 @@ function ps_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pl.js
+// ../../node_modules/zod/v4/locales/pl.js
 var error34 = () => {
   const Sizable = {
     string: { unit: "znak\xF3w", verb: "mie\u0107" },
@@ -30667,7 +30681,7 @@ function pl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pt.js
+// ../../node_modules/zod/v4/locales/pt.js
 var error35 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "ter" },
@@ -30776,7 +30790,7 @@ function pt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ru.js
+// ../../node_modules/zod/v4/locales/ru.js
 function getRussianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -30933,7 +30947,7 @@ function ru_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sl.js
+// ../../node_modules/zod/v4/locales/sl.js
 var error37 = () => {
   const Sizable = {
     string: { unit: "znakov", verb: "imeti" },
@@ -31043,7 +31057,7 @@ function sl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sv.js
+// ../../node_modules/zod/v4/locales/sv.js
 var error38 = () => {
   const Sizable = {
     string: { unit: "tecken", verb: "att ha" },
@@ -31154,7 +31168,7 @@ function sv_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ta.js
+// ../../node_modules/zod/v4/locales/ta.js
 var error39 = () => {
   const Sizable = {
     string: { unit: "\u0B8E\u0BB4\u0BC1\u0BA4\u0BCD\u0BA4\u0BC1\u0B95\u0BCD\u0B95\u0BB3\u0BCD", verb: "\u0B95\u0BCA\u0BA3\u0BCD\u0B9F\u0BBF\u0BB0\u0BC1\u0B95\u0BCD\u0B95 \u0BB5\u0BC7\u0BA3\u0BCD\u0B9F\u0BC1\u0BAE\u0BCD" },
@@ -31265,7 +31279,7 @@ function ta_default() {
   };
 }
 
-// node_modules/zod/v4/locales/th.js
+// ../../node_modules/zod/v4/locales/th.js
 var error40 = () => {
   const Sizable = {
     string: { unit: "\u0E15\u0E31\u0E27\u0E2D\u0E31\u0E01\u0E29\u0E23", verb: "\u0E04\u0E27\u0E23\u0E21\u0E35" },
@@ -31376,7 +31390,7 @@ function th_default() {
   };
 }
 
-// node_modules/zod/v4/locales/tr.js
+// ../../node_modules/zod/v4/locales/tr.js
 var error41 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "olmal\u0131" },
@@ -31482,7 +31496,7 @@ function tr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uk.js
+// ../../node_modules/zod/v4/locales/uk.js
 var error42 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0456\u0432", verb: "\u043C\u0430\u0442\u0438\u043C\u0435" },
@@ -31591,12 +31605,12 @@ function uk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ua.js
+// ../../node_modules/zod/v4/locales/ua.js
 function ua_default() {
   return uk_default();
 }
 
-// node_modules/zod/v4/locales/ur.js
+// ../../node_modules/zod/v4/locales/ur.js
 var error43 = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0648\u0641", verb: "\u06C1\u0648\u0646\u0627" },
@@ -31707,7 +31721,7 @@ function ur_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uz.js
+// ../../node_modules/zod/v4/locales/uz.js
 var error44 = () => {
   const Sizable = {
     string: { unit: "belgi", verb: "bo\u2018lishi kerak" },
@@ -31817,7 +31831,7 @@ function uz_default() {
   };
 }
 
-// node_modules/zod/v4/locales/vi.js
+// ../../node_modules/zod/v4/locales/vi.js
 var error45 = () => {
   const Sizable = {
     string: { unit: "k\xFD t\u1EF1", verb: "c\xF3" },
@@ -31926,7 +31940,7 @@ function vi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-CN.js
+// ../../node_modules/zod/v4/locales/zh-CN.js
 var error46 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u7B26", verb: "\u5305\u542B" },
@@ -32036,7 +32050,7 @@ function zh_CN_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-TW.js
+// ../../node_modules/zod/v4/locales/zh-TW.js
 var error47 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u5143", verb: "\u64C1\u6709" },
@@ -32144,7 +32158,7 @@ function zh_TW_default() {
   };
 }
 
-// node_modules/zod/v4/locales/yo.js
+// ../../node_modules/zod/v4/locales/yo.js
 var error48 = () => {
   const Sizable = {
     string: { unit: "\xE0mi", verb: "n\xED" },
@@ -32252,7 +32266,7 @@ function yo_default() {
   };
 }
 
-// node_modules/zod/v4/core/registries.js
+// ../../node_modules/zod/v4/core/registries.js
 var _a;
 var $output = /* @__PURE__ */ Symbol("ZodOutput");
 var $input = /* @__PURE__ */ Symbol("ZodInput");
@@ -32302,7 +32316,7 @@ function registry2() {
 (_a = globalThis).__zod_globalRegistry ?? (_a.__zod_globalRegistry = registry2());
 var globalRegistry2 = globalThis.__zod_globalRegistry;
 
-// node_modules/zod/v4/core/api.js
+// ../../node_modules/zod/v4/core/api.js
 // @__NO_SIDE_EFFECTS__
 function _string2(Class3, params) {
   return new Class3({
@@ -33341,7 +33355,7 @@ function _stringFormat(Class3, format, fnOrRegex, _params = {}) {
   return inst;
 }
 
-// node_modules/zod/v4/core/to-json-schema.js
+// ../../node_modules/zod/v4/core/to-json-schema.js
 function initializeContext(params) {
   let target = params?.target ?? "draft-2020-12";
   if (target === "draft-4")
@@ -33693,7 +33707,7 @@ var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) =
   return finalize(ctx, schema);
 };
 
-// node_modules/zod/v4/core/json-schema-processors.js
+// ../../node_modules/zod/v4/core/json-schema-processors.js
 var formatMap = {
   guid: "uuid",
   url: "uri",
@@ -34244,7 +34258,7 @@ function toJSONSchema2(input, params) {
   return finalize(ctx, input);
 }
 
-// node_modules/zod/v4/core/json-schema-generator.js
+// ../../node_modules/zod/v4/core/json-schema-generator.js
 var JSONSchemaGenerator2 = class {
   /** @deprecated Access via ctx instead */
   get metadataRegistry() {
@@ -34319,10 +34333,10 @@ var JSONSchemaGenerator2 = class {
   }
 };
 
-// node_modules/zod/v4/core/json-schema.js
+// ../../node_modules/zod/v4/core/json-schema.js
 var json_schema_exports = {};
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../node_modules/zod/v4/classic/schemas.js
 var schemas_exports2 = {};
 __export(schemas_exports2, {
   ZodAny: () => ZodAny2,
@@ -34491,7 +34505,7 @@ __export(schemas_exports2, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/classic/checks.js
+// ../../node_modules/zod/v4/classic/checks.js
 var checks_exports2 = {};
 __export(checks_exports2, {
   endsWith: () => _endsWith2,
@@ -34525,7 +34539,7 @@ __export(checks_exports2, {
   uppercase: () => _uppercase2
 });
 
-// node_modules/zod/v4/classic/iso.js
+// ../../node_modules/zod/v4/classic/iso.js
 var iso_exports = {};
 __export(iso_exports, {
   ZodISODate: () => ZodISODate2,
@@ -34566,7 +34580,7 @@ function duration4(params) {
   return _isoDuration2(ZodISODuration2, params);
 }
 
-// node_modules/zod/v4/classic/errors.js
+// ../../node_modules/zod/v4/classic/errors.js
 var initializer4 = (inst, issues) => {
   $ZodError2.init(inst, issues);
   inst.name = "ZodError";
@@ -34606,7 +34620,7 @@ var ZodRealError2 = $constructor2("ZodError", initializer4, {
   Parent: Error
 });
 
-// node_modules/zod/v4/classic/parse.js
+// ../../node_modules/zod/v4/classic/parse.js
 var parse3 = /* @__PURE__ */ _parse2(ZodRealError2);
 var parseAsync4 = /* @__PURE__ */ _parseAsync2(ZodRealError2);
 var safeParse5 = /* @__PURE__ */ _safeParse2(ZodRealError2);
@@ -34620,7 +34634,7 @@ var safeDecode2 = /* @__PURE__ */ _safeDecode(ZodRealError2);
 var safeEncodeAsync2 = /* @__PURE__ */ _safeEncodeAsync(ZodRealError2);
 var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError2);
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../node_modules/zod/v4/classic/schemas.js
 var ZodType3 = /* @__PURE__ */ $constructor2("ZodType", (inst, def) => {
   $ZodType2.init(inst, def);
   Object.assign(inst["~standard"], {
@@ -35699,7 +35713,7 @@ function preprocess2(fn, schema) {
   return pipe2(transform2(fn), schema);
 }
 
-// node_modules/zod/v4/classic/compat.js
+// ../../node_modules/zod/v4/classic/compat.js
 var ZodIssueCode2 = {
   invalid_type: "invalid_type",
   too_big: "too_big",
@@ -35725,7 +35739,7 @@ var ZodFirstPartyTypeKind2;
 /* @__PURE__ */ (function(ZodFirstPartyTypeKind3) {
 })(ZodFirstPartyTypeKind2 || (ZodFirstPartyTypeKind2 = {}));
 
-// node_modules/zod/v4/classic/from-json-schema.js
+// ../../node_modules/zod/v4/classic/from-json-schema.js
 var z = {
   ...schemas_exports2,
   ...checks_exports2,
@@ -36199,7 +36213,7 @@ function fromJSONSchema(schema, params) {
   return convertSchema(schema, ctx);
 }
 
-// node_modules/zod/v4/classic/coerce.js
+// ../../node_modules/zod/v4/classic/coerce.js
 var coerce_exports = {};
 __export(coerce_exports, {
   bigint: () => bigint3,
@@ -36224,7 +36238,7 @@ function date6(params) {
   return _coercedDate(ZodDate2, params);
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../node_modules/zod/v4/classic/external.js
 config2(en_default3());
 
 // src/mcp/definitions.ts
@@ -36278,7 +36292,6 @@ var MNEMO_ALLOWED_TOOLS = [
 // src/worker/agent-session.ts
 var import_node_fs4 = require("node:fs");
 var import_node_child_process = require("node:child_process");
-var import_node_path4 = require("node:path");
 
 // src/db/memories.ts
 var MEMORY_SELECT = `
@@ -38373,35 +38386,6 @@ function createMnemoSdkServer(database, defaultProject, deps = {
 function missingHandler(toolName) {
   throw new Error(`Missing Mnemo tool handler: ${toolName}`);
 }
-var defaultMoveDeps = {
-  resolveSrcPath: resolveTranscriptPath,
-  resolveDestPath: resolveAgentSessionPath,
-  existsSync: import_node_fs4.existsSync,
-  mkdirSync: import_node_fs4.mkdirSync,
-  renameSync: import_node_fs4.renameSync,
-  copyFileSync: import_node_fs4.copyFileSync,
-  unlinkSync: import_node_fs4.unlinkSync
-};
-function isExdevError(error49) {
-  return error49 instanceof Error && "code" in error49 && error49.code === "EXDEV";
-}
-function moveAgentSession(cwd2, sessionId, deps = defaultMoveDeps) {
-  const srcPath = deps.resolveSrcPath(cwd2, sessionId);
-  const destPath = deps.resolveDestPath(sessionId);
-  if (!deps.existsSync(srcPath)) {
-    return;
-  }
-  deps.mkdirSync((0, import_node_path4.dirname)(destPath), { recursive: true });
-  try {
-    deps.renameSync(srcPath, destPath);
-  } catch (error49) {
-    if (!isExdevError(error49)) {
-      throw error49;
-    }
-    deps.copyFileSync(srcPath, destPath);
-    deps.unlinkSync(srcPath);
-  }
-}
 
 // src/mnemosyne/env.ts
 var BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
@@ -38504,7 +38488,8 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const createSdkMcpServerImpl = deps.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = deps.toolImpl ?? tool;
   const spawnImpl = deps.spawnImpl ?? import_node_child_process2.spawn;
-  const moveAgentSessionImpl = deps.moveAgentSessionImpl ?? moveAgentSession;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs5.existsSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs5.mkdirSync;
   const killImpl = deps.killImpl ?? process.kill;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable();
@@ -38517,7 +38502,10 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
       toolImpl
     })
   };
-  let sessionId = null;
+  mkdirSyncImpl(DATA_DIR, { recursive: true });
+  const resumeCandidate = input.resumeAgentSessionId ?? null;
+  const resumeTarget = resumeCandidate && existsSyncImpl(resolveTranscriptPath(DATA_DIR, resumeCandidate)) ? resumeCandidate : null;
+  let sessionId = resumeTarget;
   let queryPid;
   let closed = false;
   let closePromise = null;
@@ -38525,7 +38513,8 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
     prompt: promptStream,
     options: {
       model: "claude-sonnet-4-6",
-      cwd: input.project,
+      cwd: DATA_DIR,
+      ...resumeTarget ? { resume: resumeTarget } : {},
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
       pathToClaudeCodeExecutable,
@@ -38656,9 +38645,6 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
           ]);
         } catch {
         } finally {
-          if (sessionId) {
-            moveAgentSessionImpl(input.project, sessionId);
-          }
           if (queryPid && isProcessAliveImpl(queryPid)) {
             try {
               killImpl(queryPid, "SIGKILL");
@@ -38827,16 +38813,39 @@ function createWorkerCore(deps) {
     }
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    if (session.lastAgentSessionId) {
+      state.agentSessionId = session.lastAgentSessionId;
+    }
     state.querySession = createWorkerQuerySessionImpl(
-      deps.db,
-      state.sessionDbId,
-      session.project,
+      {
+        db: deps.db,
+        sessionDbId: state.sessionDbId,
+        contentSessionId: session.contentSessionId,
+        project: session.project,
+        resumeAgentSessionId: session.lastAgentSessionId
+      },
       {
         onMessage: (message) => {
           state.lastMessageAt = nowMs();
           state.lastActivity = nowMs();
           if ("session_id" in message && typeof message.session_id === "string" && message.session_id !== "") {
-            state.agentSessionId = message.session_id;
+            const newAgentSessionId = message.session_id;
+            const isFirstObservation = state.agentSessionId !== newAgentSessionId;
+            state.agentSessionId = newAgentSessionId;
+            if (isFirstObservation) {
+              try {
+                updateLastAgentSessionId(
+                  deps.db,
+                  state.sessionDbId,
+                  newAgentSessionId
+                );
+              } catch (error49) {
+                logger.error?.("updateLastAgentSessionId failed", {
+                  sessionDbId: state.sessionDbId,
+                  error: error49
+                });
+              }
+            }
           }
         },
         onPid: (pid) => {
@@ -39045,14 +39054,14 @@ function acquireWorkerSingleton(deps = {}) {
   const now = deps.now ?? Date.now;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs5.existsSync;
-  const statSyncImpl = deps.statSyncImpl ?? import_node_fs5.statSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs5.readFileSync;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs5.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs5.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs6.existsSync;
+  const statSyncImpl = deps.statSyncImpl ?? import_node_fs6.statSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs6.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs6.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs6.unlinkSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs6.mkdirSync;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const dataDir = (0, import_node_path5.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
+  const dataDir = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
   if (!existsSyncImpl(dataDir)) {
     mkdirSyncImpl(dataDir, { recursive: true });
   }
@@ -39144,7 +39153,7 @@ async function shutdownGracefully(deps = {}) {
 }
 function createShutdownCleanup(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs6.unlinkSync;
   const processImpl = deps.processImpl ?? process;
   return async () => {
     try {
@@ -39190,8 +39199,8 @@ async function main(deps = {}) {
   const BunServeImpl = deps.BunServeImpl ?? Bun.serve;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs5.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs6.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs6.unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   initializeDatabase(db);

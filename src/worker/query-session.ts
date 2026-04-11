@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
 
 import type { Database } from "bun:sqlite";
 
@@ -15,11 +16,11 @@ import {
 import { MNEMO_ALLOWED_TOOLS } from "../mcp/definitions";
 import {
   createMnemoSdkServer,
-  moveAgentSession,
   resolveClaudeCodeExecutablePath,
 } from "./agent-session";
 import { getSession } from "../db/sessions";
 import { buildIsolatedEnv } from "../mnemosyne/env";
+import { DATA_DIR, resolveTranscriptPath } from "../shared/paths";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -37,6 +38,7 @@ export interface WorkerQuerySessionInput {
   sessionDbId: number;
   contentSessionId: string;
   project: string;
+  resumeAgentSessionId?: string | null;
   systemPrompt?: string;
 }
 
@@ -45,7 +47,8 @@ export interface WorkerQuerySessionDeps {
   createSdkMcpServerImpl?: typeof createSdkMcpServer;
   toolImpl?: typeof tool;
   spawnImpl?: typeof spawn;
-  moveAgentSessionImpl?: typeof moveAgentSession;
+  existsSyncImpl?: (path: string) => boolean;
+  mkdirSyncImpl?: typeof mkdirSync;
   killImpl?: typeof process.kill;
   isProcessAliveImpl?: (pid: number) => boolean;
   onMessage?: (message: SDKMessage) => void;
@@ -179,7 +182,8 @@ export function createWorkerQuerySession(
     deps.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = deps.toolImpl ?? tool;
   const spawnImpl = deps.spawnImpl ?? spawn;
-  const moveAgentSessionImpl = deps.moveAgentSessionImpl ?? moveAgentSession;
+  const existsSyncImpl = deps.existsSyncImpl ?? existsSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? mkdirSync;
   const killImpl = deps.killImpl ?? process.kill;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable<SDKUserMessage>();
@@ -193,7 +197,16 @@ export function createWorkerQuerySession(
     }),
   };
 
-  let sessionId: string | null = null;
+  mkdirSyncImpl(DATA_DIR, { recursive: true });
+
+  const resumeCandidate = input.resumeAgentSessionId ?? null;
+  const resumeTarget =
+    resumeCandidate &&
+    existsSyncImpl(resolveTranscriptPath(DATA_DIR, resumeCandidate))
+      ? resumeCandidate
+      : null;
+
+  let sessionId: string | null = resumeTarget;
   let queryPid: number | undefined;
   let closed = false;
   let closePromise: Promise<void> | null = null;
@@ -202,7 +215,8 @@ export function createWorkerQuerySession(
     prompt: promptStream,
     options: {
       model: "claude-sonnet-4-6",
-      cwd: input.project,
+      cwd: DATA_DIR,
+      ...(resumeTarget ? { resume: resumeTarget } : {}),
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
       mcpServers,
       pathToClaudeCodeExecutable,
@@ -350,9 +364,6 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
         } catch {
           // close remains best-effort
         } finally {
-          if (sessionId) {
-            moveAgentSessionImpl(input.project, sessionId);
-          }
           if (queryPid && isProcessAliveImpl(queryPid)) {
             try {
               killImpl(queryPid, "SIGKILL");

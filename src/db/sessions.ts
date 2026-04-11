@@ -11,6 +11,7 @@ export interface SessionRecord {
   insight: string | null;
   nextSteps: string | null;
   lastCompactTurn: number | null;
+  lastAgentSessionId: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -44,6 +45,7 @@ const SESSION_SELECT = `
     insight,
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
+    last_agent_session_id AS lastAgentSessionId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -88,6 +90,7 @@ export function upsertSession(
         insight,
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
+        last_agent_session_id AS lastAgentSessionId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -168,4 +171,16 @@ export function updateCompactAnchor(db: Database, sessionId: number): void {
      )
      WHERE id = ?`,
   ).run(sessionId, sessionId);
+}
+
+export function updateLastAgentSessionId(
+  db: Database,
+  sessionId: number,
+  agentSessionId: string,
+): void {
+  db.query(
+    `UPDATE sessions
+     SET last_agent_session_id = ?
+     WHERE id = ?`,
+  ).run(agentSessionId, sessionId);
 }

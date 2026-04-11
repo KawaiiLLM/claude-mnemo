@@ -12,6 +12,7 @@ const SCHEMA_SQL = `
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
+    last_agent_session_id TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -111,8 +112,17 @@ const SCHEMA_SQL = `
 
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+  ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+}
+
+function ensureSessionLastAgentSessionIdColumn(db: Database): void {
+  if (hasColumn(db, "sessions", "last_agent_session_id")) {
+    return;
+  }
+
+  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
 }
 
 function ensureSessionProjectIndex(db: Database): void {

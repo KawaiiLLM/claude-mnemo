@@ -168,7 +168,7 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 
 | Table | Purpose |
 |-------|---------|
-| `sessions` | One row per conversation. Fields: `title`, `content`, `insight`, `next_steps`, `project`, timestamps. |
+| `sessions` | One row per conversation. Fields: `title`, `content`, `insight`, `next_steps`, `project`, `last_agent_session_id`, timestamps. |
 | `turns` | One row per user prompt. Fields: `user_prompt`, `assistant_response`, `title`, `content`, `insight`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count`, `status` (`active` → `extracted` / `skipped` / `undone`). |
 | `observations` | One row per tool call. Fields: `tool_name`, `tool_input`, `tool_result`, `title`, `content`, `status` (`pending` → `extracted` / `skipped`). |
 | `memories` | Durable cross-session knowledge. Fields: `type`, `scope`, `title`, `content`, `reasoning`, `application`, `tags`, `source_turn_id`, `status`. |
@@ -178,6 +178,7 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 ### Architecture Decisions
 
 - **Worker-backed extraction** — a long-lived Bun worker (`src/worker/server.ts`, port 37778) owns the Mnemosyne query sessions. Hooks never block on the LLM; they write to SQLite + `pending_queue` and fire-and-forget a `/wake` request. Replaces the old fork-per-hook model.
+- **Dedicated Mnemosyne transcript directory** — worker query sessions run with `cwd = ~/.claude-mnemo`, so Claude Agent SDK transcripts land under `~/.claude/projects/-Users-<username>-.claude-mnemo/` instead of the user's real project directories. `sessions.last_agent_session_id` stores the latest agent session id so the worker can best-effort resume the prior query session when the transcript file still exists.
 - **Per-session processing lock** — within one session, observation and turn-stop jobs run strictly serially through a chained-Promise lock in `src/worker/agent-session.ts`. Different sessions process in parallel.
 - **Synchronous `/compact`** — PreCompact is the one hook that waits. It drains the session's queue and pushes a final summary prompt before returning, so the main agent's compact anchor is accurate.
 - **UUID-based transcript dedup** — resume / `--continue` append the full history again; the parser dedupes by `entry.uuid` before computing turn boundaries, so tool call counts don't inflate on resumed sessions.

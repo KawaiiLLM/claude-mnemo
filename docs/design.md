@@ -96,6 +96,34 @@ Endpoints:
 
 The worker keeps one in-memory `SessionState` per active session and serializes work per session via a promise chain. Different sessions may progress independently; the same session is strictly serialized.
 
+### Mnemosyne Agent Session Storage
+
+The worker runs Claude Agent SDK query sessions with `cwd = ~/.claude-mnemo` (`DATA_DIR`), not the user's real project path.
+
+That causes the SDK to write Mnemosyne transcripts to a dedicated pseudo-project directory:
+
+```text
+~/.claude/projects/<encodeProjectPath(~/.claude-mnemo)>/<agent-session-id>.jsonl
+```
+
+On a typical macOS install this resolves to:
+
+```text
+~/.claude/projects/-Users-<username>-.claude-mnemo/<agent-session-id>.jsonl
+```
+
+This does not remove Mnemosyne from the `.claude/projects` tree entirely, but it does isolate all Mnemosyne transcripts into one dedicated directory so they no longer collide with real user project session directories.
+
+The old post-write archive shuttle into `~/.claude-mnemo/sessions/` is gone. Query sessions now stay at the SDK-native path, which enables native SDK resume.
+
+The worker persists the most recent agent session id in `sessions.last_agent_session_id`. On the next wake for that session, `ensureQuerySession()` best-effort resumes by:
+
+1. Reading `last_agent_session_id` from SQLite
+2. Checking whether the expected SDK jsonl file still exists at the `DATA_DIR`-based transcript path
+3. Passing `resume: <agent-session-id>` only when that file is present
+
+If the file is missing, the worker silently falls back to a fresh query session and overwrites the DB field when the next SDK session id is observed.
+
 ### Queue Semantics
 
 `pending_queue` is the durable FIFO for async work:
@@ -146,6 +174,7 @@ CREATE TABLE sessions (
   insight TEXT,
   next_steps TEXT,
   last_compact_turn INTEGER,
+  last_agent_session_id TEXT,
   created_at_epoch INTEGER NOT NULL,
   updated_at_epoch INTEGER,
   completed_at_epoch INTEGER

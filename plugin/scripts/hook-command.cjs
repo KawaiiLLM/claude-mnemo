@@ -51,7 +51,6 @@ function resolveDatabasePath(explicitPath) {
   }
   return candidatePath;
 }
-var SESSIONS_DIR = (0, import_node_path.join)(DATA_DIR, "sessions");
 
 // src/db/database.ts
 function resolveDatabasePath2(path) {
@@ -213,6 +212,7 @@ var SCHEMA_SQL = `
     insight TEXT,
     next_steps TEXT,
     last_compact_turn INTEGER,
+    last_agent_session_id TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -311,8 +311,15 @@ var SCHEMA_SQL = `
 `;
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+}
+function ensureSessionLastAgentSessionIdColumn(db) {
+  if (hasColumn(db, "sessions", "last_agent_session_id")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -508,6 +515,7 @@ var SESSION_SELECT = `
     insight,
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
+    last_agent_session_id AS lastAgentSessionId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -546,6 +554,7 @@ function upsertSession(db, input) {
         insight,
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
+        last_agent_session_id AS lastAgentSessionId,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch

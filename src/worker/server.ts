@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../db/database";
-import { getSession } from "../db/sessions";
+import { getSession, updateLastAgentSessionId } from "../db/sessions";
 import { parseReplayTranscript } from "../shared/transcript-parser";
 import {
   claimNextItem,
@@ -307,10 +307,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    if (session.lastAgentSessionId) {
+      state.agentSessionId = session.lastAgentSessionId;
+    }
     state.querySession = createWorkerQuerySessionImpl(
-      deps.db,
-      state.sessionDbId,
-      session.project,
+      {
+        db: deps.db,
+        sessionDbId: state.sessionDbId,
+        contentSessionId: session.contentSessionId,
+        project: session.project,
+        resumeAgentSessionId: session.lastAgentSessionId,
+      },
       {
         onMessage: (message) => {
           state!.lastMessageAt = nowMs();
@@ -320,7 +327,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             typeof message.session_id === "string" &&
             message.session_id !== ""
           ) {
-            state!.agentSessionId = message.session_id;
+            const newAgentSessionId = message.session_id;
+            const isFirstObservation =
+              state!.agentSessionId !== newAgentSessionId;
+            state!.agentSessionId = newAgentSessionId;
+            if (isFirstObservation) {
+              try {
+                updateLastAgentSessionId(
+                  deps.db,
+                  state!.sessionDbId,
+                  newAgentSessionId,
+                );
+              } catch (error) {
+                logger.error?.("updateLastAgentSessionId failed", {
+                  sessionDbId: state!.sessionDbId,
+                  error,
+                });
+              }
+            }
           }
         },
         onPid: (pid) => {

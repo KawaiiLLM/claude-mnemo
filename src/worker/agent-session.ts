@@ -1,6 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
@@ -20,7 +19,6 @@ import {
   createDatabaseBackedHandlers,
   type MnemoToolHandlers,
 } from "../mcp/handlers";
-import { resolveAgentSessionPath, resolveTranscriptPath } from "../shared/paths";
 
 interface ClaudeExecutableResolverDeps {
   existsSync: (path: string) => boolean;
@@ -111,58 +109,4 @@ export function createMnemoSdkServer(
 
 function missingHandler(toolName: string): never {
   throw new Error(`Missing Mnemo tool handler: ${toolName}`);
-}
-
-export interface MoveAgentSessionDeps {
-  resolveSrcPath: (cwd: string, sessionId: string) => string;
-  resolveDestPath: (sessionId: string) => string;
-  existsSync: typeof existsSync;
-  mkdirSync: typeof mkdirSync;
-  renameSync: typeof renameSync;
-  copyFileSync: typeof copyFileSync;
-  unlinkSync: typeof unlinkSync;
-}
-
-const defaultMoveDeps: MoveAgentSessionDeps = {
-  resolveSrcPath: resolveTranscriptPath,
-  resolveDestPath: resolveAgentSessionPath,
-  existsSync,
-  mkdirSync,
-  renameSync,
-  copyFileSync,
-  unlinkSync,
-};
-
-function isExdevError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "EXDEV"
-  );
-}
-
-export function moveAgentSession(
-  cwd: string,
-  sessionId: string,
-  deps: MoveAgentSessionDeps = defaultMoveDeps,
-): void {
-  const srcPath = deps.resolveSrcPath(cwd, sessionId);
-  const destPath = deps.resolveDestPath(sessionId);
-
-  if (!deps.existsSync(srcPath)) {
-    return;
-  }
-
-  deps.mkdirSync(dirname(destPath), { recursive: true });
-
-  try {
-    deps.renameSync(srcPath, destPath);
-  } catch (error) {
-    if (!isExdevError(error)) {
-      throw error;
-    }
-
-    deps.copyFileSync(srcPath, destPath);
-    deps.unlinkSync(srcPath);
-  }
 }

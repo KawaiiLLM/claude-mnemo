@@ -4,10 +4,8 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import {
-  moveAgentSession,
-  resolveClaudeCodeExecutablePath,
-} from "../../src/worker/agent-session";
+import { DATA_DIR, resolveTranscriptPath } from "../../src/shared/paths";
+import { resolveClaudeCodeExecutablePath } from "../../src/worker/agent-session";
 import { createWorkerQuerySession } from "../../src/worker/query-session";
 
 describe("worker query session", () => {
@@ -108,6 +106,7 @@ describe("worker query session", () => {
         onPid,
         spawnImpl:
           (mock(() => ({ pid: 4321 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
       },
     );
 
@@ -124,7 +123,6 @@ describe("worker query session", () => {
   });
 
   test("close is idempotent and rejects prompts after shutdown", async () => {
-    const movedSessions: Array<{ project: string; sessionId: string }> = [];
     let closeSignalCount = 0;
     const queryImpl = mock(
       ({
@@ -193,11 +191,9 @@ describe("worker query session", () => {
       },
       {
         queryImpl: queryImpl as never,
-        moveAgentSessionImpl: async (project: string, sessionId: string) => {
-          movedSessions.push({ project, sessionId });
-        },
         spawnImpl:
           (mock(() => ({ pid: 4321 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
         isProcessAliveImpl: () => false,
       },
     );
@@ -210,14 +206,202 @@ describe("worker query session", () => {
       "Worker query session is closed.",
     );
     expect(closeSignalCount).toBe(1);
-    expect(movedSessions).toEqual([
-      { project: "/tmp/project", sessionId: "agent-session-1" },
-    ]);
   });
 
   test("uses worker agent-session helpers from the worker module path", () => {
-    expect(typeof moveAgentSession).toBe("function");
     expect(typeof resolveClaudeCodeExecutablePath).toBe("function");
+  });
+
+  test("creates DATA_DIR locally and uses it as the SDK cwd", () => {
+    const mkdirSyncImpl = mock(() => undefined);
+    let capturedOptions: { cwd?: string } | undefined;
+    const queryImpl = mock((args: { options?: { cwd?: string } }) => {
+      capturedOptions = args.options;
+      // eslint-disable-next-line @typescript-eslint/require-await
+      return (async function* () {
+        return;
+      })();
+    });
+
+    createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl,
+      },
+    );
+
+    expect(mkdirSyncImpl).toHaveBeenCalledWith(DATA_DIR, { recursive: true });
+    expect(capturedOptions?.cwd).toBe(DATA_DIR);
+  });
+
+  test("passes resume to query and pre-fills the first prompt session id when the transcript exists", async () => {
+    const seenInputSessionIds: string[] = [];
+    let capturedOptions:
+      | {
+          cwd?: string;
+          resume?: string;
+        }
+      | undefined;
+    const queryImpl = mock(
+      ({
+        prompt,
+        options,
+      }: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+        options?: {
+          cwd?: string;
+          resume?: string;
+          spawnClaudeCodeProcess?: (options: {
+            command: string;
+            args: string[];
+            cwd?: string;
+            env?: Record<string, string | undefined>;
+            signal?: AbortSignal;
+          }) => { pid?: number };
+        };
+      }) =>
+        (async function* () {
+          capturedOptions = options;
+          for await (const message of prompt) {
+            seenInputSessionIds.push(message.session_id);
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                server_tool_use: {
+                  web_search_requests: 0,
+                },
+                service_tier: "standard",
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-1",
+              session_id: "resume-target",
+            };
+          }
+        })(),
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+        resumeAgentSessionId: "resume-target",
+      },
+      {
+        queryImpl: queryImpl as never,
+        existsSyncImpl: (path: string) =>
+          path === resolveTranscriptPath(DATA_DIR, "resume-target"),
+        mkdirSyncImpl: mock(() => undefined),
+      },
+    );
+
+    await session.sendPrompt("first");
+
+    expect(capturedOptions?.cwd).toBe(DATA_DIR);
+    expect(capturedOptions?.resume).toBe("resume-target");
+    expect(seenInputSessionIds).toEqual(["resume-target"]);
+
+    await session.close();
+  });
+
+  test("omits resume and does not leak a stale resume id into the first prompt when the transcript is missing", async () => {
+    const seenInputSessionIds: string[] = [];
+    let capturedOptions:
+      | {
+          cwd?: string;
+          resume?: string;
+        }
+      | undefined;
+    const queryImpl = mock(
+      ({
+        prompt,
+        options,
+      }: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+        options?: {
+          cwd?: string;
+          resume?: string;
+        };
+      }) =>
+        (async function* () {
+          capturedOptions = options;
+          for await (const message of prompt) {
+            seenInputSessionIds.push(message.session_id);
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                server_tool_use: {
+                  web_search_requests: 0,
+                },
+                service_tier: "standard",
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-1",
+              session_id: "fresh-agent-session",
+            };
+          }
+        })(),
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+        resumeAgentSessionId: "stale-agent-session",
+      },
+      {
+        queryImpl: queryImpl as never,
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: mock(() => undefined),
+      },
+    );
+
+    await session.sendPrompt("first");
+
+    expect(capturedOptions?.cwd).toBe(DATA_DIR);
+    expect(capturedOptions).not.toHaveProperty("resume");
+    expect(seenInputSessionIds).toEqual(["content-session-1"]);
+
+    await session.close();
   });
 
   test("defaults the system prompt to the hardened Mnemosyne rules", async () => {
@@ -243,6 +427,7 @@ describe("worker query session", () => {
         queryImpl: queryImpl as never,
         spawnImpl:
           (mock(() => ({ pid: 1 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
         isProcessAliveImpl: () => false,
       },
     );
@@ -303,6 +488,7 @@ describe("worker query session", () => {
         queryImpl: queryImpl as never,
         spawnImpl:
           (mock(() => ({ pid: 1 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
         isProcessAliveImpl: () => false,
       },
     );
