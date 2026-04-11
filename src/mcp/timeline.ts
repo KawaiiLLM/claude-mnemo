@@ -471,17 +471,13 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
     };
   }
 
+  const liveTurns = turns.filter((turn) => turn.status !== "undone");
   let fastestGap: ShapeSignals["fastestGap"] = null;
   let longestGap: ShapeSignals["longestGap"] = null;
 
-  for (let index = 0; index < turns.length - 1; index += 1) {
-    const current = turns[index];
-    const next = turns[index + 1];
-
-    if (current.status === "undone" || next.status === "undone") {
-      continue;
-    }
-
+  for (let index = 0; index < liveTurns.length - 1; index += 1) {
+    const current = liveTurns[index];
+    const next = liveTurns[index + 1];
     const gapMs = (next.createdAtEpoch - current.createdAtEpoch) * 1000;
     if (fastestGap === null || gapMs < fastestGap.ms) {
       fastestGap = { afterPromptNumber: current.promptNumber, ms: gapMs };
@@ -491,7 +487,6 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
     }
   }
 
-  const liveTurns = turns.filter((turn) => turn.status !== "undone");
   const sortedToolCounts = liveTurns
     .map((turn) => turn.toolCallCount ?? 0)
     .sort((left, right) => left - right);

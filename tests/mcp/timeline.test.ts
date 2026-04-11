@@ -8,8 +8,10 @@ import {
   detectShapeSignals,
   formatDuration,
   formatGap,
+  formatLocalDate,
   formatLocalTime,
   getSystemTimezone,
+  extractSourceTags,
   parseTimelineId,
   resolveWindow,
   segmentPhases,
@@ -255,6 +257,16 @@ describe("formatGap", () => {
   });
 });
 
+describe("formatLocalDate", () => {
+  it("renders an epoch as YYYY-MM-DD", () => {
+    const output = formatLocalDate(
+      Math.floor(Date.parse("2026-04-11T01:50:47Z") / 1000),
+    );
+
+    expect(output).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
 describe("formatLocalTime", () => {
   it("renders an epoch as HH:MM in the local timezone", () => {
     const output = formatLocalTime(
@@ -262,6 +274,14 @@ describe("formatLocalTime", () => {
     );
 
     expect(output).toMatch(/^\d{2}:\d{2}$/);
+  });
+});
+
+describe("extractSourceTags", () => {
+  it("returns only source tags without the prefix", () => {
+    expect(
+      extractSourceTags(["source:codex", "foo", "source:slack", "bar"]),
+    ).toEqual(["codex", "slack"]);
   });
 });
 
@@ -492,8 +512,29 @@ describe("detectShapeSignals", () => {
       ms: 10_000,
     });
     expect(signals.longestGap).toMatchObject({
-      afterPromptNumber: 2,
-      ms: 890_000,
+      afterPromptNumber: 4,
+      ms: 1_588_000,
+    });
+  });
+
+  it("measures gaps across live turns even when an undone turn sits between them", () => {
+    const signals = detectShapeSignals([
+      turn({ promptNumber: 1, createdAtEpoch: 1000 }),
+      turn({
+        promptNumber: 2,
+        createdAtEpoch: 1300,
+        status: "undone",
+      }),
+      turn({ promptNumber: 3, createdAtEpoch: 1600 }),
+    ]);
+
+    expect(signals.fastestGap).toMatchObject({
+      afterPromptNumber: 1,
+      ms: 600_000,
+    });
+    expect(signals.longestGap).toMatchObject({
+      afterPromptNumber: 1,
+      ms: 600_000,
     });
   });
 
