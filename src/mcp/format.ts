@@ -8,15 +8,11 @@ export const TYPE_EMOJI: Record<string, string> = {
 };
 
 const FIELD_TRUNCATION_SUFFIX = "...";
+export const DEFAULT_TRUNCATE = 200;
+export const MAX_TRUNCATE = 2000;
+export const DEFAULT_PREVIEW_COUNT = 5;
 
-const LEGACY_TRUNCATION_LIMIT = 200;
-const UNIFIED_TRUNCATION_LIMITS = {
-  collapsed: 120,
-  expanded: 300,
-  full: 1000,
-} as const;
-
-export type RenderDepth = "collapsed" | "expanded" | "full";
+export type RenderDepth = "collapsed" | "expanded";
 
 type RenderMode = "legacy" | "unified";
 
@@ -125,11 +121,6 @@ type RenderNode =
   | { type: "memory"; value: FormattedMemory }
   | { type: "toolCall"; value: FormattedToolCall };
 
-export interface OmissionResult<T> {
-  items: Array<T | { omittedCount: number }>;
-  omittedCount: number;
-}
-
 function formatEpoch(epoch: number): string {
   const date = new Date(epoch * 1000);
   const year = date.getUTCFullYear();
@@ -236,51 +227,56 @@ function joinHint(sessionId: number | undefined, turnPromptNumber: number | unde
 
   return `mnemo-replay skill → read S${sessionId}/T${turnPromptNumber}`;
 }
-
-function resolveTruncationLimit(
-  depth: RenderDepth,
-  mode: RenderMode,
-  truncate?: number,
-): number {
-  if (truncate !== undefined) {
-    return Math.max(1, Math.min(2000, truncate));
-  }
-
-  if (mode === "legacy") {
-    return LEGACY_TRUNCATION_LIMIT;
-  }
-
-  return UNIFIED_TRUNCATION_LIMITS[depth];
-}
-
 function truncateText(
   text: string,
   {
-    depth,
+    limit,
     mode = "legacy",
-    sessionId,
-    turnPromptNumber,
-    truncate,
+    hintId,
   }: {
-    depth: RenderDepth;
+    limit: number;
     mode?: RenderMode;
-    sessionId?: number;
-    turnPromptNumber?: number;
-    truncate?: number;
+    hintId?: string;
   },
 ): string {
-  const limit = resolveTruncationLimit(depth, mode, truncate);
+  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
 
-  if (text.length <= limit) {
+  if (text.length <= boundedLimit) {
     return text;
   }
 
-  const hint =
-    mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
-
-  return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${
-    hint ? ` [use ${hint} for full content]` : ""
+  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${
+    mode === "unified" && hintId
+      ? ` [use mnemo-replay skill → read ${hintId} for full content]`
+      : ""
   }`;
+}
+
+function resolveExplicitTruncate(truncate?: number): number {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
+}
+
+function buildSessionHintId(sessionId: number): string {
+  return `S${sessionId}`;
+}
+
+function buildTurnHintId(
+  sessionId: number | undefined,
+  promptNumber: number,
+): string | undefined {
+  return sessionId === undefined ? undefined : `S${sessionId}/T${promptNumber}`;
+}
+
+function buildObservationHintId(
+  observationId: number,
+  sessionId?: number,
+  turnPromptNumber?: number,
+): string | undefined {
+  if (sessionId === undefined || turnPromptNumber === undefined) {
+    return undefined;
+  }
+
+  return `S${sessionId}/T${turnPromptNumber}/O${observationId}`;
 }
 
 function formatStatus(status?: string | null): string {
@@ -351,6 +347,7 @@ function formatSessionCollapsedWithMode(
   mode: RenderMode,
   truncate?: number,
 ): string {
+  const limit = resolveExplicitTruncate(truncate);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -360,10 +357,9 @@ function formatSessionCollapsedWithMode(
   if (session.content) {
     lines.push(
       `  - desc: ${truncateText(session.content, {
-        depth: "collapsed",
+        limit,
         mode,
-        sessionId: session.id,
-        truncate,
+        hintId: buildSessionHintId(session.id),
       })}`,
     );
   }
@@ -376,6 +372,7 @@ function formatSessionExpandedWithMode(
   mode: RenderMode,
   truncate?: number,
 ): string {
+  const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
 
   if (session.insight && session.insight.length > 0) {
@@ -385,10 +382,9 @@ function formatSessionExpandedWithMode(
       "    ",
       session.insight.map((line) =>
         truncateText(line, {
-          depth: "expanded",
+          limit,
           mode,
-          sessionId: session.id,
-          truncate,
+          hintId: buildSessionHintId(session.id),
         }),
       ),
     );
@@ -398,10 +394,9 @@ function formatSessionExpandedWithMode(
     lines.push("  - next_steps:");
     lines.push(
       `    - ${truncateText(session.nextSteps, {
-        depth: "expanded",
+        limit,
         mode,
-        sessionId: session.id,
-        truncate,
+        hintId: buildSessionHintId(session.id),
       })}`,
     );
   }
@@ -426,21 +421,19 @@ function formatTurnLabel(
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
+  const limit = resolveExplicitTruncate(truncate);
+  const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title =
     turn.title === null && turn.promptPreview
       ? `"${truncateText(turn.promptPreview, {
-          depth,
+          limit,
           mode,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate,
+          hintId,
         })}"`
       : truncateText(rawTitle, {
-          depth,
+          limit,
           mode,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate,
+          hintId,
         });
 
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
@@ -451,6 +444,7 @@ function formatTurnCollapsedWithMode(
   options: TurnFormatOptions & { mode?: RenderMode } = {},
 ): string {
   const { indent = "  ", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate);
   const lines = [
     formatTurnLabel(turn, {
       ...options,
@@ -462,11 +456,9 @@ function formatTurnCollapsedWithMode(
   if (turn.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(turn.content, {
-        depth: "collapsed",
+        limit,
         mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber,
-        truncate: options.truncate,
+        hintId: buildTurnHintId(options.sessionId, turn.promptNumber),
       })}`,
     );
   }
@@ -481,9 +473,10 @@ function formatToolCallLabel(
     depth?: RenderDepth;
   } = {},
 ): string {
+  const limit = resolveExplicitTruncate(truncate);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam
-    ? ` ${truncateText(keyParam, { depth, mode, truncate })}`
+    ? ` ${truncateText(keyParam, { limit, mode })}`
     : "";
 
   return `${indent}- 🔧 ${toolCall.name}${suffix}`;
@@ -505,22 +498,24 @@ function formatToolCallExpandedWithMode(
   options: ToolCallFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
   const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
+  const limit = resolveExplicitTruncate(truncate);
   const detailIndent = `${indent}  `;
+  const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
       mode,
-        depth: depth === "full" ? "full" : "expanded",
-        truncate,
-      }),
+      depth: "expanded",
+      truncate,
+    }),
   ];
 
   if (toolCall.input !== undefined) {
     lines.push(
       `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
-        depth,
+        limit,
         mode,
-        truncate,
+        hintId,
       })}`,
     );
   }
@@ -528,9 +523,9 @@ function formatToolCallExpandedWithMode(
   if (toolCall.result) {
     lines.push(
       `${detailIndent}- out: ${truncateText(toolCall.result, {
-        depth,
+        limit,
         mode,
-        truncate,
+        hintId,
       })}`,
     );
   }
@@ -549,46 +544,45 @@ function renderTurnChildren(
 
   const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
   const childIndent = `${indent}  `;
-  const childDepth = depth === "full" ? "full" : "expanded";
   const childLines: string[] = [];
 
   if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
       childLines.push(
-        childDepth === "full"
-          ? formatObservationExpandedWithMode(observation, {
-              indent: childIndent,
-              sessionId,
-              turnPromptNumber: turn.promptNumber,
-              mode,
-              depth: "full",
-              truncate,
-            })
-          : formatObservationCollapsedWithMode(observation, {
-              indent: childIndent,
-              sessionId,
-              turnPromptNumber: turn.promptNumber,
-              mode,
-              truncate,
-            }),
+        formatObservationExpandedWithMode(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: "expanded",
+          truncate,
+        }),
       );
+    }
+
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
     }
 
     return childLines.join("\n");
   }
 
   if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
       childLines.push(
         formatToolCallExpandedWithMode(toolCall, {
           indent: childIndent,
           sessionId,
           turnPromptNumber: turn.promptNumber,
           mode,
-          depth: childDepth,
+          depth: "expanded",
           truncate,
         }),
       );
+    }
+
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
     }
   }
 
@@ -610,6 +604,8 @@ function formatTurnExpandedWithMode(
     includeChildren = mode === "unified",
   } = options;
   const detailIndent = `${indent}  `;
+  const limit = resolveExplicitTruncate(options.truncate);
+  const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
 
   if (turn.promptPreview) {
@@ -617,11 +613,9 @@ function formatTurnExpandedWithMode(
       `${detailIndent}- prompt: "${truncateText(
         turn.promptPreview,
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate,
+          hintId,
         },
       )}"`,
     );
@@ -632,11 +626,9 @@ function formatTurnExpandedWithMode(
       `${detailIndent}- response: "${truncateText(
         turn.responsePreview,
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate,
+          hintId,
         },
       )}"`,
     );
@@ -649,11 +641,9 @@ function formatTurnExpandedWithMode(
       `${detailIndent}  `,
       turn.insight.map((line) =>
         truncateText(line, {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate,
+          hintId,
         }),
       ),
     );
@@ -662,11 +652,9 @@ function formatTurnExpandedWithMode(
   if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
     lines.push(
       `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
-        depth,
+        limit,
         mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber,
-        truncate: options.truncate,
+        hintId,
       })}`,
     );
   }
@@ -676,11 +664,9 @@ function formatTurnExpandedWithMode(
       `${detailIndent}- files_modified: ${truncateText(
         turn.filesModified.join(", "),
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate,
+          hintId,
         },
       )}`,
     );
@@ -734,22 +720,21 @@ function formatMemoryExpandedWithMode(
   mode: RenderMode,
   truncate?: number,
 ): string {
+  const limit = resolveExplicitTruncate(truncate);
   const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
 
   lines.push(
     `  - content: ${truncateText(memory.content, {
-      depth: "expanded",
+      limit,
       mode,
-      truncate,
     })}`,
   );
 
   if (memory.reasoning) {
     lines.push(
       `  - reasoning: ${truncateText(memory.reasoning, {
-        depth: "expanded",
+        limit,
         mode,
-        truncate,
       })}`,
     );
   }
@@ -757,9 +742,8 @@ function formatMemoryExpandedWithMode(
   if (memory.application) {
     lines.push(
       `  - application: ${truncateText(memory.application, {
-        depth: "expanded",
+        limit,
         mode,
-        truncate,
       })}`,
     );
   }
@@ -767,9 +751,8 @@ function formatMemoryExpandedWithMode(
   if (memory.tags && memory.tags.length > 0) {
     lines.push(
       `  - tags: [${truncateText(memory.tags.join(", "), {
-        depth: "expanded",
+        limit,
         mode,
-        truncate,
       })}]`,
     );
   }
@@ -790,6 +773,7 @@ function formatObservationCollapsedWithMode(
   options: ObservationFormatOptions & { mode?: RenderMode } = {},
 ): string {
   const { indent = "", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate);
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.content) {
@@ -797,11 +781,13 @@ function formatObservationCollapsedWithMode(
       `${indent}  - desc: ${truncateText(
         observation.content,
         {
-          depth: "collapsed",
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber,
-          truncate: options.truncate,
+          hintId: buildObservationHintId(
+            observation.id,
+            options.sessionId,
+            options.turnPromptNumber,
+          ),
         },
       )}`,
     );
@@ -830,20 +816,20 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions): string
         : formatSessionExpandedWithMode(node.value, mode, options.truncate);
     case "turn":
       return options.depth === "collapsed"
-        ? formatTurnCollapsedWithMode(node.value, options)
-        : formatTurnExpandedWithMode(node.value, options);
+        ? formatTurnCollapsedWithMode(node.value, { ...options, mode })
+        : formatTurnExpandedWithMode(node.value, { ...options, mode });
     case "observation":
       return options.depth === "collapsed"
-        ? formatObservationCollapsedWithMode(node.value, options)
-        : formatObservationExpandedWithMode(node.value, options);
+        ? formatObservationCollapsedWithMode(node.value, { ...options, mode })
+        : formatObservationExpandedWithMode(node.value, { ...options, mode });
     case "memory":
       return options.depth === "collapsed"
         ? formatMemoryCollapsedWithMode(node.value, mode)
         : formatMemoryExpandedWithMode(node.value, mode, options.truncate);
     case "toolCall":
       return options.depth === "collapsed"
-        ? formatToolCallCollapsedWithMode(node.value, options)
-        : formatToolCallExpandedWithMode(node.value, options);
+        ? formatToolCallCollapsedWithMode(node.value, { ...options, mode })
+        : formatToolCallExpandedWithMode(node.value, { ...options, mode });
   }
 }
 
@@ -891,109 +877,21 @@ export function formatObservationExpanded(
   return renderNode({ type: "observation", value: observation }, { depth: "expanded", mode: "legacy", ...options });
 }
 
-export function sampleWithOmissions<T>(
-  items: T[],
-  isProtected: (item: T, index: number) => boolean = () => false,
-): OmissionResult<T> {
-  if (items.length <= 50) {
-    return { items: [...items], omittedCount: 0 };
-  }
-
-  const visibleIndexes = new Set<number>();
-  const headCount = Math.min(5, items.length);
-  const tailCount = Math.min(10, items.length - headCount);
-
-  for (let index = 0; index < headCount; index += 1) {
-    visibleIndexes.add(index);
-  }
-
-  for (let index = items.length - tailCount; index < items.length; index += 1) {
-    if (index >= 0) {
-      visibleIndexes.add(index);
-    }
-  }
-
-  const middleStart = headCount;
-  const middleEnd = Math.max(headCount, items.length - tailCount);
-  const middleLength = middleEnd - middleStart;
-
-  if (middleLength > 0) {
-    const sampleTargets = new Set<number>();
-
-    for (let sampleIndex = 0; sampleIndex < 5; sampleIndex += 1) {
-      const position = Math.round(
-        (sampleIndex * Math.max(middleLength - 1, 0)) / Math.max(5 - 1, 1),
-      );
-      sampleTargets.add(middleStart + Math.min(position, middleLength - 1));
-    }
-
-    for (const index of sampleTargets) {
-      visibleIndexes.add(index);
-    }
-  }
-
-  items.forEach((item, index) => {
-    if (isProtected(item, index)) {
-      visibleIndexes.add(index);
-    }
-  });
-
-  const orderedItems: Array<T | { omittedCount: number }> = [];
-  let omittedCount = 0;
-  let gapStart: number | null = null;
-
-  for (let index = 0; index < items.length; index += 1) {
-    if (visibleIndexes.has(index)) {
-      if (gapStart !== null) {
-        orderedItems.push({ omittedCount: index - gapStart });
-        gapStart = null;
-      }
-
-      orderedItems.push(items[index]!);
-    } else {
-      omittedCount += 1;
-      if (gapStart === null) {
-        gapStart = index;
-      }
-    }
-  }
-
-  if (gapStart !== null) {
-    orderedItems.push({ omittedCount: items.length - gapStart });
-  }
-
-  return { items: orderedItems, omittedCount };
-}
-
 export function formatTree(sessions: FormattedSession[]): string {
   const lines: string[] = [];
 
   for (const session of sessions) {
     lines.push(formatSessionExpanded(session));
 
-    const turnsResult = sampleWithOmissions(session.turns ?? []);
-    for (const entry of turnsResult.items) {
-      if ("omittedCount" in entry) {
-        lines.push(`  - ... ${entry.omittedCount} omitted ...`);
-        continue;
-      }
-
+    const turns = session.turns ?? [];
+    for (const entry of turns.slice(0, DEFAULT_PREVIEW_COUNT)) {
       const turnLine = isTurnExpanded(entry)
         ? formatTurnExpanded(entry, { sessionId: session.id })
         : formatTurnCollapsed(entry, { sessionId: session.id });
       lines.push(turnLine);
 
-      const observationsResult = sampleWithOmissions(
-        entry.observations ?? [],
-        (observation) => Boolean(observation),
-      );
-
-      for (const observationEntry of observationsResult.items) {
-        if ("omittedCount" in observationEntry) {
-          lines.push(`    - ... ${observationEntry.omittedCount} omitted ...`);
-          continue;
-        }
-
+      const observations = entry.observations ?? [];
+      for (const observationEntry of observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
         lines.push(
           isObservationExpanded(observationEntry)
             ? formatObservationExpanded(observationEntry, {
@@ -1008,6 +906,14 @@ export function formatTree(sessions: FormattedSession[]): string {
               }),
         );
       }
+
+      if (observations.length > DEFAULT_PREVIEW_COUNT) {
+        lines.push(`    - ... ${observations.length - DEFAULT_PREVIEW_COUNT} omitted ...`);
+      }
+    }
+
+    if (turns.length > DEFAULT_PREVIEW_COUNT) {
+      lines.push(`  - ... ${turns.length - DEFAULT_PREVIEW_COUNT} omitted ...`);
     }
   }
 

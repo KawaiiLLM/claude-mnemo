@@ -822,12 +822,9 @@ function getTurnsForSession(db, sessionId) {
 
 // src/mcp/format.ts
 var FIELD_TRUNCATION_SUFFIX = "...";
-var LEGACY_TRUNCATION_LIMIT = 200;
-var UNIFIED_TRUNCATION_LIMITS = {
-  collapsed: 120,
-  expanded: 300,
-  full: 1e3
-};
+var DEFAULT_TRUNCATE = 200;
+var MAX_TRUNCATE = 2e3;
+var DEFAULT_PREVIEW_COUNT = 5;
 function formatEpoch(epoch) {
   const date = new Date(epoch * 1e3);
   const year = date.getUTCFullYear();
@@ -899,40 +896,31 @@ function pushBullets(lines, indent, values) {
     lines.push(`${indent}- ${value}`);
   }
 }
-function joinHint(sessionId, turnPromptNumber) {
-  if (sessionId === void 0 && turnPromptNumber === void 0) {
-    return "";
-  }
-  if (sessionId === void 0) {
-    return "";
-  }
-  if (turnPromptNumber === void 0) {
-    return `mnemo-replay skill \u2192 read S${sessionId}`;
-  }
-  return `mnemo-replay skill \u2192 read S${sessionId}/T${turnPromptNumber}`;
-}
-function resolveTruncationLimit(depth, mode, truncate) {
-  if (truncate !== void 0) {
-    return Math.max(1, Math.min(2e3, truncate));
-  }
-  if (mode === "legacy") {
-    return LEGACY_TRUNCATION_LIMIT;
-  }
-  return UNIFIED_TRUNCATION_LIMITS[depth];
-}
 function truncateText(text, {
-  depth,
+  limit,
   mode = "legacy",
-  sessionId,
-  turnPromptNumber,
-  truncate
+  hintId
 }) {
-  const limit = resolveTruncationLimit(depth, mode, truncate);
-  if (text.length <= limit) {
+  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  if (text.length <= boundedLimit) {
     return text;
   }
-  const hint = mode === "legacy" ? joinHint(sessionId, turnPromptNumber) : "";
-  return `${text.slice(0, limit)}${FIELD_TRUNCATION_SUFFIX}${hint ? ` [use ${hint} for full content]` : ""}`;
+  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`;
+}
+function resolveExplicitTruncate(truncate) {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
+}
+function buildSessionHintId(sessionId) {
+  return `S${sessionId}`;
+}
+function buildTurnHintId(sessionId, promptNumber) {
+  return sessionId === void 0 ? void 0 : `S${sessionId}/T${promptNumber}`;
+}
+function buildObservationHintId(observationId, sessionId, turnPromptNumber) {
+  if (sessionId === void 0 || turnPromptNumber === void 0) {
+    return void 0;
+  }
+  return `S${sessionId}/T${turnPromptNumber}/O${observationId}`;
 }
 function formatStatus(status) {
   return status ? ` [${status}]` : "";
@@ -979,6 +967,7 @@ function extractKeyParam(name, input) {
   }
 }
 function formatSessionCollapsedWithMode(session, mode, truncate) {
+  const limit = resolveExplicitTruncate(truncate);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -987,16 +976,16 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
   if (session.content) {
     lines.push(
       `  - desc: ${truncateText(session.content, {
-        depth: "collapsed",
+        limit,
         mode,
-        sessionId: session.id,
-        truncate
+        hintId: buildSessionHintId(session.id)
       })}`
     );
   }
   return lines.join("\n");
 }
 function formatSessionExpandedWithMode(session, mode, truncate) {
+  const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
   if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
@@ -1005,10 +994,9 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
       "    ",
       session.insight.map(
         (line) => truncateText(line, {
-          depth: "expanded",
+          limit,
           mode,
-          sessionId: session.id,
-          truncate
+          hintId: buildSessionHintId(session.id)
         })
       )
     );
@@ -1017,10 +1005,9 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
     lines.push("  - next_steps:");
     lines.push(
       `    - ${truncateText(session.nextSteps, {
-        depth: "expanded",
+        limit,
         mode,
-        sessionId: session.id,
-        truncate
+        hintId: buildSessionHintId(session.id)
       })}`
     );
   }
@@ -1037,23 +1024,22 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
+  const limit = resolveExplicitTruncate(truncate);
+  const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
-    depth,
+    limit,
     mode,
-    sessionId,
-    turnPromptNumber: turn.promptNumber,
-    truncate
+    hintId
   })}"` : truncateText(rawTitle, {
-    depth,
+    limit,
     mode,
-    sessionId,
-    turnPromptNumber: turn.promptNumber,
-    truncate
+    hintId
   });
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
 }
 function formatTurnCollapsedWithMode(turn, options = {}) {
   const { indent = "  ", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate);
   const lines = [
     formatTurnLabel(turn, {
       ...options,
@@ -1064,19 +1050,18 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   if (turn.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(turn.content, {
-        depth: "collapsed",
+        limit,
         mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber,
-        truncate: options.truncate
+        hintId: buildTurnHintId(options.sessionId, turn.promptNumber)
       })}`
     );
   }
   return lines.join("\n");
 }
 function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate } = {}) {
+  const limit = resolveExplicitTruncate(truncate);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam ? ` ${truncateText(keyParam, { depth, mode, truncate })}` : "";
+  const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
 }
 function formatToolCallCollapsedWithMode(toolCall, options = {}) {
@@ -1088,30 +1073,32 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
   const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
+  const limit = resolveExplicitTruncate(truncate);
   const detailIndent = `${indent}  `;
+  const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
       mode,
-      depth: depth === "full" ? "full" : "expanded",
+      depth: "expanded",
       truncate
     })
   ];
   if (toolCall.input !== void 0) {
     lines.push(
       `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
-        depth,
+        limit,
         mode,
-        truncate
+        hintId
       })}`
     );
   }
   if (toolCall.result) {
     lines.push(
       `${detailIndent}- out: ${truncateText(toolCall.result, {
-        depth,
+        limit,
         mode,
-        truncate
+        hintId
       })}`
     );
   }
@@ -1123,41 +1110,40 @@ function renderTurnChildren(turn, depth, options = {}) {
   }
   const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
   const childIndent = `${indent}  `;
-  const childDepth = depth === "full" ? "full" : "expanded";
   const childLines = [];
   if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
       childLines.push(
-        childDepth === "full" ? formatObservationExpandedWithMode(observation, {
+        formatObservationExpandedWithMode(observation, {
           indent: childIndent,
           sessionId,
           turnPromptNumber: turn.promptNumber,
           mode,
-          depth: "full",
-          truncate
-        }) : formatObservationCollapsedWithMode(observation, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
+          depth: "expanded",
           truncate
         })
       );
     }
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
     return childLines.join("\n");
   }
   if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
       childLines.push(
         formatToolCallExpandedWithMode(toolCall, {
           indent: childIndent,
           sessionId,
           turnPromptNumber: turn.promptNumber,
           mode,
-          depth: childDepth,
+          depth: "expanded",
           truncate
         })
       );
+    }
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
     }
   }
   return childLines.join("\n");
@@ -1170,17 +1156,17 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     includeChildren = mode === "unified"
   } = options;
   const detailIndent = `${indent}  `;
+  const limit = resolveExplicitTruncate(options.truncate);
+  const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
     lines.push(
       `${detailIndent}- prompt: "${truncateText(
         turn.promptPreview,
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate
+          hintId
         }
       )}"`
     );
@@ -1190,11 +1176,9 @@ function formatTurnExpandedWithMode(turn, options = {}) {
       `${detailIndent}- response: "${truncateText(
         turn.responsePreview,
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate
+          hintId
         }
       )}"`
     );
@@ -1206,11 +1190,9 @@ function formatTurnExpandedWithMode(turn, options = {}) {
       `${detailIndent}  `,
       turn.insight.map(
         (line) => truncateText(line, {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate
+          hintId
         })
       )
     );
@@ -1218,11 +1200,9 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
     lines.push(
       `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
-        depth,
+        limit,
         mode,
-        sessionId: options.sessionId,
-        turnPromptNumber: turn.promptNumber,
-        truncate: options.truncate
+        hintId
       })}`
     );
   }
@@ -1231,11 +1211,9 @@ function formatTurnExpandedWithMode(turn, options = {}) {
       `${detailIndent}- files_modified: ${truncateText(
         turn.filesModified.join(", "),
         {
-          depth,
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: turn.promptNumber,
-          truncate: options.truncate
+          hintId
         }
       )}`
     );
@@ -1264,38 +1242,35 @@ function formatMemoryCollapsedWithMode(memory, mode) {
   return formatMemoryLabel(memory);
 }
 function formatMemoryExpandedWithMode(memory, mode, truncate) {
+  const limit = resolveExplicitTruncate(truncate);
   const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
   lines.push(
     `  - content: ${truncateText(memory.content, {
-      depth: "expanded",
-      mode,
-      truncate
+      limit,
+      mode
     })}`
   );
   if (memory.reasoning) {
     lines.push(
       `  - reasoning: ${truncateText(memory.reasoning, {
-        depth: "expanded",
-        mode,
-        truncate
+        limit,
+        mode
       })}`
     );
   }
   if (memory.application) {
     lines.push(
       `  - application: ${truncateText(memory.application, {
-        depth: "expanded",
-        mode,
-        truncate
+        limit,
+        mode
       })}`
     );
   }
   if (memory.tags && memory.tags.length > 0) {
     lines.push(
       `  - tags: [${truncateText(memory.tags.join(", "), {
-        depth: "expanded",
-        mode,
-        truncate
+        limit,
+        mode
       })}]`
     );
   }
@@ -1308,17 +1283,20 @@ function formatMemoryExpandedWithMode(memory, mode, truncate) {
 }
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate);
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(
         observation.content,
         {
-          depth: "collapsed",
+          limit,
           mode,
-          sessionId: options.sessionId,
-          turnPromptNumber: options.turnPromptNumber,
-          truncate: options.truncate
+          hintId: buildObservationHintId(
+            observation.id,
+            options.sessionId,
+            options.turnPromptNumber
+          )
         }
       )}`
     );
@@ -1336,13 +1314,13 @@ function renderNode(node, options) {
     case "session":
       return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, options.truncate) : formatSessionExpandedWithMode(node.value, mode, options.truncate);
     case "turn":
-      return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, options) : formatTurnExpandedWithMode(node.value, options);
+      return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...options, mode }) : formatTurnExpandedWithMode(node.value, { ...options, mode });
     case "observation":
-      return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, options) : formatObservationExpandedWithMode(node.value, options);
+      return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...options, mode }) : formatObservationExpandedWithMode(node.value, { ...options, mode });
     case "memory":
       return options.depth === "collapsed" ? formatMemoryCollapsedWithMode(node.value, mode) : formatMemoryExpandedWithMode(node.value, mode, options.truncate);
     case "toolCall":
-      return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, options) : formatToolCallExpandedWithMode(node.value, options);
+      return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...options, mode }) : formatToolCallExpandedWithMode(node.value, { ...options, mode });
   }
 }
 

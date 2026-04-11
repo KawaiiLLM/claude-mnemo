@@ -12,8 +12,8 @@ import {
 } from "../db/turns";
 
 import {
+  DEFAULT_TRUNCATE,
   renderNode,
-  sampleWithOmissions,
   type FormattedMemory,
   type FormattedObservation,
   type FormattedSession,
@@ -43,6 +43,10 @@ interface QueryFilters {
   project?: string;
   tag?: string;
 }
+
+const CHILD_PREVIEW_SIZE = 5;
+const SESSION_SCAN_LIMIT = 10_000;
+const SEARCH_SCAN_LIMIT = 5_000;
 
 type RoutedRecallId =
   | { kind: "sessions"; sessionIds?: number[] }
@@ -473,10 +477,41 @@ function buildMemoryView(
   };
 }
 
+function previewItems<T>(items: T[], size = 5): { items: T[]; omittedCount: number } {
+  return {
+    items: items.slice(0, size),
+    omittedCount: Math.max(0, items.length - size),
+  };
+}
+
+function paginateItems<T>(
+  items: T[],
+  page: number,
+  pageSize: number,
+): { items: T[]; total: number; pageCount: number } {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const offset = (page - 1) * pageSize;
+
+  return {
+    items: items.slice(offset, offset + pageSize),
+    total,
+    pageCount,
+  };
+}
+
+function formatPageHeader(page: number, pageCount: number, total: number): string {
+  return `page ${page} / ${pageCount} (total ${total})`;
+}
+
+function joinPage(header: string, body: string): string {
+  return body ? `${header}\n${body}` : header;
+}
+
 function renderSession(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
   turnSelector?: Set<number>,
 ): string {
@@ -500,21 +535,13 @@ function renderSession(
     turnSelector ? turnSelector.has(turn.promptNumber) : true,
   );
 
-  const sampledTurns = sampleWithOmissions(turns, (turn) =>
-    turn.status === "active",
-  );
-
-  for (const item of sampledTurns.items) {
-    if ("omittedCount" in item) {
-      lines.push(`  - ... ${item.omittedCount} omitted ...`);
-      continue;
-    }
-
+  const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
+  for (const item of preview.items) {
     const turnView = buildTurnView(db, item);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
-        depth: depth === "full" ? "expanded" : "collapsed",
+        depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
         truncate,
@@ -523,13 +550,17 @@ function renderSession(
     lines.push(turnLines);
   }
 
+  if (preview.omittedCount > 0) {
+    lines.push(`  +${preview.omittedCount} more`);
+  }
+
   return lines.join("\n");
 }
 
 function renderTurnScope(
   db: Database,
   turns: TurnRecord[],
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const lines: string[] = [];
@@ -557,16 +588,7 @@ function renderTurnScope(
     );
 
     const sessionTurns = grouped.get(session.id) ?? [];
-    const sampledTurns = sampleWithOmissions(sessionTurns, (turn) =>
-      turn.status === "active",
-    );
-
-    for (const item of sampledTurns.items) {
-      if ("omittedCount" in item) {
-        lines.push(`  - ... ${item.omittedCount} omitted ...`);
-        continue;
-      }
-
+    for (const item of sessionTurns) {
       const turnView = buildTurnView(db, item);
       lines.push(
         renderNode(
@@ -588,7 +610,7 @@ function renderTurnScope(
 function renderObservationScope(
   db: Database,
   observations: Array<{ sessionId: number; turnId: number; observationId: number }>,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   includeParents: boolean,
   truncate?: number,
 ): string {
@@ -604,13 +626,7 @@ function renderObservationScope(
   }
 
   if (!includeParents) {
-    const sampledObservations = sampleWithOmissions(observations);
-    for (const entry of sampledObservations.items) {
-      if ("omittedCount" in entry) {
-        lines.push(`- ... ${entry.omittedCount} omitted ...`);
-        continue;
-      }
-
+    for (const entry of observations) {
       const row = entry;
       const observation = getObservation(db, row.observationId);
       if (!observation) {
@@ -673,17 +689,7 @@ function renderObservationScope(
       );
 
       const observationIds = turnMap.get(turn.id) ?? [];
-      const sampledObservations = sampleWithOmissions(observationIds);
-      for (const observationEntry of sampledObservations.items) {
-        if (
-          typeof observationEntry === "object" &&
-          observationEntry !== null &&
-          "omittedCount" in observationEntry
-        ) {
-          lines.push(`    - ... ${observationEntry.omittedCount} omitted ...`);
-          continue;
-        }
-
+      for (const observationEntry of observationIds) {
         const observationId = observationEntry;
         const observation = getObservation(db, observationId);
         if (!observation) {
@@ -719,7 +725,7 @@ function renderObservationScope(
 function renderMemoryScope(
   db: Database,
   memoryIds: number[],
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   return memoryIds
@@ -754,7 +760,7 @@ function buildObservationView(
 function renderSessionDetail(
   db: Database,
   sessionId: number,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const session = getSession(db, sessionId);
@@ -765,7 +771,7 @@ function renderTurnDetail(
   db: Database,
   sessionId: number,
   promptNumber: number,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const turn = getTurn(db, sessionId, promptNumber);
@@ -775,7 +781,7 @@ function renderTurnDetail(
 function renderObservationDetail(
   db: Database,
   observationId: number,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const observation = getObservation(db, observationId);
@@ -797,7 +803,7 @@ function renderObservationDetail(
 function renderMemoryDetail(
   db: Database,
   memoryId: number,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const memory = getMemory(db, memoryId);
@@ -819,7 +825,6 @@ function renderMemoryDetail(
 function listSessionIds(
   db: Database,
   sessionIds: number[] | undefined,
-  limit: number,
   after?: number,
   before?: number,
 ): number[] {
@@ -830,7 +835,7 @@ function listSessionIds(
           (session): session is NonNullable<ReturnType<typeof getSession>> =>
             session !== null,
         )
-    : getRecentSessions(db, { limit });
+    : getRecentSessions(db, { limit: SESSION_SCAN_LIMIT });
 
   return sessions
     .filter((session) => {
@@ -881,7 +886,7 @@ function filterResultsByTag(
 function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
   const memoryLines: string[] = [];
@@ -1022,20 +1027,26 @@ function renderGroupedSearchResults(
 function renderRoutedId(
   db: Database,
   routed: RoutedRecallId,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   page: number,
-  limit: number,
+  pageSize: number,
   truncate?: number,
   after?: number,
   before?: number,
 ): string {
-  const offset = (page - 1) * limit;
-
   if (routed.kind === "sessions") {
-    return listSessionIds(db, routed.sessionIds, limit, after, before)
-      .slice(offset, offset + limit)
-      .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
-      .join("\n");
+    const paged = paginateItems(
+      listSessionIds(db, routed.sessionIds, after, before),
+      page,
+      pageSize,
+    );
+
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items
+        .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
+        .join("\n"),
+    );
   }
 
   if (routed.kind === "turns") {
@@ -1048,7 +1059,11 @@ function renderRoutedId(
       }
       return true;
     });
-    return renderTurnScope(db, turns.slice(offset, offset + limit), depth, truncate);
+    const paged = paginateItems(turns, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderTurnScope(db, paged.items, depth, truncate),
+    );
   }
 
   if (routed.kind === "observation-list") {
@@ -1067,14 +1082,17 @@ function renderRoutedId(
         }
         return true;
       })
-      .slice(offset, offset + limit)
       .map((observation) => ({
         sessionId: routed.sessionId,
         turnId: turn.id,
         observationId: observation.id,
       }));
 
-    return renderObservationScope(db, observations, depth, true, truncate);
+    const paged = paginateItems(observations, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderObservationScope(db, paged.items, depth, true, truncate),
+    );
   }
 
   if (routed.kind === "session-observation-list") {
@@ -1095,10 +1113,13 @@ function renderRoutedId(
             turnId: turn.id,
             observationId: observation.id,
           })),
-      )
-      .slice(offset, offset + limit);
+      );
 
-    return renderObservationScope(db, observations, depth, true, truncate);
+    const paged = paginateItems(observations, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderObservationScope(db, paged.items, depth, true, truncate),
+    );
   }
 
   if (routed.kind === "observation") {
@@ -1108,8 +1129,15 @@ function renderRoutedId(
   if (routed.kind === "memories") {
     const memoryIds = routed.memoryIds && routed.memoryIds.length > 0
       ? routed.memoryIds
-      : searchMemory(db, { scope: "memories", limit, after, before }).map((result) => result.sourceId);
-    return renderMemoryScope(db, memoryIds.slice(offset, offset + limit), depth, truncate);
+      : searchMemory(
+          db,
+          { scope: "memories", limit: SEARCH_SCAN_LIMIT, after, before },
+        ).map((result) => result.sourceId);
+    const paged = paginateItems(memoryIds, page, pageSize);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderMemoryScope(db, paged.items, depth, truncate),
+    );
   }
 
   return routed.kind === "memory"
@@ -1119,18 +1147,25 @@ function renderRoutedId(
 
 function renderSessionList(
   db: Database,
-  depth: "collapsed" | "expanded" | "full",
+  depth: "collapsed" | "expanded",
   page: number,
-  limit: number,
+  pageSize: number,
   truncate?: number,
   after?: number,
   before?: number,
 ): string {
-  const offset = (page - 1) * limit;
-  return listSessionIds(db, undefined, limit, after, before)
-    .slice(offset, offset + limit)
-    .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
-    .join("\n");
+  const paged = paginateItems(
+    listSessionIds(db, undefined, after, before),
+    page,
+    pageSize,
+  );
+
+  return joinPage(
+    formatPageHeader(page, paged.pageCount, paged.total),
+    paged.items
+      .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
+      .join("\n"),
+  );
 }
 
 function searchQueryResults(
@@ -1176,9 +1211,9 @@ function searchQueryResults(
 
 export function recallMemory(db: Database, input: RecallInput): string {
   const depth = input.depth ?? "collapsed";
-  const limit = input.pageSize ?? 50;
   const page = Math.max(1, input.page ?? 1);
-  const truncate = input.truncate;
+  const pageSize = input.pageSize ?? (depth === "collapsed" ? 50 : 10);
+  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1196,7 +1231,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       routed,
       depth,
       page,
-      limit,
+      pageSize,
       truncate,
       timeRange.after,
       timeRange.before,
@@ -1207,12 +1242,30 @@ export function recallMemory(db: Database, input: RecallInput): string {
     const filters = parseQueryFilters(input.query);
     const results = filterResultsByTag(
       db,
-      searchQueryResults(db, filters, limit, timeRange.after, timeRange.before),
+      searchQueryResults(
+        db,
+        filters,
+        SEARCH_SCAN_LIMIT,
+        timeRange.after,
+        timeRange.before,
+      ),
       filters.tag,
-    ).slice((page - 1) * limit, (page - 1) * limit + limit);
+    );
+    const paged = paginateItems(results, page, pageSize);
 
-    return renderGroupedSearchResults(db, results, depth, truncate);
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      renderGroupedSearchResults(db, paged.items, depth, truncate),
+    );
   }
 
-  return renderSessionList(db, depth, page, limit, truncate, timeRange.after, timeRange.before);
+  return renderSessionList(
+    db,
+    depth,
+    page,
+    pageSize,
+    truncate,
+    timeRange.after,
+    timeRange.before,
+  );
 }

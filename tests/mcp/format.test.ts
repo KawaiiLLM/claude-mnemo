@@ -11,6 +11,7 @@ import {
   formatObservationExpanded,
   formatSessionCollapsed,
   formatSessionExpanded,
+  renderNode,
   formatTree,
   formatTurnCollapsed,
   formatTurnExpanded,
@@ -211,8 +212,8 @@ describe("MCP format renderer", () => {
       ].join("\n"),
     );
 
-    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
-      "[use mnemo-replay skill → read S142/T9 for full content]",
+    expect(formatTurnExpanded(longTurn, { sessionId: 142 })).not.toContain(
+      "[use mnemo-replay skill",
     );
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
       "p".repeat(200),
@@ -295,5 +296,79 @@ describe("MCP format renderer", () => {
         "  - source: [S142/T3] Add concurrency coverage | 2026-04-05",
       ].join("\n"),
     );
+  });
+
+  test("uses the global truncate option at all depths", () => {
+    const turn: FormattedTurn = {
+      id: 10,
+      promptNumber: 10,
+      title: "fix auth",
+      content: "x".repeat(500),
+      promptPreview: null,
+      responsePreview: null,
+      insight: [],
+      filesRead: [],
+      filesModified: [],
+      observationCount: 0,
+      toolCallCount: 0,
+      filesReadCount: 0,
+      filesModifiedCount: 0,
+      status: "extracted",
+    };
+
+    const shortLimit = renderNode(
+      { type: "turn", value: turn },
+      { depth: "expanded", truncate: 50 },
+    );
+    const longLimit = renderNode(
+      { type: "turn", value: turn },
+      { depth: "expanded", truncate: 500 },
+    );
+
+    expect(shortLimit).toContain("x".repeat(50));
+    expect(shortLimit).toContain("...");
+    expect(longLimit).toContain("x".repeat(500));
+    expect(longLimit).not.toContain("x".repeat(500) + "...");
+  });
+
+  test("defaults truncate to 200 when unspecified", () => {
+    const rendered = renderNode(
+      {
+        type: "turn",
+        value: {
+          id: 11,
+          promptNumber: 11,
+          title: "truncate default",
+          content: "x".repeat(500),
+        },
+      },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).toContain("x".repeat(200));
+    expect(rendered).not.toContain("x".repeat(201));
+  });
+
+  test("shows mnemo-replay hint only for unified-mode truncation", () => {
+    const turn: FormattedTurn = {
+      id: 12,
+      promptNumber: 12,
+      title: null,
+      content: "short text",
+      promptPreview: "y".repeat(500),
+      responsePreview: null,
+    };
+
+    const short = renderNode(
+      { type: "turn", value: { ...turn, promptPreview: "short text" } },
+      { depth: "expanded", truncate: 200, sessionId: 142 },
+    );
+    const long = renderNode(
+      { type: "turn", value: turn },
+      { depth: "expanded", truncate: 200, sessionId: 142 },
+    );
+
+    expect(short).not.toContain("[use ");
+    expect(long).toContain("[use mnemo-replay skill → read S142/T12 for full content]");
   });
 });

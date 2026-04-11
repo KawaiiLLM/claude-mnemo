@@ -262,6 +262,7 @@ describe("recallMemory", () => {
       time: "1970-01-02",
     });
 
+    expect(defaultOutput).toContain("page 1 / 1 (total 4)");
     expect(defaultOutput).toContain(`[S${bigSessionId}] Large timeline`);
     expect(defaultOutput).toContain(`[S${authSessionId}] Auth race fix`);
     expect(filteredOutput).toContain(`[S${authSessionId}] Auth race fix`);
@@ -276,6 +277,7 @@ describe("recallMemory", () => {
       pageSize: 3,
     });
 
+    expect(output).toContain("page 2 / 4 (total 10)");
     expect(output).toContain("[T14] Turn 14");
     expect(output).toContain("[T16] Turn 16");
     expect(output).not.toContain("[T13] Turn 13");
@@ -369,6 +371,7 @@ describe("recallMemory", () => {
     });
 
     expect(turnsOutput).toContain(`[S${bigSessionId}] Large timeline`);
+    expect(turnsOutput).toContain("page 1 / 1 (total 10)");
     expect(turnsOutput).toContain("[T12] Turn 12");
     expect(turnsOutput).toContain("[T20] Turn 20");
     expect(turnsOutput).not.toContain("[T10] Turn 10");
@@ -376,6 +379,7 @@ describe("recallMemory", () => {
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
     expect(observationsOutput).toContain("[T1] Diagnose auth race");
+    expect(sessionObservationsOutput).toContain("page 1 / 1 (total 60)");
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
     expect(sessionObservationsOutput).toContain("[T1] Observation flood");
     expect(sessionObservationsOutput).toContain("[O");
@@ -433,16 +437,53 @@ describe("recallMemory", () => {
     expect(output).not.toContain("Archived note");
   });
 
-  test("applies omission sampling to direct observation browsing", () => {
+  test("applies page offsets to direct observation browsing", () => {
     const output = recallMemory(db, {
       id: `S${floodSessionId}/T1/O*`,
       depth: "collapsed",
-      pageSize: 60,
+      page: 2,
+      pageSize: 3,
     });
 
-    expect(output).toContain("... ");
-    expect(output).toContain("[O");
+    expect(output).toContain("page 2 / 20 (total 60)");
+    expect(output).toContain("[O6] Observation 4");
+    expect(output).toContain("[O8] Observation 6");
+    expect(output).not.toContain("[O5] Observation 3");
+    expect(output).not.toContain("[O9] Observation 7");
     expect(output).toContain("[S");
+  });
+
+  test("defaults expanded turn listings to pageSize 10", () => {
+    const output = recallMemory(db, {
+      id: `S${bigSessionId}/T*`,
+      depth: "expanded",
+    });
+
+    expect(output).toContain("page 1 / 6 (total 60)");
+    expect(output).toContain("[T1] Turn 1");
+    expect(output).toContain("[T10] Turn 10");
+    expect(output).not.toContain("[T11] Turn 11");
+  });
+
+  test("caps child previews at 5 with +N more markers", () => {
+    const sessionOutput = recallMemory(db, {
+      id: `S${bigSessionId}`,
+      depth: "expanded",
+    });
+    const turnOutput = recallMemory(db, {
+      id: `S${floodSessionId}/T1`,
+      depth: "expanded",
+    });
+
+    expect(sessionOutput).toContain("[T1] Turn 1");
+    expect(sessionOutput).toContain("[T5] Turn 5");
+    expect(sessionOutput).not.toContain("[T6] Turn 6");
+    expect(sessionOutput).toContain("+55 more");
+
+    expect(turnOutput).toContain("[O3] Observation 1");
+    expect(turnOutput).toContain("[O7] Observation 5");
+    expect(turnOutput).not.toContain("[O8] Observation 6");
+    expect(turnOutput).toContain("+55 more");
   });
 
   test("rejects invalid time and legacy-style ids", () => {
