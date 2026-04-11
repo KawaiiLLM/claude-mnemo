@@ -467,7 +467,10 @@ describe("worker query session", () => {
     // Tool scope rules — obs path must explicitly forbid recall from the
     // wrong contexts, and the memory-creation boundary must be present.
     expect(prompt).toContain("`remember()` — your only output");
-    expect(prompt).toContain("`recall()` — read-only fallback");
+    expect(prompt).toContain("`recall()` — the only read fallback");
+    expect(prompt).toContain(
+      "`recall()` is usually unnecessary — the inline data and conversation history usually suffice. Only escalate when they genuinely do not.",
+    );
     expect(prompt).toContain(
       "Never update T/S records, create memories, or call `recall()` from an obs message.",
     );
@@ -476,6 +479,9 @@ describe("worker query session", () => {
     );
     expect(prompt).toContain(
       "Never call `recall()` from a session-summary message",
+    );
+    expect(prompt).toContain(
+      "Turn messages are the ONLY context where `recall()` is permitted as a fallback",
     );
     expect(prompt).toContain("recall({ id: \"<session id>/<turn id>\", depth: \"expanded\", truncate: 2000 })");
     expect(prompt).not.toContain("replay(");

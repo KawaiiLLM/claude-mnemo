@@ -1192,7 +1192,6 @@ function renderSessionList(
 function searchQueryResults(
   db: Database,
   filters: QueryFilters,
-  limit?: number,
   after?: number,
   before?: number,
 ): SearchMemoryResult[] {
@@ -1208,13 +1207,11 @@ function searchQueryResults(
         scope: "observations",
         after,
         before,
-        limit,
       }),
       ...searchMemory(db, {
         scope: "memories",
         after,
         before,
-        limit,
       }),
     ];
   }
@@ -1226,7 +1223,6 @@ function searchQueryResults(
     project: filters.project,
     after,
     before,
-    limit,
   });
 }
 
@@ -1266,7 +1262,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
       searchQueryResults(
         db,
         filters,
-        undefined,
         timeRange.after,
         timeRange.before,
       ),
