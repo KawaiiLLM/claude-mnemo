@@ -4,6 +4,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   recall:
     "Recall structured memories from the SQLite store. Paginated index; use the mnemo-replay skill for raw JSONL.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
+  timeline: "Render a compact timeline view for a routed session or turn selector.",
 } as const;
 
 export const recallInputShape = {
@@ -41,8 +42,13 @@ export const rememberInputShape = {
   source: z.string().optional(),
 };
 
+export const timelineInputShape = {
+  id: z.string().min(1),
+};
+
 export const recallInputSchema = z.object(recallInputShape).strict();
 export const rememberInputSchema = z.object(rememberInputShape).strict();
+export const timelineInputSchema = z.object(timelineInputShape).strict();
 
 export const MNEMO_ALLOWED_TOOLS = [
   "mcp__mnemo__remember",

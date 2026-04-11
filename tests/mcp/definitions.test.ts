@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import {
   MNEMO_ALLOWED_TOOLS,
   MNEMO_TOOL_DESCRIPTIONS,
+  timelineInputSchema,
   recallInputSchema,
   rememberInputSchema,
 } from "../../src/mcp/definitions";
@@ -41,7 +42,7 @@ describe("recallInputSchema", () => {
 });
 
 describe("tool surface", () => {
-  it("exposes exactly two read/write tools: recall and remember", () => {
+  it("keeps the worker allowlist at two tools and exposes timeline descriptions", () => {
     expect(MNEMO_ALLOWED_TOOLS).toEqual([
       "mcp__mnemo__remember",
       "mcp__mnemo__recall",
@@ -49,10 +50,39 @@ describe("tool surface", () => {
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
       "recall",
       "remember",
+      "timeline",
     ]);
     expect(rememberInputSchema.parse({ id: "S1", title: "ok" })).toEqual({
       id: "S1",
       title: "ok",
     });
+  });
+});
+
+describe("timelineInputSchema", () => {
+  it("accepts routed timeline ids and rejects extra fields", () => {
+    expect(timelineInputSchema.parse({ id: "S42" })).toEqual({
+      id: "S42",
+    });
+    expect(timelineInputSchema.parse({ id: "S42/T10..30" })).toEqual({
+      id: "S42/T10..30",
+    });
+    expect(timelineInputSchema.parse({ id: "S42/T30.." })).toEqual({
+      id: "S42/T30..",
+    });
+    expect(timelineInputSchema.parse({ id: "S42/T..20" })).toEqual({
+      id: "S42/T..20",
+    });
+    expect(timelineInputSchema.parse({ id: "S42/T*" })).toEqual({
+      id: "S42/T*",
+    });
+
+    expect(() => timelineInputSchema.parse({})).toThrow();
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", depth: "expanded" }),
+    ).toThrow();
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", pageSize: 10 }),
+    ).toThrow();
   });
 });

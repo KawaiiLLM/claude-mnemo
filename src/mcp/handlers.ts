@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
+import { timelineQuery } from "./timeline";
 
 export type ToolResult = {
   content: Array<{
@@ -15,6 +16,7 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 export interface MnemoToolHandlers {
   recall: ToolHandler;
   remember: ToolHandler;
+  timeline: ToolHandler;
 }
 
 export interface CreateDatabaseBackedHandlersOptions {
@@ -59,5 +61,7 @@ export function createDatabaseBackedHandlers(
       ),
     remember: (args) =>
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
+    timeline: (args) =>
+      textResult(timelineQuery(database, { id: args.id as string })),
   };
 }
