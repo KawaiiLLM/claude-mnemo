@@ -1,5 +1,6 @@
 export type HookEventName =
   | "PostToolUse"
+  | "PostCompact"
   | "SessionStart"
   | "PreCompact"
   | "UserPromptSubmit"

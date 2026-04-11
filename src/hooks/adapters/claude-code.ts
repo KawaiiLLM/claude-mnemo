@@ -54,6 +54,7 @@ function resolveEventName(raw: Record<string, unknown>): HookEventName {
 
   switch (eventName) {
     case "PostToolUse":
+    case "PostCompact":
     case "SessionStart":
     case "PreCompact":
     case "UserPromptSubmit":

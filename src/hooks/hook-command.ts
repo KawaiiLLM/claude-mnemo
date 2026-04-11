@@ -9,6 +9,7 @@ import { initializeDatabase } from "../db/schema";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import { createContextHandler } from "./handlers/context";
+import { createPostCompactHandler } from "./handlers/post-compact";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
@@ -37,6 +38,7 @@ function getDefaultHandlers(): Record<string, HookHandler> {
   defaultHandlers = {
     SessionStart: createContextHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
+    PostCompact: createPostCompactHandler({ db }),
     PreCompact: createCompactHandler({ db }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({
@@ -63,6 +65,8 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
       return "SessionStart";
     case "tool-use":
       return "PostToolUse";
+    case "post-compact":
+      return "PostCompact";
     case "compact":
       return "PreCompact";
     case "session-init":

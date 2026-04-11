@@ -10,6 +10,7 @@ interface TranscriptContentBlock {
 
 interface TranscriptEntry {
   type?: string;
+  subtype?: string;
   role?: string;
   content?: TranscriptContentBlock[] | string;
   promptId?: string;
@@ -17,6 +18,12 @@ interface TranscriptEntry {
   isSidechain?: boolean;
   isApiErrorMessage?: boolean;
   uuid?: string;
+  parentUuid?: string;
+  compactMetadata?: {
+    trigger?: string;
+    preCompactTokenCount?: number;
+    pre_tokens?: number;
+  };
 }
 
 interface TranscriptEntryWithLineNumber extends TranscriptEntry {
@@ -51,6 +58,7 @@ export interface ParsedReplayTurn {
 
 interface RawTranscriptEntry {
   type?: unknown;
+  subtype?: unknown;
   role?: unknown;
   content?: unknown;
   message?: unknown;
@@ -59,6 +67,8 @@ interface RawTranscriptEntry {
   isSidechain?: unknown;
   isApiErrorMessage?: unknown;
   uuid?: unknown;
+  parentUuid?: unknown;
+  compactMetadata?: unknown;
 }
 
 export function normalizeAssistantText(text: string): string {
@@ -228,6 +238,7 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
 
   return {
     type: typeof raw.type === "string" ? raw.type : undefined,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : undefined,
     role:
       typeof message?.role === "string"
         ? message.role
@@ -244,10 +255,31 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
           : undefined,
     promptId: typeof raw.promptId === "string" ? raw.promptId : undefined,
     uuid: typeof raw.uuid === "string" ? raw.uuid : undefined,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : undefined,
     permissionMode:
       typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
     isSidechain: Boolean(raw.isSidechain),
     isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    compactMetadata:
+      raw.compactMetadata && typeof raw.compactMetadata === "object"
+        ? {
+            trigger:
+              typeof (raw.compactMetadata as { trigger?: unknown }).trigger === "string"
+                ? (raw.compactMetadata as { trigger: string }).trigger
+                : undefined,
+            preCompactTokenCount:
+              typeof (raw.compactMetadata as { preCompactTokenCount?: unknown })
+                .preCompactTokenCount === "number"
+                ? (raw.compactMetadata as { preCompactTokenCount: number })
+                    .preCompactTokenCount
+                : undefined,
+            pre_tokens:
+              typeof (raw.compactMetadata as { pre_tokens?: unknown }).pre_tokens ===
+              "number"
+                ? (raw.compactMetadata as { pre_tokens: number }).pre_tokens
+                : undefined,
+          }
+        : undefined,
   };
 }
 
