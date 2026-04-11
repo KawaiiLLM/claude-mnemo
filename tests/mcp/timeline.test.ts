@@ -177,6 +177,14 @@ describe("resolveWindow", () => {
     expect(window.startPromptNumber).toBe(1);
     expect(window.endPromptNumber).toBe(0);
   });
+
+  it("rejects malformed programmatic range specs", () => {
+    expect(() =>
+      resolveWindow({ kind: "closed", start: 10, end: 5 }, 120),
+    ).toThrow();
+    expect(() => resolveWindow({ kind: "openStart", end: 0 }, 120)).toThrow();
+    expect(() => resolveWindow({ kind: "openEnd", start: 0 }, 120)).toThrow();
+  });
 });
 
 describe("cleanPromptForLabel", () => {
@@ -406,6 +414,35 @@ describe("segmentPhases", () => {
     expect(phases[0].durationMs).toBe(100_000);
     expect(phases[0].externalInputs).toEqual(["codex", "slack"]);
   });
+
+  it("sorts unsorted input before segmenting phases", () => {
+    const phases = segmentPhases([
+      turn({ promptNumber: 3, type: "decision", createdAtEpoch: 1300 }),
+      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1000 }),
+      turn({ promptNumber: 2, type: "discovery", createdAtEpoch: 1100 }),
+      turn({ promptNumber: 4, type: null, createdAtEpoch: 1400 }),
+    ]);
+
+    expect(phases).toHaveLength(3);
+    expect(phases[0]).toMatchObject({
+      type: "discovery",
+      startPromptNumber: 1,
+      endPromptNumber: 2,
+      durationMs: 100_000,
+    });
+    expect(phases[1]).toMatchObject({
+      kind: "typed",
+      type: "decision",
+      startPromptNumber: 3,
+      endPromptNumber: 3,
+    });
+    expect(phases[2]).toMatchObject({
+      kind: "pending",
+      type: null,
+      startPromptNumber: 4,
+      endPromptNumber: 4,
+    });
+  });
 });
 
 describe("computeTypesDistribution", () => {
@@ -501,6 +538,31 @@ describe("detectBrokenPromptPairs", () => {
     ]);
 
     expect(pairs).toEqual([{ first: 1, second: 3 }]);
+  });
+
+  it("sorts unsorted input before comparing prompts", () => {
+    const pairs = detectBrokenPromptPairs([
+      turn({
+        promptNumber: 3,
+        userPrompt: `${"x".repeat(30)} third`,
+        createdAtEpoch: 1200,
+      }),
+      turn({
+        promptNumber: 1,
+        userPrompt: `${"x".repeat(30)} first`,
+        createdAtEpoch: 1000,
+      }),
+      turn({
+        promptNumber: 2,
+        userPrompt: `${"x".repeat(30)} second`,
+        createdAtEpoch: 1100,
+      }),
+    ]);
+
+    expect(pairs).toEqual([
+      { first: 1, second: 2 },
+      { first: 2, second: 3 },
+    ]);
   });
 });
 
@@ -634,5 +696,48 @@ describe("detectShapeSignals", () => {
     expect(signals.fastestGap).toBeNull();
     expect(signals.longestGap).toBeNull();
     expect(signals.toolBursts).toEqual([]);
+  });
+
+  it("sorts unsorted input before deriving shape signals", () => {
+    const signals = detectShapeSignals([
+      turn({
+        promptNumber: 3,
+        createdAtEpoch: 1300,
+        toolCallCount: 9,
+        userPrompt: `${"x".repeat(30)} third`,
+      }),
+      turn({
+        promptNumber: 1,
+        createdAtEpoch: 1000,
+        toolCallCount: 2,
+        userPrompt: `${"x".repeat(30)} first`,
+      }),
+      turn({
+        promptNumber: 2,
+        createdAtEpoch: 1120,
+        toolCallCount: 4,
+        userPrompt: `${"x".repeat(30)} second`,
+      }),
+      turn({
+        promptNumber: 4,
+        createdAtEpoch: 1500,
+        status: "undone",
+      }),
+    ]);
+
+    expect(signals.fastestGap).toMatchObject({
+      afterPromptNumber: 1,
+      ms: 120_000,
+    });
+    expect(signals.longestGap).toMatchObject({
+      afterPromptNumber: 2,
+      ms: 180_000,
+    });
+    expect(signals.brokenPromptPairs).toEqual([
+      { first: 1, second: 2 },
+      { first: 2, second: 3 },
+    ]);
+    expect(signals.undoneTurns).toEqual([4]);
+    expect(signals.externalInputs).toEqual([]);
   });
 });

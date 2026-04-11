@@ -169,6 +169,7 @@ export function resolveWindow(
   }
 
   if (range.kind === "closed") {
+    validateClosedRange(range);
     const startPromptNumber = Math.max(1, range.start);
     const endPromptNumber = Math.min(
       range.end,
@@ -186,6 +187,7 @@ export function resolveWindow(
   }
 
   if (range.kind === "openEnd") {
+    validateOpenEndRange(range);
     const startPromptNumber = Math.max(1, range.start);
 
     return {
@@ -201,6 +203,7 @@ export function resolveWindow(
   }
 
   if (range.kind === "openStart") {
+    validateOpenStartRange(range);
     const endPromptNumber = Math.min(range.end, TIMELINE_WINDOW_CAP, totalTurns);
 
     return {
@@ -319,10 +322,13 @@ export function extractSourceTags(tags: string[]): string[] {
 }
 
 export function segmentPhases(turns: TurnRecord[]): Phase[] {
+  const sortedTurns = sortTurnsForAnalysis(turns);
   const phases: Phase[] = [];
   let current: Phase | null = null;
+  let currentStartEpoch = 0;
+  let currentEndEpoch = 0;
 
-  for (const turn of turns) {
+  for (const turn of sortedTurns) {
     if (turn.status === "undone") {
       continue;
     }
@@ -332,6 +338,10 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
       turn.type === null ? PENDING_EMOJI : (TYPE_EMOJI_MAP[turn.type] ?? "•");
 
     if (current === null || current.kind !== kind || current.type !== turn.type) {
+      if (current !== null) {
+        current.durationMs = (currentEndEpoch - currentStartEpoch) * 1000;
+      }
+
       current = {
         kind,
         type: turn.type,
@@ -346,6 +356,7 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
         externalInputs: [],
       };
       phases.push(current);
+      currentStartEpoch = turn.createdAtEpoch;
     }
 
     current.endPromptNumber = turn.promptNumber;
@@ -353,6 +364,7 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
     current.totalToolCalls += turn.toolCallCount ?? 0;
     current.totalFilesRead += turn.filesRead.length;
     current.totalFilesModified += turn.filesModified.length;
+    currentEndEpoch = turn.createdAtEpoch;
 
     for (const source of extractSourceTags(turn.tags)) {
       if (!current.externalInputs.includes(source)) {
@@ -361,17 +373,8 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
     }
   }
 
-  for (const phase of phases) {
-    const firstTurn = turns.find(
-      (turn) => turn.promptNumber === phase.startPromptNumber,
-    );
-    const lastTurn = turns.find(
-      (turn) => turn.promptNumber === phase.endPromptNumber,
-    );
-
-    if (firstTurn && lastTurn) {
-      phase.durationMs = (lastTurn.createdAtEpoch - firstTurn.createdAtEpoch) * 1000;
-    }
+  if (current !== null) {
+    current.durationMs = (currentEndEpoch - currentStartEpoch) * 1000;
   }
 
   return phases;
@@ -408,7 +411,9 @@ export function detectBrokenPromptPairs(
   turns: TurnRecord[],
 ): Array<{ first: number; second: number }> {
   const pairs: Array<{ first: number; second: number }> = [];
-  const liveTurns = turns.filter((turn) => turn.status !== "undone");
+  const liveTurns = sortTurnsForAnalysis(turns).filter(
+    (turn) => turn.status !== "undone",
+  );
 
   for (let index = 0; index < liveTurns.length - 1; index += 1) {
     const current = liveTurns[index];
@@ -490,7 +495,8 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
     };
   }
 
-  const liveTurns = turns.filter((turn) => turn.status !== "undone");
+  const sortedTurns = sortTurnsForAnalysis(turns);
+  const liveTurns = sortedTurns.filter((turn) => turn.status !== "undone");
   let fastestGap: ShapeSignals["fastestGap"] = null;
   let longestGap: ShapeSignals["longestGap"] = null;
 
@@ -552,6 +558,52 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
     undoneTurns,
     externalInputs,
   };
+}
+
+function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
+  return [...turns].sort((left, right) => {
+    if (left.promptNumber !== right.promptNumber) {
+      return left.promptNumber - right.promptNumber;
+    }
+
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+
+    return left.id - right.id;
+  });
+}
+
+function validateClosedRange(range: Extract<RangeSpec, { kind: "closed" }>): void {
+  if (
+    !Number.isInteger(range.start) ||
+    !Number.isInteger(range.end) ||
+    range.start < 1 ||
+    range.end < 1 ||
+    range.start > range.end
+  ) {
+    throw new Error(
+      `timeline range is invalid: closed ranges require positive integers with start <= end`,
+    );
+  }
+}
+
+function validateOpenStartRange(
+  range: Extract<RangeSpec, { kind: "openStart" }>,
+): void {
+  if (!Number.isInteger(range.end) || range.end < 1) {
+    throw new Error(
+      `timeline range is invalid: open-start ranges require a positive integer end`,
+    );
+  }
+}
+
+function validateOpenEndRange(range: Extract<RangeSpec, { kind: "openEnd" }>): void {
+  if (!Number.isInteger(range.start) || range.start < 1) {
+    throw new Error(
+      `timeline range is invalid: open-end ranges require a positive integer start`,
+    );
+  }
 }
 
 export function timelineQuery(_db: Database, _input: TimelineInput): string {
