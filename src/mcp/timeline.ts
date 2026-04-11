@@ -53,6 +53,7 @@ export interface TypesDistribution {
   change: number;
   discovery: number;
   decision: number;
+  compact: number;
   pending: number;
 }
 
@@ -105,25 +106,32 @@ export function parseTimelineId(id: string): ParsedId {
 
   const closed = rangeValue.match(/^(\d+)\.\.(\d+)$/);
   if (closed) {
+    const start = parsePositiveBound(closed[1], id);
+    const end = parsePositiveBound(closed[2], id);
+    if (start > end) {
+      throw new Error(`timeline range start must be <= end: ${id}`);
+    }
     return {
       sessionId,
-      range: { kind: "closed", start: Number(closed[1]), end: Number(closed[2]) },
+      range: { kind: "closed", start, end },
     };
   }
 
   const openStart = rangeValue.match(/^\.\.(\d+)$/);
   if (openStart) {
+    const end = parsePositiveBound(openStart[1], id);
     return {
       sessionId,
-      range: { kind: "openStart", end: Number(openStart[1]) },
+      range: { kind: "openStart", end },
     };
   }
 
   const openEnd = rangeValue.match(/^(\d+)\.\.$/);
   if (openEnd) {
+    const start = parsePositiveBound(openEnd[1], id);
     return {
       sessionId,
-      range: { kind: "openEnd", start: Number(openEnd[1]) },
+      range: { kind: "openEnd", start },
     };
   }
 
@@ -377,6 +385,7 @@ export function computeTypesDistribution(turns: TurnRecord[]): TypesDistribution
     change: 0,
     discovery: 0,
     decision: 0,
+    compact: 0,
     pending: 0,
   };
 
@@ -453,8 +462,18 @@ function isTypedTurnKind(value: string): value is TypedTurnKind {
     value === "refactor" ||
     value === "change" ||
     value === "discovery" ||
-    value === "decision"
+    value === "decision" ||
+    value === "compact"
   );
+}
+
+function parsePositiveBound(raw: string, id: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`timeline range bounds must be positive integers: ${id}`);
+  }
+
+  return value;
 }
 
 export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {

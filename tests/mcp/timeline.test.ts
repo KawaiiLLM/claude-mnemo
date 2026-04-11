@@ -82,6 +82,12 @@ describe("parseTimelineId", () => {
     expect(() => parseTimelineId("S42/T10")).toThrow(/single turn/i);
   });
 
+  it("rejects invalid range bounds", () => {
+    expect(() => parseTimelineId("S42/T10..5")).toThrow(/start must be <= end/i);
+    expect(() => parseTimelineId("S42/T..0")).toThrow(/positive integers/i);
+    expect(() => parseTimelineId("S42/T0..")).toThrow(/positive integers/i);
+  });
+
   it("rejects malformed input", () => {
     expect(() => parseTimelineId("foo")).toThrow();
     expect(() => parseTimelineId("S42/bogus")).toThrow();
@@ -409,8 +415,9 @@ describe("computeTypesDistribution", () => {
       turn({ promptNumber: 2, type: "discovery" }),
       turn({ promptNumber: 3, type: "decision" }),
       turn({ promptNumber: 4, type: "change" }),
-      turn({ promptNumber: 5, type: null }),
+      turn({ promptNumber: 5, type: "compact" }),
       turn({ promptNumber: 6, type: null }),
+      turn({ promptNumber: 7, type: null }),
     ]);
 
     expect(distribution).toEqual({
@@ -420,6 +427,7 @@ describe("computeTypesDistribution", () => {
       change: 1,
       discovery: 2,
       decision: 1,
+      compact: 1,
       pending: 2,
     });
   });
