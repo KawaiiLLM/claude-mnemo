@@ -564,7 +564,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools");
     expect(output).toContain("Format:");
     expect(output).toContain(
-      'Expand: recall(id="Sx/Ty", depth="expanded")',
+      'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)',
     );
     expect(output).toContain("## Current Session");
     expect(output).toContain("## Memories");

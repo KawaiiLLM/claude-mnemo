@@ -51,7 +51,7 @@ function buildHeader(db: Database): string {
     "  - [Tx] title | 💡n 📖n ✏️n 🔧n",
     "  - [Ox] 🔵 title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(id="Sx/Ty", depth="expanded")',
+    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)',
   ].join("\n");
 }
 
