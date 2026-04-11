@@ -414,6 +414,100 @@ describe("initializeSchema", () => {
     });
   });
 
+  test("initializeSchema adds transcript_line_start to an existing turns table without resetting data", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        next_steps TEXT,
+        last_compact_turn INTEGER,
+        last_agent_session_id TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    db.query(
+      `
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          created_at_epoch
+        ) VALUES (?, ?, ?)
+      `,
+    ).run("existing-session", "claude-mnemo", 1);
+    db.query(
+      `
+        INSERT INTO turns (
+          session_id,
+          prompt_number,
+          status,
+          created_at_epoch
+        ) VALUES (
+          (SELECT id FROM sessions WHERE content_session_id = ?),
+          ?,
+          ?,
+          ?
+        )
+      `,
+    ).run("existing-session", 1, "active", 2);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    const turnCount = db
+      .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM turns")
+      .get().count;
+    const turn = db
+      .query<
+        { promptNumber: number; transcriptLineStart: number | null },
+        []
+      >(
+        `
+          SELECT
+            prompt_number AS promptNumber,
+            transcript_line_start AS transcriptLineStart
+          FROM turns
+        `,
+      )
+      .get();
+
+    expect(columns).toContain("transcript_line_start");
+    expect(turnCount).toBe(1);
+    expect(turn).toEqual({
+      promptNumber: 1,
+      transcriptLineStart: null,
+    });
+  });
+
   test("creates the worker queue table with FIFO and claim columns", () => {
     initializeSchema(db);
 

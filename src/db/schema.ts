@@ -34,6 +34,7 @@ const SCHEMA_SQL = `
     files_read TEXT,
     files_modified TEXT,
     tool_call_count INTEGER,
+    transcript_line_start INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -113,6 +114,7 @@ const SCHEMA_SQL = `
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureTurnTranscriptLineStartColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -123,6 +125,14 @@ function ensureSessionLastAgentSessionIdColumn(db: Database): void {
   }
 
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+
+function ensureTurnTranscriptLineStartColumn(db: Database): void {
+  if (hasColumn(db, "turns", "transcript_line_start")) {
+    return;
+  }
+
+  db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
 }
 
 function ensureSessionProjectIndex(db: Database): void {

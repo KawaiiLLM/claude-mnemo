@@ -19,6 +19,10 @@ interface TranscriptEntry {
   uuid?: string;
 }
 
+interface TranscriptEntryWithLineNumber extends TranscriptEntry {
+  lineNumber: number;
+}
+
 export interface TranscriptToolCall {
   name: string;
   input: unknown;
@@ -38,6 +42,7 @@ export interface ParsedTurn {
 export interface ParsedReplayTurn {
   promptNumber: number;
   promptId: string | null;
+  transcriptLineStart: number | null;
   userPrompt: string;
   assistantText: string;
   toolCalls: ReplayToolCall[];
@@ -164,7 +169,9 @@ export function readTranscriptEntries(transcriptPath: string): TranscriptEntry[]
   );
 }
 
-export function readAllTranscriptEntries(transcriptPath: string): TranscriptEntry[] {
+export function readAllTranscriptEntries(
+  transcriptPath: string,
+): TranscriptEntryWithLineNumber[] {
   if (!existsSync(transcriptPath)) {
     return [];
   }
@@ -175,15 +182,29 @@ export function readAllTranscriptEntries(transcriptPath: string): TranscriptEntr
     return [];
   }
 
-  const entries = rawTranscript
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => normalizeEntry(JSON.parse(line) as RawTranscriptEntry))
-    .filter((entry) => !entry.isApiErrorMessage);
+  const entries: TranscriptEntryWithLineNumber[] = [];
+
+  rawTranscript.split("\n").forEach((line, index) => {
+    const trimmedLine = line.trim();
+
+    if (!trimmedLine) {
+      return;
+    }
+
+    const entry = normalizeEntry(JSON.parse(trimmedLine) as RawTranscriptEntry);
+
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+
+    entries.push({
+      ...entry,
+      lineNumber: index + 1,
+    });
+  });
 
   const seenUuids = new Set<string>();
-  const deduped: TranscriptEntry[] = [];
+  const deduped: TranscriptEntryWithLineNumber[] = [];
 
   for (const entry of entries) {
     if (entry.uuid) {
@@ -228,6 +249,20 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
     isSidechain: Boolean(raw.isSidechain),
     isApiErrorMessage: Boolean(raw.isApiErrorMessage),
   };
+}
+
+export function buildPromptIdLineMap(transcriptPath: string): Map<string, number> {
+  const promptIdLineMap = new Map<string, number>();
+
+  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+    if (!entry.promptId || promptIdLineMap.has(entry.promptId)) {
+      continue;
+    }
+
+    promptIdLineMap.set(entry.promptId, entry.lineNumber);
+  }
+
+  return promptIdLineMap;
 }
 
 function startsNewTurn(
@@ -303,6 +338,7 @@ export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[
       currentTurn = {
         promptNumber,
         promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
         userPrompt,
         assistantText: "",
         toolCalls: [],

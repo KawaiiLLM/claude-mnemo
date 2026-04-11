@@ -212,6 +212,38 @@ describe("parseTranscript", () => {
     ]);
   });
 
+  test("parseReplayTranscript records transcript line starts for each turn", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        content: [{ type: "text", text: "First prompt" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "First answer" }],
+      },
+      {
+        role: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        content: [{ type: "text", text: "Second prompt" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(
+      parseReplayTranscript(transcript.path).map((turn) => [
+        turn.promptNumber,
+        turn.transcriptLineStart,
+      ]),
+    ).toEqual([
+      [1, 1],
+      [2, 3],
+    ]);
+  });
+
   test("countUserPromptsInTranscript matches parseReplayTranscript length", () => {
     const transcript = writeTranscript([
       {
