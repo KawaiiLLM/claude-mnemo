@@ -74,7 +74,7 @@ export function createMnemoSdkServer(
   const partialHandlers = createDatabaseBackedHandlers(database, {
     defaultProject,
   });
-  const handlers: MnemoToolHandlers = {
+  const handlers: Pick<MnemoToolHandlers, "recall" | "remember"> = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
     remember: partialHandlers.remember ?? missingHandler("remember"),
   };

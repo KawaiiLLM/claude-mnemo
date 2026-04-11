@@ -93,4 +93,16 @@ describe("database-backed MCP handlers", () => {
       }),
     ).toThrow();
   });
+
+  test("exposes the timeline stub from the database-backed handler set", async () => {
+    const handlers = createDatabaseBackedHandlers(db, {
+      defaultProject: "claude-mnemo",
+    });
+
+    const result = await handlers.timeline?.({
+      id: "S1",
+    });
+
+    expect(result?.content[0]?.text).toBe("timeline not implemented");
+  });
 });

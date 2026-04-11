@@ -56,7 +56,7 @@ export function createMcpServer(
     ...options.handlers,
   };
 
-  const toolHandlers: MnemoToolHandlers = {
+  const toolHandlers: Pick<MnemoToolHandlers, "recall" | "remember"> = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     remember: mergedHandlers.remember ?? createStubHandler("remember"),
   };
