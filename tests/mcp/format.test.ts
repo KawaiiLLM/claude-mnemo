@@ -33,6 +33,7 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 1,
       promptNumber: 1,
+      transcriptLineStart: 17,
       title: "Diagnose auth",
       content: "Refresh overlap diagnosed",
       observationCount: 2,
@@ -56,14 +57,14 @@ describe("MCP format renderer", () => {
 
     expect(formatTurnCollapsed(turn)).toBe(
       [
-        "  - [T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
+        "  - [T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "    - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
 
     expect(formatTurnCollapsed(turn, { indent: "", sessionId: 142 })).toBe(
       [
-        "- [S142][T1] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
+        "- [S142][T1:L17] Diagnose auth | 💡2 📖1 ✏️2 🔧4 [extracted]",
         "  - desc: Refresh overlap diagnosed",
       ].join("\n"),
     );
@@ -96,6 +97,7 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 2,
       promptNumber: 2,
+      transcriptLineStart: null,
       title: "No stats",
       content: "Collapsed description stays visible",
       observationCount: 0,
@@ -124,12 +126,14 @@ describe("MCP format renderer", () => {
     const activeTurn: FormattedTurn = {
       id: 3,
       promptNumber: 3,
+      transcriptLineStart: null,
       title: "Active turn",
       status: "active",
     };
     const undoneTurn: FormattedTurn = {
       id: 4,
       promptNumber: 4,
+      transcriptLineStart: null,
       title: "Undone turn",
       status: "undone",
     };
@@ -155,6 +159,7 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 1,
       promptNumber: 1,
+      transcriptLineStart: null,
       title: "Diagnose auth",
       observationCount: 2,
       toolCallCount: 4,
@@ -176,6 +181,7 @@ describe("MCP format renderer", () => {
     const longTurn: FormattedTurn = {
       id: 9,
       promptNumber: 9,
+      transcriptLineStart: null,
       title: "Verbose turn",
       status: "extracted",
       promptPreview: "p".repeat(260),
@@ -236,6 +242,7 @@ describe("MCP format renderer", () => {
           {
             id: 1,
             promptNumber: 1,
+            transcriptLineStart: null,
             title: "Diagnose auth",
             observationCount: 1,
             status: "extracted",
@@ -302,6 +309,7 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 10,
       promptNumber: 10,
+      transcriptLineStart: null,
       title: "fix auth",
       content: "x".repeat(500),
       promptPreview: null,
@@ -333,14 +341,15 @@ describe("MCP format renderer", () => {
 
   test("defaults truncate to 200 when unspecified", () => {
     const rendered = renderNode(
-      {
-        type: "turn",
-        value: {
-          id: 11,
-          promptNumber: 11,
-          title: "truncate default",
-          content: "x".repeat(500),
-        },
+        {
+          type: "turn",
+          value: {
+            id: 11,
+            promptNumber: 11,
+            transcriptLineStart: null,
+            title: "truncate default",
+            content: "x".repeat(500),
+          },
       },
       { depth: "expanded" },
     );
@@ -353,10 +362,19 @@ describe("MCP format renderer", () => {
     const turn: FormattedTurn = {
       id: 12,
       promptNumber: 12,
+      transcriptLineStart: null,
       title: null,
       content: "short text",
       promptPreview: "y".repeat(500),
       responsePreview: null,
+    };
+
+    const anchoredTurn: FormattedTurn = {
+      id: 13,
+      promptNumber: 13,
+      transcriptLineStart: 42,
+      title: "Anchored turn",
+      status: "extracted",
     };
 
     const short = renderNode(
@@ -370,5 +388,8 @@ describe("MCP format renderer", () => {
 
     expect(short).not.toContain("[use ");
     expect(long).toContain("[use mnemo-replay skill → read S142/T12 for full content]");
+    expect(
+      formatTurnCollapsed(anchoredTurn, { sessionId: 17 }),
+    ).toContain("[S17][T13:L42] Anchored turn");
   });
 });

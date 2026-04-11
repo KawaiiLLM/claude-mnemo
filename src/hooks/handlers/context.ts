@@ -48,7 +48,7 @@ function buildHeader(db: Database): string {
     "Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools",
     "Format:",
     "  - [Sx] title | 💬n 💡n | yyyy-mm-dd | project",
-    "  - [Tx] title | 💡n 📖n ✏️n 🔧n",
+    "  - [Tx] or [Tx:Lz] title | 💡n 📖n ✏️n 🔧n",
     "  - [Ox] 🔵 title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
     'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)',
@@ -170,6 +170,7 @@ function buildCollapsedTurnViews(
   return turns.map((turn) => ({
     id: turn.id,
     promptNumber: turn.promptNumber,
+    transcriptLineStart: turn.transcriptLineStart,
     title: turn.title,
     content: turn.content,
     observationCount: observationCounts.get(turn.id) ?? 0,

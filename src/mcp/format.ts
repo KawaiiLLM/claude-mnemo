@@ -61,6 +61,7 @@ interface ObservationFormatOptions {
 export interface FormattedTurn {
   id: number;
   promptNumber: number;
+  transcriptLineStart: number | null;
   title: string | null;
   createdAtEpoch?: number | null;
   content?: string | null;
@@ -419,10 +420,13 @@ function formatTurnLabel(
     truncate,
   }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
+  const turnId = turn.transcriptLineStart === null
+    ? `T${turn.promptNumber}`
+    : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
   const prefix =
     sessionId === undefined
-      ? `${indent}- [T${turn.promptNumber}]`
-      : `${indent}- [S${sessionId}][T${turn.promptNumber}]`;
+      ? `${indent}- [${turnId}]`
+      : `${indent}- [S${sessionId}][${turnId}]`;
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";

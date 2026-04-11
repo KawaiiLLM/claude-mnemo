@@ -77,6 +77,27 @@ describe("recallMemory", () => {
       ],
     });
 
+    db
+      .query(
+        "UPDATE turns SET transcript_line_start = ? WHERE session_id = ? AND prompt_number = ?",
+      )
+      .run(4, authSession.id, 1);
+
+    saveTurn(db, {
+      sessionId: authSession.id,
+      promptNumber: 2,
+      userPrompt: "Any follow-up?",
+      assistantResponse: "No line anchor yet.",
+      title: "Follow-up",
+      content: "Legacy turn id remains unchanged",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 86_650,
+      updatedAtEpoch: 86_660,
+      observations: [],
+    });
+
     const authTurn = getTurn(db, authSession.id, 1)!;
     authObservationId = getObservationsForTurn(db, authTurn.id)[0]!.id;
 
@@ -307,11 +328,11 @@ describe("recallMemory", () => {
     expect(sessionOutput).toContain(
       `raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`,
     );
-    expect(sessionOutput).toContain("[T1] Diagnose auth race");
+    expect(sessionOutput).toContain("[T1:L4] Diagnose auth race");
     expect(sessionOutput).not.toContain('prompt: "Why am I getting 401 errors?"');
     expect(sessionOutput).not.toContain("[O1] Auth mutex");
 
-    expect(turnOutput).toContain(`[T1] Diagnose auth race`);
+    expect(turnOutput).toContain(`[T1:L4] Diagnose auth race`);
     expect(turnOutput).toContain('prompt: "Why am I getting 401 errors?"');
     expect(turnOutput).toContain("[O1] Auth mutex");
 
@@ -324,6 +345,16 @@ describe("recallMemory", () => {
     expect(memoryOutput).toContain(
       "content: Refresh token work must be serialized with a mutex.",
     );
+  });
+
+  test("renders anchored and legacy turn ids in routed turn listings", () => {
+    const output = recallMemory(db, {
+      id: `S${authSessionId}/T1..2`,
+      depth: "collapsed",
+    });
+
+    expect(output).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
+    expect(output).toContain(`[S${authSessionId}][T2] Follow-up`);
   });
 
   test("honors truncate when expanding a turn", () => {
@@ -392,7 +423,7 @@ describe("recallMemory", () => {
 
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
-    expect(observationsOutput).toContain("[T1] Diagnose auth race");
+    expect(observationsOutput).toContain("[T1:L4] Diagnose auth race");
     expect(sessionObservationsOutput).toContain("page 1 / 1 (total 60)");
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
     expect(sessionObservationsOutput).toContain("[T1] Observation flood");
@@ -421,7 +452,7 @@ describe("recallMemory", () => {
     });
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
-    expect(typeQuery).toContain(`[S${authSessionId}][T1] Diagnose auth race`);
+    expect(typeQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
     expect(typeQuery).not.toContain(`[M${projectMemoryId}]`);
 
     expect(projectScopedQuery).toContain("Auth race fix");
