@@ -8,7 +8,6 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   recallInputSchema,
   rememberInputSchema,
-  replayInputSchema,
 } from "./definitions";
 import {
   createDatabaseBackedHandlers,
@@ -59,7 +58,6 @@ export function createMcpServer(
 
   const toolHandlers: MnemoToolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
-    replay: mergedHandlers.replay ?? createStubHandler("replay"),
     remember: mergedHandlers.remember ?? createStubHandler("remember"),
   };
 
@@ -70,14 +68,6 @@ export function createMcpServer(
       inputSchema: recallInputSchema,
     },
     (args) => toolHandlers.recall(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "replay",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.replay,
-      inputSchema: replayInputSchema,
-    },
-    (args) => toolHandlers.replay(args as Record<string, unknown>),
   );
   server.registerTool(
     "remember",

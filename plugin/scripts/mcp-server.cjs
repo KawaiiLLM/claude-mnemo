@@ -7355,18 +7355,6 @@ function resolveDatabasePath(explicitPath) {
   }
   return candidatePath;
 }
-function encodeProjectPath(projectPath) {
-  return projectPath.replace(/[/:\\]+/g, "-");
-}
-function resolveTranscriptPath(projectPath, sessionId) {
-  return (0, import_node_path.join)(
-    (0, import_node_os.homedir)(),
-    ".claude",
-    "projects",
-    encodeProjectPath(projectPath),
-    `${sessionId}.jsonl`
-  );
-}
 var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
   "src/shared/paths.ts"() {
@@ -7395,9 +7383,9 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
-  if (!(0, import_node_fs3.existsSync)(parentDirectory)) {
-    (0, import_node_fs3.mkdirSync)(parentDirectory, { recursive: true });
+  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
+  if (!(0, import_node_fs.existsSync)(parentDirectory)) {
+    (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
 function configureDatabase(db) {
@@ -7415,12 +7403,12 @@ function createDatabase(path) {
   configureDatabase(db);
   return db;
 }
-var import_node_fs3, import_node_path3, import_bun_sqlite;
+var import_node_fs, import_node_path2, import_bun_sqlite;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
-    import_node_fs3 = require("node:fs");
-    import_node_path3 = require("node:path");
+    import_node_fs = require("node:fs");
+    import_node_path2 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
   }
@@ -30989,20 +30977,17 @@ var StdioServerTransport = class {
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Recall structured memories from the SQLite store.",
-  replay: "Replay raw transcript content from the source JSONL.",
+  recall: "Recall structured memories from the SQLite store. Paginated index; use the mnemo-replay skill for raw JSONL.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
   query: external_exports3.string().optional(),
   time: external_exports3.string().optional(),
-  depth: external_exports3.enum(["collapsed", "expanded", "full"]).optional(),
-  limit: external_exports3.number().int().positive().optional()
-};
-var replayInputShape = {
-  id: external_exports3.string(),
-  depth: external_exports3.enum(["collapsed", "expanded", "full"]).optional()
+  depth: external_exports3.enum(["collapsed", "expanded"]).optional(),
+  page: external_exports3.number().int().positive().optional(),
+  pageSize: external_exports3.number().int().positive().optional(),
+  truncate: external_exports3.number().int().min(1).max(2e3).optional()
 };
 var rememberInputShape = {
   id: external_exports3.string().optional(),
@@ -31027,7 +31012,6 @@ var rememberInputShape = {
   source: external_exports3.string().optional()
 };
 var recallInputSchema = external_exports3.object(recallInputShape).strict();
-var replayInputSchema = external_exports3.object(replayInputShape).strict();
 var rememberInputSchema = external_exports3.object(rememberInputShape).strict();
 
 // src/db/memories.ts
@@ -31586,9 +31570,9 @@ function joinHint(sessionId, turnPromptNumber) {
     return "";
   }
   if (turnPromptNumber === void 0) {
-    return `replay(id="S${sessionId}", depth="expanded")`;
+    return `mnemo-replay skill \u2192 read S${sessionId}`;
   }
-  return `replay(id="S${sessionId}/T${turnPromptNumber}", depth="expanded")`;
+  return `mnemo-replay skill \u2192 read S${sessionId}/T${turnPromptNumber}`;
 }
 function resolveTruncationLimit(depth, mode) {
   if (mode === "legacy") {
@@ -32819,7 +32803,7 @@ function searchQueryResults(db, filters, limit, after, before) {
 }
 function recallMemory(db, input) {
   const depth = input.depth ?? "collapsed";
-  const limit = input.limit ?? 50;
+  const limit = input.pageSize ?? 50;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -33073,419 +33057,6 @@ function rememberTool(db, input) {
   return textResult(`Unsupported id selector: ${input.id}`);
 }
 
-// src/mcp/replay.ts
-var import_node_path2 = require("node:path");
-var import_node_fs2 = require("node:fs");
-
-// src/shared/transcript-parser.ts
-var import_node_fs = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  const entries = rawTranscript.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => normalizeEntry(JSON.parse(line))).filter((entry) => !entry.isApiErrorMessage);
-  const seenUuids = /* @__PURE__ */ new Set();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
-        continue;
-      }
-      seenUuids.add(entry.uuid);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage)
-  };
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath) {
-  const turns = [];
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain)
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-
-// src/mcp/replay.ts
-init_paths();
-function parseReplayId(id) {
-  const trimmed = id.trim();
-  const toolMatch = /^S(\d+)\/T(\d+)\/Tool(\*|\d+)$/i.exec(trimmed);
-  if (toolMatch) {
-    const toolNumbers = toolMatch[3] === "*" ? [] : [Number(toolMatch[3])];
-    return {
-      kind: "tools",
-      sessionId: Number(toolMatch[1]),
-      promptNumber: Number(toolMatch[2]),
-      toolNumbers
-    };
-  }
-  const turnMatch = /^S(\d+)\/T(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
-  if (turnMatch) {
-    const promptNumbers = expandNumericSelector(turnMatch[2]);
-    if (promptNumbers === null) {
-      return null;
-    }
-    return {
-      kind: "turns",
-      sessionId: Number(turnMatch[1]),
-      promptNumbers
-    };
-  }
-  const sessionMatch = /^S(\d+)$/i.exec(trimmed);
-  if (sessionMatch) {
-    return {
-      kind: "session",
-      sessionId: Number(sessionMatch[1])
-    };
-  }
-  return null;
-}
-function formatParameterError2(message) {
-  return `Parameter error: ${message}`;
-}
-function resolveReplayTranscriptPath(db, sessionId, transcriptPath) {
-  if (transcriptPath) {
-    return transcriptPath;
-  }
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return null;
-  }
-  return resolveTranscriptPath(session.project, session.contentSessionId);
-}
-function buildToolCalls(turn) {
-  return turn.toolCalls.map((toolCall) => ({
-    name: toolCall.name,
-    input: toolCall.input,
-    result: toolCall.result
-  }));
-}
-function buildReplaySessionView(sessionId, transcriptPath, transcriptTurns, db) {
-  const session = getSession(db, sessionId);
-  if (session) {
-    return {
-      id: session.id,
-      title: session.title,
-      project: session.project,
-      createdAtEpoch: session.createdAtEpoch,
-      content: session.content,
-      insight: [],
-      nextSteps: session.nextSteps,
-      turnCount: transcriptTurns.length
-    };
-  }
-  return {
-    id: sessionId,
-    title: "Untitled",
-    project: (0, import_node_path2.dirname)((0, import_node_path2.dirname)(transcriptPath)),
-    createdAtEpoch: Math.floor(Date.now() / 1e3),
-    content: `Transcript: ${(0, import_node_path2.basename)(transcriptPath)}`,
-    turnCount: transcriptTurns.length
-  };
-}
-function buildReplayTurnView(promptNumber, transcriptTurn, dbTurn) {
-  return {
-    id: dbTurn?.id ?? promptNumber,
-    promptNumber,
-    title: dbTurn?.title ?? null,
-    createdAtEpoch: dbTurn?.createdAtEpoch ?? null,
-    content: dbTurn?.content ?? null,
-    observationCount: 0,
-    toolCallCount: transcriptTurn.toolCalls.length,
-    filesReadCount: dbTurn?.filesRead.length ?? 0,
-    filesModifiedCount: dbTurn?.filesModified.length ?? 0,
-    status: dbTurn?.status,
-    promptPreview: transcriptTurn.userPrompt,
-    responsePreview: transcriptTurn.assistantText,
-    insight: dbTurn?.insight ? dbTurn.insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, "")) : [],
-    filesRead: dbTurn?.filesRead ?? [],
-    filesModified: dbTurn?.filesModified ?? [],
-    toolCalls: buildToolCalls(transcriptTurn)
-  };
-}
-function findReplayTurn(dbTurns, transcriptTurns, promptNumber) {
-  const dbTurn = dbTurns.find((turn) => turn.promptNumber === promptNumber) ?? null;
-  const transcriptTurn = (dbTurn?.contentPromptId ? transcriptTurns.find((candidate) => candidate.promptId === dbTurn.contentPromptId) : void 0) ?? transcriptTurns.find((candidate) => candidate.promptNumber === promptNumber) ?? null;
-  if (!transcriptTurn) {
-    return null;
-  }
-  return { transcriptTurn, dbTurn };
-}
-function matchDbTurn(transcriptTurn, dbTurns) {
-  return (transcriptTurn.promptId ? dbTurns.find((candidate) => candidate.contentPromptId === transcriptTurn.promptId) : void 0) ?? dbTurns.find((candidate) => candidate.promptNumber === transcriptTurn.promptNumber) ?? null;
-}
-function renderReplaySession(session, turns, depth) {
-  const lines = [
-    renderNode(
-      { type: "session", value: session },
-      { depth: depth === "collapsed" ? "collapsed" : "expanded", mode: "unified" }
-    )
-  ];
-  for (const turn of turns) {
-    lines.push(
-      renderNode(
-        { type: "turn", value: turn },
-        {
-          depth: depth === "full" ? "full" : "collapsed",
-          mode: "unified",
-          sessionId: session.id
-        }
-      )
-    );
-  }
-  return lines.join("\n");
-}
-function renderReplayTurns(session, turns, depth) {
-  const lines = [
-    renderNode(
-      { type: "session", value: session },
-      { depth: "collapsed", mode: "unified" }
-    )
-  ];
-  for (const turn of turns) {
-    lines.push(
-      renderNode(
-        { type: "turn", value: turn },
-        {
-          depth,
-          mode: "unified",
-          sessionId: session.id
-        }
-      )
-    );
-  }
-  return lines.join("\n");
-}
-function renderReplayTools(session, turn, toolCalls, depth) {
-  const lines = [
-    renderNode(
-      { type: "session", value: session },
-      { depth: "collapsed", mode: "unified" }
-    ),
-    renderNode(
-      { type: "turn", value: turn },
-      {
-        depth: "collapsed",
-        mode: "unified",
-        sessionId: session.id
-      }
-    )
-  ];
-  for (const toolCall of toolCalls) {
-    lines.push(
-      renderNode(
-        { type: "toolCall", value: toolCall },
-        {
-          depth,
-          mode: "unified",
-          indent: "    ",
-          sessionId: session.id,
-          turnPromptNumber: turn.promptNumber
-        }
-      )
-    );
-  }
-  return lines.join("\n");
-}
-function replayMemory(db, input) {
-  if (!input.id?.trim()) {
-    return formatParameterError2(
-      'replay() requires id like "S1", "S1/T2", or "S1/T2/Tool3".'
-    );
-  }
-  const routed = parseReplayId(input.id);
-  if (!routed) {
-    return formatParameterError2(`invalid replay id "${input.id}"`);
-  }
-  const transcriptPath = resolveReplayTranscriptPath(
-    db,
-    routed.sessionId,
-    input.transcriptPath
-  );
-  if (!transcriptPath || !(0, import_node_fs2.existsSync)(transcriptPath)) {
-    return "Transcript not found.";
-  }
-  const transcriptTurns = parseReplayTranscript(transcriptPath);
-  const dbSession = getSession(db, routed.sessionId);
-  const dbTurns = dbSession ? getTurnsForSession(db, dbSession.id) : [];
-  const depth = input.depth ?? "collapsed";
-  const sessionView = buildReplaySessionView(
-    routed.sessionId,
-    transcriptPath,
-    transcriptTurns,
-    db
-  );
-  if (routed.kind === "session") {
-    const turnViews = transcriptTurns.map(
-      (turn) => buildReplayTurnView(turn.promptNumber, turn, matchDbTurn(turn, dbTurns))
-    );
-    return renderReplaySession(sessionView, turnViews, depth);
-  }
-  const promptNumbers = routed.kind === "turns" ? routed.promptNumbers : [routed.promptNumber];
-  const selectedTurns = promptNumbers && promptNumbers.length > 0 ? promptNumbers.map((promptNumber) => findReplayTurn(dbTurns, transcriptTurns, promptNumber)).filter(
-    (turn) => turn !== null
-  ) : transcriptTurns.map((turn) => ({
-    transcriptTurn: turn,
-    dbTurn: matchDbTurn(turn, dbTurns)
-  }));
-  if (selectedTurns.length === 0) {
-    return "Turn not found.";
-  }
-  if (routed.kind === "turns") {
-    return renderReplayTurns(
-      sessionView,
-      selectedTurns.map(
-        ({ transcriptTurn: transcriptTurn2, dbTurn: dbTurn2 }) => buildReplayTurnView(transcriptTurn2.promptNumber, transcriptTurn2, dbTurn2)
-      ),
-      depth
-    );
-  }
-  const { transcriptTurn, dbTurn } = selectedTurns[0];
-  const turnView = buildReplayTurnView(
-    transcriptTurn.promptNumber,
-    transcriptTurn,
-    dbTurn
-  );
-  const toolCalls = routed.toolNumbers && routed.toolNumbers.length > 0 ? routed.toolNumbers.map((toolNumber) => turnView.toolCalls?.[toolNumber - 1] ?? null).filter((toolCall) => toolCall !== null) : turnView.toolCalls ?? [];
-  if (toolCalls.length === 0) {
-    return "Tool call not found.";
-  }
-  return renderReplayTools(sessionView, turnView, toolCalls, depth);
-}
-
 // src/mcp/handlers.ts
 function textResult2(text) {
   return {
@@ -33511,13 +33082,9 @@ function createDatabaseBackedHandlers(database, _options = {}) {
         query: args.query,
         time: args.time,
         depth: args.depth,
-        limit: args.limit
-      })
-    ),
-    replay: (args) => textResult2(
-      replayMemory(database, {
-        id: args.id,
-        depth: args.depth
+        page: args.page,
+        pageSize: args.pageSize,
+        truncate: args.truncate
       })
     ),
     remember: (args) => rememberTool(database, args)
@@ -33554,7 +33121,6 @@ function createMcpServer(options = {}) {
   };
   const toolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
-    replay: mergedHandlers.replay ?? createStubHandler("replay"),
     remember: mergedHandlers.remember ?? createStubHandler("remember")
   };
   server.registerTool(
@@ -33564,14 +33130,6 @@ function createMcpServer(options = {}) {
       inputSchema: recallInputSchema
     },
     (args) => toolHandlers.recall(args)
-  );
-  server.registerTool(
-    "replay",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.replay,
-      inputSchema: replayInputSchema
-    },
-    (args) => toolHandlers.replay(args)
   );
   server.registerTool(
     "remember",

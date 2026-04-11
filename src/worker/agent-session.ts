@@ -13,7 +13,6 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   recallInputShape,
   rememberInputShape,
-  replayInputShape,
 } from "../mcp/definitions";
 import {
   createDatabaseBackedHandlers,
@@ -77,7 +76,6 @@ export function createMnemoSdkServer(
   });
   const handlers: MnemoToolHandlers = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
-    replay: partialHandlers.replay ?? missingHandler("replay"),
     remember: partialHandlers.remember ?? missingHandler("remember"),
   };
 
@@ -96,12 +94,6 @@ export function createMnemoSdkServer(
         MNEMO_TOOL_DESCRIPTIONS.recall,
         recallInputShape,
         async (args) => handlers.recall(args as Record<string, unknown>),
-      ),
-      deps.toolImpl(
-        "replay",
-        MNEMO_TOOL_DESCRIPTIONS.replay,
-        replayInputShape,
-        async (args) => handlers.replay(args as Record<string, unknown>),
       ),
     ],
   });

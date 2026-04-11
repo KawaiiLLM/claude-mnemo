@@ -14,7 +14,6 @@ import { createSessionInitHandler } from "../../src/hooks/handlers/session-init"
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { recallMemory } from "../../src/mcp/recall";
 import { rememberTool } from "../../src/mcp/remember";
-import { replayMemory } from "../../src/mcp/replay";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-e2e-"));
@@ -227,18 +226,10 @@ describe("claude-mnemo smoke test", () => {
       id: `S${session.id}/T2/O*`,
       depth: "expanded",
     });
-    const replayTurn = replayMemory(db, {
-      id: `S${session.id}/T2`,
-      depth: "expanded",
-      transcriptPath,
-    });
-
     expect(recallSessions).toContain("[S1] Auth race fix");
     expect(recallSessionTree).toContain("[T1] Diagnose auth");
     expect(recallSessionTree).toContain("[T2] Fix auth race");
     expect(recallTurn).toContain("[O2] Mutex added");
-    expect(replayTurn).toContain('prompt: "Fix it and add tests"');
-    expect(replayTurn).toContain("- [S1] Auth race fix");
-    expect(replayTurn).toContain("- 🔧 Edit src/auth.ts");
+    expect(recallSessionTree).toContain("- [S1] Auth race fix");
   });
 });

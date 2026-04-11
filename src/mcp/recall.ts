@@ -25,8 +25,10 @@ export interface RecallInput {
   id?: string;
   query?: string;
   time?: string;
-  depth?: "collapsed" | "expanded" | "full";
-  limit?: number;
+  depth?: "collapsed" | "expanded";
+  page?: number;
+  pageSize?: number;
+  truncate?: number;
 }
 
 interface ParsedTimeRange {
@@ -1144,7 +1146,7 @@ function searchQueryResults(
 
 export function recallMemory(db: Database, input: RecallInput): string {
   const depth = input.depth ?? "collapsed";
-  const limit = input.limit ?? 50;
+  const limit = input.pageSize ?? 50;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {

@@ -240,7 +240,7 @@ describe("handleContextHook", () => {
     const result = await handler(createInput({ sessionId: "missing-session" }));
 
     expect(result.hookSpecificOutput).toBe(
-      "claude-mnemo memory available via recall() and replay().",
+      "claude-mnemo memory available via recall() and the mnemo-replay skill.",
     );
 
     emptyDb.close();
@@ -528,7 +528,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools");
     expect(output).toContain("Format:");
     expect(output).toContain(
-      'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")',
+      'Expand: recall(id="Sx/Ty", depth="expanded")',
     );
     expect(output).toContain("## Current Session");
     expect(output).toContain("## Memories");

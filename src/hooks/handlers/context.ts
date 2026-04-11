@@ -19,7 +19,7 @@ export interface ContextHandlerDependencies {
   db: Database;
 }
 
-const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
+const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -50,7 +50,7 @@ function buildHeader(db: Database): string {
     "  - [Tx] title | 💡n 📖n ✏️n 🔧n",
     "  - [Ox] 🔵 title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")',
+    'Expand: recall(id="Sx/Ty", depth="expanded")',
   ].join("\n");
 }
 

@@ -245,7 +245,9 @@ describe("recallMemory", () => {
         query: "type:bugfix auth",
         time: "1970-01-01",
         depth: "expanded",
-        limit: 5,
+        page: 1,
+        pageSize: 5,
+        truncate: 200,
       }),
     ).not.toThrow();
 
@@ -316,7 +318,7 @@ describe("recallMemory", () => {
     const sessionObservationsOutput = recallMemory(db, {
       id: `S${floodSessionId}/T*/O*`,
       depth: "collapsed",
-      limit: 60,
+      pageSize: 60,
     });
 
     expect(turnsOutput).toContain(`[S${bigSessionId}] Large timeline`);
@@ -335,14 +337,14 @@ describe("recallMemory", () => {
     );
   });
 
-  test("renders mixed query results with prefix filters, time, and limit", () => {
+  test("renders mixed query results with prefix filters, time, and page size", () => {
     const typeQuery = recallMemory(db, {
       query: "type:bugfix",
       depth: "expanded",
     });
     const projectScopedQuery = recallMemory(db, {
       query: "project:claude-mnemo auth",
-      limit: 2,
+      pageSize: 2,
     });
     const tagQuery = recallMemory(db, {
       query: "tag:concurrency",
@@ -350,7 +352,7 @@ describe("recallMemory", () => {
     const timeScopedQuery = recallMemory(db, {
       query: "auth",
       time: "1970-01-02",
-      limit: 1,
+      pageSize: 1,
     });
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
@@ -388,7 +390,7 @@ describe("recallMemory", () => {
     const output = recallMemory(db, {
       id: `S${floodSessionId}/T1/O*`,
       depth: "collapsed",
-      limit: 60,
+      pageSize: 60,
     });
 
     expect(output).toContain("... ");

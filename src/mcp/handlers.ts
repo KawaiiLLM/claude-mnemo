@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
-import { replayMemory } from "./replay";
 
 export type ToolResult = {
   content: Array<{
@@ -15,7 +14,6 @@ export type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>
 
 export interface MnemoToolHandlers {
   recall: ToolHandler;
-  replay: ToolHandler;
   remember: ToolHandler;
 }
 
@@ -53,15 +51,10 @@ export function createDatabaseBackedHandlers(
           id: args.id as string | undefined,
           query: args.query as string | undefined,
           time: args.time as string | undefined,
-          depth: args.depth as "collapsed" | "expanded" | "full" | undefined,
-          limit: args.limit as number | undefined,
-        }),
-      ),
-    replay: (args) =>
-      textResult(
-        replayMemory(database, {
-          id: args.id as string | undefined,
-          depth: args.depth as "collapsed" | "expanded" | "full" | undefined,
+          depth: args.depth as "collapsed" | "expanded" | undefined,
+          page: args.page as number | undefined,
+          pageSize: args.pageSize as number | undefined,
+          truncate: args.truncate as number | undefined,
         }),
       ),
     remember: (args) =>

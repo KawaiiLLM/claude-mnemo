@@ -212,7 +212,7 @@ describe("MCP format renderer", () => {
     );
 
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
-      '[use replay(id="S142/T9", depth="expanded") for full content]',
+      "[use mnemo-replay skill → read S142/T9 for full content]",
     );
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
       "p".repeat(200),

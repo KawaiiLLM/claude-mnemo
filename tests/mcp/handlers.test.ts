@@ -4,8 +4,8 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { createMemory } from "../../src/db/memories";
 import { initializeDatabase } from "../../src/db/schema";
+import { recallInputSchema } from "../../src/mcp/definitions";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
-import { replayInputSchema } from "../../src/mcp/definitions";
 
 describe("database-backed MCP handlers", () => {
   let db: Database;
@@ -63,27 +63,33 @@ describe("database-backed MCP handlers", () => {
     expect(result?.content[0]?.text).toContain("Auth mutex policy");
   });
 
-  test("routes simplified replay args through the replay handler", async () => {
-    const handlers = createDatabaseBackedHandlers(db);
-
-    const result = await handlers.replay?.({
-      id: "S1",
-      depth: "collapsed",
-    });
-
-    expect(result?.content[0]?.text).toBe("Transcript not found.");
-  });
-
-  test("replay schema only accepts id and optional depth", () => {
-    expect(replayInputSchema.parse({ id: "S1/T2", depth: "full" })).toEqual({
+  test("recall schema accepts the new surface and rejects removed fields", () => {
+    expect(
+      recallInputSchema.parse({
+        id: "S1/T2",
+        depth: "expanded",
+        page: 2,
+        pageSize: 10,
+        truncate: 500,
+      }),
+    ).toEqual({
       id: "S1/T2",
-      depth: "full",
+      depth: "expanded",
+      page: 2,
+      pageSize: 10,
+      truncate: 500,
     });
 
     expect(() =>
-      replayInputSchema.parse({
+      recallInputSchema.parse({
         id: "S1",
-        session: 1,
+        limit: 10,
+      }),
+    ).toThrow();
+    expect(() =>
+      recallInputSchema.parse({
+        id: "S1",
+        depth: "full",
       }),
     ).toThrow();
   });

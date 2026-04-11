@@ -406,9 +406,16 @@ describe("worker query session", () => {
 
   test("defaults the system prompt to the hardened Mnemosyne rules", async () => {
     let capturedSystemPrompt: string | undefined;
+    let capturedAllowedTools: string[] | undefined;
     const queryImpl = mock(
-      (args: { options?: { systemPrompt?: string } }) => {
+      (args: {
+        options?: {
+          systemPrompt?: string;
+          allowedTools?: string[];
+        };
+      }) => {
         capturedSystemPrompt = args.options?.systemPrompt;
+        capturedAllowedTools = args.options?.allowedTools;
         // eslint-disable-next-line @typescript-eslint/require-await
         return (async function* () {
           return;
@@ -452,14 +459,27 @@ describe("worker query session", () => {
       "bugfix | feature | refactor | change | discovery | decision",
     );
 
-    // Tool scope rules — obs path must explicitly forbid recall/replay, and
-    // the memory-creation boundary must be present.
+    expect(capturedAllowedTools).toEqual([
+      "mcp__mnemo__remember",
+      "mcp__mnemo__recall",
+    ]);
+
+    // Tool scope rules — obs path must explicitly forbid recall from the
+    // wrong contexts, and the memory-creation boundary must be present.
+    expect(prompt).toContain("`remember()` — your only output");
+    expect(prompt).toContain("`recall()` — read-only fallback");
     expect(prompt).toContain(
-      "Never update T/S records, create memories, or call",
+      "Never update T/S records, create memories, or call `recall()` from an obs message.",
     );
     expect(prompt).toContain(
       "Never call `remember()` without an `id` field",
     );
+    expect(prompt).toContain(
+      "Never call `recall()` from a session-summary message",
+    );
+    expect(prompt).toContain("recall({ id: \"<session id>/<turn id>\", depth: \"expanded\", truncate: 2000 })");
+    expect(prompt).not.toContain("replay(");
+    expect(prompt).not.toContain("replay()");
 
     await session.close();
   });

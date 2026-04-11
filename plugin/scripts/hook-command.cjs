@@ -907,9 +907,9 @@ function joinHint(sessionId, turnPromptNumber) {
     return "";
   }
   if (turnPromptNumber === void 0) {
-    return `replay(id="S${sessionId}", depth="expanded")`;
+    return `mnemo-replay skill \u2192 read S${sessionId}`;
   }
-  return `replay(id="S${sessionId}/T${turnPromptNumber}", depth="expanded")`;
+  return `mnemo-replay skill \u2192 read S${sessionId}/T${turnPromptNumber}`;
 }
 function resolveTruncationLimit(depth, mode) {
   if (mode === "legacy") {
@@ -1320,7 +1320,7 @@ function renderNode(node, options) {
 }
 
 // src/hooks/handlers/context.ts
-var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and replay().";
+var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -1339,7 +1339,7 @@ function buildHeader(db) {
     "  - [Tx] title | \u{1F4A1}n \u{1F4D6}n \u270F\uFE0Fn \u{1F527}n",
     "  - [Ox] \u{1F535} title",
     "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: replay(id="Sx/Ty", depth="expanded")'
+    'Expand: recall(id="Sx/Ty", depth="expanded")'
   ].join("\n");
 }
 function resolvePrimarySessionRecord(db, input, recentSessions) {
