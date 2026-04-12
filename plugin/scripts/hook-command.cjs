@@ -625,7 +625,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvgs2ee" : "dev";
+var BUILD_ID = true ? "0.2.0-mnvw4i4c" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2525,9 +2525,18 @@ function normalizeEntry(raw) {
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
     uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
     isSidechain: Boolean(raw.isSidechain),
     isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
     compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
       trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
       preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,

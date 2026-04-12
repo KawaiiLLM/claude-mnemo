@@ -29,6 +29,10 @@ const builds = [
     entryPoint: join(projectRoot, "src", "worker", "server.ts"),
     outputFile: join(pluginScriptsDirectory, "worker.cjs"),
   },
+  {
+    entryPoint: join(projectRoot, "src", "replay", "cli.ts"),
+    outputFile: join(pluginScriptsDirectory, "replay-parse.cjs"),
+  },
 ];
 
 mkdirSync(pluginScriptsDirectory, { recursive: true });

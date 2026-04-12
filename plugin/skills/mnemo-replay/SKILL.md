@@ -5,18 +5,19 @@ description: Read raw Claude Code session transcripts and the mnemo SQLite datab
 
 # Mnemo Replay
 
-Raw access to the source data behind claude-mnemo. This is a skill, not an MCP tool. Use normal file and shell tools to inspect the JSONL transcript and the SQLite database directly.
+Raw access to the source transcript behind claude-mnemo. This is a skill, not an MCP tool.
 
-Use this only after `recall` has already narrowed you to a specific session, turn, or observation. `mnemo-replay` is for raw reads, not broad search.
+Use this only after `recall` or `timeline` has already narrowed you to a specific session or turn. `mnemo-replay` is for raw reads, not broad search.
 
-## Two data sources
+## Preferred path
 
-| Source | Contents | How to read it |
-|---|---|---|
-| JSONL transcript | Exact Claude session bytes: user prompts, assistant responses, tool calls, tool results, summary markers | `Read`, `Grep` |
-| SQLite database | Indexed mirror: sessions, turns, observations, memories | `sqlite3` in read-only mode |
+Use the bundled parser script first:
 
-Use JSONL for exact wording and full payloads. Use SQLite for joined lookups and aggregates.
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" ls <jsonl-path> --last 30
+```
+
+It understands resumed transcripts, promptId turn boundaries, compact markers, tool results, and malformed-line skips the same way claude-mnemo itself does.
 
 ## JSONL transcripts
 
@@ -45,33 +46,32 @@ recall(id="S12", depth="expanded")
 
 Expanded session output includes a `raw:` line with the absolute JSONL path.
 
-### Useful patterns
+### Script entrypoints
 
-**Open the transcript directly**
+**List turns**
 
-```text
-Read(<absolute jsonl path>)
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" ls <jsonl-path> --last 30
 ```
 
-**Find user-message boundaries**
+**Show one turn**
 
-```text
-Grep(pattern='"type":"user"', path='<jsonl path>')
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" show <jsonl-path> T12
 ```
 
-**Find tool calls for one tool**
+**Search raw transcript content**
 
-```text
-Grep(pattern='"name":"Bash"', path='<jsonl path>')
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" grep <jsonl-path> "auth race" --type assistant
 ```
 
-**Find compact boundaries**
+### When to fall back to direct reads
 
-```text
-Grep(pattern='"type":"summary"', path='<jsonl path>')
-```
-
-Summary lines mark compact boundaries in the raw transcript.
+Use raw `Read`/`Grep` only when the script output is still insufficient, for example:
+- inspecting bytes the formatter truncated
+- verifying an exact JSON field that `show` does not print
+- checking transcript corruption by line number
 
 ## SQLite database
 
@@ -143,20 +143,10 @@ ORDER BY COALESCE(updated_at_epoch, created_at_epoch) DESC
 LIMIT 20;
 ```
 
-## When to use which source
-
-| Situation | Use |
-|---|---|
-| Exact user prompt wording | JSONL |
-| Full, untruncated tool output | JSONL |
-| Pre/post-compact transcript reconstruction | JSONL |
-| Aggregates or cross-session joins | SQLite |
-| Tag / type / file filtering | SQLite |
-| High-level search or browsing | `recall`, not this skill |
-
 ## Guidance
 
 - Always narrow with `recall` first.
 - Use the `raw:` line from expanded session output as the copy-paste handoff.
+- Prefer `replay-parse.cjs` over hand-written `Read`/`Grep` flows.
 - Treat SQLite as read-only unless you are going through `remember`.
 - If you need exact bytes, prefer the JSONL over the indexed mirror.

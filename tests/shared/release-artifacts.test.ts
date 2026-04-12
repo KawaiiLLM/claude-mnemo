@@ -25,6 +25,7 @@ describe("release artifacts", () => {
         "--error-unmatch",
         "plugin/scripts/hook-command.cjs",
         "plugin/scripts/mcp-server.cjs",
+        "plugin/scripts/replay-parse.cjs",
       ],
       {
         encoding: "utf8",

@@ -1,11 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 
-interface TranscriptContentBlock {
+export interface TranscriptContentBlock {
   type?: string;
   text?: string;
   name?: string;
   input?: unknown;
   content?: unknown;
+}
+
+interface TranscriptUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 interface TranscriptEntry {
@@ -19,6 +26,10 @@ interface TranscriptEntry {
   isApiErrorMessage?: boolean;
   uuid?: string;
   parentUuid?: string;
+  timestamp?: string;
+  usage?: TranscriptUsage;
+  durationMs?: number;
+  messageCount?: number;
   compactMetadata?: {
     trigger?: string;
     preCompactTokenCount?: number;
@@ -68,7 +79,16 @@ interface RawTranscriptEntry {
   isApiErrorMessage?: unknown;
   uuid?: unknown;
   parentUuid?: unknown;
+  timestamp?: unknown;
+  durationMs?: unknown;
+  messageCount?: unknown;
   compactMetadata?: unknown;
+}
+
+interface RawTranscriptMessage {
+  role?: unknown;
+  content?: unknown;
+  usage?: unknown;
 }
 
 export function normalizeAssistantText(text: string): string {
@@ -238,7 +258,7 @@ export function readAllTranscriptEntries(
 function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
   const message =
     raw.message && typeof raw.message === "object"
-      ? (raw.message as { role?: unknown; content?: unknown })
+      ? (raw.message as RawTranscriptMessage)
       : undefined;
 
   return {
@@ -261,10 +281,41 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
     promptId: typeof raw.promptId === "string" ? raw.promptId : undefined,
     uuid: typeof raw.uuid === "string" ? raw.uuid : undefined,
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : undefined,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : undefined,
     permissionMode:
       typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
     isSidechain: Boolean(raw.isSidechain),
     isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    usage:
+      message?.usage && typeof message.usage === "object"
+        ? {
+            inputTokens:
+              typeof (message.usage as { input_tokens?: unknown }).input_tokens ===
+              "number"
+                ? (message.usage as { input_tokens: number }).input_tokens
+                : undefined,
+            outputTokens:
+              typeof (message.usage as { output_tokens?: unknown }).output_tokens ===
+              "number"
+                ? (message.usage as { output_tokens: number }).output_tokens
+                : undefined,
+            cacheReadTokens:
+              typeof (message.usage as { cache_read_input_tokens?: unknown })
+                .cache_read_input_tokens === "number"
+                ? (message.usage as { cache_read_input_tokens: number })
+                    .cache_read_input_tokens
+                : undefined,
+            cacheCreationTokens:
+              typeof (message.usage as { cache_creation_input_tokens?: unknown })
+                .cache_creation_input_tokens === "number"
+                ? (message.usage as { cache_creation_input_tokens: number })
+                    .cache_creation_input_tokens
+                : undefined,
+          }
+        : undefined,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : undefined,
+    messageCount:
+      typeof raw.messageCount === "number" ? raw.messageCount : undefined,
     compactMetadata:
       raw.compactMetadata && typeof raw.compactMetadata === "object"
         ? {
