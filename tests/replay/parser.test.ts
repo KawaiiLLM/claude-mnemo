@@ -204,4 +204,62 @@ describe("parseReplayFile", () => {
       "tool_result",
     ]);
   });
+
+  test("uses the original timestamp when a replay appends a later duplicate snapshot", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        uuid: "u1",
+        promptId: "p1",
+        timestamp: "2026-04-12T01:50:00.000Z",
+        message: {
+          role: "user",
+          content: "Inspect auth flow",
+        },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        timestamp: "2026-04-12T01:50:05.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Working the first pass." }],
+        },
+      },
+      {
+        type: "user",
+        uuid: "u1",
+        promptId: "p1",
+        timestamp: "2026-04-12T02:10:00.000Z",
+        message: {
+          role: "user",
+          content: "Inspect auth flow with replay state",
+        },
+      },
+      {
+        type: "assistant",
+        uuid: "a2",
+        timestamp: "2026-04-12T02:10:05.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Working the final pass." }],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const result = parseReplayFile(transcript.path);
+
+    expect(result.turns).toHaveLength(1);
+    expect(result.turns[0]).toEqual(
+      expect.objectContaining({
+        promptNumber: 1,
+        promptId: "p1",
+        lineStart: 1,
+        timestamp: "2026-04-12T01:50:00.000Z",
+        localTime: formatExpectedLocalTime("2026-04-12T01:50:00.000Z"),
+        userPrompt: "Inspect auth flow with replay state",
+      }),
+    );
+  });
 });

@@ -553,6 +553,72 @@ describe("parseTranscript", () => {
     expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
   });
 
+  test("readAllTranscriptEntries keeps last payload while preserving first line and timestamp", () => {
+    const transcript = writeTranscript([
+      {
+        type: "assistant",
+        role: "assistant",
+        uuid: "u1",
+        timestamp: "2026-04-12T01:00:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "draft answer" }],
+          usage: {
+            input_tokens: 3,
+            output_tokens: 5,
+            cache_read_input_tokens: 1,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+      {
+        role: "system",
+        content: [{ type: "text", text: "system note" }],
+      },
+      {
+        type: "assistant",
+        role: "assistant",
+        uuid: "u1",
+        timestamp: "2026-04-12T01:30:00.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "final answer" }],
+          usage: {
+            input_tokens: 9,
+            output_tokens: 11,
+            cache_read_input_tokens: 4,
+            cache_creation_input_tokens: 2,
+          },
+        },
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "uuid-less entry" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const entries = readAllTranscriptEntries(transcript.path);
+
+    expect(entries).toHaveLength(3);
+    expect(entries.map((entry) => entry.uuid)).toEqual(["u1", undefined, undefined]);
+    expect(entries.map((entry) => entry.lineNumber)).toEqual([1, 2, 4]);
+    expect(entries[0]).toEqual(
+      expect.objectContaining({
+        uuid: "u1",
+        lineNumber: 1,
+        timestamp: "2026-04-12T01:00:00.000Z",
+        content: [{ type: "text", text: "final answer" }],
+        usage: {
+          inputTokens: 9,
+          outputTokens: 11,
+          cacheReadTokens: 4,
+          cacheCreationTokens: 2,
+        },
+      }),
+    );
+  });
+
   test("treats a resumed transcript replay as the original turn sequence", () => {
     const transcript = writeTranscript([
       makeEntry({

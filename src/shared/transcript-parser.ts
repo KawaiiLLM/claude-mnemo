@@ -238,15 +238,22 @@ export function readAllTranscriptEntries(
     });
   });
 
-  const seenUuids = new Set<string>();
+  const uuidToIndex = new Map<string, number>();
   const deduped: TranscriptEntryWithLineNumber[] = [];
 
   for (const entry of entries) {
     if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== undefined) {
+        const firstEntry = deduped[existingIndex]!;
+        deduped[existingIndex] = {
+          ...entry,
+          lineNumber: firstEntry.lineNumber,
+          timestamp: firstEntry.timestamp ?? entry.timestamp,
+        };
         continue;
       }
-      seenUuids.add(entry.uuid);
+      uuidToIndex.set(entry.uuid, deduped.length);
     }
 
     deduped.push(entry);
