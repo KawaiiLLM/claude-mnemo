@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import type { PendingQueueItem } from "../db/pending-queue";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { getSession } from "../db/sessions";
 import { getTurnById, updateTurnById } from "../db/turns";
@@ -94,6 +95,57 @@ function buildTurnStopPrompt(
   files_read: ${filesRead.join(", ")}
   files_modified: ${filesModified.join(", ")}
 </session>`;
+}
+
+function buildBatchTurnBlock(
+  turnId: number,
+  prompt: string | null,
+  response: string | null,
+  filesRead: string[],
+  filesModified: string[],
+  toolCallCount: number,
+): string {
+  return `  <turn id="T${turnId}">
+    prompt: ${truncateMiddle(prompt, 1000)}
+    response: ${truncateMiddle(response, 1000)}
+    files_read: ${filesRead.join(", ")}
+    files_modified: ${filesModified.join(", ")}
+    tool_call_count: ${toolCallCount}
+  </turn>`;
+}
+
+export function buildBatchPrompt(args: {
+  sessionId: number;
+  project: string;
+  firstUserPrompt: string | null;
+  priorTitle: string | null;
+  priorContent: string | null;
+  priorInsight: string | null;
+  priorNextSteps: string | null;
+  obsBlocks: string[];
+  turnBlock?: string | null;
+}): string {
+  const priorSessionBlock =
+    args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps
+      ? `
+<prior_session>
+  title: ${args.priorTitle ?? ""}
+  content: ${args.priorContent ?? ""}
+  insight: ${args.priorInsight ?? ""}
+  next_steps: ${args.priorNextSteps ?? ""}
+</prior_session>
+`
+      : "";
+  const body = [...args.obsBlocks, args.turnBlock ?? ""].filter(Boolean).join("\n");
+
+  return `<session id="S${args.sessionId}">
+  project: ${args.project}
+  user_request: ${args.firstUserPrompt ?? ""}
+</session>
+${priorSessionBlock}
+<batch>
+${body}
+</batch>`;
 }
 
 function safeJsonParse(value: string | null): Record<string, unknown> | null {
@@ -296,6 +348,93 @@ export function createWorkerProcessors(db: Database) {
           aggregate.filesRead,
           aggregate.filesModified,
         ),
+      );
+      state.initialized = true;
+    },
+
+    async processBatch(
+      state: SessionState,
+      items: PendingQueueItem[],
+      turnStopItem?: PendingQueueItem,
+    ): Promise<void> {
+      if (items.length === 0 && !turnStopItem) {
+        return;
+      }
+
+      const sessionId =
+        turnStopItem?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
+      const session = getSession(db, sessionId);
+      if (!session) {
+        return;
+      }
+
+      const firstTurn = db
+        .query<{ user_prompt: string | null }, [number]>(
+          `
+            SELECT user_prompt
+            FROM turns
+            WHERE session_id = ?
+            ORDER BY prompt_number ASC
+            LIMIT 1
+          `,
+        )
+        .get(session.id);
+
+      const obsBlocks = items
+        .map((item) => {
+          const observation = getObservation(db, item.targetId);
+          if (!observation || observation.status !== "pending") {
+            return null;
+          }
+
+          return buildObsBlock(
+            observation.id,
+            observation.toolName ?? "Tool",
+            observation.toolInput,
+            observation.toolResult,
+          );
+        })
+        .filter((value): value is string => value !== null);
+
+      let turnBlock: string | null = null;
+      if (turnStopItem) {
+        const turn = getTurnById(db, turnStopItem.targetId);
+        if (turn && turn.status === "active") {
+          const aggregate = aggregateTurnFiles(db, turn.id);
+          updateTurnById(db, turn.id, {
+            filesRead: aggregate.filesRead,
+            filesModified: aggregate.filesModified,
+            toolCallCount: aggregate.toolCallCount,
+            updatedAtEpoch: Math.floor(Date.now() / 1000),
+          });
+
+          turnBlock = buildBatchTurnBlock(
+            turn.id,
+            turn.userPrompt,
+            turn.assistantResponse,
+            aggregate.filesRead,
+            aggregate.filesModified,
+            aggregate.toolCallCount,
+          );
+        }
+      }
+
+      if (obsBlocks.length === 0 && !turnBlock) {
+        return;
+      }
+
+      await state.pushMessage(
+        buildBatchPrompt({
+          sessionId: session.id,
+          project: session.project,
+          firstUserPrompt: firstTurn?.user_prompt ?? null,
+          priorTitle: session.title,
+          priorContent: session.content,
+          priorInsight: session.insight,
+          priorNextSteps: session.nextSteps,
+          obsBlocks,
+          turnBlock,
+        }),
       );
       state.initialized = true;
     },

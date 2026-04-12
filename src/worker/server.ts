@@ -48,6 +48,10 @@ export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
 }
 
+export interface BufferState {
+  items: PendingQueueItem[];
+}
+
 export interface SessionState {
   sessionDbId: number;
   querySession: WorkerQuerySession | null;
@@ -70,6 +74,11 @@ export interface WorkerCoreDeps {
   nowMs?: () => number;
   processObsImpl?: (state: SessionState, observationId: number) => Promise<void>;
   processTurnStopImpl?: (state: SessionState, turnId: number) => Promise<void>;
+  processBatchImpl?: (
+    state: SessionState,
+    items: PendingQueueItem[],
+    turnStopItem?: PendingQueueItem,
+  ) => Promise<void>;
   pushSessionSummaryPromptImpl?: (
     state: SessionState,
     sessionId: number,
@@ -112,6 +121,7 @@ interface WorkerServerState {
 
 export interface WorkerCore {
   sessions: Map<number, SessionState>;
+  buffers: Map<number, BufferState>;
   compactingSessions: Set<number>;
   recoverFromCrash(): void;
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
@@ -249,6 +259,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const nowMs = deps.nowMs ?? Date.now;
   const logger = deps.logger ?? console;
   const sessions = new Map<number, SessionState>();
+  const buffers = new Map<number, BufferState>();
   const compactingSessions = new Set<number>();
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
@@ -264,9 +275,29 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     (async (_state: SessionState, turnId: number) => {
       throw new Error(`processTurnStop not implemented for T${turnId}`);
     });
+  const processBatchImpl =
+    deps.processBatchImpl ??
+    (async () => {
+      throw new Error("processBatch not implemented");
+    });
   const pushSessionSummaryPromptImpl =
     deps.pushSessionSummaryPromptImpl ?? (async () => {});
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {});
+
+  function getOrCreateBuffer(sessionDbId: number): BufferState {
+    let buffer = buffers.get(sessionDbId);
+    if (buffer) {
+      return buffer;
+    }
+
+    buffer = { items: [] };
+    buffers.set(sessionDbId, buffer);
+    return buffer;
+  }
+
+  function clearBuffer(sessionDbId: number): void {
+    buffers.delete(sessionDbId);
+  }
 
   function getOrCreateSessionState(sessionDbId: number): SessionState {
     let state = sessions.get(sessionDbId);
@@ -395,9 +426,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return state.closing;
   }
 
-  async function processClaimedItem(item: PendingQueueItem): Promise<void> {
-    const state = getOrCreateSessionState(item.sessionDbId);
-
+  async function withSessionProcessingLock<T>(
+    sessionDbId: number,
+    work: (state: SessionState) => Promise<T>,
+  ): Promise<T> {
+    const state = getOrCreateSessionState(sessionDbId);
     const myTurn = state.processingLock;
     let release!: () => void;
     state.processingLock = new Promise<void>((resolve) => {
@@ -405,22 +438,61 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     });
     await myTurn;
 
-    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
-    const workPromise = Promise.resolve(
-      item.kind === "obs"
-        ? processObsImpl(state, item.targetId)
-        : processTurnStopImpl(state, item.targetId),
-    );
+    const workPromise = Promise.resolve(work(state));
     const completion = workPromise.finally(() => {
       release();
     });
     completion.catch(() => {});
+
+    return workPromise;
+  }
+
+  async function processClaimedItem(item: PendingQueueItem): Promise<void> {
+    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
+    const workPromise = withSessionProcessingLock(item.sessionDbId, (state) =>
+      item.kind === "obs"
+        ? processObsImpl(state, item.targetId)
+        : processTurnStopImpl(state, item.targetId),
+    );
 
     await withTimeout(
       workPromise,
       timeoutMs,
       `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`,
     );
+  }
+
+  async function flushBufferedItems(
+    sessionDbId: number,
+    turnStopItem?: PendingQueueItem,
+  ): Promise<void> {
+    const bufferedItems = [...(buffers.get(sessionDbId)?.items ?? [])];
+    if (bufferedItems.length === 0 && !turnStopItem) {
+      return;
+    }
+
+    try {
+      await withSessionProcessingLock(sessionDbId, (state) =>
+        processBatchImpl(state, bufferedItems, turnStopItem),
+      );
+
+      for (const item of bufferedItems) {
+        deleteQueueItem(deps.db, item.seq);
+      }
+      if (turnStopItem) {
+        deleteQueueItem(deps.db, turnStopItem.seq);
+      }
+      clearBuffer(sessionDbId);
+    } catch (error) {
+      for (const item of bufferedItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      if (turnStopItem) {
+        releaseQueueClaim(deps.db, turnStopItem.seq);
+      }
+      clearBuffer(sessionDbId);
+      throw error;
+    }
   }
 
   async function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
@@ -438,12 +510,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
 
+      if (item.kind === "obs") {
+        getOrCreateBuffer(item.sessionDbId).items.push(item);
+        continue;
+      }
+
+      const bufferedSeqs = (buffers.get(item.sessionDbId)?.items ?? []).map(
+        (bufferedItem) => bufferedItem.seq,
+      );
+
       try {
-        await processClaimedItem(item);
-        deleteQueueItem(deps.db, item.seq);
+        await flushBufferedItems(item.sessionDbId, item);
       } catch (error) {
-        releaseQueueClaim(deps.db, item.seq);
         skippedSeqs.add(item.seq);
+        for (const seq of bufferedSeqs) {
+          skippedSeqs.add(seq);
+        }
         logger.error?.("queue item failed, skipping for this drain", {
           seq: item.seq,
           kind: item.kind,
@@ -458,7 +540,25 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     let previousCount = Number.POSITIVE_INFINITY;
 
     while (true) {
+      try {
+        await flushBufferedItems(sessionDbId);
+      } catch (error) {
+        logger.error?.("drainSessionCompletely failed to flush buffer", {
+          sessionDbId,
+          error,
+        });
+      }
+
       await scanAndDrainQueue(sessionDbId);
+
+      try {
+        await flushBufferedItems(sessionDbId);
+      } catch (error) {
+        logger.error?.("drainSessionCompletely failed to flush buffer", {
+          sessionDbId,
+          error,
+        });
+      }
 
       const state = sessions.get(sessionDbId);
       if (state) {
@@ -489,6 +589,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   function recoverFromCrash(): void {
+    buffers.clear();
     resetClaimedQueueItems(deps.db);
   }
 
@@ -546,6 +647,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   return {
     sessions,
+    buffers,
     compactingSessions,
     recoverFromCrash,
     scanAndDrainQueue,
@@ -652,16 +754,26 @@ export function createWorkerFetchHandler(
   deps: WorkerServerDeps = {},
   state: WorkerServerState = createWorkerServerState(deps.nowMs?.() ?? Date.now()),
 ): (req: Request) => Promise<Response> {
+  const runtimeDb = deps.db ?? createDatabase();
+  const runtimeProcessors =
+    deps.scanAndDrainQueue || deps.handleCompactImpl || deps.recoverFromCrashImpl
+      ? undefined
+      : createWorkerProcessors(runtimeDb);
   const runtime =
     deps.scanAndDrainQueue || deps.handleCompactImpl || deps.recoverFromCrashImpl
       ? undefined
       : createWorkerCore({
-          db: deps.db ?? createDatabase(),
+          db: runtimeDb,
           now: deps.now,
           nowMs: deps.nowMs,
-          processObsImpl: deps.processObsImpl,
-          processTurnStopImpl: deps.processTurnStopImpl,
-          pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl,
+          processObsImpl: deps.processObsImpl ?? runtimeProcessors?.processObs,
+          processTurnStopImpl:
+            deps.processTurnStopImpl ?? runtimeProcessors?.processTurnStop,
+          processBatchImpl:
+            deps.processBatchImpl ?? runtimeProcessors?.processBatch,
+          pushSessionSummaryPromptImpl:
+            deps.pushSessionSummaryPromptImpl ??
+            runtimeProcessors?.pushSessionSummaryPrompt,
           closeSessionQueryImpl: deps.closeSessionQueryImpl,
           createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
           isProcessAliveImpl: deps.isProcessAliveImpl,
@@ -811,6 +923,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     nowMs: deps.nowMs,
     processObsImpl: deps.processObsImpl ?? processors.processObs,
     processTurnStopImpl: deps.processTurnStopImpl ?? processors.processTurnStop,
+    processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl:
       deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
