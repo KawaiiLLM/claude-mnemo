@@ -97,7 +97,7 @@ function seedSession(db: Database) {
       session.id,
       promptNumber,
       null,
-      null,
+      promptNumber * 10,
       "extracted",
       `raw prompt ${promptNumber}`,
       null,
@@ -989,6 +989,31 @@ describe("buildTimelineView", () => {
     expect(view.compactBoundaries).toContain(15);
   });
 
+  it("prefers compact turn rows over the session fallback for compact boundaries", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      `UPDATE turns
+       SET type = 'compact',
+           status = 'extracted',
+           transcript_line_start = 210,
+           tags = ?,
+           tool_call_count = 0
+       WHERE session_id = ? AND prompt_number = 21`,
+    ).run(
+      JSON.stringify(["compact:pre_tokens=357000", "compact:trigger=auto"]),
+      session.id,
+    );
+    db.query("UPDATE sessions SET last_compact_turn = 15 WHERE id = ?").run(
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1" });
+
+    expect(view.compactBoundaries).toEqual([21]);
+  });
+
   it("rejects ranges that start beyond the session end", () => {
     const db = createDatabase(":memory:");
 
@@ -1017,7 +1042,7 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/raw: .+\.jsonl/);
   });
 
-  it("renders two-column turn table header matching T# time gap stats prompt title", () => {
+  it("renders turn table header with line anchors between T# and time", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
@@ -1025,7 +1050,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T1..5" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/T#\s+time\s+gap\s+stats\s+prompt\s+title/);
+    expect(output).toMatch(/T#\s+line\s+time\s+gap\s+stats\s+prompt\s+title/);
   });
 
   it("showing line reports truncation when request exceeds cap", () => {
@@ -1065,6 +1090,21 @@ describe("renderTimeline", () => {
     expect(turn21Line).toContain("⏳");
   });
 
+  it("renders transcript line anchors in the turn table", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T1..1" });
+    const output = renderTimeline(view);
+    const turn1Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  T1 "));
+
+    expect(turn1Line).toBeDefined();
+    expect(turn1Line).toContain("L10");
+  });
+
   it("extracted turns render emoji plus title in the title column", () => {
     const db = createDatabase(":memory:");
 
@@ -1096,6 +1136,38 @@ describe("renderTimeline", () => {
 
     expect(turn19Line).toBeDefined();
     expect(turn19Line).toContain("~~⚖️ title for T19~~");
+  });
+
+  it("renders compact turns as structural rows with line anchors and parsed tags", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      `UPDATE turns
+       SET type = 'compact',
+           status = 'extracted',
+           user_prompt = 'ignored raw summary wrapper',
+           title = '/compact',
+           transcript_line_start = 210,
+           tags = ?,
+           tool_call_count = 0
+       WHERE session_id = ? AND prompt_number = 21`,
+    ).run(
+      JSON.stringify(["compact:pre_tokens=357000", "compact:trigger=auto"]),
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+    const compactLine = output
+      .split("\n")
+      .find((line) => line.startsWith("  T21 "));
+
+    expect(compactLine).toBeDefined();
+    expect(compactLine).toContain("L210");
+    expect(compactLine).toContain("/compact");
+    expect(compactLine).toContain("⏸ /compact 357k tokens, auto");
+    expect(compactLine).not.toContain("ignored raw summary wrapper");
   });
 
   it("renders a phases block labeled session-wide", () => {

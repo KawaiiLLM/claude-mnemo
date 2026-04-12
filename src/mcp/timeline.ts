@@ -106,6 +106,8 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 };
 
 export const PENDING_EMOJI = "⏳";
+const SKIPPED_EMOJI = "⏭";
+const MISSING_LINE_ANCHOR = "—";
 
 export function parseTimelineId(id: string): ParsedId {
   const trimmed = id.trim();
@@ -362,6 +364,50 @@ export function extractSourceTags(tags: string[]): string[] {
   return tags
     .filter((tag) => tag.startsWith("source:"))
     .map((tag) => tag.slice("source:".length));
+}
+
+function getCompactMetadata(tags: string[]): {
+  preTokens: number;
+  trigger: string;
+} | null {
+  let preTokens = 0;
+  let trigger = "manual";
+  let sawCompactTag = false;
+
+  for (const tag of tags) {
+    if (tag.startsWith("compact:pre_tokens=")) {
+      const rawValue = Number(tag.slice("compact:pre_tokens=".length));
+      if (Number.isFinite(rawValue) && rawValue >= 0) {
+        preTokens = rawValue;
+      }
+      sawCompactTag = true;
+      continue;
+    }
+
+    if (tag.startsWith("compact:trigger=")) {
+      trigger = tag.slice("compact:trigger=".length) || trigger;
+      sawCompactTag = true;
+    }
+  }
+
+  return sawCompactTag ? { preTokens, trigger } : null;
+}
+
+function formatCompactTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const millions = Math.round((tokens / 1_000_000) * 10) / 10;
+    return `${millions % 1 === 0 ? millions.toFixed(0) : millions.toFixed(1)}M`;
+  }
+
+  if (tokens >= 1_000) {
+    return `${Math.round(tokens / 1_000)}k`;
+  }
+
+  return String(tokens);
+}
+
+function formatTranscriptLineAnchor(lineNumber: number | null): string {
+  return lineNumber === null ? MISSING_LINE_ANCHOR : `L${lineNumber}`;
 }
 
 export function segmentPhases(turns: TurnRecord[]): Phase[] {
@@ -675,8 +721,15 @@ export function buildTimelineView(
   const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
-  const compactBoundaries =
-    session.lastCompactTurn === null ? [] : [session.lastCompactTurn];
+  const compactBoundaries = allTurns
+    .filter((turn) => turn.type === "compact")
+    .map((turn) => turn.promptNumber);
+  if (
+    compactBoundaries.length === 0 &&
+    session.lastCompactTurn !== null
+  ) {
+    compactBoundaries.push(session.lastCompactTurn);
+  }
   const jsonlPath =
     resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
@@ -785,8 +838,8 @@ function renderTurnTable(view: TimelineView): string[] {
 
   const lines = [
     "",
-    "  T#    time    gap          stats          prompt                                                                                                                                                                                                          title",
-    "  ───   ─────   ─────────    ────────────   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────   ────────────────────────────────────────",
+    "  T#    line   time    gap          stats          prompt                                                                                                                                                                                                          title",
+    "  ───   ────   ─────   ─────────    ────────────   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────   ────────────────────────────────────────",
   ];
 
   let prevEpoch: number | null = null;
@@ -811,18 +864,23 @@ function renderTurnRow(
 ): string {
   const isUndone = turn.status === "undone";
   const isSkipped = turn.status === "skipped";
+  const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " ※" : "";
   const sourceBadges = extractSourceTags(turn.tags)
     .map((source) => `[ext:${source}]`)
     .join(" ");
-  const promptCore = cleanPromptForLabel(turn.userPrompt);
+  const promptCore =
+    turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges =
-    sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
+    turn.type === "compact"
+      ? promptCore
+      : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = truncateText(promptWithBadges, PROMPT_COLUMN_CAP);
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
-  const statusPrefix = isUndone ? "⨯ " : isSkipped ? "⏭ " : "";
+  const statusPrefix = isUndone ? "⨯ " : isSkipped ? `${SKIPPED_EMOJI} ` : "";
+  const lineAnchor = formatTranscriptLineAnchor(turn.transcriptLineStart).padEnd(4);
 
-  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone, isSkipped)}`;
+  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${lineAnchor}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone, isSkipped, compactMetadata)}`;
 }
 
 function renderStats(turn: TurnRecord): string {
@@ -846,9 +904,16 @@ function renderTitleCell(
   turn: TurnRecord,
   isUndone: boolean,
   isSkipped: boolean,
+  compactMetadata: { preTokens: number; trigger: string } | null,
 ): string {
   if (isSkipped) {
-    return "⏭";
+    return SKIPPED_EMOJI;
+  }
+
+  if (turn.type === "compact") {
+    const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
+    const trigger = compactMetadata?.trigger ?? "manual";
+    return `${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
 
   if (turn.type !== null && turn.title !== null) {
