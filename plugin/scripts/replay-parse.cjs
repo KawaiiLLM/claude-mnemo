@@ -25,6 +25,288 @@ __export(cli_exports, {
 });
 module.exports = __toCommonJS(cli_exports);
 
+// src/replay/fields.ts
+var fieldRegistry = [
+  {
+    name: "promptNumber",
+    type: "number",
+    description: "Turn number (= recall/timeline T<n>)",
+    extract: (turn) => turn.promptNumber
+  },
+  {
+    name: "lineStart",
+    type: "number",
+    description: "JSONL 1-based line number",
+    extract: (turn) => turn.lineStart
+  },
+  {
+    name: "localTime",
+    type: "string",
+    description: "Local time HH:MM",
+    defaultCap: 5,
+    extract: (turn) => turn.localTime
+  },
+  {
+    name: "timestamp",
+    type: "string",
+    description: "ISO timestamp",
+    defaultCap: 120,
+    extract: (turn) => turn.timestamp ?? ""
+  },
+  {
+    name: "durationMs",
+    type: "number",
+    description: "Turn duration in ms",
+    extract: (turn) => turn.durationMs ?? 0
+  },
+  {
+    name: "userPrompt",
+    type: "string",
+    description: "Full user prompt text",
+    defaultCap: 120,
+    extract: (turn) => turn.userPrompt
+  },
+  {
+    name: "assistantText",
+    type: "string",
+    description: "Assistant text blocks concatenated",
+    defaultCap: 120,
+    extract: (turn) => turn.assistantText
+  },
+  {
+    name: "toolCount",
+    type: "number",
+    description: "Total tool_use calls",
+    extract: (turn) => turn.toolCalls.length
+  },
+  {
+    name: "readCount",
+    type: "number",
+    description: "Read tool calls",
+    extract: (turn) => turn.toolCalls.filter((call) => call.name.toLowerCase() === "read").length
+  },
+  {
+    name: "editCount",
+    type: "number",
+    description: "Edit/Write tool calls",
+    extract: (turn) => turn.toolCalls.filter((call) => {
+      const name = call.name.toLowerCase();
+      return name === "edit" || name === "write";
+    }).length
+  },
+  {
+    name: "toolNames",
+    type: "string",
+    description: "Unique tool names (comma-sep)",
+    defaultCap: 80,
+    extract: (turn) => [...new Set(turn.toolCalls.map((call) => call.name))].join(",")
+  },
+  {
+    name: "usage.input",
+    type: "number",
+    description: "Input tokens",
+    extract: (turn) => turn.usage.inputTokens
+  },
+  {
+    name: "usage.output",
+    type: "number",
+    description: "Output tokens",
+    extract: (turn) => turn.usage.outputTokens
+  },
+  {
+    name: "usage.cacheRead",
+    type: "number",
+    description: "Cache read tokens",
+    extract: (turn) => turn.usage.cacheReadTokens
+  },
+  {
+    name: "usage.cacheCr",
+    type: "number",
+    description: "Cache creation tokens",
+    extract: (turn) => turn.usage.cacheCreationTokens
+  },
+  {
+    name: "messageCount",
+    type: "number",
+    description: "Raw message count in turn",
+    extract: (turn) => turn.messages.length
+  },
+  {
+    name: "compactAfter",
+    type: "number",
+    description: "1 if compact follows this turn, 0 otherwise",
+    extract: (turn, ctx) => ctx.compactAfterSet.has(turn.promptNumber) ? 1 : 0
+  },
+  {
+    name: "compactInfo",
+    type: "string",
+    description: "Compact metadata or empty",
+    defaultCap: 60,
+    extract: (turn, ctx) => ctx.compactInfoMap.get(turn.promptNumber) ?? ""
+  }
+];
+var fieldByName = new Map(fieldRegistry.map((field) => [field.name, field]));
+function getFieldRegistry() {
+  return fieldRegistry;
+}
+function getFieldContext(result) {
+  const compactAfterSet = /* @__PURE__ */ new Set();
+  const compactInfoMap = /* @__PURE__ */ new Map();
+  for (const compact of result.compacts) {
+    compactAfterSet.add(compact.afterPromptNumber);
+    compactInfoMap.set(
+      compact.afterPromptNumber,
+      `${formatCompactTokens(compact.preTokens)} tokens, ${compact.trigger}`
+    );
+  }
+  return { compactAfterSet, compactInfoMap };
+}
+function parseFieldSpec(spec) {
+  const tokens = spec.split(",").map((token) => token.trim()).filter(Boolean);
+  if (tokens.length === 0) {
+    throw new Error('Usage: replay-parse query <jsonl> -f "field[:cap],..."');
+  }
+  return tokens.map((token) => {
+    const [name, capSpec] = token.split(":", 2);
+    const field = fieldByName.get(name);
+    if (!field) {
+      throw new Error(`Unknown field: ${name}`);
+    }
+    if (capSpec === void 0) {
+      return {
+        def: field,
+        cap: field.type === "string" ? field.defaultCap ?? null : null
+      };
+    }
+    const cap = Number.parseInt(capSpec, 10);
+    if (!Number.isInteger(cap) || cap < 0) {
+      throw new Error(`Invalid cap for ${name}: ${capSpec}`);
+    }
+    return {
+      def: field,
+      cap: cap === 0 ? null : cap
+    };
+  });
+}
+function renderQueryCell(value, cap) {
+  if (typeof value === "number") {
+    return String(value);
+  }
+  const escaped = escapeTsvString(value);
+  if (cap === null || escaped.length <= cap) {
+    return escaped;
+  }
+  return `${escaped.slice(0, Math.max(0, cap - 1))}\u2026`;
+}
+function escapeTsvString(value) {
+  return value.replaceAll("\n", "\\n").replaceAll("	", "\\t");
+}
+function formatCompactTokens(preTokens) {
+  if (preTokens >= 1e6) {
+    return `${Math.floor(preTokens / 1e5) / 10}M`;
+  }
+  return `${Math.floor(preTokens / 1e3)}k`;
+}
+function filterReplayTurns(result, options) {
+  let turns = result.turns;
+  if (options.grep) {
+    turns = turns.filter((turn) => matchesGrep(turn, options.grep, options.ignoreCase ?? false));
+  }
+  if (options.all) {
+    return turns;
+  }
+  if (options.range) {
+    return turns.filter(
+      (turn) => turn.promptNumber >= options.range.start && turn.promptNumber <= options.range.end
+    );
+  }
+  if (options.first !== void 0) {
+    return turns.slice(0, options.first);
+  }
+  return turns.slice(-1 * (options.last ?? 30));
+}
+function matchesGrep(turn, pattern, ignoreCase) {
+  const haystack = buildSearchText(turn);
+  return ignoreCase ? haystack.toLowerCase().includes(pattern.toLowerCase()) : haystack.includes(pattern);
+}
+function buildSearchText(turn) {
+  const toolCallText = turn.toolCalls.map((call) => `${call.name}
+${JSON.stringify(call.input ?? {})}
+${call.result ?? ""}`).join("\n");
+  return [
+    turn.userPrompt,
+    turn.assistantText,
+    toolCallText,
+    turn.toolCalls.map((call) => call.name).join("\n")
+  ].join("\n");
+}
+
+// src/replay/commands/query.ts
+function renderReplayQuery(result, options = {}) {
+  const fields = parseFieldSpec(options.fields ?? "");
+  const turns = filterReplayTurns(result, options);
+  const context = getFieldContext(result);
+  const lines = [fields.map((field) => field.def.name).join("	")];
+  for (const turn of turns) {
+    lines.push(
+      fields.map((field) => renderQueryCell(field.def.extract(turn, context), field.cap)).join("	")
+    );
+  }
+  return lines.join("\n");
+}
+
+// src/replay/commands/schema.ts
+function truncateSample(value, limit) {
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, limit - 1))}\u2026`;
+}
+function formatSampleValue(value) {
+  if (value === null || value === void 0) {
+    return `""`;
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return JSON.stringify(truncateSample(value, 60));
+}
+function formatTimeRange(result) {
+  if (!result.timeRange) {
+    return "(empty file)";
+  }
+  const start = result.timeRange.start.slice(0, 16).replace("T", " ");
+  const end = result.timeRange.end.slice(11, 16);
+  return `${start} \u2192 ${end}`;
+}
+function renderReplaySchema(result) {
+  const lines = [];
+  lines.push(
+    `${result.turns.length} turns | ${result.compacts.length} compacts | ${formatTimeRange(result)}`
+  );
+  lines.push("");
+  lines.push("Fields:");
+  const sampleTurns = result.turns.slice(0, 3);
+  for (const field of getFieldRegistry()) {
+    const samples = sampleTurns.map((turn) => formatSampleValue(field.extract(turn, {
+      compactAfterSet: new Set(result.compacts.map((compact) => compact.afterPromptNumber)),
+      compactInfoMap: new Map(
+        result.compacts.map((compact) => [
+          compact.afterPromptNumber,
+          `${formatCompactTokens(compact.preTokens)} tokens, ${compact.trigger}`
+        ])
+      )
+    })));
+    const sampleText = samples.length > 0 ? samples.join(", ") : "(empty file)";
+    lines.push(
+      `  ${field.name.padEnd(15)} ${field.type.padEnd(6)} ${sampleText.padEnd(35)} ${field.description}`
+    );
+  }
+  lines.push("");
+  lines.push('Usage: replay-parse query <jsonl> -f "promptNumber,localTime,userPrompt:80" --last 10');
+  return lines.join("\n");
+}
+
 // src/replay/format.ts
 function truncateText(text, preview, raw = false) {
   if (raw || preview === 0 || text.length <= preview) {
@@ -42,174 +324,6 @@ function truncateJsonValue(value, preview = 60) {
     return `"${inner.slice(0, preview - 3)}\u2026"`;
   }
   return truncateText(stringified, preview);
-}
-
-// src/replay/commands/grep.ts
-function isVisibleByDefault(message) {
-  return message.type === "user" || message.type === "assistant" || message.type === "tool_use" || message.type === "tool_result";
-}
-function isVisibleInOutput(message) {
-  return isVisibleByDefault(message);
-}
-function matchesType(message, type) {
-  if (!type) {
-    return isVisibleByDefault(message);
-  }
-  if (type === "user") {
-    return message.type === "user";
-  }
-  if (type === "assistant") {
-    return message.type === "assistant";
-  }
-  return message.type === "tool_use" || message.type === "tool_result";
-}
-function includesPattern(value, pattern, ignoreCase = false) {
-  if (ignoreCase) {
-    return value.toLowerCase().includes(pattern.toLowerCase());
-  }
-  return value.includes(pattern);
-}
-function renderMatchedMessage(message, preview) {
-  switch (message.type) {
-    case "user":
-      return `  USER: ${truncateText(message.content, preview)}`;
-    case "assistant":
-      return `  ASST: ${truncateText(message.content, preview)}`;
-    case "tool_use":
-      return `  TOOL: ${message.toolName ?? "Tool"} ${truncateText(message.content, preview)}`;
-    case "tool_result":
-      return `  \u2192 ${truncateText(message.content, preview)}`;
-    case "thinking":
-      return `  THINK: ${truncateText(message.content, preview)}`;
-  }
-}
-function renderReplayGrep(result, pattern, options = {}) {
-  const preview = options.preview ?? 120;
-  const sections = [];
-  let matchCount = 0;
-  let turnCount = 0;
-  const context = options.context ?? 0;
-  for (const turn of result.turns) {
-    const visibleMessages = turn.messages.map((message, originalIndex) => ({ message, originalIndex })).filter(({ message }) => isVisibleInOutput(message));
-    const matchingIndexes = visibleMessages.map(({ message }, index) => ({ message, index })).filter(
-      ({ message }) => matchesType(message, options.type) && includesPattern(
-        message.type === "tool_use" ? `${message.toolName ?? ""} ${message.content}` : message.content,
-        pattern,
-        options.ignoreCase
-      )
-    ).map(({ index }) => index);
-    if (matchingIndexes.length === 0) {
-      continue;
-    }
-    turnCount += 1;
-    matchCount += matchingIndexes.length;
-    const indexesToRender = context > 0 ? Array.from(
-      new Set(
-        matchingIndexes.flatMap(
-          (index) => visibleMessages.map((_, candidateIndex) => candidateIndex).slice(Math.max(0, index - context), index + context + 1)
-        )
-      )
-    ) : matchingIndexes;
-    sections.push(`T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}   ${turn.localTime}`);
-    for (const index of indexesToRender) {
-      sections.push(renderMatchedMessage(visibleMessages[index].message, preview));
-    }
-    sections.push("");
-  }
-  return [`${matchCount} matches in ${turnCount} turns`, "", ...sections].join("\n").trimEnd();
-}
-
-// src/replay/commands/ls.ts
-function truncate(text, preview) {
-  if (preview === 0 || text.length <= preview) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, preview - 1))}\u2026`;
-}
-function countToolStats(turn) {
-  let tool = 0;
-  let read = 0;
-  let write = 0;
-  for (const message of turn.messages) {
-    if (message.type !== "tool_use") {
-      continue;
-    }
-    const name = message.toolName ?? "";
-    if (name === "Read") {
-      read += 1;
-    } else if (name === "Edit" || name === "Write") {
-      write += 1;
-    } else {
-      tool += 1;
-    }
-  }
-  return { tool, read, write };
-}
-function formatDuration(start, end) {
-  const startDate = new Date(start);
-  const endDate = new Date(end);
-  const totalMinutes = Math.max(
-    0,
-    Math.round((endDate.getTime() - startDate.getTime()) / 6e4)
-  );
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-  return `${minutes}m`;
-}
-function formatBoundary(boundary) {
-  const tokens = boundary.preTokens >= 1e6 ? `${Math.floor(boundary.preTokens / 1e5) / 10}M` : `${Math.floor(boundary.preTokens / 1e3)}k`;
-  return `\u2500\u2500 compact (${tokens} tokens, ${boundary.trigger}) \u2500\u2500`;
-}
-function selectTurns(turns, options) {
-  let selected = turns;
-  if (options.grep) {
-    selected = selected.filter((turn) => turn.userPrompt.includes(options.grep));
-  }
-  if (options.all) {
-    return selected;
-  }
-  if (options.range) {
-    return selected.filter(
-      (turn) => turn.promptNumber >= options.range.start && turn.promptNumber <= options.range.end
-    );
-  }
-  if (options.first) {
-    return selected.slice(0, options.first);
-  }
-  return selected.slice(-1 * (options.last ?? 30));
-}
-function renderReplayLs(result, options = {}) {
-  const preview = options.preview ?? 120;
-  const selected = selectTurns(result.turns, options);
-  const selectedPromptNumbers = new Set(selected.map((turn) => turn.promptNumber));
-  const lines = [];
-  if (result.timeRange) {
-    lines.push(
-      `${result.turns.length} turns | ${result.compacts.length} compacts | ${result.timeRange.start.slice(0, 16).replace("T", " ")} \u2192 ${result.timeRange.end.slice(11, 16)} (${formatDuration(result.timeRange.start, result.timeRange.end)})`
-    );
-    lines.push("");
-  }
-  for (const turn of selected) {
-    const stats = countToolStats(turn);
-    const statParts = [
-      stats.tool > 0 ? `\u{1F527}${stats.tool}` : "",
-      stats.read > 0 ? `\u{1F4D6}${stats.read}` : "",
-      stats.write > 0 ? `\u270F\uFE0F${stats.write}` : ""
-    ].filter(Boolean);
-    const usageSuffix = options.usage ? `    in=${turn.usage.inputTokens} out=${turn.usage.outputTokens} cache=${turn.usage.cacheReadTokens}` : "";
-    lines.push(
-      `T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}    ${turn.localTime}  ${statParts.join(" ")}${statParts.length > 0 ? "  " : ""}${truncate(turn.userPrompt, preview)}${usageSuffix}`
-    );
-    for (const boundary of result.compacts) {
-      if (boundary.afterPromptNumber === turn.promptNumber && selectedPromptNumbers.has(turn.promptNumber + 1)) {
-        lines.push(formatBoundary(boundary));
-      }
-    }
-  }
-  return lines.join("\n");
 }
 
 // src/replay/commands/show.ts
@@ -671,30 +785,33 @@ function parseRange(value) {
 function runReplayParseCommand(argv) {
   const [subcommand, transcriptPath, ...rest] = argv;
   if (!subcommand || !transcriptPath) {
-    throw new Error("Usage: replay-parse <ls|show|grep> <jsonl-path> ...");
+    throw new Error("Usage: replay-parse <schema|query|show> <jsonl-path> ...");
   }
   const result = parseReplayFile(transcriptPath);
-  if (subcommand === "ls") {
+  if (subcommand === "schema") {
+    return renderReplaySchema(result);
+  }
+  if (subcommand === "query") {
     const options = {};
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index];
-      if (token === "--all") {
+      if (token === "-f") {
+        options.fields = rest[++index];
+      } else if (token === "--all") {
         options.all = true;
-      } else if (token === "--usage") {
-        options.usage = true;
       } else if (token === "--last") {
         options.last = parseNumber(rest[++index], "--last");
       } else if (token === "--first") {
         options.first = parseNumber(rest[++index], "--first");
       } else if (token === "--range") {
         options.range = parseRange(rest[++index]);
-      } else if (token === "--preview") {
-        options.preview = parseNumber(rest[++index], "--preview");
       } else if (token === "--grep") {
         options.grep = rest[++index];
+      } else if (token === "-i") {
+        options.ignoreCase = true;
       }
     }
-    return renderReplayLs(result, options);
+    return renderReplayQuery(result, options);
   }
   if (subcommand === "show") {
     const turnToken = rest.shift();
@@ -716,26 +833,6 @@ function runReplayParseCommand(argv) {
       }
     }
     return renderReplayShow(result, Number.parseInt(match[1], 10), options);
-  }
-  if (subcommand === "grep") {
-    const pattern = rest.shift();
-    if (!pattern) {
-      throw new Error("Usage: replay-parse grep <jsonl> <pattern> [options]");
-    }
-    const options = {};
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index];
-      if (token === "--type") {
-        options.type = rest[++index];
-      } else if (token === "--context") {
-        options.context = parseNumber(rest[++index], "--context");
-      } else if (token === "--preview") {
-        options.preview = parseNumber(rest[++index], "--preview");
-      } else if (token === "-i") {
-        options.ignoreCase = true;
-      }
-    }
-    return renderReplayGrep(result, pattern, options);
   }
   throw new Error(`Unknown subcommand: ${subcommand}`);
 }

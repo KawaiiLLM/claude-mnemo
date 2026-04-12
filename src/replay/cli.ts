@@ -1,5 +1,5 @@
-import { renderReplayGrep } from "./commands/grep";
-import { renderReplayLs } from "./commands/ls";
+import { renderReplayQuery } from "./commands/query";
+import { renderReplaySchema } from "./commands/schema";
 import { renderReplayShow } from "./commands/show";
 import { parseReplayFile } from "./parser";
 
@@ -32,32 +32,36 @@ export function runReplayParseCommand(argv: string[]): string {
   const [subcommand, transcriptPath, ...rest] = argv;
 
   if (!subcommand || !transcriptPath) {
-    throw new Error("Usage: replay-parse <ls|show|grep> <jsonl-path> ...");
+    throw new Error("Usage: replay-parse <schema|query|show> <jsonl-path> ...");
   }
 
   const result = parseReplayFile(transcriptPath);
 
-  if (subcommand === "ls") {
+  if (subcommand === "schema") {
+    return renderReplaySchema(result);
+  }
+
+  if (subcommand === "query") {
     const options: Record<string, unknown> = {};
     for (let index = 0; index < rest.length; index += 1) {
       const token = rest[index]!;
-      if (token === "--all") {
+      if (token === "-f") {
+        options.fields = rest[++index];
+      } else if (token === "--all") {
         options.all = true;
-      } else if (token === "--usage") {
-        options.usage = true;
       } else if (token === "--last") {
         options.last = parseNumber(rest[++index], "--last");
       } else if (token === "--first") {
         options.first = parseNumber(rest[++index], "--first");
       } else if (token === "--range") {
         options.range = parseRange(rest[++index]);
-      } else if (token === "--preview") {
-        options.preview = parseNumber(rest[++index], "--preview");
       } else if (token === "--grep") {
         options.grep = rest[++index];
+      } else if (token === "-i") {
+        options.ignoreCase = true;
       }
     }
-    return renderReplayLs(result, options);
+    return renderReplayQuery(result, options);
   }
 
   if (subcommand === "show") {
@@ -80,27 +84,6 @@ export function runReplayParseCommand(argv: string[]): string {
       }
     }
     return renderReplayShow(result, Number.parseInt(match[1]!, 10), options);
-  }
-
-  if (subcommand === "grep") {
-    const pattern = rest.shift();
-    if (!pattern) {
-      throw new Error("Usage: replay-parse grep <jsonl> <pattern> [options]");
-    }
-    const options: Record<string, unknown> = {};
-    for (let index = 0; index < rest.length; index += 1) {
-      const token = rest[index]!;
-      if (token === "--type") {
-        options.type = rest[++index];
-      } else if (token === "--context") {
-        options.context = parseNumber(rest[++index], "--context");
-      } else if (token === "--preview") {
-        options.preview = parseNumber(rest[++index], "--preview");
-      } else if (token === "-i") {
-        options.ignoreCase = true;
-      }
-    }
-    return renderReplayGrep(result, pattern, options);
   }
 
   throw new Error(`Unknown subcommand: ${subcommand}`);

@@ -14,7 +14,7 @@ Use this only after `recall` or `timeline` has already narrowed you to a specifi
 Use the bundled parser script first:
 
 ```bash
-bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" ls <jsonl-path> --last 30
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" schema <jsonl-path>
 ```
 
 It understands resumed transcripts, promptId turn boundaries, compact markers, tool results, and malformed-line skips the same way claude-mnemo itself does.
@@ -48,10 +48,16 @@ Expanded session output includes a `raw:` line with the absolute JSONL path.
 
 ### Script entrypoints
 
-**List turns**
+**Inspect available fields**
 
 ```bash
-bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" ls <jsonl-path> --last 30
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" schema <jsonl-path>
+```
+
+**Query selected columns**
+
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" query <jsonl-path> -f "promptNumber,localTime,userPrompt:80" --last 30
 ```
 
 **Show one turn**
@@ -60,17 +66,17 @@ bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" ls <jsonl-path> --last 30
 bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" show <jsonl-path> T12
 ```
 
-**Search raw transcript content**
+**Search raw transcript content while selecting fields**
 
 ```bash
-bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" grep <jsonl-path> "auth race" --type assistant
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" query <jsonl-path> -f "promptNumber,assistantText:160" --grep "auth race"
 ```
 
 ### When to fall back to direct reads
 
 Use raw `Read`/`Grep` only when the script output is still insufficient, for example:
 - inspecting bytes the formatter truncated
-- verifying an exact JSON field that `show` does not print
+- verifying an exact JSON field that `show` or `query` does not print
 - checking transcript corruption by line number
 
 ## SQLite database
@@ -147,6 +153,6 @@ LIMIT 20;
 
 - Always narrow with `recall` first.
 - Use the `raw:` line from expanded session output as the copy-paste handoff.
-- Prefer `replay-parse.cjs` over hand-written `Read`/`Grep` flows.
+- Prefer `replay-parse.cjs schema/query/show` over hand-written `Read`/`Grep` flows.
 - Treat SQLite as read-only unless you are going through `remember`.
 - If you need exact bytes, prefer the JSONL over the indexed mirror.
