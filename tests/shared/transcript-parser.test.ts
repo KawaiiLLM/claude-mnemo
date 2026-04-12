@@ -663,6 +663,55 @@ describe("parseTranscript", () => {
     expect(buildPromptIdLineMap(transcript.path).get("p1")).toBe(1);
   });
 
+  test("preserves sidechain status across a duplicate snapshot that omits the flag", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        role: "user",
+        uuid: "u1",
+        promptId: "p1",
+        isSidechain: true,
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Draft sidechain prompt",
+        },
+      },
+      {
+        type: "assistant",
+        role: "assistant",
+        uuid: "a1",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Sidechain answer" }],
+        },
+      },
+      {
+        type: "user",
+        role: "user",
+        uuid: "u1",
+        promptId: "p1",
+        permissionMode: "default",
+        message: {
+          role: "user",
+          content: "Draft sidechain prompt",
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(parseTranscript(transcript.path)).toEqual([]);
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
+    expect(parseReplayTranscript(transcript.path)).toEqual([
+      expect.objectContaining({
+        promptNumber: 1,
+        promptId: "p1",
+        userPrompt: "Draft sidechain prompt",
+        isSidechain: true,
+      }),
+    ]);
+  });
+
   test("treats a resumed transcript replay as the original turn sequence", () => {
     const transcript = writeTranscript([
       makeEntry({

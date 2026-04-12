@@ -348,8 +348,12 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : undefined,
     permissionMode:
       typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    isSidechain:
+      typeof raw.isSidechain === "boolean" ? raw.isSidechain : undefined,
+    isApiErrorMessage:
+      typeof raw.isApiErrorMessage === "boolean"
+        ? raw.isApiErrorMessage
+        : undefined,
     usage:
       message?.usage && typeof message.usage === "object"
         ? {
