@@ -8,6 +8,7 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   recallInputSchema,
   rememberInputSchema,
+  timelineInputSchema,
 } from "./definitions";
 import {
   createDatabaseBackedHandlers,
@@ -22,6 +23,12 @@ export interface CreateMcpServerOptions {
   handlers?: Partial<MnemoToolHandlers>;
 }
 
+export const MAIN_MCP_TOOL_NAMES = ["recall", "timeline", "remember"] as const;
+
+type MainMcpToolName = (typeof MAIN_MCP_TOOL_NAMES)[number];
+type MainMcpToolHandlers = Pick<MnemoToolHandlers, MainMcpToolName>;
+type ToolRegistrationTarget = Pick<McpServer, "registerTool">;
+
 function startParentHeartbeat(intervalMs = 30_000): NodeJS.Timeout {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
@@ -32,6 +39,36 @@ function startParentHeartbeat(intervalMs = 30_000): NodeJS.Timeout {
   timer.unref();
 
   return timer;
+}
+
+export function registerMainMcpTools(
+  server: ToolRegistrationTarget,
+  toolHandlers: MainMcpToolHandlers,
+): void {
+  server.registerTool(
+    "recall",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.recall,
+      inputSchema: recallInputSchema,
+    },
+    (args) => toolHandlers.recall(args as Record<string, unknown>),
+  );
+  server.registerTool(
+    "timeline",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.timeline,
+      inputSchema: timelineInputSchema,
+    },
+    (args) => toolHandlers.timeline(args as Record<string, unknown>),
+  );
+  server.registerTool(
+    "remember",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.remember,
+      inputSchema: rememberInputSchema,
+    },
+    (args) => toolHandlers.remember(args as Record<string, unknown>),
+  );
 }
 
 export function createMcpServer(
@@ -56,27 +93,13 @@ export function createMcpServer(
     ...options.handlers,
   };
 
-  const toolHandlers: Pick<MnemoToolHandlers, "recall" | "remember"> = {
+  const toolHandlers: MainMcpToolHandlers = {
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
+    timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
     remember: mergedHandlers.remember ?? createStubHandler("remember"),
   };
 
-  server.registerTool(
-    "recall",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.recall,
-      inputSchema: recallInputSchema,
-    },
-    (args) => toolHandlers.recall(args as Record<string, unknown>),
-  );
-  server.registerTool(
-    "remember",
-    {
-      description: MNEMO_TOOL_DESCRIPTIONS.remember,
-      inputSchema: rememberInputSchema,
-    },
-    (args) => toolHandlers.remember(args as Record<string, unknown>),
-  );
+  registerMainMcpTools(server, toolHandlers);
 
   return server;
 }

@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { createMemory } from "../../src/db/memories";
 import { initializeDatabase } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 
@@ -94,15 +95,66 @@ describe("database-backed MCP handlers", () => {
     ).toThrow();
   });
 
-  test("exposes the timeline stub from the database-backed handler set", async () => {
+  test("routes timeline requests through the database-backed handler set", async () => {
     const handlers = createDatabaseBackedHandlers(db, {
       defaultProject: "claude-mnemo",
     });
 
-    const result = await handlers.timeline?.({
-      id: "S1",
+    const session = upsertSession(db, {
+      contentSessionId: "timeline-session",
+      project: "claude-mnemo",
+      title: "Timeline fixture",
+      insight: null,
+      createdAtEpoch: 1_700_000_000,
+      updatedAtEpoch: 1_700_000_100,
+      completedAtEpoch: null,
     });
 
-    expect(result?.content[0]?.text).toBe("timeline not implemented");
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        content_prompt_id,
+        transcript_line_start,
+        status,
+        user_prompt,
+        assistant_response,
+        title,
+        content,
+        insight,
+        type,
+        tags,
+        files_read,
+        files_modified,
+        tool_call_count,
+        created_at_epoch,
+        updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      session.id,
+      1,
+      null,
+      null,
+      "extracted",
+      "Investigate timeline registration",
+      null,
+      "Wire timeline tool",
+      null,
+      null,
+      "change",
+      JSON.stringify([]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      1,
+      1_700_000_100,
+      null,
+    );
+
+    const result = await handlers.timeline?.({
+      id: `S${session.id}`,
+    });
+
+    expect(result?.content[0]?.text).toContain("claude-mnemo | 1 turns | 1 tool_calls");
+    expect(result?.content[0]?.text).toContain("showing: T1-T1 of 1 (end)");
   });
 });
