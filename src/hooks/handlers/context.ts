@@ -161,21 +161,58 @@ function buildCurrentSessionOutput(
   return lines.join("\n");
 }
 
+function classifyTimeGroup(epochSeconds: number, now: Date): string {
+  const target = new Date(epochSeconds * 1000);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 86400_000);
+  const weekStart = new Date(todayStart.getTime() - 6 * 86400_000);
+
+  if (target >= todayStart) {
+    return "Today";
+  }
+
+  if (target >= yesterdayStart) {
+    return "Yesterday";
+  }
+
+  if (target >= weekStart) {
+    return "Last 7 days";
+  }
+
+  return "Earlier";
+}
+
 function buildRecentSessionsOutput(
   recentSessions: SessionRecord[],
   sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
   primarySessionId: number,
 ): string[] {
-  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
+  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 10);
 
-  return others
-    .map((session) => buildSessionView(session, sessionMetrics.get(session.id)))
-    .map((session) =>
+  if (others.length === 0) {
+    return [];
+  }
+
+  const now = new Date();
+  const lines: string[] = [];
+  let currentGroup = "";
+
+  for (const session of others) {
+    const group = classifyTimeGroup(session.createdAtEpoch, now);
+    if (group !== currentGroup) {
+      currentGroup = group;
+      lines.push(`### ${group}`);
+    }
+
+    lines.push(
       formatModule.renderNode(
-        { type: "session", value: session },
+        { type: "session", value: buildSessionView(session, sessionMetrics.get(session.id)) },
         { depth: "collapsed", truncate: 120, mode: "unified" },
       ),
     );
+  }
+
+  return lines;
 }
 
 function buildMemoryView(memory: MemoryRecord): FormattedMemory {
@@ -273,7 +310,10 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     });
   }
 
-  const recentSessions = getRecentSessions(db, { limit: 5 });
+  const recentSessions = getRecentSessions(db, {
+    project: input.cwd ?? undefined,
+    limit: 20,
+  });
   const primarySessionRecord = resolvePrimarySessionRecord(
     db,
     input,

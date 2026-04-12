@@ -695,6 +695,163 @@ describe("handleContextHook", () => {
     expect(output).not.toContain('Expand: recall(id="Sx/Ty", depth="expanded")');
   });
 
+  test("recent sessions are grouped by calendar day boundary", async () => {
+    const now = new Date();
+    const todayEpoch = Math.floor(now.getTime() / 1000) - 3600; // 1 hour ago
+    const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayEpoch = Math.floor(yesterdayStart.getTime() / 1000) - 3600; // 1 hour before midnight
+    const fiveDaysAgoEpoch = Math.floor(yesterdayStart.getTime() / 1000) - 5 * 86400;
+    const tenDaysAgoEpoch = Math.floor(yesterdayStart.getTime() / 1000) - 10 * 86400;
+
+    const groupDb = createDatabase(":memory:");
+    initializeSchema(groupDb);
+
+    upsertSession(groupDb, {
+      contentSessionId: "current-s",
+      project: "/test/project",
+      title: "Current",
+      content: null,
+      insight: null,
+      createdAtEpoch: todayEpoch + 1800,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    upsertSession(groupDb, {
+      contentSessionId: "today-s",
+      project: "/test/project",
+      title: "Today session",
+      content: "Created today",
+      insight: null,
+      createdAtEpoch: todayEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    upsertSession(groupDb, {
+      contentSessionId: "yesterday-s",
+      project: "/test/project",
+      title: "Yesterday session",
+      content: "Created yesterday",
+      insight: null,
+      createdAtEpoch: yesterdayEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    upsertSession(groupDb, {
+      contentSessionId: "week-s",
+      project: "/test/project",
+      title: "Five days ago session",
+      content: "Created 5 days ago",
+      insight: null,
+      createdAtEpoch: fiveDaysAgoEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    upsertSession(groupDb, {
+      contentSessionId: "old-s",
+      project: "/test/project",
+      title: "Ten days ago session",
+      content: "Created 10 days ago",
+      insight: null,
+      createdAtEpoch: tenDaysAgoEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const handler = createContextHandler({ db: groupDb });
+    const result = await handler(
+      createInput({ sessionId: "current-s", cwd: "/test/project", source: "startup" }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+    expect(output).toContain("### Today");
+    expect(output).toContain("### Yesterday");
+    expect(output).toContain("### Last 7 days");
+    expect(output).toContain("### Earlier");
+    expect(output).toContain("Today session");
+    expect(output).toContain("Yesterday session");
+    expect(output).toContain("Five days ago session");
+    expect(output).toContain("Ten days ago session");
+
+    // Verify ordering: Today before Yesterday before Last 7 days before Earlier
+    const todayIdx = output.indexOf("### Today");
+    const yesterdayIdx = output.indexOf("### Yesterday");
+    const weekIdx = output.indexOf("### Last 7 days");
+    const earlierIdx = output.indexOf("### Earlier");
+    expect(todayIdx).toBeLessThan(yesterdayIdx);
+    expect(yesterdayIdx).toBeLessThan(weekIdx);
+    expect(weekIdx).toBeLessThan(earlierIdx);
+
+    groupDb.close();
+  });
+
+  test("recent sessions are capped at 10 and scoped to project", async () => {
+    const capDb = createDatabase(":memory:");
+    initializeSchema(capDb);
+
+    const nowEpoch = Math.floor(Date.now() / 1000);
+
+    // Current session
+    upsertSession(capDb, {
+      contentSessionId: "primary",
+      project: "/test/project",
+      title: "Primary",
+      content: null,
+      insight: null,
+      createdAtEpoch: nowEpoch,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // 15 same-project sessions
+    for (let i = 1; i <= 15; i++) {
+      upsertSession(capDb, {
+        contentSessionId: `same-${i}`,
+        project: "/test/project",
+        title: `Same project ${i}`,
+        content: null,
+        insight: null,
+        createdAtEpoch: nowEpoch - i * 100,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+    }
+
+    // 3 other-project sessions (should not appear)
+    for (let i = 1; i <= 3; i++) {
+      upsertSession(capDb, {
+        contentSessionId: `other-${i}`,
+        project: "/other/project",
+        title: `Other project ${i}`,
+        content: null,
+        insight: null,
+        createdAtEpoch: nowEpoch - i * 50,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+    }
+
+    const handler = createContextHandler({ db: capDb });
+    const result = await handler(
+      createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+
+    // Should not contain other-project sessions
+    expect(output).not.toContain("Other project");
+
+    // Count session lines (cap at 10, excluding primary)
+    const sessionLines = output.split("\n").filter((line) => /^- \[S\d+\]/.test(line));
+    expect(sessionLines.length).toBeLessThanOrEqual(10);
+    expect(sessionLines.length).toBeGreaterThan(0);
+
+    capDb.close();
+  });
+
   test("compact falls back to session summary when timeline rendering throws", async () => {
     const turnId = insertTurn(db, {
       sessionId: currentSessionId,

@@ -625,7 +625,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvw4z45" : "dev";
+var BUILD_ID = true ? "0.2.0-mnvxvplj" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2269,14 +2269,44 @@ function buildCurrentSessionOutput(db, session, sessionRecord) {
   }
   return lines.join("\n");
 }
+function classifyTimeGroup(epochSeconds, now) {
+  const target = new Date(epochSeconds * 1e3);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 864e5);
+  const weekStart = new Date(todayStart.getTime() - 6 * 864e5);
+  if (target >= todayStart) {
+    return "Today";
+  }
+  if (target >= yesterdayStart) {
+    return "Yesterday";
+  }
+  if (target >= weekStart) {
+    return "This week";
+  }
+  return "Earlier";
+}
 function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessionId) {
-  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 4);
-  return others.map((session) => buildSessionView(session, sessionMetrics.get(session.id))).map(
-    (session) => renderNode(
-      { type: "session", value: session },
-      { depth: "collapsed", truncate: 120, mode: "unified" }
-    )
-  );
+  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 10);
+  if (others.length === 0) {
+    return [];
+  }
+  const now = /* @__PURE__ */ new Date();
+  const lines = [];
+  let currentGroup = "";
+  for (const session of others) {
+    const group = classifyTimeGroup(session.createdAtEpoch, now);
+    if (group !== currentGroup) {
+      currentGroup = group;
+      lines.push(`### ${group}`);
+    }
+    lines.push(
+      renderNode(
+        { type: "session", value: buildSessionView(session, sessionMetrics.get(session.id)) },
+        { depth: "collapsed", truncate: 120, mode: "unified" }
+      )
+    );
+  }
+  return lines;
 }
 function buildMemoryView(memory) {
   return {
@@ -2355,7 +2385,10 @@ function buildContextOutput(db, input) {
       completedAtEpoch: null
     });
   }
-  const recentSessions = getRecentSessions(db, { limit: 5 });
+  const recentSessions = getRecentSessions(db, {
+    project: input.cwd ?? void 0,
+    limit: 20
+  });
   const primarySessionRecord = resolvePrimarySessionRecord(
     db,
     input,
