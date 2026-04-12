@@ -625,7 +625,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvgevlt" : "dev";
+var BUILD_ID = true ? "0.2.0-mnvgs2ee" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1861,13 +1861,13 @@ function validateOpenEndRange(range) {
     );
   }
 }
-function buildTimelineView(db, input) {
+function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
   if (!session) {
     throw new Error(`timeline: session S${parsed.sessionId} not found`);
   }
-  const allTurns = getTurnsForSession(db, session.id);
+  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
   const totalTurns = allTurns.length;
   const totalToolCalls = allTurns.reduce(
     (sum, turn) => sum + (turn.toolCallCount ?? 0),
@@ -1931,7 +1931,7 @@ function buildContextTimelineView(db, sessionId) {
   const lastPromptNumber = windowTurns[windowTurns.length - 1].promptNumber;
   const view = buildTimelineView(db, {
     id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`
-  });
+  }, sortedTurns);
   return {
     ...view,
     hasEarlier: firstPromptNumber !== sortedTurns[0].promptNumber
@@ -2104,7 +2104,7 @@ function renderPhases(view, options = {}) {
   }
   return lines;
 }
-function renderShapeSignals(view, options = {}) {
+function renderShapeSignals(view) {
   const windowLabel = view.window.startPromptNumber === 1 && view.window.endPromptNumber === view.window.totalTurns ? " = full session" : "";
   const lines = [
     "",
@@ -2154,12 +2154,16 @@ function renderShapeSignals(view, options = {}) {
       ].join("; ")}`
     );
   }
-  if (options.lastPage && view.hasEarlier) {
-    lines.push(
-      `    earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
-    );
-  }
   return lines;
+}
+function renderEarlierHint(view, options = {}) {
+  if (!options.showEarlierHint || !view.hasEarlier) {
+    return [];
+  }
+  return [
+    "",
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
+  ];
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
@@ -2167,7 +2171,8 @@ function renderTimeline(view, options = {}) {
     ...renderSessionHeader(view),
     ...renderTurnTable(view, promptCap),
     ...renderPhases(view, options),
-    ...renderShapeSignals(view, options)
+    ...renderShapeSignals(view),
+    ...renderEarlierHint(view, options)
   ].join("\n");
 }
 
@@ -2243,21 +2248,25 @@ function buildSessionView(session, metrics) {
 }
 function buildCurrentSessionOutput(db, session, sessionRecord) {
   const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  if (session.insight.length > 0) {
+  const insightLines = session.insight ?? [];
+  if (insightLines.length > 0) {
     lines.push("  insight:");
-    for (const line of session.insight) {
+    for (const line of insightLines) {
       lines.push(`  - ${line}`);
     }
   }
-  const timelineView = buildContextTimelineView(db, sessionRecord.id);
-  lines.push("");
-  lines.push(
-    renderTimeline(timelineView, {
-      promptCap: 80,
-      lastPage: true,
-      windowPhasesOnly: true
-    })
-  );
+  try {
+    const timelineView = buildContextTimelineView(db, sessionRecord.id);
+    lines.push("");
+    lines.push(
+      renderTimeline(timelineView, {
+        promptCap: 80,
+        showEarlierHint: true,
+        windowPhasesOnly: true
+      })
+    );
+  } catch {
+  }
   return lines.join("\n");
 }
 function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessionId) {

@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvgevlt" : "dev";
+var BUILD_ID = true ? "0.2.0-mnvgs2ee" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -38562,13 +38562,13 @@ function validateOpenEndRange(range) {
     );
   }
 }
-function buildTimelineView(db, input) {
+function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
   if (!session) {
     throw new Error(`timeline: session S${parsed.sessionId} not found`);
   }
-  const allTurns = getTurnsForSession(db, session.id);
+  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
   const totalTurns = allTurns.length;
   const totalToolCalls = allTurns.reduce(
     (sum, turn) => sum + (turn.toolCallCount ?? 0),
@@ -38777,7 +38777,7 @@ function renderPhases(view, options = {}) {
   }
   return lines;
 }
-function renderShapeSignals(view, options = {}) {
+function renderShapeSignals(view) {
   const windowLabel = view.window.startPromptNumber === 1 && view.window.endPromptNumber === view.window.totalTurns ? " = full session" : "";
   const lines = [
     "",
@@ -38827,12 +38827,16 @@ function renderShapeSignals(view, options = {}) {
       ].join("; ")}`
     );
   }
-  if (options.lastPage && view.hasEarlier) {
-    lines.push(
-      `    earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
-    );
-  }
   return lines;
+}
+function renderEarlierHint(view, options = {}) {
+  if (!options.showEarlierHint || !view.hasEarlier) {
+    return [];
+  }
+  return [
+    "",
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
+  ];
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
@@ -38840,7 +38844,8 @@ function renderTimeline(view, options = {}) {
     ...renderSessionHeader(view),
     ...renderTurnTable(view, promptCap),
     ...renderPhases(view, options),
-    ...renderShapeSignals(view, options)
+    ...renderShapeSignals(view),
+    ...renderEarlierHint(view, options)
   ].join("\n");
 }
 function timelineQuery(db, input) {

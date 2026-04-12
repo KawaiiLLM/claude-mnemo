@@ -144,15 +144,19 @@ function buildCurrentSessionOutput(
     }
   }
 
-  const timelineView = buildContextTimelineView(db, sessionRecord.id);
-  lines.push("");
-  lines.push(
-    renderTimeline(timelineView, {
-      promptCap: 80,
-      lastPage: true,
-      windowPhasesOnly: true,
-    }),
-  );
+  try {
+    const timelineView = buildContextTimelineView(db, sessionRecord.id);
+    lines.push("");
+    lines.push(
+      renderTimeline(timelineView, {
+        promptCap: 80,
+        showEarlierHint: true,
+        windowPhasesOnly: true,
+      }),
+    );
+  } catch {
+    // Keep the SessionStart hook resilient even if timeline rendering breaks.
+  }
 
   return lines.join("\n");
 }

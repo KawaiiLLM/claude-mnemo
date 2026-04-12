@@ -26,7 +26,7 @@ export interface TimelineView {
 
 export interface RenderTimelineOptions {
   promptCap?: number;
-  lastPage?: boolean;
+  showEarlierHint?: boolean;
   windowPhasesOnly?: boolean;
 }
 
@@ -715,6 +715,7 @@ function validateOpenEndRange(range: Extract<RangeSpec, { kind: "openEnd" }>): v
 export function buildTimelineView(
   db: Database,
   input: TimelineInput,
+  preloadedTurns?: TurnRecord[],
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
@@ -723,7 +724,7 @@ export function buildTimelineView(
     throw new Error(`timeline: session S${parsed.sessionId} not found`);
   }
 
-  const allTurns = getTurnsForSession(db, session.id);
+  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
   const totalTurns = allTurns.length;
   const totalToolCalls = allTurns.reduce(
     (sum, turn) => sum + (turn.toolCallCount ?? 0),
@@ -805,7 +806,7 @@ export function buildContextTimelineView(
   const lastPromptNumber = windowTurns[windowTurns.length - 1]!.promptNumber;
   const view = buildTimelineView(db, {
     id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
-  });
+  }, sortedTurns);
 
   return {
     ...view,
@@ -1057,7 +1058,6 @@ function renderPhases(
 
 function renderShapeSignals(
   view: TimelineView,
-  options: RenderTimelineOptions = {},
 ): string[] {
   const windowLabel =
     view.window.startPromptNumber === 1 &&
@@ -1123,13 +1123,21 @@ function renderShapeSignals(
     );
   }
 
-  if (options.lastPage && view.hasEarlier) {
-    lines.push(
-      `    earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`,
-    );
+  return lines;
+}
+
+function renderEarlierHint(
+  view: TimelineView,
+  options: RenderTimelineOptions = {},
+): string[] {
+  if (!options.showEarlierHint || !view.hasEarlier) {
+    return [];
   }
 
-  return lines;
+  return [
+    "",
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`,
+  ];
 }
 
 export function renderTimeline(
@@ -1142,7 +1150,8 @@ export function renderTimeline(
     ...renderSessionHeader(view),
     ...renderTurnTable(view, promptCap),
     ...renderPhases(view, options),
-    ...renderShapeSignals(view, options),
+    ...renderShapeSignals(view),
+    ...renderEarlierHint(view, options),
   ].join("\n");
 }
 

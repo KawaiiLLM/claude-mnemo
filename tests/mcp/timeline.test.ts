@@ -1311,7 +1311,7 @@ describe("renderTimeline", () => {
     const session = seedLongSession(db, 40);
 
     const view = buildContextTimelineView(db, session.id);
-    const output = renderTimeline(view, { promptCap: 80, lastPage: true });
+    const output = renderTimeline(view, { promptCap: 80, showEarlierHint: true });
     const turn40Line = output
       .split("\n")
       .find((line) => line.startsWith("  T40"));
@@ -1325,10 +1325,11 @@ describe("renderTimeline", () => {
     const session = seedLongSession(db, 40);
 
     const view = buildContextTimelineView(db, session.id);
-    const output = renderTimeline(view, { lastPage: true, windowPhasesOnly: true });
+    const output = renderTimeline(view, { showEarlierHint: true, windowPhasesOnly: true });
 
     expect(output).toContain('earlier: timeline(id="S1/T1..10") or recall(id="S1")');
     expect(output).toMatch(/phases \(window T11-T40\):/);
+    expect(output).toMatch(/\n  earlier: timeline\(id="S1\/T1\.\.10"\) or recall\(id="S1"\)/);
   });
 });
 

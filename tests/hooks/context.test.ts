@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 import * as formatModule from "../../src/mcp/format";
+import * as timelineModule from "../../src/mcp/timeline";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { resolveTranscriptPath } from "../../src/shared/paths";
@@ -692,5 +693,48 @@ describe("handleContextHook", () => {
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");
     expect(output).not.toContain('Expand: recall(id="Sx/Ty", depth="expanded")');
+  });
+
+  test("compact falls back to session summary when timeline rendering throws", async () => {
+    const turnId = insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 1,
+      title: "Investigate cache race",
+      content: "Current session content that should stay out of the compact header block.",
+      userPrompt: "Investigate the cache race.",
+      assistantResponse: "The cache race is isolated to startup.",
+      toolCallCount: 1,
+      createdAtEpoch: 301,
+    });
+
+    insertObservation(db, turnId, {
+      title: "Cache race reproduction",
+      content: "The cache race reproduces only during startup.",
+      createdAtEpoch: 302,
+    });
+
+    const buildTimelineSpy = spyOn(timelineModule, "buildContextTimelineView").mockImplementation(
+      () => {
+        throw new Error("timeline exploded");
+      },
+    );
+
+    const handler = createContextHandler({ db });
+    const result = await handler(
+      createInput({
+        source: "compact",
+        sessionId: "session-context",
+      }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+    expect(output).toContain("## Current Session");
+    expect(output).toContain(`[S${currentSessionId}] Anchored session`);
+    expect(output).toContain("  insight:");
+    expect(output).not.toContain("T#");
+    expect(output).not.toContain("showing:");
+    expect(output).toContain("## Recent Sessions");
+
+    buildTimelineSpy.mockRestore();
   });
 });
