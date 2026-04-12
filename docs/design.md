@@ -315,23 +315,22 @@ Observations are indexed only when their status becomes `extracted`.
 
 ### Tool surface
 
-Claude-Mnemo exposes two structured MCP tools plus a raw-access skill:
+Claude-Mnemo exposes **three structured MCP tools** plus a raw-access skill:
 
-1. `remember` — the single routed write tool for sessions, turns, observations, and memories.
-2. `recall` — the semantic read index. It is paginated (`page` + `pageSize`), truncated (`truncate`, default 200, max 2000), and depth-controlled (`collapsed` / `expanded`).
-3. `mnemo-replay` skill — not a tool; a skill that points the main agent at the raw JSONL transcript and the SQLite database for byte-accurate reads.
+1. **`remember`** — the single routed write tool.
+2. **`recall`** — the semantic content index. Paginated (`page` + `pageSize`), truncated (`truncate`), depth-controlled (`collapsed` / `expanded`).
+3. **`timeline`** — the temporal shape renderer. Single-session; range-based pagination with a 30-turn hard cap. No depth, no `pageSize`.
+4. **`mnemo-replay` skill** — not a tool; a skill that points agents at the raw JSONL transcript and the SQLite database for byte-accurate reads.
 
-A fourth surface, `timeline`, is a separate temporal read path that lands independently and does not change the write path or the raw skill contract.
-
-**Three axes of read access**:
+**Three read axes** map cleanly:
 
 | Axis | Surface | Answers |
 |---|---|---|
-| Content | `recall` | What happened? What changed? Which record should I inspect next? |
+| Content | `recall` | What is this session about? |
 | Temporal | `timeline` | How did this session unfold over time? |
 | Raw | `mnemo-replay` skill | What were the exact transcript bytes and raw tool payloads? |
 
-The structured tools are the only read surfaces available to Mnemosyne's extraction agent. Raw transcript access is a main-agent concern.
+Mnemosyne's extraction agent sees only `remember` + `recall`.
 
 ### `recall`
 
@@ -569,7 +568,7 @@ Current rendering is unified across:
 
 - `recall`
 - SessionStart context
-- future temporal surfaces such as `timeline`
+- `timeline`
 
 The shared renderer produces:
 
@@ -590,6 +589,14 @@ Observation identity is global:
 
 - `O7` is the stable detail id
 - `S1/T2/O*` is only a parent-scoped list selector
+
+#### Timeline rendering
+
+Timeline uses its own renderer in `src/mcp/timeline.ts`, not the shared `format.ts` `renderNode` path. The output shape is a 6-line session header, a two-column turn table, a phases block, and a shape-signals block, so it does not fit the hierarchical renderer used by recall.
+
+Timeline's turn table has two label columns: `prompt` (200 chars, cleaned raw user prompt) and `title` (40 chars, `<type_emoji> <Mnemosyne title>`). The split is intentional: the prompt column preserves the user's ask, while the title column shows Mnemosyne's compressed turn summary.
+
+`TYPE_EMOJI` in `src/mcp/format.ts` is consumed by timeline via a local `TYPE_EMOJI_MAP` copy. Before timeline shipped, that export was orphaned; timeline closes that gap.
 
 ---
 
