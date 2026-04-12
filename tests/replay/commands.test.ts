@@ -92,6 +92,7 @@ function createFixture() {
       message: {
         role: "assistant",
         content: [
+          { type: "text", text: "Need one more check." },
           { type: "thinking", text: "hidden thought" },
           { type: "text", text: "Summary is ready." },
           { type: "tool_use", name: "Grep", input: { pattern: "auth", path: "logs/app.log" } },
@@ -165,6 +166,41 @@ describe("replay-parse CLI", () => {
     expect(omitted).toContain("  → (omitted)");
   });
 
+  test("show truncates long tool input values to 60 characters", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        uuid: "u1",
+        promptId: "p1",
+        timestamp: "2026-04-12T01:50:00.000Z",
+        message: { role: "user", content: "Apply long edit" },
+      },
+      {
+        type: "assistant",
+        uuid: "a1",
+        timestamp: "2026-04-12T01:50:05.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              name: "Edit",
+              input: {
+                file_path: "src/auth.ts",
+                old_string: "x".repeat(100),
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const output = runReplayParseCommand(["show", transcript.path, "T1"]);
+    expect(output).toContain('file_path="src/auth.ts"');
+    expect(output).toContain(`old_string="${"x".repeat(57)}…"`);
+  });
+
   test("grep searches assistant and tool content with type filters", () => {
     const transcript = createFixture();
     directories.push(transcript.directory);
@@ -177,5 +213,29 @@ describe("replay-parse CLI", () => {
     expect(toolHits).toContain("TOOL: Grep");
     expect(toolHits).toContain("3 matches in logs/app.log");
     expect(toolHits).not.toContain("Inspect auth flow");
+  });
+
+  test("grep applies --context, skips thinking by default, and renders tool results with arrows", () => {
+    const transcript = createFixture();
+    directories.push(transcript.directory);
+
+    const noThinking = runReplayParseCommand(["grep", transcript.path, "hidden thought"]);
+    expect(noThinking).toContain("0 matches in 0 turns");
+    expect(noThinking).not.toContain("THINK:");
+
+    const withContext = runReplayParseCommand([
+      "grep",
+      transcript.path,
+      "Summary is ready.",
+      "--context",
+      "1",
+    ]);
+    expect(withContext).toContain("ASST: Need one more check.");
+    expect(withContext).toContain("ASST: Summary is ready.");
+    expect(withContext).toContain("TOOL: Grep");
+
+    const toolResult = runReplayParseCommand(["grep", transcript.path, "3 matches in logs/app.log"]);
+    expect(toolResult).toContain("→ 3 matches in logs/app.log");
+    expect(toolResult).not.toContain("TOOL: 3 matches in logs/app.log");
   });
 });

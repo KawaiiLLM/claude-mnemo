@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvw4i4c" : "dev";
+var BUILD_ID = true ? "0.2.0-mnvw4tlm" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");

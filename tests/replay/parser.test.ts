@@ -5,6 +5,14 @@ import { join } from "node:path";
 
 import { parseReplayFile } from "../../src/replay/parser";
 
+function formatExpectedLocalTime(timestamp: string): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp));
+}
+
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-replay-parse-"));
   const path = join(directory, "session.jsonl");
@@ -159,7 +167,9 @@ describe("parseReplayFile", () => {
     expect(result.turns[0]?.promptId).toBe("p1");
     expect(result.turns[0]?.lineStart).toBe(1);
     expect(result.turns[0]?.timestamp).toBe("2026-04-12T01:50:00.000Z");
-    expect(result.turns[0]?.localTime).toBe("01:50");
+    expect(result.turns[0]?.localTime).toBe(
+      formatExpectedLocalTime("2026-04-12T01:50:00.000Z"),
+    );
     expect(result.turns[0]?.durationMs).toBe(42000);
     expect(result.turns[0]?.messageCount).toBe(4);
     expect(result.turns[0]?.userPrompt).toBe("Inspect auth flow");

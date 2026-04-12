@@ -1,4 +1,5 @@
 import type { ReplayParseResult, TurnMessage } from "../parser";
+import { truncateText } from "../format";
 
 export interface GrepOptions {
   type?: "user" | "assistant" | "tool";
@@ -7,16 +8,22 @@ export interface GrepOptions {
   ignoreCase?: boolean;
 }
 
-function truncate(text: string, preview: number): string {
-  if (preview === 0 || text.length <= preview) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, preview - 1))}…`;
+function isVisibleByDefault(message: TurnMessage): boolean {
+  return (
+    message.type === "user" ||
+    message.type === "assistant" ||
+    message.type === "tool_use" ||
+    message.type === "tool_result"
+  );
+}
+
+function isVisibleInOutput(message: TurnMessage): boolean {
+  return isVisibleByDefault(message);
 }
 
 function matchesType(message: TurnMessage, type: GrepOptions["type"]): boolean {
   if (!type) {
-    return true;
+    return isVisibleByDefault(message);
   }
   if (type === "user") {
     return message.type === "user";
@@ -37,15 +44,15 @@ function includesPattern(value: string, pattern: string, ignoreCase = false): bo
 function renderMatchedMessage(message: TurnMessage, preview: number): string {
   switch (message.type) {
     case "user":
-      return `  USER: ${truncate(message.content, preview)}`;
+      return `  USER: ${truncateText(message.content, preview)}`;
     case "assistant":
-      return `  ASST: ${truncate(message.content, preview)}`;
+      return `  ASST: ${truncateText(message.content, preview)}`;
     case "tool_use":
-      return `  TOOL: ${message.toolName ?? "Tool"} ${truncate(message.content, preview)}`;
+      return `  TOOL: ${message.toolName ?? "Tool"} ${truncateText(message.content, preview)}`;
     case "tool_result":
-      return `  TOOL: ${truncate(message.content, preview)}`;
+      return `  → ${truncateText(message.content, preview)}`;
     case "thinking":
-      return `  THINK: ${truncate(message.content, preview)}`;
+      return `  THINK: ${truncateText(message.content, preview)}`;
   }
 }
 
@@ -58,10 +65,17 @@ export function renderReplayGrep(
   const sections: string[] = [];
   let matchCount = 0;
   let turnCount = 0;
+  const context = options.context ?? 0;
 
   for (const turn of result.turns) {
-    const matchingMessages = turn.messages.filter(
-      (message) =>
+    const visibleMessages = turn.messages
+      .map((message, originalIndex) => ({ message, originalIndex }))
+      .filter(({ message }) => isVisibleInOutput(message));
+
+    const matchingIndexes = visibleMessages
+      .map(({ message }, index) => ({ message, index }))
+      .filter(
+        ({ message }) =>
         matchesType(message, options.type) &&
         includesPattern(
           message.type === "tool_use"
@@ -70,17 +84,32 @@ export function renderReplayGrep(
           pattern,
           options.ignoreCase,
         ),
-    );
+      )
+      .map(({ index }) => index);
 
-    if (matchingMessages.length === 0) {
+    if (matchingIndexes.length === 0) {
       continue;
     }
 
     turnCount += 1;
-    matchCount += matchingMessages.length;
+    matchCount += matchingIndexes.length;
+
+    const indexesToRender =
+      context > 0
+        ? Array.from(
+            new Set(
+              matchingIndexes.flatMap((index) =>
+                visibleMessages
+                  .map((_, candidateIndex) => candidateIndex)
+                  .slice(Math.max(0, index - context), index + context + 1),
+              ),
+            ),
+          )
+        : matchingIndexes;
+
     sections.push(`T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}   ${turn.localTime}`);
-    for (const message of matchingMessages) {
-      sections.push(renderMatchedMessage(message, preview));
+    for (const index of indexesToRender) {
+      sections.push(renderMatchedMessage(visibleMessages[index]!.message, preview));
     }
     sections.push("");
   }

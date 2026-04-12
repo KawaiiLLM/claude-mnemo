@@ -1,17 +1,11 @@
 import type { ReplayParseResult, ReplayParseTurn, TurnMessage } from "../parser";
+import { truncateJsonValue, truncateText } from "../format";
 
 export interface ShowOptions {
   preview?: number;
   noToolResult?: boolean;
   thinking?: boolean;
   raw?: boolean;
-}
-
-function truncate(text: string, preview: number, raw = false): string {
-  if (raw || preview === 0 || text.length <= preview) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, preview - 1))}…`;
 }
 
 function formatToolInput(input: Record<string, unknown> | undefined): string {
@@ -21,7 +15,7 @@ function formatToolInput(input: Record<string, unknown> | undefined): string {
 
   return Object.entries(input)
     .slice(0, 2)
-    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .map(([key, value]) => `${key}=${truncateJsonValue(value, 60)}`)
     .join(", ");
 }
 
@@ -29,14 +23,14 @@ function renderMessage(message: TurnMessage, options: ShowOptions): string[] {
   const preview = options.preview ?? 200;
   switch (message.type) {
     case "user":
-      return ["USER:", truncate(message.content, preview, options.raw), ""];
+      return ["USER:", truncateText(message.content, preview, options.raw), ""];
     case "assistant":
-      return ["ASST:", truncate(message.content, preview, options.raw), ""];
+      return ["ASST:", truncateText(message.content, preview, options.raw), ""];
     case "thinking":
       if (!options.thinking) {
         return [];
       }
-      return ["THINK:", truncate(message.content, preview, options.raw), ""];
+      return ["THINK:", truncateText(message.content, preview, options.raw), ""];
     case "tool_use":
       return [
         `TOOL: ${message.toolName}(${formatToolInput(message.toolInput)})`,
@@ -45,7 +39,7 @@ function renderMessage(message: TurnMessage, options: ShowOptions): string[] {
       return [
         options.noToolResult
           ? "  → (omitted)"
-          : `  → ${truncate(message.content, preview, options.raw)}`,
+          : `  → ${truncateText(message.content, preview, options.raw)}`,
       ];
   }
 }

@@ -25,16 +25,35 @@ __export(cli_exports, {
 });
 module.exports = __toCommonJS(cli_exports);
 
-// src/replay/commands/grep.ts
-function truncate(text, preview) {
-  if (preview === 0 || text.length <= preview) {
+// src/replay/format.ts
+function truncateText(text, preview, raw = false) {
+  if (raw || preview === 0 || text.length <= preview) {
     return text;
   }
   return `${text.slice(0, Math.max(0, preview - 1))}\u2026`;
 }
+function truncateJsonValue(value, preview = 60) {
+  const stringified = JSON.stringify(value);
+  if (stringified.length <= preview) {
+    return stringified;
+  }
+  if (preview >= 4 && stringified.startsWith('"') && stringified.endsWith('"')) {
+    const inner = stringified.slice(1, -1);
+    return `"${inner.slice(0, preview - 3)}\u2026"`;
+  }
+  return truncateText(stringified, preview);
+}
+
+// src/replay/commands/grep.ts
+function isVisibleByDefault(message) {
+  return message.type === "user" || message.type === "assistant" || message.type === "tool_use" || message.type === "tool_result";
+}
+function isVisibleInOutput(message) {
+  return isVisibleByDefault(message);
+}
 function matchesType(message, type) {
   if (!type) {
-    return true;
+    return isVisibleByDefault(message);
   }
   if (type === "user") {
     return message.type === "user";
@@ -53,15 +72,15 @@ function includesPattern(value, pattern, ignoreCase = false) {
 function renderMatchedMessage(message, preview) {
   switch (message.type) {
     case "user":
-      return `  USER: ${truncate(message.content, preview)}`;
+      return `  USER: ${truncateText(message.content, preview)}`;
     case "assistant":
-      return `  ASST: ${truncate(message.content, preview)}`;
+      return `  ASST: ${truncateText(message.content, preview)}`;
     case "tool_use":
-      return `  TOOL: ${message.toolName ?? "Tool"} ${truncate(message.content, preview)}`;
+      return `  TOOL: ${message.toolName ?? "Tool"} ${truncateText(message.content, preview)}`;
     case "tool_result":
-      return `  TOOL: ${truncate(message.content, preview)}`;
+      return `  \u2192 ${truncateText(message.content, preview)}`;
     case "thinking":
-      return `  THINK: ${truncate(message.content, preview)}`;
+      return `  THINK: ${truncateText(message.content, preview)}`;
   }
 }
 function renderReplayGrep(result, pattern, options = {}) {
@@ -69,22 +88,31 @@ function renderReplayGrep(result, pattern, options = {}) {
   const sections = [];
   let matchCount = 0;
   let turnCount = 0;
+  const context = options.context ?? 0;
   for (const turn of result.turns) {
-    const matchingMessages = turn.messages.filter(
-      (message) => matchesType(message, options.type) && includesPattern(
+    const visibleMessages = turn.messages.map((message, originalIndex) => ({ message, originalIndex })).filter(({ message }) => isVisibleInOutput(message));
+    const matchingIndexes = visibleMessages.map(({ message }, index) => ({ message, index })).filter(
+      ({ message }) => matchesType(message, options.type) && includesPattern(
         message.type === "tool_use" ? `${message.toolName ?? ""} ${message.content}` : message.content,
         pattern,
         options.ignoreCase
       )
-    );
-    if (matchingMessages.length === 0) {
+    ).map(({ index }) => index);
+    if (matchingIndexes.length === 0) {
       continue;
     }
     turnCount += 1;
-    matchCount += matchingMessages.length;
+    matchCount += matchingIndexes.length;
+    const indexesToRender = context > 0 ? Array.from(
+      new Set(
+        matchingIndexes.flatMap(
+          (index) => visibleMessages.map((_, candidateIndex) => candidateIndex).slice(Math.max(0, index - context), index + context + 1)
+        )
+      )
+    ) : matchingIndexes;
     sections.push(`T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}   ${turn.localTime}`);
-    for (const message of matchingMessages) {
-      sections.push(renderMatchedMessage(message, preview));
+    for (const index of indexesToRender) {
+      sections.push(renderMatchedMessage(visibleMessages[index].message, preview));
     }
     sections.push("");
   }
@@ -92,7 +120,7 @@ function renderReplayGrep(result, pattern, options = {}) {
 }
 
 // src/replay/commands/ls.ts
-function truncate2(text, preview) {
+function truncate(text, preview) {
   if (preview === 0 || text.length <= preview) {
     return text;
   }
@@ -173,7 +201,7 @@ function renderReplayLs(result, options = {}) {
     ].filter(Boolean);
     const usageSuffix = options.usage ? `    in=${turn.usage.inputTokens} out=${turn.usage.outputTokens} cache=${turn.usage.cacheReadTokens}` : "";
     lines.push(
-      `T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}    ${turn.localTime}  ${statParts.join(" ")}${statParts.length > 0 ? "  " : ""}${truncate2(turn.userPrompt, preview)}${usageSuffix}`
+      `T${String(turn.promptNumber).padStart(3, " ")}  L${turn.lineStart}    ${turn.localTime}  ${statParts.join(" ")}${statParts.length > 0 ? "  " : ""}${truncate(turn.userPrompt, preview)}${usageSuffix}`
     );
     for (const boundary of result.compacts) {
       if (boundary.afterPromptNumber === turn.promptNumber && selectedPromptNumbers.has(turn.promptNumber + 1)) {
@@ -185,37 +213,31 @@ function renderReplayLs(result, options = {}) {
 }
 
 // src/replay/commands/show.ts
-function truncate3(text, preview, raw = false) {
-  if (raw || preview === 0 || text.length <= preview) {
-    return text;
-  }
-  return `${text.slice(0, Math.max(0, preview - 1))}\u2026`;
-}
 function formatToolInput(input) {
   if (!input) {
     return "";
   }
-  return Object.entries(input).slice(0, 2).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(", ");
+  return Object.entries(input).slice(0, 2).map(([key, value]) => `${key}=${truncateJsonValue(value, 60)}`).join(", ");
 }
 function renderMessage(message, options) {
   const preview = options.preview ?? 200;
   switch (message.type) {
     case "user":
-      return ["USER:", truncate3(message.content, preview, options.raw), ""];
+      return ["USER:", truncateText(message.content, preview, options.raw), ""];
     case "assistant":
-      return ["ASST:", truncate3(message.content, preview, options.raw), ""];
+      return ["ASST:", truncateText(message.content, preview, options.raw), ""];
     case "thinking":
       if (!options.thinking) {
         return [];
       }
-      return ["THINK:", truncate3(message.content, preview, options.raw), ""];
+      return ["THINK:", truncateText(message.content, preview, options.raw), ""];
     case "tool_use":
       return [
         `TOOL: ${message.toolName}(${formatToolInput(message.toolInput)})`
       ];
     case "tool_result":
       return [
-        options.noToolResult ? "  \u2192 (omitted)" : `  \u2192 ${truncate3(message.content, preview, options.raw)}`
+        options.noToolResult ? "  \u2192 (omitted)" : `  \u2192 ${truncateText(message.content, preview, options.raw)}`
       ];
   }
 }
