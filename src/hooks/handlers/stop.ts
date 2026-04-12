@@ -5,6 +5,7 @@ import { enqueueQueueItem } from "../../db/pending-queue";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { extractAssistantResponse } from "../../shared/transcript-parser";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
+import { detectAndCleanSidechainTurns } from "../../worker/rollback";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -179,6 +180,15 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       updatedAtEpoch: epoch,
       completedAtEpoch: epoch,
     });
+
+    if (input.transcriptPath) {
+      detectAndCleanSidechainTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        epoch,
+      );
+    }
 
     await notifyWorkerWake(
       dependencies.workerClientDeps,

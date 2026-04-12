@@ -610,15 +610,12 @@ describe("worker server", () => {
       completedAtEpoch: null,
     }).id;
 
-    db.query(
-      `
-        INSERT INTO pending_queue (kind, target_id, session_db_id, claimed_at_epoch, enqueued_at_epoch)
-        VALUES
-          ('obs', 1, ?, NULL, 1),
-          ('turn-stop', 2, ?, NULL, 2),
-          ('obs', 3, ?, NULL, 3)
-      `,
-    ).run(compactSessionId, compactSessionId, otherSessionId);
+    const compactTurnId = createTurn(db, compactSessionId, 1);
+    const compactObservationId = queueObs(db, compactSessionId, compactTurnId, 1, "compact");
+    queueTurnStop(db, compactSessionId, compactTurnId, 2);
+
+    const otherTurnId = createTurn(db, otherSessionId, 1);
+    queueObs(db, otherSessionId, otherTurnId, 3, "other");
 
     const processed: string[] = [];
     const pushed: number[] = [];
@@ -659,10 +656,13 @@ describe("worker server", () => {
 
     await core.handleCompact(compactSessionId, "/tmp/session.jsonl");
 
-    expect(processed).toEqual(["batch:1:2"]);
+    expect(processed).toEqual([`batch:${compactObservationId}:${compactTurnId}`]);
     expect(pushed).toEqual([compactSessionId]);
     expect(closed).toEqual([compactSessionId]);
-    expect(sentPrompts).toEqual([`batch:1:2`, `summary:${compactSessionId}`]);
+    expect(sentPrompts).toEqual([
+      `batch:${compactObservationId}:${compactTurnId}`,
+      `summary:${compactSessionId}`,
+    ]);
     expect(
       db
         .query<{ count: number }, []>(

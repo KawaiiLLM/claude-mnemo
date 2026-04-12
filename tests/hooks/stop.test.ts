@@ -281,4 +281,54 @@ describe("handleStopHook", () => {
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });
+
+  test("marks current sidechain turns undone and removes their pending queue work", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'p1', 'active', 'Draft approach', 120)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          role: "user",
+          promptId: "p1",
+          permissionMode: "default",
+          isSidechain: true,
+          content: [{ type: "text", text: "Draft approach" }],
+        }),
+        JSON.stringify({
+          role: "assistant",
+          isSidechain: true,
+          content: [{ type: "text", text: "Discarded branch" }],
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Discarded branch",
+      }),
+    );
+
+    const turn = getTurn(db, sessionId, 1)!;
+    expect(turn.status).toBe("undone");
+    expect(turn.tags).toContain("rollback:pending");
+    expect(getPendingQueueRows(db)).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
 });

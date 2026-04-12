@@ -319,4 +319,56 @@ describe("handleSessionInitHook", () => {
 
     expect(getTurn(db, session.id, 3)?.userPrompt).toBe("Third real prompt");
   });
+
+  test("marks prior sidechain turns undone and still inserts the new active turn", async () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        isSidechain: true,
+        content: [{ type: "text", text: "Draft approach" }],
+      },
+      {
+        role: "assistant",
+        isSidechain: true,
+        content: [{ type: "text", text: "Discarded branch" }],
+      },
+    ]);
+    transcriptDirectories.push(transcript.directory);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 5000,
+      updatedAtEpoch: 5000,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, created_at_epoch, updated_at_epoch
+      ) VALUES (?, 1, 'p1', 'extracted', 'Draft approach', 'Discarded branch', 5000, 5000)`,
+    ).run(session.id);
+
+    const handler = createSessionInitHandler({
+      db,
+      now: () => 5001,
+    });
+
+    await handler(
+      createInput({
+        prompt: "Final approach",
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(getTurn(db, session.id, 1)?.status).toBe("undone");
+    expect(getTurn(db, session.id, 1)?.tags).toContain("rollback:pending");
+    expect(getTurn(db, session.id, 2)?.status).toBe("active");
+    expect(getTurn(db, session.id, 2)?.userPrompt).toBe("Final approach");
+  });
 });

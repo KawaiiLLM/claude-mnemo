@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { getTurnsForSession } from "../../db/turns";
 import { countUserPromptsInTranscript } from "../../shared/transcript-parser";
+import { detectAndCleanSidechainTurns } from "../../worker/rollback";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
@@ -54,6 +55,15 @@ export function createSessionInitHandler(
       updatedAtEpoch: now(),
       completedAtEpoch: existingSession?.completedAtEpoch ?? null,
     });
+
+    if (input.transcriptPath) {
+      detectAndCleanSidechainTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        now(),
+      );
+    }
 
     const promptNumber = input.transcriptPath
       ? countUserPromptsInTranscript(input.transcriptPath) + 1

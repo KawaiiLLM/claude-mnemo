@@ -18,6 +18,8 @@ import {
   updateCompactAnchor,
   updateLastAgentSessionId,
 } from "../db/sessions";
+import { getObservation } from "../db/observations";
+import { getTurnById } from "../db/turns";
 import { parseReplayTranscript } from "../shared/transcript-parser";
 import {
   claimNextItem,
@@ -29,6 +31,11 @@ import {
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
 import { WORKER_PID_PATH, WORKER_STARTING_PATH } from "../shared/paths";
+import {
+  detectAndCleanSidechainTurns,
+  getPendingRollbackTurns,
+  markRollbackTurnsNotified,
+} from "./rollback";
 import { createWorkerProcessors } from "./processors";
 import {
   createWorkerQuerySession,
@@ -187,90 +194,33 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-function markSidechainTurnsUndone(
-  db: Database,
-  sessionDbId: number,
-  transcriptPath: string,
-  updatedAtEpoch: number,
-): number[] {
-  const sidechainTurns = parseReplayTranscript(transcriptPath).filter(
-    (turn) => turn.isSidechain,
-  );
-
-  if (sidechainTurns.length === 0) {
-    return [];
-  }
-
-  const promptIds = sidechainTurns
-    .map((turn) => turn.promptId)
-    .filter((value): value is string => Boolean(value));
-  const promptNumbers = sidechainTurns.map((turn) => turn.promptNumber);
-  const matchClauses: string[] = [];
-  const params: Array<number | string> = [sessionDbId];
-
-  if (promptIds.length > 0) {
-    matchClauses.push(
-      `content_prompt_id IN (${promptIds.map(() => "?").join(", ")})`,
-    );
-    params.push(...promptIds);
-  }
-
-  if (promptNumbers.length > 0) {
-    matchClauses.push(
-      `prompt_number IN (${promptNumbers.map(() => "?").join(", ")})`,
-    );
-    params.push(...promptNumbers);
-  }
-
-  if (matchClauses.length === 0) {
-    return [];
-  }
-
-  const turnIds = db
-    .query<{ id: number }, Array<number | string>>(
-      `
-        SELECT id
-        FROM turns
-        WHERE session_id = ?
-          AND (${matchClauses.join(" OR ")})
-      `,
-    )
-    .all(...params)
-    .map((row) => row.id);
-
-  if (turnIds.length === 0) {
-    return [];
-  }
-
-  db.query<unknown, [number, ...number[]]>(
-    `
-      UPDATE turns
-      SET status = 'undone',
-          updated_at_epoch = ?
-      WHERE id IN (${turnIds.map(() => "?").join(", ")})
-    `,
-  ).run(updatedAtEpoch, ...turnIds);
-
-  return turnIds;
+function buildRollbackEnvelope(promptNumbers: number[]): string {
+  const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
+  return `<rollback>
+  ${labels} were rolled back (sidechain). Observations extracted from
+  these turns should be considered invalid.
+</rollback>`;
 }
 
-function cleanupUndoneTurnTasks(
+function pruneBufferedUndoneItems(
   db: Database,
-  sessionDbId: number,
-  turnIds: number[],
-): void {
-  if (turnIds.length === 0) {
-    return;
+  items: PendingQueueItem[],
+): PendingQueueItem[] {
+  const activeItems: PendingQueueItem[] = [];
+
+  for (const item of items) {
+    const observation = getObservation(db, item.targetId);
+    const turn = observation ? getTurnById(db, observation.turnId) : null;
+
+    if (!observation || !turn || turn.status === "undone") {
+      deleteQueueItem(db, item.seq);
+      continue;
+    }
+
+    activeItems.push(item);
   }
 
-  db.query<unknown, [number, ...number[]]>(
-    `
-      DELETE FROM pending_queue
-      WHERE session_db_id = ?
-        AND kind = 'turn-stop'
-        AND target_id IN (${turnIds.map(() => "?").join(", ")})
-    `,
-  ).run(sessionDbId, ...turnIds);
+  return activeItems;
 }
 
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
@@ -337,13 +287,33 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       processingLock: Promise.resolve(),
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
+        const pendingRollbacks = getPendingRollbackTurns(
+          deps.db,
+          state!.sessionDbId,
+        );
+        const promptWithRollback =
+          pendingRollbacks.length > 0
+            ? `${buildRollbackEnvelope(
+                pendingRollbacks.map((turn) => turn.promptNumber),
+              )}\n\n${prompt}`
+            : prompt;
         state!.lastActivity = nowMs();
         state!.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(prompt);
+        const result = await runtime.sendPrompt(promptWithRollback);
         state!.lastMessageAt = nowMs();
         state!.queryPid = runtime.queryPid;
         state!.agentSessionId = result.session_id;
         state!.initialized = true;
+        if (pendingRollbacks.length > 0) {
+          try {
+            markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
+          } catch (error) {
+            logger.error?.("failed to mark rollback turns notified", {
+              sessionDbId: state!.sessionDbId,
+              error,
+            });
+          }
+        }
       },
     };
     sessions.set(sessionDbId, state);
@@ -485,8 +455,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     sessionDbId: number,
     turnStopItem?: PendingQueueItem,
   ): Promise<void> {
-    const bufferedItems = [...(buffers.get(sessionDbId)?.items ?? [])];
+    const bufferedItems = pruneBufferedUndoneItems(
+      deps.db,
+      [...(buffers.get(sessionDbId)?.items ?? [])],
+    );
     if (bufferedItems.length === 0 && !turnStopItem) {
+      clearBuffer(sessionDbId);
       return;
     }
 
@@ -625,13 +599,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     try {
       if (transcriptPath) {
-        const undoneTurnIds = markSidechainTurnsUndone(
+        detectAndCleanSidechainTurns(
           deps.db,
           sessionDbId,
           transcriptPath,
           now(),
         );
-        cleanupUndoneTurnTasks(deps.db, sessionDbId, undoneTurnIds);
       }
 
       try {

@@ -455,18 +455,67 @@ function readAllTranscriptEntries(transcriptPath) {
       lineNumber: index + 1
     });
   });
-  const seenUuids = /* @__PURE__ */ new Set();
+  const uuidToIndex = /* @__PURE__ */ new Map();
   const deduped = [];
   for (const entry of entries) {
     if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
         continue;
       }
-      seenUuids.add(entry.uuid);
+      uuidToIndex.set(entry.uuid, deduped.length);
     }
     deduped.push(entry);
   }
   return deduped;
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
 }
 function normalizeEntry(raw) {
   const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
@@ -480,8 +529,8 @@ function normalizeEntry(raw) {
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
     usage: message?.usage && typeof message.usage === "object" ? {
       inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
       outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
@@ -616,7 +665,7 @@ function createEmptyUsage() {
     cacheCreationTokens: 0
   };
 }
-function mergeUsage(target, entry) {
+function mergeUsage2(target, entry) {
   target.inputTokens += entry.usage?.inputTokens ?? 0;
   target.outputTokens += entry.usage?.outputTokens ?? 0;
   target.cacheReadTokens += entry.usage?.cacheReadTokens ?? 0;
@@ -697,7 +746,7 @@ function parseReplayFile(transcriptPath) {
       continue;
     }
     if (entry.role === "assistant") {
-      mergeUsage(currentTurn.usage, entry);
+      mergeUsage2(currentTurn.usage, entry);
       for (const block of getContentBlocks2(entry)) {
         if (block.type === "thinking" && block.text) {
           currentTurn.messages.push({

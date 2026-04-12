@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvxvplj" : "dev";
+var BUILD_ID = true ? "0.2.0-mnw2l4hv" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -745,201 +745,209 @@ function updateLastAgentSessionId(db, sessionId, agentSessionId) {
   ).run(agentSessionId, sessionId);
 }
 
-// src/shared/transcript-parser.ts
-var import_node_fs2 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
+// src/db/observations.ts
+var OBSERVATION_SELECT = `
+  SELECT
+    id,
+    turn_id AS turnId,
+    tool_name AS toolName,
+    tool_input AS toolInput,
+    tool_result AS toolResult,
+    status,
+    title,
+    content,
+    created_at_epoch AS createdAtEpoch
+  FROM observations
+`;
+function mapObservationRow(row) {
+  if (!row) {
+    return null;
   }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+  return row;
 }
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
+function updateObservation(db, observationId, input) {
+  const existing = getObservation(db, observationId);
+  if (!existing) {
+    return null;
   }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  const updated = mapObservationRow(
+    db.query(
+      `
+          UPDATE observations
+          SET
+            title = ?,
+            content = ?,
+            status = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            turn_id AS turnId,
+            tool_name AS toolName,
+            tool_input AS toolInput,
+            tool_result AS toolResult,
+            status,
+            title,
+            content,
+            created_at_epoch AS createdAtEpoch
+        `
+    ).get(
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.status ?? existing.status,
+      observationId
+    ) ?? null
   );
-  return { assistantText, toolCalls };
+  if (!updated) {
+    return null;
+  }
+  if (updated.status === "extracted") {
+    indexObservationToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
+    ).run(observationId);
+  }
+  return updated;
 }
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
+function getObservationsForTurn(db, turnId) {
+  return db.query(
+    `${OBSERVATION_SELECT} WHERE turn_id = ? ORDER BY id ASC`
+  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs2.existsSync)(transcriptPath)) {
+function getObservation(db, observationId) {
+  return mapObservationRow(
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+  );
+}
+
+// src/db/turns.ts
+var TURN_SELECT = `
+  SELECT
+    id,
+    session_id AS sessionId,
+    prompt_number AS promptNumber,
+    content_prompt_id AS contentPromptId,
+    transcript_line_start AS transcriptLineStart,
+    status,
+    user_prompt AS userPrompt,
+    assistant_response AS assistantResponse,
+    title,
+    content,
+    insight,
+    type,
+    tags,
+    files_read AS filesRead,
+    files_modified AS filesModified,
+    tool_call_count AS toolCallCount,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch
+  FROM turns
+`;
+function stringifyArray(values) {
+  return JSON.stringify(values);
+}
+function parseJsonArray2(value) {
+  if (!value) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs2.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  const entries = [];
-  rawTranscript.split("\n").forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: index + 1
-    });
-  });
-  const seenUuids = /* @__PURE__ */ new Set();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
-        continue;
-      }
-      seenUuids.add(entry.uuid);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
+  return JSON.parse(value);
 }
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+function mapTurnRow(row) {
+  if (!row) {
+    return null;
+  }
   return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
+    ...row,
+    tags: parseJsonArray2(row.tags),
+    filesRead: parseJsonArray2(row.filesRead),
+    filesModified: parseJsonArray2(row.filesModified)
   };
 }
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
+function getTurn(db, sessionId, promptNumber) {
+  return mapTurnRow(
+    db.query(
+      `${TURN_SELECT} WHERE session_id = ? AND prompt_number = ?`
+    ).get(sessionId, promptNumber) ?? null
+  );
 }
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain)
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
+function getTurnById(db, turnId) {
+  return mapTurnRow(
+    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
+  );
+}
+function updateTurnById(db, turnId, input) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
   }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
+  const updated = mapTurnRow(
+    db.query(
+      `
+          UPDATE turns
+          SET
+            status = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            transcript_line_start = ?,
+            tags = ?,
+            files_read = ?,
+            files_modified = ?,
+            tool_call_count = ?,
+            updated_at_epoch = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            session_id AS sessionId,
+            prompt_number AS promptNumber,
+            content_prompt_id AS contentPromptId,
+            status,
+            user_prompt AS userPrompt,
+            assistant_response AS assistantResponse,
+            title,
+            content,
+            insight,
+            type,
+            transcript_line_start AS transcriptLineStart,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            tool_call_count AS toolCallCount,
+            created_at_epoch AS createdAtEpoch,
+            updated_at_epoch AS updatedAtEpoch
+        `
+    ).get(
+      input.status ?? existing.status,
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.insight ?? existing.insight,
+      input.type ?? existing.type,
+      input.transcriptLineStart ?? existing.transcriptLineStart,
+      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(input.filesRead ?? existing.filesRead),
+      stringifyArray(input.filesModified ?? existing.filesModified),
+      input.toolCallCount ?? existing.toolCallCount,
+      input.updatedAtEpoch ?? existing.updatedAtEpoch,
+      turnId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  if (updated.status === "extracted") {
+    indexTurnToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
+    ).run(turnId);
+  }
+  return updated;
+}
+function getTurnsForSession(db, sessionId) {
+  return db.query(
+    `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
+  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 
 // src/db/pending-queue.ts
@@ -1262,209 +1270,392 @@ function initializeDatabase(db) {
   }
 }
 
-// src/db/observations.ts
-var OBSERVATION_SELECT = `
-  SELECT
-    id,
-    turn_id AS turnId,
-    tool_name AS toolName,
-    tool_input AS toolInput,
-    tool_result AS toolResult,
-    status,
-    title,
-    content,
-    created_at_epoch AS createdAtEpoch
-  FROM observations
-`;
-function mapObservationRow(row) {
-  if (!row) {
-    return null;
-  }
-  return row;
+// src/shared/transcript-parser.ts
+var import_node_fs2 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
-function updateObservation(db, observationId, input) {
-  const existing = getObservation(db, observationId);
-  if (!existing) {
-    return null;
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
   }
-  const updated = mapObservationRow(
-    db.query(
-      `
-          UPDATE observations
-          SET
-            title = ?,
-            content = ?,
-            status = ?
-          WHERE id = ?
-          RETURNING
-            id,
-            turn_id AS turnId,
-            tool_name AS toolName,
-            tool_input AS toolInput,
-            tool_result AS toolResult,
-            status,
-            title,
-            content,
-            created_at_epoch AS createdAtEpoch
-        `
-    ).get(
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      input.status ?? existing.status,
-      observationId
-    ) ?? null
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
   );
-  if (!updated) {
-    return null;
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
   }
-  if (updated.status === "extracted") {
-    indexObservationToFTS(db, updated);
-  } else {
-    db.query(
-      "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
-    ).run(observationId);
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
   }
-  return updated;
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
 }
-function getObservationsForTurn(db, turnId) {
-  return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? ORDER BY id ASC`
-  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
-}
-function getObservation(db, observationId) {
-  return mapObservationRow(
-    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
-  );
-}
-
-// src/db/turns.ts
-var TURN_SELECT = `
-  SELECT
-    id,
-    session_id AS sessionId,
-    prompt_number AS promptNumber,
-    content_prompt_id AS contentPromptId,
-    transcript_line_start AS transcriptLineStart,
-    status,
-    user_prompt AS userPrompt,
-    assistant_response AS assistantResponse,
-    title,
-    content,
-    insight,
-    type,
-    tags,
-    files_read AS filesRead,
-    files_modified AS filesModified,
-    tool_call_count AS toolCallCount,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch
-  FROM turns
-`;
-function stringifyArray(values) {
-  return JSON.stringify(values);
-}
-function parseJsonArray2(value) {
-  if (!value) {
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs2.existsSync)(transcriptPath)) {
     return [];
   }
-  return JSON.parse(value);
+  const rawTranscript = (0, import_node_fs2.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  const entries = [];
+  rawTranscript.split("\n").forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: index + 1
+    });
+  });
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
 }
-function mapTurnRow(row) {
-  if (!row) {
-    return null;
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
   }
   return {
-    ...row,
-    tags: parseJsonArray2(row.tags),
-    filesRead: parseJsonArray2(row.filesRead),
-    filesModified: parseJsonArray2(row.filesModified)
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
   };
 }
-function getTurn(db, sessionId, promptNumber) {
-  return mapTurnRow(
-    db.query(
-      `${TURN_SELECT} WHERE session_id = ? AND prompt_number = ?`
-    ).get(sessionId, promptNumber) ?? null
-  );
-}
-function getTurnById(db, turnId) {
-  return mapTurnRow(
-    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
-  );
-}
-function updateTurnById(db, turnId, input) {
-  const existing = getTurnById(db, turnId);
-  if (!existing) {
-    return null;
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
   }
-  const updated = mapTurnRow(
-    db.query(
-      `
-          UPDATE turns
-          SET
-            status = ?,
-            title = ?,
-            content = ?,
-            insight = ?,
-            type = ?,
-            transcript_line_start = ?,
-            tags = ?,
-            files_read = ?,
-            files_modified = ?,
-            tool_call_count = ?,
-            updated_at_epoch = ?
-          WHERE id = ?
-          RETURNING
-            id,
-            session_id AS sessionId,
-            prompt_number AS promptNumber,
-            content_prompt_id AS contentPromptId,
-            status,
-            user_prompt AS userPrompt,
-            assistant_response AS assistantResponse,
-            title,
-            content,
-            insight,
-            type,
-            transcript_line_start AS transcriptLineStart,
-            tags,
-            files_read AS filesRead,
-            files_modified AS filesModified,
-            tool_call_count AS toolCallCount,
-            created_at_epoch AS createdAtEpoch,
-            updated_at_epoch AS updatedAtEpoch
-        `
-    ).get(
-      input.status ?? existing.status,
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      input.insight ?? existing.insight,
-      input.type ?? existing.type,
-      input.transcriptLineStart ?? existing.transcriptLineStart,
-      stringifyArray(input.tags ?? existing.tags),
-      stringifyArray(input.filesRead ?? existing.filesRead),
-      stringifyArray(input.filesModified ?? existing.filesModified),
-      input.toolCallCount ?? existing.toolCallCount,
-      input.updatedAtEpoch ?? existing.updatedAtEpoch,
-      turnId
-    ) ?? null
-  );
-  if (!updated) {
-    return null;
-  }
-  if (updated.status === "extracted") {
-    indexTurnToFTS(db, updated);
-  } else {
-    db.query(
-      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
-    ).run(turnId);
-  }
-  return updated;
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
 }
-function getTurnsForSession(db, sessionId) {
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain)
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+
+// src/worker/rollback.ts
+var ROLLBACK_PENDING_TAG = "rollback:pending";
+var ROLLBACK_NOTIFIED_TAG = "rollback:notified";
+function addRollbackPendingTag(tags) {
+  if (tags.includes(ROLLBACK_PENDING_TAG) || tags.includes(ROLLBACK_NOTIFIED_TAG)) {
+    return tags;
+  }
+  return [...tags, ROLLBACK_PENDING_TAG];
+}
+function markRollbackNotifiedTags(tags) {
+  const withoutPending = tags.filter((tag) => tag !== ROLLBACK_PENDING_TAG);
+  if (withoutPending.includes(ROLLBACK_NOTIFIED_TAG)) {
+    return withoutPending;
+  }
+  return [...withoutPending, ROLLBACK_NOTIFIED_TAG];
+}
+function deleteObservationFtsRows(db, observationIds) {
+  if (observationIds.length === 0) {
+    return;
+  }
+  const deleteStatement = db.query(
+    "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
+  );
+  for (const observationId of observationIds) {
+    deleteStatement.run(observationId);
+  }
+}
+function selectObservationIdsForTurns(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
   return db.query(
-    `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
-  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+    `
+        SELECT id
+        FROM observations
+        WHERE turn_id IN (${turnIds.map(() => "?").join(", ")})
+        ORDER BY id ASC
+      `
+  ).all(...turnIds).map((row) => row.id);
+}
+function deleteTurnStopQueueItems(db, sessionDbId, turnIds) {
+  if (turnIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM pending_queue
+      WHERE session_db_id = ?
+        AND kind = 'turn-stop'
+        AND target_id IN (${turnIds.map(() => "?").join(", ")})
+    `
+  ).run(sessionDbId, ...turnIds);
+}
+function deleteObservationQueueItems(db, sessionDbId, observationIds) {
+  if (observationIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM pending_queue
+      WHERE session_db_id = ?
+        AND kind = 'obs'
+        AND target_id IN (${observationIds.map(() => "?").join(", ")})
+    `
+  ).run(sessionDbId, ...observationIds);
+}
+function deleteObservationsForTurns(db, turnIds) {
+  if (turnIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM observations
+      WHERE turn_id IN (${turnIds.map(() => "?").join(", ")})
+    `
+  ).run(...turnIds);
+}
+function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
+  const parsedTurns = parseReplayTranscript(transcriptPath);
+  const newestSidechainChain = [];
+  for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
+    const parsedTurn = parsedTurns[index];
+    if (!parsedTurn.isSidechain) {
+      break;
+    }
+    newestSidechainChain.unshift(parsedTurn);
+  }
+  if (newestSidechainChain.length === 0) {
+    return [];
+  }
+  const liveTurns = getTurnsForSession(db, sessionDbId).filter(
+    (turn) => turn.status !== "undone"
+  );
+  const byPromptId = new Map(
+    liveTurns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn])
+  );
+  const byPromptNumber = new Map(liveTurns.map((turn) => [turn.promptNumber, turn]));
+  const matched = /* @__PURE__ */ new Map();
+  for (const parsedTurn of newestSidechainChain) {
+    const turn = (parsedTurn.promptId ? byPromptId.get(parsedTurn.promptId) : void 0) ?? byPromptNumber.get(parsedTurn.promptNumber);
+    if (turn) {
+      matched.set(turn.id, turn);
+    }
+  }
+  return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
+}
+function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
+  const matchedTurns = resolveSidechainTurns(db, sessionDbId, transcriptPath);
+  if (matchedTurns.length === 0) {
+    return [];
+  }
+  const turnIds = matchedTurns.map((turn) => turn.id);
+  const observationIds = selectObservationIdsForTurns(db, turnIds);
+  db.transaction(() => {
+    deleteTurnStopQueueItems(db, sessionDbId, turnIds);
+    deleteObservationQueueItems(db, sessionDbId, observationIds);
+    deleteObservationFtsRows(db, observationIds);
+    deleteObservationsForTurns(db, turnIds);
+    for (const turn of matchedTurns) {
+      updateTurnById(db, turn.id, {
+        status: "undone",
+        tags: addRollbackPendingTag(turn.tags),
+        updatedAtEpoch
+      });
+    }
+  })();
+  return matchedTurns.map((turn) => turn.promptNumber);
+}
+function getPendingRollbackTurns(db, sessionDbId) {
+  return getTurnsForSession(db, sessionDbId).filter(
+    (turn) => turn.status === "undone" && turn.tags.includes(ROLLBACK_PENDING_TAG)
+  ).sort((left, right) => left.promptNumber - right.promptNumber);
+}
+function markRollbackTurnsNotified(db, turns, updatedAtEpoch) {
+  for (const turn of turns) {
+    updateTurnById(db, turn.id, {
+      tags: markRollbackNotifiedTags(turn.tags),
+      updatedAtEpoch
+    });
+  }
 }
 
 // src/worker/processors.ts
@@ -1519,6 +1710,34 @@ function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSt
   files_read: ${filesRead.join(", ")}
   files_modified: ${filesModified.join(", ")}
 </session>`;
+}
+function buildBatchTurnBlock(turnId, prompt, response, filesRead, filesModified, toolCallCount) {
+  return `  <turn id="T${turnId}">
+    prompt: ${truncateMiddle(prompt, 1e3)}
+    response: ${truncateMiddle(response, 1e3)}
+    files_read: ${filesRead.join(", ")}
+    files_modified: ${filesModified.join(", ")}
+    tool_call_count: ${toolCallCount}
+  </turn>`;
+}
+function buildBatchPrompt(args) {
+  const priorSessionBlock = args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps ? `
+<prior_session>
+  title: ${args.priorTitle ?? ""}
+  content: ${args.priorContent ?? ""}
+  insight: ${args.priorInsight ?? ""}
+  next_steps: ${args.priorNextSteps ?? ""}
+</prior_session>
+` : "";
+  const body = [...args.obsBlocks, args.turnBlock ?? ""].filter(Boolean).join("\n");
+  return `<session id="S${args.sessionId}">
+  project: ${args.project}
+  user_request: ${args.firstUserPrompt ?? ""}
+</session>
+${priorSessionBlock}
+<batch>
+${body}
+</batch>`;
 }
 function safeJsonParse(value) {
   if (!value) {
@@ -1695,6 +1914,75 @@ function createWorkerProcessors(db) {
       );
       state.initialized = true;
     },
+    async processBatch(state, items, turnStopItem) {
+      if (items.length === 0 && !turnStopItem) {
+        return;
+      }
+      const sessionId = turnStopItem?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
+      const session = getSession(db, sessionId);
+      if (!session) {
+        return;
+      }
+      const firstTurn = db.query(
+        `
+            SELECT user_prompt
+            FROM turns
+            WHERE session_id = ?
+            ORDER BY prompt_number ASC
+            LIMIT 1
+          `
+      ).get(session.id);
+      const obsBlocks = items.map((item) => {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          return null;
+        }
+        return buildObsBlock(
+          observation.id,
+          observation.toolName ?? "Tool",
+          observation.toolInput,
+          observation.toolResult
+        );
+      }).filter((value) => value !== null);
+      let turnBlock = null;
+      if (turnStopItem) {
+        const turn = getTurnById(db, turnStopItem.targetId);
+        if (turn && turn.status === "active") {
+          const aggregate = aggregateTurnFiles(db, turn.id);
+          updateTurnById(db, turn.id, {
+            filesRead: aggregate.filesRead,
+            filesModified: aggregate.filesModified,
+            toolCallCount: aggregate.toolCallCount,
+            updatedAtEpoch: Math.floor(Date.now() / 1e3)
+          });
+          turnBlock = buildBatchTurnBlock(
+            turn.id,
+            turn.userPrompt,
+            turn.assistantResponse,
+            aggregate.filesRead,
+            aggregate.filesModified,
+            aggregate.toolCallCount
+          );
+        }
+      }
+      if (obsBlocks.length === 0 && !turnBlock) {
+        return;
+      }
+      await state.pushMessage(
+        buildBatchPrompt({
+          sessionId: session.id,
+          project: session.project,
+          firstUserPrompt: firstTurn?.user_prompt ?? null,
+          priorTitle: session.title,
+          priorContent: session.content,
+          priorInsight: session.insight,
+          priorNextSteps: session.nextSteps,
+          obsBlocks,
+          turnBlock
+        })
+      );
+      state.initialized = true;
+    },
     async pushSessionSummaryPrompt(state, sessionId) {
       const session = getSession(db, sessionId);
       if (!session) {
@@ -1719,7 +2007,7 @@ function createWorkerProcessors(db) {
 var import_node_child_process2 = require("node:child_process");
 var import_node_fs4 = require("node:fs");
 
-// node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+// ../../node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
 var import_url = require("url");
 var import_events = require("events");
@@ -22521,7 +22809,7 @@ function query({
   return queryInstance;
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../node_modules/zod/v4/classic/external.js
 var external_exports = {};
 __export(external_exports, {
   $brand: () => $brand,
@@ -22762,7 +23050,7 @@ __export(external_exports, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/core/index.js
+// ../../node_modules/zod/v4/core/index.js
 var core_exports2 = {};
 __export(core_exports2, {
   $ZodAny: () => $ZodAny,
@@ -23040,7 +23328,7 @@ __export(core_exports2, {
   version: () => version2
 });
 
-// node_modules/zod/v4/core/core.js
+// ../../node_modules/zod/v4/core/core.js
 var NEVER2 = Object.freeze({
   status: "aborted"
 });
@@ -23115,7 +23403,7 @@ function config2(newConfig) {
   return globalConfig2;
 }
 
-// node_modules/zod/v4/core/util.js
+// ../../node_modules/zod/v4/core/util.js
 var util_exports = {};
 __export(util_exports, {
   BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES2,
@@ -23794,7 +24082,7 @@ var Class2 = class {
   }
 };
 
-// node_modules/zod/v4/core/errors.js
+// ../../node_modules/zod/v4/core/errors.js
 var initializer3 = (inst, def) => {
   inst.name = "$ZodError";
   Object.defineProperty(inst, "_zod", {
@@ -23930,7 +24218,7 @@ function prettifyError(error49) {
   return lines.join("\n");
 }
 
-// node_modules/zod/v4/core/parse.js
+// ../../node_modules/zod/v4/core/parse.js
 var _parse2 = (_Err) => (schema, value, _ctx, _params) => {
   const ctx = _ctx ? Object.assign(_ctx, { async: false }) : { async: false };
   const result = schema._zod.run({ value, issues: [] }, ctx);
@@ -24018,7 +24306,7 @@ var _safeDecodeAsync = (_Err) => async (schema, value, _ctx) => {
 };
 var safeDecodeAsync = /* @__PURE__ */ _safeDecodeAsync($ZodRealError2);
 
-// node_modules/zod/v4/core/regexes.js
+// ../../node_modules/zod/v4/core/regexes.js
 var regexes_exports = {};
 __export(regexes_exports, {
   base64: () => base642,
@@ -24175,7 +24463,7 @@ var sha512_hex = /^[0-9a-fA-F]{128}$/;
 var sha512_base64 = /* @__PURE__ */ fixedBase64(86, "==");
 var sha512_base64url = /* @__PURE__ */ fixedBase64url(86);
 
-// node_modules/zod/v4/core/checks.js
+// ../../node_modules/zod/v4/core/checks.js
 var $ZodCheck2 = /* @__PURE__ */ $constructor2("$ZodCheck", (inst, def) => {
   var _a2;
   inst._zod ?? (inst._zod = {});
@@ -24723,7 +25011,7 @@ var $ZodCheckOverwrite2 = /* @__PURE__ */ $constructor2("$ZodCheckOverwrite", (i
   };
 });
 
-// node_modules/zod/v4/core/doc.js
+// ../../node_modules/zod/v4/core/doc.js
 var Doc2 = class {
   constructor(args = []) {
     this.content = [];
@@ -24759,14 +25047,14 @@ var Doc2 = class {
   }
 };
 
-// node_modules/zod/v4/core/versions.js
+// ../../node_modules/zod/v4/core/versions.js
 var version2 = {
   major: 4,
   minor: 3,
   patch: 6
 };
 
-// node_modules/zod/v4/core/schemas.js
+// ../../node_modules/zod/v4/core/schemas.js
 var $ZodType2 = /* @__PURE__ */ $constructor2("$ZodType", (inst, def) => {
   var _a2;
   inst ?? (inst = {});
@@ -26737,7 +27025,7 @@ function handleRefineResult2(result, payload, input, inst) {
   }
 }
 
-// node_modules/zod/v4/locales/index.js
+// ../../node_modules/zod/v4/locales/index.js
 var locales_exports = {};
 __export(locales_exports, {
   ar: () => ar_default,
@@ -26791,7 +27079,7 @@ __export(locales_exports, {
   zhTW: () => zh_TW_default
 });
 
-// node_modules/zod/v4/locales/ar.js
+// ../../node_modules/zod/v4/locales/ar.js
 var error2 = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0641", verb: "\u0623\u0646 \u064A\u062D\u0648\u064A" },
@@ -26898,7 +27186,7 @@ function ar_default() {
   };
 }
 
-// node_modules/zod/v4/locales/az.js
+// ../../node_modules/zod/v4/locales/az.js
 var error3 = () => {
   const Sizable = {
     string: { unit: "simvol", verb: "olmal\u0131d\u0131r" },
@@ -27004,7 +27292,7 @@ function az_default() {
   };
 }
 
-// node_modules/zod/v4/locales/be.js
+// ../../node_modules/zod/v4/locales/be.js
 function getBelarusianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -27161,7 +27449,7 @@ function be_default() {
   };
 }
 
-// node_modules/zod/v4/locales/bg.js
+// ../../node_modules/zod/v4/locales/bg.js
 var error5 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0430", verb: "\u0434\u0430 \u0441\u044A\u0434\u044A\u0440\u0436\u0430" },
@@ -27282,7 +27570,7 @@ function bg_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ca.js
+// ../../node_modules/zod/v4/locales/ca.js
 var error6 = () => {
   const Sizable = {
     string: { unit: "car\xE0cters", verb: "contenir" },
@@ -27391,7 +27679,7 @@ function ca_default() {
   };
 }
 
-// node_modules/zod/v4/locales/cs.js
+// ../../node_modules/zod/v4/locales/cs.js
 var error7 = () => {
   const Sizable = {
     string: { unit: "znak\u016F", verb: "m\xEDt" },
@@ -27503,7 +27791,7 @@ function cs_default() {
   };
 }
 
-// node_modules/zod/v4/locales/da.js
+// ../../node_modules/zod/v4/locales/da.js
 var error8 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "havde" },
@@ -27619,7 +27907,7 @@ function da_default() {
   };
 }
 
-// node_modules/zod/v4/locales/de.js
+// ../../node_modules/zod/v4/locales/de.js
 var error9 = () => {
   const Sizable = {
     string: { unit: "Zeichen", verb: "zu haben" },
@@ -27728,7 +28016,7 @@ function de_default() {
   };
 }
 
-// node_modules/zod/v4/locales/en.js
+// ../../node_modules/zod/v4/locales/en.js
 var error10 = () => {
   const Sizable = {
     string: { unit: "characters", verb: "to have" },
@@ -27837,7 +28125,7 @@ function en_default3() {
   };
 }
 
-// node_modules/zod/v4/locales/eo.js
+// ../../node_modules/zod/v4/locales/eo.js
 var error11 = () => {
   const Sizable = {
     string: { unit: "karaktrojn", verb: "havi" },
@@ -27947,7 +28235,7 @@ function eo_default() {
   };
 }
 
-// node_modules/zod/v4/locales/es.js
+// ../../node_modules/zod/v4/locales/es.js
 var error12 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "tener" },
@@ -28080,7 +28368,7 @@ function es_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fa.js
+// ../../node_modules/zod/v4/locales/fa.js
 var error13 = () => {
   const Sizable = {
     string: { unit: "\u06A9\u0627\u0631\u0627\u06A9\u062A\u0631", verb: "\u062F\u0627\u0634\u062A\u0647 \u0628\u0627\u0634\u062F" },
@@ -28195,7 +28483,7 @@ function fa_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fi.js
+// ../../node_modules/zod/v4/locales/fi.js
 var error14 = () => {
   const Sizable = {
     string: { unit: "merkki\xE4", subject: "merkkijonon" },
@@ -28308,7 +28596,7 @@ function fi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr.js
+// ../../node_modules/zod/v4/locales/fr.js
 var error15 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -28417,7 +28705,7 @@ function fr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/fr-CA.js
+// ../../node_modules/zod/v4/locales/fr-CA.js
 var error16 = () => {
   const Sizable = {
     string: { unit: "caract\xE8res", verb: "avoir" },
@@ -28525,7 +28813,7 @@ function fr_CA_default() {
   };
 }
 
-// node_modules/zod/v4/locales/he.js
+// ../../node_modules/zod/v4/locales/he.js
 var error17 = () => {
   const TypeNames = {
     string: { label: "\u05DE\u05D7\u05E8\u05D5\u05D6\u05EA", gender: "f" },
@@ -28720,7 +29008,7 @@ function he_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hu.js
+// ../../node_modules/zod/v4/locales/hu.js
 var error18 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "legyen" },
@@ -28829,7 +29117,7 @@ function hu_default() {
   };
 }
 
-// node_modules/zod/v4/locales/hy.js
+// ../../node_modules/zod/v4/locales/hy.js
 function getArmenianPlural(count, one, many) {
   return Math.abs(count) === 1 ? one : many;
 }
@@ -28977,7 +29265,7 @@ function hy_default() {
   };
 }
 
-// node_modules/zod/v4/locales/id.js
+// ../../node_modules/zod/v4/locales/id.js
 var error20 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "memiliki" },
@@ -29084,7 +29372,7 @@ function id_default() {
   };
 }
 
-// node_modules/zod/v4/locales/is.js
+// ../../node_modules/zod/v4/locales/is.js
 var error21 = () => {
   const Sizable = {
     string: { unit: "stafi", verb: "a\xF0 hafa" },
@@ -29194,7 +29482,7 @@ function is_default() {
   };
 }
 
-// node_modules/zod/v4/locales/it.js
+// ../../node_modules/zod/v4/locales/it.js
 var error22 = () => {
   const Sizable = {
     string: { unit: "caratteri", verb: "avere" },
@@ -29303,7 +29591,7 @@ function it_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ja.js
+// ../../node_modules/zod/v4/locales/ja.js
 var error23 = () => {
   const Sizable = {
     string: { unit: "\u6587\u5B57", verb: "\u3067\u3042\u308B" },
@@ -29411,7 +29699,7 @@ function ja_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ka.js
+// ../../node_modules/zod/v4/locales/ka.js
 var error24 = () => {
   const Sizable = {
     string: { unit: "\u10E1\u10D8\u10DB\u10D1\u10DD\u10DA\u10DD", verb: "\u10E3\u10DC\u10D3\u10D0 \u10E8\u10D4\u10D8\u10EA\u10D0\u10D5\u10D3\u10D4\u10E1" },
@@ -29524,7 +29812,7 @@ function ka_default() {
   };
 }
 
-// node_modules/zod/v4/locales/km.js
+// ../../node_modules/zod/v4/locales/km.js
 var error25 = () => {
   const Sizable = {
     string: { unit: "\u178F\u17BD\u17A2\u1780\u17D2\u179F\u179A", verb: "\u1782\u17BD\u179A\u1798\u17B6\u1793" },
@@ -29635,12 +29923,12 @@ function km_default() {
   };
 }
 
-// node_modules/zod/v4/locales/kh.js
+// ../../node_modules/zod/v4/locales/kh.js
 function kh_default() {
   return km_default();
 }
 
-// node_modules/zod/v4/locales/ko.js
+// ../../node_modules/zod/v4/locales/ko.js
 var error26 = () => {
   const Sizable = {
     string: { unit: "\uBB38\uC790", verb: "to have" },
@@ -29752,7 +30040,7 @@ function ko_default() {
   };
 }
 
-// node_modules/zod/v4/locales/lt.js
+// ../../node_modules/zod/v4/locales/lt.js
 var capitalizeFirstCharacter = (text) => {
   return text.charAt(0).toUpperCase() + text.slice(1);
 };
@@ -29956,7 +30244,7 @@ function lt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/mk.js
+// ../../node_modules/zod/v4/locales/mk.js
 var error28 = () => {
   const Sizable = {
     string: { unit: "\u0437\u043D\u0430\u0446\u0438", verb: "\u0434\u0430 \u0438\u043C\u0430\u0430\u0442" },
@@ -30066,7 +30354,7 @@ function mk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ms.js
+// ../../node_modules/zod/v4/locales/ms.js
 var error29 = () => {
   const Sizable = {
     string: { unit: "aksara", verb: "mempunyai" },
@@ -30174,7 +30462,7 @@ function ms_default() {
   };
 }
 
-// node_modules/zod/v4/locales/nl.js
+// ../../node_modules/zod/v4/locales/nl.js
 var error30 = () => {
   const Sizable = {
     string: { unit: "tekens", verb: "heeft" },
@@ -30285,7 +30573,7 @@ function nl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/no.js
+// ../../node_modules/zod/v4/locales/no.js
 var error31 = () => {
   const Sizable = {
     string: { unit: "tegn", verb: "\xE5 ha" },
@@ -30394,7 +30682,7 @@ function no_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ota.js
+// ../../node_modules/zod/v4/locales/ota.js
 var error32 = () => {
   const Sizable = {
     string: { unit: "harf", verb: "olmal\u0131d\u0131r" },
@@ -30504,7 +30792,7 @@ function ota_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ps.js
+// ../../node_modules/zod/v4/locales/ps.js
 var error33 = () => {
   const Sizable = {
     string: { unit: "\u062A\u0648\u06A9\u064A", verb: "\u0648\u0644\u0631\u064A" },
@@ -30619,7 +30907,7 @@ function ps_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pl.js
+// ../../node_modules/zod/v4/locales/pl.js
 var error34 = () => {
   const Sizable = {
     string: { unit: "znak\xF3w", verb: "mie\u0107" },
@@ -30729,7 +31017,7 @@ function pl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/pt.js
+// ../../node_modules/zod/v4/locales/pt.js
 var error35 = () => {
   const Sizable = {
     string: { unit: "caracteres", verb: "ter" },
@@ -30838,7 +31126,7 @@ function pt_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ru.js
+// ../../node_modules/zod/v4/locales/ru.js
 function getRussianPlural(count, one, few, many) {
   const absCount = Math.abs(count);
   const lastDigit = absCount % 10;
@@ -30995,7 +31283,7 @@ function ru_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sl.js
+// ../../node_modules/zod/v4/locales/sl.js
 var error37 = () => {
   const Sizable = {
     string: { unit: "znakov", verb: "imeti" },
@@ -31105,7 +31393,7 @@ function sl_default() {
   };
 }
 
-// node_modules/zod/v4/locales/sv.js
+// ../../node_modules/zod/v4/locales/sv.js
 var error38 = () => {
   const Sizable = {
     string: { unit: "tecken", verb: "att ha" },
@@ -31216,7 +31504,7 @@ function sv_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ta.js
+// ../../node_modules/zod/v4/locales/ta.js
 var error39 = () => {
   const Sizable = {
     string: { unit: "\u0B8E\u0BB4\u0BC1\u0BA4\u0BCD\u0BA4\u0BC1\u0B95\u0BCD\u0B95\u0BB3\u0BCD", verb: "\u0B95\u0BCA\u0BA3\u0BCD\u0B9F\u0BBF\u0BB0\u0BC1\u0B95\u0BCD\u0B95 \u0BB5\u0BC7\u0BA3\u0BCD\u0B9F\u0BC1\u0BAE\u0BCD" },
@@ -31327,7 +31615,7 @@ function ta_default() {
   };
 }
 
-// node_modules/zod/v4/locales/th.js
+// ../../node_modules/zod/v4/locales/th.js
 var error40 = () => {
   const Sizable = {
     string: { unit: "\u0E15\u0E31\u0E27\u0E2D\u0E31\u0E01\u0E29\u0E23", verb: "\u0E04\u0E27\u0E23\u0E21\u0E35" },
@@ -31438,7 +31726,7 @@ function th_default() {
   };
 }
 
-// node_modules/zod/v4/locales/tr.js
+// ../../node_modules/zod/v4/locales/tr.js
 var error41 = () => {
   const Sizable = {
     string: { unit: "karakter", verb: "olmal\u0131" },
@@ -31544,7 +31832,7 @@ function tr_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uk.js
+// ../../node_modules/zod/v4/locales/uk.js
 var error42 = () => {
   const Sizable = {
     string: { unit: "\u0441\u0438\u043C\u0432\u043E\u043B\u0456\u0432", verb: "\u043C\u0430\u0442\u0438\u043C\u0435" },
@@ -31653,12 +31941,12 @@ function uk_default() {
   };
 }
 
-// node_modules/zod/v4/locales/ua.js
+// ../../node_modules/zod/v4/locales/ua.js
 function ua_default() {
   return uk_default();
 }
 
-// node_modules/zod/v4/locales/ur.js
+// ../../node_modules/zod/v4/locales/ur.js
 var error43 = () => {
   const Sizable = {
     string: { unit: "\u062D\u0631\u0648\u0641", verb: "\u06C1\u0648\u0646\u0627" },
@@ -31769,7 +32057,7 @@ function ur_default() {
   };
 }
 
-// node_modules/zod/v4/locales/uz.js
+// ../../node_modules/zod/v4/locales/uz.js
 var error44 = () => {
   const Sizable = {
     string: { unit: "belgi", verb: "bo\u2018lishi kerak" },
@@ -31879,7 +32167,7 @@ function uz_default() {
   };
 }
 
-// node_modules/zod/v4/locales/vi.js
+// ../../node_modules/zod/v4/locales/vi.js
 var error45 = () => {
   const Sizable = {
     string: { unit: "k\xFD t\u1EF1", verb: "c\xF3" },
@@ -31988,7 +32276,7 @@ function vi_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-CN.js
+// ../../node_modules/zod/v4/locales/zh-CN.js
 var error46 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u7B26", verb: "\u5305\u542B" },
@@ -32098,7 +32386,7 @@ function zh_CN_default() {
   };
 }
 
-// node_modules/zod/v4/locales/zh-TW.js
+// ../../node_modules/zod/v4/locales/zh-TW.js
 var error47 = () => {
   const Sizable = {
     string: { unit: "\u5B57\u5143", verb: "\u64C1\u6709" },
@@ -32206,7 +32494,7 @@ function zh_TW_default() {
   };
 }
 
-// node_modules/zod/v4/locales/yo.js
+// ../../node_modules/zod/v4/locales/yo.js
 var error48 = () => {
   const Sizable = {
     string: { unit: "\xE0mi", verb: "n\xED" },
@@ -32314,7 +32602,7 @@ function yo_default() {
   };
 }
 
-// node_modules/zod/v4/core/registries.js
+// ../../node_modules/zod/v4/core/registries.js
 var _a;
 var $output = /* @__PURE__ */ Symbol("ZodOutput");
 var $input = /* @__PURE__ */ Symbol("ZodInput");
@@ -32364,7 +32652,7 @@ function registry2() {
 (_a = globalThis).__zod_globalRegistry ?? (_a.__zod_globalRegistry = registry2());
 var globalRegistry2 = globalThis.__zod_globalRegistry;
 
-// node_modules/zod/v4/core/api.js
+// ../../node_modules/zod/v4/core/api.js
 // @__NO_SIDE_EFFECTS__
 function _string2(Class3, params) {
   return new Class3({
@@ -33403,7 +33691,7 @@ function _stringFormat(Class3, format, fnOrRegex, _params = {}) {
   return inst;
 }
 
-// node_modules/zod/v4/core/to-json-schema.js
+// ../../node_modules/zod/v4/core/to-json-schema.js
 function initializeContext(params) {
   let target = params?.target ?? "draft-2020-12";
   if (target === "draft-4")
@@ -33755,7 +34043,7 @@ var createStandardJSONSchemaMethod = (schema, io, processors = {}) => (params) =
   return finalize(ctx, schema);
 };
 
-// node_modules/zod/v4/core/json-schema-processors.js
+// ../../node_modules/zod/v4/core/json-schema-processors.js
 var formatMap = {
   guid: "uuid",
   url: "uri",
@@ -34306,7 +34594,7 @@ function toJSONSchema2(input, params) {
   return finalize(ctx, input);
 }
 
-// node_modules/zod/v4/core/json-schema-generator.js
+// ../../node_modules/zod/v4/core/json-schema-generator.js
 var JSONSchemaGenerator2 = class {
   /** @deprecated Access via ctx instead */
   get metadataRegistry() {
@@ -34381,10 +34669,10 @@ var JSONSchemaGenerator2 = class {
   }
 };
 
-// node_modules/zod/v4/core/json-schema.js
+// ../../node_modules/zod/v4/core/json-schema.js
 var json_schema_exports = {};
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../node_modules/zod/v4/classic/schemas.js
 var schemas_exports2 = {};
 __export(schemas_exports2, {
   ZodAny: () => ZodAny2,
@@ -34553,7 +34841,7 @@ __export(schemas_exports2, {
   xor: () => xor
 });
 
-// node_modules/zod/v4/classic/checks.js
+// ../../node_modules/zod/v4/classic/checks.js
 var checks_exports2 = {};
 __export(checks_exports2, {
   endsWith: () => _endsWith2,
@@ -34587,7 +34875,7 @@ __export(checks_exports2, {
   uppercase: () => _uppercase2
 });
 
-// node_modules/zod/v4/classic/iso.js
+// ../../node_modules/zod/v4/classic/iso.js
 var iso_exports = {};
 __export(iso_exports, {
   ZodISODate: () => ZodISODate2,
@@ -34628,7 +34916,7 @@ function duration4(params) {
   return _isoDuration2(ZodISODuration2, params);
 }
 
-// node_modules/zod/v4/classic/errors.js
+// ../../node_modules/zod/v4/classic/errors.js
 var initializer4 = (inst, issues) => {
   $ZodError2.init(inst, issues);
   inst.name = "ZodError";
@@ -34668,7 +34956,7 @@ var ZodRealError2 = $constructor2("ZodError", initializer4, {
   Parent: Error
 });
 
-// node_modules/zod/v4/classic/parse.js
+// ../../node_modules/zod/v4/classic/parse.js
 var parse3 = /* @__PURE__ */ _parse2(ZodRealError2);
 var parseAsync4 = /* @__PURE__ */ _parseAsync2(ZodRealError2);
 var safeParse5 = /* @__PURE__ */ _safeParse2(ZodRealError2);
@@ -34682,7 +34970,7 @@ var safeDecode2 = /* @__PURE__ */ _safeDecode(ZodRealError2);
 var safeEncodeAsync2 = /* @__PURE__ */ _safeEncodeAsync(ZodRealError2);
 var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError2);
 
-// node_modules/zod/v4/classic/schemas.js
+// ../../node_modules/zod/v4/classic/schemas.js
 var ZodType3 = /* @__PURE__ */ $constructor2("ZodType", (inst, def) => {
   $ZodType2.init(inst, def);
   Object.assign(inst["~standard"], {
@@ -35761,7 +36049,7 @@ function preprocess2(fn, schema) {
   return pipe2(transform2(fn), schema);
 }
 
-// node_modules/zod/v4/classic/compat.js
+// ../../node_modules/zod/v4/classic/compat.js
 var ZodIssueCode2 = {
   invalid_type: "invalid_type",
   too_big: "too_big",
@@ -35787,7 +36075,7 @@ var ZodFirstPartyTypeKind2;
 /* @__PURE__ */ (function(ZodFirstPartyTypeKind3) {
 })(ZodFirstPartyTypeKind2 || (ZodFirstPartyTypeKind2 = {}));
 
-// node_modules/zod/v4/classic/from-json-schema.js
+// ../../node_modules/zod/v4/classic/from-json-schema.js
 var z = {
   ...schemas_exports2,
   ...checks_exports2,
@@ -36261,7 +36549,7 @@ function fromJSONSchema(schema, params) {
   return convertSchema(schema, ctx);
 }
 
-// node_modules/zod/v4/classic/coerce.js
+// ../../node_modules/zod/v4/classic/coerce.js
 var coerce_exports = {};
 __export(coerce_exports, {
   bigint: () => bigint3,
@@ -36286,7 +36574,7 @@ function date6(params) {
   return _coercedDate(ZodDate2, params);
 }
 
-// node_modules/zod/v4/classic/external.js
+// ../../node_modules/zod/v4/classic/external.js
 config2(en_default3());
 
 // src/mcp/definitions.ts
@@ -39239,6 +39527,17 @@ var TURN_STOP_TIMEOUT_MS = 3e4;
 function defaultNoopDrain() {
   return Promise.resolve();
 }
+function getStartupFlushSessionId(env = process.env) {
+  const raw = env.CLAUDE_MNEMO_FLUSH_SESSION_ID;
+  if (!raw) {
+    return null;
+  }
+  const sessionId = Number(raw);
+  if (!Number.isInteger(sessionId) || sessionId <= 0) {
+    return null;
+  }
+  return sessionId;
+}
 function createWorkerServerState(nowMs = Date.now()) {
   return {
     globalScanInFlight: null,
@@ -39264,71 +39563,32 @@ function isProcessAlive2(pid) {
     return error49.code !== "ESRCH";
   }
 }
-function markSidechainTurnsUndone(db, sessionDbId, transcriptPath, updatedAtEpoch) {
-  const sidechainTurns = parseReplayTranscript(transcriptPath).filter(
-    (turn) => turn.isSidechain
-  );
-  if (sidechainTurns.length === 0) {
-    return [];
-  }
-  const promptIds = sidechainTurns.map((turn) => turn.promptId).filter((value) => Boolean(value));
-  const promptNumbers = sidechainTurns.map((turn) => turn.promptNumber);
-  const matchClauses = [];
-  const params = [sessionDbId];
-  if (promptIds.length > 0) {
-    matchClauses.push(
-      `content_prompt_id IN (${promptIds.map(() => "?").join(", ")})`
-    );
-    params.push(...promptIds);
-  }
-  if (promptNumbers.length > 0) {
-    matchClauses.push(
-      `prompt_number IN (${promptNumbers.map(() => "?").join(", ")})`
-    );
-    params.push(...promptNumbers);
-  }
-  if (matchClauses.length === 0) {
-    return [];
-  }
-  const turnIds = db.query(
-    `
-        SELECT id
-        FROM turns
-        WHERE session_id = ?
-          AND (${matchClauses.join(" OR ")})
-      `
-  ).all(...params).map((row) => row.id);
-  if (turnIds.length === 0) {
-    return [];
-  }
-  db.query(
-    `
-      UPDATE turns
-      SET status = 'undone',
-          updated_at_epoch = ?
-      WHERE id IN (${turnIds.map(() => "?").join(", ")})
-    `
-  ).run(updatedAtEpoch, ...turnIds);
-  return turnIds;
+function buildRollbackEnvelope(promptNumbers) {
+  const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
+  return `<rollback>
+  ${labels} were rolled back (sidechain). Observations extracted from
+  these turns should be considered invalid.
+</rollback>`;
 }
-function cleanupUndoneTurnTasks(db, sessionDbId, turnIds) {
-  if (turnIds.length === 0) {
-    return;
+function pruneBufferedUndoneItems(db, items) {
+  const activeItems = [];
+  for (const item of items) {
+    const observation = getObservation(db, item.targetId);
+    const turn = observation ? getTurnById(db, observation.turnId) : null;
+    if (!observation || !turn || turn.status === "undone") {
+      deleteQueueItem(db, item.seq);
+      continue;
+    }
+    activeItems.push(item);
   }
-  db.query(
-    `
-      DELETE FROM pending_queue
-      WHERE session_db_id = ?
-        AND kind = 'turn-stop'
-        AND target_id IN (${turnIds.map(() => "?").join(", ")})
-    `
-  ).run(sessionDbId, ...turnIds);
+  return activeItems;
 }
 function createWorkerCore(deps) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1e3));
   const nowMs = deps.nowMs ?? Date.now;
   const logger = deps.logger ?? console;
   const sessions = /* @__PURE__ */ new Map();
+  const buffers = /* @__PURE__ */ new Map();
   const compactingSessions = /* @__PURE__ */ new Set();
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
@@ -39338,10 +39598,25 @@ function createWorkerCore(deps) {
   const processTurnStopImpl = deps.processTurnStopImpl ?? (async (_state, turnId) => {
     throw new Error(`processTurnStop not implemented for T${turnId}`);
   });
+  const processBatchImpl = deps.processBatchImpl ?? (async () => {
+    throw new Error("processBatch not implemented");
+  });
   const pushSessionSummaryPromptImpl = deps.pushSessionSummaryPromptImpl ?? (async () => {
   });
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {
   });
+  function getOrCreateBuffer(sessionDbId) {
+    let buffer = buffers.get(sessionDbId);
+    if (buffer) {
+      return buffer;
+    }
+    buffer = { items: [] };
+    buffers.set(sessionDbId, buffer);
+    return buffer;
+  }
+  function clearBuffer(sessionDbId) {
+    buffers.delete(sessionDbId);
+  }
   function getOrCreateSessionState(sessionDbId) {
     let state = sessions.get(sessionDbId);
     if (state) {
@@ -39359,13 +39634,32 @@ function createWorkerCore(deps) {
       processingLock: Promise.resolve(),
       async pushMessage(prompt) {
         const runtime = ensureQuerySession(state);
+        const pendingRollbacks = getPendingRollbackTurns(
+          deps.db,
+          state.sessionDbId
+        );
+        const promptWithRollback = pendingRollbacks.length > 0 ? `${buildRollbackEnvelope(
+          pendingRollbacks.map((turn) => turn.promptNumber)
+        )}
+
+${prompt}` : prompt;
         state.lastActivity = nowMs();
         state.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(prompt);
+        const result = await runtime.sendPrompt(promptWithRollback);
         state.lastMessageAt = nowMs();
         state.queryPid = runtime.queryPid;
         state.agentSessionId = result.session_id;
         state.initialized = true;
+        if (pendingRollbacks.length > 0) {
+          try {
+            markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
+          } catch (error49) {
+            logger.error?.("failed to mark rollback turns notified", {
+              sessionDbId: state.sessionDbId,
+              error: error49
+            });
+          }
+        }
       }
     };
     sessions.set(sessionDbId, state);
@@ -39452,28 +39746,65 @@ function createWorkerCore(deps) {
     })();
     return state.closing;
   }
-  async function processClaimedItem(item) {
-    const state = getOrCreateSessionState(item.sessionDbId);
+  async function withSessionProcessingLock(sessionDbId, work) {
+    const state = getOrCreateSessionState(sessionDbId);
     const myTurn = state.processingLock;
     let release;
     state.processingLock = new Promise((resolve) => {
       release = resolve;
     });
     await myTurn;
-    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
-    const workPromise = Promise.resolve(
-      item.kind === "obs" ? processObsImpl(state, item.targetId) : processTurnStopImpl(state, item.targetId)
-    );
+    const workPromise = Promise.resolve(work(state));
     const completion = workPromise.finally(() => {
       release();
     });
     completion.catch(() => {
     });
+    return workPromise;
+  }
+  async function processClaimedItem(item) {
+    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
+    const workPromise = withSessionProcessingLock(
+      item.sessionDbId,
+      (state) => item.kind === "obs" ? processObsImpl(state, item.targetId) : processTurnStopImpl(state, item.targetId)
+    );
     await withTimeout(
       workPromise,
       timeoutMs,
       `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`
     );
+  }
+  async function flushBufferedItems(sessionDbId, turnStopItem) {
+    const bufferedItems = pruneBufferedUndoneItems(
+      deps.db,
+      [...buffers.get(sessionDbId)?.items ?? []]
+    );
+    if (bufferedItems.length === 0 && !turnStopItem) {
+      clearBuffer(sessionDbId);
+      return;
+    }
+    try {
+      await withSessionProcessingLock(
+        sessionDbId,
+        (state) => processBatchImpl(state, bufferedItems, turnStopItem)
+      );
+      for (const item of bufferedItems) {
+        deleteQueueItem(deps.db, item.seq);
+      }
+      if (turnStopItem) {
+        deleteQueueItem(deps.db, turnStopItem.seq);
+      }
+      clearBuffer(sessionDbId);
+    } catch (error49) {
+      for (const item of bufferedItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      if (turnStopItem) {
+        releaseQueueClaim(deps.db, turnStopItem.seq);
+      }
+      clearBuffer(sessionDbId);
+      throw error49;
+    }
   }
   async function scanAndDrainQueue(sessionFilter) {
     const skippedSeqs = /* @__PURE__ */ new Set();
@@ -39486,12 +39817,20 @@ function createWorkerCore(deps) {
       if (!item) {
         return;
       }
+      if (item.kind === "obs") {
+        getOrCreateBuffer(item.sessionDbId).items.push(item);
+        continue;
+      }
+      const bufferedSeqs = (buffers.get(item.sessionDbId)?.items ?? []).map(
+        (bufferedItem) => bufferedItem.seq
+      );
       try {
-        await processClaimedItem(item);
-        deleteQueueItem(deps.db, item.seq);
+        await flushBufferedItems(item.sessionDbId, item);
       } catch (error49) {
-        releaseQueueClaim(deps.db, item.seq);
         skippedSeqs.add(item.seq);
+        for (const seq of bufferedSeqs) {
+          skippedSeqs.add(seq);
+        }
         logger.error?.("queue item failed, skipping for this drain", {
           seq: item.seq,
           kind: item.kind,
@@ -39504,7 +39843,23 @@ function createWorkerCore(deps) {
   async function drainSessionCompletely(sessionDbId) {
     let previousCount = Number.POSITIVE_INFINITY;
     while (true) {
+      try {
+        await flushBufferedItems(sessionDbId);
+      } catch (error49) {
+        logger.error?.("drainSessionCompletely failed to flush buffer", {
+          sessionDbId,
+          error: error49
+        });
+      }
       await scanAndDrainQueue(sessionDbId);
+      try {
+        await flushBufferedItems(sessionDbId);
+      } catch (error49) {
+        logger.error?.("drainSessionCompletely failed to flush buffer", {
+          sessionDbId,
+          error: error49
+        });
+      }
       const state = sessions.get(sessionDbId);
       if (state) {
         while (true) {
@@ -39529,20 +39884,24 @@ function createWorkerCore(deps) {
       previousCount = remaining;
     }
   }
+  async function flushSession(sessionDbId) {
+    await scanAndDrainQueue(sessionDbId);
+    await flushBufferedItems(sessionDbId);
+  }
   function recoverFromCrash() {
+    buffers.clear();
     resetClaimedQueueItems(deps.db);
   }
   async function handleCompact(sessionDbId, transcriptPath) {
     compactingSessions.add(sessionDbId);
     try {
       if (transcriptPath) {
-        const undoneTurnIds = markSidechainTurnsUndone(
+        detectAndCleanSidechainTurns(
           deps.db,
           sessionDbId,
           transcriptPath,
           now()
         );
-        cleanupUndoneTurnTasks(deps.db, sessionDbId, undoneTurnIds);
       }
       try {
         await drainSessionCompletely(sessionDbId);
@@ -39578,10 +39937,12 @@ function createWorkerCore(deps) {
   }
   return {
     sessions,
+    buffers,
     compactingSessions,
     recoverFromCrash,
     scanAndDrainQueue,
     processClaimedItem,
+    flushSession,
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
@@ -39666,18 +40027,24 @@ function acquireWorkerSingleton(deps = {}) {
   return "acquired";
 }
 function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(deps.nowMs?.() ?? Date.now())) {
-  const runtime = deps.scanAndDrainQueue || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
-    db: deps.db ?? createDatabase(),
+  const runtimeDb = deps.db ?? createDatabase();
+  const runtimeProcessors = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerProcessors(runtimeDb);
+  const runtime = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
+    db: runtimeDb,
     now: deps.now,
     nowMs: deps.nowMs,
-    processObsImpl: deps.processObsImpl,
-    processTurnStopImpl: deps.processTurnStopImpl,
-    pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl,
+    processObsImpl: deps.processObsImpl ?? runtimeProcessors?.processObs,
+    processTurnStopImpl: deps.processTurnStopImpl ?? runtimeProcessors?.processTurnStop,
+    processBatchImpl: deps.processBatchImpl ?? runtimeProcessors?.processBatch,
+    pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? runtimeProcessors?.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl
   });
   const scanAndDrainQueue = deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
+  const handleFlushImpl = deps.handleFlushImpl ?? runtime?.flushSession ?? (async (sessionId) => {
+    await scanAndDrainQueue(sessionId);
+  });
   const handleCompactImpl = deps.handleCompactImpl ?? runtime?.handleCompact ?? (async (sessionId) => {
     await scanAndDrainQueue(sessionId);
   });
@@ -39716,6 +40083,19 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
           return new Response("session_id is required", { status: 400 });
         }
         await handleCompactImpl(payload.session_id, payload.transcript_path);
+        return new Response(null, { status: 200 });
+      }
+      if (req.method === "POST" && url2.pathname === "/flush") {
+        const payload = await req.json();
+        if (typeof payload.session_id !== "number") {
+          return new Response("session_id is required", { status: 400 });
+        }
+        void handleFlushImpl(payload.session_id).catch((error49) => {
+          deps.logger?.error?.("flush request failed", {
+            sessionId: payload.session_id,
+            error: error49
+          });
+        });
         return new Response(null, { status: 200 });
       }
       return new Response("Not found", { status: 404 });
@@ -39768,6 +40148,7 @@ function registerShutdownCleanup(deps = {}) {
   processImpl.on("beforeExit", cleanup);
 }
 async function main(deps = {}) {
+  const env = deps.env ?? process.env;
   const result = acquireWorkerSingleton(deps);
   if (result === "already-running") {
     process.exit(0);
@@ -39787,6 +40168,7 @@ async function main(deps = {}) {
     nowMs: deps.nowMs,
     processObsImpl: deps.processObsImpl ?? processors.processObs,
     processTurnStopImpl: deps.processTurnStopImpl ?? processors.processTurnStop,
+    processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
@@ -39826,7 +40208,18 @@ async function main(deps = {}) {
     } catch {
     }
   }
-  void core.scanAndDrainQueue();
+  const startupFlushSessionId = getStartupFlushSessionId(env);
+  if (startupFlushSessionId !== null) {
+    void (async () => {
+      try {
+        await core.flushSession(startupFlushSessionId);
+      } finally {
+        await core.scanAndDrainQueue();
+      }
+    })();
+  } else {
+    void core.scanAndDrainQueue();
+  }
   setInterval(() => {
     void core.abortStalledSessions();
   }, WATCHDOG_INTERVAL_MS);

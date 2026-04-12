@@ -486,6 +486,7 @@ function resolveEventName(raw) {
     case "PostToolUse":
     case "PostCompact":
     case "SessionStart":
+    case "SessionEnd":
     case "PreCompact":
     case "UserPromptSubmit":
     case "Stop":
@@ -625,12 +626,13 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnvxvplj" : "dev";
+var BUILD_ID = true ? "0.2.0-mnw2l4hv" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
 var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 var WAKE_TIMEOUT_MS = 500;
+var FLUSH_TIMEOUT_MS = 500;
 var COMPACT_TIMEOUT_MS = 25e3;
 function createAbortSignal(timeoutMs) {
   return AbortSignal.timeout(timeoutMs);
@@ -733,6 +735,28 @@ async function notifyWorkerWake(deps = {}, env = process.env) {
   } catch {
     spawnWorkerProcess(deps, env);
   }
+}
+async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const flushEnv = {
+    ...env,
+    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
+  };
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionDbId
+      }),
+      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
+    });
+    if (response.ok) {
+      return;
+    }
+    killStaleWorker(deps);
+  } catch {
+  }
+  spawnWorkerProcess(deps, flushEnv);
 }
 async function waitForCompatibleWorker(deps = {}) {
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -1382,6 +1406,9 @@ var TURN_SELECT = `
     updated_at_epoch AS updatedAtEpoch
   FROM turns
 `;
+function stringifyArray(values) {
+  return JSON.stringify(values);
+}
 function parseJsonArray2(value) {
   if (!value) {
     return [];
@@ -1398,6 +1425,80 @@ function mapTurnRow(row) {
     filesRead: parseJsonArray2(row.filesRead),
     filesModified: parseJsonArray2(row.filesModified)
   };
+}
+function getTurnById(db, turnId) {
+  return mapTurnRow(
+    db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
+  );
+}
+function updateTurnById(db, turnId, input) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
+  }
+  const updated = mapTurnRow(
+    db.query(
+      `
+          UPDATE turns
+          SET
+            status = ?,
+            title = ?,
+            content = ?,
+            insight = ?,
+            type = ?,
+            transcript_line_start = ?,
+            tags = ?,
+            files_read = ?,
+            files_modified = ?,
+            tool_call_count = ?,
+            updated_at_epoch = ?
+          WHERE id = ?
+          RETURNING
+            id,
+            session_id AS sessionId,
+            prompt_number AS promptNumber,
+            content_prompt_id AS contentPromptId,
+            status,
+            user_prompt AS userPrompt,
+            assistant_response AS assistantResponse,
+            title,
+            content,
+            insight,
+            type,
+            transcript_line_start AS transcriptLineStart,
+            tags,
+            files_read AS filesRead,
+            files_modified AS filesModified,
+            tool_call_count AS toolCallCount,
+            created_at_epoch AS createdAtEpoch,
+            updated_at_epoch AS updatedAtEpoch
+        `
+    ).get(
+      input.status ?? existing.status,
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.insight ?? existing.insight,
+      input.type ?? existing.type,
+      input.transcriptLineStart ?? existing.transcriptLineStart,
+      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(input.filesRead ?? existing.filesRead),
+      stringifyArray(input.filesModified ?? existing.filesModified),
+      input.toolCallCount ?? existing.toolCallCount,
+      input.updatedAtEpoch ?? existing.updatedAtEpoch,
+      turnId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  if (updated.status === "extracted") {
+    indexTurnToFTS(db, updated);
+  } else {
+    db.query(
+      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
+    ).run(turnId);
+  }
+  return updated;
 }
 function getTurnsForSession(db, sessionId) {
   return db.query(
@@ -2281,7 +2382,7 @@ function classifyTimeGroup(epochSeconds, now) {
     return "Yesterday";
   }
   if (target >= weekStart) {
-    return "This week";
+    return "Last 7 days";
   }
   return "Earlier";
 }
@@ -2535,18 +2636,67 @@ function readAllTranscriptEntries(transcriptPath) {
       lineNumber: index + 1
     });
   });
-  const seenUuids = /* @__PURE__ */ new Set();
+  const uuidToIndex = /* @__PURE__ */ new Map();
   const deduped = [];
   for (const entry of entries) {
     if (entry.uuid) {
-      if (seenUuids.has(entry.uuid)) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
         continue;
       }
-      seenUuids.add(entry.uuid);
+      uuidToIndex.set(entry.uuid, deduped.length);
     }
     deduped.push(entry);
   }
   return deduped;
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
 }
 function normalizeEntry(raw) {
   const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
@@ -2560,8 +2710,8 @@ function normalizeEntry(raw) {
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    isSidechain: Boolean(raw.isSidechain),
-    isApiErrorMessage: Boolean(raw.isApiErrorMessage),
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
     usage: message?.usage && typeof message.usage === "object" ? {
       inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
       outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
@@ -2922,6 +3072,147 @@ function createPostToolUseHandler(dependencies) {
   };
 }
 
+// src/hooks/handlers/session-end.ts
+function createSessionEndHandler(dependencies) {
+  return async function handleSessionEndHook(input) {
+    if (!input.sessionId) {
+      return { continue: true };
+    }
+    const session = getSessionByContentId(dependencies.db, input.sessionId);
+    if (!session) {
+      return { continue: true };
+    }
+    await notifyWorkerFlush(
+      session.id,
+      dependencies.workerClientDeps,
+      dependencies.workerEnv
+    );
+    return { continue: true };
+  };
+}
+
+// src/worker/rollback.ts
+var ROLLBACK_PENDING_TAG = "rollback:pending";
+var ROLLBACK_NOTIFIED_TAG = "rollback:notified";
+function addRollbackPendingTag(tags) {
+  if (tags.includes(ROLLBACK_PENDING_TAG) || tags.includes(ROLLBACK_NOTIFIED_TAG)) {
+    return tags;
+  }
+  return [...tags, ROLLBACK_PENDING_TAG];
+}
+function deleteObservationFtsRows(db, observationIds) {
+  if (observationIds.length === 0) {
+    return;
+  }
+  const deleteStatement = db.query(
+    "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?"
+  );
+  for (const observationId of observationIds) {
+    deleteStatement.run(observationId);
+  }
+}
+function selectObservationIdsForTurns(db, turnIds) {
+  if (turnIds.length === 0) {
+    return [];
+  }
+  return db.query(
+    `
+        SELECT id
+        FROM observations
+        WHERE turn_id IN (${turnIds.map(() => "?").join(", ")})
+        ORDER BY id ASC
+      `
+  ).all(...turnIds).map((row) => row.id);
+}
+function deleteTurnStopQueueItems(db, sessionDbId, turnIds) {
+  if (turnIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM pending_queue
+      WHERE session_db_id = ?
+        AND kind = 'turn-stop'
+        AND target_id IN (${turnIds.map(() => "?").join(", ")})
+    `
+  ).run(sessionDbId, ...turnIds);
+}
+function deleteObservationQueueItems(db, sessionDbId, observationIds) {
+  if (observationIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM pending_queue
+      WHERE session_db_id = ?
+        AND kind = 'obs'
+        AND target_id IN (${observationIds.map(() => "?").join(", ")})
+    `
+  ).run(sessionDbId, ...observationIds);
+}
+function deleteObservationsForTurns(db, turnIds) {
+  if (turnIds.length === 0) {
+    return;
+  }
+  db.query(
+    `
+      DELETE FROM observations
+      WHERE turn_id IN (${turnIds.map(() => "?").join(", ")})
+    `
+  ).run(...turnIds);
+}
+function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
+  const parsedTurns = parseReplayTranscript(transcriptPath);
+  const newestSidechainChain = [];
+  for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
+    const parsedTurn = parsedTurns[index];
+    if (!parsedTurn.isSidechain) {
+      break;
+    }
+    newestSidechainChain.unshift(parsedTurn);
+  }
+  if (newestSidechainChain.length === 0) {
+    return [];
+  }
+  const liveTurns = getTurnsForSession(db, sessionDbId).filter(
+    (turn) => turn.status !== "undone"
+  );
+  const byPromptId = new Map(
+    liveTurns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn])
+  );
+  const byPromptNumber = new Map(liveTurns.map((turn) => [turn.promptNumber, turn]));
+  const matched = /* @__PURE__ */ new Map();
+  for (const parsedTurn of newestSidechainChain) {
+    const turn = (parsedTurn.promptId ? byPromptId.get(parsedTurn.promptId) : void 0) ?? byPromptNumber.get(parsedTurn.promptNumber);
+    if (turn) {
+      matched.set(turn.id, turn);
+    }
+  }
+  return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
+}
+function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
+  const matchedTurns = resolveSidechainTurns(db, sessionDbId, transcriptPath);
+  if (matchedTurns.length === 0) {
+    return [];
+  }
+  const turnIds = matchedTurns.map((turn) => turn.id);
+  const observationIds = selectObservationIdsForTurns(db, turnIds);
+  db.transaction(() => {
+    deleteTurnStopQueueItems(db, sessionDbId, turnIds);
+    deleteObservationQueueItems(db, sessionDbId, observationIds);
+    deleteObservationFtsRows(db, observationIds);
+    deleteObservationsForTurns(db, turnIds);
+    for (const turn of matchedTurns) {
+      updateTurnById(db, turn.id, {
+        status: "undone",
+        tags: addRollbackPendingTag(turn.tags),
+        updatedAtEpoch
+      });
+    }
+  })();
+  return matchedTurns.map((turn) => turn.promptNumber);
+}
+
 // src/hooks/handlers/session-init.ts
 function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch) {
   db.query(
@@ -2954,6 +3245,14 @@ function createSessionInitHandler(dependencies) {
       updatedAtEpoch: now(),
       completedAtEpoch: existingSession?.completedAtEpoch ?? null
     });
+    if (input.transcriptPath) {
+      detectAndCleanSidechainTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        now()
+      );
+    }
     const promptNumber = input.transcriptPath ? countUserPromptsInTranscript(input.transcriptPath) + 1 : getTurnsForSession(dependencies.db, session.id).length + 1;
     createPendingTurn(
       dependencies.db,
@@ -3120,6 +3419,14 @@ function createStopHandler(dependencies) {
       updatedAtEpoch: epoch,
       completedAtEpoch: epoch
     });
+    if (input.transcriptPath) {
+      detectAndCleanSidechainTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        epoch
+      );
+    }
     await notifyWorkerWake(
       dependencies.workerClientDeps,
       dependencies.workerEnv
@@ -3141,6 +3448,7 @@ function getDefaultHandlers() {
   initializeDatabase(db);
   defaultHandlers = {
     SessionStart: createContextHandler({ db }),
+    SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
     PostCompact: createPostCompactHandler({ db }),
     PreCompact: createCompactHandler({ db }),
@@ -3162,6 +3470,8 @@ function eventNameFromCommandArgument(arg) {
   switch (arg) {
     case "context":
       return "SessionStart";
+    case "session-end":
+      return "SessionEnd";
     case "tool-use":
       return "PostToolUse";
     case "post-compact":
