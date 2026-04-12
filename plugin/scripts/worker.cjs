@@ -817,7 +817,12 @@ function readAllTranscriptEntries(transcriptPath) {
     if (!trimmedLine) {
       return;
     }
-    const entry = normalizeEntry(JSON.parse(trimmedLine));
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
     if (entry.isApiErrorMessage) {
       return;
     }
@@ -868,12 +873,12 @@ function startsNewTurn(entry, currentPromptId) {
   }
   return extractUserPrompt(entry) !== "";
 }
-function parseReplayTranscript(transcriptPath) {
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
   let promptNumber = 0;
   let currentTurn = null;
   let currentPromptId = null;
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
@@ -36276,7 +36281,7 @@ config2(en_default3());
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Recall structured memories from the SQLite store. Paginated index; use the mnemo-replay skill for raw JSONL.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
-  timeline: "Render a compact timeline view for a routed session or turn selector."
+  timeline: "Render the temporal/decision shape of a past session \u2014 phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range-based pagination (30-turn hard cap)."
 };
 var recallInputShape = {
   id: external_exports.string().optional(),
@@ -38714,16 +38719,17 @@ function renderTitleCell(turn, isUndone, isSkipped, compactMetadata) {
     const trigger = compactMetadata?.trigger ?? "manual";
     return `${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
-  if (turn.type !== null && turn.title !== null) {
-    const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
-    if (isUndone) {
+  if (isUndone) {
+    if (turn.type !== null && turn.title !== null) {
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
       return `~~${body}~~`;
     }
-    if (turn.status === "extracted") {
-      return body;
-    }
+    return "\u2A2F";
   }
-  return isUndone ? "\u2A2F" : "\u23F3";
+  if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
+    return `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
+  }
+  return "\u23F3";
 }
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";

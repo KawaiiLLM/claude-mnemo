@@ -1680,7 +1680,12 @@ function readAllTranscriptEntries(transcriptPath) {
     if (!trimmedLine) {
       return;
     }
-    const entry = normalizeEntry(JSON.parse(trimmedLine));
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
     if (entry.isApiErrorMessage) {
       return;
     }
@@ -1766,12 +1771,12 @@ ${assistantText}` : assistantText;
     assistantText: normalizeAssistantText(turn.assistantText)
   }));
 }
-function parseReplayTranscript(transcriptPath) {
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
   let promptNumber = 0;
   let currentTurn = null;
   let currentPromptId = null;
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
@@ -1861,29 +1866,22 @@ function getRawContentText(content) {
     return Boolean(block) && typeof block === "object";
   }).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
 }
-function findLatestCompactBoundary(transcriptPath) {
-  const entries = readAllTranscriptEntries(transcriptPath);
+function findLatestCompactBoundary(entries) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.type === "system" && entry.subtype === "compact_boundary" && entry.uuid) {
       return {
         uuid: entry.uuid,
+        index,
         compactMetadata: entry.compactMetadata
       };
     }
   }
   return null;
 }
-function findSummaryWrapper(transcriptPath, boundaryUuid) {
-  const entries = readAllTranscriptEntries(transcriptPath);
-  const boundaryIndex = entries.findIndex(
-    (entry) => entry.type === "system" && entry.subtype === "compact_boundary" && entry.uuid === boundaryUuid
-  );
-  if (boundaryIndex === -1) {
-    return null;
-  }
-  const nextEntry = entries[boundaryIndex + 1];
-  if (!nextEntry || nextEntry.role !== "user" || nextEntry.parentUuid !== boundaryUuid || !nextEntry.promptId) {
+function findSummaryWrapper(entries, boundary) {
+  const nextEntry = entries[boundary.index + 1];
+  if (!nextEntry || nextEntry.role !== "user" || nextEntry.parentUuid !== boundary.uuid || !nextEntry.promptId) {
     return null;
   }
   const content = getRawContentText(nextEntry.content);
@@ -1895,9 +1893,6 @@ function findSummaryWrapper(transcriptPath, boundaryUuid) {
     lineNumber: nextEntry.lineNumber,
     content
   };
-}
-function resolvePromptNumber(transcriptPath, promptId) {
-  return parseReplayTranscript(transcriptPath).find((turn) => turn.promptId === promptId)?.promptNumber ?? null;
 }
 function resolvePreCompactTokens(input, boundary) {
   const rawMetadata = input.raw.compact_metadata && typeof input.raw.compact_metadata === "object" ? input.raw.compact_metadata : null;
@@ -1934,18 +1929,17 @@ function createPostCompactHandler(dependencies) {
     if (!session) {
       return { continue: true };
     }
-    const boundary = findLatestCompactBoundary(input.transcriptPath);
+    const entries = readAllTranscriptEntries(input.transcriptPath);
+    const boundary = findLatestCompactBoundary(entries);
     if (!boundary) {
       return { continue: true };
     }
-    const summaryWrapper = findSummaryWrapper(input.transcriptPath, boundary.uuid);
+    const summaryWrapper = findSummaryWrapper(entries, boundary);
     if (!summaryWrapper) {
       return { continue: true };
     }
-    const promptNumber = resolvePromptNumber(
-      input.transcriptPath,
-      summaryWrapper.promptId
-    );
+    const parsedTurns = parseReplayTranscript(input.transcriptPath, entries);
+    const promptNumber = parsedTurns.find((turn) => turn.promptId === summaryWrapper.promptId)?.promptNumber ?? null;
     if (promptNumber === null) {
       return { continue: true };
     }
