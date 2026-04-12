@@ -824,7 +824,7 @@ function renderStats(turn: TurnRecord): string {
 }
 
 function renderTitleCell(turn: TurnRecord, isUndone: boolean): string {
-  if (turn.type !== null && turn.title !== null) {
+  if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
     const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
     return isUndone ? `~~${body}~~` : body;
   }

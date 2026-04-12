@@ -972,8 +972,12 @@ describe("renderTimeline", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
+    const turn21Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  T21"));
 
-    expect(output).toMatch(/T19[\s\S]*⏳/);
+    expect(turn21Line).toBeDefined();
+    expect(turn21Line).toContain("⏳");
   });
 
   it("renders a phases block labeled session-wide", () => {
