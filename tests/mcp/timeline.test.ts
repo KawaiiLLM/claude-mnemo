@@ -22,6 +22,7 @@ import {
   renderTimeline,
   resolveWindow,
   segmentPhases,
+  timelineQuery,
   truncateText,
 } from "../../src/mcp/timeline";
 
@@ -980,6 +981,39 @@ describe("renderTimeline", () => {
     expect(turn21Line).toContain("⏳");
   });
 
+  it("extracted turns render emoji plus title in the title column", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T1..1" });
+    const output = renderTimeline(view);
+    const turn1Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  T1 "));
+
+    expect(turn1Line).toBeDefined();
+    expect(turn1Line).toContain("🔵 title for T1");
+  });
+
+  it("undone turns render a marker and strikethrough title", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query("UPDATE turns SET status = 'undone' WHERE session_id = ? AND prompt_number = 19").run(
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+    const turn19Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  ⨯ T19"));
+
+    expect(turn19Line).toBeDefined();
+    expect(turn19Line).toContain("~~⚖️ title for T19~~");
+  });
+
   it("renders a phases block labeled session-wide", () => {
     const db = createDatabase(":memory:");
 
@@ -989,5 +1023,41 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
 
     expect(output).toMatch(/phases \(session-wide\)/);
+  });
+
+  it("renders shape signals as a window-scoped block", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T5..10" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/shape signals \(window T5-T10\):/);
+    expect(output).toMatch(/fastest gap:/);
+    expect(output).toMatch(/tool bursts:/);
+  });
+});
+
+describe("timelineQuery", () => {
+  it("builds and renders the timeline for a valid session id", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const output = timelineQuery(db, { id: "S1" });
+
+    expect(output).toContain("- [S1]");
+    expect(output).toContain("showing: T1-T21 of 21 (end)");
+  });
+
+  it("returns a timeline error string when the view builder throws", () => {
+    const db = createDatabase(":memory:");
+
+    initializeSchema(db);
+
+    expect(timelineQuery(db, { id: "S999" })).toBe(
+      "timeline error: timeline: session S999 not found",
+    );
   });
 });
