@@ -596,7 +596,7 @@ Timeline uses its own renderer in `src/mcp/timeline.ts`, not the shared `format.
 
 Timeline's turn table has two label columns: `prompt` (200 chars, cleaned raw user prompt) and `title` (40 chars, `<type_emoji> <Mnemosyne title>`). The split is intentional: the prompt column preserves the user's ask, while the title column shows Mnemosyne's compressed turn summary.
 
-`TYPE_EMOJI` in `src/mcp/format.ts` is consumed by timeline via a local `TYPE_EMOJI_MAP` copy. Before timeline shipped, that export was orphaned; timeline closes that gap.
+`TYPE_EMOJI` in `src/mcp/format.ts` is still mirrored by a local `TYPE_EMOJI_MAP` copy inside timeline. The shared export is not wired into the timeline renderer yet.
 
 ---
 

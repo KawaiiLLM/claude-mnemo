@@ -381,6 +381,90 @@ describe("getSystemTimezone", () => {
     expect(timezone.name).toBeTruthy();
     expect(timezone.offsetLabel).toMatch(/^[+-]\d{2}:\d{2}$/);
   });
+
+  it("uses the supplied reference epoch when resolving the timezone", () => {
+    const referenceEpochSeconds = Math.floor(
+      Date.parse("2026-07-01T12:00:00Z") / 1000,
+    );
+    const observedEpochs: number[] = [];
+
+    const timezone = getSystemTimezone(referenceEpochSeconds, {
+      timeZone: "America/New_York",
+      resolveTimeZoneName: (epoch) => {
+        observedEpochs.push(epoch);
+        return epoch === referenceEpochSeconds ? "EDT" : "EST";
+      },
+      resolveOffsetMinutes: (epoch) => {
+        observedEpochs.push(epoch);
+        return epoch === referenceEpochSeconds ? -240 : -300;
+      },
+    });
+
+    expect(timezone).toEqual({
+      name: "EDT",
+      offsetLabel: "-04:00",
+    });
+    expect(observedEpochs.every((epoch) => epoch === referenceEpochSeconds)).toBe(
+      true,
+    );
+  });
+});
+
+describe("skipped turns", () => {
+  it("excludes skipped turns from live aggregates", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1000 }),
+      turn({
+        promptNumber: 2,
+        status: "skipped",
+        type: "decision",
+        createdAtEpoch: 1100,
+      }),
+      turn({ promptNumber: 3, type: "discovery", createdAtEpoch: 1200 }),
+    ];
+
+    expect(computeTypesDistribution(turns)).toEqual({
+      bugfix: 0,
+      feature: 0,
+      refactor: 0,
+      change: 0,
+      discovery: 2,
+      decision: 0,
+      compact: 0,
+      pending: 0,
+    });
+
+    expect(segmentPhases(turns)).toHaveLength(1);
+
+    const signals = detectShapeSignals(turns);
+    expect(signals.fastestGap).toEqual({
+      afterPromptNumber: 1,
+      ms: 200_000,
+    });
+    expect(signals.longestGap).toEqual({
+      afterPromptNumber: 1,
+      ms: 200_000,
+    });
+  });
+
+  it("renders skipped turns without the pending marker", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      "UPDATE turns SET status = 'skipped' WHERE session_id = ? AND prompt_number = 19",
+    ).run(session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+    const turn19Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  ⏭ T19"));
+
+    expect(turn19Line).toBeDefined();
+    expect(turn19Line).not.toContain("⏳");
+    expect(turn19Line).toContain("⏭");
+  });
 });
 
 describe("segmentPhases", () => {

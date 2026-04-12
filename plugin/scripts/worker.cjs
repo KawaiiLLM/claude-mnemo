@@ -38291,14 +38291,13 @@ function formatLocalDate(epochSeconds) {
     day: "2-digit"
   }).format(new Date(epochSeconds * 1e3));
 }
-function getSystemTimezone() {
-  const ianaName = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const parts = new Intl.DateTimeFormat("en-US", {
+function getSystemTimezone(referenceEpochSeconds = Math.floor(Date.now() / 1e3), source = {}) {
+  const ianaName = source.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const name = source.resolveTimeZoneName ? source.resolveTimeZoneName(referenceEpochSeconds, ianaName) : new Intl.DateTimeFormat("en-US", {
     timeZone: ianaName,
     timeZoneName: "short"
-  }).formatToParts(/* @__PURE__ */ new Date());
-  const name = parts.find((part) => part.type === "timeZoneName")?.value ?? ianaName;
-  const offsetMinutes = -(/* @__PURE__ */ new Date()).getTimezoneOffset();
+  }).formatToParts(new Date(referenceEpochSeconds * 1e3)).find((part) => part.type === "timeZoneName")?.value ?? ianaName;
+  const offsetMinutes = source.resolveOffsetMinutes ? source.resolveOffsetMinutes(referenceEpochSeconds) : -new Date(referenceEpochSeconds * 1e3).getTimezoneOffset();
   const sign = offsetMinutes >= 0 ? "+" : "-";
   const absoluteMinutes = Math.abs(offsetMinutes);
   const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, "0");
@@ -38318,7 +38317,7 @@ function segmentPhases(turns) {
   let currentStartEpoch = 0;
   let currentEndEpoch = 0;
   for (const turn of sortedTurns) {
-    if (turn.status === "undone") {
+    if (!isTimelineLiveTurn(turn)) {
       continue;
     }
     const kind = turn.type === null ? "pending" : "typed";
@@ -38372,7 +38371,7 @@ function computeTypesDistribution(turns) {
     pending: 0
   };
   for (const turn of turns) {
-    if (turn.status === "undone") {
+    if (!isTimelineLiveTurn(turn)) {
       continue;
     }
     if (turn.type === null) {
@@ -38386,7 +38385,7 @@ function computeTypesDistribution(turns) {
 function detectBrokenPromptPairs(turns) {
   const pairs = [];
   const liveTurns = sortTurnsForAnalysis(turns).filter(
-    (turn) => turn.status !== "undone"
+    isTimelineLiveTurn
   );
   for (let index = 0; index < liveTurns.length - 1; index += 1) {
     const current = liveTurns[index];
@@ -38442,7 +38441,7 @@ function detectShapeSignals(turns) {
     };
   }
   const sortedTurns = sortTurnsForAnalysis(turns);
-  const liveTurns = sortedTurns.filter((turn) => turn.status !== "undone");
+  const liveTurns = sortedTurns.filter(isTimelineLiveTurn);
   let fastestGap = null;
   let longestGap = null;
   for (let index = 0; index < liveTurns.length - 1; index += 1) {
@@ -38540,7 +38539,7 @@ function buildTimelineView(db, input) {
   const windowSignals = detectShapeSignals(windowTurns);
   const compactBoundaries = session.lastCompactTurn === null ? [] : [session.lastCompactTurn];
   const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
-  const tz = getSystemTimezone();
+  const tz = getSystemTimezone(session.createdAtEpoch);
   return {
     session,
     totalTurns,
@@ -38642,13 +38641,15 @@ function renderTurnTable(view) {
 }
 function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate) {
   const isUndone = turn.status === "undone";
+  const isSkipped = turn.status === "skipped";
   const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
   const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
   const promptCore = cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = truncateText2(promptWithBadges, PROMPT_COLUMN_CAP);
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
-  return `  ${`${isUndone ? "\u2A2F " : ""}T${turn.promptNumber}`.padEnd(4)}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone)}`;
+  const statusPrefix = isUndone ? "\u2A2F " : isSkipped ? "\u23ED " : "";
+  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone, isSkipped)}`;
 }
 function renderStats(turn) {
   const stats = [];
@@ -38664,7 +38665,10 @@ function renderStats(turn) {
   }
   return stats.length > 0 ? stats.join(" ") : "\u2014";
 }
-function renderTitleCell(turn, isUndone) {
+function renderTitleCell(turn, isUndone, isSkipped) {
+  if (isSkipped) {
+    return "\u23ED";
+  }
   if (turn.type !== null && turn.title !== null) {
     const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
     if (isUndone) {
@@ -38675,6 +38679,9 @@ function renderTitleCell(turn, isUndone) {
     }
   }
   return isUndone ? "\u2A2F" : "\u23F3";
+}
+function isTimelineLiveTurn(turn) {
+  return turn.status !== "undone" && turn.status !== "skipped";
 }
 function renderPhases(view) {
   if (view.phases.length === 0) {
