@@ -1,8 +1,24 @@
 import type { Database } from "bun:sqlite";
-import type { TurnRecord } from "../db/turns";
+import { getSession, type SessionRecord } from "../db/sessions";
+import { getTurnsForSession, type TurnRecord } from "../db/turns";
+import { resolveTranscriptPath } from "../shared/paths";
 
 export interface TimelineInput {
   id: string;
+}
+
+export interface TimelineView {
+  session: SessionRecord;
+  totalTurns: number;
+  totalToolCalls: number;
+  typesDistribution: TypesDistribution;
+  compactBoundaries: number[];
+  phases: Phase[];
+  window: ResolvedWindow;
+  windowTurns: TurnRecord[];
+  windowSignals: ShapeSignals;
+  jsonlPath: string | null;
+  tz: { name: string; offsetLabel: string };
 }
 
 export const TIMELINE_WINDOW_CAP = 30;
@@ -604,6 +620,53 @@ function validateOpenEndRange(range: Extract<RangeSpec, { kind: "openEnd" }>): v
       `timeline range is invalid: open-end ranges require a positive integer start`,
     );
   }
+}
+
+export function buildTimelineView(
+  db: Database,
+  input: TimelineInput,
+): TimelineView {
+  const parsed = parseTimelineId(input.id);
+  const session = getSession(db, parsed.sessionId);
+
+  if (!session) {
+    throw new Error(`timeline: session S${parsed.sessionId} not found`);
+  }
+
+  const allTurns = getTurnsForSession(db, session.id);
+  const totalTurns = allTurns.length;
+  const totalToolCalls = allTurns.reduce(
+    (sum, turn) => sum + (turn.toolCallCount ?? 0),
+    0,
+  );
+  const window = resolveWindow(parsed.range, totalTurns);
+  const windowTurns = allTurns.filter(
+    (turn) =>
+      turn.promptNumber >= window.startPromptNumber &&
+      turn.promptNumber <= window.endPromptNumber,
+  );
+  const phases = segmentPhases(allTurns);
+  const typesDistribution = computeTypesDistribution(allTurns);
+  const windowSignals = detectShapeSignals(windowTurns);
+  const compactBoundaries =
+    session.lastCompactTurn === null ? [] : [session.lastCompactTurn];
+  const jsonlPath =
+    resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
+  const tz = getSystemTimezone();
+
+  return {
+    session,
+    totalTurns,
+    totalToolCalls,
+    typesDistribution,
+    compactBoundaries,
+    phases,
+    window,
+    windowTurns,
+    windowSignals,
+    jsonlPath,
+    tz,
+  };
 }
 
 export function timelineQuery(_db: Database, _input: TimelineInput): string {

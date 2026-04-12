@@ -1,7 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import type { Database } from "bun:sqlite";
 
+import { createDatabase } from "../../src/db/database";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
 import type { TurnRecord } from "../../src/db/turns";
 import {
+  buildTimelineView,
   cleanPromptForLabel,
   computeTypesDistribution,
   detectBrokenPromptPairs,
@@ -40,6 +45,73 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     updatedAtEpoch: null,
     ...overrides,
   };
+}
+
+function seedSession(db: Database) {
+  initializeSchema(db);
+
+  const session = upsertSession(db, {
+    contentSessionId: "abc-uuid-timeline",
+    project: "/tmp/claude-mnemo-test",
+    title: "timeline fixture",
+    insight: null,
+    createdAtEpoch: 1_700_000_000,
+    updatedAtEpoch: 1_700_000_100,
+    completedAtEpoch: null,
+  });
+
+  const insertTurn = db.query(
+    `INSERT INTO turns (
+      session_id,
+      prompt_number,
+      content_prompt_id,
+      transcript_line_start,
+      status,
+      user_prompt,
+      assistant_response,
+      title,
+      content,
+      insight,
+      type,
+      tags,
+      files_read,
+      files_modified,
+      tool_call_count,
+      created_at_epoch,
+      updated_at_epoch
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (let promptNumber = 1; promptNumber <= 21; promptNumber += 1) {
+    const type =
+      promptNumber === 6 || promptNumber === 19 || promptNumber === 20
+        ? "decision"
+        : promptNumber >= 19
+          ? null
+          : "discovery";
+
+    insertTurn.run(
+      session.id,
+      promptNumber,
+      null,
+      null,
+      "extracted",
+      `raw prompt ${promptNumber}`,
+      null,
+      type === null ? null : `title for T${promptNumber}`,
+      null,
+      null,
+      type,
+      JSON.stringify([]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      promptNumber === 5 || promptNumber === 11 ? 15 : 2,
+      1_700_000_000 + promptNumber * 100,
+      null,
+    );
+  }
+
+  return session;
 }
 
 describe("parseTimelineId", () => {
@@ -739,5 +811,67 @@ describe("detectShapeSignals", () => {
     ]);
     expect(signals.undoneTurns).toEqual([4]);
     expect(signals.externalInputs).toEqual([]);
+  });
+});
+
+describe("buildTimelineView", () => {
+  it("returns a view for a plain S id", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1" });
+
+    expect(view.totalTurns).toBe(21);
+    expect(view.window.startPromptNumber).toBe(1);
+    expect(view.window.endPromptNumber).toBe(21);
+    expect(view.windowTurns).toHaveLength(21);
+    expect(view.phases.length).toBeGreaterThan(1);
+  });
+
+  it("respects closed range", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T5..10" });
+
+    expect(view.window.startPromptNumber).toBe(5);
+    expect(view.window.endPromptNumber).toBe(10);
+    expect(view.windowTurns).toHaveLength(6);
+  });
+
+  it("phases always use the full session regardless of window", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T10..15" });
+    const firstPhase = view.phases[0];
+    const lastPhase = view.phases[view.phases.length - 1];
+
+    expect(firstPhase.startPromptNumber).toBe(1);
+    expect(lastPhase.endPromptNumber).toBeGreaterThanOrEqual(19);
+  });
+
+  it("rejects unknown session ids", () => {
+    const db = createDatabase(":memory:");
+
+    initializeSchema(db);
+
+    expect(() => buildTimelineView(db, { id: "S999" })).toThrow(/session/i);
+  });
+
+  it("includes the compact boundary when the session stores one", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query("UPDATE sessions SET last_compact_turn = 15 WHERE id = ?").run(
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1" });
+
+    expect(view.compactBoundaries).toContain(15);
   });
 });
