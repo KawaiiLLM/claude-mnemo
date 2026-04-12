@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
-import { parseReplayTranscript, readAllTranscriptEntries } from "../../shared/transcript-parser";
+import {
+  parseReplayTranscript,
+  readAllTranscriptEntries,
+  type TranscriptEntryWithLineNumber,
+} from "../../shared/transcript-parser";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface PostCompactHandlerDependencies {
@@ -11,6 +15,7 @@ export interface PostCompactHandlerDependencies {
 
 interface CompactBoundaryEntry {
   uuid: string;
+  index: number;
   compactMetadata?: {
     trigger?: string;
     preCompactTokenCount?: number;
@@ -37,10 +42,8 @@ function getRawContentText(content: unknown): string {
 }
 
 function findLatestCompactBoundary(
-  transcriptPath: string,
+  entries: TranscriptEntryWithLineNumber[],
 ): CompactBoundaryEntry | null {
-  const entries = readAllTranscriptEntries(transcriptPath);
-
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
 
@@ -51,6 +54,7 @@ function findLatestCompactBoundary(
     ) {
       return {
         uuid: entry.uuid,
+        index,
         compactMetadata: entry.compactMetadata,
       };
     }
@@ -60,30 +64,18 @@ function findLatestCompactBoundary(
 }
 
 function findSummaryWrapper(
-  transcriptPath: string,
-  boundaryUuid: string,
+  entries: TranscriptEntryWithLineNumber[],
+  boundary: CompactBoundaryEntry,
 ): {
   promptId: string;
   lineNumber: number;
   content: string;
 } | null {
-  const entries = readAllTranscriptEntries(transcriptPath);
-  const boundaryIndex = entries.findIndex(
-    (entry) =>
-      entry.type === "system" &&
-      entry.subtype === "compact_boundary" &&
-      entry.uuid === boundaryUuid,
-  );
-
-  if (boundaryIndex === -1) {
-    return null;
-  }
-
-  const nextEntry = entries[boundaryIndex + 1];
+  const nextEntry = entries[boundary.index + 1];
   if (
     !nextEntry ||
     nextEntry.role !== "user" ||
-    nextEntry.parentUuid !== boundaryUuid ||
+    nextEntry.parentUuid !== boundary.uuid ||
     !nextEntry.promptId
   ) {
     return null;
@@ -99,16 +91,6 @@ function findSummaryWrapper(
     lineNumber: nextEntry.lineNumber,
     content,
   };
-}
-
-function resolvePromptNumber(
-  transcriptPath: string,
-  promptId: string,
-): number | null {
-  return (
-    parseReplayTranscript(transcriptPath).find((turn) => turn.promptId === promptId)
-      ?.promptNumber ?? null
-  );
 }
 
 function resolvePreCompactTokens(
@@ -177,20 +159,22 @@ export function createPostCompactHandler(
       return { continue: true };
     }
 
-    const boundary = findLatestCompactBoundary(input.transcriptPath);
+    const entries = readAllTranscriptEntries(input.transcriptPath);
+
+    const boundary = findLatestCompactBoundary(entries);
     if (!boundary) {
       return { continue: true };
     }
 
-    const summaryWrapper = findSummaryWrapper(input.transcriptPath, boundary.uuid);
+    const summaryWrapper = findSummaryWrapper(entries, boundary);
     if (!summaryWrapper) {
       return { continue: true };
     }
 
-    const promptNumber = resolvePromptNumber(
-      input.transcriptPath,
-      summaryWrapper.promptId,
-    );
+    const parsedTurns = parseReplayTranscript(input.transcriptPath, entries);
+    const promptNumber =
+      parsedTurns.find((turn) => turn.promptId === summaryWrapper.promptId)
+        ?.promptNumber ?? null;
     if (promptNumber === null) {
       return { continue: true };
     }

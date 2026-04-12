@@ -916,17 +916,19 @@ function renderTitleCell(
     return `${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
 
-  if (turn.type !== null && turn.title !== null) {
-    const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
-    if (isUndone) {
+  if (isUndone) {
+    if (turn.type !== null && turn.title !== null) {
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
       return `~~${body}~~`;
     }
-    if (turn.status === "extracted") {
-      return body;
-    }
+    return "⨯";
   }
 
-  return isUndone ? "⨯" : "⏳";
+  if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
+    return `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
+  }
+
+  return "⏳";
 }
 
 function isTimelineLiveTurn(turn: TurnRecord): boolean {

@@ -8,6 +8,7 @@ import {
   extractAssistantResponse,
   parseReplayTranscript,
   parseTranscript,
+  readAllTranscriptEntries,
 } from "../../src/shared/transcript-parser";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
@@ -242,6 +243,34 @@ describe("parseTranscript", () => {
       [1, 1],
       [2, 3],
     ]);
+  });
+
+  test("parseReplayTranscript accepts preloaded entries and produces identical results", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        content: [{ type: "text", text: "First prompt" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "First answer" }],
+      },
+      {
+        role: "user",
+        promptId: "p2",
+        permissionMode: "default",
+        content: [{ type: "text", text: "Second prompt" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const entries = readAllTranscriptEntries(transcript.path);
+    const fromPath = parseReplayTranscript(transcript.path);
+    const fromEntries = parseReplayTranscript(transcript.path, entries);
+
+    expect(fromEntries).toEqual(fromPath);
   });
 
   test("countUserPromptsInTranscript matches parseReplayTranscript length", () => {
@@ -691,5 +720,35 @@ describe("parseTranscript", () => {
     directories.push(transcript.directory);
 
     expect(countUserPromptsInTranscript(transcript.path)).toBe(3);
+  });
+
+  test("readAllTranscriptEntries skips malformed JSONL lines and returns surrounding entries", () => {
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-transcript-"));
+    directories.push(directory);
+    const path = join(directory, "malformed.jsonl");
+
+    const goodBefore = JSON.stringify({
+      type: "user",
+      uuid: "u1",
+      promptId: "A",
+      message: { role: "user", content: "first" },
+    });
+    const badLine = "{ this is not valid json !!!";
+    const goodAfter = JSON.stringify({
+      type: "user",
+      uuid: "u2",
+      promptId: "B",
+      message: { role: "user", content: "second" },
+    });
+
+    writeFileSync(path, [goodBefore, badLine, goodAfter].join("\n"), "utf8");
+
+    const entries = readAllTranscriptEntries(path);
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0].uuid).toBe("u1");
+    expect(entries[0].lineNumber).toBe(1);
+    expect(entries[1].uuid).toBe("u2");
+    expect(entries[1].lineNumber).toBe(3);
   });
 });

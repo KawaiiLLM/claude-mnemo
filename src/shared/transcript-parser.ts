@@ -26,7 +26,7 @@ interface TranscriptEntry {
   };
 }
 
-interface TranscriptEntryWithLineNumber extends TranscriptEntry {
+export interface TranscriptEntryWithLineNumber extends TranscriptEntry {
   lineNumber: number;
 }
 
@@ -201,7 +201,12 @@ export function readAllTranscriptEntries(
       return;
     }
 
-    const entry = normalizeEntry(JSON.parse(trimmedLine) as RawTranscriptEntry);
+    let entry: TranscriptEntry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine) as RawTranscriptEntry);
+    } catch {
+      return;
+    }
 
     if (entry.isApiErrorMessage) {
       return;
@@ -355,13 +360,16 @@ export function parseTranscript(transcriptPath: string): ParsedTurn[] {
   }));
 }
 
-export function parseReplayTranscript(transcriptPath: string): ParsedReplayTurn[] {
+export function parseReplayTranscript(
+  transcriptPath: string,
+  preloadedEntries?: TranscriptEntryWithLineNumber[],
+): ParsedReplayTurn[] {
   const turns: ParsedReplayTurn[] = [];
   let promptNumber = 0;
   let currentTurn: ParsedReplayTurn | null = null;
   let currentPromptId: string | null = null;
 
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of (preloadedEntries ?? readAllTranscriptEntries(transcriptPath))) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
 
