@@ -7,7 +7,6 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 import * as formatModule from "../../src/mcp/format";
-import * as recallModule from "../../src/mcp/recall";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { resolveTranscriptPath } from "../../src/shared/paths";
@@ -230,7 +229,7 @@ describe("handleContextHook", () => {
     db.close();
   });
 
-  test("returns the fallback message when no memory rows exist", async () => {
+  test("startup upserts a minimal current session even when memory rows do not exist", async () => {
     const emptyDb = createDatabase(":memory:");
     initializeSchema(emptyDb);
 
@@ -238,16 +237,20 @@ describe("handleContextHook", () => {
       db: emptyDb,
     });
 
-    const result = await handler(createInput({ sessionId: "missing-session" }));
-
-    expect(result.hookSpecificOutput).toBe(
-      "claude-mnemo memory available via recall() and the mnemo-replay skill.",
+    const result = await handler(
+      createInput({ sessionId: "missing-session", source: "startup" }),
     );
+
+    expect(result.hookSpecificOutput).toContain(
+      "claude-mnemo: 1 sessions, 0 observations | current: S1",
+    );
+    expect(result.hookSpecificOutput).toContain("## Recent Sessions");
+    expect(result.hookSpecificOutput).not.toContain("## Current Session");
 
     emptyDb.close();
   });
 
-  test("queries recent sessions once and renders through shared nodes without recall summary helpers", async () => {
+  test("startup skips Current Session and adds compact header axes", async () => {
     const singleSessionDb = createDatabase(":memory:");
     initializeSchema(singleSessionDb);
 
@@ -263,8 +266,6 @@ describe("handleContextHook", () => {
     });
 
     const getRecentSessionsSpy = spyOn(sessionsModule, "getRecentSessions");
-    const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
-    const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
     const renderNodeSpy = spyOn(formatModule, "renderNode");
     const handler = createContextHandler({
       db: singleSessionDb,
@@ -273,30 +274,27 @@ describe("handleContextHook", () => {
     await handler(
       createInput({
         sessionId: "single-session",
+        source: "startup",
       }),
     );
 
     expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
-    expect(buildSessionSummarySpy).not.toHaveBeenCalled();
-    expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
-    expect(renderNodeSpy).toHaveBeenCalledTimes(1);
-    expect(renderNodeSpy).toHaveBeenCalledWith(
-      {
-        type: "session",
-        value: expect.objectContaining({
-          id: singleSession.id,
-          jsonlPath: resolveTranscriptPath(
-            "/Users/zhaoqixuan/Projects/claude-mnemo",
-            "single-session",
-          ),
-        }),
-      },
-      { depth: "expanded", truncate: 120, mode: "unified" },
+    expect(renderNodeSpy).toHaveBeenCalledTimes(0);
+
+    const output = (await handler(
+      createInput({
+        sessionId: "single-session",
+        source: "startup",
+      }),
+    )).hookSpecificOutput ?? "";
+    expect(output).toContain(`claude-mnemo: 1 sessions, 0 observations | current: S${singleSession.id}`);
+    expect(output).toContain(
+      "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
     );
+    expect(output).not.toContain("## Current Session");
+    expect(output).toContain("## Recent Sessions");
 
     getRecentSessionsSpy.mockRestore();
-    buildSessionSummarySpy.mockRestore();
-    buildCollapsedTurnsSpy.mockRestore();
     renderNodeSpy.mockRestore();
     singleSessionDb.close();
   });
@@ -359,7 +357,7 @@ describe("handleContextHook", () => {
     expect(new Set(memoryIds).size).toBe(50);
   });
 
-  test("anchors on the current session and applies graduated depth", async () => {
+  test("compact injects current-session timeline and keeps recent sessions collapsed", async () => {
     insertTurn(db, {
       sessionId: currentSessionId,
       promptNumber: 1,
@@ -547,33 +545,29 @@ describe("handleContextHook", () => {
     const handler = createContextHandler({
       db,
     });
-    const buildSessionSummarySpy = spyOn(recallModule, "buildSessionSummary");
-    const buildCollapsedTurnsSpy = spyOn(recallModule, "buildCollapsedTurnsForSession");
     const renderNodeSpy = spyOn(formatModule, "renderNode");
 
     const result = await handler(
       createInput({
         sessionId: "session-context",
+        source: "compact",
       }),
     );
 
     const output = result.hookSpecificOutput ?? "";
 
-    expect(output).toContain("claude-mnemo: 5 sessions, 5 observations");
-    expect(output).toContain("Types: 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision");
-    expect(output).toContain("Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools");
-    expect(output).toContain("Format:");
+    expect(output).toContain(`claude-mnemo: 5 sessions, 5 observations | current: S${currentSessionId}`);
     expect(output).toContain(
-      'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)',
+      "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
     );
+    expect(output).not.toContain("Format:");
+    expect(output).not.toContain("Stats:");
     expect(output).toContain("## Current Session");
     expect(output).toContain("## Memories");
     expect(output).toContain("## Recent Sessions");
+    expect(output).toContain(`[S${currentSessionId}] Anchored session`);
     expect(output).toContain(
-      `- [S3] Anchored session | 💬6 💡5 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
-    );
-    expect(output).toContain(
-      `  raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
+      `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
     );
     expect(output).toContain(
       `[M1] feedback/global: Use real DB tests | 1970-01-01`,
@@ -582,30 +576,16 @@ describe("handleContextHook", () => {
       `[M2] project//Users/zhaoqixuan/Projects/claude-mnemo: Auth mutex policy | 1970-01-01`,
     );
     expect(output).not.toContain("Other project note");
-    expect(output).toContain(
-      "  - desc: Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
-    );
-    expect(output).toContain("  - insight:");
-    expect(output).toContain("    - Primary insight bullet for the current session");
-    expect(output).toContain("  - next_steps:");
-    expect(output).toContain("    - Implement the mutex fix before the next session begins.");
-
-    expect(output).toContain(
-      `  - [T2] Investigate timeout | 💡1 📖1 ✏️1 🔧2`,
-    );
-    expect(output).toContain(
-      `  - [T6] Close out session | 🔧1 [extracted]`,
-    );
+    expect(output).toContain("  insight:");
+    expect(output).toContain("  - Primary insight bullet for the current session");
+    expect(output).toContain("T#");
+    expect(output).toContain("showing: T1-T6 of 6 (end)");
+    expect(output).toContain("phases (window T1-T6):");
+    expect(output).toContain("shape signals (window T1-T6");
+    expect(output).not.toContain("next_steps:");
     expect(output).not.toContain(
-      `  - [T1] Prep cache | 🔧1 [extracted]`,
+      "Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
     );
-    expect(output).toContain(
-      `  - [T4] Document findings | 💡4 📖2 ✏️1 🔧4`,
-    );
-    expect(output).not.toContain("    - prompt:");
-    expect(output).not.toContain("    - response:");
-    expect(output).not.toContain("    - [O");
-    expect(output).not.toContain("more observations");
 
     expect(output).toContain(
       `- [S1] Most recent session | 💬6 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
@@ -647,30 +627,11 @@ describe("handleContextHook", () => {
     );
     expect(output).not.toContain("Oldest turn 1");
 
-    expect(output.indexOf("- [S3] Anchored session")).toBeLessThan(
+    expect(output.indexOf(`[S${currentSessionId}] Anchored session`)).toBeLessThan(
       output.indexOf("- [S1] Most recent session"),
-    );
-    expect(buildSessionSummarySpy).not.toHaveBeenCalled();
-    expect(buildCollapsedTurnsSpy).not.toHaveBeenCalled();
-    expect(renderNodeSpy).toHaveBeenCalledWith(
-      {
-        type: "session",
-        value: expect.objectContaining({
-          id: currentSessionId,
-          jsonlPath: resolveTranscriptPath(
-            "/Users/zhaoqixuan/Projects/claude-mnemo",
-            "session-context",
-          ),
-        }),
-      },
-      { depth: "expanded", truncate: 120, mode: "unified" },
     );
     expect(renderNodeSpy).toHaveBeenCalledWith(
       { type: "session", value: expect.objectContaining({ id: 1 }) },
-      { depth: "collapsed", truncate: 120, mode: "unified" },
-    );
-    expect(renderNodeSpy).toHaveBeenCalledWith(
-      { type: "turn", value: expect.objectContaining({ promptNumber: 2 }) },
       { depth: "collapsed", truncate: 120, mode: "unified" },
     );
     expect(renderNodeSpy).toHaveBeenCalledWith(
@@ -680,8 +641,56 @@ describe("handleContextHook", () => {
       },
       { depth: "collapsed", mode: "legacy" },
     );
-    buildSessionSummarySpy.mockRestore();
-    buildCollapsedTurnsSpy.mockRestore();
     renderNodeSpy.mockRestore();
+  });
+
+  test("startup shows current session id but skips Current Session timeline when there are no turns", async () => {
+    const handler = createContextHandler({ db });
+
+    const result = await handler(
+      createInput({
+        source: "startup",
+        sessionId: "session-context",
+      }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+    expect(output).toContain(`current: S${currentSessionId}`);
+    expect(output).toContain("Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)");
+    expect(output).not.toContain("## Current Session");
+    expect(output).not.toContain("T#");
+  });
+
+  test("compact injects a last-page timeline instead of collapsed turns", async () => {
+    for (let promptNumber = 1; promptNumber <= 40; promptNumber += 1) {
+      insertTurn(db, {
+        sessionId: currentSessionId,
+        promptNumber,
+        title: `Turn ${promptNumber}`,
+        content: `Turn ${promptNumber} content`,
+        userPrompt: `Turn ${promptNumber} ${"x".repeat(120)}`,
+        assistantResponse: `Response ${promptNumber}`,
+        toolCallCount: 1,
+        createdAtEpoch: 300 + promptNumber,
+      });
+    }
+
+    const handler = createContextHandler({ db });
+    const result = await handler(
+      createInput({
+        source: "compact",
+        sessionId: "session-context",
+      }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+    expect(output).toContain(`claude-mnemo: 5 sessions, 0 observations | current: S${currentSessionId}`);
+    expect(output).toContain("## Current Session");
+    expect(output).toContain("T#");
+    expect(output).toContain("showing: T11-T40 of 40 (end)");
+    expect(output).toContain('earlier: timeline(id="S3/T1..10") or recall(id="S3")');
+    expect(output).not.toContain("Format:");
+    expect(output).not.toContain("Stats:");
+    expect(output).not.toContain('Expand: recall(id="Sx/Ty", depth="expanded")');
   });
 });
