@@ -46,6 +46,9 @@ var import_node_fs5 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
+// src/shared/build-id.ts
+var BUILD_ID = true ? "0.2.0-mnveicyq" : "dev";
+
 // src/db/database.ts
 var import_node_fs = require("node:fs");
 var import_node_path2 = require("node:path");
@@ -38174,11 +38177,12 @@ function parseTimelineId(id) {
   }
   throw new Error(`timeline range syntax not recognized: T${rangeValue}`);
 }
-function resolveWindow(range, totalTurns) {
+function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns }) {
+  const { first, last } = bounds;
   if (totalTurns === 0) {
     return {
-      startPromptNumber: 1,
-      endPromptNumber: 0,
+      startPromptNumber: first,
+      endPromptNumber: first - 1,
       requestedEnd: null,
       hadExplicitEnd: false,
       totalTurns: 0
@@ -38186,8 +38190,8 @@ function resolveWindow(range, totalTurns) {
   }
   if (range.kind === "none" || range.kind === "all") {
     return {
-      startPromptNumber: 1,
-      endPromptNumber: Math.min(TIMELINE_WINDOW_CAP, totalTurns),
+      startPromptNumber: first,
+      endPromptNumber: Math.min(first + TIMELINE_WINDOW_CAP - 1, last),
       requestedEnd: null,
       hadExplicitEnd: false,
       totalTurns
@@ -38195,16 +38199,16 @@ function resolveWindow(range, totalTurns) {
   }
   if (range.kind === "closed") {
     validateClosedRange(range);
-    const startPromptNumber = Math.max(1, range.start);
-    if (startPromptNumber > totalTurns) {
+    const startPromptNumber = Math.max(first, range.start);
+    if (startPromptNumber > last) {
       throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds session length ${totalTurns}`
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
       );
     }
     const endPromptNumber = Math.min(
       range.end,
       startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-      totalTurns
+      last
     );
     return {
       startPromptNumber,
@@ -38216,17 +38220,17 @@ function resolveWindow(range, totalTurns) {
   }
   if (range.kind === "openEnd") {
     validateOpenEndRange(range);
-    const startPromptNumber = Math.max(1, range.start);
-    if (startPromptNumber > totalTurns) {
+    const startPromptNumber = Math.max(first, range.start);
+    if (startPromptNumber > last) {
       throw new Error(
-        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds session length ${totalTurns}`
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
       );
     }
     return {
       startPromptNumber,
       endPromptNumber: Math.min(
         startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-        totalTurns
+        last
       ),
       requestedEnd: null,
       hadExplicitEnd: false,
@@ -38235,9 +38239,9 @@ function resolveWindow(range, totalTurns) {
   }
   if (range.kind === "openStart") {
     validateOpenStartRange(range);
-    const endPromptNumber = Math.min(range.end, TIMELINE_WINDOW_CAP, totalTurns);
+    const endPromptNumber = Math.min(range.end, first + TIMELINE_WINDOW_CAP - 1, last);
     return {
-      startPromptNumber: 1,
+      startPromptNumber: first,
       endPromptNumber,
       requestedEnd: endPromptNumber < range.end ? range.end : null,
       hadExplicitEnd: true,
@@ -38570,14 +38574,20 @@ function buildTimelineView(db, input) {
     (sum, turn) => sum + (turn.toolCallCount ?? 0),
     0
   );
-  const window = resolveWindow(parsed.range, totalTurns);
+  const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
+  const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
+  const window = resolveWindow(parsed.range, totalTurns, bounds);
   const windowTurns = allTurns.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
   const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
-  const compactBoundaries = allTurns.filter((turn) => turn.type === "compact").map((turn) => turn.promptNumber);
+  const compactBoundaries = [
+    ...new Set(
+      allTurns.filter((turn) => turn.type === "compact").map((turn) => turn.promptNumber)
+    )
+  ].sort((a, b) => a - b);
   if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
     compactBoundaries.push(session.lastCompactTurn);
   }
@@ -38586,6 +38596,7 @@ function buildTimelineView(db, input) {
   return {
     session,
     totalTurns,
+    lastPromptNumber: bounds.last,
     totalToolCalls,
     typesDistribution,
     compactBoundaries,
@@ -38639,12 +38650,13 @@ function formatShowingLine(view) {
   if (view.totalTurns === 0) {
     return "T0-T0 of 0 (empty)";
   }
+  const last = view.lastPromptNumber;
   const base = `T${view.window.startPromptNumber}-T${view.window.endPromptNumber} of ${view.totalTurns}`;
-  const atEnd = view.window.endPromptNumber >= view.totalTurns;
+  const atEnd = view.window.endPromptNumber >= last;
   if (view.window.requestedEnd !== null) {
     const rows = view.window.endPromptNumber - view.window.startPromptNumber + 1;
     const nextParts = atEnd ? [] : [
-      `next: T${view.window.endPromptNumber + 1}..${Math.min(view.window.endPromptNumber + TIMELINE_WINDOW_CAP, view.totalTurns)}`
+      `next: T${view.window.endPromptNumber + 1}..${Math.min(view.window.endPromptNumber + TIMELINE_WINDOW_CAP, last)}`
     ];
     return `${base} (requested T${view.window.startPromptNumber}..${view.window.requestedEnd}, truncated to ${rows} rows${nextParts.length > 0 ? `; ${nextParts[0]}` : ""})`;
   }
@@ -38652,7 +38664,7 @@ function formatShowingLine(view) {
     return `${base} (end)`;
   }
   const nextStart = view.window.endPromptNumber + 1;
-  const nextEnd = Math.min(nextStart + TIMELINE_WINDOW_CAP - 1, view.totalTurns);
+  const nextEnd = Math.min(nextStart + TIMELINE_WINDOW_CAP - 1, last);
   return `${base} (next: T${nextStart}..${nextEnd})`;
 }
 function renderTurnTable(view) {
@@ -39665,7 +39677,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     try {
       const url2 = new URL(req.url);
       if (req.method === "GET" && url2.pathname === "/health") {
-        return new Response(JSON.stringify({ ok: true }), {
+        return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
           status: 200,
           headers: { "content-type": "application/json" }
         });

@@ -11,6 +11,7 @@ import { join } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
+import { BUILD_ID } from "../shared/build-id";
 import { createDatabase } from "../db/database";
 import {
   getSession,
@@ -701,7 +702,7 @@ export function createWorkerFetchHandler(
       const url = new URL(req.url);
 
       if (req.method === "GET" && url.pathname === "/health") {
-        return new Response(JSON.stringify({ ok: true }), {
+        return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });

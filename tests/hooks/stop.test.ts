@@ -129,8 +129,9 @@ describe("handleStopHook", () => {
     ]);
     expect(session.updatedAtEpoch).toBe(500);
     expect(session.completedAtEpoch).toBe(500);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/wake");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/wake");
   });
 
   test("does not enqueue the same turn-stop task twice for the current turn", async () => {
@@ -276,7 +277,7 @@ describe("handleStopHook", () => {
         sessionDbId: sessionId,
       },
     ]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });

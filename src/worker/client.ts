@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+import { BUILD_ID } from "../shared/build-id";
 import {
   HOOK_HEALTH_TIMEOUT_MS,
   HOOK_READINESS_TIMEOUT_MS,
 } from "../shared/hook-constants";
+import { WORKER_PID_PATH } from "../shared/paths";
 
 const WORKER_PORT = 37778;
 const WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
@@ -17,6 +19,8 @@ export interface WorkerClientDeps {
   spawnImpl?: typeof spawn;
   existsSyncImpl?: typeof existsSync;
   setTimeoutImpl?: typeof setTimeout;
+  nowMsImpl?: () => number;
+  pidPath?: string;
 }
 
 function createAbortSignal(timeoutMs: number): AbortSignal {
@@ -56,19 +60,56 @@ export function resolveWorkerScriptPaths(
   };
 }
 
-async function isWorkerHealthy(
+async function isWorkerCompatible(
   fetchImpl: typeof fetch,
   timeoutMs: number,
-): Promise<boolean> {
+): Promise<"compatible" | "stale" | "down"> {
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
       method: "GET",
       signal: createAbortSignal(timeoutMs),
     });
-    return response.ok;
+
+    if (!response.ok) {
+      return "down";
+    }
+
+    let body: { ok?: boolean; buildId?: string };
+    try {
+      body = (await response.json()) as { ok?: boolean; buildId?: string };
+    } catch {
+      return "compatible";
+    }
+
+    if (body.buildId && body.buildId !== BUILD_ID) {
+      return "stale";
+    }
+
+    return "compatible";
   } catch {
-    return false;
+    return "down";
   }
+}
+
+function killStaleWorker(deps: WorkerClientDeps = {}): void {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? existsSync;
+
+  if (!existsSyncImpl(pidPath)) {
+    return;
+  }
+
+  try {
+    const pid = Number(readFileSync(pidPath, "utf8").trim());
+
+    if (Number.isInteger(pid) && pid > 0) {
+      process.kill(pid, "SIGTERM");
+    }
+  } catch {
+    // Process already gone or permission error — either way, proceed
+  }
+  // Do NOT remove the PID file here. The new worker overwrites it on startup.
+  // If the old process survives SIGTERM, the file remains as a handle for retry.
 }
 
 export function spawnWorkerProcess(
@@ -97,6 +138,22 @@ export async function notifyWorkerWake(
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
+  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+
+  if (status === "stale") {
+    killStaleWorker(deps);
+    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+    spawnWorkerProcess(deps, env);
+    if (!(await waitForCompatibleWorker(deps))) {
+      return;
+    }
+  } else if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    if (!(await waitForCompatibleWorker(deps))) {
+      return;
+    }
+  }
+
   try {
     await fetchImpl(`${WORKER_BASE_URL}/wake`, {
       method: "POST",
@@ -108,15 +165,17 @@ export async function notifyWorkerWake(
   }
 }
 
-async function waitForWorkerReadiness(
+async function waitForCompatibleWorker(
   deps: WorkerClientDeps = {},
 ): Promise<boolean> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const startedAt = Date.now();
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
 
-  while (Date.now() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    if (await isWorkerHealthy(fetchImpl, HOOK_HEALTH_TIMEOUT_MS)) {
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (status === "compatible") {
       return true;
     }
     await sleep(100, setTimeoutImpl);
@@ -133,9 +192,16 @@ export async function notifyWorkerCompact(
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
 
-  if (!(await isWorkerHealthy(fetchImpl, HOOK_HEALTH_TIMEOUT_MS))) {
+  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+
+  if (status === "stale") {
+    killStaleWorker(deps);
+    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+  }
+
+  if (status !== "compatible") {
     spawnWorkerProcess(deps, env);
-    const ready = await waitForWorkerReadiness(deps);
+    const ready = await waitForCompatibleWorker(deps);
     if (!ready) {
       throw new Error("Worker did not become ready before compact request.");
     }

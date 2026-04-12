@@ -14,6 +14,7 @@ const packageJson = await import(join(projectRoot, "package.json"), {
 });
 
 const defaultVersion = packageJson.default.version;
+const buildId = `${defaultVersion}-${Date.now().toString(36)}`;
 
 const builds = [
   {
@@ -45,6 +46,7 @@ for (const build of builds) {
     },
     define: {
       __DEFAULT_PACKAGE_VERSION__: JSON.stringify(defaultVersion),
+      __BUILD_ID__: JSON.stringify(buildId),
     },
     external: ["bun:sqlite"],
   });

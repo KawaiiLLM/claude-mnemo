@@ -137,8 +137,9 @@ describe("handlePostToolUseHook", () => {
         sessionDbId: sessionId,
       },
     ]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://127.0.0.1:37778/wake");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://127.0.0.1:37778/health");
+    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/wake");
   });
 
   test("continues without writing when session or turn context is missing", async () => {

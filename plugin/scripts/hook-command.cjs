@@ -620,6 +620,11 @@ function getRecentSessions(db, options = {}) {
 var import_node_child_process = require("node:child_process");
 var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
+
+// src/shared/build-id.ts
+var BUILD_ID = true ? "0.2.0-mnveicyq" : "dev";
+
+// src/worker/client.ts
 var WORKER_PORT = 37778;
 var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 var WAKE_TIMEOUT_MS = 500;
@@ -649,15 +654,41 @@ function resolveWorkerScriptPaths(env = process.env) {
     workerPath: (0, import_node_path3.join)(pluginRoot, "scripts", "worker.cjs")
   };
 }
-async function isWorkerHealthy(fetchImpl, timeoutMs) {
+async function isWorkerCompatible(fetchImpl, timeoutMs) {
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
       method: "GET",
       signal: createAbortSignal(timeoutMs)
     });
-    return response.ok;
+    if (!response.ok) {
+      return "down";
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return "compatible";
+    }
+    if (body.buildId && body.buildId !== BUILD_ID) {
+      return "stale";
+    }
+    return "compatible";
   } catch {
-    return false;
+    return "down";
+  }
+}
+function killStaleWorker(deps = {}) {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
+  if (!existsSyncImpl(pidPath)) {
+    return;
+  }
+  try {
+    const pid = Number((0, import_node_fs2.readFileSync)(pidPath, "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      process.kill(pid, "SIGTERM");
+    }
+  } catch {
   }
 }
 function spawnWorkerProcess(deps = {}, env = process.env) {
@@ -676,6 +707,20 @@ function spawnWorkerProcess(deps = {}, env = process.env) {
 }
 async function notifyWorkerWake(deps = {}, env = process.env) {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (status === "stale") {
+    killStaleWorker(deps);
+    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+    spawnWorkerProcess(deps, env);
+    if (!await waitForCompatibleWorker(deps)) {
+      return;
+    }
+  } else if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    if (!await waitForCompatibleWorker(deps)) {
+      return;
+    }
+  }
   try {
     await fetchImpl(`${WORKER_BASE_URL}/wake`, {
       method: "POST",
@@ -686,12 +731,14 @@ async function notifyWorkerWake(deps = {}, env = process.env) {
     spawnWorkerProcess(deps, env);
   }
 }
-async function waitForWorkerReadiness(deps = {}) {
+async function waitForCompatibleWorker(deps = {}) {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    if (await isWorkerHealthy(fetchImpl, HOOK_HEALTH_TIMEOUT_MS)) {
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (status === "compatible") {
       return true;
     }
     await sleep(100, setTimeoutImpl);
@@ -700,9 +747,14 @@ async function waitForWorkerReadiness(deps = {}) {
 }
 async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  if (!await isWorkerHealthy(fetchImpl, HOOK_HEALTH_TIMEOUT_MS)) {
+  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (status === "stale") {
+    killStaleWorker(deps);
+    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+  }
+  if (status !== "compatible") {
     spawnWorkerProcess(deps, env);
-    const ready = await waitForWorkerReadiness(deps);
+    const ready = await waitForCompatibleWorker(deps);
     if (!ready) {
       throw new Error("Worker did not become ready before compact request.");
     }

@@ -1014,6 +1014,30 @@ describe("buildTimelineView", () => {
     expect(view.compactBoundaries).toEqual([21]);
   });
 
+  it("dedupes and sorts compact boundaries from compact turn rows", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      `UPDATE turns
+       SET type = 'compact',
+           status = 'extracted',
+           tags = ?,
+           tool_call_count = 0
+       WHERE session_id = ? AND prompt_number IN (6, 15, 21)`,
+    ).run(
+      JSON.stringify(["compact:pre_tokens=357000", "compact:trigger=auto"]),
+      session.id,
+    );
+    db.query("UPDATE sessions SET last_compact_turn = 15 WHERE id = ?").run(
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1" });
+
+    expect(view.compactBoundaries).toEqual([6, 15, 21]);
+  });
+
   it("rejects ranges that start beyond the session end", () => {
     const db = createDatabase(":memory:");
 
@@ -1073,6 +1097,23 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
 
     expect(output).toMatch(/showing: T1-T21 of 21 \(end\)/);
+  });
+
+  it("showing line uses the last prompt number, not total row count, for non-1-based sessions", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      `UPDATE turns
+       SET prompt_number = prompt_number + 135
+       WHERE session_id = ?`,
+    ).run(session.id);
+
+    const view = buildTimelineView(db, { id: "S1" });
+    const output = renderTimeline(view);
+
+    expect(view.lastPromptNumber).toBe(156);
+    expect(output).toContain("showing: T136-T156 of 21 (end)");
   });
 
   it("pending turns render ⏳ in the title column for S1/T19..21", () => {
