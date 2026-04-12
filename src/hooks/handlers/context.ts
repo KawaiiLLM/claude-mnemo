@@ -4,14 +4,14 @@ import { listMemories, type MemoryRecord } from "../../db/memories";
 import {
   getRecentSessions,
   getSessionByContentId,
+  upsertSession,
   type SessionRecord,
 } from "../../db/sessions";
-import { getTurnsForSession } from "../../db/turns";
 import * as formatModule from "../../mcp/format";
+import { buildContextTimelineView, renderTimeline } from "../../mcp/timeline";
 import type {
   FormattedMemory,
   FormattedSession,
-  FormattedTurn,
 } from "../../mcp/format";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -34,7 +34,7 @@ function splitInsight(insight: string | null): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
-function buildHeader(db: Database): string {
+function buildHeader(db: Database, primarySessionId?: number): string {
   const sessionCount =
     db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions")
       .get()?.count ?? 0;
@@ -43,15 +43,8 @@ function buildHeader(db: Database): string {
       .get()?.count ?? 0;
 
   return [
-    `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations`,
-    "Types: 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision",
-    "Stats: 💬turns 💡observations 📖read ✏️modified 🔧tools",
-    "Format:",
-    "  - [Sx] title | 💬n 💡n | yyyy-mm-dd | project",
-    "  - [Tx] or [Tx:Lz] title | 💡n 📖n ✏️n 🔧n",
-    "  - [Ox] 🔵 title",
-    "  - [Mx] type/scope: title | yyyy-mm-dd | sources",
-    'Expand: recall(id="Sx/Ty", depth="expanded") | Raw: mnemo-replay skill (read jsonlPath)',
+    `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
+    "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
   ].join("\n");
 }
 
@@ -136,69 +129,33 @@ function buildSessionView(
   };
 }
 
-function getObservationCountByTurnId(
+function buildCurrentSessionOutput(
   db: Database,
-  turnIds: number[],
-): Map<number, number> {
-  if (turnIds.length === 0) {
-    return new Map();
+  session: FormattedSession,
+  sessionRecord: SessionRecord,
+): string {
+  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
+  const insightLines = session.insight ?? [];
+
+  if (insightLines.length > 0) {
+    lines.push("  insight:");
+    for (const line of insightLines) {
+      lines.push(`  - ${line}`);
+    }
   }
 
-  const placeholders = turnIds.map(() => "?").join(", ");
-  const rows = db
-    .query<{ turnId: number; count: number }, number[]>(
-      `SELECT turn_id AS turnId, COUNT(*) AS count
-       FROM observations
-       WHERE turn_id IN (${placeholders})
-       GROUP BY turn_id`,
-    )
-    .all(...turnIds);
-
-  return new Map(rows.map((row) => [row.turnId, row.count]));
-}
-
-function buildCollapsedTurnViews(
-  db: Database,
-  sessionId: number,
-): FormattedTurn[] {
-  const turns = getTurnsForSession(db, sessionId);
-  const observationCounts = getObservationCountByTurnId(
-    db,
-    turns.map((turn) => turn.id),
-  );
-
-  return turns.map((turn) => ({
-    id: turn.id,
-    promptNumber: turn.promptNumber,
-    transcriptLineStart: turn.transcriptLineStart,
-    title: turn.title,
-    content: turn.content,
-    observationCount: observationCounts.get(turn.id) ?? 0,
-    toolCallCount: turn.toolCallCount,
-    filesReadCount: turn.filesRead.length,
-    filesModifiedCount: turn.filesModified.length,
-    status: turn.status,
-  }));
-}
-
-function buildCurrentSessionOutput(
-  session: FormattedSession,
-  turns: FormattedTurn[],
-): string {
-  const lines = [
-    formatModule.renderNode(
-      { type: "session", value: session },
-      { depth: "expanded", truncate: 120, mode: "unified" },
-    ),
-  ];
-
-  for (const turn of turns.slice(-5)) {
+  try {
+    const timelineView = buildContextTimelineView(db, sessionRecord.id);
+    lines.push("");
     lines.push(
-      formatModule.renderNode(
-        { type: "turn", value: turn },
-        { depth: "collapsed", truncate: 120, mode: "unified" },
-      ),
+      renderTimeline(timelineView, {
+        promptCap: 80,
+        showEarlierHint: true,
+        windowPhasesOnly: true,
+      }),
     );
+  } catch {
+    // Keep the SessionStart hook resilient even if timeline rendering breaks.
   }
 
   return lines.join("\n");
@@ -303,6 +260,19 @@ function buildMemoriesOutput(
 }
 
 function buildContextOutput(db: Database, input: NormalizedHookInput): string {
+  if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
+    upsertSession(db, {
+      contentSessionId: input.sessionId,
+      project: input.cwd ?? "",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: Math.floor(Date.now() / 1000),
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+  }
+
   const recentSessions = getRecentSessions(db, { limit: 5 });
   const primarySessionRecord = resolvePrimarySessionRecord(
     db,
@@ -322,7 +292,6 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id),
   );
-  const primaryTurns = buildCollapsedTurnViews(db, primarySessionRecord.id);
   const memories = buildMemoriesOutput(
     db,
     primarySessionRecord.project,
@@ -334,15 +303,23 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     primarySessionRecord.id,
   );
 
+  const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
+  const includeCurrentSession =
+    input.source !== "startup" && primaryTurnCount > 0;
+
   return [
-    buildHeader(db),
+    buildHeader(db, input.sessionId ? primarySessionRecord.id : undefined),
     "",
     ...memories,
     ...(memories.length > 0 ? [""] : []),
-    "## Current Session",
-    "",
-    buildCurrentSessionOutput(primarySession, primaryTurns),
-    "",
+    ...(includeCurrentSession
+      ? [
+          "## Current Session",
+          "",
+          buildCurrentSessionOutput(db, primarySession, primarySessionRecord),
+          "",
+        ]
+      : []),
     "## Recent Sessions",
     "",
     ...recentSessionOutputs,

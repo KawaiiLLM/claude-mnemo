@@ -7,6 +7,7 @@ import { upsertSession } from "../../src/db/sessions";
 import type { TurnRecord } from "../../src/db/turns";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import {
+  buildContextTimelineView,
   buildTimelineView,
   cleanPromptForLabel,
   computeTypesDistribution,
@@ -110,6 +111,66 @@ function seedSession(db: Database) {
       JSON.stringify([]),
       promptNumber === 5 || promptNumber === 11 ? 15 : 2,
       1_700_000_000 + promptNumber * 100,
+      null,
+    );
+  }
+
+  return session;
+}
+
+function seedLongSession(db: Database, count: number) {
+  initializeSchema(db);
+
+  const session = upsertSession(db, {
+    contentSessionId: "long-context-session",
+    project: "/tmp/claude-mnemo-test",
+    title: "long timeline fixture",
+    insight: null,
+    createdAtEpoch: 1_700_100_000,
+    updatedAtEpoch: 1_700_100_100,
+    completedAtEpoch: null,
+  });
+
+  const insertTurn = db.query(
+    `INSERT INTO turns (
+      session_id,
+      prompt_number,
+      content_prompt_id,
+      transcript_line_start,
+      status,
+      user_prompt,
+      assistant_response,
+      title,
+      content,
+      insight,
+      type,
+      tags,
+      files_read,
+      files_modified,
+      tool_call_count,
+      created_at_epoch,
+      updated_at_epoch
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (let promptNumber = 1; promptNumber <= count; promptNumber += 1) {
+    insertTurn.run(
+      session.id,
+      promptNumber,
+      null,
+      promptNumber * 10,
+      "extracted",
+      `long prompt ${promptNumber} ${"x".repeat(120)}`,
+      null,
+      `title for T${promptNumber}`,
+      null,
+      null,
+      promptNumber >= count - 2 ? null : "discovery",
+      JSON.stringify([]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      1,
+      1_700_100_000 + promptNumber * 60,
       null,
     );
   }
@@ -1047,6 +1108,16 @@ describe("buildTimelineView", () => {
       /starts beyond session end/i,
     );
   });
+
+  it("buildContextTimelineView returns the last page by row count", () => {
+    const db = createDatabase(":memory:");
+    const session = seedLongSession(db, 40);
+
+    const view = buildContextTimelineView(db, session.id);
+
+    expect(view.window.startPromptNumber).toBe(11);
+    expect(view.window.endPromptNumber).toBe(40);
+  });
 });
 
 describe("renderTimeline", () => {
@@ -1233,6 +1304,32 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/shape signals \(window T5-T10\):/);
     expect(output).toMatch(/fastest gap:/);
     expect(output).toMatch(/tool bursts:/);
+  });
+
+  it("renderTimeline respects promptCap option", () => {
+    const db = createDatabase(":memory:");
+    const session = seedLongSession(db, 40);
+
+    const view = buildContextTimelineView(db, session.id);
+    const output = renderTimeline(view, { promptCap: 80, showEarlierHint: true });
+    const turn40Line = output
+      .split("\n")
+      .find((line) => line.startsWith("  T40"));
+
+    expect(turn40Line).toBeDefined();
+    expect(turn40Line).toContain("…");
+  });
+
+  it("renderTimeline shows earlier hint when rendering the last page", () => {
+    const db = createDatabase(":memory:");
+    const session = seedLongSession(db, 40);
+
+    const view = buildContextTimelineView(db, session.id);
+    const output = renderTimeline(view, { showEarlierHint: true, windowPhasesOnly: true });
+
+    expect(output).toContain('earlier: timeline(id="S1/T1..10") or recall(id="S1")');
+    expect(output).toMatch(/phases \(window T11-T40\):/);
+    expect(output).toMatch(/\n  earlier: timeline\(id="S1\/T1\.\.10"\) or recall\(id="S1"\)/);
   });
 });
 

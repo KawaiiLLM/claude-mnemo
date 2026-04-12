@@ -10,6 +10,7 @@ export interface TimelineInput {
 export interface TimelineView {
   session: SessionRecord;
   totalTurns: number;
+  firstPromptNumber: number;
   lastPromptNumber: number;
   totalToolCalls: number;
   typesDistribution: TypesDistribution;
@@ -20,6 +21,13 @@ export interface TimelineView {
   windowSignals: ShapeSignals;
   jsonlPath: string | null;
   tz: { name: string; offsetLabel: string };
+  hasEarlier: boolean;
+}
+
+export interface RenderTimelineOptions {
+  promptCap?: number;
+  showEarlierHint?: boolean;
+  windowPhasesOnly?: boolean;
 }
 
 export interface SystemTimezoneSource {
@@ -707,6 +715,7 @@ function validateOpenEndRange(range: Extract<RangeSpec, { kind: "openEnd" }>): v
 export function buildTimelineView(
   db: Database,
   input: TimelineInput,
+  preloadedTurns?: TurnRecord[],
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
@@ -715,7 +724,7 @@ export function buildTimelineView(
     throw new Error(`timeline: session S${parsed.sessionId} not found`);
   }
 
-  const allTurns = getTurnsForSession(db, session.id);
+  const allTurns = preloadedTurns ?? getTurnsForSession(db, session.id);
   const totalTurns = allTurns.length;
   const totalToolCalls = allTurns.reduce(
     (sum, turn) => sum + (turn.toolCallCount ?? 0),
@@ -754,6 +763,7 @@ export function buildTimelineView(
   return {
     session,
     totalTurns,
+    firstPromptNumber: bounds.first,
     lastPromptNumber: bounds.last,
     totalToolCalls,
     typesDistribution,
@@ -764,6 +774,43 @@ export function buildTimelineView(
     windowSignals,
     jsonlPath,
     tz,
+    hasEarlier: false,
+  };
+}
+
+export function buildContextTimelineView(
+  db: Database,
+  sessionId: number,
+): TimelineView {
+  const session = getSession(db, sessionId);
+  if (!session) {
+    throw new Error(`timeline: session S${sessionId} not found`);
+  }
+
+  const sortedTurns = getTurnsForSession(db, sessionId).sort((a, b) => {
+    if (a.promptNumber !== b.promptNumber) {
+      return a.promptNumber - b.promptNumber;
+    }
+    if (a.createdAtEpoch !== b.createdAtEpoch) {
+      return a.createdAtEpoch - b.createdAtEpoch;
+    }
+    return a.id - b.id;
+  });
+
+  if (sortedTurns.length === 0) {
+    return buildTimelineView(db, { id: `S${sessionId}` });
+  }
+
+  const windowTurns = sortedTurns.slice(-TIMELINE_WINDOW_CAP);
+  const firstPromptNumber = windowTurns[0]!.promptNumber;
+  const lastPromptNumber = windowTurns[windowTurns.length - 1]!.promptNumber;
+  const view = buildTimelineView(db, {
+    id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
+  }, sortedTurns);
+
+  return {
+    ...view,
+    hasEarlier: firstPromptNumber !== sortedTurns[0]!.promptNumber,
   };
 }
 
@@ -844,7 +891,10 @@ function formatShowingLine(view: TimelineView): string {
   return `${base} (next: T${nextStart}..${nextEnd})`;
 }
 
-function renderTurnTable(view: TimelineView): string[] {
+function renderTurnTable(
+  view: TimelineView,
+  promptCap: number = PROMPT_COLUMN_CAP,
+): string[] {
   if (view.windowTurns.length === 0) {
     return [];
   }
@@ -857,8 +907,8 @@ function renderTurnTable(view: TimelineView): string[] {
 
   const lines = [
     "",
-    "  T#    line   time    gap          stats          prompt                                                                                                                                                                                                          title",
-    "  ───   ────   ─────   ─────────    ────────────   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────   ────────────────────────────────────────",
+    `  T#    line   time    gap          stats          prompt${" ".repeat(Math.max(1, promptCap - "prompt".length + 3))}title`,
+    `  ───   ────   ─────   ─────────    ────────────   ${"─".repeat(promptCap)}   ────────────────────────────────────────`,
   ];
 
   let prevEpoch: number | null = null;
@@ -868,6 +918,7 @@ function renderTurnTable(view: TimelineView): string[] {
         turn,
         prevEpoch,
         brokenPromptCandidates.has(turn.promptNumber),
+        promptCap,
       ),
     );
     prevEpoch = turn.createdAtEpoch;
@@ -880,6 +931,7 @@ function renderTurnRow(
   turn: TurnRecord,
   prevEpoch: number | null,
   isBrokenPromptCandidate: boolean,
+  promptCap: number,
 ): string {
   const isUndone = turn.status === "undone";
   const isSkipped = turn.status === "skipped";
@@ -894,12 +946,12 @@ function renderTurnRow(
     turn.type === "compact"
       ? promptCore
       : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = truncateText(promptWithBadges, PROMPT_COLUMN_CAP);
+  const promptText = truncateText(promptWithBadges, promptCap);
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "⨯ " : isSkipped ? `${SKIPPED_EMOJI} ` : "";
   const lineAnchor = formatTranscriptLineAnchor(turn.transcriptLineStart).padEnd(4);
 
-  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${lineAnchor}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone, isSkipped, compactMetadata)}`;
+  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${lineAnchor}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(promptCap)}   ${renderTitleCell(turn, isUndone, isSkipped, compactMetadata)}`;
 }
 
 function renderStats(turn: TurnRecord): string {
@@ -954,14 +1006,24 @@ function isTimelineLiveTurn(turn: TurnRecord): boolean {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
 
-function renderPhases(view: TimelineView): string[] {
-  if (view.phases.length === 0) {
+function renderPhases(
+  view: TimelineView,
+  options: RenderTimelineOptions = {},
+): string[] {
+  const phases = options.windowPhasesOnly
+    ? segmentPhases(view.windowTurns)
+    : view.phases;
+
+  if (phases.length === 0) {
     return [];
   }
 
-  const lines = ["", "  phases (session-wide):"];
+  const label = options.windowPhasesOnly
+    ? `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`
+    : "  phases (session-wide):";
+  const lines = ["", label];
 
-  for (const [index, phase] of view.phases.entries()) {
+  for (const [index, phase] of phases.entries()) {
     const range =
       phase.startPromptNumber === phase.endPromptNumber
         ? `T${phase.startPromptNumber}`
@@ -994,7 +1056,9 @@ function renderPhases(view: TimelineView): string[] {
   return lines;
 }
 
-function renderShapeSignals(view: TimelineView): string[] {
+function renderShapeSignals(
+  view: TimelineView,
+): string[] {
   const windowLabel =
     view.window.startPromptNumber === 1 &&
     view.window.endPromptNumber === view.window.totalTurns
@@ -1062,12 +1126,32 @@ function renderShapeSignals(view: TimelineView): string[] {
   return lines;
 }
 
-export function renderTimeline(view: TimelineView): string {
+function renderEarlierHint(
+  view: TimelineView,
+  options: RenderTimelineOptions = {},
+): string[] {
+  if (!options.showEarlierHint || !view.hasEarlier) {
+    return [];
+  }
+
+  return [
+    "",
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`,
+  ];
+}
+
+export function renderTimeline(
+  view: TimelineView,
+  options: RenderTimelineOptions = {},
+): string {
+  const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
+
   return [
     ...renderSessionHeader(view),
-    ...renderTurnTable(view),
-    ...renderPhases(view),
+    ...renderTurnTable(view, promptCap),
+    ...renderPhases(view, options),
     ...renderShapeSignals(view),
+    ...renderEarlierHint(view, options),
   ].join("\n");
 }
 
