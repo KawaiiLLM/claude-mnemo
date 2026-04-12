@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  buildPromptIdLineMap,
   countUserPromptsInTranscript,
   extractAssistantResponse,
   parseReplayTranscript,
@@ -617,6 +618,49 @@ describe("parseTranscript", () => {
         },
       }),
     );
+  });
+
+  test("preserves earlier prompt metadata when a later duplicate snapshot is partial", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        role: "user",
+        uuid: "u1",
+        promptId: "p1",
+        permissionMode: "default",
+        timestamp: "2026-04-12T01:00:00.000Z",
+        message: {
+          role: "user",
+          content: "Explain the cache layer",
+        },
+      },
+      {
+        type: "assistant",
+        role: "assistant",
+        uuid: "a1",
+        timestamp: "2026-04-12T01:00:05.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Initial answer" }],
+        },
+      },
+      {
+        type: "user",
+        role: "user",
+        uuid: "u1",
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(parseTranscript(transcript.path)).toEqual([
+      expect.objectContaining({
+        promptNumber: 1,
+        userPrompt: "Explain the cache layer",
+        assistantText: "Initial answer",
+      }),
+    ]);
+    expect(countUserPromptsInTranscript(transcript.path)).toBe(1);
+    expect(buildPromptIdLineMap(transcript.path).get("p1")).toBe(1);
   });
 
   test("treats a resumed transcript replay as the original turn sequence", () => {

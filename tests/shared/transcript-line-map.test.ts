@@ -59,6 +59,34 @@ describe("buildPromptIdLineMap", () => {
     expect(map.size).toBe(2);
   });
 
+  it("keeps the first promptId when a later duplicate snapshot conflicts", () => {
+    const path = writeJsonl("conflict.jsonl", [
+      {
+        type: "user",
+        promptId: "pa",
+        uuid: "u1",
+        message: { role: "user", content: "first" },
+      },
+      {
+        type: "assistant",
+        uuid: "u2",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      },
+      {
+        type: "user",
+        promptId: "pb",
+        uuid: "u1",
+        message: { role: "user", content: "resumed snapshot" },
+      },
+    ]);
+
+    const map = buildPromptIdLineMap(path);
+
+    expect(map.get("pa")).toBe(1);
+    expect(map.has("pb")).toBe(false);
+    expect(map.size).toBe(1);
+  });
+
   it("skips entries without promptId", () => {
     const path = writeJsonl("no-prompt-id.jsonl", [
       { type: "system", subtype: "turn_duration", uuid: "u1" },

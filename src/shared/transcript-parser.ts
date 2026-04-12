@@ -245,12 +245,10 @@ export function readAllTranscriptEntries(
     if (entry.uuid) {
       const existingIndex = uuidToIndex.get(entry.uuid);
       if (existingIndex !== undefined) {
-        const firstEntry = deduped[existingIndex]!;
-        deduped[existingIndex] = {
-          ...entry,
-          lineNumber: firstEntry.lineNumber,
-          timestamp: firstEntry.timestamp ?? entry.timestamp,
-        };
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex]!,
+          entry,
+        );
         continue;
       }
       uuidToIndex.set(entry.uuid, deduped.length);
@@ -260,6 +258,65 @@ export function readAllTranscriptEntries(
   }
 
   return deduped;
+}
+
+function mergeUsage(
+  first: TranscriptUsage | undefined,
+  later: TranscriptUsage | undefined,
+): TranscriptUsage | undefined {
+  if (!first && !later) {
+    return undefined;
+  }
+
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens,
+  };
+}
+
+function mergeCompactMetadata(
+  first: TranscriptEntry["compactMetadata"],
+  later: TranscriptEntry["compactMetadata"],
+): TranscriptEntry["compactMetadata"] {
+  if (!first && !later) {
+    return undefined;
+  }
+
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount:
+      later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens,
+  };
+}
+
+function mergeTranscriptEntries(
+  first: TranscriptEntryWithLineNumber,
+  later: TranscriptEntryWithLineNumber,
+): TranscriptEntryWithLineNumber {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata,
+    ),
+    lineNumber: first.lineNumber,
+  };
 }
 
 function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
