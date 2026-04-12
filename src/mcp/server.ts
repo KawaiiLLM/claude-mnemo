@@ -18,14 +18,17 @@ import {
 
 declare const __DEFAULT_PACKAGE_VERSION__: string;
 
+const PACKAGE_VERSION =
+  typeof __DEFAULT_PACKAGE_VERSION__ === "string"
+    ? __DEFAULT_PACKAGE_VERSION__
+    : "0.0.0-test";
+
 export interface CreateMcpServerOptions {
   database?: Database;
   handlers?: Partial<MnemoToolHandlers>;
 }
 
-export const MAIN_MCP_TOOL_NAMES = ["recall", "timeline", "remember"] as const;
-
-type MainMcpToolName = (typeof MAIN_MCP_TOOL_NAMES)[number];
+type MainMcpToolName = "recall" | "timeline" | "remember";
 type MainMcpToolHandlers = Pick<MnemoToolHandlers, MainMcpToolName>;
 type ToolRegistrationTarget = Pick<McpServer, "registerTool">;
 
@@ -77,7 +80,7 @@ export function createMcpServer(
   const server = new McpServer(
     {
       name: "claude-mnemo",
-      version: __DEFAULT_PACKAGE_VERSION__,
+      version: PACKAGE_VERSION,
     },
     {
       capabilities: {
