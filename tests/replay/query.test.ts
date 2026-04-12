@@ -242,6 +242,37 @@ describe("replay-parse query surface", () => {
     );
   });
 
+  test("query supports --first and --range selectors", () => {
+    const transcript = createFixture();
+    directories.push(transcript.directory);
+
+    const first = runReplayParseCommand([
+      "query",
+      transcript.path,
+      "-f",
+      "promptNumber",
+      "--first",
+      "2",
+    ]);
+    expect(first).toBe(["promptNumber", "1", "2"].join("\n"));
+
+    const range = runReplayParseCommand([
+      "query",
+      transcript.path,
+      "-f",
+      "promptNumber,localTime",
+      "--range",
+      "T2..T3",
+    ]);
+    expect(range).toBe(
+      [
+        "promptNumber\tlocalTime",
+        "2\t01:55",
+        "3\t02:00",
+      ].join("\n"),
+    );
+  });
+
   test("query searches tool input and tool result content", () => {
     const transcript = createFixture();
     directories.push(transcript.directory);
@@ -265,6 +296,23 @@ describe("replay-parse query surface", () => {
       "Patched auth.ts",
     ]);
     expect(toolResultHits).toBe(["promptNumber", "2"].join("\n"));
+  });
+
+  test("query supports case-insensitive grep", () => {
+    const transcript = createFixture();
+    directories.push(transcript.directory);
+
+    const output = runReplayParseCommand([
+      "query",
+      transcript.path,
+      "-f",
+      "promptNumber",
+      "--grep",
+      "AUTH RACE",
+      "-i",
+    ]);
+
+    expect(output).toBe(["promptNumber", "3"].join("\n"));
   });
 
   test("show keeps the current drill-down behavior", () => {

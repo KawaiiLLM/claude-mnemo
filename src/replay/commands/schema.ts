@@ -1,5 +1,5 @@
 import type { ReplayParseResult } from "../parser";
-import { getFieldRegistry, formatCompactTokens } from "../fields";
+import { getFieldContext, getFieldRegistry } from "../fields";
 
 function truncateSample(value: string, limit: number): string {
   if (value.length <= limit) {
@@ -39,16 +39,9 @@ export function renderReplaySchema(result: ReplayParseResult): string {
   lines.push("Fields:");
 
   const sampleTurns = result.turns.slice(0, 3);
+  const context = getFieldContext(result);
   for (const field of getFieldRegistry()) {
-    const samples = sampleTurns.map((turn) => formatSampleValue(field.extract(turn, {
-      compactAfterSet: new Set(result.compacts.map((compact) => compact.afterPromptNumber)),
-      compactInfoMap: new Map(
-        result.compacts.map((compact) => [
-          compact.afterPromptNumber,
-          `${formatCompactTokens(compact.preTokens)} tokens, ${compact.trigger}`,
-        ]),
-      ),
-    })));
+    const samples = sampleTurns.map((turn) => formatSampleValue(field.extract(turn, context)));
 
     const sampleText = samples.length > 0 ? samples.join(", ") : "(empty file)";
     lines.push(

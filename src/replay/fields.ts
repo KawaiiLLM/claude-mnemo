@@ -275,6 +275,5 @@ function buildSearchText(turn: ReplayParseTurn): string {
     turn.userPrompt,
     turn.assistantText,
     toolCallText,
-    turn.toolCalls.map((call) => call.name).join("\n"),
   ].join("\n");
 }

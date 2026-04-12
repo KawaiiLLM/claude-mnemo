@@ -236,8 +236,7 @@ ${call.result ?? ""}`).join("\n");
   return [
     turn.userPrompt,
     turn.assistantText,
-    toolCallText,
-    turn.toolCalls.map((call) => call.name).join("\n")
+    toolCallText
   ].join("\n");
 }
 
@@ -287,16 +286,9 @@ function renderReplaySchema(result) {
   lines.push("");
   lines.push("Fields:");
   const sampleTurns = result.turns.slice(0, 3);
+  const context = getFieldContext(result);
   for (const field of getFieldRegistry()) {
-    const samples = sampleTurns.map((turn) => formatSampleValue(field.extract(turn, {
-      compactAfterSet: new Set(result.compacts.map((compact) => compact.afterPromptNumber)),
-      compactInfoMap: new Map(
-        result.compacts.map((compact) => [
-          compact.afterPromptNumber,
-          `${formatCompactTokens(compact.preTokens)} tokens, ${compact.trigger}`
-        ])
-      )
-    })));
+    const samples = sampleTurns.map((turn) => formatSampleValue(field.extract(turn, context)));
     const sampleText = samples.length > 0 ? samples.join(", ") : "(empty file)";
     lines.push(
       `  ${field.name.padEnd(15)} ${field.type.padEnd(6)} ${sampleText.padEnd(35)} ${field.description}`
