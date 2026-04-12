@@ -679,6 +679,281 @@ export function buildTimelineView(
   };
 }
 
-export function timelineQuery(_db: Database, _input: TimelineInput): string {
-  return "timeline not implemented";
+function renderSessionHeader(view: TimelineView): string[] {
+  const sessionStart = view.session.createdAtEpoch;
+  const sessionEnd =
+    view.session.updatedAtEpoch ??
+    view.session.completedAtEpoch ??
+    view.session.createdAtEpoch;
+  const compactSuffix =
+    view.compactBoundaries.length > 0
+      ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}`
+      : "";
+  const typesParts: string[] = [];
+
+  if (view.typesDistribution.bugfix > 0) {
+    typesParts.push(`🔴${view.typesDistribution.bugfix}`);
+  }
+  if (view.typesDistribution.feature > 0) {
+    typesParts.push(`🟣${view.typesDistribution.feature}`);
+  }
+  if (view.typesDistribution.refactor > 0) {
+    typesParts.push(`🔄${view.typesDistribution.refactor}`);
+  }
+  if (view.typesDistribution.change > 0) {
+    typesParts.push(`✅${view.typesDistribution.change}`);
+  }
+  if (view.typesDistribution.discovery > 0) {
+    typesParts.push(`🔵${view.typesDistribution.discovery}`);
+  }
+  if (view.typesDistribution.decision > 0) {
+    typesParts.push(`⚖️${view.typesDistribution.decision}`);
+  }
+  if (view.typesDistribution.compact > 0) {
+    typesParts.push(`⏸${view.typesDistribution.compact}`);
+  }
+  if (view.typesDistribution.pending > 0) {
+    typesParts.push(`⏳${view.typesDistribution.pending}`);
+  }
+
+  return [
+    `- [S${view.session.id}] ${formatLocalDate(sessionStart)} ${formatLocalTime(sessionStart)} → ${formatLocalTime(sessionEnd)} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
+    `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
+    `  types: ${typesParts.join(" ")} (session-wide)`,
+    `  showing: ${formatShowingLine(view)}`,
+    `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
+    `  raw: ${view.jsonlPath ?? "(unresolved)"}`,
+  ];
+}
+
+function formatShowingLine(view: TimelineView): string {
+  if (view.totalTurns === 0) {
+    return "T0-T0 of 0 (empty)";
+  }
+
+  const base = `T${view.window.startPromptNumber}-T${view.window.endPromptNumber} of ${view.totalTurns}`;
+  const atEnd = view.window.endPromptNumber >= view.totalTurns;
+
+  if (view.window.requestedEnd !== null) {
+    const rows = view.window.endPromptNumber - view.window.startPromptNumber + 1;
+    const nextParts =
+      atEnd
+        ? []
+        : [
+            `next: T${view.window.endPromptNumber + 1}..${Math.min(view.window.endPromptNumber + TIMELINE_WINDOW_CAP, view.totalTurns)}`,
+          ];
+
+    return `${base} (requested T${view.window.startPromptNumber}..${view.window.requestedEnd}, truncated to ${rows} rows${nextParts.length > 0 ? `; ${nextParts[0]}` : ""})`;
+  }
+
+  if (atEnd) {
+    return `${base} (end)`;
+  }
+
+  const nextStart = view.window.endPromptNumber + 1;
+  const nextEnd = Math.min(nextStart + TIMELINE_WINDOW_CAP - 1, view.totalTurns);
+  return `${base} (next: T${nextStart}..${nextEnd})`;
+}
+
+function renderTurnTable(view: TimelineView): string[] {
+  if (view.windowTurns.length === 0) {
+    return [];
+  }
+
+  const brokenPromptCandidates = new Set<number>();
+  for (const pair of view.windowSignals.brokenPromptPairs) {
+    brokenPromptCandidates.add(pair.first);
+    brokenPromptCandidates.add(pair.second);
+  }
+
+  const lines = [
+    "",
+    "  T#    time    gap          stats          prompt                                                                                                                                                                                                          title",
+    "  ───   ─────   ─────────    ────────────   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────   ────────────────────────────────────────",
+  ];
+
+  let prevEpoch: number | null = null;
+  for (const turn of view.windowTurns) {
+    lines.push(
+      renderTurnRow(
+        turn,
+        prevEpoch,
+        brokenPromptCandidates.has(turn.promptNumber),
+      ),
+    );
+    prevEpoch = turn.createdAtEpoch;
+  }
+
+  return lines;
+}
+
+function renderTurnRow(
+  turn: TurnRecord,
+  prevEpoch: number | null,
+  isBrokenPromptCandidate: boolean,
+): string {
+  const isUndone = turn.status === "undone";
+  const gapSuffix = isBrokenPromptCandidate ? " ※" : "";
+  const sourceBadges = extractSourceTags(turn.tags)
+    .map((source) => `[ext:${source}]`)
+    .join(" ");
+  const promptCore = cleanPromptForLabel(turn.userPrompt);
+  const promptWithBadges =
+    sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
+  const promptText = truncateText(promptWithBadges, PROMPT_COLUMN_CAP);
+  const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
+
+  return `  ${`${isUndone ? "⨯ " : ""}T${turn.promptNumber}`.padEnd(4)}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(PROMPT_COLUMN_CAP)}   ${renderTitleCell(turn, isUndone)}`;
+}
+
+function renderStats(turn: TurnRecord): string {
+  const stats: string[] = [];
+  const toolCallCount = turn.toolCallCount ?? 0;
+
+  if (toolCallCount > 0) {
+    stats.push(`🔧${toolCallCount}`);
+  }
+  if (turn.filesRead.length > 0) {
+    stats.push(`📖${turn.filesRead.length}`);
+  }
+  if (turn.filesModified.length > 0) {
+    stats.push(`✏️${turn.filesModified.length}`);
+  }
+
+  return stats.length > 0 ? stats.join(" ") : "—";
+}
+
+function renderTitleCell(turn: TurnRecord, isUndone: boolean): string {
+  if (turn.type !== null && turn.title !== null) {
+    const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
+    return isUndone ? `~~${body}~~` : body;
+  }
+
+  return isUndone ? "⨯" : "⏳";
+}
+
+function renderPhases(view: TimelineView): string[] {
+  if (view.phases.length === 0) {
+    return [];
+  }
+
+  const lines = ["", "  phases (session-wide):"];
+
+  for (const [index, phase] of view.phases.entries()) {
+    const range =
+      phase.startPromptNumber === phase.endPromptNumber
+        ? `T${phase.startPromptNumber}`
+        : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
+    const durationLabel =
+      phase.durationMs > 0 ? `~${formatDuration(phase.durationMs)}` : "<1m";
+    const countsLabel = `${phase.turnCount} ${phase.turnCount === 1 ? "turn" : "turns"}`;
+    const stats: string[] = [];
+
+    if (phase.totalFilesRead > 0) {
+      stats.push(`📖${phase.totalFilesRead}`);
+    }
+    if (phase.totalFilesModified > 0) {
+      stats.push(`✏️${phase.totalFilesModified}`);
+    }
+    if (phase.totalToolCalls > 0) {
+      stats.push(`🔧${phase.totalToolCalls}`);
+    }
+
+    const extSuffix =
+      phase.externalInputs.length > 0
+        ? `  [ext:${phase.externalInputs.join(",")}]`
+        : "";
+
+    lines.push(
+      `    ${String(index + 1)}. ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} ${range.padEnd(8)} ${durationLabel.padEnd(7)} ${countsLabel.padEnd(7)} ${stats.join(" ").padEnd(14)}${extSuffix}`.trimEnd(),
+    );
+  }
+
+  return lines;
+}
+
+function renderShapeSignals(view: TimelineView): string[] {
+  const windowLabel =
+    view.window.startPromptNumber === 1 &&
+    view.window.endPromptNumber === view.window.totalTurns
+      ? " = full session"
+      : "";
+  const lines = [
+    "",
+    `  shape signals (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}${windowLabel}):`,
+  ];
+
+  if (view.windowSignals.fastestGap !== null) {
+    lines.push(
+      `    - fastest gap:   after T${view.windowSignals.fastestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.fastestGap.ms)})`,
+    );
+  }
+
+  if (view.windowSignals.longestGap !== null) {
+    lines.push(
+      `    - longest gap:   after T${view.windowSignals.longestGap.afterPromptNumber} (+${formatDuration(view.windowSignals.longestGap.ms)})`,
+    );
+  }
+
+  if (view.windowSignals.toolBursts.length > 0) {
+    lines.push(
+      `    - tool bursts:   ${view.windowSignals.toolBursts.map((burst) => `T${burst.promptNumber} 🔧${burst.toolCallCount}`).join(", ")}   [median 🔧${view.windowSignals.toolBurstMedian}, threshold >🔧${view.windowSignals.toolBurstThreshold}]`,
+    );
+  }
+
+  if (view.windowSignals.brokenPromptPairs.length > 0) {
+    lines.push(
+      `    - broken-prompt: ${view.windowSignals.brokenPromptPairs.map((pair) => `T${pair.first}→T${pair.second}`).join(", ")}`,
+    );
+  }
+
+  if (view.windowSignals.undoneTurns.length > 0) {
+    lines.push(
+      `    - undone turns:  ${view.windowSignals.undoneTurns.map((turn) => `T${turn}`).join(", ")}`,
+    );
+  }
+
+  if (view.windowSignals.externalInputs.length > 0) {
+    lines.push(
+      `    - external inputs: ${view.windowSignals.externalInputs.map((input) => `T${input.promptNumber} [ext:${input.source}]`).join(", ")}`,
+    );
+  }
+
+  const withinWindow = view.compactBoundaries.filter(
+    (boundary) =>
+      boundary >= view.window.startPromptNumber &&
+      boundary <= view.window.endPromptNumber,
+  );
+  const outsideWindow = view.compactBoundaries.filter(
+    (boundary) => !withinWindow.includes(boundary),
+  );
+
+  if (withinWindow.length > 0 || outsideWindow.length > 0) {
+    lines.push(
+      `    - compact boundary: ${[
+        ...withinWindow.map((boundary) => `after T${boundary} (within window)`),
+        ...outsideWindow.map((boundary) => `after T${boundary} (outside window)`),
+      ].join("; ")}`,
+    );
+  }
+
+  return lines;
+}
+
+export function renderTimeline(view: TimelineView): string {
+  return [
+    ...renderSessionHeader(view),
+    ...renderTurnTable(view),
+    ...renderPhases(view),
+    ...renderShapeSignals(view),
+  ].join("\n");
+}
+
+export function timelineQuery(db: Database, input: TimelineInput): string {
+  try {
+    return renderTimeline(buildTimelineView(db, input));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `timeline error: ${message}`;
+  }
 }

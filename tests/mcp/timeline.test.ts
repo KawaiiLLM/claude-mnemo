@@ -19,6 +19,7 @@ import {
   getSystemTimezone,
   extractSourceTags,
   parseTimelineId,
+  renderTimeline,
   resolveWindow,
   segmentPhases,
   truncateText,
@@ -911,5 +912,78 @@ describe("buildTimelineView", () => {
     expect(() => buildTimelineView(db, { id: "S1/T30..40" })).toThrow(
       /starts beyond session end/i,
     );
+  });
+});
+
+describe("renderTimeline", () => {
+  it("includes all 6 metadata lines in the header", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/- \[S1\]/);
+    expect(output).toMatch(/\| \d+ turns \| \d+ tool_calls/);
+    expect(output).toMatch(/types: .+\(session-wide\)/);
+    expect(output).toMatch(/showing: T\d+-T\d+/);
+    expect(output).toMatch(/tz: .+/);
+    expect(output).toMatch(/raw: .+\.jsonl/);
+  });
+
+  it("renders two-column turn table header matching T# time gap stats prompt title", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T1..5" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/T#\s+time\s+gap\s+stats\s+prompt\s+title/);
+  });
+
+  it("showing line reports truncation when request exceeds cap", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T5..60" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/requested T5\.\.60, truncated/);
+  });
+
+  it("showing line emits (end) on last page for S1", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/showing: T1-T21 of 21 \(end\)/);
+  });
+
+  it("pending turns render ⏳ in the title column for S1/T19..21", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/T19[\s\S]*⏳/);
+  });
+
+  it("renders a phases block labeled session-wide", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T10..15" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/phases \(session-wide\)/);
   });
 });
