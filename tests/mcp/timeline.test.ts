@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import type { TurnRecord } from "../../src/db/turns";
+import { resolveTranscriptPath } from "../../src/shared/paths";
 import {
   buildTimelineView,
   cleanPromptForLabel,
@@ -823,10 +824,27 @@ describe("buildTimelineView", () => {
     const view = buildTimelineView(db, { id: "S1" });
 
     expect(view.totalTurns).toBe(21);
+    expect(view.totalToolCalls).toBe(68);
+    expect(view.typesDistribution).toEqual({
+      bugfix: 0,
+      feature: 0,
+      refactor: 0,
+      change: 0,
+      discovery: 17,
+      decision: 3,
+      compact: 0,
+      pending: 1,
+    });
     expect(view.window.startPromptNumber).toBe(1);
     expect(view.window.endPromptNumber).toBe(21);
     expect(view.windowTurns).toHaveLength(21);
     expect(view.phases.length).toBeGreaterThan(1);
+    expect(view.jsonlPath).toBe(
+      resolveTranscriptPath("/tmp/claude-mnemo-test", "abc-uuid-timeline"),
+    );
+    expect(view.tz.name).toEqual(expect.any(String));
+    expect(view.tz.name.length).toBeGreaterThan(0);
+    expect(view.tz.offsetLabel).toMatch(/^[+-]\d{2}:\d{2}$/);
   });
 
   it("respects closed range", () => {
@@ -839,6 +857,16 @@ describe("buildTimelineView", () => {
     expect(view.window.startPromptNumber).toBe(5);
     expect(view.window.endPromptNumber).toBe(10);
     expect(view.windowTurns).toHaveLength(6);
+    expect(view.windowSignals).toEqual({
+      fastestGap: { afterPromptNumber: 5, ms: 100000 },
+      longestGap: { afterPromptNumber: 5, ms: 100000 },
+      toolBursts: [{ promptNumber: 5, toolCallCount: 15 }],
+      toolBurstMedian: 2,
+      toolBurstThreshold: 4,
+      brokenPromptPairs: [],
+      undoneTurns: [],
+      externalInputs: [],
+    });
   });
 
   it("phases always use the full session regardless of window", () => {
@@ -873,5 +901,15 @@ describe("buildTimelineView", () => {
     const view = buildTimelineView(db, { id: "S1" });
 
     expect(view.compactBoundaries).toContain(15);
+  });
+
+  it("rejects ranges that start beyond the session end", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    expect(() => buildTimelineView(db, { id: "S1/T30..40" })).toThrow(
+      /starts beyond session end/i,
+    );
   });
 });

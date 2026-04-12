@@ -187,6 +187,11 @@ export function resolveWindow(
   if (range.kind === "closed") {
     validateClosedRange(range);
     const startPromptNumber = Math.max(1, range.start);
+    if (startPromptNumber > totalTurns) {
+      throw new Error(
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds session length ${totalTurns}`,
+      );
+    }
     const endPromptNumber = Math.min(
       range.end,
       startPromptNumber + TIMELINE_WINDOW_CAP - 1,
@@ -205,6 +210,11 @@ export function resolveWindow(
   if (range.kind === "openEnd") {
     validateOpenEndRange(range);
     const startPromptNumber = Math.max(1, range.start);
+    if (startPromptNumber > totalTurns) {
+      throw new Error(
+        `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds session length ${totalTurns}`,
+      );
+    }
 
     return {
       startPromptNumber,
