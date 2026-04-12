@@ -172,6 +172,39 @@ describe("worker server", () => {
     expect(handleCompactImpl).toHaveBeenCalledWith(7, "/tmp/session.jsonl");
   });
 
+  test("createWorkerFetchHandler validates flush requests and returns before async flush completes", async () => {
+    let resolveFlush: (() => void) | null = null;
+    const handleFlushImpl = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveFlush = resolve;
+        }),
+    );
+    const handler = createWorkerFetchHandler({
+      handleFlushImpl,
+    });
+
+    const missingSession = await handler(
+      new Request("http://127.0.0.1:37778/flush", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(missingSession.status).toBe(400);
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/flush", {
+        method: "POST",
+        body: JSON.stringify({ session_id: 7 }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(handleFlushImpl).toHaveBeenCalledWith(7);
+
+    resolveFlush?.();
+  });
+
   test("createWorkerFetchHandler tracks HTTP activity while requests are in flight", async () => {
     let resolveCompact: (() => void) | null = null;
     const serverState = createWorkerServerState(100);

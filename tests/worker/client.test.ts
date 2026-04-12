@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 
 import {
   notifyWorkerCompact,
+  notifyWorkerFlush,
   notifyWorkerWake,
   resolveWorkerScriptPaths,
   spawnWorkerProcess,
@@ -252,6 +253,70 @@ describe("worker client", () => {
     );
 
     expect(spawnImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("notifyWorkerFlush sends /flush when worker is compatible", async () => {
+    let flushCallCount = 0;
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/flush")) {
+        flushCallCount += 1;
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    await notifyWorkerFlush(
+      42,
+      { fetchImpl, existsSyncImpl: () => true },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(flushCallCount).toBe(1);
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      session_id: 42,
+    });
+  });
+
+  test("notifyWorkerFlush spawns a worker with a startup flush hint when down", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        throw new Error("connection refused");
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    await notifyWorkerFlush(
+      42,
+      { fetchImpl, spawnImpl, existsSyncImpl: () => true },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(spawnImpl.mock.calls[0]?.[2]?.env).toMatchObject({
+      CLAUDE_MNEMO_FLUSH_SESSION_ID: "42",
+    });
+  });
+
+  test("notifyWorkerFlush replaces a worker that answers /flush with non-OK", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/flush")) {
+        return new Response("missing endpoint", { status: 404 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    await notifyWorkerFlush(
+      42,
+      { fetchImpl, spawnImpl, existsSyncImpl: () => true },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(spawnImpl.mock.calls[0]?.[2]?.env).toMatchObject({
+      CLAUDE_MNEMO_FLUSH_SESSION_ID: "42",
+    });
   });
 
   test("health response without buildId is treated as compatible", async () => {

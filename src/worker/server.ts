@@ -92,6 +92,7 @@ export interface WorkerCoreDeps {
 export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   BunServeImpl?: typeof Bun.serve;
   scanAndDrainQueue?: QueueDrain;
+  handleFlushImpl?: (sessionId: number) => Promise<void>;
   handleCompactImpl?: (
     sessionId: number,
     transcriptPath?: string | null,
@@ -109,6 +110,7 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
   processImpl?: Pick<NodeJS.Process, "pid" | "on" | "exit">;
+  env?: NodeJS.ProcessEnv;
 }
 
 interface WorkerServerState {
@@ -126,6 +128,7 @@ export interface WorkerCore {
   recoverFromCrash(): void;
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
   processClaimedItem(item: PendingQueueItem): Promise<void>;
+  flushSession(sessionDbId: number): Promise<void>;
   drainSessionCompletely(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
@@ -134,6 +137,22 @@ export interface WorkerCore {
 
 function defaultNoopDrain(): Promise<void> {
   return Promise.resolve();
+}
+
+function getStartupFlushSessionId(
+  env: NodeJS.ProcessEnv = process.env,
+): number | null {
+  const raw = env.CLAUDE_MNEMO_FLUSH_SESSION_ID;
+  if (!raw) {
+    return null;
+  }
+
+  const sessionId = Number(raw);
+  if (!Number.isInteger(sessionId) || sessionId <= 0) {
+    return null;
+  }
+
+  return sessionId;
 }
 
 export function createWorkerServerState(nowMs = Date.now()): WorkerServerState {
@@ -588,6 +607,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
+  async function flushSession(sessionDbId: number): Promise<void> {
+    await scanAndDrainQueue(sessionDbId);
+    await flushBufferedItems(sessionDbId);
+  }
+
   function recoverFromCrash(): void {
     buffers.clear();
     resetClaimedQueueItems(deps.db);
@@ -652,6 +676,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     recoverFromCrash,
     scanAndDrainQueue,
     processClaimedItem,
+    flushSession,
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
@@ -756,11 +781,17 @@ export function createWorkerFetchHandler(
 ): (req: Request) => Promise<Response> {
   const runtimeDb = deps.db ?? createDatabase();
   const runtimeProcessors =
-    deps.scanAndDrainQueue || deps.handleCompactImpl || deps.recoverFromCrashImpl
+    deps.scanAndDrainQueue ||
+    deps.handleFlushImpl ||
+    deps.handleCompactImpl ||
+    deps.recoverFromCrashImpl
       ? undefined
       : createWorkerProcessors(runtimeDb);
   const runtime =
-    deps.scanAndDrainQueue || deps.handleCompactImpl || deps.recoverFromCrashImpl
+    deps.scanAndDrainQueue ||
+    deps.handleFlushImpl ||
+    deps.handleCompactImpl ||
+    deps.recoverFromCrashImpl
       ? undefined
       : createWorkerCore({
           db: runtimeDb,
@@ -781,6 +812,12 @@ export function createWorkerFetchHandler(
 
   const scanAndDrainQueue =
     deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
+  const handleFlushImpl =
+    deps.handleFlushImpl ??
+    runtime?.flushSession ??
+    (async (sessionId: number) => {
+      await scanAndDrainQueue(sessionId);
+    });
   const handleCompactImpl =
     deps.handleCompactImpl ??
     runtime?.handleCompact ??
@@ -835,6 +872,24 @@ export function createWorkerFetchHandler(
         }
 
         await handleCompactImpl(payload.session_id, payload.transcript_path);
+        return new Response(null, { status: 200 });
+      }
+
+      if (req.method === "POST" && url.pathname === "/flush") {
+        const payload = (await req.json()) as {
+          session_id?: number;
+        };
+
+        if (typeof payload.session_id !== "number") {
+          return new Response("session_id is required", { status: 400 });
+        }
+
+        void handleFlushImpl(payload.session_id).catch((error) => {
+          deps.logger?.error?.("flush request failed", {
+            sessionId: payload.session_id,
+            error,
+          });
+        });
         return new Response(null, { status: 200 });
       }
 
@@ -901,6 +956,7 @@ export function registerShutdownCleanup(deps: WorkerServerDeps = {}): void {
 }
 
 export async function main(deps: WorkerServerDeps = {}): Promise<void> {
+  const env = deps.env ?? process.env;
   const result = acquireWorkerSingleton(deps);
   if (result === "already-running") {
     process.exit(0);
@@ -968,7 +1024,18 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     } catch {}
   }
 
-  void core.scanAndDrainQueue();
+  const startupFlushSessionId = getStartupFlushSessionId(env);
+  if (startupFlushSessionId !== null) {
+    void (async () => {
+      try {
+        await core.flushSession(startupFlushSessionId);
+      } finally {
+        await core.scanAndDrainQueue();
+      }
+    })();
+  } else {
+    void core.scanAndDrainQueue();
+  }
   setInterval(() => {
     void core.abortStalledSessions();
   }, WATCHDOG_INTERVAL_MS);

@@ -91,6 +91,36 @@ describe("runHookCommand", () => {
     expect(handler).toHaveBeenCalled();
   });
 
+  test("maps the session-end command argument to SessionEnd", async () => {
+    const handler = mock(async () => ({
+      continue: true,
+      exitCode: 0,
+    }));
+    const normalized = mock(() => ({
+      ...createNormalizedInput(),
+      eventName: "SessionEnd" as const,
+    }));
+    const run = runHookCommand as unknown as (
+      dependencies?: TestHookCommandDependencies,
+    ) => Promise<number>;
+
+    const exitCode = await run({
+      env: {},
+      argv: ["bun", "hook-command.ts", "session-end"],
+      stdout: { write: mock(() => true) },
+      stderr: { write: mock(() => true) },
+      readJsonFromStdin: () => ({}),
+      normalizeHookInputImpl: normalized,
+      handlers: {
+        SessionEnd: handler,
+      } as unknown as Record<string, HookHandler>,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(normalized).toHaveBeenCalled();
+    expect(handler).toHaveBeenCalled();
+  });
+
   test("writes only the async sentinel to stdout and awaits async work", async () => {
     const events: string[] = [];
     const asyncWork = mock(async () => {

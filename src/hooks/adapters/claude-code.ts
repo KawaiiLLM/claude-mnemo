@@ -56,6 +56,7 @@ function resolveEventName(raw: Record<string, unknown>): HookEventName {
     case "PostToolUse":
     case "PostCompact":
     case "SessionStart":
+    case "SessionEnd":
     case "PreCompact":
     case "UserPromptSubmit":
     case "Stop":

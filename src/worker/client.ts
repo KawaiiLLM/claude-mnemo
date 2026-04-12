@@ -12,6 +12,7 @@ import { WORKER_PID_PATH } from "../shared/paths";
 const WORKER_PORT = 37778;
 const WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 const WAKE_TIMEOUT_MS = 500;
+const FLUSH_TIMEOUT_MS = 500;
 const COMPACT_TIMEOUT_MS = 25_000;
 
 export interface WorkerClientDeps {
@@ -163,6 +164,38 @@ export async function notifyWorkerWake(
   } catch {
     spawnWorkerProcess(deps, env);
   }
+}
+
+export async function notifyWorkerFlush(
+  sessionDbId: number,
+  deps: WorkerClientDeps = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const flushEnv = {
+    ...env,
+    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId),
+  } satisfies NodeJS.ProcessEnv;
+
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionDbId,
+      }),
+      signal: createAbortSignal(FLUSH_TIMEOUT_MS),
+    });
+
+    if (response.ok) {
+      return;
+    }
+
+    killStaleWorker(deps);
+  } catch {
+    // Fall through to a startup-flush worker spawn.
+  }
+
+  spawnWorkerProcess(deps, flushEnv);
 }
 
 async function waitForCompatibleWorker(
