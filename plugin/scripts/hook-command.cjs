@@ -52,7 +52,7 @@ function resolveDatabasePath(explicitPath) {
   return candidatePath;
 }
 function encodeProjectPath(projectPath) {
-  return projectPath.replace(/[/:\\.]+/g, "-");
+  return projectPath.replace(/[/:\\.]/g, "-");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
@@ -626,7 +626,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwn0qhk" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwnvwxp" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1507,7 +1507,7 @@ function getTurnsForSession(db, sessionId) {
 }
 
 // src/mcp/timeline.ts
-var TIMELINE_WINDOW_CAP = 30;
+var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 200;
 var TITLE_COLUMN_CAP = 40;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
@@ -1525,6 +1525,16 @@ var TYPE_EMOJI_MAP = {
 var PENDING_EMOJI = "\u23F3";
 var SKIPPED_EMOJI = "\u23ED";
 var MISSING_LINE_ANCHOR = "\u2014";
+function paginateItems(items, page, pageSize) {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const offset = (page - 1) * pageSize;
+  return {
+    items: items.slice(offset, offset + pageSize),
+    total,
+    pageCount
+  };
+}
 function parseTimelineId(id) {
   const trimmed = id.trim();
   if (!trimmed) {
@@ -1583,17 +1593,13 @@ function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns 
     return {
       startPromptNumber: first,
       endPromptNumber: first - 1,
-      requestedEnd: null,
-      hadExplicitEnd: false,
       totalTurns: 0
     };
   }
   if (range.kind === "none" || range.kind === "all") {
     return {
       startPromptNumber: first,
-      endPromptNumber: Math.min(first + TIMELINE_WINDOW_CAP - 1, last),
-      requestedEnd: null,
-      hadExplicitEnd: false,
+      endPromptNumber: last,
       totalTurns
     };
   }
@@ -1605,16 +1611,9 @@ function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns 
         `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`
       );
     }
-    const endPromptNumber = Math.min(
-      range.end,
-      startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-      last
-    );
     return {
       startPromptNumber,
-      endPromptNumber,
-      requestedEnd: endPromptNumber < range.end ? range.end : null,
-      hadExplicitEnd: true,
+      endPromptNumber: Math.min(range.end, last),
       totalTurns
     };
   }
@@ -1628,23 +1627,16 @@ function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns 
     }
     return {
       startPromptNumber,
-      endPromptNumber: Math.min(
-        startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-        last
-      ),
-      requestedEnd: null,
-      hadExplicitEnd: false,
+      endPromptNumber: last,
       totalTurns
     };
   }
   if (range.kind === "openStart") {
     validateOpenStartRange(range);
-    const endPromptNumber = Math.min(range.end, first + TIMELINE_WINDOW_CAP - 1, last);
+    const endPromptNumber = Math.min(range.end, last);
     return {
       startPromptNumber: first,
       endPromptNumber,
-      requestedEnd: endPromptNumber < range.end ? range.end : null,
-      hadExplicitEnd: true,
       totalTurns
     };
   }
@@ -1977,9 +1969,12 @@ function buildTimelineView(db, input, preloadedTurns) {
   const sorted = [...allTurns].sort((a, b) => a.promptNumber - b.promptNumber);
   const bounds = totalTurns > 0 ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber } : { first: 1, last: 0 };
   const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const windowTurns = allTurns.filter(
+  const windowTurns = sorted.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
+  const page = Math.max(1, input.page ?? 1);
+  const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+  const pagedTurns = paginateItems(windowTurns, page, pageSize);
   const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
@@ -2004,6 +1999,10 @@ function buildTimelineView(db, input, preloadedTurns) {
     phases,
     window,
     windowTurns,
+    pageTurns: pagedTurns.items,
+    page,
+    pageSize,
+    pageCount: pagedTurns.pageCount,
     windowSignals,
     jsonlPath,
     tz,
@@ -2027,11 +2026,12 @@ function buildContextTimelineView(db, sessionId) {
   if (sortedTurns.length === 0) {
     return buildTimelineView(db, { id: `S${sessionId}` });
   }
-  const windowTurns = sortedTurns.slice(-TIMELINE_WINDOW_CAP);
+  const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
   const firstPromptNumber = windowTurns[0].promptNumber;
   const lastPromptNumber = windowTurns[windowTurns.length - 1].promptNumber;
   const view = buildTimelineView(db, {
-    id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`
+    id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
+    pageSize: DEFAULT_TIMELINE_PAGE_SIZE
   }, sortedTurns);
   return {
     ...view,
@@ -2067,38 +2067,27 @@ function renderSessionHeader(view) {
   if (view.typesDistribution.pending > 0) {
     typesParts.push(`\u23F3${view.typesDistribution.pending}`);
   }
-  return [
+  const lines = [
     `- [S${view.session.id}] ${formatLocalDate(sessionStart)} ${formatLocalTime(sessionStart)} \u2192 ${formatLocalTime(sessionEnd)} (${formatDuration((sessionEnd - sessionStart) * 1e3)}${compactSuffix})`,
     `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
     `  types: ${typesParts.join(" ")} (session-wide)`,
-    `  showing: ${formatShowingLine(view)}`,
     `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
     `  raw: ${view.jsonlPath ?? "(unresolved)"}`
   ];
+  const showingLine = formatShowingLine(view);
+  if (showingLine) {
+    lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+  return lines;
 }
 function formatShowingLine(view) {
-  if (view.totalTurns === 0) {
-    return "T0-T0 of 0 (empty)";
+  if (view.totalTurns === 0 || view.windowTurns.length <= view.pageSize) {
+    return null;
   }
-  const last = view.lastPromptNumber;
-  const base = `T${view.window.startPromptNumber}-T${view.window.endPromptNumber} of ${view.totalTurns}`;
-  const atEnd = view.window.endPromptNumber >= last;
-  if (view.window.requestedEnd !== null) {
-    const rows = view.window.endPromptNumber - view.window.startPromptNumber + 1;
-    const nextParts = atEnd ? [] : [
-      `next: T${view.window.endPromptNumber + 1}..${Math.min(view.window.endPromptNumber + TIMELINE_WINDOW_CAP, last)}`
-    ];
-    return `${base} (requested T${view.window.startPromptNumber}..${view.window.requestedEnd}, truncated to ${rows} rows${nextParts.length > 0 ? `; ${nextParts[0]}` : ""})`;
-  }
-  if (atEnd) {
-    return `${base} (end)`;
-  }
-  const nextStart = view.window.endPromptNumber + 1;
-  const nextEnd = Math.min(nextStart + TIMELINE_WINDOW_CAP - 1, last);
-  return `${base} (next: T${nextStart}..${nextEnd})`;
+  return `page ${view.page} / ${view.pageCount} (total ${view.windowTurns.length})`;
 }
 function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
-  if (view.windowTurns.length === 0) {
+  if (view.pageTurns.length === 0) {
     return [];
   }
   const brokenPromptCandidates = /* @__PURE__ */ new Set();
@@ -2112,7 +2101,7 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
     `  \u2500\u2500\u2500   \u2500\u2500\u2500\u2500   \u2500\u2500\u2500\u2500\u2500   \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500   ${"\u2500".repeat(promptCap)}   \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`
   ];
   let prevEpoch = null;
-  for (const turn of view.windowTurns) {
+  for (const turn of view.pageTurns) {
     lines.push(
       renderTurnRow(
         turn,
@@ -2206,7 +2195,7 @@ function renderPhases(view, options = {}) {
   return lines;
 }
 function renderShapeSignals(view) {
-  const windowLabel = view.window.startPromptNumber === 1 && view.window.endPromptNumber === view.window.totalTurns ? " = full session" : "";
+  const windowLabel = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber ? " = full session" : "";
   const lines = [
     "",
     `  shape signals (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}${windowLabel}):`

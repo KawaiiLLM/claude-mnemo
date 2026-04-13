@@ -5,6 +5,8 @@ import { resolveTranscriptPath } from "../shared/paths";
 
 export interface TimelineInput {
   id: string;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface TimelineView {
@@ -18,6 +20,10 @@ export interface TimelineView {
   phases: Phase[];
   window: ResolvedWindow;
   windowTurns: TurnRecord[];
+  pageTurns: TurnRecord[];
+  page: number;
+  pageSize: number;
+  pageCount: number;
   windowSignals: ShapeSignals;
   jsonlPath: string | null;
   tz: { name: string; offsetLabel: string };
@@ -39,7 +45,7 @@ export interface SystemTimezoneSource {
   resolveOffsetMinutes?: (referenceEpochSeconds: number) => number;
 }
 
-export const TIMELINE_WINDOW_CAP = 30;
+export const DEFAULT_TIMELINE_PAGE_SIZE = 30;
 export const PROMPT_COLUMN_CAP = 200;
 export const TITLE_COLUMN_CAP = 40;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
@@ -61,8 +67,6 @@ export interface ParsedId {
 export interface ResolvedWindow {
   startPromptNumber: number;
   endPromptNumber: number;
-  requestedEnd: number | null;
-  hadExplicitEnd: boolean;
   totalTurns: number;
 }
 
@@ -117,6 +121,22 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 export const PENDING_EMOJI = "⏳";
 const SKIPPED_EMOJI = "⏭";
 const MISSING_LINE_ANCHOR = "—";
+
+function paginateItems<T>(
+  items: T[],
+  page: number,
+  pageSize: number,
+): { items: T[]; total: number; pageCount: number } {
+  const total = items.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const offset = (page - 1) * pageSize;
+
+  return {
+    items: items.slice(offset, offset + pageSize),
+    total,
+    pageCount,
+  };
+}
 
 export function parseTimelineId(id: string): ParsedId {
   const trimmed = id.trim();
@@ -196,8 +216,6 @@ export function resolveWindow(
     return {
       startPromptNumber: first,
       endPromptNumber: first - 1,
-      requestedEnd: null,
-      hadExplicitEnd: false,
       totalTurns: 0,
     };
   }
@@ -205,9 +223,7 @@ export function resolveWindow(
   if (range.kind === "none" || range.kind === "all") {
     return {
       startPromptNumber: first,
-      endPromptNumber: Math.min(first + TIMELINE_WINDOW_CAP - 1, last),
-      requestedEnd: null,
-      hadExplicitEnd: false,
+      endPromptNumber: last,
       totalTurns,
     };
   }
@@ -220,17 +236,10 @@ export function resolveWindow(
         `timeline range starts beyond session end: start prompt ${startPromptNumber} exceeds last prompt T${last}`,
       );
     }
-    const endPromptNumber = Math.min(
-      range.end,
-      startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-      last,
-    );
 
     return {
       startPromptNumber,
-      endPromptNumber,
-      requestedEnd: endPromptNumber < range.end ? range.end : null,
-      hadExplicitEnd: true,
+      endPromptNumber: Math.min(range.end, last),
       totalTurns,
     };
   }
@@ -246,25 +255,18 @@ export function resolveWindow(
 
     return {
       startPromptNumber,
-      endPromptNumber: Math.min(
-        startPromptNumber + TIMELINE_WINDOW_CAP - 1,
-        last,
-      ),
-      requestedEnd: null,
-      hadExplicitEnd: false,
+      endPromptNumber: last,
       totalTurns,
     };
   }
 
   if (range.kind === "openStart") {
     validateOpenStartRange(range);
-    const endPromptNumber = Math.min(range.end, first + TIMELINE_WINDOW_CAP - 1, last);
+    const endPromptNumber = Math.min(range.end, last);
 
     return {
       startPromptNumber: first,
       endPromptNumber,
-      requestedEnd: endPromptNumber < range.end ? range.end : null,
-      hadExplicitEnd: true,
       totalTurns,
     };
   }
@@ -735,11 +737,14 @@ export function buildTimelineView(
     ? { first: sorted[0].promptNumber, last: sorted[totalTurns - 1].promptNumber }
     : { first: 1, last: 0 };
   const window = resolveWindow(parsed.range, totalTurns, bounds);
-  const windowTurns = allTurns.filter(
+  const windowTurns = sorted.filter(
     (turn) =>
       turn.promptNumber >= window.startPromptNumber &&
       turn.promptNumber <= window.endPromptNumber,
   );
+  const page = Math.max(1, input.page ?? 1);
+  const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
+  const pagedTurns = paginateItems(windowTurns, page, pageSize);
   const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
@@ -771,6 +776,10 @@ export function buildTimelineView(
     phases,
     window,
     windowTurns,
+    pageTurns: pagedTurns.items,
+    page,
+    pageSize,
+    pageCount: pagedTurns.pageCount,
     windowSignals,
     jsonlPath,
     tz,
@@ -801,11 +810,12 @@ export function buildContextTimelineView(
     return buildTimelineView(db, { id: `S${sessionId}` });
   }
 
-  const windowTurns = sortedTurns.slice(-TIMELINE_WINDOW_CAP);
+  const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
   const firstPromptNumber = windowTurns[0]!.promptNumber;
   const lastPromptNumber = windowTurns[windowTurns.length - 1]!.promptNumber;
   const view = buildTimelineView(db, {
     id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
+    pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
   }, sortedTurns);
 
   return {
@@ -851,51 +861,35 @@ function renderSessionHeader(view: TimelineView): string[] {
     typesParts.push(`⏳${view.typesDistribution.pending}`);
   }
 
-  return [
+  const lines = [
     `- [S${view.session.id}] ${formatLocalDate(sessionStart)} ${formatLocalTime(sessionStart)} → ${formatLocalTime(sessionEnd)} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
     `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
     `  types: ${typesParts.join(" ")} (session-wide)`,
-    `  showing: ${formatShowingLine(view)}`,
     `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
     `  raw: ${view.jsonlPath ?? "(unresolved)"}`,
   ];
+
+  const showingLine = formatShowingLine(view);
+  if (showingLine) {
+    lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+
+  return lines;
 }
 
-function formatShowingLine(view: TimelineView): string {
-  if (view.totalTurns === 0) {
-    return "T0-T0 of 0 (empty)";
+function formatShowingLine(view: TimelineView): string | null {
+  if (view.totalTurns === 0 || view.windowTurns.length <= view.pageSize) {
+    return null;
   }
 
-  const last = view.lastPromptNumber;
-  const base = `T${view.window.startPromptNumber}-T${view.window.endPromptNumber} of ${view.totalTurns}`;
-  const atEnd = view.window.endPromptNumber >= last;
-
-  if (view.window.requestedEnd !== null) {
-    const rows = view.window.endPromptNumber - view.window.startPromptNumber + 1;
-    const nextParts =
-      atEnd
-        ? []
-        : [
-            `next: T${view.window.endPromptNumber + 1}..${Math.min(view.window.endPromptNumber + TIMELINE_WINDOW_CAP, last)}`,
-          ];
-
-    return `${base} (requested T${view.window.startPromptNumber}..${view.window.requestedEnd}, truncated to ${rows} rows${nextParts.length > 0 ? `; ${nextParts[0]}` : ""})`;
-  }
-
-  if (atEnd) {
-    return `${base} (end)`;
-  }
-
-  const nextStart = view.window.endPromptNumber + 1;
-  const nextEnd = Math.min(nextStart + TIMELINE_WINDOW_CAP - 1, last);
-  return `${base} (next: T${nextStart}..${nextEnd})`;
+  return `page ${view.page} / ${view.pageCount} (total ${view.windowTurns.length})`;
 }
 
 function renderTurnTable(
   view: TimelineView,
   promptCap: number = PROMPT_COLUMN_CAP,
 ): string[] {
-  if (view.windowTurns.length === 0) {
+  if (view.pageTurns.length === 0) {
     return [];
   }
 
@@ -912,7 +906,7 @@ function renderTurnTable(
   ];
 
   let prevEpoch: number | null = null;
-  for (const turn of view.windowTurns) {
+  for (const turn of view.pageTurns) {
     lines.push(
       renderTurnRow(
         turn,
@@ -1060,8 +1054,8 @@ function renderShapeSignals(
   view: TimelineView,
 ): string[] {
   const windowLabel =
-    view.window.startPromptNumber === 1 &&
-    view.window.endPromptNumber === view.window.totalTurns
+    view.window.startPromptNumber === view.firstPromptNumber &&
+    view.window.endPromptNumber === view.lastPromptNumber
       ? " = full session"
       : "";
   const lines = [

@@ -284,7 +284,7 @@ describe("recallMemory", () => {
       time: "1970-01-02",
     });
 
-    expect(defaultOutput).toContain("page 1 / 1 (total 4)");
+    expect(defaultOutput).not.toContain("page 1 / 1 (total 4)");
     expect(defaultOutput).toContain(`[S${bigSessionId}] Large timeline`);
     expect(defaultOutput).toContain(`[S${authSessionId}] Auth race fix`);
     expect(filteredOutput).toContain(`[S${authSessionId}] Auth race fix`);
@@ -416,7 +416,7 @@ describe("recallMemory", () => {
     });
 
     expect(turnsOutput).toContain(`[S${bigSessionId}] Large timeline`);
-    expect(turnsOutput).toContain("page 1 / 1 (total 10)");
+    expect(turnsOutput).not.toContain("page 1 / 1 (total 10)");
     expect(turnsOutput).toContain("[T12] Turn 12");
     expect(turnsOutput).toContain("[T20] Turn 20");
     expect(turnsOutput).not.toContain("[T10] Turn 10");
@@ -424,7 +424,7 @@ describe("recallMemory", () => {
     expect(observationsOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationsOutput).toContain("desc: Guards refresh");
     expect(observationsOutput).toContain("[T1:L4] Diagnose auth race");
-    expect(sessionObservationsOutput).toContain("page 1 / 1 (total 60)");
+    expect(sessionObservationsOutput).not.toContain("page 1 / 1 (total 60)");
     expect(sessionObservationsOutput).toContain(`[S${floodSessionId}] Observation flood`);
     expect(sessionObservationsOutput).toContain("[T1] Observation flood");
     expect(sessionObservationsOutput).toContain("[O");

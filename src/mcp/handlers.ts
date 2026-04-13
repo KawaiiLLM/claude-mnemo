@@ -62,6 +62,12 @@ export function createDatabaseBackedHandlers(
     remember: (args) =>
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
     timeline: (args) =>
-      textResult(timelineQuery(database, { id: args.id as string })),
+      textResult(
+        timelineQuery(database, {
+          id: args.id as string,
+          page: args.page as number | undefined,
+          pageSize: args.pageSize as number | undefined,
+        }),
+      ),
   };
 }

@@ -232,13 +232,11 @@ describe("parseTimelineId", () => {
 });
 
 describe("resolveWindow", () => {
-  it("defaults to first 30 turns when range is none", () => {
+  it("defaults to the full candidate range when range is none", () => {
     const window = resolveWindow({ kind: "none" }, 120);
 
     expect(window.startPromptNumber).toBe(1);
-    expect(window.endPromptNumber).toBe(30);
-    expect(window.requestedEnd).toBeNull();
-    expect(window.hadExplicitEnd).toBe(false);
+    expect(window.endPromptNumber).toBe(120);
   });
 
   it("returns whole short session when total is within cap", () => {
@@ -255,39 +253,32 @@ describe("resolveWindow", () => {
     expect(allWindow).toEqual(noneWindow);
   });
 
-  it("respects a closed range within cap", () => {
+  it("respects a closed range without truncation", () => {
     const window = resolveWindow({ kind: "closed", start: 10, end: 30 }, 120);
 
     expect(window.startPromptNumber).toBe(10);
     expect(window.endPromptNumber).toBe(30);
-    expect(window.hadExplicitEnd).toBe(true);
-    expect(window.requestedEnd).toBeNull();
   });
 
-  it("truncates a closed range that exceeds the cap", () => {
+  it("keeps the full closed range when it exceeds the old cap", () => {
     const window = resolveWindow({ kind: "closed", start: 10, end: 50 }, 120);
 
     expect(window.startPromptNumber).toBe(10);
-    expect(window.endPromptNumber).toBe(39);
-    expect(window.hadExplicitEnd).toBe(true);
-    expect(window.requestedEnd).toBe(50);
+    expect(window.endPromptNumber).toBe(50);
   });
 
-  it("truncates a closed range that exceeds the session end", () => {
+  it("clips a closed range only at the session end", () => {
     const window = resolveWindow({ kind: "closed", start: 100, end: 150 }, 120);
 
     expect(window.startPromptNumber).toBe(100);
     expect(window.endPromptNumber).toBe(120);
-    expect(window.requestedEnd).toBe(150);
   });
 
-  it("caps open-end ranges at 30 rows", () => {
+  it("keeps open-end ranges through the session end", () => {
     const window = resolveWindow({ kind: "openEnd", start: 30 }, 120);
 
     expect(window.startPromptNumber).toBe(30);
-    expect(window.endPromptNumber).toBe(59);
-    expect(window.requestedEnd).toBeNull();
-    expect(window.hadExplicitEnd).toBe(false);
+    expect(window.endPromptNumber).toBe(120);
   });
 
   it("ends open-start ranges at the requested turn", () => {
@@ -295,16 +286,13 @@ describe("resolveWindow", () => {
 
     expect(window.startPromptNumber).toBe(1);
     expect(window.endPromptNumber).toBe(20);
-    expect(window.hadExplicitEnd).toBe(true);
-    expect(window.requestedEnd).toBeNull();
   });
 
-  it("truncates open-start ranges that exceed the cap", () => {
+  it("keeps open-start ranges without truncation", () => {
     const window = resolveWindow({ kind: "openStart", end: 50 }, 120);
 
     expect(window.startPromptNumber).toBe(1);
-    expect(window.endPromptNumber).toBe(30);
-    expect(window.requestedEnd).toBe(50);
+    expect(window.endPromptNumber).toBe(50);
   });
 
   it("returns a zero-length window for empty sessions", () => {
@@ -1121,7 +1109,7 @@ describe("buildTimelineView", () => {
 });
 
 describe("renderTimeline", () => {
-  it("includes all 6 metadata lines in the header", () => {
+  it("omits the showing line when the candidate set fits on one page", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
@@ -1132,7 +1120,7 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/- \[S1\]/);
     expect(output).toMatch(/\| \d+ turns \| \d+ tool_calls/);
     expect(output).toMatch(/types: .+\(session-wide\)/);
-    expect(output).toMatch(/showing: T\d+-T\d+/);
+    expect(output).not.toMatch(/showing:/);
     expect(output).toMatch(/tz: .+/);
     expect(output).toMatch(/raw: .+\.jsonl/);
   });
@@ -1148,31 +1136,33 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/T#\s+line\s+time\s+gap\s+stats\s+prompt\s+title/);
   });
 
-  it("showing line reports truncation when request exceeds cap", () => {
+  it("showing line reports page counts when the candidate set exceeds pageSize", () => {
     const db = createDatabase(":memory:");
 
-    seedSession(db);
+    seedLongSession(db, 45);
 
-    const view = buildTimelineView(db, { id: "S1/T5..60" });
+    const view = buildTimelineView(db, { id: "S1", pageSize: 30 });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/requested T5\.\.60, truncated/);
+    expect(output).toContain("showing: page 1 / 2 (total 45)");
   });
 
-  it("showing line emits (end) on last page for S1", () => {
+  it("shows the second page of a paginated timeline", () => {
     const db = createDatabase(":memory:");
+    seedLongSession(db, 45);
 
-    seedSession(db);
-
-    const view = buildTimelineView(db, { id: "S1" });
+    const view = buildTimelineView(db, { id: "S1", page: 2, pageSize: 30 });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/showing: T1-T21 of 21 \(end\)/);
+    expect(output).toContain("showing: page 2 / 2 (total 45)");
+    expect(output).toContain("T31");
+    expect(output).toContain("T45");
+    expect(output).not.toContain("T30");
   });
 
-  it("showing line uses the last prompt number, not total row count, for non-1-based sessions", () => {
+  it("showing line uses page counts for non-1-based sessions", () => {
     const db = createDatabase(":memory:");
-    const session = seedSession(db);
+    const session = seedLongSession(db, 45);
 
     db.query(
       `UPDATE turns
@@ -1180,11 +1170,26 @@ describe("renderTimeline", () => {
        WHERE session_id = ?`,
     ).run(session.id);
 
-    const view = buildTimelineView(db, { id: "S1" });
+    const view = buildTimelineView(db, { id: "S1", page: 2, pageSize: 30 });
     const output = renderTimeline(view);
 
-    expect(view.lastPromptNumber).toBe(156);
-    expect(output).toContain("showing: T136-T156 of 21 (end)");
+    expect(view.lastPromptNumber).toBe(180);
+    expect(output).toContain("showing: page 2 / 2 (total 45)");
+  });
+
+  it("keeps shape signals scoped to the full selected range instead of the current page", () => {
+    const db = createDatabase(":memory:");
+    seedLongSession(db, 60);
+
+    const view = buildTimelineView(db, { id: "S1/T20..50", page: 2, pageSize: 10 });
+    const output = renderTimeline(view);
+
+    expect(output).toContain("showing: page 2 / 4 (total 31)");
+    expect(output).toMatch(/shape signals \(window T20-T50\):/);
+    expect(output).toContain("T30");
+    expect(output).toContain("T39");
+    expect(output).not.toContain("T29");
+    expect(output).not.toContain("T40");
   });
 
   it("pending turns render ⏳ in the title column for S1/T19..21", () => {
@@ -1342,7 +1347,7 @@ describe("timelineQuery", () => {
     const output = timelineQuery(db, { id: "S1" });
 
     expect(output).toContain("- [S1]");
-    expect(output).toContain("showing: T1-T21 of 21 (end)");
+    expect(output).not.toContain("showing:");
   });
 
   it("returns a timeline error string when the view builder throws", () => {

@@ -52,6 +52,8 @@ describe("tool surface", () => {
       "remember",
       "timeline",
     ]);
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain("page/pageSize");
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("hard cap");
     expect(rememberInputSchema.parse({ id: "S1", title: "ok" })).toEqual({
       id: "S1",
       title: "ok",
@@ -63,6 +65,11 @@ describe("timelineInputSchema", () => {
   it("accepts routed timeline ids and rejects extra fields", () => {
     expect(timelineInputSchema.parse({ id: "S42" })).toEqual({
       id: "S42",
+    });
+    expect(timelineInputSchema.parse({ id: "S42", page: 2, pageSize: 10 })).toEqual({
+      id: "S42",
+      page: 2,
+      pageSize: 10,
     });
     expect(timelineInputSchema.parse({ id: "S42/T10..30" })).toEqual({
       id: "S42/T10..30",
@@ -80,9 +87,6 @@ describe("timelineInputSchema", () => {
     expect(() => timelineInputSchema.parse({})).toThrow();
     expect(() =>
       timelineInputSchema.parse({ id: "S42", depth: "expanded" }),
-    ).toThrow();
-    expect(() =>
-      timelineInputSchema.parse({ id: "S42", pageSize: 10 }),
     ).toThrow();
   });
 });

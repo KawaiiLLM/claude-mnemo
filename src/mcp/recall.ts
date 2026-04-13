@@ -508,7 +508,11 @@ function formatPageHeader(page: number, pageCount: number, total: number): strin
   return `page ${page} / ${pageCount} (total ${total})`;
 }
 
-function joinPage(header: string, body: string): string {
+function joinPage(header: string, body: string, pageCount: number): string {
+  if (pageCount <= 1) {
+    return body;
+  }
+
   return body ? `${header}\n${body}` : header;
 }
 
@@ -1069,6 +1073,7 @@ function renderRoutedId(
       paged.items
         .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
         .join("\n"),
+      paged.pageCount,
     );
   }
 
@@ -1086,6 +1091,7 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderTurnScope(db, paged.items, depth, truncate),
+      paged.pageCount,
     );
   }
 
@@ -1115,6 +1121,7 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderObservationScope(db, paged.items, depth, true, truncate),
+      paged.pageCount,
     );
   }
 
@@ -1142,6 +1149,7 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderObservationScope(db, paged.items, depth, true, truncate),
+      paged.pageCount,
     );
   }
 
@@ -1160,6 +1168,7 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderMemoryScope(db, paged.items, depth, truncate),
+      paged.pageCount,
     );
   }
 
@@ -1188,6 +1197,7 @@ function renderSessionList(
     paged.items
       .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
       .join("\n"),
+    paged.pageCount,
   );
 }
 
@@ -1274,6 +1284,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       renderGroupedSearchResults(db, paged.items, depth, truncate),
+      paged.pageCount,
     );
   }
 

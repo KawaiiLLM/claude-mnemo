@@ -580,7 +580,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("  insight:");
     expect(output).toContain("  - Primary insight bullet for the current session");
     expect(output).toContain("T#");
-    expect(output).toContain("showing: T1-T6 of 6 (end)");
+    expect(output).not.toContain("showing:");
     expect(output).toContain("phases (window T1-T6):");
     expect(output).toContain("shape signals (window T1-T6");
     expect(output).not.toContain("next_steps:");
@@ -688,7 +688,9 @@ describe("handleContextHook", () => {
     expect(output).toContain(`claude-mnemo: 5 sessions, 0 observations | current: S${currentSessionId}`);
     expect(output).toContain("## Current Session");
     expect(output).toContain("T#");
-    expect(output).toContain("showing: T11-T40 of 40 (end)");
+    expect(output).not.toContain("showing:");
+    expect(output).toContain("phases (window T11-T40):");
+    expect(output).toContain("shape signals (window T11-T40):");
     expect(output).toContain('earlier: timeline(id="S3/T1..10") or recall(id="S3")');
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");

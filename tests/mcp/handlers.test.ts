@@ -149,12 +149,55 @@ describe("database-backed MCP handlers", () => {
       1_700_000_100,
       null,
     );
+    db.query(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        content_prompt_id,
+        transcript_line_start,
+        status,
+        user_prompt,
+        assistant_response,
+        title,
+        content,
+        insight,
+        type,
+        tags,
+        files_read,
+        files_modified,
+        tool_call_count,
+        created_at_epoch,
+        updated_at_epoch
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      session.id,
+      2,
+      null,
+      null,
+      "extracted",
+      "Investigate timeline pagination",
+      null,
+      "Page two turn",
+      null,
+      null,
+      "change",
+      JSON.stringify([]),
+      JSON.stringify([]),
+      JSON.stringify([]),
+      1,
+      1_700_000_110,
+      null,
+    );
 
     const result = await handlers.timeline?.({
       id: `S${session.id}`,
+      page: 2,
+      pageSize: 1,
     });
 
-    expect(result?.content[0]?.text).toContain("claude-mnemo | 1 turns | 1 tool_calls");
-    expect(result?.content[0]?.text).toContain("showing: T1-T1 of 1 (end)");
+    expect(result?.content[0]?.text).toContain("claude-mnemo | 2 turns | 2 tool_calls");
+    expect(result?.content[0]?.text).toContain("showing: page 2 / 2 (total 2)");
+    expect(result?.content[0]?.text).toContain("T2");
+    expect(result?.content[0]?.text).not.toContain("T1  ");
   });
 });
