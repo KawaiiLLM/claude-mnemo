@@ -12,14 +12,14 @@
 
 ### 批量处理
 
-**D1**: 每个 turn 的**第一个 obs 立即处理**。理由：建立/刷新 agent kv-cache，确保两个 turn 之间不会出现过长的 agent 空闲（避免 cache 过期）。
+**D1**: **所有 obs 一律进入 per-session buffer**，不立即发给 agent。只有以下事件触发处理：
+- **(a) Stop hook（turn-stop）** — 将 buffer 中所有 obs + turn info 合并为**一个 batch prompt** 发给 agent。这是主要处理路径，大多数 obs 在此批量消化。缓存建立/过期后的首次请求也在此触发——不需要提前保温。
+- **(b) SessionEnd hook** — 将 buffer 中所有剩余 obs 批量处理。CC 在 session 关闭时触发 `SessionEnd` 事件（claude-mem 已使用此 hook）。确保 session 结束前不丢 obs。
+- **(c) Compact（`drainSessionCompletely`）** — 强制 flush buffer 中所有剩余 obs。兜底路径，确保 compact 前记忆完整。
 
-**D2**: 第一个 obs 之后的 obs 进入 **per-session buffer**，不立即发给 agent。等待以下任一条件触发批量处理：
-- **(a)** buffer 中累积 **≥ 3 个 obs** — 立即批量处理全部
-- **(b)** 距上次处理 **≥ 4 分钟** — 处理 **1 个 obs**（cache keepalive，< 5 分钟 TTL）
-- **(c)** **turn-stop 到达** — 将 buffer 中所有剩余 obs + turn-stop 合并为**一个 prompt** 发给 agent
+不设 keepalive timer，不设"首个 obs 立即处理"特殊路径。缓存可能在长 turn 中过期（> 5min），但 turn-stop 时的 batch 调用会重建缓存，一次性 cache creation 成本可接受。
 
-**D3**: 批量 prompt 格式：
+**D2**: 批量 prompt 格式：
 
 ```xml
 <batch>
@@ -37,24 +37,50 @@
 
 Agent 在一个 response 中处理所有 obs + turn，调用多次 `remember` 工具。
 
-**D4**: 缓存保温（D2b）的 timer 通过 `setInterval` 实现，周期 **60 秒**，检查各 session buffer 的 `lastProcessedAt`。当 `now - lastProcessedAt ≥ 4min` 且 buffer 非空时，处理 buffer 中最旧的 1 个 obs。
+**D3**: **Queue/buffer 交接语义**：
+- obs 被 `claimNextItem()` 从 queue 取出后，**保持 claimed 状态**，加入内存 buffer
+- batch 成功（`pushMessage` 返回 + agent response 收到）后，**批量 `deleteQueueItem(seq)`** 删除所有 buffer 中的 items
+- batch 失败（超时、crash、agent error）时，**批量 `releaseQueueClaim(seq)`** 放回 queue
+- Worker crash 时 `recoverFromCrash()` 调用 `resetClaimedQueueItems()`，将所有 claimed items 放回未 claimed 状态。后续 `/wake` 会重新 claim 它们进 buffer，等待下一个 flush trigger（turn-stop / SessionEnd / compact）正常批量处理
+- 这确保 obs 在 batch 成功前不会从 queue 中消失，crash 恢复承诺成立。
 
-**D5**: `drainSessionCompletely`（compact 路径）跳过批量逻辑，**立即 flush** 所有 buffer 中的 obs + 所有 pending_queue 中的 item，确保 compact 前记忆完整。
+**D4**: `drainSessionCompletely`（compact 路径）跳过批量逻辑，**立即 flush** 所有 buffer 中的 obs + 所有 pending_queue 中的 item，确保 compact 前记忆完整。
 
-**D6**: 批量处理不改变 `processingLock` 的串行语义。一个 batch prompt 等同于一次 `pushMessage` 调用，在 lock 保护下执行。
+**D5**: 批量处理不改变 `processingLock` 的串行语义。一个 batch prompt 等同于一次 `pushMessage` 调用，在 lock 保护下执行。
 
 ### 回退检测
 
-**D7**: **Buffer 层**（零成本）— 新的 UserPromptSubmit 到达时，如果同 session 的 buffer 中有前一个 turn 的未处理 obs：
-- 丢弃这些 obs（从 buffer 移除）
-- 删除对应的 `pending_queue` 条目
-- 在 DB 中将对应 turn 标记为 `status = 'undone'`
-- 理由：正常流程是 Stop → turn-stop → 新 UserPromptSubmit；如果 Stop/turn-stop 没到就来了新 UserPromptSubmit，说明前一个 turn 被回退。
+**架构约束**: Hook 进程（session-init、stop）和 worker 进程是独立进程。Hook 只能读写 DB，无法直接操作 worker 的 in-memory buffer 或 rollbackPending 队列。因此回退检测分为两步：(1) hook 写 DB signal；(2) worker drain path 消费 signal。
 
-**D8**: **Stop/turn-stop 层**（及时检测）— 处理 turn-stop 时（或 Stop hook 触发时），读取 session JSONL 末尾，检查最近是否有 `isSidechain` 的 turn：
-- 使用 `parseReplayTranscript` 的 `isSidechain` 字段检测
+**D7**: **UserPromptSubmit 层**（DB signal）— 新的 UserPromptSubmit 到达时，session-init hook 扫描 JSONL 检测 `isSidechain` turns：
+- 使用 `parseReplayTranscript` 的 `isSidechain` 字段做链式检测（chain-walk from newest leaf）
 - 将新发现的 sidechain turns 在 DB 中标记为 `status = 'undone'`
-- 在**下一次 batch prompt** 中附加回退通知：
+- **清理 sidechain turns 的 observations 和 FTS 索引**：`DELETE FROM observations WHERE turn_id IN (...)` + 对应 FTS 清理，确保污染数据不残留。复用 DB 层已有的 undone 清理路径（`tests/db/turns.test.ts:164` 验证的语义）。
+- 删除 `pending_queue` 中属于这些 turns 的条目（obs 和 turn-stop）
+- 在 sidechain turns 的 tags 中记录 `rollback:pending`
+- **不操作 worker 内存**。Buffer 清理和 rollback 通知由 worker drain path 消费（见 D12）。
+- **不使用"缺少 Stop/turn-stop"作为回退推断**。原因：Stop hook 可能丢失或延迟，`stop.ts` 已有 orphan active turns 补救机制，这是正常流程而非回退信号。
+- 此检测同时覆盖单 obs sidechain turns（被 D1 立即处理的），因为不依赖 buffer 状态，而是直接读 JSONL 判断。
+
+**D8**: **Stop/turn-stop 层**（DB signal）— 处理 turn-stop 时（或 Stop hook 触发时），同样扫描 JSONL 检测 `isSidechain`：
+- 逻辑与 D7 相同：标记 undone + 清理 observations/FTS + 清理 queue + 记录 `rollback:pending`
+- 作为 D7 的补充：如果 UserPromptSubmit 恰好在 JSONL 写入 sidechain 标记之前触发，turn-stop 时有机会再检测一次
+
+**D9**: **Compact 层**（兜底）— 保留现有 `markSidechainTurnsUndone` + `cleanupUndoneTurnTasks` 逻辑，但**增加 observations/FTS 清理**。当前 `markSidechainTurnsUndone`（`server.ts:216-223`）只做裸 `UPDATE turns SET status='undone'`，不清理 observations。修改为同时执行 `DELETE FROM observations WHERE turn_id IN (...)`。
+
+**D10**: 回退通知使用**两阶段交付**，全部基于 DB 持久化：
+- 发现 sidechain 时（D7/D8/D9），在 turn tags 中记录 `rollback:pending`
+- 当任意携带 `<rollback>` 的 agent prompt（batch、单 obs、keepalive 均可）成功返回后，升级为 `rollback:notified`
+- 只有 `rollback:notified` 的 turns 才跳过通知
+
+**D12**: **Worker drain path 消费 DB signal** — worker 在**每次 `processBatch` / `pushMessage` 之前**（turn-stop batch、SessionEnd flush、或 compact flush），执行以下检查：
+- 扫描当前 session 的 buffer，丢弃 `status = 'undone'` 的 turns 对应的 obs items
+- 查询 DB：`SELECT * FROM turns WHERE session_id = ? AND status = 'undone' AND tags LIKE '%rollback:pending%'`
+- 如果有 pending rollbacks，在当前 prompt 前附加 `<rollback>` 元素（prompt 级 envelope）
+- Agent response 成功后，升级为 `rollback:notified`
+- **Worker 重启恢复**：此逻辑不依赖内存状态，完全从 DB 读取。Worker crash 后重启，下次 drain 时自动从 DB 扫到 `rollback:pending` 并重新通知。
+
+回退通知格式：
 
 ```xml
 <rollback>
@@ -65,13 +91,9 @@ Agent 在一个 response 中处理所有 obs + turn，调用多次 `remember` �
 
 Agent 可据此修正之前基于这些 turn 生成的 observations（调用 `remember` 更新或标记失效）。
 
-**D9**: **Compact 层**（兜底）— 保留现有 `markSidechainTurnsUndone` + `cleanupUndoneTurnTasks` 逻辑不变。作为 D7/D8 的兜底：crash、hook 未触发等异常情况下，compact 时最终一致。
-
-**D10**: 回退通知只发送**一次**。通过在 turn 的 tags 中记录 `rollback:notified` 标记，避免重复通知 agent。
-
 ### Buffer 持久化
 
-**D11**: Buffer 是纯内存结构（`Map<sessionDbId, BufferState>`），**不持久化**。Worker 重启时 buffer 丢失，但 obs 仍在 `pending_queue` 中（已入库），`recoverFromCrash` → `scanAndDrainQueue` 会按旧模式逐条处理。批量优化是 best-effort——降级为逐条处理不影响正确性。
+**D11**: Buffer 是纯内存结构（`Map<sessionDbId, BufferState>`），**不持久化**。Worker 重启时 buffer 丢失，但 obs 仍以 claimed 状态保留在 `pending_queue` 中。`recoverFromCrash` → `resetClaimedQueueItems` 将它们恢复为未 claimed。后续 `/wake` 将它们重新 claim 进 buffer，等待下一个 flush trigger（turn-stop / SessionEnd / compact）正常批量处理。不存在单独的逐条降级路径——crash 恢复后仍走批量模型。
 
 ---
 
@@ -81,10 +103,10 @@ Agent 可据此修正之前基于这些 turn 生成的 observations（调用 `re
 
 | 指标 | 当前（逐条） | 批量处理 | 节省 |
 |------|-------------|---------|------|
-| Agent calls / turn | 5 + 1 turn-stop = 6 | 1（首个 obs）+ 1（batch + turn-stop）= 2 | ~67% |
-| Output tokens / turn | 6 × 198 = 1188 | 198 + ~400 = ~598 | ~50% |
-| Cache creation / turn | 6 次增量 | 2 次增量 | ~67% |
-| 每 turn 成本 | ~$0.034 × 6 = $0.20 | ~$0.034 + $0.06 = $0.09 | ~55% |
+| Agent calls / turn | 5 + 1 turn-stop = 6 | **1**（turn-stop batch） | ~83% |
+| Output tokens / turn | 6 × 198 = 1188 | ~400（单次 batch response） | ~66% |
+| Cache creation / turn | 6 次增量 | 1 次（可能 cache miss） | ~83% |
+| 每 turn 成本 | ~$0.034 × 6 = $0.20 | ~$0.06 | ~70% |
 
 ---
 
@@ -97,9 +119,6 @@ Agent 可据此修正之前基于这些 turn 生成的 observations（调用 `re
 ```typescript
 interface BufferState {
   items: PendingQueueItem[];       // 累积的 obs items
-  turnPromptNumber: number | null; // 当前 turn 的 promptNumber
-  firstObsProcessed: boolean;      // 本 turn 的第一个 obs 是否已处理
-  lastProcessedAt: number;         // 上次处理时间 (ms)
 }
 ```
 
@@ -107,46 +126,62 @@ interface BufferState {
 
 ### Task 2: 修改 scanAndDrainQueue
 
-将 claim → process 循环改为 claim → buffer → conditional-process：
+将 claim → process 循环改为 claim → buffer → conditional-flush：
 
 1. `claimNextItem` 获取 item
-2. 如果是 obs 且 `!buffer.firstObsProcessed` → 立即处理，设 `firstObsProcessed = true`
-3. 如果是 obs 且 `buffer.firstObsProcessed` → 加入 buffer
-4. 如果 buffer.items.length ≥ 3 → 触发 `processBatch`
-5. 如果是 turn-stop → 触发 `processBatch`（含 turn-stop）
+2. 如果是 obs → 加入 buffer
+3. 如果是 turn-stop → 触发 `processBatch`（buffer 中所有 obs + turn-stop）
+4. `/wake` 调用不再逐条处理 obs，只负责把 queue items 搬入 buffer
 
-### Task 3: 缓存保温 timer
+### Task 3: SessionEnd flush
 
-在 `main()` 中新增 `setInterval`（60s），遍历 `buffers`：
-- 如果 `now - buffer.lastProcessedAt ≥ 240_000`（4 分钟）且 `buffer.items.length > 0`
-- 取 buffer 最旧的 1 个 obs，调用 `processClaimedItem` 处理
-- 更新 `lastProcessedAt`
+**Hook 侧**（fire-and-forget）：
+- `plugin/hooks/hooks.json`：新增 `SessionEnd` hook entry，调用 worker 的 `/flush` endpoint，timeout 设为 2 秒
+- `src/hooks/types.ts`：`HookEventName` 新增 `"SessionEnd"`
+- `src/hooks/adapters/claude-code.ts`：`resolveEventName()` 新增 `"session-end"` → `"SessionEnd"` 映射
+- `src/hooks/hook-command.ts`：新增 `SessionEnd` handler，只发 HTTP POST `/flush` 给 worker **然后立即返回**（不等待 flush 完成）。CC 对 SessionEnd 的 timeout 预算只有 ~1500ms，必须是 fire-and-forget。
+
+**Worker 侧**（异步执行）：
+- `src/worker/server.ts`：新增 `/flush` endpoint，接收 `{ session_id }` 参数
+- Worker 收到后**异步**对该 session 执行 `processBatch`（flush buffer 中所有剩余 obs），不阻塞 HTTP response
+- 如果 worker 在 flush 过程中被终止，buffered obs 仍以 claimed 状态保留在 queue 中，由 `recoverFromCrash` 恢复（D3）
+
+**Batch 成功/失败的 queue 清理**（适用于所有触发路径：turn-stop、SessionEnd、compact）：
+- 成功：批量 `deleteQueueItem(seq)` 删除 buffer 中所有 items 的 queue rows
+- 失败（超时/error）：批量 `releaseQueueClaim(seq)` 放回 queue，清空内存 buffer
 
 ### Task 4: 批量 prompt 构建
 
 新增 `buildBatchPrompt(items: PendingQueueItem[], turnStopItem?: PendingQueueItem): string`：
 - 将多个 obs prompt 包裹在 `<batch>` 标签中
 - 如果有 turn-stop，附加 `<turn>` 元素
-- 如果有回退通知（D8），附加 `<rollback>` 元素
+- 如果有 pending rollback（D12），附加 `<rollback>` 元素
 - 返回合并后的单个 prompt 字符串
 
-### Task 5: Buffer 层回退检测（D7）
+### Task 5: 共享 sidechain 检测 + DB 清理函数
 
-在 `UserPromptSubmit` handler（session-init）中：
-1. 查找当前 session 的 buffer
-2. 如果 buffer 有 items 且 `turnPromptNumber` 与新 turn 不同 → 回退发生
-3. 丢弃 buffer items，删除对应 pending_queue 条目
-4. 标记对应 turn 为 `undone`
-5. 重置 buffer 状态
+新增 `detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath)` 共享函数：
+1. 调用 `parseReplayTranscript` 获取所有 turns
+2. 筛选 `isSidechain === true` 且 DB 中 status 不是 `'undone'` 的 turns
+3. 对新发现的 sidechain turns（turn IDs = undone_turn_ids），按以下顺序执行：
+   1. `UPDATE turns SET status = 'undone'` WHERE id IN (undone_turn_ids)
+   2. `SELECT id FROM observations WHERE turn_id IN (undone_turn_ids)` → obs_ids
+   3. `DELETE FROM pending_queue WHERE session_db_id = ? AND kind = 'turn-stop' AND target_id IN (undone_turn_ids)`
+   4. `DELETE FROM pending_queue WHERE session_db_id = ? AND kind = 'obs' AND target_id IN (obs_ids)`
+   5. `DELETE FROM observations WHERE turn_id IN (undone_turn_ids)`（含 FTS 清理）
+   6. 在 turn tags 中记录 `rollback:pending`
+4. 返回新发现的 sidechain turn promptNumbers（用于通知）
 
-### Task 6: Stop/turn-stop 层回退检测（D8）
+在 session-init hook 和 stop hook 中均调用此函数（D7 + D8）。
 
-在 `processTurnStop`（或 Stop hook handler）中：
-1. 读取 session 的 transcriptPath
-2. 调用 `parseReplayTranscript` 获取 sidechain turns
-3. 筛选尚未标记为 `undone` 的 sidechain turns
-4. 标记为 `undone`，记录 `rollback:notified` tag
-5. 将回退信息注入下次 batch prompt 的 `<rollback>` 元素
+### Task 6: Worker drain path 消费 rollback signal（D12）
+
+在**每次 `processBatch` / `pushMessage` 之前**（turn-stop batch、SessionEnd flush、或 compact flush）：
+1. 扫描 buffer，丢弃 `status = 'undone'` turns 的 obs items
+2. 查询 DB：`turns WHERE session_id = ? AND status = 'undone' AND tags LIKE '%rollback:pending%'`
+3. 如果有 pending rollbacks，在当前 prompt 前附加 `<rollback>` 元素（prompt 级 envelope，不是 batch 专属结构）
+4. Agent response 成功后，将 `rollback:pending` 升级为 `rollback:notified`
+5. 此逻辑不依赖内存状态，worker restart 后自动恢复
 
 ### Task 7: drainSessionCompletely 适配
 
@@ -157,12 +192,19 @@ Compact 路径下，在 drain 前先 flush 当前 session 的 buffer：
 
 ### Task 8: Tests
 
-1. 首个 obs 立即处理，后续 obs 进入 buffer
-2. Buffer ≥ 3 触发 batch 处理
-3. Turn-stop 触发 flush（含 buffer 中所有 obs）
-4. 4 分钟 keepalive 处理 1 个 obs
-5. 新 UserPromptSubmit 丢弃旧 turn 的 buffer obs（D7）
-6. Turn-stop 时检测 sidechain 并附加 `<rollback>`（D8）
-7. Compact drain 先 flush buffer（Task 7）
-8. Worker 重启后 buffer 为空，pending_queue 逐条处理（D11 降级）
-9. `<rollback>` 只通知一次（D10）
+1. 所有 obs 进入 buffer（claimed 状态保留在 queue），不立即处理
+2. Turn-stop 触发 batch flush（buffer 中所有 obs + turn info → 一次 pushMessage）
+3. SessionEnd 触发 batch flush（buffer 中剩余 obs）
+4. Batch 成功 → 批量 deleteQueueItem；失败 → 批量 releaseQueueClaim
+5. Compact drain 先 flush buffer（Task 7）
+5. `detectAndCleanSidechainTurns` 标记 undone + 清理 observations/FTS + 清理 pending_queue（按 kind 分别处理） + 记录 `rollback:pending`
+6. UserPromptSubmit 调用检测函数，worker drain path 消费 DB signal 并附加 `<rollback>`（D7 + D12）
+7. 单 obs sidechain turn（obs 在 buffer 中未发送）：检测函数发现，buffer 中 obs 被丢弃
+8. 单 obs sidechain turn（turn-stop 已 batch 发送）：检测函数发现，observations 被清理，rollback 通知排队
+9. Stop hook 丢失/延迟不触发误杀——orphan turn 不被标记为 undone
+10. Turn-stop 时检测 sidechain 并附加 `<rollback>`（D8）
+11. D9 compact 层也清理 observations/FTS，不只是裸 UPDATE status
+12. Worker 重启后 buffer 为空，resetClaimedQueueItems 恢复 obs，重新 claim 进 buffer 等待下一个 flush trigger（D11）
+13. Worker 重启后从 DB 扫到 `rollback:pending`，自动重新通知（D12 恢复路径）
+14. `rollback:pending` → agent 成功响应 → `rollback:notified`（D10 两阶段）
+15. `rollback:pending` + agent call 失败 → tag 不升级，下次重新通知
