@@ -223,6 +223,24 @@ describe("worker processors", () => {
     );
   });
 
+  test("renderFileTree handles relative paths with a shared prefix", () => {
+    expect(
+      renderSharedFileTree(["src/auth.ts", "src/server.ts"]),
+    ).toBe(["src", "auth.ts", "server.ts"].join("\n"));
+  });
+
+  test("renderFileTree handles relative paths with no shared prefix", () => {
+    expect(
+      renderSharedFileTree(["src/auth.ts", "lib/utils.ts"]),
+    ).toBe([".", "lib/utils.ts", "src/auth.ts"].join("\n"));
+  });
+
+  test("renderFileTree handles relative path that is a prefix of another", () => {
+    expect(
+      renderSharedFileTree(["src", "src/auth.ts"]),
+    ).toBe(["src", "auth.ts"].join("\n"));
+  });
+
   test("processObs invokes Mnemosyne for pending observations", async () => {
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);

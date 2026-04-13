@@ -396,6 +396,28 @@ describe("MCP format renderer", () => {
     expect(rendered).toContain("... +4 lines");
   });
 
+  test("renders expanded turn with relative-path filesRead as correct tree", () => {
+    const turn: FormattedTurn = {
+      id: 17,
+      promptNumber: 17,
+      transcriptLineStart: null,
+      title: "relative tree",
+      status: "extracted",
+      filesRead: ["src/auth.ts", "src/server.ts"],
+      filesModified: [],
+    };
+
+    expect(renderNode({ type: "turn", value: turn }, { depth: "expanded" })).toBe(
+      [
+        "  - [T17] relative tree | 📖2 [extracted]",
+        "    - files_read:",
+        "      - src",
+        "      - auth.ts",
+        "      - server.ts",
+      ].join("\n"),
+    );
+  });
+
   test("tree truncation includes replay hints only in unified mode when hintId exists", () => {
     const turn: FormattedTurn = {
       id: 16,

@@ -9,7 +9,7 @@ function createFileTreeNode(): FileTreeNode {
   return { files: [], dirs: new Map() };
 }
 
-function commonPathPrefix(paths: string[]): string {
+export function commonPathPrefix(paths: string[]): string {
   if (paths.length === 0) {
     return "";
   }
@@ -17,6 +17,7 @@ function commonPathPrefix(paths: string[]): string {
     return paths[0] ?? "";
   }
 
+  const allAbsolute = paths.every((value) => value.startsWith("/"));
   const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
   const common: string[] = [];
   const limit = Math.min(...splitPaths.map((segments) => segments.length));
@@ -30,10 +31,11 @@ function commonPathPrefix(paths: string[]): string {
   }
 
   if (common.length === 0) {
-    return "/";
+    return allAbsolute ? "/" : ".";
   }
 
-  return `/${common.join("/")}`;
+  const joined = common.join("/");
+  return allAbsolute ? `/${joined}` : joined;
 }
 
 function renderTreeNode(
