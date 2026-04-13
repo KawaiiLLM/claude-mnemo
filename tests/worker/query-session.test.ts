@@ -526,4 +526,77 @@ describe("worker query session", () => {
 
     await session.close();
   });
+
+  test("compact pushes /compact and resolves on compact_boundary", async () => {
+    const seenMessages: string[] = [];
+    const queryImpl = mock(
+      ({
+        prompt,
+      }: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+      }) =>
+        (async function* () {
+          for await (const message of prompt) {
+            seenMessages.push(message.message.content[0]?.text ?? "");
+            if (message.message.content[0]?.text === "/compact") {
+              yield {
+                type: "system",
+                subtype: "compact_boundary",
+                session_id: "agent-session-compact",
+                uuid: "compact-boundary-1",
+              };
+              continue;
+            }
+
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                server_tool_use: {
+                  web_search_requests: 0,
+                },
+                service_tier: "standard",
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-1",
+              session_id: "agent-session-compact",
+            };
+          }
+        })(),
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+      },
+    );
+
+    await session.sendPrompt("first");
+    await session.compact();
+
+    expect(seenMessages).toEqual(["first", "/compact"]);
+
+    await session.close();
+  });
 });

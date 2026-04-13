@@ -57,6 +57,7 @@ describe("initializeSchema", () => {
       "next_steps",
       "last_compact_turn",
       "last_agent_session_id",
+      "summary_updated_at_epoch",
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
@@ -206,6 +207,67 @@ describe("initializeSchema", () => {
     ]);
   });
 
+  test("initializeSchema adds summary_updated_at_epoch to an existing sessions table without resetting data", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        next_steps TEXT,
+        last_compact_turn INTEGER,
+        last_agent_session_id TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      )
+    `);
+
+    db.query(
+      `
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          title,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, ?, ?, ?, ?)
+      `,
+    ).run("legacy-session", "claude-mnemo", "Legacy", 10, 20);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => row.name);
+    const session = db
+      .query<
+        {
+          title: string | null;
+          summaryUpdatedAtEpoch: number | null;
+        },
+        []
+      >(
+        `
+          SELECT
+            title,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch
+          FROM sessions
+          WHERE content_session_id = ?
+        `,
+      )
+      .get("legacy-session");
+
+    expect(columns).toContain("summary_updated_at_epoch");
+    expect(session).toEqual({
+      title: "Legacy",
+      summaryUpdatedAtEpoch: null,
+    });
+  });
+
   test("initializeDatabase keeps fresh observations schema free of legacy insight and tags columns", () => {
     initializeDatabase(db);
 
@@ -295,6 +357,7 @@ describe("initializeSchema", () => {
       "next_steps",
       "last_compact_turn",
       "last_agent_session_id",
+      "summary_updated_at_epoch",
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",

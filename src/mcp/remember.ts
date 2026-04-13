@@ -314,13 +314,26 @@ function handleSessionRemember(
     return textResult(`Session ${sessionId} not found.`);
   }
 
+  const nextTitle = input.title ?? session.title;
+  const nextContent = input.content ?? session.content;
+  const nextInsight = input.insight ?? session.insight;
+  const nextNextSteps = input.next_steps ?? session.nextSteps;
+  const summaryChanged =
+    nextTitle !== session.title ||
+    nextContent !== session.content ||
+    nextInsight !== session.insight ||
+    nextNextSteps !== session.nextSteps;
+
   upsertSession(db, {
     contentSessionId: session.contentSessionId,
     project: session.project,
-    title: input.title ?? session.title,
-    content: input.content ?? session.content,
-    insight: input.insight ?? session.insight,
-    nextSteps: input.next_steps ?? session.nextSteps,
+    title: nextTitle,
+    content: nextContent,
+    insight: nextInsight,
+    nextSteps: nextNextSteps,
+    summaryUpdatedAtEpoch: summaryChanged
+      ? Math.floor(Date.now() / 1000)
+      : session.summaryUpdatedAtEpoch,
     createdAtEpoch: session.createdAtEpoch,
     updatedAtEpoch: Math.floor(Date.now() / 1000),
     completedAtEpoch: session.completedAtEpoch,

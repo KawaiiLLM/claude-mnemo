@@ -996,7 +996,7 @@ describe("worker server", () => {
     ).toBe(5);
   });
 
-  test("handleCompact drains the session, pushes summary, and closes query", async () => {
+  test("handleCompact drains the session, pushes summary, compacts the query, and resets it to cold without closing", async () => {
     const compactSessionId = upsertSession(db, {
       contentSessionId: "worker-session-20",
       project: "/tmp/project-compact",
@@ -1027,6 +1027,7 @@ describe("worker server", () => {
 
     const processed: string[] = [];
     const pushed: number[] = [];
+    const compacted: number[] = [];
     const closed: number[] = [];
     const sentPrompts: string[] = [];
 
@@ -1057,6 +1058,9 @@ describe("worker server", () => {
               session_id: "worker-query",
             };
           },
+          async compact() {
+            compacted.push(compactSessionId);
+          },
           async close() {},
         }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
       isProcessAliveImpl: () => false,
@@ -1066,11 +1070,15 @@ describe("worker server", () => {
 
     expect(processed).toEqual([`batch:${compactObservationId}:${compactTurnId}`]);
     expect(pushed).toEqual([compactSessionId]);
-    expect(closed).toEqual([compactSessionId]);
+    expect(compacted).toEqual([compactSessionId]);
+    expect(closed).toEqual([]);
     expect(sentPrompts).toEqual([
       `batch:${compactObservationId}:${compactTurnId}`,
       `summary:${compactSessionId}`,
     ]);
+    const state = core.sessions.get(compactSessionId);
+    expect(state?.initialized).toBe(false);
+    expect(state?.lastPushAt).toBe(0);
     expect(
       db
         .query<{ count: number }, []>(
@@ -1085,6 +1093,150 @@ describe("worker server", () => {
         )
         .get(otherSessionId)?.count,
     ).toBe(1);
+  });
+
+  test("handleCompact skips compact step when querySession is null", async () => {
+    const compactSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-no-qs",
+      project: "/tmp/project-compact-no-qs",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async () => {},
+      pushSessionSummaryPromptImpl: async () => {},
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async compact() {
+            compacted.push(compactSessionId);
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    // No items queued, pushSessionSummaryPromptImpl is a noop → querySession stays null
+    await core.handleCompact(compactSessionId, null);
+
+    expect(compacted).toEqual([]);
+    const state = core.sessions.get(compactSessionId);
+    expect(state?.initialized).toBe(false);
+    expect(state?.lastPushAt).toBe(0);
+    expect(state?.lastInjectedSummaryEpoch).toBe(0);
+  });
+
+  test("handleCompact resets state even when compact() throws", async () => {
+    const compactSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-fail",
+      project: "/tmp/project-compact-fail",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const errors: unknown[] = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async () => {},
+      pushSessionSummaryPromptImpl: async (_state, _sessionId) => {
+        await _state.pushMessage(`summary:${_sessionId}`);
+      },
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async compact() {
+            throw new Error("compact exploded");
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+      logger: {
+        warn: () => {},
+        error: (...args: unknown[]) => {
+          errors.push(args);
+        },
+      },
+    });
+
+    await core.handleCompact(compactSessionId, null);
+
+    const state = core.sessions.get(compactSessionId);
+    expect(state?.initialized).toBe(false);
+    expect(state?.lastPushAt).toBe(0);
+    expect(state?.lastInjectedSummaryEpoch).toBe(0);
+    expect(errors.some((e) => String(e).includes("mnemosyne compact failed"))).toBe(true);
+  });
+
+  test("abortStalledSessions skips sessions that are compacting", async () => {
+    const compactSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-stalled",
+      project: "/tmp/project-compact-stalled",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const closed: number[] = [];
+    const core = createWorkerCore({
+      db,
+      closeSessionQueryImpl: async (sessionId) => {
+        closed.push(sessionId);
+      },
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async compact() {},
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    primeSessionState(core, compactSessionId, {
+      lastPushAt: 1_000,
+      lastMessageAt: 0,
+      lastActivity: 0,
+    });
+    core.sessions.get(compactSessionId)!.querySession = {
+      sessionId: "worker-query",
+      queryPid: 1234,
+      sendPrompt: async () => ({ session_id: "worker-query" }),
+      compact: async () => {},
+      close: async () => {},
+    } satisfies WorkerQuerySession;
+    core.compactingSessions.add(compactSessionId);
+
+    await core.abortStalledSessions(1_000 + 31_000);
+
+    expect(closed).toEqual([]);
+    expect(core.sessions.has(compactSessionId)).toBe(true);
   });
 
   test("handleCompact advances last_compact_turn to the latest finalized turn", async () => {

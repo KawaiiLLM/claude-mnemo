@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
 
@@ -320,5 +320,150 @@ describe("worker processors", () => {
     expect(turn?.filesRead).toEqual(["src/auth.ts"]);
     expect(turn?.toolCallCount).toBe(1);
     expect(String(pushMessage.mock.calls[0]?.[0])).toContain("files_read: src/auth.ts");
+  });
+
+  test("processBatch injects prior_session on the first batch and records the injected summary epoch", async () => {
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+    const state = {
+      sessionDbId: sessionId,
+      processingLock: Promise.resolve(),
+      pushMessage,
+      querySession: null,
+      contentSessionId: null,
+      project: null,
+      initialized: false,
+      lastPushAt: 0,
+      lastMessageAt: 0,
+      lastActivity: 0,
+      lastInjectedSummaryEpoch: 0,
+    };
+
+    await processors.processBatch(
+      state,
+      [{ seq: 1, kind: "obs", targetId: observationId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 }],
+      {
+        turnStopItems: [
+          { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
+        ],
+      },
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).toContain("<prior_session>");
+    expect(prompt).not.toContain("<session-updated>");
+    expect(state.initialized).toBe(true);
+    expect(state.lastInjectedSummaryEpoch).toBe(
+      getSession(db, sessionId)?.summaryUpdatedAtEpoch ?? 0,
+    );
+  });
+
+  test("processBatch skips prior_session when the injected summary epoch is already current", async () => {
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+    const currentSummaryEpoch = getSession(db, sessionId)?.summaryUpdatedAtEpoch ?? 0;
+
+    await processors.processBatch(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage,
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: true,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+        lastInjectedSummaryEpoch: currentSummaryEpoch,
+      },
+      [{ seq: 1, kind: "obs", targetId: observationId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 }],
+      {
+        turnStopItems: [
+          { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
+        ],
+      },
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).not.toContain("<prior_session>");
+    expect(prompt).not.toContain("<session-updated>");
+  });
+
+  test("processBatch injects prior_session with session-updated tag when summary epoch advances after initialization", async () => {
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+    db.query(
+      "UPDATE sessions SET summary_updated_at_epoch = 500 WHERE id = ?",
+    ).run(sessionId);
+
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+
+    await processors.processBatch(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage,
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: true,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+        lastInjectedSummaryEpoch: 200,
+      },
+      [{ seq: 1, kind: "obs", targetId: observationId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 }],
+      {
+        turnStopItems: [
+          { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
+        ],
+      },
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).toContain("<prior_session>");
+    expect(prompt).toContain("<session-updated>");
+    expect(prompt).toContain("Session summary was refreshed since your last message.");
+  });
+
+  test("processBatch re-reads the session after pushMessage to capture summary updates triggered during the batch", async () => {
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+    const processors = createWorkerProcessors(db);
+    const state = {
+      sessionDbId: sessionId,
+      processingLock: Promise.resolve(),
+      pushMessage: mock(async () => {
+        db.query(
+          `
+            UPDATE sessions
+            SET summary_updated_at_epoch = 999
+            WHERE id = ?
+          `,
+        ).run(sessionId);
+      }),
+      querySession: null,
+      contentSessionId: null,
+      project: null,
+      initialized: false,
+      lastPushAt: 0,
+      lastMessageAt: 0,
+      lastActivity: 0,
+      lastInjectedSummaryEpoch: 0,
+    };
+
+    await processors.processBatch(
+      state,
+      [{ seq: 1, kind: "obs", targetId: observationId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 }],
+      {
+        turnStopItems: [
+          { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
+        ],
+      },
+    );
+
+    expect(state.lastInjectedSummaryEpoch).toBe(999);
   });
 });

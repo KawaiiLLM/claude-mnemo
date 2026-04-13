@@ -225,6 +225,7 @@ var SCHEMA_SQL = `
     next_steps TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
+    summary_updated_at_epoch INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -325,6 +326,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
@@ -334,6 +336,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureSessionSummaryUpdatedAtEpochColumn(db) {
+  if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
 }
 function ensureTurnTranscriptLineStartColumn(db) {
   if (hasColumn(db, "turns", "transcript_line_start")) {
@@ -538,6 +546,7 @@ var SESSION_SELECT = `
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
+    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -553,10 +562,11 @@ function upsertSession(db, input) {
         insight,
         next_steps,
         last_compact_turn,
+        summary_updated_at_epoch,
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
@@ -564,6 +574,7 @@ function upsertSession(db, input) {
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
         last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
+        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
         created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -577,6 +588,7 @@ function upsertSession(db, input) {
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -588,6 +600,7 @@ function upsertSession(db, input) {
     input.insight,
     input.nextSteps ?? null,
     input.lastCompactTurn ?? null,
+    input.summaryUpdatedAtEpoch ?? null,
     input.createdAtEpoch,
     input.updatedAtEpoch,
     input.completedAtEpoch
@@ -626,7 +639,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwu09sd" : "dev";
+var BUILD_ID = true ? "0.2.2-mnwwwru6" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;

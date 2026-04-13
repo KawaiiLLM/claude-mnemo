@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwu09sd" : "dev";
+var BUILD_ID = true ? "0.2.2-mnwwwru6" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -663,6 +663,7 @@ var SESSION_SELECT = `
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
+    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -678,10 +679,11 @@ function upsertSession(db, input) {
         insight,
         next_steps,
         last_compact_turn,
+        summary_updated_at_epoch,
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
@@ -689,6 +691,7 @@ function upsertSession(db, input) {
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
         last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
+        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
         created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -702,6 +705,7 @@ function upsertSession(db, input) {
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -713,6 +717,7 @@ function upsertSession(db, input) {
     input.insight,
     input.nextSteps ?? null,
     input.lastCompactTurn ?? null,
+    input.summaryUpdatedAtEpoch ?? null,
     input.createdAtEpoch,
     input.updatedAtEpoch,
     input.completedAtEpoch
@@ -1048,6 +1053,7 @@ var SCHEMA_SQL = `
     next_steps TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
+    summary_updated_at_epoch INTEGER,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -1148,6 +1154,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
@@ -1157,6 +1164,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureSessionSummaryUpdatedAtEpochColumn(db) {
+  if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
 }
 function ensureTurnTranscriptLineStartColumn(db) {
   if (hasColumn(db, "turns", "transcript_line_start")) {
@@ -1743,6 +1756,11 @@ function buildPartialTurnBlock(args) {
   return lines.join("\n");
 }
 function buildBatchPrompt(args) {
+  const sessionUpdatedBlock = args.sessionUpdated ? `<session-updated>
+Session summary was refreshed since your last message.
+</session-updated>
+
+` : "";
   const priorSessionBlock = args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps ? `
 <prior_session>
   title: ${args.priorTitle ?? ""}
@@ -1759,6 +1777,7 @@ function buildBatchPrompt(args) {
   project: ${args.project}
   user_request: ${args.firstUserPrompt ?? ""}
 </session>
+${sessionUpdatedBlock}
 ${priorSessionBlock}
 <batch>
 ${body}
@@ -2038,19 +2057,24 @@ function createWorkerProcessors(db) {
       if (completedTurnBlocks.length === 0 && partialTurnBlocks.length === 0) {
         return;
       }
+      const needsSessionContext = !state.initialized || (session.summaryUpdatedAtEpoch ?? 0) > (state.lastInjectedSummaryEpoch ?? 0);
+      const sessionUpdated = state.initialized && needsSessionContext;
       await state.pushMessage(
         buildBatchPrompt({
           sessionId: session.id,
           project: session.project,
           firstUserPrompt: firstTurn?.user_prompt ?? null,
-          priorTitle: session.title,
-          priorContent: session.content,
-          priorInsight: session.insight,
-          priorNextSteps: session.nextSteps,
+          priorTitle: needsSessionContext ? session.title : null,
+          priorContent: needsSessionContext ? session.content : null,
+          priorInsight: needsSessionContext ? session.insight : null,
+          priorNextSteps: needsSessionContext ? session.nextSteps : null,
+          sessionUpdated,
           completedTurnBlocks,
           partialTurnBlocks
         })
       );
+      const freshSession = getSession(db, session.id);
+      state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
       state.initialized = true;
     },
     async pushSessionSummaryPrompt(state, sessionId) {
@@ -38449,13 +38473,19 @@ function handleSessionRemember(db, sessionId, input) {
   if (!session) {
     return textResult(`Session ${sessionId} not found.`);
   }
+  const nextTitle = input.title ?? session.title;
+  const nextContent = input.content ?? session.content;
+  const nextInsight = input.insight ?? session.insight;
+  const nextNextSteps = input.next_steps ?? session.nextSteps;
+  const summaryChanged = nextTitle !== session.title || nextContent !== session.content || nextInsight !== session.insight || nextNextSteps !== session.nextSteps;
   upsertSession(db, {
     contentSessionId: session.contentSessionId,
     project: session.project,
-    title: input.title ?? session.title,
-    content: input.content ?? session.content,
-    insight: input.insight ?? session.insight,
-    nextSteps: input.next_steps ?? session.nextSteps,
+    title: nextTitle,
+    content: nextContent,
+    insight: nextInsight,
+    nextSteps: nextNextSteps,
+    summaryUpdatedAtEpoch: summaryChanged ? Math.floor(Date.now() / 1e3) : session.summaryUpdatedAtEpoch,
     createdAtEpoch: session.createdAtEpoch,
     updatedAtEpoch: Math.floor(Date.now() / 1e3),
     completedAtEpoch: session.completedAtEpoch
@@ -39298,7 +39328,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.1",
+    version: "0.2.2",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39334,6 +39364,7 @@ function buildIsolatedEnv(sourceEnv = process.env) {
 }
 
 // src/worker/query-session.ts
+var QUERY_COMPACT_TIMEOUT_MS = 12e4;
 function createDeferred() {
   let resolve;
   let reject;
@@ -39426,6 +39457,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable();
   const pendingResults = [];
+  let pendingCompact = null;
   const abortController = new AbortController();
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutablePath();
   const mcpServers = {
@@ -39441,6 +39473,22 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   let queryPid;
   let closed = false;
   let closePromise = null;
+  function resolvePendingCompact() {
+    const currentCompact = pendingCompact;
+    if (!currentCompact) {
+      return;
+    }
+    pendingCompact = null;
+    currentCompact.resolve();
+  }
+  function rejectPendingCompact(error49) {
+    const currentCompact = pendingCompact;
+    if (!currentCompact) {
+      return;
+    }
+    pendingCompact = null;
+    currentCompact.reject(error49);
+  }
   const execution = queryImpl({
     prompt: promptStream,
     options: {
@@ -39525,16 +39573,24 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
         if ("session_id" in message && typeof message.session_id === "string" && message.session_id !== "") {
           sessionId = message.session_id;
         }
+        if (message.type === "system" && "subtype" in message && message.subtype === "compact_boundary") {
+          resolvePendingCompact();
+          continue;
+        }
         if (message.type === "result") {
           pendingResults.shift()?.resolve(message);
         }
       }
     } catch (error49) {
+      rejectPendingCompact(error49);
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(error49);
       }
       throw error49;
     } finally {
+      rejectPendingCompact(
+        new Error("Worker query session closed before compact completed.")
+      );
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(
           new Error("Worker query session closed before returning a result.")
@@ -39559,6 +39615,34 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
         createUserMessage(promptText, sessionId ?? input.contentSessionId)
       );
       return deferred.promise;
+    },
+    async compact() {
+      if (closed) {
+        throw new Error("Worker query session is closed.");
+      }
+      if (pendingCompact) {
+        throw new Error("Worker query session compact already in progress.");
+      }
+      const deferred = createDeferred();
+      pendingCompact = deferred;
+      promptStream.push(
+        createUserMessage("/compact", sessionId ?? input.contentSessionId)
+      );
+      const timeoutId = setTimeout(() => {
+        if (pendingCompact === deferred) {
+          pendingCompact = null;
+          deferred.reject(
+            new Error(
+              `Worker query session compact timed out after ${QUERY_COMPACT_TIMEOUT_MS}ms.`
+            )
+          );
+        }
+      }, QUERY_COMPACT_TIMEOUT_MS);
+      try {
+        await deferred.promise;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     },
     async close() {
       if (closePromise) {
@@ -39786,6 +39870,7 @@ function createWorkerCore(deps) {
       contentSessionId: null,
       project: null,
       initialized: false,
+      lastInjectedSummaryEpoch: 0,
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
@@ -40188,11 +40273,25 @@ ${prompt}` : prompt;
           error: error49
         });
       }
+      try {
+        const state = sessions.get(sessionDbId);
+        if (state?.querySession) {
+          await state.querySession.compact?.();
+        }
+      } catch (error49) {
+        logger.error?.("mnemosyne compact failed", {
+          sessionDbId,
+          error: error49
+        });
+      }
     } finally {
       compactingSessions.delete(sessionDbId);
-      await closeSessionQuery(sessionDbId).catch((error49) => {
-        logger.error?.("closeSessionQuery failed", { sessionDbId, error: error49 });
-      });
+      const state = sessions.get(sessionDbId);
+      if (state) {
+        state.initialized = false;
+        state.lastPushAt = 0;
+        state.lastInjectedSummaryEpoch = 0;
+      }
     }
   }
   return {
@@ -40211,6 +40310,9 @@ ${prompt}` : prompt;
       await Promise.all(
         Array.from(sessions.values()).map(async (state) => {
           if (!state.querySession) {
+            return;
+          }
+          if (compactingSessions.has(state.sessionDbId)) {
             return;
           }
           const hasInflightRequest = state.lastPushAt > state.lastMessageAt;

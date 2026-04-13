@@ -150,9 +150,17 @@ export function buildBatchPrompt(args: {
   priorContent: string | null;
   priorInsight: string | null;
   priorNextSteps: string | null;
+  sessionUpdated?: boolean;
   completedTurnBlocks: string[];
   partialTurnBlocks?: string[];
 }): string {
+  const sessionUpdatedBlock = args.sessionUpdated
+    ? `<session-updated>
+Session summary was refreshed since your last message.
+</session-updated>
+
+`
+    : "";
   const priorSessionBlock =
     args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps
       ? `
@@ -175,6 +183,7 @@ export function buildBatchPrompt(args: {
   project: ${args.project}
   user_request: ${args.firstUserPrompt ?? ""}
 </session>
+${sessionUpdatedBlock}
 ${priorSessionBlock}
 <batch>
 ${body}
@@ -541,19 +550,28 @@ export function createWorkerProcessors(db: Database) {
         return;
       }
 
+      const needsSessionContext =
+        !state.initialized ||
+        (session.summaryUpdatedAtEpoch ?? 0) >
+          (state.lastInjectedSummaryEpoch ?? 0);
+      const sessionUpdated = state.initialized && needsSessionContext;
+
       await state.pushMessage(
         buildBatchPrompt({
           sessionId: session.id,
           project: session.project,
           firstUserPrompt: firstTurn?.user_prompt ?? null,
-          priorTitle: session.title,
-          priorContent: session.content,
-          priorInsight: session.insight,
-          priorNextSteps: session.nextSteps,
+          priorTitle: needsSessionContext ? session.title : null,
+          priorContent: needsSessionContext ? session.content : null,
+          priorInsight: needsSessionContext ? session.insight : null,
+          priorNextSteps: needsSessionContext ? session.nextSteps : null,
+          sessionUpdated,
           completedTurnBlocks,
           partialTurnBlocks,
         }),
       );
+      const freshSession = getSession(db, session.id);
+      state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
       state.initialized = true;
     },
 

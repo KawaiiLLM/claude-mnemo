@@ -68,6 +68,7 @@ export interface SessionState {
   contentSessionId: string | null;
   project: string | null;
   initialized: boolean;
+  lastInjectedSummaryEpoch?: number;
   lastPushAt: number;
   lastMessageAt: number;
   lastActivity: number;
@@ -405,6 +406,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       contentSessionId: null,
       project: null,
       initialized: false,
+      lastInjectedSummaryEpoch: 0,
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
@@ -907,11 +909,26 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           error,
         });
       }
+
+      try {
+        const state = sessions.get(sessionDbId);
+        if (state?.querySession) {
+          await state.querySession.compact?.();
+        }
+      } catch (error) {
+        logger.error?.("mnemosyne compact failed", {
+          sessionDbId,
+          error,
+        });
+      }
     } finally {
       compactingSessions.delete(sessionDbId);
-      await closeSessionQuery(sessionDbId).catch((error) => {
-        logger.error?.("closeSessionQuery failed", { sessionDbId, error });
-      });
+      const state = sessions.get(sessionDbId);
+      if (state) {
+        state.initialized = false;
+        state.lastPushAt = 0;
+        state.lastInjectedSummaryEpoch = 0;
+      }
     }
   }
 
@@ -931,6 +948,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await Promise.all(
         Array.from(sessions.values()).map(async (state) => {
           if (!state.querySession) {
+            return;
+          }
+
+          if (compactingSessions.has(state.sessionDbId)) {
             return;
           }
 

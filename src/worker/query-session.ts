@@ -59,8 +59,11 @@ export interface WorkerQuerySession {
   readonly sessionId: string | null;
   readonly queryPid: number | undefined;
   sendPrompt(promptText: string): Promise<SDKResultMessage>;
+  compact?(): Promise<void>;
   close(): Promise<void>;
 }
+
+const QUERY_COMPACT_TIMEOUT_MS = 120_000;
 
 function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
@@ -188,6 +191,7 @@ export function createWorkerQuerySession(
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable<SDKUserMessage>();
   const pendingResults: Deferred<SDKResultMessage>[] = [];
+  let pendingCompact: Deferred<void> | null = null;
   const abortController = new AbortController();
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutablePath();
   const mcpServers = {
@@ -210,6 +214,26 @@ export function createWorkerQuerySession(
   let queryPid: number | undefined;
   let closed = false;
   let closePromise: Promise<void> | null = null;
+
+  function resolvePendingCompact(): void {
+    const currentCompact = pendingCompact;
+    if (!currentCompact) {
+      return;
+    }
+
+    pendingCompact = null;
+    currentCompact.resolve();
+  }
+
+  function rejectPendingCompact(error: unknown): void {
+    const currentCompact = pendingCompact;
+    if (!currentCompact) {
+      return;
+    }
+
+    pendingCompact = null;
+    currentCompact.reject(error);
+  }
 
   const execution: Query = queryImpl({
     prompt: promptStream,
@@ -304,16 +328,29 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
           sessionId = message.session_id;
         }
 
+        if (
+          message.type === "system" &&
+          "subtype" in message &&
+          message.subtype === "compact_boundary"
+        ) {
+          resolvePendingCompact();
+          continue;
+        }
+
         if (message.type === "result") {
           pendingResults.shift()?.resolve(message);
         }
       }
     } catch (error) {
+      rejectPendingCompact(error);
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(error);
       }
       throw error;
     } finally {
+      rejectPendingCompact(
+        new Error("Worker query session closed before compact completed."),
+      );
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(
           new Error("Worker query session closed before returning a result."),
@@ -342,6 +379,39 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
         createUserMessage(promptText, sessionId ?? input.contentSessionId),
       );
       return deferred.promise;
+    },
+
+    async compact(): Promise<void> {
+      if (closed) {
+        throw new Error("Worker query session is closed.");
+      }
+
+      if (pendingCompact) {
+        throw new Error("Worker query session compact already in progress.");
+      }
+
+      const deferred = createDeferred<void>();
+      pendingCompact = deferred;
+      promptStream.push(
+        createUserMessage("/compact", sessionId ?? input.contentSessionId),
+      );
+
+      const timeoutId = setTimeout(() => {
+        if (pendingCompact === deferred) {
+          pendingCompact = null;
+          deferred.reject(
+            new Error(
+              `Worker query session compact timed out after ${QUERY_COMPACT_TIMEOUT_MS}ms.`,
+            ),
+          );
+        }
+      }, QUERY_COMPACT_TIMEOUT_MS);
+
+      try {
+        await deferred.promise;
+      } finally {
+        clearTimeout(timeoutId);
+      }
     },
 
     async close(): Promise<void> {

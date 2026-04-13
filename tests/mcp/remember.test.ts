@@ -218,6 +218,43 @@ describe("remember tool routing and validation", () => {
     expect(session.content).toBe("Updated session summary");
     expect(session.insight).toBe("- updated insight");
     expect(session.nextSteps).toBe("Ship the follow-up cleanup");
+    expect(session.summaryUpdatedAtEpoch).toBeGreaterThanOrEqual(110);
+  });
+
+  test("does not advance summaryUpdatedAtEpoch when the session summary is unchanged", () => {
+    const before = getSession(db, sessionId)!;
+
+    const result = rememberTool(db, {
+      id: `S${sessionId}`,
+      title: before.title ?? undefined,
+      content: before.content ?? undefined,
+      insight: before.insight ?? undefined,
+      next_steps: before.nextSteps ?? undefined,
+    });
+
+    const after = getSession(db, sessionId)!;
+
+    expect(result.content[0]?.text).toContain(`Updated session ${sessionId}`);
+    expect(after.summaryUpdatedAtEpoch).toBe(before.summaryUpdatedAtEpoch);
+  });
+
+  test("advances summaryUpdatedAtEpoch only when the summary payload changes", () => {
+    const before = getSession(db, sessionId)!;
+
+    rememberTool(db, {
+      id: `S${sessionId}`,
+      title: before.title ?? undefined,
+      content: "Summary changed materially",
+      insight: before.insight ?? undefined,
+      next_steps: before.nextSteps ?? undefined,
+    });
+
+    const after = getSession(db, sessionId)!;
+
+    expect(after.content).toBe("Summary changed materially");
+    expect(after.summaryUpdatedAtEpoch).toBeGreaterThan(
+      before.summaryUpdatedAtEpoch ?? 0,
+    );
   });
 
   test("creates and updates memories via routed ids", () => {

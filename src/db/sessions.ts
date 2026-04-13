@@ -12,6 +12,7 @@ export interface SessionRecord {
   nextSteps: string | null;
   lastCompactTurn: number | null;
   lastAgentSessionId: string | null;
+  summaryUpdatedAtEpoch: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -25,6 +26,7 @@ export interface UpsertSessionInput {
   insight: string | null;
   nextSteps?: string | null;
   lastCompactTurn?: number | null;
+  summaryUpdatedAtEpoch?: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -46,6 +48,7 @@ const SESSION_SELECT = `
     next_steps AS nextSteps,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
+    summary_updated_at_epoch AS summaryUpdatedAtEpoch,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -58,7 +61,7 @@ export function upsertSession(
 ): SessionRecord {
   const session =
   db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number | null, number, number | null, number | null]>(`
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number | null, number | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
@@ -67,10 +70,11 @@ export function upsertSession(
         insight,
         next_steps,
         last_compact_turn,
+        summary_updated_at_epoch,
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
         title = COALESCE(excluded.title, sessions.title),
@@ -78,6 +82,7 @@ export function upsertSession(
         insight = COALESCE(excluded.insight, sessions.insight),
         next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
         last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
+        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
         created_at_epoch = excluded.created_at_epoch,
         updated_at_epoch = excluded.updated_at_epoch,
         completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
@@ -91,6 +96,7 @@ export function upsertSession(
         next_steps AS nextSteps,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -103,6 +109,7 @@ export function upsertSession(
       input.insight,
       input.nextSteps ?? null,
       input.lastCompactTurn ?? null,
+      input.summaryUpdatedAtEpoch ?? null,
       input.createdAtEpoch,
       input.updatedAtEpoch,
       input.completedAtEpoch,
