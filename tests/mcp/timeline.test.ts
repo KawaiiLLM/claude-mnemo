@@ -508,11 +508,12 @@ describe("skipped turns", () => {
     const output = renderTimeline(view);
     const turn19Line = output
       .split("\n")
-      .find((line) => line.startsWith("  ⏭ T19"));
+      .find((line) => line.startsWith("⏭ T19"));
 
     expect(turn19Line).toBeDefined();
     expect(turn19Line).not.toContain("⏳");
     expect(turn19Line).toContain("⏭");
+    expect(output).not.toContain("T19 |");
   });
 });
 
@@ -1120,7 +1121,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T1..5" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/T#\s+line\s+time\s+gap\s+stats\s+prompt\s+title/);
+    expect(output).toContain("T# | line | time | gap | stats | prompt → title");
   });
 
   it("showing line reports page counts when the candidate set exceeds pageSize", () => {
@@ -1188,7 +1189,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const turn21Line = output
       .split("\n")
-      .find((line) => line.startsWith("  T21"));
+      .find((line) => line.startsWith("T21 |"));
 
     expect(turn21Line).toBeDefined();
     expect(turn21Line).toContain("⏳");
@@ -1203,7 +1204,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const turn1Line = output
       .split("\n")
-      .find((line) => line.startsWith("  T1 "));
+      .find((line) => line.startsWith("T1 |"));
 
     expect(turn1Line).toBeDefined();
     expect(turn1Line).toContain("L10");
@@ -1218,7 +1219,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const turn1Line = output
       .split("\n")
-      .find((line) => line.startsWith("  T1 "));
+      .find((line) => line.startsWith("T1 |"));
 
     expect(turn1Line).toBeDefined();
     expect(turn1Line).toContain("🔵 title for T1");
@@ -1236,7 +1237,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const turn19Line = output
       .split("\n")
-      .find((line) => line.startsWith("  ⨯ T19"));
+      .find((line) => line.startsWith("⨯ T19 |"));
 
     expect(turn19Line).toBeDefined();
     expect(turn19Line).toContain("~~⚖️ title for T19~~");
@@ -1265,7 +1266,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
     const compactLine = output
       .split("\n")
-      .find((line) => line.startsWith("  T21 "));
+      .find((line) => line.startsWith("T21 |"));
 
     expect(compactLine).toBeDefined();
     expect(compactLine).toContain("L210");
@@ -1317,10 +1318,90 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view, { promptCap: 80, showEarlierHint: true });
     const turn40Line = output
       .split("\n")
-      .find((line) => line.startsWith("  T40"));
+      .find((line) => line.startsWith("T40 |"));
 
     expect(turn40Line).toBeDefined();
     expect(turn40Line).toContain("…");
+  });
+
+  it("renders a compact pipe-delimited header without the separator row", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+
+    expect(output).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).not.toContain("───");
+  });
+
+  it("sanitizes prompt delimiters inside the merged prompt-title field", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      "UPDATE turns SET user_prompt = ? WHERE session_id = ? AND prompt_number = 21",
+    ).run("rg foo | sed\nrest ignored", session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T21..21" });
+    const output = renderTimeline(view);
+    const line = output
+      .split("\n")
+      .find((row) => row.startsWith("T21 |"));
+
+    expect(line).toBeDefined();
+    expect(line).toContain("rg foo / sed");
+    expect(line).not.toContain("rg foo | sed");
+  });
+
+  it("sanitizes title delimiters inside the merged prompt-title field", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      "UPDATE turns SET type = 'discovery', title = ? WHERE session_id = ? AND prompt_number = 21",
+    ).run("left → right", session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T21..21" });
+    const output = renderTimeline(view);
+    const line = output
+      .split("\n")
+      .find((row) => row.startsWith("T21 |"));
+
+    expect(line).toBeDefined();
+    expect(line).toContain("raw prompt 21 → 🔵 left -> right");
+    expect(line).not.toContain("left → right");
+  });
+
+  it("keeps skipped turns in gap tracking while collapsing them to a trailing summary", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+
+    db.query(
+      "UPDATE turns SET status = 'skipped' WHERE session_id = ? AND prompt_number = 20",
+    ).run(session.id);
+    db.query(
+      `UPDATE turns
+       SET created_at_epoch = CASE prompt_number
+         WHEN 19 THEN 1700000000
+         WHEN 20 THEN 1700000010
+         WHEN 21 THEN 1700000060
+         ELSE created_at_epoch
+       END
+       WHERE session_id = ? AND prompt_number IN (19, 20, 21)`,
+    ).run(session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T19..21" });
+    const output = renderTimeline(view);
+    const turn21Line = output
+      .split("\n")
+      .find((line) => line.startsWith("T21 |"));
+
+    expect(turn21Line).toBeDefined();
+    expect(turn21Line).toContain("| +50s |");
+    expect(output).toContain("⏭ T20");
+    expect(output).not.toContain("T20 |");
   });
 
   it("renderTimeline shows earlier hint when rendering the last page", () => {

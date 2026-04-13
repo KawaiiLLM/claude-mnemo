@@ -649,7 +649,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.4-mnxcjkbm" : "dev";
+var BUILD_ID = true ? "0.2.4-mnxefbuz" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2323,36 +2323,52 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
   }
   const lines = [
     "",
-    `  T#    line   time    gap          stats          prompt${" ".repeat(Math.max(1, promptCap - "prompt".length + 3))}title`,
-    `  \u2500\u2500\u2500   \u2500\u2500\u2500\u2500   \u2500\u2500\u2500\u2500\u2500   \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500   ${"\u2500".repeat(promptCap)}   \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`
+    "T# | line | time | gap | stats | prompt \u2192 title"
   ];
   let prevEpoch = null;
+  const skippedTurnNumbers = [];
   for (const turn of view.pageTurns) {
+    const previousTurnEpoch = prevEpoch;
+    prevEpoch = turn.createdAtEpoch;
+    if (turn.status === "skipped") {
+      skippedTurnNumbers.push(turn.promptNumber);
+      continue;
+    }
     lines.push(
       renderTurnRow(
         turn,
-        prevEpoch,
+        previousTurnEpoch,
         brokenPromptCandidates.has(turn.promptNumber),
         promptCap
       )
     );
-    prevEpoch = turn.createdAtEpoch;
+  }
+  if (skippedTurnNumbers.length > 0) {
+    lines.push(renderSkippedSummary(skippedTurnNumbers));
   }
   return lines;
 }
 function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap) {
   const isUndone = turn.status === "undone";
-  const isSkipped = turn.status === "skipped";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
   const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
   const promptCore = turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = turn.type === "compact" ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = truncateText2(promptWithBadges, promptCap);
+  const promptText = sanitizeTimelineField(truncateText2(promptWithBadges, promptCap));
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
-  const statusPrefix = isUndone ? "\u2A2F " : isSkipped ? `${SKIPPED_EMOJI} ` : "";
-  const lineAnchor = formatTranscriptLineAnchor(turn.transcriptLineStart).padEnd(4);
-  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${lineAnchor}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(promptCap)}   ${renderTitleCell(turn, isUndone, isSkipped, compactMetadata)}`;
+  const statusPrefix = isUndone ? "\u2A2F " : "";
+  const titleText = sanitizeTimelineField(
+    renderTitleCell(turn, isUndone, compactMetadata)
+  );
+  return [
+    `${statusPrefix}T${turn.promptNumber}`,
+    formatTranscriptLineAnchor(turn.transcriptLineStart),
+    formatLocalTime(turn.createdAtEpoch),
+    `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
+    renderStats(turn),
+    `${renderedPrompt} \u2192 ${titleText}`
+  ].join(" | ");
 }
 function renderStats(turn) {
   const stats = [];
@@ -2368,10 +2384,7 @@ function renderStats(turn) {
   }
   return stats.length > 0 ? stats.join(" ") : "\u2014";
 }
-function renderTitleCell(turn, isUndone, isSkipped, compactMetadata) {
-  if (isSkipped) {
-    return SKIPPED_EMOJI;
-  }
+function renderTitleCell(turn, isUndone, compactMetadata) {
   if (turn.type === "compact") {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
     const trigger = compactMetadata?.trigger ?? "manual";
@@ -2388,6 +2401,24 @@ function renderTitleCell(turn, isUndone, isSkipped, compactMetadata) {
     return `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
   }
   return "\u23F3";
+}
+function sanitizeTimelineField(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function renderSkippedSummary(promptNumbers) {
+  const ranges = [];
+  let index = 0;
+  while (index < promptNumbers.length) {
+    const start = promptNumbers[index];
+    let end = start;
+    while (index + 1 < promptNumbers.length && promptNumbers[index + 1] === end + 1) {
+      end = promptNumbers[index + 1];
+      index += 1;
+    }
+    ranges.push(start === end ? `T${start}` : `T${start}-T${end}`);
+    index += 1;
+  }
+  return `${SKIPPED_EMOJI} ${ranges.join(", ")}`;
 }
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";

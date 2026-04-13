@@ -897,21 +897,32 @@ function renderTurnTable(
 
   const lines = [
     "",
-    `  T#    line   time    gap          stats          prompt${" ".repeat(Math.max(1, promptCap - "prompt".length + 3))}title`,
-    `  ───   ────   ─────   ─────────    ────────────   ${"─".repeat(promptCap)}   ────────────────────────────────────────`,
+    "T# | line | time | gap | stats | prompt → title",
   ];
 
   let prevEpoch: number | null = null;
+  const skippedTurnNumbers: number[] = [];
   for (const turn of view.pageTurns) {
+    const previousTurnEpoch = prevEpoch;
+    prevEpoch = turn.createdAtEpoch;
+
+    if (turn.status === "skipped") {
+      skippedTurnNumbers.push(turn.promptNumber);
+      continue;
+    }
+
     lines.push(
       renderTurnRow(
         turn,
-        prevEpoch,
+        previousTurnEpoch,
         brokenPromptCandidates.has(turn.promptNumber),
         promptCap,
       ),
     );
-    prevEpoch = turn.createdAtEpoch;
+  }
+
+  if (skippedTurnNumbers.length > 0) {
+    lines.push(renderSkippedSummary(skippedTurnNumbers));
   }
 
   return lines;
@@ -924,7 +935,6 @@ function renderTurnRow(
   promptCap: number,
 ): string {
   const isUndone = turn.status === "undone";
-  const isSkipped = turn.status === "skipped";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " ※" : "";
   const sourceBadges = extractSourceTags(turn.tags)
@@ -936,12 +946,21 @@ function renderTurnRow(
     turn.type === "compact"
       ? promptCore
       : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = truncateText(promptWithBadges, promptCap);
+  const promptText = sanitizeTimelineField(truncateText(promptWithBadges, promptCap));
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
-  const statusPrefix = isUndone ? "⨯ " : isSkipped ? `${SKIPPED_EMOJI} ` : "";
-  const lineAnchor = formatTranscriptLineAnchor(turn.transcriptLineStart).padEnd(4);
+  const statusPrefix = isUndone ? "⨯ " : "";
+  const titleText = sanitizeTimelineField(
+    renderTitleCell(turn, isUndone, compactMetadata),
+  );
 
-  return `  ${`${statusPrefix}T${turn.promptNumber}`.padEnd(4)}  ${lineAnchor}  ${formatLocalTime(turn.createdAtEpoch)}   ${`${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`.padEnd(12)} ${renderStats(turn).padEnd(14)}   ${renderedPrompt.padEnd(promptCap)}   ${renderTitleCell(turn, isUndone, isSkipped, compactMetadata)}`;
+  return [
+    `${statusPrefix}T${turn.promptNumber}`,
+    formatTranscriptLineAnchor(turn.transcriptLineStart),
+    formatLocalTime(turn.createdAtEpoch),
+    `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
+    renderStats(turn),
+    `${renderedPrompt} → ${titleText}`,
+  ].join(" | ");
 }
 
 function renderStats(turn: TurnRecord): string {
@@ -964,13 +983,8 @@ function renderStats(turn: TurnRecord): string {
 function renderTitleCell(
   turn: TurnRecord,
   isUndone: boolean,
-  isSkipped: boolean,
   compactMetadata: { preTokens: number; trigger: string } | null,
 ): string {
-  if (isSkipped) {
-    return SKIPPED_EMOJI;
-  }
-
   if (turn.type === "compact") {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
     const trigger = compactMetadata?.trigger ?? "manual";
@@ -990,6 +1004,33 @@ function renderTitleCell(
   }
 
   return "⏳";
+}
+
+function sanitizeTimelineField(value: string): string {
+  return value.replaceAll("|", "/").replaceAll("→", "->");
+}
+
+function renderSkippedSummary(promptNumbers: number[]): string {
+  const ranges: string[] = [];
+  let index = 0;
+
+  while (index < promptNumbers.length) {
+    const start = promptNumbers[index]!;
+    let end = start;
+
+    while (
+      index + 1 < promptNumbers.length &&
+      promptNumbers[index + 1] === end + 1
+    ) {
+      end = promptNumbers[index + 1]!;
+      index += 1;
+    }
+
+    ranges.push(start === end ? `T${start}` : `T${start}-T${end}`);
+    index += 1;
+  }
+
+  return `${SKIPPED_EMOJI} ${ranges.join(", ")}`;
 }
 
 function isTimelineLiveTurn(turn: TurnRecord): boolean {
