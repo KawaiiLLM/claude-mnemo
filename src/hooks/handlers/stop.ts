@@ -2,11 +2,12 @@ import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
+import { getTurnsForSession } from "../../db/turns";
 import { stripPrivateTags } from "../../shared/tag-stripping";
-import { extractAssistantResponse } from "../../shared/transcript-parser";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
 import { detectAndCleanSidechainTurns } from "../../worker/rollback";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
+import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface StopHandlerDependencies {
@@ -119,26 +120,26 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
 
     dependencies.db.transaction(() => {
-      for (const orphanTurn of orphanTurns) {
-        const orphanAssistantResponse =
-          input.transcriptPath && orphanTurn.userPrompt
-            ? extractAssistantResponse(
-                input.transcriptPath,
-                orphanTurn.userPrompt,
-                orphanTurn.promptNumber,
-              )
-            : "";
+      if (input.transcriptPath) {
+        const allTurns = getTurnsForSession(dependencies.db, session.id);
+        backfillFromTranscript(
+          dependencies.db,
+          allTurns,
+          input.transcriptPath,
+          assistantResponse ?? undefined,
+        );
+      }
 
+      for (const orphanTurn of orphanTurns) {
         dependencies.db
-          .query<unknown, [string, number, number]>(
+          .query<unknown, [number, number]>(
             `
               UPDATE turns
-              SET assistant_response = ?,
-                  updated_at_epoch = ?
+              SET updated_at_epoch = ?
               WHERE id = ?
             `,
           )
-          .run(orphanAssistantResponse, epoch, orphanTurn.id);
+          .run(epoch, orphanTurn.id);
 
         enqueueQueueItem(dependencies.db, {
           kind: "turn-stop",

@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path4 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.3-mnx1tml6" : "dev";
+var BUILD_ID = true ? "0.2.4-mnxcjkbm" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1687,6 +1687,7 @@ function commonPathPrefix(paths) {
   if (paths.length === 1) {
     return paths[0] ?? "";
   }
+  const allAbsolute = paths.every((value) => value.startsWith("/"));
   const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
   const common = [];
   const limit = Math.min(...splitPaths.map((segments) => segments.length));
@@ -1698,9 +1699,10 @@ function commonPathPrefix(paths) {
     common.push(segment);
   }
   if (common.length === 0) {
-    return "/";
+    return allAbsolute ? "/" : ".";
   }
-  return `/${common.join("/")}`;
+  const joined = common.join("/");
+  return allAbsolute ? `/${joined}` : joined;
 }
 function renderTreeNode(name, node, indent) {
   if (node.files.length === 1 && node.dirs.size === 0) {
@@ -38751,7 +38753,7 @@ function rememberTool(db, input) {
 
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
-var PROMPT_COLUMN_CAP = 200;
+var PROMPT_COLUMN_CAP = 100;
 var TITLE_COLUMN_CAP = 40;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
@@ -39218,7 +39220,6 @@ function buildTimelineView(db, input, preloadedTurns) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const pagedTurns = paginateItems2(windowTurns, page, pageSize);
-  const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
   const compactBoundaries = [
@@ -39239,7 +39240,6 @@ function buildTimelineView(db, input, preloadedTurns) {
     totalToolCalls,
     typesDistribution,
     compactBoundaries,
-    phases,
     window,
     windowTurns,
     pageTurns: pagedTurns.items,
@@ -39381,11 +39381,12 @@ function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
 function renderPhases(view, options = {}) {
-  const phases = options.windowPhasesOnly ? segmentPhases(view.windowTurns) : view.phases;
+  const windowIsFullSession = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber;
+  const phases = segmentPhases(view.windowTurns);
   if (phases.length === 0) {
     return [];
   }
-  const label = options.windowPhasesOnly ? `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):` : "  phases (session-wide):";
+  const label = windowIsFullSession ? "  phases (session-wide):" : `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`;
   const lines = ["", label];
   for (const [index, phase] of phases.entries()) {
     const range = phase.startPromptNumber === phase.endPromptNumber ? `T${phase.startPromptNumber}` : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
@@ -39562,7 +39563,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.3",
+    version: "0.2.4",
     tools: [
       deps.toolImpl(
         "remember",

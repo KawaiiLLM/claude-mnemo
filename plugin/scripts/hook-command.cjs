@@ -649,7 +649,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.3-mnx1tml6" : "dev";
+var BUILD_ID = true ? "0.2.4-mnxcjkbm" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -973,6 +973,7 @@ function commonPathPrefix(paths) {
   if (paths.length === 1) {
     return paths[0] ?? "";
   }
+  const allAbsolute = paths.every((value) => value.startsWith("/"));
   const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
   const common = [];
   const limit = Math.min(...splitPaths.map((segments) => segments.length));
@@ -984,9 +985,10 @@ function commonPathPrefix(paths) {
     common.push(segment);
   }
   if (common.length === 0) {
-    return "/";
+    return allAbsolute ? "/" : ".";
   }
-  return `/${common.join("/")}`;
+  const joined = common.join("/");
+  return allAbsolute ? `/${joined}` : joined;
 }
 function renderTreeNode(name, node, indent) {
   if (node.files.length === 1 && node.dirs.size === 0) {
@@ -1715,10 +1717,26 @@ function getTurnsForSession(db, sessionId) {
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
+function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart) {
+  db.query(
+    `UPDATE turns
+     SET assistant_response = ?,
+         tool_call_count = ?,
+         content_prompt_id = COALESCE(content_prompt_id, ?),
+         transcript_line_start = COALESCE(?, transcript_line_start)
+     WHERE id = ?`
+  ).run(
+    assistantResponse,
+    toolCallCount,
+    contentPromptId ?? null,
+    transcriptLineStart ?? null,
+    turnId
+  );
+}
 
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
-var PROMPT_COLUMN_CAP = 200;
+var PROMPT_COLUMN_CAP = 100;
 var TITLE_COLUMN_CAP = 40;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
@@ -2185,7 +2203,6 @@ function buildTimelineView(db, input, preloadedTurns) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const pagedTurns = paginateItems(windowTurns, page, pageSize);
-  const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
   const compactBoundaries = [
@@ -2206,7 +2223,6 @@ function buildTimelineView(db, input, preloadedTurns) {
     totalToolCalls,
     typesDistribution,
     compactBoundaries,
-    phases,
     window,
     windowTurns,
     pageTurns: pagedTurns.items,
@@ -2377,11 +2393,12 @@ function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
 function renderPhases(view, options = {}) {
-  const phases = options.windowPhasesOnly ? segmentPhases(view.windowTurns) : view.phases;
+  const windowIsFullSession = view.window.startPromptNumber === view.firstPromptNumber && view.window.endPromptNumber === view.lastPromptNumber;
+  const phases = segmentPhases(view.windowTurns);
   if (phases.length === 0) {
     return [];
   }
-  const label = options.windowPhasesOnly ? `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):` : "  phases (session-wide):";
+  const label = windowIsFullSession ? "  phases (session-wide):" : `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`;
   const lines = ["", label];
   for (const [index, phase] of phases.entries()) {
     const range = phase.startPromptNumber === phase.endPromptNumber ? `T${phase.startPromptNumber}` : `T${phase.startPromptNumber}-T${phase.endPromptNumber}`;
@@ -2561,8 +2578,7 @@ function buildCurrentSessionOutput(db, session, sessionRecord) {
     lines.push(
       renderTimeline(timelineView, {
         promptCap: 80,
-        showEarlierHint: true,
-        windowPhasesOnly: true
+        showEarlierHint: true
       })
     );
   } catch {
@@ -2802,11 +2818,6 @@ function stringifyToolResultContent(content) {
   }
   return JSON.stringify(content);
 }
-function readTranscriptEntries(transcriptPath) {
-  return readAllTranscriptEntries(transcriptPath).filter(
-    (entry) => !entry.isSidechain && !entry.isApiErrorMessage
-  );
-}
 function readAllTranscriptEntries(transcriptPath) {
   if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
     return [];
@@ -2939,41 +2950,6 @@ function startsNewTurn(entry, currentPromptId) {
   }
   return extractUserPrompt(entry) !== "";
 }
-function parseTranscript(transcriptPath) {
-  const turns = [];
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of readTranscriptEntries(transcriptPath)) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: []
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(...toolCalls);
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
 function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
   let promptNumber = 0;
@@ -3050,11 +3026,6 @@ function countUserPromptsInTranscript(transcriptPath) {
     }
   }
   return count;
-}
-function extractAssistantResponse(transcriptPath, userPromptPrefix, promptNumber) {
-  const turns = parseTranscript(transcriptPath);
-  const turn = (promptNumber !== void 0 ? turns.find((candidate) => candidate.promptNumber === promptNumber) : void 0) ?? turns.find((candidate) => candidate.userPrompt.startsWith(userPromptPrefix));
-  return turn?.assistantText ?? "";
 }
 
 // src/hooks/handlers/post-compact.ts
@@ -3509,6 +3480,43 @@ function enqueueQueueItem(db, input) {
   return inserted;
 }
 
+// src/hooks/backfill.ts
+function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurns) {
+  if (pendingTurns.length === 0) {
+    return;
+  }
+  const replayTurns = transcriptTurns ?? (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
+  const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
+  const consumed = /* @__PURE__ */ new Set();
+  for (const pendingTurn of pendingTurns) {
+    if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
+      continue;
+    }
+    let matchIndex = replayTurns.findIndex(
+      (turn, index) => !consumed.has(index) && turn.userPrompt === pendingTurn.userPrompt
+    );
+    if (matchIndex < 0) {
+      matchIndex = replayTurns.findIndex(
+        (turn, index) => !consumed.has(index) && turn.promptNumber === pendingTurn.promptNumber
+      );
+    }
+    const transcriptTurn = matchIndex >= 0 ? replayTurns[matchIndex] : void 0;
+    const assistantResponse = pendingTurn.promptNumber === lastPendingPromptNumber && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
+    const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
+    if (matchIndex >= 0) {
+      consumed.add(matchIndex);
+    }
+    updateTurnBackfill(
+      db,
+      pendingTurn.id,
+      assistantResponse,
+      toolCallCount,
+      transcriptTurn?.promptId,
+      transcriptTurn?.transcriptLineStart
+    );
+  }
+}
+
 // src/hooks/handlers/stop.ts
 function getLatestTurn(db, sessionDbId) {
   const row = db.query(
@@ -3581,20 +3589,23 @@ function createStopHandler(dependencies) {
     const assistantResponse = input.lastAssistantMessage !== void 0 ? stripPrivateTags(input.lastAssistantMessage) : null;
     const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
     dependencies.db.transaction(() => {
-      for (const orphanTurn of orphanTurns) {
-        const orphanAssistantResponse = input.transcriptPath && orphanTurn.userPrompt ? extractAssistantResponse(
+      if (input.transcriptPath) {
+        const allTurns = getTurnsForSession(dependencies.db, session.id);
+        backfillFromTranscript(
+          dependencies.db,
+          allTurns,
           input.transcriptPath,
-          orphanTurn.userPrompt,
-          orphanTurn.promptNumber
-        ) : "";
+          assistantResponse ?? void 0
+        );
+      }
+      for (const orphanTurn of orphanTurns) {
         dependencies.db.query(
           `
               UPDATE turns
-              SET assistant_response = ?,
-                  updated_at_epoch = ?
+              SET updated_at_epoch = ?
               WHERE id = ?
             `
-        ).run(orphanAssistantResponse, epoch, orphanTurn.id);
+        ).run(epoch, orphanTurn.id);
         enqueueQueueItem(dependencies.db, {
           kind: "turn-stop",
           targetId: orphanTurn.id,

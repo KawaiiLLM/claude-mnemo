@@ -288,6 +288,206 @@ describe("handleStopHook", () => {
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });
 
+  test("populates transcriptLineStart for the current turn from the transcript", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Current prompt', 120)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u0",
+          type: "system",
+          subtype: "turn_start",
+          content: "preface",
+        }),
+        JSON.stringify({
+          uuid: "u1",
+          type: "user",
+          promptId: "pid-current",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "Current prompt",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Transcript answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Hook answer",
+      }),
+    );
+
+    expect(result.continue).toBe(true);
+    expect(getTurn(db, sessionId, 1)?.assistantResponse).toBe("Hook answer");
+    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBe("pid-current");
+    expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(2);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  test("populates transcriptLineStart for orphan turns during stop recovery", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'First prompt', 120)`,
+    ).run(sessionId);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 2, 'active', 'Second prompt', 121)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u0",
+          type: "user",
+          promptId: "pid-1",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "First prompt",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "First answer" }],
+          },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "user",
+          promptId: "pid-2",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "Second prompt",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u3",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Second answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Second answer",
+      }),
+    );
+
+    expect(result.continue).toBe(true);
+    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBe("pid-1");
+    expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(1);
+    expect(getTurn(db, sessionId, 2)?.contentPromptId).toBe("pid-2");
+    expect(getTurn(db, sessionId, 2)?.transcriptLineStart).toBe(3);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  test("preserves transcriptLineStart on a repeated stop for the same turn", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Repeat prompt', 120)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u0",
+          type: "user",
+          promptId: "pid-repeat",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "Repeat prompt",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Answer once" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Answer once",
+      }),
+    );
+    expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(1);
+
+    await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Answer twice",
+      }),
+    );
+
+    expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(1);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
   test("marks current sidechain turns undone and removes their pending queue work", async () => {
     db.query(
       `INSERT INTO turns (
