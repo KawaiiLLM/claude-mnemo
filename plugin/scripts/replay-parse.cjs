@@ -502,6 +502,8 @@ function mergeTranscriptEntries(first, later) {
     content: later.content ?? first.content,
     promptId: first.promptId ?? later.promptId,
     permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
     isSidechain: later.isSidechain ?? first.isSidechain,
     isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
     uuid: first.uuid ?? later.uuid,
@@ -529,6 +531,8 @@ function normalizeEntry(raw) {
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
     isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
     isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
     usage: message?.usage && typeof message.usage === "object" ? {

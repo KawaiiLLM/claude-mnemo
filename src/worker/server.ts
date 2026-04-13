@@ -971,6 +971,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           ...deps,
           db,
           scanAndDrainQueue: core.scanAndDrainQueue,
+          handleFlushImpl: core.flushSession,
           handleCompactImpl: core.handleCompact,
         },
         serverState,

@@ -1107,4 +1107,61 @@ describe("worker server", () => {
       globalThis.setInterval = originalSetInterval;
     }
   });
+
+  test("main wires /flush to core.flushSession so SessionEnd flushes buffered observations", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-flush",
+      project: "/tmp/project-flush",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, turnId, 101, "flush-me");
+
+    let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
+    const processBatchImpl = mock(async () => {});
+    const originalSetInterval = globalThis.setInterval;
+
+    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+
+    try {
+      await main({
+        db,
+        BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop() {} };
+        }) as typeof Bun.serve),
+        processBatchImpl,
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+      });
+
+      expect(fetchHandler).not.toBeNull();
+
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/flush", {
+          method: "POST",
+          body: JSON.stringify({ session_id: sessionId }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(processBatchImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+    }
+  });
 });
