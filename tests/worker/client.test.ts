@@ -255,6 +255,40 @@ describe("worker client", () => {
     expect(spawnImpl).toHaveBeenCalledTimes(1);
   });
 
+  test("notifyWorkerCompact applies a 5s timeout only to the compact request", async () => {
+    const originalTimeout = AbortSignal.timeout;
+    let timeoutMs: number | null = null;
+
+    (AbortSignal as typeof AbortSignal & {
+      timeout: (ms: number) => AbortSignal;
+    }).timeout = ((ms: number) => {
+      timeoutMs = ms;
+      return new AbortController().signal;
+    }) as typeof AbortSignal.timeout;
+
+    try {
+      const fetchImpl = mock(async (input: string | URL) => {
+        if (String(input).endsWith("/health")) {
+          return healthResponse();
+        }
+        return new Response(null, { status: 200 });
+      }) as typeof fetch;
+
+      await notifyWorkerCompact(
+        42,
+        "/tmp/session.jsonl",
+        { fetchImpl, existsSyncImpl: () => true },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+
+      expect(timeoutMs).toBe(5_000);
+    } finally {
+      (AbortSignal as typeof AbortSignal & {
+        timeout: typeof AbortSignal.timeout;
+      }).timeout = originalTimeout;
+    }
+  });
+
   test("notifyWorkerFlush sends /flush when worker is compatible", async () => {
     let flushCallCount = 0;
     const fetchImpl = mock(async (input: string | URL) => {

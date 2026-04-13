@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnwmdpiw" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwn0qhk" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -69,7 +69,7 @@ function resolveDatabasePath(explicitPath) {
   return candidatePath;
 }
 function encodeProjectPath(projectPath) {
-  return projectPath.replace(/[/:\\]+/g, "-");
+  return projectPath.replace(/[/:\\.]+/g, "-");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
@@ -39226,7 +39226,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.1.0",
+    version: "0.2.1",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39908,17 +39908,17 @@ ${prompt}` : prompt;
         );
       }
       try {
-        await drainSessionCompletely(sessionDbId);
+        updateCompactAnchor(deps.db, sessionDbId);
       } catch (error49) {
-        logger.error?.("drainSessionCompletely failed during compact", {
+        logger.error?.("updateCompactAnchor failed during compact", {
           sessionDbId,
           error: error49
         });
       }
       try {
-        updateCompactAnchor(deps.db, sessionDbId);
+        await drainSessionCompletely(sessionDbId);
       } catch (error49) {
-        logger.error?.("updateCompactAnchor failed during compact", {
+        logger.error?.("drainSessionCompletely failed during compact", {
           sessionDbId,
           error: error49
         });
@@ -40086,7 +40086,12 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         if (typeof payload.session_id !== "number") {
           return new Response("session_id is required", { status: 400 });
         }
-        await handleCompactImpl(payload.session_id, payload.transcript_path);
+        void handleCompactImpl(payload.session_id, payload.transcript_path).catch((error49) => {
+          deps.logger?.error?.("compact request failed", {
+            sessionId: payload.session_id,
+            error: error49
+          });
+        });
         return new Response(null, { status: 200 });
       }
       if (req.method === "POST" && url2.pathname === "/flush") {

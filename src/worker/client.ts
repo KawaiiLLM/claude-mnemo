@@ -13,7 +13,7 @@ const WORKER_PORT = 37778;
 const WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 const WAKE_TIMEOUT_MS = 500;
 const FLUSH_TIMEOUT_MS = 500;
-const COMPACT_TIMEOUT_MS = 25_000;
+const COMPACT_TIMEOUT_MS = 5_000;
 
 export interface WorkerClientDeps {
   fetchImpl?: typeof fetch;

@@ -172,6 +172,146 @@ describe("worker server", () => {
     expect(handleCompactImpl).toHaveBeenCalledWith(7, "/tmp/session.jsonl");
   });
 
+  test("createWorkerFetchHandler returns before async compact completes", async () => {
+    let resolveCompact: (() => void) | null = null;
+    const serverState = createWorkerServerState(100);
+    const handleCompactImpl = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCompact = resolve;
+        }),
+    );
+    const handler = createWorkerFetchHandler(
+      {
+        nowMs: () => 100,
+        handleCompactImpl,
+      },
+      serverState,
+    );
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/compact", {
+        method: "POST",
+        body: JSON.stringify({ session_id: 7 }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(handleCompactImpl).toHaveBeenCalledWith(7, undefined);
+    expect(serverState.lastHttpRequestAt).toBe(100);
+    expect(serverState.activeRequests).toBe(0);
+
+    resolveCompact?.();
+  });
+
+  test("createWorkerFetchHandler leaves a compacting session excluded from concurrent scans after /compact returns", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-skip",
+      project: "/tmp/project-compact-skip",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const compactTurnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, compactTurnId, 101, "compact-inflight");
+    queueTurnStop(db, sessionId, compactTurnId, 102);
+
+    let releaseCompactBatch!: () => void;
+    const compactBatchStarted = new Promise<void>((resolve) => {
+      releaseCompactBatch = resolve;
+    });
+    let compactPromise: Promise<void> | null = null;
+
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      processObsImpl: async (state, observationId) => {
+        await state.pushMessage(`obs:${observationId}`);
+      },
+      processTurnStopImpl: async (state, queuedTurnId) => {
+        await state.pushMessage(`turn:${queuedTurnId}`);
+      },
+      processBatchImpl: async () => {
+        await compactBatchStarted;
+      },
+      pushSessionSummaryPromptImpl: async () => {},
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const handler = createWorkerFetchHandler({
+      scanAndDrainQueue: core.scanAndDrainQueue,
+      handleCompactImpl: (queuedSessionId, transcriptPath) => {
+        compactPromise = core.handleCompact(queuedSessionId, transcriptPath);
+        return compactPromise;
+      },
+    });
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/compact", {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+
+    await Promise.resolve();
+    expect((core as { compactingSessions: Set<number> }).compactingSessions.has(sessionId)).toBe(
+      true,
+    );
+
+    const skippedTurnId = createTurn(db, sessionId, 2);
+    const skippedObservationId = queueObs(db, sessionId, skippedTurnId, 103, "skip-me");
+
+    await core.scanAndDrainQueue();
+
+    expect(
+      db
+        .query<{ claimed_at_epoch: number | null }, [number]>(
+          "SELECT claimed_at_epoch FROM pending_queue WHERE kind = 'obs' AND target_id = ?",
+        )
+        .get(skippedObservationId)?.claimed_at_epoch,
+    ).toBeNull();
+
+    releaseCompactBatch();
+    await compactPromise;
+  });
+
+  test("createWorkerFetchHandler swallows background compact failures after returning 200", async () => {
+    const logger = { error: mock(() => {}) };
+    const handler = createWorkerFetchHandler({
+      handleCompactImpl: mock(async () => {
+        throw new Error("compact failed");
+      }),
+      logger,
+    });
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/compact", {
+        method: "POST",
+        body: JSON.stringify({ session_id: 7 }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+
+    await Promise.resolve();
+    expect(logger.error).toHaveBeenCalledTimes(1);
+  });
+
   test("createWorkerFetchHandler validates flush requests and returns before async flush completes", async () => {
     let resolveFlush: (() => void) | null = null;
     const handleFlushImpl = mock(
@@ -205,40 +345,26 @@ describe("worker server", () => {
     resolveFlush?.();
   });
 
-  test("createWorkerFetchHandler tracks HTTP activity while requests are in flight", async () => {
-    let resolveCompact: (() => void) | null = null;
+  test("createWorkerFetchHandler tracks HTTP activity timestamps for compact requests", async () => {
     const serverState = createWorkerServerState(100);
     const handler = createWorkerFetchHandler(
       {
         nowMs: () => 100,
-        handleCompactImpl: mock(
-          () =>
-            new Promise<void>((resolve) => {
-              resolveCompact = resolve;
-            }),
-        ),
+        handleCompactImpl: mock(async () => {}),
       },
       serverState,
     );
 
-    const responsePromise = handler(
+    const response = await handler(
       new Request("http://127.0.0.1:37778/compact", {
         method: "POST",
         body: JSON.stringify({ session_id: 7 }),
       }),
     );
 
-    await Promise.resolve();
-
     expect(serverState.lastHttpRequestAt).toBe(100);
-    expect(serverState.activeRequests).toBe(1);
-
-    resolveCompact?.();
-    const response = await responsePromise;
-
     expect(response.status).toBe(200);
     expect(serverState.activeRequests).toBe(0);
-    expect(serverState.lastHttpRequestAt).toBe(100);
   });
 
   test("checkForIdleWorkerShutdown shuts down after 30 minutes without HTTP traffic", async () => {
@@ -724,6 +850,71 @@ describe("worker server", () => {
       )
       .get(compactSessionId);
     expect(before?.last_compact_turn).toBeNull();
+
+    await core.handleCompact(compactSessionId, null);
+
+    const after = db
+      .query<{ last_compact_turn: number | null }, [number]>(
+        "SELECT last_compact_turn FROM sessions WHERE id = ?",
+      )
+      .get(compactSessionId);
+    expect(after?.last_compact_turn).toBe(2);
+  });
+
+  test("handleCompact updates last_compact_turn before drain can insert a compact turn", async () => {
+    const compactSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-compact-race",
+      project: "/tmp/project-race",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES
+        (?, 1, 'extracted', 'first', 110),
+        (?, 2, 'undone', 'second', 120),
+        (?, 3, 'active', 'third', 130)`,
+    ).run(compactSessionId, compactSessionId, compactSessionId);
+
+    const activeTurnId = getSession(db, compactSessionId) ? createTurn(db, compactSessionId, 4) : 0;
+    queueObs(db, compactSessionId, activeTurnId, 140, "compact-race");
+
+    const core = createWorkerCore({
+      db,
+      processObsImpl: async () => {},
+      processTurnStopImpl: async () => {},
+      processBatchImpl: async () => {
+        db.query(
+          `INSERT INTO turns (
+            session_id,
+            prompt_number,
+            status,
+            user_prompt,
+            title,
+            type,
+            created_at_epoch
+          ) VALUES (?, 99, 'extracted', '/compact', '/compact', 'compact', 150)`,
+        ).run(compactSessionId);
+      },
+      pushSessionSummaryPromptImpl: async () => {},
+      closeSessionQueryImpl: async () => {},
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
 
     await core.handleCompact(compactSessionId, null);
 

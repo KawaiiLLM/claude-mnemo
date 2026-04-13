@@ -608,18 +608,18 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       }
 
       try {
-        await drainSessionCompletely(sessionDbId);
+        updateCompactAnchor(deps.db, sessionDbId);
       } catch (error) {
-        logger.error?.("drainSessionCompletely failed during compact", {
+        logger.error?.("updateCompactAnchor failed during compact", {
           sessionDbId,
           error,
         });
       }
 
       try {
-        updateCompactAnchor(deps.db, sessionDbId);
+        await drainSessionCompletely(sessionDbId);
       } catch (error) {
-        logger.error?.("updateCompactAnchor failed during compact", {
+        logger.error?.("drainSessionCompletely failed during compact", {
           sessionDbId,
           error,
         });
@@ -844,7 +844,12 @@ export function createWorkerFetchHandler(
           return new Response("session_id is required", { status: 400 });
         }
 
-        await handleCompactImpl(payload.session_id, payload.transcript_path);
+        void handleCompactImpl(payload.session_id, payload.transcript_path).catch((error) => {
+          deps.logger?.error?.("compact request failed", {
+            sessionId: payload.session_id,
+            error,
+          });
+        });
         return new Response(null, { status: 200 });
       }
 

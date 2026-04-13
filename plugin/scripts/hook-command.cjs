@@ -52,7 +52,7 @@ function resolveDatabasePath(explicitPath) {
   return candidatePath;
 }
 function encodeProjectPath(projectPath) {
-  return projectPath.replace(/[/:\\]+/g, "-");
+  return projectPath.replace(/[/:\\.]+/g, "-");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
@@ -626,14 +626,14 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.0-mnwmdpiw" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwn0qhk" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
 var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 var WAKE_TIMEOUT_MS = 500;
 var FLUSH_TIMEOUT_MS = 500;
-var COMPACT_TIMEOUT_MS = 25e3;
+var COMPACT_TIMEOUT_MS = 5e3;
 function createAbortSignal(timeoutMs) {
   return AbortSignal.timeout(timeoutMs);
 }

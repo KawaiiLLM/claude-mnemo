@@ -7355,7 +7355,7 @@ function resolveDatabasePath(explicitPath) {
   return candidatePath;
 }
 function encodeProjectPath(projectPath) {
-  return projectPath.replace(/[/:\\]+/g, "-");
+  return projectPath.replace(/[/:\\.]+/g, "-");
 }
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
@@ -33892,7 +33892,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.1" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
