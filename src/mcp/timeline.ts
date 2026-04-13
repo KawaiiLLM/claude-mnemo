@@ -44,7 +44,7 @@ export interface SystemTimezoneSource {
 }
 
 export const DEFAULT_TIMELINE_PAGE_SIZE = 30;
-export const PROMPT_COLUMN_CAP = 200;
+export const PROMPT_COLUMN_CAP = 100;
 export const TITLE_COLUMN_CAP = 40;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
