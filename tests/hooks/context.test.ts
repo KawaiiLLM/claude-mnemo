@@ -581,7 +581,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("  - Primary insight bullet for the current session");
     expect(output).toContain("T#");
     expect(output).not.toContain("showing:");
-    expect(output).toContain("phases (window T1-T6):");
+    expect(output).toContain("phases (session-wide):");
     expect(output).toContain("shape signals (window T1-T6");
     expect(output).not.toContain("next_steps:");
     expect(output).not.toContain(

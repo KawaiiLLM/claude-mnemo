@@ -973,7 +973,7 @@ describe("buildTimelineView", () => {
     expect(view.window.startPromptNumber).toBe(1);
     expect(view.window.endPromptNumber).toBe(21);
     expect(view.windowTurns).toHaveLength(21);
-    expect(view.phases.length).toBeGreaterThan(1);
+    expect(segmentPhases(view.windowTurns).length).toBeGreaterThan(1);
     expect(view.jsonlPath).toBe(
       resolveTranscriptPath("/tmp/claude-mnemo-test", "abc-uuid-timeline"),
     );
@@ -1002,19 +1002,6 @@ describe("buildTimelineView", () => {
       undoneTurns: [],
       externalInputs: [],
     });
-  });
-
-  it("phases always use the full session regardless of window", () => {
-    const db = createDatabase(":memory:");
-
-    seedSession(db);
-
-    const view = buildTimelineView(db, { id: "S1/T10..15" });
-    const firstPhase = view.phases[0];
-    const lastPhase = view.phases[view.phases.length - 1];
-
-    expect(firstPhase.startPromptNumber).toBe(1);
-    expect(lastPhase.endPromptNumber).toBeGreaterThanOrEqual(19);
   });
 
   it("rejects unknown session ids", () => {
@@ -1287,12 +1274,23 @@ describe("renderTimeline", () => {
     expect(compactLine).not.toContain("ignored raw summary wrapper");
   });
 
-  it("renders a phases block labeled session-wide", () => {
+  it("renders phases scoped to window for range queries", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
 
     const view = buildTimelineView(db, { id: "S1/T10..15" });
+    const output = renderTimeline(view);
+
+    expect(output).toMatch(/phases \(window T10-T15\)/);
+  });
+
+  it("renders phases labeled session-wide for full session", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1" });
     const output = renderTimeline(view);
 
     expect(output).toMatch(/phases \(session-wide\)/);
@@ -1330,7 +1328,7 @@ describe("renderTimeline", () => {
     const session = seedLongSession(db, 40);
 
     const view = buildContextTimelineView(db, session.id);
-    const output = renderTimeline(view, { showEarlierHint: true, windowPhasesOnly: true });
+    const output = renderTimeline(view, { showEarlierHint: true });
 
     expect(output).toContain('earlier: timeline(id="S1/T1..10") or recall(id="S1")');
     expect(output).toMatch(/phases \(window T11-T40\):/);

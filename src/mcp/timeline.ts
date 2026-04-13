@@ -17,7 +17,6 @@ export interface TimelineView {
   totalToolCalls: number;
   typesDistribution: TypesDistribution;
   compactBoundaries: number[];
-  phases: Phase[];
   window: ResolvedWindow;
   windowTurns: TurnRecord[];
   pageTurns: TurnRecord[];
@@ -33,7 +32,6 @@ export interface TimelineView {
 export interface RenderTimelineOptions {
   promptCap?: number;
   showEarlierHint?: boolean;
-  windowPhasesOnly?: boolean;
 }
 
 export interface SystemTimezoneSource {
@@ -745,7 +743,6 @@ export function buildTimelineView(
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const pagedTurns = paginateItems(windowTurns, page, pageSize);
-  const phases = segmentPhases(allTurns);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
   const compactBoundaries = [
@@ -773,7 +770,6 @@ export function buildTimelineView(
     totalToolCalls,
     typesDistribution,
     compactBoundaries,
-    phases,
     window,
     windowTurns,
     pageTurns: pagedTurns.items,
@@ -1004,17 +1000,18 @@ function renderPhases(
   view: TimelineView,
   options: RenderTimelineOptions = {},
 ): string[] {
-  const phases = options.windowPhasesOnly
-    ? segmentPhases(view.windowTurns)
-    : view.phases;
+  const windowIsFullSession =
+    view.window.startPromptNumber === view.firstPromptNumber &&
+    view.window.endPromptNumber === view.lastPromptNumber;
+  const phases = segmentPhases(view.windowTurns);
 
   if (phases.length === 0) {
     return [];
   }
 
-  const label = options.windowPhasesOnly
-    ? `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`
-    : "  phases (session-wide):";
+  const label = windowIsFullSession
+    ? "  phases (session-wide):"
+    : `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`;
   const lines = ["", label];
 
   for (const [index, phase] of phases.entries()) {

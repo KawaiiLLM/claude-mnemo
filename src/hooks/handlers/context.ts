@@ -151,7 +151,6 @@ function buildCurrentSessionOutput(
       renderTimeline(timelineView, {
         promptCap: 80,
         showEarlierHint: true,
-        windowPhasesOnly: true,
       }),
     );
   } catch {
