@@ -89,7 +89,7 @@ describe("handleStopHook", () => {
     expect(getPendingQueueRows(db)).toEqual([]);
   });
 
-  test("updates the latest turn, enqueues a turn-stop task, and notifies the worker", async () => {
+  test("updates the latest turn, enqueues a turn-stop task, and defers worker wake to asyncWork", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
@@ -113,10 +113,9 @@ describe("handleStopHook", () => {
     const queueRows = getPendingQueueRows(db);
     const session = getSessionByContentId(db, "session-stop")!;
 
-    expect(result).toEqual({
-      continue: true,
-      exitCode: 0,
-    });
+    expect(result.continue).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(typeof result.asyncWork).toBe("function");
     expect(turn.assistantResponse).toBe("Done ");
     expect(turn.status).toBe("active");
     expect(queueRows).toEqual([
@@ -129,6 +128,10 @@ describe("handleStopHook", () => {
     ]);
     expect(session.updatedAtEpoch).toBe(500);
     expect(session.completedAtEpoch).toBe(500);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    await result.asyncWork?.();
+
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
     expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/wake");
@@ -257,10 +260,9 @@ describe("handleStopHook", () => {
       }),
     );
 
-    expect(result).toEqual({
-      continue: true,
-      exitCode: 0,
-    });
+    expect(result.continue).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(typeof result.asyncWork).toBe("function");
     expect(getTurn(db, sessionId, 1)?.assistantResponse).toBe("First answer");
     expect(getTurn(db, sessionId, 2)?.assistantResponse).toBe("Second answer");
     expect(getPendingQueueRows(db)).toEqual([
@@ -277,6 +279,10 @@ describe("handleStopHook", () => {
         sessionDbId: sessionId,
       },
     ]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    await result.asyncWork?.();
+
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
@@ -316,7 +322,7 @@ describe("handleStopHook", () => {
       workerClientDeps: { fetchImpl },
     });
 
-    await handler(
+    const result = await handler(
       createInput({
         transcriptPath,
         lastAssistantMessage: "Discarded branch",
@@ -327,6 +333,13 @@ describe("handleStopHook", () => {
     expect(turn.status).toBe("undone");
     expect(turn.tags).toContain("rollback:pending");
     expect(getPendingQueueRows(db)).toEqual([]);
+    expect(result.continue).toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(typeof result.asyncWork).toBe("function");
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    await result.asyncWork?.();
+
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;

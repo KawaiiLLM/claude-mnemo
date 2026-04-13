@@ -436,7 +436,7 @@ describe("worker rollback helpers", () => {
         }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
-    await core.scanAndDrainQueue();
+    await core.flushSession(sessionId);
 
     expect(sentPrompts).toHaveLength(1);
     expect(sentPrompts[0]).toContain("<rollback>");
@@ -499,7 +499,7 @@ describe("worker rollback helpers", () => {
         }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
-    await core.scanAndDrainQueue();
+    await expect(core.flushSession(sessionId)).rejects.toThrow("send failed");
 
     expect(getPendingRollbackPromptNumbers(db, sessionId)).toEqual([1]);
     expect(getTurnById(db, 1)?.tags.includes("rollback:notified")).toBe(false);

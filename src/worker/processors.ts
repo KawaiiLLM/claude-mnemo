@@ -99,19 +99,47 @@ function buildTurnStopPrompt(
 
 function buildBatchTurnBlock(
   turnId: number,
+  obsBlocks: string[],
   prompt: string | null,
   response: string | null,
   filesRead: string[],
   filesModified: string[],
   toolCallCount: number,
 ): string {
-  return `  <turn id="T${turnId}">
-    prompt: ${truncateMiddle(prompt, 1000)}
-    response: ${truncateMiddle(response, 1000)}
-    files_read: ${filesRead.join(", ")}
-    files_modified: ${filesModified.join(", ")}
-    tool_call_count: ${toolCallCount}
-  </turn>`;
+  const lines = [`  <turn id="T${turnId}">`];
+  for (const obsBlock of obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(prompt, 1000)}`);
+  lines.push(`    response: ${truncateMiddle(response, 1000)}`);
+  lines.push(`    files_read: ${filesRead.join(", ")}`);
+  lines.push(`    files_modified: ${filesModified.join(", ")}`);
+  lines.push(`    tool_call_count: ${toolCallCount}`);
+  lines.push("  </turn>");
+  return lines.join("\n");
+}
+
+function buildPartialTurnBlock(args: {
+  turnId: number;
+  obsBlocks: string[];
+  prompt: string | null;
+  filesRead: string[];
+  filesModified: string[];
+  includedObsCount: number;
+  totalObsCount: number;
+}): string {
+  const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
+  for (const obsBlock of args.obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(args.prompt, 1000)}`);
+  lines.push(`    files_read: ${args.filesRead.join(", ")}`);
+  lines.push(`    files_modified: ${args.filesModified.join(", ")}`);
+  lines.push(
+    `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`,
+  );
+  lines.push("  </partial-turn>");
+  return lines.join("\n");
 }
 
 export function buildBatchPrompt(args: {
@@ -122,8 +150,8 @@ export function buildBatchPrompt(args: {
   priorContent: string | null;
   priorInsight: string | null;
   priorNextSteps: string | null;
-  obsBlocks: string[];
-  turnBlock?: string | null;
+  completedTurnBlocks: string[];
+  partialTurnBlocks?: string[];
 }): string {
   const priorSessionBlock =
     args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps
@@ -136,7 +164,12 @@ export function buildBatchPrompt(args: {
 </prior_session>
 `
       : "";
-  const body = [...args.obsBlocks, args.turnBlock ?? ""].filter(Boolean).join("\n");
+  const body = [
+    ...args.completedTurnBlocks,
+    ...(args.partialTurnBlocks ?? []),
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return `<session id="S${args.sessionId}">
   project: ${args.project}
@@ -178,6 +211,15 @@ function collectPathValues(input: Record<string, unknown>, key: string): string[
 
 function aggregateTurnFiles(db: Database, turnId: number) {
   const observations = getObservationsForTurn(db, turnId);
+  return aggregateFilesFromObservations(observations);
+}
+
+function aggregateFilesFromObservations(
+  observations: Array<{
+    toolName: string | null;
+    toolInput: string | null;
+  }>,
+) {
   const filesRead = new Set<string>();
   const filesModified = new Set<string>();
 
@@ -355,14 +397,27 @@ export function createWorkerProcessors(db: Database) {
     async processBatch(
       state: SessionState,
       items: PendingQueueItem[],
-      turnStopItem?: PendingQueueItem,
+      options?: {
+        turnStopItems?: PendingQueueItem[];
+        partialTurns?: Array<{
+          turnId: number;
+          totalObsCount: number;
+          contextObservationIds: number[];
+        }>;
+      },
     ): Promise<void> {
-      if (items.length === 0 && !turnStopItem) {
+      if (
+        items.length === 0 &&
+        (options?.turnStopItems?.length ?? 0) === 0 &&
+        (options?.partialTurns?.length ?? 0) === 0
+      ) {
         return;
       }
 
       const sessionId =
-        turnStopItem?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
+        options?.turnStopItems?.[0]?.sessionDbId ??
+        items[0]?.sessionDbId ??
+        state.sessionDbId;
       const session = getSession(db, sessionId);
       if (!session) {
         return;
@@ -380,26 +435,39 @@ export function createWorkerProcessors(db: Database) {
         )
         .get(session.id);
 
-      const obsBlocks = items
-        .map((item) => {
-          const observation = getObservation(db, item.targetId);
-          if (!observation || observation.status !== "pending") {
+      const obsByTurnId = new Map<
+        number,
+        Array<{
+          observationId: number;
+          toolName: string;
+          toolInput: string | null;
+          toolResult: string | null;
+        }>
+      >();
+
+      for (const item of items) {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          continue;
+        }
+
+        const group = obsByTurnId.get(observation.turnId) ?? [];
+        group.push({
+          observationId: observation.id,
+          toolName: observation.toolName ?? "Tool",
+          toolInput: observation.toolInput,
+          toolResult: observation.toolResult,
+        });
+        obsByTurnId.set(observation.turnId, group);
+      }
+
+      const completedTurnBlocks = (options?.turnStopItems ?? [])
+        .map((turnStopItem) => {
+          const turn = getTurnById(db, turnStopItem.targetId);
+          if (!turn || turn.status === "undone") {
             return null;
           }
 
-          return buildObsBlock(
-            observation.id,
-            observation.toolName ?? "Tool",
-            observation.toolInput,
-            observation.toolResult,
-          );
-        })
-        .filter((value): value is string => value !== null);
-
-      let turnBlock: string | null = null;
-      if (turnStopItem) {
-        const turn = getTurnById(db, turnStopItem.targetId);
-        if (turn && turn.status === "active") {
           const aggregate = aggregateTurnFiles(db, turn.id);
           updateTurnById(db, turn.id, {
             filesRead: aggregate.filesRead,
@@ -408,18 +476,68 @@ export function createWorkerProcessors(db: Database) {
             updatedAtEpoch: Math.floor(Date.now() / 1000),
           });
 
-          turnBlock = buildBatchTurnBlock(
+          const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map((observation) =>
+            buildObsBlock(
+              observation.observationId,
+              observation.toolName,
+              observation.toolInput,
+              observation.toolResult,
+            ),
+          );
+
+          return buildBatchTurnBlock(
             turn.id,
+            obsBlocks,
             turn.userPrompt,
             turn.assistantResponse,
             aggregate.filesRead,
             aggregate.filesModified,
             aggregate.toolCallCount,
           );
-        }
-      }
+        })
+        .filter((block): block is string => block !== null);
 
-      if (obsBlocks.length === 0 && !turnBlock) {
+      const partialTurnBlocks = (options?.partialTurns ?? [])
+        .map((partialTurn) => {
+          const turn = getTurnById(db, partialTurn.turnId);
+          if (!turn || turn.status === "undone") {
+            return null;
+          }
+
+          const contextObservations = partialTurn.contextObservationIds
+            .map((observationId) => getObservation(db, observationId))
+            .filter(
+              (
+                observation,
+              ): observation is NonNullable<typeof observation> => observation !== null,
+            );
+          const aggregate = aggregateFilesFromObservations(contextObservations);
+          const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map((observation) =>
+            buildObsBlock(
+              observation.observationId,
+              observation.toolName,
+              observation.toolInput,
+              observation.toolResult,
+            ),
+          );
+
+          if (obsBlocks.length === 0) {
+            return null;
+          }
+
+          return buildPartialTurnBlock({
+            turnId: turn.id,
+            obsBlocks,
+            prompt: turn.userPrompt,
+            filesRead: aggregate.filesRead,
+            filesModified: aggregate.filesModified,
+            includedObsCount: obsBlocks.length,
+            totalObsCount: partialTurn.totalObsCount,
+          });
+        })
+        .filter((block): block is string => block !== null);
+
+      if (completedTurnBlocks.length === 0 && partialTurnBlocks.length === 0) {
         return;
       }
 
@@ -432,8 +550,8 @@ export function createWorkerProcessors(db: Database) {
           priorContent: session.content,
           priorInsight: session.insight,
           priorNextSteps: session.nextSteps,
-          obsBlocks,
-          turnBlock,
+          completedTurnBlocks,
+          partialTurnBlocks,
         }),
       );
       state.initialized = true;

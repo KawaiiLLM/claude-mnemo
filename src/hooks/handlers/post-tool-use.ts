@@ -108,11 +108,14 @@ export function createPostToolUseHandler(
         .run(inserted.id, session.id, createdAtEpoch);
     })();
 
-    await notifyWorkerWake(
-      dependencies.workerClientDeps,
-      dependencies.workerEnv,
-    );
-
-    return { continue: true };
+    return {
+      continue: true,
+      asyncWork: async () => {
+        await notifyWorkerWake(
+          dependencies.workerClientDeps,
+          dependencies.workerEnv,
+        );
+      },
+    };
   };
 }

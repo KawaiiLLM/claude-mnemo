@@ -84,6 +84,30 @@ function queueTurnStop(
   ).run(turnId, sessionId, enqueuedAtEpoch);
 }
 
+function primeSessionState(
+  core: ReturnType<typeof createWorkerCore>,
+  sessionId: number,
+  overrides: Partial<{
+    initialized: boolean;
+    lastPushAt: number;
+    lastMessageAt: number;
+    lastActivity: number;
+  }> = {},
+): void {
+  core.sessions.set(sessionId, {
+    sessionDbId: sessionId,
+    querySession: null,
+    contentSessionId: null,
+    project: null,
+    initialized: overrides.initialized ?? true,
+    lastPushAt: overrides.lastPushAt ?? 0,
+    lastMessageAt: overrides.lastMessageAt ?? 0,
+    lastActivity: overrides.lastActivity ?? 0,
+    processingLock: Promise.resolve(),
+    pushMessage: async () => {},
+  });
+}
+
 describe("worker server", () => {
   let db: Database;
 
@@ -521,7 +545,7 @@ describe("worker server", () => {
     ).toHaveLength(2);
   });
 
-  test("scanAndDrainQueue flushes buffered observations and turn-stop as one batch prompt", async () => {
+  test("scanAndDrainQueue keeps three completed turns buffered and flushes the oldest on the fourth turn-stop", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-batch",
       project: "/tmp/project-batch",
@@ -533,15 +557,23 @@ describe("worker server", () => {
       updatedAtEpoch: 1,
       completedAtEpoch: null,
     }).id;
-    const turnId = createTurn(db, sessionId, 1, "Diagnose batch flush", "Combined reply");
-    const firstObsId = queueObs(db, sessionId, turnId, 101, "batch-one");
-    const secondObsId = queueObs(db, sessionId, turnId, 102, "batch-two");
-    queueTurnStop(db, sessionId, turnId, 103);
+    const turnIds = [
+      createTurn(db, sessionId, 1, "Turn 1", "Reply 1"),
+      createTurn(db, sessionId, 2, "Turn 2", "Reply 2"),
+      createTurn(db, sessionId, 3, "Turn 3", "Reply 3"),
+      createTurn(db, sessionId, 4, "Turn 4", "Reply 4"),
+    ];
+    const observationIds = turnIds.map((turnId, index) =>
+      queueObs(db, sessionId, turnId, 101 + index, `batch-${index + 1}`),
+    );
+    turnIds.forEach((turnId, index) => {
+      queueTurnStop(db, sessionId, turnId, 201 + index);
+    });
 
     const sentPrompts: string[] = [];
     const batchCalls: Array<{
       itemIds: number[];
-      turnStopTargetId: number | null;
+      turnStopTargetIds: number[];
     }> = [];
     const core = createWorkerCore({
       db,
@@ -566,14 +598,16 @@ describe("worker server", () => {
         processBatchImpl: async (
           state: { pushMessage(prompt: string): Promise<void> },
           items: Array<{ targetId: number }>,
-          turnStopItem?: { targetId: number },
+          options?: { turnStopItems?: Array<{ targetId: number }> },
         ) => {
           batchCalls.push({
             itemIds: items.map((item) => item.targetId),
-            turnStopTargetId: turnStopItem?.targetId ?? null,
+            turnStopTargetIds: (options?.turnStopItems ?? []).map(
+              (item) => item.targetId,
+            ),
           });
           await state.pushMessage(
-            `<batch><obs id="O${items[0]?.targetId}"/><obs id="O${items[1]?.targetId}"/><turn id="T${turnStopItem?.targetId ?? 0}"/></batch>`,
+            `<batch>${items.map((item) => `<obs id="O${item.targetId}"/>`).join("")}</batch>`,
           );
         },
       } as Record<string, unknown>),
@@ -583,22 +617,32 @@ describe("worker server", () => {
 
     expect(batchCalls).toEqual([
       {
-        itemIds: [firstObsId, secondObsId],
-        turnStopTargetId: turnId,
+        itemIds: [observationIds[0]!],
+        turnStopTargetIds: [turnIds[0]!],
       },
     ]);
     expect(sentPrompts).toHaveLength(1);
     expect(sentPrompts[0]).toContain("<batch>");
-    expect(sentPrompts[0]).toContain(`<obs id="O${firstObsId}"`);
-    expect(sentPrompts[0]).toContain(`<obs id="O${secondObsId}"`);
-    expect(sentPrompts[0]).toContain(`<turn id="T${turnId}"`);
+    expect(sentPrompts[0]).toContain(`<obs id="O${observationIds[0]}"`);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(0);
+    ).toBe(6);
+    expect(
+      ((core as unknown as {
+        buffers?: Map<number, { items: Array<{ targetId: number }> }>;
+      }).buffers?.get(sessionId)?.items ?? []).map((item) => item.targetId),
+    ).toEqual([
+      observationIds[1]!,
+      observationIds[2]!,
+      observationIds[3]!,
+      turnIds[1]!,
+      turnIds[2]!,
+      turnIds[3]!,
+    ]);
   });
 
-  test("scanAndDrainQueue releases buffered observation claims when batch flush fails", async () => {
+  test("scanAndDrainQueue releases only the overflow turn claims when reserve flush fails", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-fail",
       project: "/tmp/project-fail",
@@ -609,10 +653,16 @@ describe("worker server", () => {
       updatedAtEpoch: 1,
       completedAtEpoch: null,
     }).id;
-    const turnId = createTurn(db, sessionId, 1);
-    queueObs(db, sessionId, turnId, 101, "fail-one");
-    queueObs(db, sessionId, turnId, 102, "fail-two");
-    queueTurnStop(db, sessionId, turnId, 103);
+    const turnIds = [
+      createTurn(db, sessionId, 1),
+      createTurn(db, sessionId, 2),
+      createTurn(db, sessionId, 3),
+      createTurn(db, sessionId, 4),
+    ];
+    turnIds.forEach((turnId, index) => {
+      queueObs(db, sessionId, turnId, 101 + index, `fail-${index + 1}`);
+      queueTurnStop(db, sessionId, turnId, 201 + index);
+    });
 
     const logger = {
       warn: mock(() => {}),
@@ -651,20 +701,20 @@ describe("worker server", () => {
     expect(
       db
         .query<{ claimed_at_epoch: number | null }, []>(
-          "SELECT claimed_at_epoch FROM pending_queue ORDER BY seq ASC LIMIT 3",
+          "SELECT claimed_at_epoch FROM pending_queue ORDER BY seq ASC",
         )
         .all()
         .map((row) => row.claimed_at_epoch),
-    ).toEqual([null, null, null]);
+    ).toEqual([null, null, 123, 123, 123, 123, 123, 123]);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(3);
+    ).toBe(8);
     expect(
       ((core as unknown as {
         buffers?: Map<number, { items: Array<{ targetId: number }> }>;
       }).buffers?.get(sessionId)?.items ?? []).map((item) => item.targetId),
-    ).toEqual([]);
+    ).toHaveLength(6);
     expect(logger.error).toHaveBeenCalled();
   });
 
@@ -726,6 +776,226 @@ describe("worker server", () => {
     ).toEqual([]);
   });
 
+  test("runKeepaliveTick sends one reserve turn after four minutes in warm state", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-keepalive-reserve",
+      project: "/tmp/project-keepalive-reserve",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const turnIds = [1, 2, 3].map((promptNumber) =>
+      createTurn(db, sessionId, promptNumber, `Turn ${promptNumber}`, `Reply ${promptNumber}`),
+    );
+    const observationIds = turnIds.map((turnId, index) =>
+      queueObs(db, sessionId, turnId, 100 + index, `reserve-${index + 1}`),
+    );
+    turnIds.forEach((turnId, index) => {
+      queueTurnStop(db, sessionId, turnId, 200 + index);
+    });
+
+    const keepaliveCalls: Array<{
+      itemIds: number[];
+      turnStopTargetIds: number[];
+    }> = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async (_state, items, options) => {
+        keepaliveCalls.push({
+          itemIds: items.map((item) => item.targetId),
+          turnStopTargetIds: (options?.turnStopItems ?? []).map((item) => item.targetId),
+        });
+      },
+    });
+
+    await core.scanAndDrainQueue();
+    primeSessionState(core, sessionId, {
+      lastPushAt: 1_000_000,
+      lastMessageAt: 1_000_000,
+      lastActivity: 1_000_000,
+    });
+
+    await core.runKeepaliveTick(1_240_000);
+
+    expect(keepaliveCalls).toEqual([
+      {
+        itemIds: [observationIds[0]!],
+        turnStopTargetIds: [turnIds[0]!],
+      },
+    ]);
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
+        ?.count,
+    ).toBe(4);
+    expect(core.buffers.get(sessionId)?.items).toHaveLength(4);
+  });
+
+  test("runKeepaliveTick sends half of an in-progress turn as partial-turn keepalive", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-keepalive-partial",
+      project: "/tmp/project-keepalive-partial",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1, "Long task", "Still working");
+    const observationIds = Array.from({ length: 6 }, (_, index) =>
+      queueObs(db, sessionId, turnId, 100 + index, `partial-${index + 1}`),
+    );
+
+    const partialCalls: Array<{
+      itemIds: number[];
+      partialTurns: Array<{ turnId: number; totalObsCount: number; contextObservationIds: number[] }>;
+    }> = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async (_state, items, options) => {
+        partialCalls.push({
+          itemIds: items.map((item) => item.targetId),
+          partialTurns: options?.partialTurns ?? [],
+        });
+      },
+    });
+
+    await core.scanAndDrainQueue();
+    primeSessionState(core, sessionId, {
+      lastPushAt: 2_000_000,
+      lastMessageAt: 2_000_000,
+      lastActivity: 2_000_000,
+    });
+
+    await core.runKeepaliveTick(2_240_000);
+
+    expect(partialCalls).toEqual([
+      {
+        itemIds: observationIds.slice(0, 3),
+        partialTurns: [
+          {
+            turnId,
+            totalObsCount: 6,
+            contextObservationIds: observationIds,
+          },
+        ],
+      },
+    ]);
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
+        ?.count,
+    ).toBe(3);
+    expect(core.buffers.get(sessionId)?.items).toHaveLength(3);
+  });
+
+  test("runKeepaliveTick does nothing for cold sessions without an established cache", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-keepalive-cold",
+      project: "/tmp/project-keepalive-cold",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1, "Cold turn", "Cold reply");
+    queueObs(db, sessionId, turnId, 100, "cold-1");
+    queueTurnStop(db, sessionId, turnId, 200);
+
+    const processBatchImpl = mock(async () => {});
+    const core = createWorkerCore({
+      db,
+      processBatchImpl,
+    });
+
+    await core.scanAndDrainQueue();
+    primeSessionState(core, sessionId, {
+      lastPushAt: 0,
+      lastMessageAt: 0,
+      lastActivity: 0,
+    });
+
+    await core.runKeepaliveTick(240_000);
+
+    expect(processBatchImpl).not.toHaveBeenCalled();
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
+        ?.count,
+    ).toBe(2);
+    expect(core.buffers.get(sessionId)?.items).toHaveLength(2);
+  });
+
+  test("runKeepaliveTick preserves concurrently buffered obs via seq-based removal", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-keepalive-concurrent",
+      project: "/tmp/project-keepalive-concurrent",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const reserveTurnIds = [1, 2, 3].map((promptNumber) =>
+      createTurn(db, sessionId, promptNumber, `Turn ${promptNumber}`, `Reply ${promptNumber}`),
+    );
+    reserveTurnIds.forEach((turnId, index) => {
+      queueObs(db, sessionId, turnId, 100 + index, `reserve-concurrent-${index + 1}`);
+      queueTurnStop(db, sessionId, turnId, 200 + index);
+    });
+
+    const inflightTurnId = createTurn(db, sessionId, 4, "Concurrent turn", "Reply 4");
+    let releaseBatch!: () => void;
+    const batchStarted = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async () => {
+        await batchStarted;
+      },
+    });
+
+    await core.scanAndDrainQueue();
+    primeSessionState(core, sessionId, {
+      lastPushAt: 3_000_000,
+      lastMessageAt: 3_000_000,
+      lastActivity: 3_000_000,
+    });
+
+    const keepalivePromise = core.runKeepaliveTick(3_240_000);
+    await Promise.resolve();
+
+    const concurrentObservationId = queueObs(
+      db,
+      sessionId,
+      inflightTurnId,
+      400,
+      "concurrent-extra",
+    );
+    await core.scanAndDrainQueue(sessionId);
+
+    releaseBatch();
+    await keepalivePromise;
+
+    expect(
+      core.buffers
+        .get(sessionId)
+        ?.items.some((item) => item.kind === "obs" && item.targetId === concurrentObservationId),
+    ).toBe(true);
+    expect(
+      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
+        ?.count,
+    ).toBe(5);
+  });
+
   test("handleCompact drains the session, pushes summary, and closes query", async () => {
     const compactSessionId = upsertSession(db, {
       contentSessionId: "worker-session-20",
@@ -762,12 +1032,12 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
-      processBatchImpl: async (_state, items, turnStopItem) => {
+      processBatchImpl: async (_state, items, options) => {
         processed.push(
-          `batch:${items.map((item) => item.targetId).join(",")}:${turnStopItem?.targetId ?? "none"}`,
+          `batch:${items.map((item) => item.targetId).join(",")}:${(options?.turnStopItems ?? []).map((item) => item.targetId).join(",") || "none"}`,
         );
         await _state.pushMessage(
-          `batch:${items.map((item) => item.targetId).join(",")}:${turnStopItem?.targetId ?? "none"}`,
+          `batch:${items.map((item) => item.targetId).join(",")}:${(options?.turnStopItems ?? []).map((item) => item.targetId).join(",") || "none"}`,
         );
       },
       pushSessionSummaryPromptImpl: async (_state, sessionId) => {

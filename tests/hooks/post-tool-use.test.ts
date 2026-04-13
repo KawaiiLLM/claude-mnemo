@@ -87,7 +87,7 @@ describe("handlePostToolUseHook", () => {
     db.close();
   });
 
-  test("inserts an observation, enqueues it, and notifies the worker", async () => {
+  test("inserts an observation, enqueues it, and defers worker wake to asyncWork", async () => {
     const fetchImpl = mock(async () => new Response(null, { status: 200 }));
     const handler = createPostToolUseHandler({
       db,
@@ -123,7 +123,8 @@ describe("handlePostToolUseHook", () => {
       )
       .get()!;
 
-    expect(result).toEqual({ continue: true });
+    expect(result.continue).toBe(true);
+    expect(typeof result.asyncWork).toBe("function");
     expect(observation.turnId).toBe(turnId);
     expect(observation.toolName).toBe("Read");
     expect(observation.toolInput).toBe('{"file_path":"src/auth.ts"}');
@@ -137,6 +138,10 @@ describe("handlePostToolUseHook", () => {
         sessionDbId: sessionId,
       },
     ]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    await result.asyncWork?.();
+
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://127.0.0.1:37778/health");
     expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/wake");

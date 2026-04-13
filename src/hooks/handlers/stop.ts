@@ -190,14 +190,15 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       );
     }
 
-    await notifyWorkerWake(
-      dependencies.workerClientDeps,
-      dependencies.workerEnv,
-    );
-
     return {
       continue: true,
       exitCode: HOOK_SUCCESS_EXIT_CODE,
+      asyncWork: async () => {
+        await notifyWorkerWake(
+          dependencies.workerClientDeps,
+          dependencies.workerEnv,
+        );
+      },
     };
   };
 }

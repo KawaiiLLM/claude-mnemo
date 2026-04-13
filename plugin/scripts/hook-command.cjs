@@ -626,7 +626,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwt3v68" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwu09sd" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -3120,11 +3120,15 @@ function createPostToolUseHandler(dependencies) {
           `
       ).run(inserted.id, session.id, createdAtEpoch);
     })();
-    await notifyWorkerWake(
-      dependencies.workerClientDeps,
-      dependencies.workerEnv
-    );
-    return { continue: true };
+    return {
+      continue: true,
+      asyncWork: async () => {
+        await notifyWorkerWake(
+          dependencies.workerClientDeps,
+          dependencies.workerEnv
+        );
+      }
+    };
   };
 }
 
@@ -3138,12 +3142,16 @@ function createSessionEndHandler(dependencies) {
     if (!session) {
       return { continue: true };
     }
-    await notifyWorkerFlush(
-      session.id,
-      dependencies.workerClientDeps,
-      dependencies.workerEnv
-    );
-    return { continue: true };
+    return {
+      continue: true,
+      asyncWork: async () => {
+        await notifyWorkerFlush(
+          session.id,
+          dependencies.workerClientDeps,
+          dependencies.workerEnv
+        );
+      }
+    };
   };
 }
 
@@ -3483,13 +3491,15 @@ function createStopHandler(dependencies) {
         epoch
       );
     }
-    await notifyWorkerWake(
-      dependencies.workerClientDeps,
-      dependencies.workerEnv
-    );
     return {
       continue: true,
-      exitCode: HOOK_SUCCESS_EXIT_CODE
+      exitCode: HOOK_SUCCESS_EXIT_CODE,
+      asyncWork: async () => {
+        await notifyWorkerWake(
+          dependencies.workerClientDeps,
+          dependencies.workerEnv
+        );
+      }
     };
   };
 }

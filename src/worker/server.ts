@@ -50,6 +50,9 @@ const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
 const TURN_STOP_TIMEOUT_MS = 30_000;
+const RESERVE_TURNS = 3;
+const KEEPALIVE_MS = 240_000;
+const CACHE_TTL_MS = 300_000;
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
@@ -84,7 +87,14 @@ export interface WorkerCoreDeps {
   processBatchImpl?: (
     state: SessionState,
     items: PendingQueueItem[],
-    turnStopItem?: PendingQueueItem,
+    options?: {
+      turnStopItems?: PendingQueueItem[];
+      partialTurns?: Array<{
+        turnId: number;
+        totalObsCount: number;
+        contextObservationIds: number[];
+      }>;
+    },
   ) => Promise<void>;
   pushSessionSummaryPromptImpl?: (
     state: SessionState,
@@ -140,6 +150,7 @@ export interface WorkerCore {
   closeSessionQuery(sessionDbId: number): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   abortStalledSessions(nowMs?: number): Promise<void>;
+  runKeepaliveTick(nowMs?: number): Promise<void>;
 }
 
 function defaultNoopDrain(): Promise<void> {
@@ -205,22 +216,36 @@ function buildRollbackEnvelope(promptNumbers: number[]): string {
 function pruneBufferedUndoneItems(
   db: Database,
   items: PendingQueueItem[],
-): PendingQueueItem[] {
+): { activeItems: PendingQueueItem[]; prunedSeqs: Set<number> } {
   const activeItems: PendingQueueItem[] = [];
+  const prunedSeqs = new Set<number>();
 
   for (const item of items) {
-    const observation = getObservation(db, item.targetId);
-    const turn = observation ? getTurnById(db, observation.turnId) : null;
+    if (item.kind === "obs") {
+      const observation = getObservation(db, item.targetId);
+      const turn = observation ? getTurnById(db, observation.turnId) : null;
 
-    if (!observation || !turn || turn.status === "undone") {
+      if (!observation || !turn || turn.status === "undone") {
+        deleteQueueItem(db, item.seq);
+        prunedSeqs.add(item.seq);
+        continue;
+      }
+
+      activeItems.push(item);
+      continue;
+    }
+
+    const turn = getTurnById(db, item.targetId);
+    if (!turn || turn.status === "undone") {
       deleteQueueItem(db, item.seq);
+      prunedSeqs.add(item.seq);
       continue;
     }
 
     activeItems.push(item);
   }
 
-  return activeItems;
+  return { activeItems, prunedSeqs };
 }
 
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
@@ -266,6 +291,105 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   function clearBuffer(sessionDbId: number): void {
     buffers.delete(sessionDbId);
+  }
+
+  function removeBufferedItemsBySeq(
+    sessionDbId: number,
+    seqs: Set<number>,
+  ): void {
+    if (seqs.size === 0) {
+      return;
+    }
+
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+
+    buffer.items = buffer.items.filter((item) => !seqs.has(item.seq));
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+
+  function replaceBufferItems(
+    sessionDbId: number,
+    items: PendingQueueItem[],
+  ): void {
+    if (items.length === 0) {
+      buffers.delete(sessionDbId);
+      return;
+    }
+
+    const buffer = getOrCreateBuffer(sessionDbId);
+    buffer.items = items;
+  }
+
+  function buildTurnGroups(items: PendingQueueItem[]): Array<{
+    turnId: number;
+    promptNumber: number;
+    obsItems: PendingQueueItem[];
+    turnStopItem?: PendingQueueItem;
+  }> {
+    const groups = new Map<
+      number,
+      {
+        turnId: number;
+        promptNumber: number;
+        obsItems: PendingQueueItem[];
+        turnStopItem?: PendingQueueItem;
+      }
+    >();
+
+    for (const item of items) {
+      let turnId: number | null = null;
+      if (item.kind === "turn-stop") {
+        turnId = item.targetId;
+      } else {
+        turnId = getObservation(deps.db, item.targetId)?.turnId ?? null;
+      }
+
+      if (turnId === null) {
+        continue;
+      }
+
+      const turn = getTurnById(deps.db, turnId);
+      if (!turn) {
+        continue;
+      }
+
+      let group = groups.get(turnId);
+      if (!group) {
+        group = {
+          turnId,
+          promptNumber: turn.promptNumber,
+          obsItems: [],
+        };
+        groups.set(turnId, group);
+      }
+
+      if (item.kind === "turn-stop") {
+        group.turnStopItem = item;
+      } else {
+        group.obsItems.push(item);
+      }
+    }
+
+    return Array.from(groups.values()).sort((left, right) => {
+      if (left.promptNumber !== right.promptNumber) {
+        return left.promptNumber - right.promptNumber;
+      }
+
+      const leftSeq = Math.min(
+        left.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
+        ...left.obsItems.map((item) => item.seq),
+      );
+      const rightSeq = Math.min(
+        right.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
+        ...right.obsItems.map((item) => item.seq),
+      );
+      return leftSeq - rightSeq;
+    });
   }
 
   function getOrCreateSessionState(sessionDbId: number): SessionState {
@@ -451,41 +575,114 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     );
   }
 
-  async function flushBufferedItems(
+  async function sendBatchSelectionLocked(
+    state: SessionState,
     sessionDbId: number,
-    turnStopItem?: PendingQueueItem,
+    selection: {
+      obsItems: PendingQueueItem[];
+      turnStopItems: PendingQueueItem[];
+      partialTurns?: Array<{
+        turnId: number;
+        totalObsCount: number;
+        contextObservationIds: number[];
+      }>;
+    },
   ): Promise<void> {
-    const bufferedItems = pruneBufferedUndoneItems(
-      deps.db,
-      [...(buffers.get(sessionDbId)?.items ?? [])],
-    );
-    if (bufferedItems.length === 0 && !turnStopItem) {
-      clearBuffer(sessionDbId);
+    if (
+      selection.obsItems.length === 0 &&
+      selection.turnStopItems.length === 0 &&
+      (selection.partialTurns?.length ?? 0) === 0
+    ) {
       return;
     }
 
-    try {
-      await withSessionProcessingLock(sessionDbId, (state) =>
-        processBatchImpl(state, bufferedItems, turnStopItem),
-      );
+    const sentSeqs = new Set(
+      [...selection.obsItems, ...selection.turnStopItems].map((item) => item.seq),
+    );
 
-      for (const item of bufferedItems) {
+    try {
+      await processBatchImpl(state, selection.obsItems, {
+        turnStopItems: selection.turnStopItems,
+        partialTurns: selection.partialTurns,
+      });
+
+      for (const item of selection.obsItems) {
         deleteQueueItem(deps.db, item.seq);
       }
-      if (turnStopItem) {
-        deleteQueueItem(deps.db, turnStopItem.seq);
+      for (const item of selection.turnStopItems) {
+        deleteQueueItem(deps.db, item.seq);
       }
-      clearBuffer(sessionDbId);
     } catch (error) {
-      for (const item of bufferedItems) {
+      for (const item of selection.obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      if (turnStopItem) {
-        releaseQueueClaim(deps.db, turnStopItem.seq);
+      for (const item of selection.turnStopItems) {
+        releaseQueueClaim(deps.db, item.seq);
       }
-      clearBuffer(sessionDbId);
       throw error;
+    } finally {
+      removeBufferedItemsBySeq(sessionDbId, sentSeqs);
     }
+  }
+
+  async function flushExcessTurns(sessionDbId: number): Promise<void> {
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+
+      const groups = buildTurnGroups(activeItems);
+      const completedGroups = groups.filter((group) => group.turnStopItem);
+      if (completedGroups.length <= RESERVE_TURNS) {
+        replaceBufferItems(sessionDbId, activeItems);
+        return;
+      }
+
+      const groupsToFlush = completedGroups.slice(
+        0,
+        completedGroups.length - RESERVE_TURNS,
+      );
+
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: groupsToFlush.flatMap((group) => group.obsItems),
+        turnStopItems: groupsToFlush
+          .map((group) => group.turnStopItem)
+          .filter((item): item is PendingQueueItem => item !== undefined),
+      });
+    });
+  }
+
+  async function flushBufferedItems(sessionDbId: number): Promise<void> {
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+
+      const groups = buildTurnGroups(activeItems);
+      const partialTurns = groups
+        .filter((group) => !group.turnStopItem && group.obsItems.length > 0)
+        .map((group) => ({
+          turnId: group.turnId,
+          totalObsCount: group.obsItems.length,
+          contextObservationIds: group.obsItems.map((item) => item.targetId),
+        }));
+
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: activeItems.filter((item) => item.kind === "obs"),
+        turnStopItems: activeItems.filter((item) => item.kind === "turn-stop"),
+        partialTurns,
+      });
+    });
   }
 
   async function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
@@ -503,28 +700,26 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
 
-      if (item.kind === "obs") {
-        getOrCreateBuffer(item.sessionDbId).items.push(item);
-        continue;
-      }
+      const buffer = getOrCreateBuffer(item.sessionDbId);
+      buffer.items.push(item);
 
-      const bufferedSeqs = (buffers.get(item.sessionDbId)?.items ?? []).map(
-        (bufferedItem) => bufferedItem.seq,
-      );
+      if (item.kind === "turn-stop") {
+        const bufferedSeqs = buffer.items.map((bufferedItem) => bufferedItem.seq);
 
-      try {
-        await flushBufferedItems(item.sessionDbId, item);
-      } catch (error) {
-        skippedSeqs.add(item.seq);
-        for (const seq of bufferedSeqs) {
-          skippedSeqs.add(seq);
+        try {
+          await flushExcessTurns(item.sessionDbId);
+        } catch (error) {
+          skippedSeqs.add(item.seq);
+          for (const seq of bufferedSeqs) {
+            skippedSeqs.add(seq);
+          }
+          logger.error?.("queue item failed, skipping for this drain", {
+            seq: item.seq,
+            kind: item.kind,
+            targetId: item.targetId,
+            error,
+          });
         }
-        logger.error?.("queue item failed, skipping for this drain", {
-          seq: item.seq,
-          kind: item.kind,
-          targetId: item.targetId,
-          error,
-        });
       }
     }
   }
@@ -584,6 +779,84 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   async function flushSession(sessionDbId: number): Promise<void> {
     await scanAndDrainQueue(sessionDbId);
     await flushBufferedItems(sessionDbId);
+  }
+
+  async function tryKeepaliveSession(
+    sessionDbId: number,
+    currentMs: number,
+  ): Promise<void> {
+    if (compactingSessions.has(sessionDbId)) {
+      return;
+    }
+
+    const existingState = sessions.get(sessionDbId);
+    if (!existingState || existingState.lastPushAt <= 0) {
+      return;
+    }
+
+    const age = currentMs - existingState.lastPushAt;
+    if (age < KEEPALIVE_MS || age >= CACHE_TTL_MS) {
+      return;
+    }
+
+    if (existingState.lastPushAt > existingState.lastMessageAt) {
+      return;
+    }
+
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const refreshedAge = currentMs - state.lastPushAt;
+      if (
+        state.lastPushAt <= 0 ||
+        refreshedAge < KEEPALIVE_MS ||
+        refreshedAge >= CACHE_TTL_MS ||
+        state.lastPushAt > state.lastMessageAt
+      ) {
+        return;
+      }
+
+      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+
+      const groups = buildTurnGroups(activeItems);
+      const completedGroups = groups.filter((group) => group.turnStopItem);
+
+      if (completedGroups.length > 0) {
+        const group = completedGroups[0]!;
+        await sendBatchSelectionLocked(state, sessionDbId, {
+          obsItems: group.obsItems,
+          turnStopItems: group.turnStopItem ? [group.turnStopItem] : [],
+        });
+        return;
+      }
+
+      const partialGroup = [...groups]
+        .filter((group) => !group.turnStopItem && group.obsItems.length > 0)
+        .sort((left, right) => right.promptNumber - left.promptNumber)[0];
+      if (!partialGroup) {
+        return;
+      }
+
+      const selectedCount = Math.max(1, Math.ceil(partialGroup.obsItems.length / 2));
+      const selectedObsItems = partialGroup.obsItems.slice(0, selectedCount);
+
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: selectedObsItems,
+        turnStopItems: [],
+        partialTurns: [
+          {
+            turnId: partialGroup.turnId,
+            totalObsCount: partialGroup.obsItems.length,
+            contextObservationIds: partialGroup.obsItems.map((item) => item.targetId),
+          },
+        ],
+      });
+    });
   }
 
   function recoverFromCrash(): void {
@@ -700,6 +973,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           }
         }),
       );
+    },
+    async runKeepaliveTick(nowMsOverride?: number): Promise<void> {
+      const currentMs = nowMsOverride ?? nowMs();
+      for (const sessionDbId of buffers.keys()) {
+        await tryKeepaliveSession(sessionDbId, currentMs);
+      }
     },
   };
 }
@@ -1020,6 +1299,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   }
   setInterval(() => {
     void core.abortStalledSessions();
+    void core.runKeepaliveTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void checkForIdleWorkerShutdown(serverState, {

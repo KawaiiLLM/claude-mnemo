@@ -166,10 +166,10 @@ describe("claude-mnemo smoke test", () => {
       raw: {},
     });
 
-    expect(stopResult).toEqual({
-      continue: true,
-      exitCode: 0,
-    });
+    expect(stopResult.continue).toBe(true);
+    expect(stopResult.exitCode).toBe(0);
+    expect(typeof stopResult.asyncWork).toBe("function");
+    await stopResult.asyncWork?.();
     expect(getTurn(db, session.id, 1)?.status).toBe("active");
     expect(getTurn(db, session.id, 2)?.status).toBe("active");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);

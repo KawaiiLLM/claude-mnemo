@@ -25,12 +25,15 @@ export function createSessionEndHandler(
       return { continue: true };
     }
 
-    await notifyWorkerFlush(
-      session.id,
-      dependencies.workerClientDeps,
-      dependencies.workerEnv,
-    );
-
-    return { continue: true };
+    return {
+      continue: true,
+      asyncWork: async () => {
+        await notifyWorkerFlush(
+          session.id,
+          dependencies.workerClientDeps,
+          dependencies.workerEnv,
+        );
+      },
+    };
   };
 }

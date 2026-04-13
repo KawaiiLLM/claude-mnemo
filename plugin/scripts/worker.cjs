@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwt3v68" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwu09sd" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1715,14 +1715,32 @@ function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSt
   files_modified: ${filesModified.join(", ")}
 </session>`;
 }
-function buildBatchTurnBlock(turnId, prompt, response, filesRead, filesModified, toolCallCount) {
-  return `  <turn id="T${turnId}">
-    prompt: ${truncateMiddle(prompt, 1e3)}
-    response: ${truncateMiddle(response, 1e3)}
-    files_read: ${filesRead.join(", ")}
-    files_modified: ${filesModified.join(", ")}
-    tool_call_count: ${toolCallCount}
-  </turn>`;
+function buildBatchTurnBlock(turnId, obsBlocks, prompt, response, filesRead, filesModified, toolCallCount) {
+  const lines = [`  <turn id="T${turnId}">`];
+  for (const obsBlock of obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(prompt, 1e3)}`);
+  lines.push(`    response: ${truncateMiddle(response, 1e3)}`);
+  lines.push(`    files_read: ${filesRead.join(", ")}`);
+  lines.push(`    files_modified: ${filesModified.join(", ")}`);
+  lines.push(`    tool_call_count: ${toolCallCount}`);
+  lines.push("  </turn>");
+  return lines.join("\n");
+}
+function buildPartialTurnBlock(args) {
+  const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
+  for (const obsBlock of args.obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(args.prompt, 1e3)}`);
+  lines.push(`    files_read: ${args.filesRead.join(", ")}`);
+  lines.push(`    files_modified: ${args.filesModified.join(", ")}`);
+  lines.push(
+    `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`
+  );
+  lines.push("  </partial-turn>");
+  return lines.join("\n");
 }
 function buildBatchPrompt(args) {
   const priorSessionBlock = args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps ? `
@@ -1733,7 +1751,10 @@ function buildBatchPrompt(args) {
   next_steps: ${args.priorNextSteps ?? ""}
 </prior_session>
 ` : "";
-  const body = [...args.obsBlocks, args.turnBlock ?? ""].filter(Boolean).join("\n");
+  const body = [
+    ...args.completedTurnBlocks,
+    ...args.partialTurnBlocks ?? []
+  ].filter(Boolean).join("\n");
   return `<session id="S${args.sessionId}">
   project: ${args.project}
   user_request: ${args.firstUserPrompt ?? ""}
@@ -1768,6 +1789,9 @@ function collectPathValues(input, key) {
 }
 function aggregateTurnFiles(db, turnId) {
   const observations = getObservationsForTurn(db, turnId);
+  return aggregateFilesFromObservations(observations);
+}
+function aggregateFilesFromObservations(observations) {
   const filesRead = /* @__PURE__ */ new Set();
   const filesModified = /* @__PURE__ */ new Set();
   for (const observation of observations) {
@@ -1918,11 +1942,11 @@ function createWorkerProcessors(db) {
       );
       state.initialized = true;
     },
-    async processBatch(state, items, turnStopItem) {
-      if (items.length === 0 && !turnStopItem) {
+    async processBatch(state, items, options) {
+      if (items.length === 0 && (options?.turnStopItems?.length ?? 0) === 0 && (options?.partialTurns?.length ?? 0) === 0) {
         return;
       }
-      const sessionId = turnStopItem?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
+      const sessionId = options?.turnStopItems?.[0]?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
       const session = getSession(db, sessionId);
       if (!session) {
         return;
@@ -1936,40 +1960,82 @@ function createWorkerProcessors(db) {
             LIMIT 1
           `
       ).get(session.id);
-      const obsBlocks = items.map((item) => {
+      const obsByTurnId = /* @__PURE__ */ new Map();
+      for (const item of items) {
         const observation = getObservation(db, item.targetId);
         if (!observation || observation.status !== "pending") {
+          continue;
+        }
+        const group = obsByTurnId.get(observation.turnId) ?? [];
+        group.push({
+          observationId: observation.id,
+          toolName: observation.toolName ?? "Tool",
+          toolInput: observation.toolInput,
+          toolResult: observation.toolResult
+        });
+        obsByTurnId.set(observation.turnId, group);
+      }
+      const completedTurnBlocks = (options?.turnStopItems ?? []).map((turnStopItem) => {
+        const turn = getTurnById(db, turnStopItem.targetId);
+        if (!turn || turn.status === "undone") {
           return null;
         }
-        return buildObsBlock(
-          observation.id,
-          observation.toolName ?? "Tool",
-          observation.toolInput,
-          observation.toolResult
+        const aggregate = aggregateTurnFiles(db, turn.id);
+        updateTurnById(db, turn.id, {
+          filesRead: aggregate.filesRead,
+          filesModified: aggregate.filesModified,
+          toolCallCount: aggregate.toolCallCount,
+          updatedAtEpoch: Math.floor(Date.now() / 1e3)
+        });
+        const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map(
+          (observation) => buildObsBlock(
+            observation.observationId,
+            observation.toolName,
+            observation.toolInput,
+            observation.toolResult
+          )
         );
-      }).filter((value) => value !== null);
-      let turnBlock = null;
-      if (turnStopItem) {
-        const turn = getTurnById(db, turnStopItem.targetId);
-        if (turn && turn.status === "active") {
-          const aggregate = aggregateTurnFiles(db, turn.id);
-          updateTurnById(db, turn.id, {
-            filesRead: aggregate.filesRead,
-            filesModified: aggregate.filesModified,
-            toolCallCount: aggregate.toolCallCount,
-            updatedAtEpoch: Math.floor(Date.now() / 1e3)
-          });
-          turnBlock = buildBatchTurnBlock(
-            turn.id,
-            turn.userPrompt,
-            turn.assistantResponse,
-            aggregate.filesRead,
-            aggregate.filesModified,
-            aggregate.toolCallCount
-          );
+        return buildBatchTurnBlock(
+          turn.id,
+          obsBlocks,
+          turn.userPrompt,
+          turn.assistantResponse,
+          aggregate.filesRead,
+          aggregate.filesModified,
+          aggregate.toolCallCount
+        );
+      }).filter((block) => block !== null);
+      const partialTurnBlocks = (options?.partialTurns ?? []).map((partialTurn) => {
+        const turn = getTurnById(db, partialTurn.turnId);
+        if (!turn || turn.status === "undone") {
+          return null;
         }
-      }
-      if (obsBlocks.length === 0 && !turnBlock) {
+        const contextObservations = partialTurn.contextObservationIds.map((observationId) => getObservation(db, observationId)).filter(
+          (observation) => observation !== null
+        );
+        const aggregate = aggregateFilesFromObservations(contextObservations);
+        const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map(
+          (observation) => buildObsBlock(
+            observation.observationId,
+            observation.toolName,
+            observation.toolInput,
+            observation.toolResult
+          )
+        );
+        if (obsBlocks.length === 0) {
+          return null;
+        }
+        return buildPartialTurnBlock({
+          turnId: turn.id,
+          obsBlocks,
+          prompt: turn.userPrompt,
+          filesRead: aggregate.filesRead,
+          filesModified: aggregate.filesModified,
+          includedObsCount: obsBlocks.length,
+          totalObsCount: partialTurn.totalObsCount
+        });
+      }).filter((block) => block !== null);
+      if (completedTurnBlocks.length === 0 && partialTurnBlocks.length === 0) {
         return;
       }
       await state.pushMessage(
@@ -1981,8 +2047,8 @@ function createWorkerProcessors(db) {
           priorContent: session.content,
           priorInsight: session.insight,
           priorNextSteps: session.nextSteps,
-          obsBlocks,
-          turnBlock
+          completedTurnBlocks,
+          partialTurnBlocks
         })
       );
       state.initialized = true;
@@ -39534,6 +39600,9 @@ var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var OBS_TIMEOUT_MS = 15e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
+var RESERVE_TURNS = 3;
+var KEEPALIVE_MS = 24e4;
+var CACHE_TTL_MS = 3e5;
 function defaultNoopDrain() {
   return Promise.resolve();
 }
@@ -39582,16 +39651,28 @@ function buildRollbackEnvelope(promptNumbers) {
 }
 function pruneBufferedUndoneItems(db, items) {
   const activeItems = [];
+  const prunedSeqs = /* @__PURE__ */ new Set();
   for (const item of items) {
-    const observation = getObservation(db, item.targetId);
-    const turn = observation ? getTurnById(db, observation.turnId) : null;
-    if (!observation || !turn || turn.status === "undone") {
+    if (item.kind === "obs") {
+      const observation = getObservation(db, item.targetId);
+      const turn2 = observation ? getTurnById(db, observation.turnId) : null;
+      if (!observation || !turn2 || turn2.status === "undone") {
+        deleteQueueItem(db, item.seq);
+        prunedSeqs.add(item.seq);
+        continue;
+      }
+      activeItems.push(item);
+      continue;
+    }
+    const turn = getTurnById(db, item.targetId);
+    if (!turn || turn.status === "undone") {
       deleteQueueItem(db, item.seq);
+      prunedSeqs.add(item.seq);
       continue;
     }
     activeItems.push(item);
   }
-  return activeItems;
+  return { activeItems, prunedSeqs };
 }
 function createWorkerCore(deps) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1e3));
@@ -39626,6 +39707,73 @@ function createWorkerCore(deps) {
   }
   function clearBuffer(sessionDbId) {
     buffers.delete(sessionDbId);
+  }
+  function removeBufferedItemsBySeq(sessionDbId, seqs) {
+    if (seqs.size === 0) {
+      return;
+    }
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    buffer.items = buffer.items.filter((item) => !seqs.has(item.seq));
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+  function replaceBufferItems(sessionDbId, items) {
+    if (items.length === 0) {
+      buffers.delete(sessionDbId);
+      return;
+    }
+    const buffer = getOrCreateBuffer(sessionDbId);
+    buffer.items = items;
+  }
+  function buildTurnGroups(items) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const item of items) {
+      let turnId = null;
+      if (item.kind === "turn-stop") {
+        turnId = item.targetId;
+      } else {
+        turnId = getObservation(deps.db, item.targetId)?.turnId ?? null;
+      }
+      if (turnId === null) {
+        continue;
+      }
+      const turn = getTurnById(deps.db, turnId);
+      if (!turn) {
+        continue;
+      }
+      let group = groups.get(turnId);
+      if (!group) {
+        group = {
+          turnId,
+          promptNumber: turn.promptNumber,
+          obsItems: []
+        };
+        groups.set(turnId, group);
+      }
+      if (item.kind === "turn-stop") {
+        group.turnStopItem = item;
+      } else {
+        group.obsItems.push(item);
+      }
+    }
+    return Array.from(groups.values()).sort((left, right) => {
+      if (left.promptNumber !== right.promptNumber) {
+        return left.promptNumber - right.promptNumber;
+      }
+      const leftSeq = Math.min(
+        left.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
+        ...left.obsItems.map((item) => item.seq)
+      );
+      const rightSeq = Math.min(
+        right.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
+        ...right.obsItems.map((item) => item.seq)
+      );
+      return leftSeq - rightSeq;
+    });
   }
   function getOrCreateSessionState(sessionDbId) {
     let state = sessions.get(sessionDbId);
@@ -39784,37 +39932,84 @@ ${prompt}` : prompt;
       `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`
     );
   }
-  async function flushBufferedItems(sessionDbId, turnStopItem) {
-    const bufferedItems = pruneBufferedUndoneItems(
-      deps.db,
-      [...buffers.get(sessionDbId)?.items ?? []]
-    );
-    if (bufferedItems.length === 0 && !turnStopItem) {
-      clearBuffer(sessionDbId);
+  async function sendBatchSelectionLocked(state, sessionDbId, selection) {
+    if (selection.obsItems.length === 0 && selection.turnStopItems.length === 0 && (selection.partialTurns?.length ?? 0) === 0) {
       return;
     }
+    const sentSeqs = new Set(
+      [...selection.obsItems, ...selection.turnStopItems].map((item) => item.seq)
+    );
     try {
-      await withSessionProcessingLock(
-        sessionDbId,
-        (state) => processBatchImpl(state, bufferedItems, turnStopItem)
-      );
-      for (const item of bufferedItems) {
+      await processBatchImpl(state, selection.obsItems, {
+        turnStopItems: selection.turnStopItems,
+        partialTurns: selection.partialTurns
+      });
+      for (const item of selection.obsItems) {
         deleteQueueItem(deps.db, item.seq);
       }
-      if (turnStopItem) {
-        deleteQueueItem(deps.db, turnStopItem.seq);
+      for (const item of selection.turnStopItems) {
+        deleteQueueItem(deps.db, item.seq);
       }
-      clearBuffer(sessionDbId);
     } catch (error49) {
-      for (const item of bufferedItems) {
+      for (const item of selection.obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      if (turnStopItem) {
-        releaseQueueClaim(deps.db, turnStopItem.seq);
+      for (const item of selection.turnStopItems) {
+        releaseQueueClaim(deps.db, item.seq);
       }
-      clearBuffer(sessionDbId);
       throw error49;
+    } finally {
+      removeBufferedItemsBySeq(sessionDbId, sentSeqs);
     }
+  }
+  async function flushExcessTurns(sessionDbId) {
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+      const groups = buildTurnGroups(activeItems);
+      const completedGroups = groups.filter((group) => group.turnStopItem);
+      if (completedGroups.length <= RESERVE_TURNS) {
+        replaceBufferItems(sessionDbId, activeItems);
+        return;
+      }
+      const groupsToFlush = completedGroups.slice(
+        0,
+        completedGroups.length - RESERVE_TURNS
+      );
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: groupsToFlush.flatMap((group) => group.obsItems),
+        turnStopItems: groupsToFlush.map((group) => group.turnStopItem).filter((item) => item !== void 0)
+      });
+    });
+  }
+  async function flushBufferedItems(sessionDbId) {
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+      const groups = buildTurnGroups(activeItems);
+      const partialTurns = groups.filter((group) => !group.turnStopItem && group.obsItems.length > 0).map((group) => ({
+        turnId: group.turnId,
+        totalObsCount: group.obsItems.length,
+        contextObservationIds: group.obsItems.map((item) => item.targetId)
+      }));
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: activeItems.filter((item) => item.kind === "obs"),
+        turnStopItems: activeItems.filter((item) => item.kind === "turn-stop"),
+        partialTurns
+      });
+    });
   }
   async function scanAndDrainQueue(sessionFilter) {
     const skippedSeqs = /* @__PURE__ */ new Set();
@@ -39827,26 +40022,24 @@ ${prompt}` : prompt;
       if (!item) {
         return;
       }
-      if (item.kind === "obs") {
-        getOrCreateBuffer(item.sessionDbId).items.push(item);
-        continue;
-      }
-      const bufferedSeqs = (buffers.get(item.sessionDbId)?.items ?? []).map(
-        (bufferedItem) => bufferedItem.seq
-      );
-      try {
-        await flushBufferedItems(item.sessionDbId, item);
-      } catch (error49) {
-        skippedSeqs.add(item.seq);
-        for (const seq of bufferedSeqs) {
-          skippedSeqs.add(seq);
+      const buffer = getOrCreateBuffer(item.sessionDbId);
+      buffer.items.push(item);
+      if (item.kind === "turn-stop") {
+        const bufferedSeqs = buffer.items.map((bufferedItem) => bufferedItem.seq);
+        try {
+          await flushExcessTurns(item.sessionDbId);
+        } catch (error49) {
+          skippedSeqs.add(item.seq);
+          for (const seq of bufferedSeqs) {
+            skippedSeqs.add(seq);
+          }
+          logger.error?.("queue item failed, skipping for this drain", {
+            seq: item.seq,
+            kind: item.kind,
+            targetId: item.targetId,
+            error: error49
+          });
         }
-        logger.error?.("queue item failed, skipping for this drain", {
-          seq: item.seq,
-          kind: item.kind,
-          targetId: item.targetId,
-          error: error49
-        });
       }
     }
   }
@@ -39897,6 +40090,63 @@ ${prompt}` : prompt;
   async function flushSession(sessionDbId) {
     await scanAndDrainQueue(sessionDbId);
     await flushBufferedItems(sessionDbId);
+  }
+  async function tryKeepaliveSession(sessionDbId, currentMs) {
+    if (compactingSessions.has(sessionDbId)) {
+      return;
+    }
+    const existingState = sessions.get(sessionDbId);
+    if (!existingState || existingState.lastPushAt <= 0) {
+      return;
+    }
+    const age = currentMs - existingState.lastPushAt;
+    if (age < KEEPALIVE_MS || age >= CACHE_TTL_MS) {
+      return;
+    }
+    if (existingState.lastPushAt > existingState.lastMessageAt) {
+      return;
+    }
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      const refreshedAge = currentMs - state.lastPushAt;
+      if (state.lastPushAt <= 0 || refreshedAge < KEEPALIVE_MS || refreshedAge >= CACHE_TTL_MS || state.lastPushAt > state.lastMessageAt) {
+        return;
+      }
+      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
+      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
+      if (prunedSeqs.size > 0) {
+        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+      }
+      if (activeItems.length === 0) {
+        return;
+      }
+      const groups = buildTurnGroups(activeItems);
+      const completedGroups = groups.filter((group) => group.turnStopItem);
+      if (completedGroups.length > 0) {
+        const group = completedGroups[0];
+        await sendBatchSelectionLocked(state, sessionDbId, {
+          obsItems: group.obsItems,
+          turnStopItems: group.turnStopItem ? [group.turnStopItem] : []
+        });
+        return;
+      }
+      const partialGroup = [...groups].filter((group) => !group.turnStopItem && group.obsItems.length > 0).sort((left, right) => right.promptNumber - left.promptNumber)[0];
+      if (!partialGroup) {
+        return;
+      }
+      const selectedCount = Math.max(1, Math.ceil(partialGroup.obsItems.length / 2));
+      const selectedObsItems = partialGroup.obsItems.slice(0, selectedCount);
+      await sendBatchSelectionLocked(state, sessionDbId, {
+        obsItems: selectedObsItems,
+        turnStopItems: [],
+        partialTurns: [
+          {
+            turnId: partialGroup.turnId,
+            totalObsCount: partialGroup.obsItems.length,
+            contextObservationIds: partialGroup.obsItems.map((item) => item.targetId)
+          }
+        ]
+      });
+    });
   }
   function recoverFromCrash() {
     buffers.clear();
@@ -39994,6 +40244,12 @@ ${prompt}` : prompt;
           }
         })
       );
+    },
+    async runKeepaliveTick(nowMsOverride) {
+      const currentMs = nowMsOverride ?? nowMs();
+      for (const sessionDbId of buffers.keys()) {
+        await tryKeepaliveSession(sessionDbId, currentMs);
+      }
     }
   };
 }
@@ -40241,6 +40497,7 @@ async function main(deps = {}) {
   }
   setInterval(() => {
     void core.abortStalledSessions();
+    void core.runKeepaliveTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void checkForIdleWorkerShutdown(serverState, {
