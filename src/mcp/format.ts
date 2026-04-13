@@ -1,3 +1,5 @@
+import { renderFileTree } from "../shared/file-tree";
+
 export const TYPE_EMOJI: Record<string, string> = {
   bugfix: "🔴",
   feature: "🟣",
@@ -252,6 +254,47 @@ function truncateText(
       ? ` [use mnemo-replay skill → read ${hintId} for full content]`
       : ""
   }`;
+}
+
+function truncateFileTree(
+  tree: string,
+  {
+    limit,
+    mode = "legacy",
+    hintId,
+  }: {
+    limit: number;
+    mode?: RenderMode;
+    hintId?: string;
+  },
+): string[] {
+  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const lines = tree.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+
+  for (const line of lines) {
+    const nextUsed = used + line.length + 1;
+    if (kept.length > 0 && nextUsed > boundedLimit) {
+      break;
+    }
+    kept.push(line);
+    used = nextUsed;
+  }
+
+  const omitted = lines.length - kept.length;
+  if (omitted <= 0) {
+    return kept;
+  }
+
+  return [
+    ...kept,
+    `... +${omitted} lines${
+      mode === "unified" && hintId
+        ? ` [use mnemo-replay skill → read ${hintId} for full content]`
+        : ""
+    }`,
+  ];
 }
 
 function resolveExplicitTruncate(truncate?: number): number {
@@ -659,25 +702,28 @@ function formatTurnExpandedWithMode(
   }
 
   if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(
-      `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
+    lines.push(`${detailIndent}- files_read:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesRead), {
         limit,
         mode,
         hintId,
-      })}`,
+      }),
     );
   }
 
   if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(
-      `${detailIndent}- files_modified: ${truncateText(
-        turn.filesModified.join(", "),
-        {
-          limit,
-          mode,
-          hintId,
-        },
-      )}`,
+    lines.push(`${detailIndent}- files_modified:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesModified), {
+        limit,
+        mode,
+        hintId,
+      }),
     );
   }
 

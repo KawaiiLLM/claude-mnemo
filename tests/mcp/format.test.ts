@@ -339,6 +339,88 @@ describe("MCP format renderer", () => {
     expect(longLimit).not.toContain("x".repeat(500) + "...");
   });
 
+  test("renders expanded turn files as a tree in unified mode", () => {
+    const turn: FormattedTurn = {
+      id: 14,
+      promptNumber: 14,
+      transcriptLineStart: null,
+      title: "tree render",
+      status: "extracted",
+      filesRead: [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
+      ],
+      filesModified: [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+      ],
+    };
+
+    expect(renderNode({ type: "turn", value: turn }, { depth: "expanded" })).toBe(
+      [
+        "  - [T14] tree render | 📖3 ✏️1 [extracted]",
+        "    - files_read:",
+        "      - /Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "      - db/pending-queue.ts",
+        "      - worker/",
+        "      -   processors.ts",
+        "      -   server.ts",
+        "    - files_modified:",
+        "      - /Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+      ].join("\n"),
+    );
+  });
+
+  test("tree rendering respects truncate with line-aware omission", () => {
+    const turn: FormattedTurn = {
+      id: 15,
+      promptNumber: 15,
+      transcriptLineStart: null,
+      title: "tree truncation",
+      status: "extracted",
+      filesRead: [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+      ],
+    };
+
+    const rendered = renderNode(
+      { type: "turn", value: turn },
+      { depth: "expanded", truncate: 40 },
+    );
+
+    expect(rendered).toContain("    - files_read:");
+    expect(rendered).toContain("      - /Users/zhaoqixuan/Projects/claude-mnemo/src");
+    expect(rendered).toContain("... +4 lines");
+  });
+
+  test("tree truncation includes replay hints only in unified mode when hintId exists", () => {
+    const turn: FormattedTurn = {
+      id: 16,
+      promptNumber: 16,
+      transcriptLineStart: null,
+      title: "tree hint",
+      status: "extracted",
+      filesRead: [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+      ],
+    };
+
+    const unified = renderNode(
+      { type: "turn", value: turn },
+      { depth: "expanded", truncate: 40, sessionId: 142 },
+    );
+    const legacy = formatTurnExpanded(turn, { truncate: 40 });
+
+    expect(unified).toContain("[use mnemo-replay skill");
+    expect(legacy).not.toContain("[use mnemo-replay skill");
+  });
+
   test("defaults truncate to 200 when unspecified", () => {
     const rendered = renderNode(
         {

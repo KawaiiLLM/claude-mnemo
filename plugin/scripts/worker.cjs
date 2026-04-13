@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path4 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.3-mnx0nl39" : "dev";
+var BUILD_ID = true ? "0.2.3-mnx1tml6" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1675,8 +1675,102 @@ function markRollbackTurnsNotified(db, turns, updatedAtEpoch) {
   }
 }
 
-// src/worker/processors.ts
+// src/shared/file-tree.ts
 var import_node_path3 = __toESM(require("node:path"), 1);
+function createFileTreeNode() {
+  return { files: [], dirs: /* @__PURE__ */ new Map() };
+}
+function commonPathPrefix(paths) {
+  if (paths.length === 0) {
+    return "";
+  }
+  if (paths.length === 1) {
+    return paths[0] ?? "";
+  }
+  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
+  const common = [];
+  const limit = Math.min(...splitPaths.map((segments) => segments.length));
+  for (let index = 0; index < limit; index += 1) {
+    const segment = splitPaths[0]?.[index];
+    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
+      break;
+    }
+    common.push(segment);
+  }
+  if (common.length === 0) {
+    return "/";
+  }
+  return `/${common.join("/")}`;
+}
+function renderTreeNode(name, node, indent) {
+  if (node.files.length === 1 && node.dirs.size === 0) {
+    return [`${indent}${name}/${node.files[0]}`];
+  }
+  if (node.files.length === 0 && node.dirs.size > 0) {
+    const childEntries = [...node.dirs.entries()].sort(
+      ([left], [right]) => left.localeCompare(right)
+    );
+    return childEntries.flatMap(
+      ([childName, childNode]) => renderTreeNode(`${name}/${childName}`, childNode, indent)
+    );
+  }
+  const lines = [`${indent}${name}/`];
+  for (const file2 of [...node.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(`${indent}  ${file2}`);
+  }
+  for (const [childName, childNode] of [...node.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
+  }
+  return lines;
+}
+function renderFileTree(paths) {
+  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
+    (left, right) => left.localeCompare(right)
+  );
+  if (uniquePaths.length === 0) {
+    return "(none)";
+  }
+  if (uniquePaths.length === 1) {
+    return uniquePaths[0] ?? "(none)";
+  }
+  const root2 = commonPathPrefix(uniquePaths);
+  const tree = createFileTreeNode();
+  for (const value of uniquePaths) {
+    const relative = import_node_path3.default.posix.relative(root2, value);
+    if (!relative || relative === "") {
+      continue;
+    }
+    const segments = relative.split("/").filter(Boolean);
+    if (segments.length === 0) {
+      continue;
+    }
+    let node = tree;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
+      let next = node.dirs.get(segment);
+      if (!next) {
+        next = createFileTreeNode();
+        node.dirs.set(segment, next);
+      }
+      node = next;
+    }
+    node.files.push(segments[segments.length - 1]);
+  }
+  const lines = [root2];
+  for (const file2 of [...tree.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(file2);
+  }
+  for (const [childName, childNode] of [...tree.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, ""));
+  }
+  return lines.join("\n");
+}
+
+// src/worker/processors.ts
 function truncateMiddle(value, limit) {
   const text = (value ?? "").trim();
   if (text.length <= limit) {
@@ -1892,98 +1986,6 @@ function safeJsonParse(value) {
   } catch {
     return null;
   }
-}
-function createFileTreeNode() {
-  return { files: [], dirs: /* @__PURE__ */ new Map() };
-}
-function commonPathPrefix(paths) {
-  if (paths.length === 0) {
-    return "";
-  }
-  if (paths.length === 1) {
-    return paths[0] ?? "";
-  }
-  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
-  const common = [];
-  const limit = Math.min(...splitPaths.map((segments) => segments.length));
-  for (let index = 0; index < limit; index += 1) {
-    const segment = splitPaths[0]?.[index];
-    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
-      break;
-    }
-    common.push(segment);
-  }
-  if (common.length === 0) {
-    return "/";
-  }
-  return `/${common.join("/")}`;
-}
-function renderTreeNode(name, node, indent) {
-  if (node.files.length === 1 && node.dirs.size === 0) {
-    return [`${indent}${name}/${node.files[0]}`];
-  }
-  if (node.files.length === 0 && node.dirs.size > 0) {
-    const childEntries = [...node.dirs.entries()].sort(
-      ([left], [right]) => left.localeCompare(right)
-    );
-    return childEntries.flatMap(
-      ([childName, childNode]) => renderTreeNode(`${name}/${childName}`, childNode, indent)
-    );
-  }
-  const lines = [`${indent}${name}/`];
-  for (const file2 of [...node.files].sort((left, right) => left.localeCompare(right))) {
-    lines.push(`${indent}  ${file2}`);
-  }
-  for (const [childName, childNode] of [...node.dirs.entries()].sort(
-    ([left], [right]) => left.localeCompare(right)
-  )) {
-    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
-  }
-  return lines;
-}
-function renderFileTree(paths) {
-  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
-    (left, right) => left.localeCompare(right)
-  );
-  if (uniquePaths.length === 0) {
-    return "(none)";
-  }
-  if (uniquePaths.length === 1) {
-    return uniquePaths[0] ?? "(none)";
-  }
-  const root2 = commonPathPrefix(uniquePaths);
-  const tree = createFileTreeNode();
-  for (const value of uniquePaths) {
-    const relative = import_node_path3.default.posix.relative(root2, value);
-    if (!relative || relative === "") {
-      continue;
-    }
-    const segments = relative.split("/").filter(Boolean);
-    if (segments.length === 0) {
-      continue;
-    }
-    let node = tree;
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const segment = segments[index];
-      let next = node.dirs.get(segment);
-      if (!next) {
-        next = createFileTreeNode();
-        node.dirs.set(segment, next);
-      }
-      node = next;
-    }
-    node.files.push(segments[segments.length - 1]);
-  }
-  const lines = [root2];
-  for (const file2 of [...tree.files].sort((left, right) => left.localeCompare(right))) {
-    lines.push(file2);
-  }
-  for (const [childName, childNode] of [...tree.dirs.entries()].sort(
-    ([left], [right]) => left.localeCompare(right)
-  )) {
-    lines.push(...renderTreeNode(childName, childNode, ""));
-  }
-  return lines.join("\n");
 }
 function collectPathValues(input, key) {
   const value = input[key];
@@ -37187,6 +37189,32 @@ function truncateText(text, {
   }
   return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`;
 }
+function truncateFileTree(tree, {
+  limit,
+  mode = "legacy",
+  hintId
+}) {
+  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const lines = tree.split("\n");
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    const nextUsed = used + line.length + 1;
+    if (kept.length > 0 && nextUsed > boundedLimit) {
+      break;
+    }
+    kept.push(line);
+    used = nextUsed;
+  }
+  const omitted = lines.length - kept.length;
+  if (omitted <= 0) {
+    return kept;
+  }
+  return [
+    ...kept,
+    `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
+  ];
+}
 function resolveExplicitTruncate(truncate) {
   return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
 }
@@ -37482,24 +37510,27 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     );
   }
   if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(
-      `${detailIndent}- files_read: ${truncateText(turn.filesRead.join(", "), {
+    lines.push(`${detailIndent}- files_read:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesRead), {
         limit,
         mode,
         hintId
-      })}`
+      })
     );
   }
   if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(
-      `${detailIndent}- files_modified: ${truncateText(
-        turn.filesModified.join(", "),
-        {
-          limit,
-          mode,
-          hintId
-        }
-      )}`
+    lines.push(`${detailIndent}- files_modified:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesModified), {
+        limit,
+        mode,
+        hintId
+      })
     );
   }
   const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";

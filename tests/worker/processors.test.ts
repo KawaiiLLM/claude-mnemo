@@ -6,11 +6,11 @@ import { createObservation, getObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
+import { renderFileTree as renderSharedFileTree } from "../../src/shared/file-tree";
 import {
   cleanInput,
   cleanOutput,
   createWorkerProcessors,
-  renderFileTree,
 } from "../../src/worker/processors";
 
 describe("worker processors", () => {
@@ -146,7 +146,7 @@ describe("worker processors", () => {
 
   test("renderFileTree groups files under a common root", () => {
     expect(
-      renderFileTree([
+      renderSharedFileTree([
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
@@ -162,19 +162,29 @@ describe("worker processors", () => {
     );
   });
 
+  test("shared renderFileTree matches the worker import contract", () => {
+    const paths = [
+      "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+      "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+    ];
+    expect(renderSharedFileTree(paths)).toBe(
+      ["/Users/zhaoqixuan/Projects/claude-mnemo/src/worker", "processors.ts", "server.ts"].join("\n"),
+    );
+  });
+
   test("renderFileTree keeps the actual longest common directory prefix", () => {
     expect(
-      renderFileTree(["/a/b/c.ts", "/a/c/d.ts"]),
+      renderSharedFileTree(["/a/b/c.ts", "/a/c/d.ts"]),
     ).toBe(["/a", "b/c.ts", "c/d.ts"].join("\n"));
   });
 
   test("renderFileTree returns none for an empty list", () => {
-    expect(renderFileTree([])).toBe("(none)");
+    expect(renderSharedFileTree([])).toBe("(none)");
   });
 
   test("renderFileTree renders single-file directories as dir/file", () => {
     expect(
-      renderFileTree([
+      renderSharedFileTree([
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
       ]),
@@ -189,7 +199,7 @@ describe("worker processors", () => {
 
   test("renderFileTree deduplicates the root path when it appears in the path list", () => {
     expect(
-      renderFileTree([
+      renderSharedFileTree([
         "/Users/zhaoqixuan/Projects/claude-mnemo",
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
       ]),
@@ -200,7 +210,7 @@ describe("worker processors", () => {
 
   test("renderFileTree handles cross-project paths without collapsing them incorrectly", () => {
     expect(
-      renderFileTree([
+      renderSharedFileTree([
         "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
         "/Users/zhaoqixuan/Projects/another-repo/src/index.ts",
       ]),
