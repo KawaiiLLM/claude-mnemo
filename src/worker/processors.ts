@@ -1,7 +1,12 @@
 import type { Database } from "bun:sqlite";
+import path from "node:path";
 
 import type { PendingQueueItem } from "../db/pending-queue";
-import { getObservation, getObservationsForTurn } from "../db/observations";
+import {
+  getObservation,
+  getObservationsForTurn,
+  updateObservation,
+} from "../db/observations";
 import { getSession } from "../db/sessions";
 import { getTurnById, updateTurnById } from "../db/turns";
 import type { SessionState } from "./server";
@@ -16,6 +21,120 @@ function truncateMiddle(value: string | null | undefined, limit: number): string
   return `${text.slice(0, keep)}\n[...${text.length - keep * 2} chars truncated...]\n${text.slice(-keep)}`;
 }
 
+const INPUT_STRIP: Record<string, Set<string>> = {
+  Bash: new Set(["description", "timeout"]),
+};
+
+const OUTPUT_ALLOW: Record<string, Set<string>> = {
+  Bash: new Set(["stdout", "stderr"]),
+  Read: new Set(["content"]),
+  Grep: new Set(["filenames", "content", "numFiles", "numLines"]),
+  Edit: new Set(["filePath", "oldString", "newString"]),
+  Glob: new Set(["filenames", "numFiles"]),
+  Write: new Set(["filePath"]),
+  Agent: new Set(["status", "content"]),
+  WebFetch: new Set(["result", "code"]),
+  WebSearch: new Set(["results"]),
+  ToolSearch: new Set(["matches"]),
+  Skill: new Set(["success", "commandName"]),
+};
+
+function formatJsonValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return JSON.stringify(value);
+}
+
+function unwrapSingleStringValue(
+  obj: Record<string, unknown>,
+): string | Record<string, unknown> {
+  const entries = Object.entries(obj);
+  if (entries.length === 1 && typeof entries[0]?.[1] === "string") {
+    return entries[0][1] as string;
+  }
+
+  return obj;
+}
+
+export function cleanInput(toolName: string, rawJson: string | null): string {
+  const parsed = safeJsonParse(rawJson);
+  if (!parsed) {
+    return (rawJson ?? "").trim();
+  }
+
+  const stripKeys = INPUT_STRIP[toolName];
+  const cleaned = Object.fromEntries(
+    Object.entries(parsed).filter(([key]) => !stripKeys?.has(key)),
+  );
+
+  return formatJsonValue(unwrapSingleStringValue(cleaned)).trim();
+}
+
+export function cleanOutput(toolName: string, rawJson: string | null): string {
+  const parsed = safeJsonParse(rawJson);
+  if (!parsed) {
+    return (rawJson ?? "").trim();
+  }
+
+  if (!(toolName in OUTPUT_ALLOW)) {
+    return (rawJson ?? "").trim();
+  }
+
+  if (toolName === "Read") {
+    const content = parsed.file;
+    if (
+      content &&
+      typeof content === "object" &&
+      typeof (content as Record<string, unknown>).content === "string"
+    ) {
+      return ((content as Record<string, unknown>).content as string).trim();
+    }
+  }
+
+  if (toolName === "Bash") {
+    const stdout =
+      typeof parsed.stdout === "string" ? parsed.stdout.trim() : "";
+    const stderr =
+      typeof parsed.stderr === "string" ? parsed.stderr.trim() : "";
+
+    if (!stdout && stderr) {
+      return stderr;
+    }
+
+    const filtered: Record<string, unknown> = {};
+    if (stdout) {
+      filtered.stdout = stdout;
+    }
+    if (stderr) {
+      filtered.stderr = stderr;
+    }
+
+    if (Object.keys(filtered).length === 0) {
+      return "";
+    }
+
+    return formatJsonValue(unwrapSingleStringValue(filtered)).trim();
+  }
+
+  const allowKeys = OUTPUT_ALLOW[toolName];
+  const filtered = Object.fromEntries(
+    Object.entries(parsed).filter(([key, value]) => {
+      if (!allowKeys?.has(key)) {
+        return false;
+      }
+      return value !== null && value !== undefined;
+    }),
+  );
+
+  if (Object.keys(filtered).length === 0) {
+    return "";
+  }
+
+  return formatJsonValue(unwrapSingleStringValue(filtered)).trim();
+}
+
 function buildObsBlock(
   observationId: number,
   toolName: string,
@@ -24,8 +143,8 @@ function buildObsBlock(
 ): string {
   return `<obs id="O${observationId}">
   🔧 ${toolName}
-  in: ${truncateMiddle(toolInput, 500)}
-  out: ${truncateMiddle(toolResult, 500)}
+  in: ${truncateMiddle(cleanInput(toolName, toolInput), 300)}
+  out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
 </obs>`;
 }
 
@@ -81,6 +200,8 @@ function buildTurnStopPrompt(
   filesRead: string[],
   filesModified: string[],
 ): string {
+  const renderedFilesRead = renderFileTree(filesRead);
+  const renderedFilesModified = renderFileTree(filesModified);
   return `<turn id="T${turnId}">
   prompt: ${truncateMiddle(prompt, 1000)}
   response: ${truncateMiddle(response, 1000)}
@@ -92,8 +213,16 @@ function buildTurnStopPrompt(
   prior_content: ${content ?? ""}
   prior_insight: ${insight ?? ""}
   prior_next_steps: ${nextSteps ?? ""}
-  files_read: ${filesRead.join(", ")}
-  files_modified: ${filesModified.join(", ")}
+  files_read:
+${renderedFilesRead
+  .split("\n")
+  .map((line) => `  ${line}`)
+  .join("\n")}
+  files_modified:
+${renderedFilesModified
+  .split("\n")
+  .map((line) => `  ${line}`)
+  .join("\n")}
 </session>`;
 }
 
@@ -106,14 +235,18 @@ function buildBatchTurnBlock(
   filesModified: string[],
   toolCallCount: number,
 ): string {
+  const renderedFilesRead = renderFileTree(filesRead);
+  const renderedFilesModified = renderFileTree(filesModified);
   const lines = [`  <turn id="T${turnId}">`];
   for (const obsBlock of obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
   lines.push(`    prompt: ${truncateMiddle(prompt, 1000)}`);
   lines.push(`    response: ${truncateMiddle(response, 1000)}`);
-  lines.push(`    files_read: ${filesRead.join(", ")}`);
-  lines.push(`    files_modified: ${filesModified.join(", ")}`);
+  lines.push("    files_read:");
+  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
+  lines.push("    files_modified:");
+  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
   lines.push(`    tool_call_count: ${toolCallCount}`);
   lines.push("  </turn>");
   return lines.join("\n");
@@ -128,13 +261,17 @@ function buildPartialTurnBlock(args: {
   includedObsCount: number;
   totalObsCount: number;
 }): string {
+  const renderedFilesRead = renderFileTree(args.filesRead);
+  const renderedFilesModified = renderFileTree(args.filesModified);
   const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
   for (const obsBlock of args.obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
   lines.push(`    prompt: ${truncateMiddle(args.prompt, 1000)}`);
-  lines.push(`    files_read: ${args.filesRead.join(", ")}`);
-  lines.push(`    files_modified: ${args.filesModified.join(", ")}`);
+  lines.push("    files_read:");
+  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
+  lines.push("    files_modified:");
+  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
   lines.push(
     `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`,
   );
@@ -203,6 +340,123 @@ function safeJsonParse(value: string | null): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+interface FileTreeNode {
+  files: string[];
+  dirs: Map<string, FileTreeNode>;
+}
+
+function createFileTreeNode(): FileTreeNode {
+  return { files: [], dirs: new Map() };
+}
+
+function commonPathPrefix(paths: string[]): string {
+  if (paths.length === 0) {
+    return "";
+  }
+  if (paths.length === 1) {
+    return paths[0] ?? "";
+  }
+
+  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
+  const common: string[] = [];
+  const limit = Math.min(...splitPaths.map((segments) => segments.length));
+
+  for (let index = 0; index < limit; index += 1) {
+    const segment = splitPaths[0]?.[index];
+    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
+      break;
+    }
+    common.push(segment);
+  }
+
+  if (common.length === 0) {
+    return "/";
+  }
+
+  return `/${common.join("/")}`;
+}
+
+function renderTreeNode(
+  name: string,
+  node: FileTreeNode,
+  indent: string,
+): string[] {
+  if (node.files.length === 1 && node.dirs.size === 0) {
+    return [`${indent}${name}/${node.files[0]}`];
+  }
+
+  if (node.files.length === 0 && node.dirs.size > 0) {
+    const childEntries = [...node.dirs.entries()].sort(([left], [right]) =>
+      left.localeCompare(right),
+    );
+    return childEntries.flatMap(([childName, childNode]) =>
+      renderTreeNode(`${name}/${childName}`, childNode, indent),
+    );
+  }
+
+  const lines = [`${indent}${name}/`];
+  for (const file of [...node.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(`${indent}  ${file}`);
+  }
+  for (const [childName, childNode] of [...node.dirs.entries()].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
+  }
+  return lines;
+}
+
+export function renderFileTree(paths: string[]): string {
+  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  if (uniquePaths.length === 0) {
+    return "(none)";
+  }
+
+  if (uniquePaths.length === 1) {
+    return uniquePaths[0] ?? "(none)";
+  }
+
+  const root = commonPathPrefix(uniquePaths);
+  const tree = createFileTreeNode();
+
+  for (const value of uniquePaths) {
+    const relative = path.posix.relative(root, value);
+    if (!relative || relative === "") {
+      continue;
+    }
+
+    const segments = relative.split("/").filter(Boolean);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    let node = tree;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index]!;
+      let next = node.dirs.get(segment);
+      if (!next) {
+        next = createFileTreeNode();
+        node.dirs.set(segment, next);
+      }
+      node = next;
+    }
+    node.files.push(segments[segments.length - 1]!);
+  }
+
+  const lines = [root];
+  for (const file of [...tree.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(file);
+  }
+  for (const [childName, childNode] of [...tree.dirs.entries()].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, ""));
+  }
+  return lines.join("\n");
 }
 
 function collectPathValues(input: Record<string, unknown>, key: string): string[] {
@@ -570,6 +824,22 @@ export function createWorkerProcessors(db: Database) {
           partialTurnBlocks,
         }),
       );
+      if ((options?.turnStopItems?.length ?? 0) > 0) {
+        const completedTurnIds = new Set(
+          (options?.turnStopItems ?? []).map((item) => item.targetId),
+        );
+        for (const item of items) {
+          const observation = getObservation(db, item.targetId);
+          if (
+            !observation ||
+            observation.status !== "pending" ||
+            !completedTurnIds.has(observation.turnId)
+          ) {
+            continue;
+          }
+          updateObservation(db, observation.id, { status: "skipped" });
+        }
+      }
       const freshSession = getSession(db, session.id);
       state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
       state.initialized = true;

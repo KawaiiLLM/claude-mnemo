@@ -44,10 +44,10 @@ __export(server_exports, {
 module.exports = __toCommonJS(server_exports);
 var import_node_fs5 = require("node:fs");
 var import_node_os2 = require("node:os");
-var import_node_path3 = require("node:path");
+var import_node_path4 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.2-mnwwwru6" : "dev";
+var BUILD_ID = true ? "0.2.3-mnx0nl39" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -82,11 +82,11 @@ function resolveTranscriptPath(projectPath, sessionId) {
 }
 
 // src/db/database.ts
-function resolveDatabasePath2(path) {
-  if (!path || path.trim() === "") {
+function resolveDatabasePath2(path2) {
+  if (!path2 || path2.trim() === "") {
     return resolveDatabasePath();
   }
-  return resolveDatabasePath(path);
+  return resolveDatabasePath(path2);
 }
 function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
@@ -105,8 +105,8 @@ function configureDatabase(db) {
   db.exec("PRAGMA cache_size = 10000;");
   db.exec("PRAGMA busy_timeout = 5000;");
 }
-function createDatabase(path) {
-  const databasePath = resolveDatabasePath2(path);
+function createDatabase(path2) {
+  const databasePath = resolveDatabasePath2(path2);
   ensureParentDirectory(databasePath);
   const db = new import_bun_sqlite.Database(databasePath);
   configureDatabase(db);
@@ -1676,6 +1676,7 @@ function markRollbackTurnsNotified(db, turns, updatedAtEpoch) {
 }
 
 // src/worker/processors.ts
+var import_node_path3 = __toESM(require("node:path"), 1);
 function truncateMiddle(value, limit) {
   const text = (value ?? "").trim();
   if (text.length <= limit) {
@@ -1686,11 +1687,97 @@ function truncateMiddle(value, limit) {
 [...${text.length - keep * 2} chars truncated...]
 ${text.slice(-keep)}`;
 }
+var INPUT_STRIP = {
+  Bash: /* @__PURE__ */ new Set(["description", "timeout"])
+};
+var OUTPUT_ALLOW = {
+  Bash: /* @__PURE__ */ new Set(["stdout", "stderr"]),
+  Read: /* @__PURE__ */ new Set(["content"]),
+  Grep: /* @__PURE__ */ new Set(["filenames", "content", "numFiles", "numLines"]),
+  Edit: /* @__PURE__ */ new Set(["filePath", "oldString", "newString"]),
+  Glob: /* @__PURE__ */ new Set(["filenames", "numFiles"]),
+  Write: /* @__PURE__ */ new Set(["filePath"]),
+  Agent: /* @__PURE__ */ new Set(["status", "content"]),
+  WebFetch: /* @__PURE__ */ new Set(["result", "code"]),
+  WebSearch: /* @__PURE__ */ new Set(["results"]),
+  ToolSearch: /* @__PURE__ */ new Set(["matches"]),
+  Skill: /* @__PURE__ */ new Set(["success", "commandName"])
+};
+function formatJsonValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+function unwrapSingleStringValue(obj) {
+  const entries = Object.entries(obj);
+  if (entries.length === 1 && typeof entries[0]?.[1] === "string") {
+    return entries[0][1];
+  }
+  return obj;
+}
+function cleanInput(toolName, rawJson) {
+  const parsed = safeJsonParse(rawJson);
+  if (!parsed) {
+    return (rawJson ?? "").trim();
+  }
+  const stripKeys = INPUT_STRIP[toolName];
+  const cleaned = Object.fromEntries(
+    Object.entries(parsed).filter(([key]) => !stripKeys?.has(key))
+  );
+  return formatJsonValue(unwrapSingleStringValue(cleaned)).trim();
+}
+function cleanOutput(toolName, rawJson) {
+  const parsed = safeJsonParse(rawJson);
+  if (!parsed) {
+    return (rawJson ?? "").trim();
+  }
+  if (!(toolName in OUTPUT_ALLOW)) {
+    return (rawJson ?? "").trim();
+  }
+  if (toolName === "Read") {
+    const content = parsed.file;
+    if (content && typeof content === "object" && typeof content.content === "string") {
+      return content.content.trim();
+    }
+  }
+  if (toolName === "Bash") {
+    const stdout = typeof parsed.stdout === "string" ? parsed.stdout.trim() : "";
+    const stderr = typeof parsed.stderr === "string" ? parsed.stderr.trim() : "";
+    if (!stdout && stderr) {
+      return stderr;
+    }
+    const filtered2 = {};
+    if (stdout) {
+      filtered2.stdout = stdout;
+    }
+    if (stderr) {
+      filtered2.stderr = stderr;
+    }
+    if (Object.keys(filtered2).length === 0) {
+      return "";
+    }
+    return formatJsonValue(unwrapSingleStringValue(filtered2)).trim();
+  }
+  const allowKeys = OUTPUT_ALLOW[toolName];
+  const filtered = Object.fromEntries(
+    Object.entries(parsed).filter(([key, value]) => {
+      if (!allowKeys?.has(key)) {
+        return false;
+      }
+      return value !== null && value !== void 0;
+    })
+  );
+  if (Object.keys(filtered).length === 0) {
+    return "";
+  }
+  return formatJsonValue(unwrapSingleStringValue(filtered)).trim();
+}
 function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   return `<obs id="O${observationId}">
   \u{1F527} ${toolName}
-  in: ${truncateMiddle(toolInput, 500)}
-  out: ${truncateMiddle(toolResult, 500)}
+  in: ${truncateMiddle(cleanInput(toolName, toolInput), 300)}
+  out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
 </obs>`;
 }
 function buildInitialObsPrompt(sessionId, project, firstUserPrompt, priorTitle, priorContent, priorInsight, priorNextSteps, obsBlock) {
@@ -1713,6 +1800,8 @@ function buildObsPrompt(observationId, toolName, toolInput, toolResult) {
   return buildObsBlock(observationId, toolName, toolInput, toolResult);
 }
 function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSteps, turnId, prompt, response, filesRead, filesModified) {
+  const renderedFilesRead = renderFileTree(filesRead);
+  const renderedFilesModified = renderFileTree(filesModified);
   return `<turn id="T${turnId}">
   prompt: ${truncateMiddle(prompt, 1e3)}
   response: ${truncateMiddle(response, 1e3)}
@@ -1724,31 +1813,41 @@ function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSt
   prior_content: ${content ?? ""}
   prior_insight: ${insight ?? ""}
   prior_next_steps: ${nextSteps ?? ""}
-  files_read: ${filesRead.join(", ")}
-  files_modified: ${filesModified.join(", ")}
+  files_read:
+${renderedFilesRead.split("\n").map((line) => `  ${line}`).join("\n")}
+  files_modified:
+${renderedFilesModified.split("\n").map((line) => `  ${line}`).join("\n")}
 </session>`;
 }
 function buildBatchTurnBlock(turnId, obsBlocks, prompt, response, filesRead, filesModified, toolCallCount) {
+  const renderedFilesRead = renderFileTree(filesRead);
+  const renderedFilesModified = renderFileTree(filesModified);
   const lines = [`  <turn id="T${turnId}">`];
   for (const obsBlock of obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
   lines.push(`    prompt: ${truncateMiddle(prompt, 1e3)}`);
   lines.push(`    response: ${truncateMiddle(response, 1e3)}`);
-  lines.push(`    files_read: ${filesRead.join(", ")}`);
-  lines.push(`    files_modified: ${filesModified.join(", ")}`);
+  lines.push("    files_read:");
+  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
+  lines.push("    files_modified:");
+  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
   lines.push(`    tool_call_count: ${toolCallCount}`);
   lines.push("  </turn>");
   return lines.join("\n");
 }
 function buildPartialTurnBlock(args) {
+  const renderedFilesRead = renderFileTree(args.filesRead);
+  const renderedFilesModified = renderFileTree(args.filesModified);
   const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
   for (const obsBlock of args.obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
   lines.push(`    prompt: ${truncateMiddle(args.prompt, 1e3)}`);
-  lines.push(`    files_read: ${args.filesRead.join(", ")}`);
-  lines.push(`    files_modified: ${args.filesModified.join(", ")}`);
+  lines.push("    files_read:");
+  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
+  lines.push("    files_modified:");
+  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
   lines.push(
     `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`
   );
@@ -1794,6 +1893,98 @@ function safeJsonParse(value) {
     return null;
   }
 }
+function createFileTreeNode() {
+  return { files: [], dirs: /* @__PURE__ */ new Map() };
+}
+function commonPathPrefix(paths) {
+  if (paths.length === 0) {
+    return "";
+  }
+  if (paths.length === 1) {
+    return paths[0] ?? "";
+  }
+  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
+  const common = [];
+  const limit = Math.min(...splitPaths.map((segments) => segments.length));
+  for (let index = 0; index < limit; index += 1) {
+    const segment = splitPaths[0]?.[index];
+    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
+      break;
+    }
+    common.push(segment);
+  }
+  if (common.length === 0) {
+    return "/";
+  }
+  return `/${common.join("/")}`;
+}
+function renderTreeNode(name, node, indent) {
+  if (node.files.length === 1 && node.dirs.size === 0) {
+    return [`${indent}${name}/${node.files[0]}`];
+  }
+  if (node.files.length === 0 && node.dirs.size > 0) {
+    const childEntries = [...node.dirs.entries()].sort(
+      ([left], [right]) => left.localeCompare(right)
+    );
+    return childEntries.flatMap(
+      ([childName, childNode]) => renderTreeNode(`${name}/${childName}`, childNode, indent)
+    );
+  }
+  const lines = [`${indent}${name}/`];
+  for (const file2 of [...node.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(`${indent}  ${file2}`);
+  }
+  for (const [childName, childNode] of [...node.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
+  }
+  return lines;
+}
+function renderFileTree(paths) {
+  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
+    (left, right) => left.localeCompare(right)
+  );
+  if (uniquePaths.length === 0) {
+    return "(none)";
+  }
+  if (uniquePaths.length === 1) {
+    return uniquePaths[0] ?? "(none)";
+  }
+  const root2 = commonPathPrefix(uniquePaths);
+  const tree = createFileTreeNode();
+  for (const value of uniquePaths) {
+    const relative = import_node_path3.default.posix.relative(root2, value);
+    if (!relative || relative === "") {
+      continue;
+    }
+    const segments = relative.split("/").filter(Boolean);
+    if (segments.length === 0) {
+      continue;
+    }
+    let node = tree;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
+      let next = node.dirs.get(segment);
+      if (!next) {
+        next = createFileTreeNode();
+        node.dirs.set(segment, next);
+      }
+      node = next;
+    }
+    node.files.push(segments[segments.length - 1]);
+  }
+  const lines = [root2];
+  for (const file2 of [...tree.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(file2);
+  }
+  for (const [childName, childNode] of [...tree.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, ""));
+  }
+  return lines.join("\n");
+}
 function collectPathValues(input, key) {
   const value = input[key];
   if (typeof value === "string" && value.trim() !== "") {
@@ -1822,18 +2013,18 @@ function aggregateFilesFromObservations(observations) {
       case "Read":
       case "Grep":
       case "Glob":
-        for (const path of [
+        for (const path2 of [
           ...collectPathValues(input, "file_path"),
           ...collectPathValues(input, "path")
         ]) {
-          filesRead.add(path);
+          filesRead.add(path2);
         }
         break;
       case "Write":
       case "Edit":
       case "MultiEdit":
-        for (const path of collectPathValues(input, "file_path")) {
-          filesModified.add(path);
+        for (const path2 of collectPathValues(input, "file_path")) {
+          filesModified.add(path2);
         }
         break;
       default:
@@ -2073,6 +2264,18 @@ function createWorkerProcessors(db) {
           partialTurnBlocks
         })
       );
+      if ((options?.turnStopItems?.length ?? 0) > 0) {
+        const completedTurnIds = new Set(
+          (options?.turnStopItems ?? []).map((item) => item.targetId)
+        );
+        for (const item of items) {
+          const observation = getObservation(db, item.targetId);
+          if (!observation || observation.status !== "pending" || !completedTurnIds.has(observation.turnId)) {
+            continue;
+          }
+          updateObservation(db, observation.id, { status: "skipped" });
+        }
+      }
       const freshSession = getSession(db, session.id);
       state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
       state.initialized = true;
@@ -5370,8 +5573,8 @@ var require_schemes = __commonJS((exports2, module2) => {
       wsComponents.secure = void 0;
     }
     if (wsComponents.resourceName) {
-      const [path, query2] = wsComponents.resourceName.split("?");
-      wsComponents.path = path && path !== "/" ? path : void 0;
+      const [path2, query2] = wsComponents.resourceName.split("?");
+      wsComponents.path = path2 && path2 !== "/" ? path2 : void 0;
       wsComponents.query = query2;
       wsComponents.resourceName = void 0;
     }
@@ -9083,11 +9286,11 @@ function getDebugWriter() {
   if (!debugWriter) {
     debugWriter = createBufferedWriter({
       writeFn: (content) => {
-        const path = getDebugLogPath();
-        if (!getFsImplementation().existsSync((0, import_path3.dirname)(path))) {
-          getFsImplementation().mkdirSync((0, import_path3.dirname)(path));
+        const path2 = getDebugLogPath();
+        if (!getFsImplementation().existsSync((0, import_path3.dirname)(path2))) {
+          getFsImplementation().mkdirSync((0, import_path3.dirname)(path2));
         }
-        getFsImplementation().appendFileSync(path, content);
+        getFsImplementation().appendFileSync(path2, content);
         updateLatestDebugLogSymlink();
       },
       flushIntervalMs: 1e3,
@@ -9189,40 +9392,40 @@ var NodeFsOperations = {
       }
     });
   },
-  appendFileSync(path, data, options) {
-    return withSlowLogging2(`appendFileSync(${path}, ${data.length} chars)`, () => {
-      if (!fs.existsSync(path) && options?.mode !== void 0) {
-        const fd = fs.openSync(path, "a", options.mode);
+  appendFileSync(path2, data, options) {
+    return withSlowLogging2(`appendFileSync(${path2}, ${data.length} chars)`, () => {
+      if (!fs.existsSync(path2) && options?.mode !== void 0) {
+        const fd = fs.openSync(path2, "a", options.mode);
         try {
           fs.appendFileSync(fd, data);
         } finally {
           fs.closeSync(fd);
         }
       } else {
-        fs.appendFileSync(path, data);
+        fs.appendFileSync(path2, data);
       }
     });
   },
   copyFileSync(src, dest) {
     return withSlowLogging2(`copyFileSync(${src} \u2192 ${dest})`, () => fs.copyFileSync(src, dest));
   },
-  unlinkSync(path) {
-    return withSlowLogging2(`unlinkSync(${path})`, () => fs.unlinkSync(path));
+  unlinkSync(path2) {
+    return withSlowLogging2(`unlinkSync(${path2})`, () => fs.unlinkSync(path2));
   },
   renameSync(oldPath, newPath) {
     return withSlowLogging2(`renameSync(${oldPath} \u2192 ${newPath})`, () => fs.renameSync(oldPath, newPath));
   },
-  linkSync(target, path) {
-    return withSlowLogging2(`linkSync(${target} \u2192 ${path})`, () => fs.linkSync(target, path));
+  linkSync(target, path2) {
+    return withSlowLogging2(`linkSync(${target} \u2192 ${path2})`, () => fs.linkSync(target, path2));
   },
-  symlinkSync(target, path) {
-    return withSlowLogging2(`symlinkSync(${target} \u2192 ${path})`, () => fs.symlinkSync(target, path));
+  symlinkSync(target, path2) {
+    return withSlowLogging2(`symlinkSync(${target} \u2192 ${path2})`, () => fs.symlinkSync(target, path2));
   },
-  readlinkSync(path) {
-    return withSlowLogging2(`readlinkSync(${path})`, () => fs.readlinkSync(path));
+  readlinkSync(path2) {
+    return withSlowLogging2(`readlinkSync(${path2})`, () => fs.readlinkSync(path2));
   },
-  realpathSync(path) {
-    return withSlowLogging2(`realpathSync(${path})`, () => fs.realpathSync(path));
+  realpathSync(path2) {
+    return withSlowLogging2(`realpathSync(${path2})`, () => fs.realpathSync(path2));
   },
   mkdirSync(dirPath, options) {
     return withSlowLogging2(`mkdirSync(${dirPath})`, () => {
@@ -9252,11 +9455,11 @@ var NodeFsOperations = {
   rmdirSync(dirPath) {
     return withSlowLogging2(`rmdirSync(${dirPath})`, () => fs.rmdirSync(dirPath));
   },
-  rmSync(path, options) {
-    return withSlowLogging2(`rmSync(${path})`, () => fs.rmSync(path, options));
+  rmSync(path2, options) {
+    return withSlowLogging2(`rmSync(${path2})`, () => fs.rmSync(path2, options));
   },
-  createWriteStream(path) {
-    return fs.createWriteStream(path);
+  createWriteStream(path2) {
+    return fs.createWriteStream(path2);
   }
 };
 var activeFs = NodeFsOperations;
@@ -9288,14 +9491,14 @@ function getOrCreateDebugFile() {
   return debugFilePath;
 }
 function logForSdkDebugging(message) {
-  const path = getOrCreateDebugFile();
-  if (!path) {
+  const path2 = getOrCreateDebugFile();
+  if (!path2) {
     return;
   }
   const timestamp = (/* @__PURE__ */ new Date()).toISOString();
   const output = `${timestamp} ${message}
 `;
-  (0, import_fs2.appendFileSync)(path, output);
+  (0, import_fs2.appendFileSync)(path2, output);
 }
 function mergeSandboxIntoExtraArgs(extraArgs, sandbox) {
   const effectiveExtraArgs = { ...extraArgs };
@@ -10639,8 +10842,8 @@ function getErrorMap() {
   return overrideErrorMap;
 }
 var makeIssue = (params) => {
-  const { data, path, errorMaps, issueData } = params;
-  const fullPath = [...path, ...issueData.path || []];
+  const { data, path: path2, errorMaps, issueData } = params;
+  const fullPath = [...path2, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -10747,11 +10950,11 @@ var errorUtil;
   errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
 })(errorUtil || (errorUtil = {}));
 var ParseInputLazyPath = class {
-  constructor(parent, value, path, key) {
+  constructor(parent, value, path2, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path;
+    this._path = path2;
     this._key = key;
   }
   get path() {
@@ -14242,10 +14445,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path) {
-  if (!path)
+function getElementAtPath(obj, path2) {
+  if (!path2)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path2.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -14562,11 +14765,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path, issues) {
+function prefixIssues(path2, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path);
+    iss.path.unshift(path2);
     return iss;
   });
 }
@@ -23670,10 +23873,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath2(obj, path) {
-  if (!path)
+function getElementAtPath2(obj, path2) {
+  if (!path2)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path2.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject2(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -24056,11 +24259,11 @@ function aborted2(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues2(path, issues) {
+function prefixIssues2(path2, issues) {
   return issues.map((iss) => {
     var _a2;
     (_a2 = iss).path ?? (_a2.path = []);
-    iss.path.unshift(path);
+    iss.path.unshift(path2);
     return iss;
   });
 }
@@ -24243,7 +24446,7 @@ function formatError2(error49, mapper = (issue3) => issue3.message) {
 }
 function treeifyError(error49, mapper = (issue3) => issue3.message) {
   const result = { errors: [] };
-  const processError = (error50, path = []) => {
+  const processError = (error50, path2 = []) => {
     var _a2, _b;
     for (const issue3 of error50.issues) {
       if (issue3.code === "invalid_union" && issue3.errors.length) {
@@ -24253,7 +24456,7 @@ function treeifyError(error49, mapper = (issue3) => issue3.message) {
       } else if (issue3.code === "invalid_element") {
         processError({ issues: issue3.issues }, issue3.path);
       } else {
-        const fullpath = [...path, ...issue3.path];
+        const fullpath = [...path2, ...issue3.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue3));
           continue;
@@ -24285,8 +24488,8 @@ function treeifyError(error49, mapper = (issue3) => issue3.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path) {
+  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path2) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -36263,13 +36466,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path = ref.slice(1).split("/").filter(Boolean);
-  if (path.length === 0) {
+  const path2 = ref.slice(1).split("/").filter(Boolean);
+  if (path2.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path[0] === defsKey) {
-    const key = path[1];
+  if (path2[0] === defsKey) {
+    const key = path2[1];
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -37026,11 +37229,11 @@ function extractKeyParam(name, input) {
       return valueForKey("command");
     case "Grep": {
       const pattern = valueForKey("pattern");
-      const path = valueForKey("path");
-      if (pattern && path) {
-        return `${pattern} ${path}`;
+      const path2 = valueForKey("path");
+      if (pattern && path2) {
+        return `${pattern} ${path2}`;
       }
-      return pattern ?? path;
+      return pattern ?? path2;
     }
     case "Agent":
       return valueForKey("description");
@@ -39328,7 +39531,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.2",
+    version: "0.2.3",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39514,13 +39717,13 @@ Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only v
 
 ## Observation messages (<obs id="O<n>">)
 
-For each \`<obs>\` block, make exactly one call:
+For each \`<obs>\` block, call \`remember({ id: "O<n>", title, content })\` only if the observation contains durable findings worth recording.
 
 - \`remember({ id: "O<n>", title, content })\`
   - title: 3-12 words, verb-led (e.g. "Read auth middleware", "Grep for token usage")
   - content: one paragraph, what the tool did and why it matters for this session. Do not restate tool arguments \u2014 they are already in the obs block.
 
-- \`remember({ id: "O<n>", status: "skipped" })\` for routine operations: repeated Reads of the same file, navigation (ls/pwd/glob), failed-and-retried Bash, environment probes.
+Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored \u2014 unprocessed observations are automatically marked as skipped.
 
 Never update T/S records, create memories, or call \`recall()\` from an obs message. Observation extraction is the high-volume path \u2014 tool-level summaries do not need transcript fidelity. The inline \`<obs>\` block is authoritative even when its \`in:\` / \`out:\` fields are truncated; write the summary from what is visible and note visibly-relevant truncation in the content (e.g. "truncated 1200-char grep output, 12 matches").
 
@@ -40366,7 +40569,7 @@ function acquireWorkerSingleton(deps = {}) {
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
   const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs5.mkdirSync;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const dataDir = (0, import_node_path3.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
+  const dataDir = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
   if (!existsSyncImpl(dataDir)) {
     mkdirSyncImpl(dataDir, { recursive: true });
   }

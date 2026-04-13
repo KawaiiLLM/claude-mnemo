@@ -262,13 +262,13 @@ Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only v
 
 ## Observation messages (<obs id="O<n>">)
 
-For each \`<obs>\` block, make exactly one call:
+For each \`<obs>\` block, call \`remember({ id: "O<n>", title, content })\` only if the observation contains durable findings worth recording.
 
 - \`remember({ id: "O<n>", title, content })\`
   - title: 3-12 words, verb-led (e.g. "Read auth middleware", "Grep for token usage")
   - content: one paragraph, what the tool did and why it matters for this session. Do not restate tool arguments — they are already in the obs block.
 
-- \`remember({ id: "O<n>", status: "skipped" })\` for routine operations: repeated Reads of the same file, navigation (ls/pwd/glob), failed-and-retried Bash, environment probes.
+Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored — unprocessed observations are automatically marked as skipped.
 
 Never update T/S records, create memories, or call \`recall()\` from an obs message. Observation extraction is the high-volume path — tool-level summaries do not need transcript fidelity. The inline \`<obs>\` block is authoritative even when its \`in:\` / \`out:\` fields are truncated; write the summary from what is visible and note visibly-relevant truncation in the content (e.g. "truncated 1200-char grep output, 12 matches").
 

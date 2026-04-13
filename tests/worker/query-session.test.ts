@@ -475,6 +475,10 @@ describe("worker query session", () => {
       "Never update T/S records, create memories, or call `recall()` from an obs message.",
     );
     expect(prompt).toContain(
+      "Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored",
+    );
+    expect(prompt).not.toContain('remember({ id: "O<n>", status: "skipped" })');
+    expect(prompt).toContain(
       "Never call `remember()` without an `id` field",
     );
     expect(prompt).toContain(

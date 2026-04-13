@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createObservation } from "../../src/db/observations";
+import { createObservation, getObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
-import { createWorkerProcessors } from "../../src/worker/processors";
+import {
+  cleanInput,
+  cleanOutput,
+  createWorkerProcessors,
+  renderFileTree,
+} from "../../src/worker/processors";
 
 describe("worker processors", () => {
   let db: Database;
@@ -60,6 +65,154 @@ describe("worker processors", () => {
     db.close();
   });
 
+  test("cleanInput strips Bash metadata and unwraps the command", () => {
+    expect(
+      cleanInput(
+        "Bash",
+        '{"command":"npm test","description":"system note","timeout":120000}',
+      ),
+    ).toBe("npm test");
+  });
+
+  test("cleanInput preserves all keys for non-Bash tools", () => {
+    expect(
+      cleanInput(
+        "Grep",
+        '{"pattern":"token","path":"src","output_mode":"content","-n":true}',
+      ),
+    ).toBe('{"pattern":"token","path":"src","output_mode":"content","-n":true}');
+  });
+
+  test("cleanInput returns the raw string when JSON parsing fails", () => {
+    expect(cleanInput("Read", '{"file_path":"src/auth.ts"')).toBe(
+      '{"file_path":"src/auth.ts"',
+    );
+  });
+
+  test("cleanOutput extracts nested Read file.content", () => {
+    expect(
+      cleanOutput(
+        "Read",
+        '{"type":"text","file":{"filePath":"src/auth.ts","content":"export const auth = true;"}}',
+      ),
+    ).toBe("export const auth = true;");
+  });
+
+  test("cleanOutput falls through to filtered Read output when file.content is missing", () => {
+    expect(
+      cleanOutput(
+        "Read",
+        '{"type":"text","error":"ENOENT","file":{"filePath":"src/auth.ts"}}',
+      ),
+    ).toBe("");
+  });
+
+  test("cleanOutput keeps Bash stderr as the primary result when stdout is empty", () => {
+    expect(
+      cleanOutput(
+        "Bash",
+        '{"stdout":"","stderr":"Permission denied","interrupted":false}',
+      ),
+    ).toBe("Permission denied");
+  });
+
+  test("cleanOutput keeps Grep allowlist fields", () => {
+    expect(
+      cleanOutput(
+        "Grep",
+        '{"filenames":["src/auth.ts"],"content":"token","numFiles":1,"numLines":4,"durationMs":12}',
+      ),
+    ).toBe('{"filenames":["src/auth.ts"],"content":"token","numFiles":1,"numLines":4}');
+  });
+
+  test("cleanOutput keeps Edit allowlist fields", () => {
+    expect(
+      cleanOutput(
+        "Edit",
+        '{"filePath":"src/auth.ts","oldString":"foo","newString":"bar","structuredPatch":[]}',
+      ),
+    ).toBe('{"filePath":"src/auth.ts","oldString":"foo","newString":"bar"}');
+  });
+
+  test("cleanOutput passes unknown tool output through unchanged", () => {
+    expect(cleanOutput("CustomMcp", '{"foo":"bar","count":1}')).toBe(
+      '{"foo":"bar","count":1}',
+    );
+  });
+
+  test("cleanOutput returns the raw string when JSON parsing fails", () => {
+    expect(cleanOutput("Bash", '{"stdout":"ok"')).toBe('{"stdout":"ok"');
+  });
+
+  test("renderFileTree groups files under a common root", () => {
+    expect(
+      renderFileTree([
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/processors.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
+      ]),
+    ).toBe(
+      [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "db/pending-queue.ts",
+        "worker/",
+        "  processors.ts",
+        "  server.ts",
+      ].join("\n"),
+    );
+  });
+
+  test("renderFileTree keeps the actual longest common directory prefix", () => {
+    expect(
+      renderFileTree(["/a/b/c.ts", "/a/c/d.ts"]),
+    ).toBe(["/a", "b/c.ts", "c/d.ts"].join("\n"));
+  });
+
+  test("renderFileTree returns none for an empty list", () => {
+    expect(renderFileTree([])).toBe("(none)");
+  });
+
+  test("renderFileTree renders single-file directories as dir/file", () => {
+    expect(
+      renderFileTree([
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/db/pending-queue.ts",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+      ]),
+    ).toBe(
+      [
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src",
+        "db/pending-queue.ts",
+        "worker/server.ts",
+      ].join("\n"),
+    );
+  });
+
+  test("renderFileTree deduplicates the root path when it appears in the path list", () => {
+    expect(
+      renderFileTree([
+        "/Users/zhaoqixuan/Projects/claude-mnemo",
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+      ]),
+    ).toBe(
+      ["/Users/zhaoqixuan/Projects/claude-mnemo", "src/worker/server.ts"].join("\n"),
+    );
+  });
+
+  test("renderFileTree handles cross-project paths without collapsing them incorrectly", () => {
+    expect(
+      renderFileTree([
+        "/Users/zhaoqixuan/Projects/claude-mnemo/src/worker/server.ts",
+        "/Users/zhaoqixuan/Projects/another-repo/src/index.ts",
+      ]),
+    ).toBe(
+      [
+        "/Users/zhaoqixuan/Projects",
+        "another-repo/src/index.ts",
+        "claude-mnemo/src/worker/server.ts",
+      ].join("\n"),
+    );
+  });
+
   test("processObs invokes Mnemosyne for pending observations", async () => {
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
@@ -84,7 +237,8 @@ describe("worker processors", () => {
     const prompt = String(pushMessage.mock.calls[0]?.[0]);
     expect(prompt).toContain(`<obs id="O${observationId}">`);
     expect(prompt).toContain("🔧 Read");
-    expect(prompt).toContain('in: {"file_path":"src/auth.ts"}');
+    expect(prompt).toContain("in: src/auth.ts");
+    expect(prompt).toContain("out: file contents");
     expect(prompt).toContain("<prior_session>");
     expect(prompt).toContain("title: Auth race");
     expect(prompt).toContain("content: Current summary");
@@ -157,10 +311,58 @@ describe("worker processors", () => {
     // prompt, so any extra bytes here are duplicated context-bloat.
     const expected = `<obs id="O${observationId}">
   🔧 Read
-  in: {"file_path":"src/auth.ts"}
+  in: src/auth.ts
   out: file contents
 </obs>`;
     expect(String(pushMessage.mock.calls[0]?.[0])).toBe(expected);
+  });
+
+  test("processObs truncates cleaned obs payloads to the 300-char head-tail limit", async () => {
+    db.query(
+      `
+        UPDATE observations
+        SET tool_name = 'Bash',
+            tool_input = ?,
+            tool_result = ?
+        WHERE id = ?
+      `,
+    ).run(
+      JSON.stringify({
+        command: "npm test",
+        description: "system note",
+        timeout: 120000,
+      }),
+      JSON.stringify({
+        stdout: `${"a".repeat(220)}${"b".repeat(220)}`,
+        stderr: "",
+      }),
+      observationId,
+    );
+
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+
+    await processors.processObs(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage,
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: true,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+      },
+      observationId,
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).toContain("in: npm test");
+    expect(prompt).toContain("[...160 chars truncated...]");
+    expect(prompt).toContain("aaaaaaaaaa");
+    expect(prompt).toContain("bbbbbbbbbb");
   });
 
   test("processObs skips already-finalized observations", async () => {
@@ -319,7 +521,7 @@ describe("worker processors", () => {
     const turn = getTurnById(db, turnId);
     expect(turn?.filesRead).toEqual(["src/auth.ts"]);
     expect(turn?.toolCallCount).toBe(1);
-    expect(String(pushMessage.mock.calls[0]?.[0])).toContain("files_read: src/auth.ts");
+    expect(String(pushMessage.mock.calls[0]?.[0])).toContain("files_read:\n  src/auth.ts");
   });
 
   test("processBatch injects prior_session on the first batch and records the injected summary epoch", async () => {
@@ -465,5 +667,122 @@ describe("worker processors", () => {
     );
 
     expect(state.lastInjectedSummaryEpoch).toBe(999);
+  });
+
+  test("processBatch auto-skips untouched observation records in completed-turn batches", async () => {
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+    const skippedObservationId = createObservation(db, {
+      turnId,
+      toolName: "Glob",
+      toolInput: '{"path":"src"}',
+      toolResult: '{"filenames":["src/auth.ts"]}',
+      status: "pending",
+      createdAtEpoch: 131,
+    }).id;
+    const processors = createWorkerProcessors(db);
+
+    await processors.processBatch(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage: mock(async () => {
+          // Simulate Mnemosyne extracting only the original observation.
+          db.query("UPDATE observations SET status = 'extracted' WHERE id = ?").run(
+            observationId,
+          );
+        }),
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: false,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+        lastInjectedSummaryEpoch: 0,
+      },
+      [
+        {
+          seq: 1,
+          kind: "obs",
+          targetId: observationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+        {
+          seq: 2,
+          kind: "obs",
+          targetId: skippedObservationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+      ],
+      {
+        turnStopItems: [
+          {
+            seq: 3,
+            kind: "turn-stop",
+            targetId: turnId,
+            sessionDbId: sessionId,
+            claimedAtEpoch: 1,
+            enqueuedAtEpoch: 1,
+          },
+        ],
+      },
+    );
+
+    expect(getObservation(db, observationId)?.status).toBe("extracted");
+    expect(getObservation(db, skippedObservationId)?.status).toBe("skipped");
+  });
+
+  test("processBatch does not auto-skip untouched observation records in partial-turn keepalive batches", async () => {
+    const keepaliveObservationId = createObservation(db, {
+      turnId,
+      toolName: "Bash",
+      toolInput: '{"command":"npm test","description":"system note","timeout":120000}',
+      toolResult: '{"stdout":"","stderr":"still running","interrupted":false}',
+      status: "pending",
+      createdAtEpoch: 131,
+    }).id;
+    const processors = createWorkerProcessors(db);
+
+    await processors.processBatch(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage: mock(async () => {}),
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        initialized: false,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+        lastInjectedSummaryEpoch: 0,
+      },
+      [
+        {
+          seq: 1,
+          kind: "obs",
+          targetId: keepaliveObservationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+      ],
+      {
+        turnStopItems: [],
+        partialTurns: [
+          {
+            turnId,
+            totalObsCount: 2,
+            contextObservationIds: [observationId, keepaliveObservationId],
+          },
+        ],
+      },
+    );
+
+    expect(getObservation(db, keepaliveObservationId)?.status).toBe("pending");
   });
 });
