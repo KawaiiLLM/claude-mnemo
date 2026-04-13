@@ -61,10 +61,21 @@ export function resolveWorkerScriptPaths(
   };
 }
 
-async function isWorkerCompatible(
+interface WorkerHealthBody {
+  ok?: boolean;
+  buildId?: string;
+  pid?: number;
+}
+
+type WorkerHealthState =
+  | { status: "compatible"; pid?: number }
+  | { status: "stale"; pid?: number }
+  | { status: "down" };
+
+async function readWorkerHealth(
   fetchImpl: typeof fetch,
   timeoutMs: number,
-): Promise<"compatible" | "stale" | "down"> {
+): Promise<WorkerHealthState> {
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
       method: "GET",
@@ -72,45 +83,77 @@ async function isWorkerCompatible(
     });
 
     if (!response.ok) {
-      return "down";
+      return { status: "down" };
     }
 
-    let body: { ok?: boolean; buildId?: string };
+    let body: WorkerHealthBody;
     try {
-      body = (await response.json()) as { ok?: boolean; buildId?: string };
+      body = (await response.json()) as WorkerHealthBody;
     } catch {
-      return "compatible";
+      return { status: "compatible" };
     }
 
     if (body.buildId && body.buildId !== BUILD_ID) {
-      return "stale";
+      return {
+        status: "stale",
+        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : undefined,
+      };
     }
 
-    return "compatible";
+    return {
+      status: "compatible",
+      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : undefined,
+    };
   } catch {
-    return "down";
+    return { status: "down" };
   }
 }
 
-function killStaleWorker(deps: WorkerClientDeps = {}): void {
+function readWorkerPidFallback(deps: WorkerClientDeps = {}): number | null {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const existsSyncImpl = deps.existsSyncImpl ?? existsSync;
 
   if (!existsSyncImpl(pidPath)) {
-    return;
+    return null;
   }
 
   try {
     const pid = Number(readFileSync(pidPath, "utf8").trim());
-
     if (Number.isInteger(pid) && pid > 0) {
-      process.kill(pid, "SIGTERM");
+      return pid;
     }
   } catch {
-    // Process already gone or permission error — either way, proceed
+    // Ignore unreadable or invalid pid files.
   }
-  // Do NOT remove the PID file here. The new worker overwrites it on startup.
-  // If the old process survives SIGTERM, the file remains as a handle for retry.
+
+  return null;
+}
+
+function killWorkerPid(pid: number): void {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // If the worker is already gone or we lack permission, continue.
+  }
+}
+
+function logUnrecoverableStaleWorker(): void {
+  console.error("stale worker detected but no pid handle is available");
+}
+
+function resolveStaleWorkerPid(
+  health: WorkerHealthState,
+  deps: WorkerClientDeps = {},
+): number | null {
+  if (health.status !== "stale") {
+    return null;
+  }
+
+  if (typeof health.pid === "number") {
+    return health.pid;
+  }
+
+  return readWorkerPidFallback(deps);
 }
 
 export function spawnWorkerProcess(
@@ -133,22 +176,86 @@ export function spawnWorkerProcess(
   child.unref();
 }
 
+async function waitForWorkerDown(
+  deps: WorkerClientDeps = {},
+): Promise<boolean> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "down") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+
+  return false;
+}
+
+async function waitForCompatibleWorker(
+  deps: WorkerClientDeps = {},
+): Promise<boolean> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "compatible") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+
+  return false;
+}
+
+type WorkerAvailability = "compatible" | "down" | "unrecoverable-stale";
+
+async function ensureCompatibleWorker(
+  deps: WorkerClientDeps = {},
+): Promise<WorkerAvailability> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+
+  if (health.status === "compatible") {
+    return "compatible";
+  }
+
+  if (health.status === "down") {
+    return "down";
+  }
+
+  const pid = resolveStaleWorkerPid(health, deps);
+  if (!pid) {
+    return "unrecoverable-stale";
+  }
+
+  killWorkerPid(pid);
+  if (!(await waitForWorkerDown(deps))) {
+    return "unrecoverable-stale";
+  }
+
+  return "down";
+}
+
 export async function notifyWorkerWake(
   deps: WorkerClientDeps = {},
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
 
-  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
 
-  if (status === "stale") {
-    killStaleWorker(deps);
-    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
-    spawnWorkerProcess(deps, env);
-    if (!(await waitForCompatibleWorker(deps))) {
-      return;
-    }
-  } else if (status === "down") {
+  if (status === "down") {
     spawnWorkerProcess(deps, env);
     if (!(await waitForCompatibleWorker(deps))) {
       return;
@@ -177,6 +284,18 @@ export async function notifyWorkerFlush(
     CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId),
   } satisfies NodeJS.ProcessEnv;
 
+  const status = await ensureCompatibleWorker(deps);
+
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+
+  if (status === "down") {
+    spawnWorkerProcess(deps, flushEnv);
+    return;
+  }
+
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
       method: "POST",
@@ -189,32 +308,11 @@ export async function notifyWorkerFlush(
     if (response.ok) {
       return;
     }
-
-    killStaleWorker(deps);
   } catch {
     // Fall through to a startup-flush worker spawn.
   }
 
   spawnWorkerProcess(deps, flushEnv);
-}
-
-async function waitForCompatibleWorker(
-  deps: WorkerClientDeps = {},
-): Promise<boolean> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (status === "compatible") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-
-  return false;
 }
 
 export async function notifyWorkerCompact(
@@ -224,15 +322,14 @@ export async function notifyWorkerCompact(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
 
-  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-
-  if (status === "stale") {
-    killStaleWorker(deps);
-    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    throw new Error("Stale worker detected but no pid handle is available for restart.");
   }
 
-  if (status !== "compatible") {
+  if (status === "down") {
     spawnWorkerProcess(deps, env);
     const ready = await waitForCompatibleWorker(deps);
     if (!ready) {

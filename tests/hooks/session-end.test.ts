@@ -47,6 +47,11 @@ describe("handleSessionEndHook", () => {
 
   test("signals worker flush for the resolved session and returns immediately", async () => {
     const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
+          status: 200,
+        });
+      }
       return new Response(null, { status: 200 });
     });
     const handler = createSessionEndHandler({
@@ -58,9 +63,10 @@ describe("handleSessionEndHook", () => {
     const result = await handler(createInput());
 
     expect(result).toEqual({ continue: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/flush");
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/flush");
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
       session_id: sessionId,
     });
   });

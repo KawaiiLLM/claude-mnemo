@@ -824,10 +824,13 @@ export function createWorkerFetchHandler(
       const url = new URL(req.url);
 
       if (req.method === "GET" && url.pathname === "/health") {
-        return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
+        return new Response(
+          JSON.stringify({ ok: true, buildId: BUILD_ID, pid: process.pid }),
+          {
           status: 200,
           headers: { "content-type": "application/json" },
-        });
+          },
+        );
       }
 
       if (req.method === "POST" && url.pathname === "/wake") {

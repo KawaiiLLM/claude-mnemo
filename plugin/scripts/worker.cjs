@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwnvwxp" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwt3v68" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40079,10 +40079,13 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     try {
       const url2 = new URL(req.url);
       if (req.method === "GET" && url2.pathname === "/health") {
-        return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
-          status: 200,
-          headers: { "content-type": "application/json" }
-        });
+        return new Response(
+          JSON.stringify({ ok: true, buildId: BUILD_ID, pid: process.pid }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          }
+        );
       }
       if (req.method === "POST" && url2.pathname === "/wake") {
         return handleWake();

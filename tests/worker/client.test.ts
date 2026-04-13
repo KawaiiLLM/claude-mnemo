@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { unlinkSync, writeFileSync } from "node:fs";
 
 import {
   notifyWorkerCompact,
@@ -15,6 +16,12 @@ function healthResponse(buildId: string = BUILD_ID): Response {
 
 function staleHealthResponse(): Response {
   return new Response(JSON.stringify({ ok: true, buildId: "old-build-000" }), {
+    status: 200,
+  });
+}
+
+function staleHealthResponseWithPid(pid: number): Response {
+  return new Response(JSON.stringify({ ok: true, buildId: "old-build-000", pid }), {
     status: 200,
   });
 }
@@ -111,15 +118,174 @@ describe("worker client", () => {
     expect(wakeCallCount).toBe(1);
   });
 
-  test("notifyWorkerWake waits for compatible worker after killing stale, then sends /wake", async () => {
+  test("notifyWorkerWake waits for down after killing stale pid from health before spawning", async () => {
     let healthCallIndex = 0;
     let wakeCallCount = 0;
+    let spawnHealthCallIndex: number | null = null;
+    const stalePid = 4321;
+    const pidPath = "/tmp/missing-worker.pid";
+    const originalKill = process.kill;
+    const killCalls: number[] = [];
+    process.kill = ((pid: number | string) => {
+      if (typeof pid === "number") {
+        killCalls.push(pid);
+      }
+      return true;
+    }) as typeof process.kill;
     const fetchImpl = mock(async (input: string | URL) => {
       const url = String(input);
       if (url.endsWith("/health")) {
         healthCallIndex += 1;
-        if (healthCallIndex <= 2) {
+        spawnHealthCallIndex = Math.max(spawnHealthCallIndex, healthCallIndex);
+        if (healthCallIndex === 1) {
+          return staleHealthResponseWithPid(stalePid);
+        }
+        if (healthCallIndex === 2) {
+          throw new Error("connection refused");
+        }
+        return healthResponse();
+      }
+      if (url.endsWith("/wake")) {
+        wakeCallCount += 1;
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => {
+      spawnHealthCallIndex = healthCallIndex;
+      return { unref: mock(() => {}) };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    try {
+      await notifyWorkerWake(
+        {
+          fetchImpl,
+          spawnImpl,
+          existsSyncImpl: (path: string) => path !== pidPath,
+          pidPath,
+          setTimeoutImpl: ((handler: TimerHandler) => {
+            if (typeof handler === "function") handler();
+            return 0 as unknown as NodeJS.Timeout;
+          }) as typeof setTimeout,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      process.kill = originalKill;
+    }
+
+    expect(killCalls).toEqual([stalePid]);
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(spawnHealthCallIndex).toBeGreaterThan(1);
+    expect(wakeCallCount).toBe(1);
+  });
+
+  test("notifyWorkerWake falls back to worker.pid when stale health has no pid", async () => {
+    const pidPath = "/tmp/worker-client-fallback.pid";
+    writeFileSync(pidPath, "5678");
+    let healthCallIndex = 0;
+    let wakeCallCount = 0;
+    let killedPid: number | null = null;
+    const originalKill = process.kill;
+    process.kill = ((pid: number | string) => {
+      if (typeof pid === "number") {
+        killedPid = pid;
+      }
+      return true;
+    }) as typeof process.kill;
+    const fetchImpl = mock(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        healthCallIndex += 1;
+        if (healthCallIndex === 1) {
           return staleHealthResponse();
+        }
+        if (healthCallIndex === 2) {
+          throw new Error("connection refused");
+        }
+        return healthResponse();
+      }
+      if (url.endsWith("/wake")) {
+        wakeCallCount += 1;
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    try {
+      await notifyWorkerWake(
+        {
+          fetchImpl,
+          spawnImpl,
+          pidPath,
+          existsSyncImpl: () => true,
+          setTimeoutImpl: ((handler: TimerHandler) => {
+            if (typeof handler === "function") handler();
+            return 0 as unknown as NodeJS.Timeout;
+          }) as typeof setTimeout,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      process.kill = originalKill;
+      unlinkSync(pidPath);
+    }
+
+    expect(killedPid).toBe(5678);
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(wakeCallCount).toBe(1);
+  });
+
+  test("notifyWorkerWake returns without spawning when stale has no pid handle", async () => {
+    let wakeCallCount = 0;
+    const errorCalls: string[] = [];
+    const originalError = console.error;
+    console.error = ((...args: unknown[]) => {
+      errorCalls.push(String(args[0]));
+    }) as typeof console.error;
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return staleHealthResponse();
+      }
+      if (String(input).endsWith("/wake")) {
+        wakeCallCount += 1;
+      }
+      return new Response(null, { status: 200 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    try {
+      await notifyWorkerWake(
+        {
+          fetchImpl,
+          spawnImpl,
+          existsSyncImpl: () => false,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(spawnImpl).not.toHaveBeenCalled();
+    expect(wakeCallCount).toBe(0);
+    expect(errorCalls).toContain("stale worker detected but no pid handle is available");
+  });
+
+  test("notifyWorkerWake waits for compatible worker after killing stale, then sends /wake", async () => {
+    let healthCallIndex = 0;
+    let wakeCallCount = 0;
+    const pidPath = "/tmp/missing-worker.pid";
+    const fetchImpl = mock(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        healthCallIndex += 1;
+        if (healthCallIndex === 1) {
+          return staleHealthResponseWithPid(4321);
+        }
+        if (healthCallIndex === 2) {
+          throw new Error("connection refused");
         }
         return healthResponse();
       }
@@ -135,8 +301,8 @@ describe("worker client", () => {
       {
         fetchImpl,
         spawnImpl,
-        existsSyncImpl: (path: string) => !path.includes("nonexistent-pid"),
-        pidPath: "/tmp/nonexistent-pid",
+        existsSyncImpl: (path: string) => path !== pidPath,
+        pidPath,
         setTimeoutImpl: ((handler: TimerHandler) => {
           if (typeof handler === "function") handler();
           return 0 as unknown as NodeJS.Timeout;
@@ -149,77 +315,114 @@ describe("worker client", () => {
     expect(wakeCallCount).toBe(1);
   });
 
-  test("notifyWorkerWake does not send /wake when stale worker never becomes compatible", async () => {
+  test("notifyWorkerWake does not spawn while stale worker remains non-down until timeout", async () => {
+    let healthCallCount = 0;
     let wakeCallCount = 0;
-    let fakeNow = 1000;
+    let killedPid: number | null = null;
+    const pidPath = "/tmp/missing-worker.pid";
+    const originalKill = process.kill;
+    process.kill = ((pid: number | string) => {
+      if (typeof pid === "number") {
+        killedPid = pid;
+      }
+      return true;
+    }) as typeof process.kill;
     const fetchImpl = mock(async (input: string | URL) => {
       const url = String(input);
       if (url.endsWith("/health")) {
-        fakeNow += 31_000;
-        return staleHealthResponse();
+        healthCallCount += 1;
+        fakeNow += 10_000;
+        return staleHealthResponseWithPid(24601);
       }
       if (url.endsWith("/wake")) {
         wakeCallCount += 1;
+        return new Response(null, { status: 200 });
       }
-      return new Response(null, { status: 200 });
+      return new Response(null, { status: 404 });
     });
     const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+    let fakeNow = 1_000;
 
-    await notifyWorkerWake(
-      {
-        fetchImpl,
-        spawnImpl,
-        existsSyncImpl: (path: string) => !path.includes("nonexistent-pid"),
-        pidPath: "/tmp/nonexistent-pid",
-        nowMsImpl: () => fakeNow,
-        setTimeoutImpl: ((handler: TimerHandler) => {
-          if (typeof handler === "function") handler();
-          return 0 as unknown as NodeJS.Timeout;
-        }) as typeof setTimeout,
-      },
-      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
-    );
+    try {
+      await notifyWorkerWake(
+        {
+          fetchImpl,
+          spawnImpl,
+          existsSyncImpl: (path: string) => path !== pidPath,
+          pidPath,
+          nowMsImpl: () => fakeNow,
+          setTimeoutImpl: ((handler: TimerHandler) => {
+            if (typeof handler === "function") handler();
+            return 0 as unknown as NodeJS.Timeout;
+          }) as typeof setTimeout,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      process.kill = originalKill;
+    }
 
-    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(killedPid).toBe(24601);
+    expect(healthCallCount).toBeGreaterThan(2);
+    expect(spawnImpl).not.toHaveBeenCalled();
     expect(wakeCallCount).toBe(0);
   });
 
-  test("notifyWorkerCompact kills stale worker before spawning new one", async () => {
-    let callIndex = 0;
+  test("notifyWorkerCompact waits for down after killing stale pid before spawning", async () => {
+    let healthCallIndex = 0;
+    let spawnHealthCallIndex: number | null = null;
+    const stalePid = 9999;
+    const pidPath = "/tmp/missing-worker.pid";
+    const originalKill = process.kill;
+    const killCalls: number[] = [];
+    process.kill = ((pid: number | string) => {
+      if (typeof pid === "number") {
+        killCalls.push(pid);
+      }
+      return true;
+    }) as typeof process.kill;
     const fetchImpl = mock(async (input: string | URL) => {
       const url = String(input);
       if (url.endsWith("/health")) {
-        callIndex += 1;
-        if (callIndex === 1) {
-          return staleHealthResponse();
+        healthCallIndex += 1;
+        if (healthCallIndex === 1) {
+          return staleHealthResponseWithPid(stalePid);
+        }
+        if (healthCallIndex === 2) {
+          throw new Error("connection refused");
         }
         return healthResponse();
       }
       return new Response(null, { status: 200 });
     }) as typeof fetch;
-    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+    const spawnImpl = mock(() => {
+      spawnHealthCallIndex = healthCallIndex;
+      return { unref: mock(() => {}) };
+    }) as unknown as typeof import("node:child_process").spawn;
 
-    await notifyWorkerCompact(
-      42,
-      "/tmp/session.jsonl",
-      {
-        fetchImpl,
-        spawnImpl,
-        existsSyncImpl: (path: string) => !path.includes("nonexistent-pid"),
-        pidPath: "/tmp/nonexistent-pid",
-        setTimeoutImpl: ((handler: TimerHandler) => {
-          if (typeof handler === "function") handler();
-          return 0 as unknown as NodeJS.Timeout;
-        }) as typeof setTimeout,
-      },
-      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
-    );
+    try {
+      await notifyWorkerCompact(
+        42,
+        "/tmp/session.jsonl",
+        {
+          fetchImpl,
+          spawnImpl,
+          existsSyncImpl: (path: string) => path !== pidPath,
+          pidPath,
+          setTimeoutImpl: ((handler: TimerHandler) => {
+            if (typeof handler === "function") handler();
+            return 0 as unknown as NodeJS.Timeout;
+          }) as typeof setTimeout,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      process.kill = originalKill;
+    }
 
+    expect(killCalls).toEqual([stalePid]);
     expect(spawnImpl).toHaveBeenCalledTimes(1);
-    const compactCall = fetchImpl.mock.calls.find((call) =>
-      String(call[0]).endsWith("/compact"),
-    );
-    expect(compactCall).toBeDefined();
+    expect(spawnHealthCallIndex).toBeGreaterThan(1);
   });
 
   test("notifyWorkerCompact skips kill when worker is simply down", async () => {
@@ -292,6 +495,9 @@ describe("worker client", () => {
   test("notifyWorkerFlush sends /flush when worker is compatible", async () => {
     let flushCallCount = 0;
     const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return healthResponse();
+      }
       if (String(input).endsWith("/flush")) {
         flushCallCount += 1;
         return new Response(null, { status: 200 });
@@ -306,9 +512,72 @@ describe("worker client", () => {
     );
 
     expect(flushCallCount).toBe(1);
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+    const flushCall = fetchImpl.mock.calls.find((call) => String(call[0]).endsWith("/flush"));
+    expect(JSON.parse(String(flushCall?.[1]?.body))).toEqual({
       session_id: 42,
     });
+  });
+
+  test("notifyWorkerFlush waits for down after killing stale pid before spawning startup flush worker", async () => {
+    let healthCallIndex = 0;
+    let flushCallCount = 0;
+    let spawnHealthCallIndex: number | null = null;
+    const stalePid = 1357;
+    const pidPath = "/tmp/missing-worker.pid";
+    const originalKill = process.kill;
+    const killCalls: number[] = [];
+    process.kill = ((pid: number | string) => {
+      if (typeof pid === "number") {
+        killCalls.push(pid);
+      }
+      return true;
+    }) as typeof process.kill;
+    const fetchImpl = mock(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/health")) {
+        healthCallIndex += 1;
+        if (healthCallIndex === 1) {
+          return staleHealthResponseWithPid(stalePid);
+        }
+        if (healthCallIndex === 2) {
+          throw new Error("connection refused");
+        }
+        return healthResponse();
+      }
+      if (url.endsWith("/flush")) {
+        flushCallCount += 1;
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => {
+      spawnHealthCallIndex = healthCallIndex;
+      return { unref: mock(() => {}) };
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    try {
+      await notifyWorkerFlush(
+        42,
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: (path: string) => path !== pidPath,
+        pidPath,
+        setTimeoutImpl: ((handler: TimerHandler) => {
+          if (typeof handler === "function") handler();
+          return 0 as unknown as NodeJS.Timeout;
+        }) as typeof setTimeout,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      );
+    } finally {
+      process.kill = originalKill;
+    }
+
+    expect(killCalls).toEqual([stalePid]);
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(spawnHealthCallIndex).toBeGreaterThan(1);
+    expect(flushCallCount).toBe(0);
   });
 
   test("notifyWorkerFlush spawns a worker with a startup flush hint when down", async () => {
@@ -332,6 +601,34 @@ describe("worker client", () => {
     });
   });
 
+  test("notifyWorkerFlush returns without spawning when stale has no pid handle", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return staleHealthResponse();
+      }
+      if (String(input).endsWith("/flush")) {
+        return new Response(null, { status: 200 });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    await notifyWorkerFlush(
+      42,
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: () => false,
+      },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(spawnImpl).not.toHaveBeenCalled();
+    expect(fetchImpl.mock.calls.some((call) => String(call[0]).endsWith("/flush"))).toBe(
+      false,
+    );
+  });
+
   test("notifyWorkerFlush replaces a worker that answers /flush with non-OK", async () => {
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/flush")) {
@@ -351,6 +648,31 @@ describe("worker client", () => {
     expect(spawnImpl.mock.calls[0]?.[2]?.env).toMatchObject({
       CLAUDE_MNEMO_FLUSH_SESSION_ID: "42",
     });
+  });
+
+  test("notifyWorkerCompact throws a diagnostic error when stale has no pid handle", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return staleHealthResponse();
+      }
+      return new Response(null, { status: 200 });
+    });
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+
+    await expect(
+      notifyWorkerCompact(
+        42,
+        "/tmp/session.jsonl",
+        {
+          fetchImpl,
+          spawnImpl,
+          existsSyncImpl: () => false,
+        },
+        { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      ),
+    ).rejects.toThrow("Stale worker detected but no pid handle is available for restart.");
+
+    expect(spawnImpl).not.toHaveBeenCalled();
   });
 
   test("health response without buildId is treated as compatible", async () => {

@@ -144,6 +144,18 @@ describe("worker server", () => {
     expect(drainCalls).toBe(2);
   });
 
+  test("createWorkerFetchHandler health response includes the worker pid", async () => {
+    const handler = createWorkerFetchHandler({});
+
+    const response = await handler(new Request("http://127.0.0.1:37778/health"));
+    const body = (await response.json()) as { ok: boolean; buildId: string; pid: number };
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(typeof body.buildId).toBe("string");
+    expect(body.pid).toBe(process.pid);
+  });
+
   test("createWorkerFetchHandler validates compact requests", async () => {
     const handleCompactImpl = mock(async () => {});
     const handler = createWorkerFetchHandler({

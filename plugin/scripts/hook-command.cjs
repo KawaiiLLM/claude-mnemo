@@ -626,7 +626,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.1-mnwnvwxp" : "dev";
+var BUILD_ID = true ? "0.2.1-mnwt3v68" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -659,42 +659,67 @@ function resolveWorkerScriptPaths(env = process.env) {
     workerPath: (0, import_node_path3.join)(pluginRoot, "scripts", "worker.cjs")
   };
 }
-async function isWorkerCompatible(fetchImpl, timeoutMs) {
+async function readWorkerHealth(fetchImpl, timeoutMs) {
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
       method: "GET",
       signal: createAbortSignal(timeoutMs)
     });
     if (!response.ok) {
-      return "down";
+      return { status: "down" };
     }
     let body;
     try {
       body = await response.json();
     } catch {
-      return "compatible";
+      return { status: "compatible" };
     }
     if (body.buildId && body.buildId !== BUILD_ID) {
-      return "stale";
+      return {
+        status: "stale",
+        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+      };
     }
-    return "compatible";
+    return {
+      status: "compatible",
+      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+    };
   } catch {
-    return "down";
+    return { status: "down" };
   }
 }
-function killStaleWorker(deps = {}) {
+function readWorkerPidFallback(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
   if (!existsSyncImpl(pidPath)) {
-    return;
+    return null;
   }
   try {
     const pid = Number((0, import_node_fs2.readFileSync)(pidPath, "utf8").trim());
     if (Number.isInteger(pid) && pid > 0) {
-      process.kill(pid, "SIGTERM");
+      return pid;
     }
   } catch {
   }
+  return null;
+}
+function killWorkerPid(pid) {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+  }
+}
+function logUnrecoverableStaleWorker() {
+  console.error("stale worker detected but no pid handle is available");
+}
+function resolveStaleWorkerPid(health, deps = {}) {
+  if (health.status !== "stale") {
+    return null;
+  }
+  if (typeof health.pid === "number") {
+    return health.pid;
+  }
+  return readWorkerPidFallback(deps);
 }
 function spawnWorkerProcess(deps = {}, env = process.env) {
   const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
@@ -710,17 +735,61 @@ function spawnWorkerProcess(deps = {}, env = process.env) {
   });
   child.unref();
 }
+async function waitForWorkerDown(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "down") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function waitForCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "compatible") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function ensureCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (health.status === "compatible") {
+    return "compatible";
+  }
+  if (health.status === "down") {
+    return "down";
+  }
+  const pid = resolveStaleWorkerPid(health, deps);
+  if (!pid) {
+    return "unrecoverable-stale";
+  }
+  killWorkerPid(pid);
+  if (!await waitForWorkerDown(deps)) {
+    return "unrecoverable-stale";
+  }
+  return "down";
+}
 async function notifyWorkerWake(deps = {}, env = process.env) {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-  if (status === "stale") {
-    killStaleWorker(deps);
-    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
-    spawnWorkerProcess(deps, env);
-    if (!await waitForCompatibleWorker(deps)) {
-      return;
-    }
-  } else if (status === "down") {
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
     spawnWorkerProcess(deps, env);
     if (!await waitForCompatibleWorker(deps)) {
       return;
@@ -742,6 +811,15 @@ async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
     ...env,
     CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
   };
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, flushEnv);
+    return;
+  }
   try {
     const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
       method: "POST",
@@ -753,33 +831,18 @@ async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
     if (response.ok) {
       return;
     }
-    killStaleWorker(deps);
   } catch {
   }
   spawnWorkerProcess(deps, flushEnv);
 }
-async function waitForCompatibleWorker(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (status === "compatible") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-  return false;
-}
 async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await isWorkerCompatible(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-  if (status === "stale") {
-    killStaleWorker(deps);
-    await sleep(300, deps.setTimeoutImpl ?? setTimeout);
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    throw new Error("Stale worker detected but no pid handle is available for restart.");
   }
-  if (status !== "compatible") {
+  if (status === "down") {
     spawnWorkerProcess(deps, env);
     const ready = await waitForCompatibleWorker(deps);
     if (!ready) {
