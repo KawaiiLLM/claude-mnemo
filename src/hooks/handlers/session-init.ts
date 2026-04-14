@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
-import { getTurnsForSession } from "../../db/turns";
+import { getMaxPromptNumber } from "../../db/turns";
 import { countUserPromptsInTranscript } from "../../shared/transcript-parser";
 import { detectAndCleanSidechainTurns } from "../../worker/rollback";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -65,9 +65,12 @@ export function createSessionInitHandler(
       );
     }
 
-    const promptNumber = input.transcriptPath
-      ? countUserPromptsInTranscript(input.transcriptPath) + 1
-      : getTurnsForSession(dependencies.db, session.id).length + 1;
+    const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
+    const promptNumber = dbMaxPromptNumber !== null
+      ? dbMaxPromptNumber + 1
+      : input.transcriptPath
+        ? countUserPromptsInTranscript(input.transcriptPath) + 1
+        : 1;
 
     createPendingTurn(
       dependencies.db,

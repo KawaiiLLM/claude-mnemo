@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
+  getMaxPromptNumber,
   getTurnById,
   getTurn,
   getTurnsForSession,
@@ -289,6 +290,59 @@ describe("turn queries", () => {
     expect(updated?.assistantResponse).toBe("Latest answer");
     expect(updated?.contentPromptId).toBeNull();
     expect(updated?.transcriptLineStart).toBe(42);
+  });
+
+  test("getMaxPromptNumber returns null for an empty session", () => {
+    expect(getMaxPromptNumber(db, sessionId)).toBeNull();
+  });
+
+  test("getMaxPromptNumber returns the highest prompt number", () => {
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 3,
+      userPrompt: "Third prompt",
+      assistantResponse: "Third answer",
+      title: "Third prompt",
+      content: "Third content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 900,
+      updatedAtEpoch: 910,
+      observations: [],
+    });
+
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 11,
+      userPrompt: "Eleventh prompt",
+      assistantResponse: "Eleventh answer",
+      title: "Eleventh prompt",
+      content: "Eleventh content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 1100,
+      updatedAtEpoch: 1110,
+      observations: [],
+    });
+
+    saveTurn(db, {
+      sessionId,
+      promptNumber: 7,
+      userPrompt: "Seventh prompt",
+      assistantResponse: "Seventh answer",
+      title: "Seventh prompt",
+      content: "Seventh content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 1000,
+      updatedAtEpoch: 1010,
+      observations: [],
+    });
+
+    expect(getMaxPromptNumber(db, sessionId)).toBe(11);
   });
 
 });

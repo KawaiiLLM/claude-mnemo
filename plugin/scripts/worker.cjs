@@ -47,7 +47,7 @@ var import_node_os2 = require("node:os");
 var import_node_path4 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.5-mnyjdub0" : "dev";
+var BUILD_ID = true ? "0.2.6-mnyt5abe" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -39594,7 +39594,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.5",
+    version: "0.2.6",
     tools: [
       deps.toolImpl(
         "remember",

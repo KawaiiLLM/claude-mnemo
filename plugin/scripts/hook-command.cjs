@@ -649,7 +649,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.5-mnyjdub0" : "dev";
+var BUILD_ID = true ? "0.2.6-mnyt5abe" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1716,6 +1716,12 @@ function getTurnsForSession(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getMaxPromptNumber(db, sessionId) {
+  const row = db.query(
+    "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
+  ).get(sessionId);
+  return row?.max ?? null;
 }
 function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart) {
   const existing = getTurnById(db, turnId);
@@ -3488,7 +3494,8 @@ function createSessionInitHandler(dependencies) {
         now()
       );
     }
-    const promptNumber = input.transcriptPath ? countUserPromptsInTranscript(input.transcriptPath) + 1 : getTurnsForSession(dependencies.db, session.id).length + 1;
+    const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
+    const promptNumber = dbMaxPromptNumber !== null ? dbMaxPromptNumber + 1 : input.transcriptPath ? countUserPromptsInTranscript(input.transcriptPath) + 1 : 1;
     createPendingTurn(
       dependencies.db,
       session.id,

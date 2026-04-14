@@ -239,6 +239,19 @@ export function getTurnsForSession(
     .filter((turn): turn is TurnRecord => turn !== null);
 }
 
+export function getMaxPromptNumber(
+  db: Database,
+  sessionId: number,
+): number | null {
+  const row = db
+    .query<{ max: number | null }, [number]>(
+      "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?",
+    )
+    .get(sessionId);
+
+  return row?.max ?? null;
+}
+
 export function updateTurnBackfill(
   db: Database,
   turnId: number,

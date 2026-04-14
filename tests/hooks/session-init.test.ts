@@ -256,6 +256,46 @@ describe("handleSessionInitHook", () => {
     expect(thirdTurn?.userPrompt).toBe("Third tracked prompt");
   });
 
+  test("uses db max plus one even when transcript count disagrees", async () => {
+    const transcript = writeTranscript([
+      { role: "user", content: [{ type: "text", text: "Only one parsed prompt" }] },
+    ]);
+    transcriptDirectories.push(transcript.directory);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 3500,
+      updatedAtEpoch: 3500,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 47, "/markdown-writing 在审查一下文档", 3500);
+
+    const handler = createSessionInitHandler({
+      db,
+      now: () => 3501,
+    });
+
+    await handler(
+      createInput({
+        prompt: "1. 4.1 可以删除切分描述 2-4 修正",
+        transcriptPath: transcript.path,
+      }),
+    );
+
+    expect(getTurn(db, session.id, 48)?.userPrompt).toBe(
+      "1. 4.1 可以删除切分描述 2-4 修正",
+    );
+  });
+
   test("counts only real user prompts in nested Claude JSONL transcripts", async () => {
     const transcript = writeTranscript([
       {
