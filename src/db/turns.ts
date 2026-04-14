@@ -247,6 +247,22 @@ export function updateTurnBackfill(
   contentPromptId?: string | null,
   transcriptLineStart?: number | null,
 ): void {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+
+  const safeContentPromptId =
+    contentPromptId &&
+    !hasOtherTurnWithContentPromptId(
+      db,
+      existing.sessionId,
+      turnId,
+      contentPromptId,
+    )
+      ? contentPromptId
+      : null;
+
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
@@ -257,8 +273,30 @@ export function updateTurnBackfill(
   ).run(
     assistantResponse,
     toolCallCount,
-    contentPromptId ?? null,
+    safeContentPromptId,
     transcriptLineStart ?? null,
     turnId,
+  );
+}
+
+function hasOtherTurnWithContentPromptId(
+  db: Database,
+  sessionId: number,
+  turnId: number,
+  contentPromptId: string,
+): boolean {
+  return (
+    db
+      .query<{ id: number }, [number, string, number]>(
+        `
+          SELECT id
+          FROM turns
+          WHERE session_id = ?
+            AND content_prompt_id = ?
+            AND id <> ?
+          LIMIT 1
+        `,
+      )
+      .get(sessionId, contentPromptId, turnId) !== null
   );
 }

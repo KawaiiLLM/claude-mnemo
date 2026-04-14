@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurn } from "../../src/db/turns";
+import { getTurn, getTurnsForSession } from "../../src/db/turns";
 import { backfillFromTranscript } from "../../src/hooks/backfill";
+import type { ParsedReplayTurn } from "../../src/shared/transcript-parser";
 
 describe("backfillFromTranscript", () => {
   const databases: Array<ReturnType<typeof createDatabase>> = [];
@@ -182,5 +183,164 @@ describe("backfillFromTranscript", () => {
     const updatedTurn = getTurn(db, session.id, 1);
     expect(updatedTurn?.contentPromptId).toBe("pid-match");
     expect(updatedTurn?.transcriptLineStart).toBe(3);
+  });
+
+  test("tail-anchors the latest turn and does not bind older orphans by text fallback", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-backfill-tail-anchor",
+      project: "/tmp/project",
+      title: "Tail anchor session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 300,
+      updatedAtEpoch: 300,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?)`,
+    ).run(session.id, 1, "pid-first", "测试", "First answer", 301, 301);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 2, "测试", 302);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 3, "当前 prompt", 303);
+
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-backfill-tail-"));
+    const transcriptPath = join(directory, "session.jsonl");
+    directories.push(directory);
+    writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u1",
+          type: "user",
+          promptId: "pid-first",
+          permissionMode: "default",
+          message: { role: "user", content: "测试" },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "First answer" }],
+          },
+        }),
+        JSON.stringify({
+          uuid: "u3",
+          type: "user",
+          promptId: "pid-orphan",
+          permissionMode: "default",
+          message: { role: "user", content: "测试" },
+        }),
+        JSON.stringify({
+          uuid: "u4",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Orphan answer" }],
+          },
+        }),
+        JSON.stringify({
+          uuid: "u5",
+          type: "user",
+          promptId: "pid-current",
+          permissionMode: "default",
+          message: { role: "user", content: "当前 prompt" },
+        }),
+        JSON.stringify({
+          uuid: "u6",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Transcript current answer" }],
+          },
+        }),
+      ].join("\n"),
+      "utf8",
+    );
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      transcriptPath,
+      "Hook current answer",
+    );
+
+    const orphanTurn = getTurn(db, session.id, 2);
+    const currentTurn = getTurn(db, session.id, 3);
+
+    expect(orphanTurn?.assistantResponse).toBe("Orphan answer");
+    expect(orphanTurn?.toolCallCount).toBe(0);
+    expect(orphanTurn?.transcriptLineStart).toBe(3);
+    expect(orphanTurn?.contentPromptId).toBeNull();
+
+    expect(currentTurn?.assistantResponse).toBe("Hook current answer");
+    expect(currentTurn?.contentPromptId).toBe("pid-current");
+    expect(currentTurn?.transcriptLineStart).toBe(5);
+  });
+
+  test("skips contentPromptId writes when the latest replay anchor is already occupied", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-backfill-tail-occupied",
+      project: "/tmp/project",
+      title: "Tail occupied session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 400,
+      updatedAtEpoch: 400,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, created_at_epoch, updated_at_epoch
+      ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?)`,
+    ).run(session.id, 1, "pid-occupied", "Earlier", "Earlier answer", 401, 401);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 2, "Latest", 402);
+
+    const transcriptTurns: ParsedReplayTurn[] = [
+      {
+        promptNumber: 2,
+        promptId: "pid-occupied",
+        userPrompt: "Latest",
+        assistantText: "Latest answer",
+        toolCalls: [],
+        transcriptLineStart: 99,
+      },
+    ];
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      undefined,
+      "Hook latest answer",
+      transcriptTurns,
+    );
+
+    const latestTurn = getTurn(db, session.id, 2);
+    expect(latestTurn?.assistantResponse).toBe("Hook latest answer");
+    expect(latestTurn?.contentPromptId).toBeNull();
+    expect(latestTurn?.transcriptLineStart).toBe(99);
   });
 });

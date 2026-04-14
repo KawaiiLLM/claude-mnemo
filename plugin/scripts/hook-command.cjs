@@ -649,7 +649,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.4-mnxefbuz" : "dev";
+var BUILD_ID = true ? "0.2.5-mnyjdub0" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1718,6 +1718,16 @@ function getTurnsForSession(db, sessionId) {
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+  const safeContentPromptId = contentPromptId && !hasOtherTurnWithContentPromptId(
+    db,
+    existing.sessionId,
+    turnId,
+    contentPromptId
+  ) ? contentPromptId : null;
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
@@ -1728,10 +1738,22 @@ function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, conten
   ).run(
     assistantResponse,
     toolCallCount,
-    contentPromptId ?? null,
+    safeContentPromptId,
     transcriptLineStart ?? null,
     turnId
   );
+}
+function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId) {
+  return db.query(
+    `
+          SELECT id
+          FROM turns
+          WHERE session_id = ?
+            AND content_prompt_id = ?
+            AND id <> ?
+          LIMIT 1
+        `
+  ).get(sessionId, contentPromptId, turnId) !== null;
 }
 
 // src/mcp/timeline.ts
@@ -3518,31 +3540,26 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
   }
   const replayTurns = transcriptTurns ?? (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
   const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
-  const consumed = /* @__PURE__ */ new Set();
   for (const pendingTurn of pendingTurns) {
     if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
       continue;
     }
-    let matchIndex = replayTurns.findIndex(
-      (turn, index) => !consumed.has(index) && turn.userPrompt === pendingTurn.userPrompt
+    const isLatestPendingTurn = pendingTurn.promptNumber === lastPendingPromptNumber;
+    const transcriptTurn = isLatestPendingTurn ? replayTurns[replayTurns.length - 1] : replayTurns.find(
+      (turn) => turn.promptNumber === pendingTurn.promptNumber
     );
-    if (matchIndex < 0) {
-      matchIndex = replayTurns.findIndex(
-        (turn, index) => !consumed.has(index) && turn.promptNumber === pendingTurn.promptNumber
-      );
+    if (!transcriptTurn && !isLatestPendingTurn) {
+      continue;
     }
-    const transcriptTurn = matchIndex >= 0 ? replayTurns[matchIndex] : void 0;
-    const assistantResponse = pendingTurn.promptNumber === lastPendingPromptNumber && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
+    const assistantResponse = isLatestPendingTurn && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
-    if (matchIndex >= 0) {
-      consumed.add(matchIndex);
-    }
+    const contentPromptId = isLatestPendingTurn && transcriptTurn?.promptId ? transcriptTurn.promptId : void 0;
     updateTurnBackfill(
       db,
       pendingTurn.id,
       assistantResponse,
       toolCallCount,
-      transcriptTurn?.promptId,
+      contentPromptId,
       transcriptTurn?.transcriptLineStart
     );
   }

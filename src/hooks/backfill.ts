@@ -22,44 +22,40 @@ export function backfillFromTranscript(
     (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
   const lastPendingPromptNumber =
     pendingTurns[pendingTurns.length - 1]?.promptNumber;
-  const consumed = new Set<number>();
 
   for (const pendingTurn of pendingTurns) {
     if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
       continue;
     }
 
-    let matchIndex = replayTurns.findIndex(
-      (turn, index) =>
-        !consumed.has(index) && turn.userPrompt === pendingTurn.userPrompt,
-    );
+    const isLatestPendingTurn =
+      pendingTurn.promptNumber === lastPendingPromptNumber;
+    const transcriptTurn = isLatestPendingTurn
+      ? replayTurns[replayTurns.length - 1]
+      : replayTurns.find(
+          (turn) => turn.promptNumber === pendingTurn.promptNumber,
+        );
 
-    if (matchIndex < 0) {
-      matchIndex = replayTurns.findIndex(
-        (turn, index) =>
-          !consumed.has(index) &&
-          turn.promptNumber === pendingTurn.promptNumber,
-      );
+    if (!transcriptTurn && !isLatestPendingTurn) {
+      continue;
     }
 
-    const transcriptTurn = matchIndex >= 0 ? replayTurns[matchIndex] : undefined;
     const assistantResponse =
-      pendingTurn.promptNumber === lastPendingPromptNumber &&
-      lastAssistantMessage !== undefined
+      isLatestPendingTurn && lastAssistantMessage !== undefined
         ? lastAssistantMessage
         : transcriptTurn?.assistantText ?? "";
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
-
-    if (matchIndex >= 0) {
-      consumed.add(matchIndex);
-    }
+    const contentPromptId =
+      isLatestPendingTurn && transcriptTurn?.promptId
+        ? transcriptTurn.promptId
+        : undefined;
 
     updateTurnBackfill(
       db,
       pendingTurn.id,
       assistantResponse,
       toolCallCount,
-      transcriptTurn?.promptId,
+      contentPromptId,
       transcriptTurn?.transcriptLineStart,
     );
   }

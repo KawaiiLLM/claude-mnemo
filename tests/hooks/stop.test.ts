@@ -349,7 +349,7 @@ describe("handleStopHook", () => {
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });
 
-  test("populates transcriptLineStart for orphan turns during stop recovery", async () => {
+  test("populates safe replay fields for orphan turns during stop recovery without binding prompt ids", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, status, user_prompt, created_at_epoch
@@ -420,7 +420,9 @@ describe("handleStopHook", () => {
     );
 
     expect(result.continue).toBe(true);
-    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBe("pid-1");
+    expect(getTurn(db, sessionId, 1)?.assistantResponse).toBe("First answer");
+    expect(getTurn(db, sessionId, 1)?.toolCallCount).toBe(0);
+    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBeNull();
     expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(1);
     expect(getTurn(db, sessionId, 2)?.contentPromptId).toBe("pid-2");
     expect(getTurn(db, sessionId, 2)?.transcriptLineStart).toBe(3);
@@ -484,6 +486,83 @@ describe("handleStopHook", () => {
     );
 
     expect(getTurn(db, sessionId, 1)?.transcriptLineStart).toBe(1);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  test("matches repeated prompt text by promptNumber before reusing an existing contentPromptId", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, created_at_epoch, updated_at_epoch
+      ) VALUES (?, 1, 'pid-first', 'extracted', '测试', 'First answer', 120, 120)`,
+    ).run(sessionId);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 2, 'active', '测试', 121)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u0",
+          type: "user",
+          promptId: "pid-first",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "测试",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u1",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "First answer" }],
+          },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "user",
+          promptId: "pid-second",
+          permissionMode: "default",
+          message: {
+            role: "user",
+            content: "测试",
+          },
+        }),
+        JSON.stringify({
+          uuid: "u3",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Second answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Second answer",
+      }),
+    );
+
+    expect(result.continue).toBe(true);
+    expect(getTurn(db, sessionId, 1)?.contentPromptId).toBe("pid-first");
+    expect(getTurn(db, sessionId, 2)?.contentPromptId).toBe("pid-second");
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });

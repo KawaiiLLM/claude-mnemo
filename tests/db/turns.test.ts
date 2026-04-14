@@ -8,6 +8,7 @@ import {
   getTurnById,
   getTurn,
   getTurnsForSession,
+  updateTurnBackfill,
   updateTurnById,
 } from "../../src/db/turns";
 import { getObservationsForTurn } from "../../src/db/observations";
@@ -237,6 +238,57 @@ describe("turn queries", () => {
 
     expect(updated?.transcriptLineStart).toBe(7);
     expect(getTurnById(db, turn.id)?.transcriptLineStart).toBe(7);
+  });
+
+  test("updateTurnBackfill skips an occupied contentPromptId instead of throwing", () => {
+    const firstTurn = saveTurn(db, {
+      sessionId,
+      promptNumber: 7,
+      userPrompt: "Earlier turn",
+      assistantResponse: "Earlier answer",
+      title: "Earlier turn",
+      content: "Earlier content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 700,
+      updatedAtEpoch: 710,
+      observations: [],
+    });
+    db.query(
+      "UPDATE turns SET content_prompt_id = ? WHERE id = ?",
+    ).run("pid-occupied", firstTurn.id);
+
+    const latestTurn = saveTurn(db, {
+      sessionId,
+      promptNumber: 8,
+      userPrompt: "Latest turn",
+      assistantResponse: null,
+      title: null,
+      content: null,
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 800,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    expect(() =>
+      updateTurnBackfill(
+        db,
+        latestTurn.id,
+        "Latest answer",
+        0,
+        "pid-occupied",
+        42,
+      ),
+    ).not.toThrow();
+
+    const updated = getTurnById(db, latestTurn.id);
+    expect(updated?.assistantResponse).toBe("Latest answer");
+    expect(updated?.contentPromptId).toBeNull();
+    expect(updated?.transcriptLineStart).toBe(42);
   });
 
 });
