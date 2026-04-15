@@ -47,7 +47,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.7-mnzojg52" : "dev";
+var BUILD_ID = true ? "0.2.8-mnzusm4u" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -36875,7 +36875,7 @@ config2(en_default3());
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Recall structured memories from the SQLite store. Paginated index; use the mnemo-replay skill for raw JSONL.",
+  recall: "Search past sessions for prior work, design decisions, and user corrections. Use before re-deriving implementation details from source. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus configurable page/pageSize pagination."
 };
@@ -39589,7 +39589,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.7",
+    version: "0.2.8",
     tools: [
       deps.toolImpl(
         "remember",

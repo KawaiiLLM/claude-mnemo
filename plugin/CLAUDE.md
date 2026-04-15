@@ -7,6 +7,8 @@ Three-axis memory, three structured tools + one skill:
 - `mnemo-replay` skill — raw axis: JSONL + SQLite direct access
 - `remember` MCP tool — the single write path
 
+**Priority rule**: if prior sessions exist and the question involves past implementation, changes, or decisions, query mnemo first (recall → timeline → mnemo-replay). Reading source is second-best; speculation is last.
+
 Preferred workflow:
 1. `recall()` to browse recent memory or `recall(query=...)` / `recall(time=...)` to narrow.
 2. `timeline(id="S<n>")` to see the session's shape - decision arc, gaps, phases.

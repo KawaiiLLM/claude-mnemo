@@ -22,6 +22,7 @@ Use timeline when:
 - Reconstructing a session after compacting
 - Asking how a session unfolded or where the decision arc changed
 - Finding where a decision was made
+- Reviewing a past spec-review / RFC / design session by id (e.g. "locked decisions in S42") — timeline renders the decision arc directly
 - Debugging an in-progress session with pending turns
 - Inspecting gaps, tool bursts, broken-prompt candidates, or compact boundaries
 
@@ -29,22 +30,29 @@ Use timeline when:
 
 ```text
 timeline(id="S42")
+timeline(id="S42", page=2, pageSize=50)
+timeline(id="S42/T10..100", pageSize=20)
 ```
 
-The input has exactly one field: `id`. No depth, page, pageSize, query, or truncate.
+| Field | Required | Purpose |
+|---|---|---|
+| `id` | yes | Session selector with optional range (see below) |
+| `page` | no | 1-indexed page number. Default `1`. |
+| `pageSize` | no | Turns per page. Default `30`. |
+
+`id` selects the candidate turns; `page`/`pageSize` controls rendering. The two layers are orthogonal — `id="S42/T1..100"` with `pageSize=30` keeps all 100 turns as candidates and renders page 1 (T1-T30) by default. Phases and session metadata remain session-wide regardless of page.
 
 ### Range syntax
 
-| Form | Returns |
+| Form | Candidates |
 |---|---|
-| `S42` | First 30 turns, or the whole session if shorter |
+| `S42` | All turns in the session |
 | `S42/T*` | Same as `S42` |
 | `S42/T10..30` | Closed range `T10-T30` |
-| `S42/T10..50` | Truncated to 30 rows |
 | `S42/T..20` | Open-start range `T1-T20` |
 | `S42/T30..` | Open-end range starting at `T30` |
 
-Hard cap: timeline returns at most 30 turns in the table. Phases and session metadata remain session-wide.
+Range produces the full candidate set with no truncation; `pageSize` then slices it for display.
 
 `timeline(id="S42/T10")` is an error. Use `recall(id="S42/T10", depth="expanded")` for single-turn detail.
 
@@ -56,7 +64,7 @@ The header includes:
 
 - Session id, local-time range, and duration
 - Session stats and type counts
-- `showing:` line with the current window and next hint
+- `showing:` line in `page X / Y (total Z)` form — rendered only when the candidate set exceeds `pageSize`
 - Explicit timezone line with abbreviation and UTC offset
 - `raw:` line with the absolute JSONL path for `mnemo-replay`
 
@@ -103,4 +111,4 @@ recall(id="S42/T19", depth="expanded")
 - Timeline is main-agent only
 - Cross-session timelines are out of scope for v1
 - Local-timezone rendering uses `Intl.DateTimeFormat`
-- The 30-turn cap is intentional
+- Default `pageSize` is 30; override with the `pageSize` arg for longer views

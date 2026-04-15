@@ -25,6 +25,8 @@ Use when the user asks about PREVIOUS sessions rather than the current turn:
 
 Also use it proactively before answering questions that may already be covered by prior work.
 
+**Especially for "how does X work / why is X done this way" in a codebase where prior sessions exist**: before re-deriving from source, check if a past spec-review or design session already enumerated the rules. Implementation rationale (why a threshold is 1000, why a hook fires on event X not Y) lives in session summaries, not code comments. Re-deriving from code alone produces self-consistent but wrong stories when the why is lost.
+
 ## Data Model
 
 ```text

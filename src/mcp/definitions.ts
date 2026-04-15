@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall:
-    "Recall structured memories from the SQLite store. Paginated index; use the mnemo-replay skill for raw JSONL.",
+    "Search past sessions for prior work, design decisions, and user corrections. Use before re-deriving implementation details from source. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
   remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
   timeline:
     "Render the temporal/decision shape of a past session — phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus configurable page/pageSize pagination.",
