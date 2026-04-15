@@ -30,13 +30,15 @@ import {
   type PendingQueueItem,
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
-import { WORKER_PID_PATH, WORKER_STARTING_PATH } from "../shared/paths";
+import { DATA_DIR, WORKER_PID_PATH, WORKER_STARTING_PATH } from "../shared/paths";
+import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import {
   detectAndCleanSidechainTurns,
   getPendingRollbackTurns,
   markRollbackTurnsNotified,
 } from "./rollback";
-import { createWorkerProcessors } from "./processors";
+import { detectCacheTtl } from "./cache-ttl";
+import { createWorkerProcessors, type TurnPayload } from "./processors";
 import {
   createWorkerQuerySession,
   type WorkerQuerySession,
@@ -50,9 +52,6 @@ const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
 const TURN_STOP_TIMEOUT_MS = 30_000;
-const RESERVE_TURNS = 3;
-const KEEPALIVE_MS = 240_000;
-const CACHE_TTL_MS = 300_000;
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
@@ -62,13 +61,22 @@ export interface BufferState {
   items: PendingQueueItem[];
 }
 
+interface BatchEntry {
+  turns: TurnPayload[];
+  size: number;
+  sessionUpdated: boolean;
+  oldestTurnEpoch: number;
+}
+
 export interface SessionState {
   sessionDbId: number;
   querySession: WorkerQuerySession | null;
   contentSessionId: string | null;
   project: string | null;
-  initialized: boolean;
+  batchQueue: BatchEntry[];
+  cacheTtlMs: number;
   lastInjectedSummaryEpoch?: number;
+  nextBatchNeedsSessionContext: boolean;
   lastPushAt: number;
   lastMessageAt: number;
   lastActivity: number;
@@ -83,18 +91,17 @@ export interface WorkerCoreDeps {
   db: Database;
   now?: () => number;
   nowMs?: () => number;
-  processObsImpl?: (state: SessionState, observationId: number) => Promise<void>;
-  processTurnStopImpl?: (state: SessionState, turnId: number) => Promise<void>;
+  buildTurnPayloadImpl?: (
+    turnId: number,
+    obsItems: PendingQueueItem[],
+    turnStopItem: PendingQueueItem,
+  ) => TurnPayload | null;
   processBatchImpl?: (
     state: SessionState,
     items: PendingQueueItem[],
     options?: {
       turnStopItems?: PendingQueueItem[];
-      partialTurns?: Array<{
-        turnId: number;
-        totalObsCount: number;
-        contextObservationIds: number[];
-      }>;
+      sessionUpdated?: boolean;
     },
   ) => Promise<void>;
   pushSessionSummaryPromptImpl?: (
@@ -105,6 +112,7 @@ export interface WorkerCoreDeps {
   createWorkerQuerySessionImpl?: typeof createWorkerQuerySession;
   isProcessAliveImpl?: typeof isProcessAlive;
   logger?: Pick<Console, "warn" | "error">;
+  config?: MnemoConfig;
 }
 
 export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
@@ -253,6 +261,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const nowMs = deps.nowMs ?? Date.now;
   const logger = deps.logger ?? console;
+  const config = deps.config ?? DEFAULT_CONFIG;
   const sessions = new Map<number, SessionState>();
   const buffers = new Map<number, BufferState>();
   const compactingSessions = new Set<number>();
@@ -260,16 +269,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
 
-  const processObsImpl =
-    deps.processObsImpl ??
-    (async (_state: SessionState, observationId: number) => {
-      throw new Error(`processObs not implemented for O${observationId}`);
-    });
-  const processTurnStopImpl =
-    deps.processTurnStopImpl ??
-    (async (_state: SessionState, turnId: number) => {
-      throw new Error(`processTurnStop not implemented for T${turnId}`);
-    });
+  const fallbackProcessors = deps.buildTurnPayloadImpl
+    ? null
+    : createWorkerProcessors(deps.db);
+  const buildTurnPayloadImpl =
+    deps.buildTurnPayloadImpl ??
+    fallbackProcessors!.buildTurnPayload;
   const processBatchImpl =
     deps.processBatchImpl ??
     (async () => {
@@ -278,6 +283,20 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const pushSessionSummaryPromptImpl =
     deps.pushSessionSummaryPromptImpl ?? (async () => {});
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {});
+
+  function hasPriorSessionSummary(sessionId: number): boolean {
+    const session = getSession(deps.db, sessionId);
+    if (!session) {
+      return false;
+    }
+
+    return (
+      (session.title ?? "") !== "" ||
+      (session.content ?? "") !== "" ||
+      (session.insight ?? "") !== "" ||
+      (session.nextSteps ?? "") !== ""
+    );
+  }
 
   function getOrCreateBuffer(sessionDbId: number): BufferState {
     let buffer = buffers.get(sessionDbId);
@@ -326,71 +345,121 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     buffer.items = items;
   }
 
-  function buildTurnGroups(items: PendingQueueItem[]): Array<{
-    turnId: number;
-    promptNumber: number;
-    obsItems: PendingQueueItem[];
-    turnStopItem?: PendingQueueItem;
-  }> {
-    const groups = new Map<
-      number,
-      {
-        turnId: number;
-        promptNumber: number;
-        obsItems: PendingQueueItem[];
-        turnStopItem?: PendingQueueItem;
-      }
-    >();
+  function refreshPendingSessionContextFlag(state: SessionState): void {
+    const session = getSession(deps.db, state.sessionDbId);
+    if (!session) {
+      return;
+    }
 
-    for (const item of items) {
-      let turnId: number | null = null;
-      if (item.kind === "turn-stop") {
-        turnId = item.targetId;
+    const summaryEpoch = session.summaryUpdatedAtEpoch ?? 0;
+    if (
+      summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0) &&
+      !state.batchQueue.some((batch) => batch.sessionUpdated)
+    ) {
+      state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+    }
+  }
+
+  function recalculateBatchSize(batch: BatchEntry): void {
+    batch.size = batch.turns.reduce((total, turn) => total + turn.size, 0);
+  }
+
+  function releaseBatchClaims(batch: BatchEntry): void {
+    for (const turn of batch.turns) {
+      for (const item of turn.obsItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      releaseQueueClaim(deps.db, turn.turnStopItem.seq);
+    }
+  }
+
+  function pruneInProgressBuffer(sessionDbId: number): void {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+
+    const activeItems: PendingQueueItem[] = [];
+    const prunedSeqs = new Set<number>();
+    const { activeItems: prunedItems, prunedSeqs: deletedSeqs } =
+      pruneBufferedUndoneItems(deps.db, buffer.items);
+
+    for (const item of prunedItems) {
+      if (item.kind === "obs") {
+        activeItems.push(item);
       } else {
-        turnId = getObservation(deps.db, item.targetId)?.turnId ?? null;
-      }
-
-      if (turnId === null) {
-        continue;
-      }
-
-      const turn = getTurnById(deps.db, turnId);
-      if (!turn) {
-        continue;
-      }
-
-      let group = groups.get(turnId);
-      if (!group) {
-        group = {
-          turnId,
-          promptNumber: turn.promptNumber,
-          obsItems: [],
-        };
-        groups.set(turnId, group);
-      }
-
-      if (item.kind === "turn-stop") {
-        group.turnStopItem = item;
-      } else {
-        group.obsItems.push(item);
+        deleteQueueItem(deps.db, item.seq);
+        prunedSeqs.add(item.seq);
       }
     }
 
-    return Array.from(groups.values()).sort((left, right) => {
-      if (left.promptNumber !== right.promptNumber) {
-        return left.promptNumber - right.promptNumber;
+    if (deletedSeqs.size > 0 || prunedSeqs.size > 0) {
+      replaceBufferItems(sessionDbId, activeItems);
+      return;
+    }
+
+    buffer.items = activeItems;
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+
+  function pruneBatchQueueLocked(state: SessionState): void {
+    const nextQueue: BatchEntry[] = [];
+
+    for (const batch of state.batchQueue) {
+      const keptTurns = batch.turns.filter((turnPayload) => {
+        const turn = getTurnById(deps.db, turnPayload.turnId);
+        if (!turn || turn.status === "undone") {
+          for (const item of turnPayload.obsItems) {
+            deleteQueueItem(deps.db, item.seq);
+          }
+          deleteQueueItem(deps.db, turnPayload.turnStopItem.seq);
+          return false;
+        }
+        return true;
+      });
+
+      if (keptTurns.length === 0) {
+        continue;
       }
 
-      const leftSeq = Math.min(
-        left.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
-        ...left.obsItems.map((item) => item.seq),
-      );
-      const rightSeq = Math.min(
-        right.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
-        ...right.obsItems.map((item) => item.seq),
-      );
-      return leftSeq - rightSeq;
+      const nextBatch: BatchEntry = {
+        ...batch,
+        turns: keptTurns,
+      };
+      recalculateBatchSize(nextBatch);
+      nextQueue.push(nextBatch);
+    }
+
+    state.batchQueue = nextQueue;
+  }
+
+  function collectTurnObsItemsLocked(
+    sessionDbId: number,
+    turnId: number,
+  ): PendingQueueItem[] {
+    pruneInProgressBuffer(sessionDbId);
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return [];
+    }
+
+    const selected = buffer.items.filter((item) => {
+      const observation = getObservation(deps.db, item.targetId);
+      return observation?.turnId === turnId;
     });
+
+    if (selected.length === 0) {
+      return [];
+    }
+
+    removeBufferedItemsBySeq(
+      sessionDbId,
+      new Set(selected.map((item) => item.seq)),
+    );
+
+    return selected;
   }
 
   function getOrCreateSessionState(sessionDbId: number): SessionState {
@@ -405,8 +474,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       querySession: null,
       contentSessionId: null,
       project: null,
-      initialized: false,
+      batchQueue: [],
+      cacheTtlMs: 300_000,
       lastInjectedSummaryEpoch: 0,
+      nextBatchNeedsSessionContext: hasPriorSessionSummary(sessionDbId),
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
@@ -429,7 +500,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         state!.lastMessageAt = nowMs();
         state!.queryPid = runtime.queryPid;
         state!.agentSessionId = result.session_id;
-        state!.initialized = true;
+        void detectCacheTtl(result.session_id, runtimeProjectPath)
+          .then((ttlMs) => {
+            if (ttlMs) {
+              state!.cacheTtlMs = ttlMs;
+            }
+          })
+          .catch(() => {});
         if (pendingRollbacks.length > 0) {
           try {
             markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
@@ -442,6 +519,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         }
       },
     };
+    const runtimeProjectPath = DATA_DIR;
     sessions.set(sessionDbId, state);
     return state;
   }
@@ -458,6 +536,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    state.nextBatchNeedsSessionContext =
+      state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
     if (session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
@@ -467,6 +547,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         sessionDbId: state.sessionDbId,
         contentSessionId: session.contentSessionId,
         project: session.project,
+        config,
         resumeAgentSessionId: session.lastAgentSessionId,
       },
       {
@@ -563,128 +644,151 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function processClaimedItem(item: PendingQueueItem): Promise<void> {
-    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
-    const workPromise = withSessionProcessingLock(item.sessionDbId, (state) =>
-      item.kind === "obs"
-        ? processObsImpl(state, item.targetId)
-        : processTurnStopImpl(state, item.targetId),
-    );
+    if (item.kind === "obs") {
+      throw new Error("processClaimedItem no longer supports standalone obs pushes");
+    }
+
+    const workPromise = withSessionProcessingLock(item.sessionDbId, async (state) => {
+      await processTurnStopLocked(state, item);
+    });
 
     await withTimeout(
       workPromise,
-      timeoutMs,
-      `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`,
+      TURN_STOP_TIMEOUT_MS,
+      `${item.kind} ${item.targetId} timeout after ${TURN_STOP_TIMEOUT_MS}ms`,
     );
   }
 
-  async function sendBatchSelectionLocked(
-    state: SessionState,
-    sessionDbId: number,
-    selection: {
-      obsItems: PendingQueueItem[];
-      turnStopItems: PendingQueueItem[];
-      partialTurns?: Array<{
-        turnId: number;
-        totalObsCount: number;
-        contextObservationIds: number[];
-      }>;
-    },
-  ): Promise<void> {
-    if (
-      selection.obsItems.length === 0 &&
-      selection.turnStopItems.length === 0 &&
-      (selection.partialTurns?.length ?? 0) === 0
-    ) {
+  async function flushOneBatchLocked(state: SessionState): Promise<void> {
+    pruneBatchQueueLocked(state);
+    const batch = state.batchQueue[0];
+    if (!batch) {
       return;
     }
 
-    const sentSeqs = new Set(
-      [...selection.obsItems, ...selection.turnStopItems].map((item) => item.seq),
-    );
+    const obsItems = batch.turns.flatMap((turn) => turn.obsItems);
+    const turnStopItems = batch.turns.map((turn) => turn.turnStopItem);
 
     try {
-      await processBatchImpl(state, selection.obsItems, {
-        turnStopItems: selection.turnStopItems,
-        partialTurns: selection.partialTurns,
+      await processBatchImpl(state, obsItems, {
+        turnStopItems,
+        sessionUpdated: batch.sessionUpdated,
       });
 
-      for (const item of selection.obsItems) {
+      for (const item of obsItems) {
         deleteQueueItem(deps.db, item.seq);
       }
-      for (const item of selection.turnStopItems) {
+      for (const item of turnStopItems) {
         deleteQueueItem(deps.db, item.seq);
       }
     } catch (error) {
-      for (const item of selection.obsItems) {
+      for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      for (const item of selection.turnStopItems) {
+      for (const item of turnStopItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
+      if (batch.sessionUpdated) {
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+      }
+      state.batchQueue.shift();
       throw error;
-    } finally {
-      removeBufferedItemsBySeq(sessionDbId, sentSeqs);
+    }
+
+    state.batchQueue.shift();
+    refreshPendingSessionContextFlag(state);
+  }
+
+  async function flushAllBatchesLocked(state: SessionState): Promise<void> {
+    while (true) {
+      pruneBatchQueueLocked(state);
+      if (state.batchQueue.length === 0) {
+        return;
+      }
+      await flushOneBatchLocked(state);
     }
   }
 
-  async function flushExcessTurns(sessionDbId: number): Promise<void> {
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
-      }
-      if (activeItems.length === 0) {
-        return;
-      }
+  async function enqueueCompletedTurnLocked(
+    state: SessionState,
+    turnPayload: TurnPayload,
+  ): Promise<void> {
+    refreshPendingSessionContextFlag(state);
+    const lastBatch = state.batchQueue[state.batchQueue.length - 1];
+    let targetBatch = lastBatch;
+    let createdBatch = false;
 
-      const groups = buildTurnGroups(activeItems);
-      const completedGroups = groups.filter((group) => group.turnStopItem);
-      if (completedGroups.length <= RESERVE_TURNS) {
-        replaceBufferItems(sessionDbId, activeItems);
-        return;
+    if (
+      !lastBatch ||
+      lastBatch.size + turnPayload.size >= config.mergeThresholdChars
+    ) {
+      targetBatch = {
+        turns: [],
+        size: 0,
+        sessionUpdated: false,
+        oldestTurnEpoch: turnPayload.turnStopItem.enqueuedAtEpoch,
+      };
+      state.batchQueue.push(targetBatch);
+      createdBatch = true;
+    }
+
+    targetBatch.turns.push(turnPayload);
+    targetBatch.size += turnPayload.size;
+    const assignedSessionUpdated =
+      !targetBatch.sessionUpdated && state.nextBatchNeedsSessionContext;
+    if (assignedSessionUpdated) {
+      targetBatch.sessionUpdated = true;
+      state.nextBatchNeedsSessionContext = false;
+    }
+
+    try {
+      if (state.batchQueue.length > config.maxQueuedBatches) {
+        await flushOneBatchLocked(state);
       }
-
-      const groupsToFlush = completedGroups.slice(
-        0,
-        completedGroups.length - RESERVE_TURNS,
-      );
-
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: groupsToFlush.flatMap((group) => group.obsItems),
-        turnStopItems: groupsToFlush
-          .map((group) => group.turnStopItem)
-          .filter((item): item is PendingQueueItem => item !== undefined),
-      });
-    });
+    } catch (error) {
+      for (const batch of state.batchQueue) {
+        releaseBatchClaims(batch);
+      }
+      state.batchQueue = [];
+      if (assignedSessionUpdated) {
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+      }
+      throw error;
+    }
   }
 
-  async function flushBufferedItems(sessionDbId: number): Promise<void> {
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
-      }
-      if (activeItems.length === 0) {
+  async function processTurnStopLocked(
+    state: SessionState,
+    turnStopItem: PendingQueueItem,
+  ): Promise<void> {
+    const turn = getTurnById(deps.db, turnStopItem.targetId);
+    if (!turn || turn.status === "undone") {
+      deleteQueueItem(deps.db, turnStopItem.seq);
+      return;
+    }
+
+    const obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
+    try {
+      const turnPayload = buildTurnPayloadImpl(turn.id, obsItems, turnStopItem);
+      if (!turnPayload) {
+        for (const item of obsItems) {
+          deleteQueueItem(deps.db, item.seq);
+        }
+        deleteQueueItem(deps.db, turnStopItem.seq);
         return;
       }
 
-      const groups = buildTurnGroups(activeItems);
-      const partialTurns = groups
-        .filter((group) => !group.turnStopItem && group.obsItems.length > 0)
-        .map((group) => ({
-          turnId: group.turnId,
-          totalObsCount: group.obsItems.length,
-          contextObservationIds: group.obsItems.map((item) => item.targetId),
-        }));
-
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: activeItems.filter((item) => item.kind === "obs"),
-        turnStopItems: activeItems.filter((item) => item.kind === "turn-stop"),
-        partialTurns,
-      });
-    });
+      await enqueueCompletedTurnLocked(state, turnPayload);
+    } catch (error) {
+      for (const item of obsItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      releaseQueueClaim(deps.db, turnStopItem.seq);
+      for (const item of obsItems) {
+        getOrCreateBuffer(state.sessionDbId).items.push(item);
+      }
+      throw error;
+    }
   }
 
   async function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
@@ -702,26 +806,31 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
 
-      const buffer = getOrCreateBuffer(item.sessionDbId);
-      buffer.items.push(item);
+      if (item.kind === "obs") {
+        getOrCreateBuffer(item.sessionDbId).items.push(item);
+        continue;
+      }
 
-      if (item.kind === "turn-stop") {
-        const bufferedSeqs = buffer.items.map((bufferedItem) => bufferedItem.seq);
-
-        try {
-          await flushExcessTurns(item.sessionDbId);
-        } catch (error) {
-          skippedSeqs.add(item.seq);
-          for (const seq of bufferedSeqs) {
-            skippedSeqs.add(seq);
-          }
-          logger.error?.("queue item failed, skipping for this drain", {
-            seq: item.seq,
-            kind: item.kind,
-            targetId: item.targetId,
-            error,
-          });
+      const bufferedSeqs = [
+        item.seq,
+        ...((buffers.get(item.sessionDbId)?.items ?? []).map(
+          (bufferedItem) => bufferedItem.seq,
+        )),
+      ];
+      try {
+        await withSessionProcessingLock(item.sessionDbId, async (state) => {
+          await processTurnStopLocked(state, item);
+        });
+      } catch (error) {
+        for (const seq of bufferedSeqs) {
+          skippedSeqs.add(seq);
         }
+        logger.error?.("queue item failed, skipping for this drain", {
+          seq: item.seq,
+          kind: item.kind,
+          targetId: item.targetId,
+          error,
+        });
       }
     }
   }
@@ -731,7 +840,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     while (true) {
       try {
-        await flushBufferedItems(sessionDbId);
+        await withSessionProcessingLock(sessionDbId, async (state) => {
+          await flushAllBatchesLocked(state);
+        });
       } catch (error) {
         logger.error?.("drainSessionCompletely failed to flush buffer", {
           sessionDbId,
@@ -742,7 +853,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await scanAndDrainQueue(sessionDbId);
 
       try {
-        await flushBufferedItems(sessionDbId);
+        await withSessionProcessingLock(sessionDbId, async (state) => {
+          await flushAllBatchesLocked(state);
+        });
       } catch (error) {
         logger.error?.("drainSessionCompletely failed to flush buffer", {
           sessionDbId,
@@ -780,7 +893,31 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   async function flushSession(sessionDbId: number): Promise<void> {
     await scanAndDrainQueue(sessionDbId);
-    await flushBufferedItems(sessionDbId);
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      await flushAllBatchesLocked(state);
+    });
+  }
+
+  async function tickKeepaliveSessionLocked(
+    state: SessionState,
+    currentMs: number,
+  ): Promise<void> {
+    pruneBatchQueueLocked(state);
+    if (state.batchQueue.length === 0 || state.lastPushAt <= 0) {
+      return;
+    }
+
+    const age = currentMs - state.lastPushAt;
+    const triggerAt = state.cacheTtlMs - config.keepaliveLeadMs;
+    if (age < triggerAt || age >= state.cacheTtlMs) {
+      return;
+    }
+
+    if (state.lastPushAt > state.lastMessageAt) {
+      return;
+    }
+
+    await flushOneBatchLocked(state);
   }
 
   async function tryKeepaliveSession(
@@ -797,7 +934,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
 
     const age = currentMs - existingState.lastPushAt;
-    if (age < KEEPALIVE_MS || age >= CACHE_TTL_MS) {
+    const triggerAt = existingState.cacheTtlMs - config.keepaliveLeadMs;
+    if (age < triggerAt || age >= existingState.cacheTtlMs) {
       return;
     }
 
@@ -806,58 +944,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
 
     await withSessionProcessingLock(sessionDbId, async (state) => {
-      const refreshedAge = currentMs - state.lastPushAt;
-      if (
-        state.lastPushAt <= 0 ||
-        refreshedAge < KEEPALIVE_MS ||
-        refreshedAge >= CACHE_TTL_MS ||
-        state.lastPushAt > state.lastMessageAt
-      ) {
-        return;
-      }
-
-      const snapshot = [...(buffers.get(sessionDbId)?.items ?? [])];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
-      }
-      if (activeItems.length === 0) {
-        return;
-      }
-
-      const groups = buildTurnGroups(activeItems);
-      const completedGroups = groups.filter((group) => group.turnStopItem);
-
-      if (completedGroups.length > 0) {
-        const group = completedGroups[0]!;
-        await sendBatchSelectionLocked(state, sessionDbId, {
-          obsItems: group.obsItems,
-          turnStopItems: group.turnStopItem ? [group.turnStopItem] : [],
-        });
-        return;
-      }
-
-      const partialGroup = [...groups]
-        .filter((group) => !group.turnStopItem && group.obsItems.length > 0)
-        .sort((left, right) => right.promptNumber - left.promptNumber)[0];
-      if (!partialGroup) {
-        return;
-      }
-
-      const selectedCount = Math.max(1, Math.ceil(partialGroup.obsItems.length / 2));
-      const selectedObsItems = partialGroup.obsItems.slice(0, selectedCount);
-
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: selectedObsItems,
-        turnStopItems: [],
-        partialTurns: [
-          {
-            turnId: partialGroup.turnId,
-            totalObsCount: partialGroup.obsItems.length,
-            contextObservationIds: partialGroup.obsItems.map((item) => item.targetId),
-          },
-        ],
-      });
+      await tickKeepaliveSessionLocked(state, currentMs);
     });
   }
 
@@ -925,9 +1012,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       compactingSessions.delete(sessionDbId);
       const state = sessions.get(sessionDbId);
       if (state) {
-        state.initialized = false;
         state.lastPushAt = 0;
         state.lastInjectedSummaryEpoch = 0;
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(sessionDbId);
       }
     }
   }
@@ -997,7 +1084,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     },
     async runKeepaliveTick(nowMsOverride?: number): Promise<void> {
       const currentMs = nowMsOverride ?? nowMs();
-      for (const sessionDbId of buffers.keys()) {
+      for (const sessionDbId of sessions.keys()) {
         await tryKeepaliveSession(sessionDbId, currentMs);
       }
     },
@@ -1070,9 +1157,9 @@ export function createWorkerFetchHandler(
           db: runtimeDb,
           now: deps.now,
           nowMs: deps.nowMs,
-          processObsImpl: deps.processObsImpl ?? runtimeProcessors?.processObs,
-          processTurnStopImpl:
-            deps.processTurnStopImpl ?? runtimeProcessors?.processTurnStop,
+          config: deps.config,
+          buildTurnPayloadImpl:
+            deps.buildTurnPayloadImpl ?? runtimeProcessors?.buildTurnPayload,
           processBatchImpl:
             deps.processBatchImpl ?? runtimeProcessors?.processBatch,
           pushSessionSummaryPromptImpl:
@@ -1250,6 +1337,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
+  const config = deps.config ?? loadConfig();
 
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
@@ -1258,8 +1346,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     db,
     now: deps.now,
     nowMs: deps.nowMs,
-    processObsImpl: deps.processObsImpl ?? processors.processObs,
-    processTurnStopImpl: deps.processTurnStopImpl ?? processors.processTurnStop,
+    config,
+    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? processors.buildTurnPayload,
     processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl:
       deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
@@ -1278,6 +1366,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
         {
           ...deps,
           db,
+          config,
           scanAndDrainQueue: core.scanAndDrainQueue,
           handleFlushImpl: core.flushSession,
           handleCompactImpl: core.handleCompact,

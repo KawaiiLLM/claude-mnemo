@@ -81,7 +81,7 @@ export function createMnemoSdkServer(
 
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.6",
+    version: "0.2.7",
     tools: [
       deps.toolImpl(
         "remember",

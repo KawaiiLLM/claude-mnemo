@@ -241,111 +241,42 @@ describe("worker processors", () => {
     ).toBe(["src", "auth.ts"].join("\n"));
   });
 
-  test("processObs invokes Mnemosyne for pending observations", async () => {
-    const pushMessage = mock(async () => {});
+  test("buildTurnPayload includes cleaned obs blocks for completed turns", () => {
     const processors = createWorkerProcessors(db);
 
-    await processors.processObs(
+    const payload = processors.buildTurnPayload(
+      turnId,
+      [
+        {
+          seq: 1,
+          kind: "obs",
+          targetId: observationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+      ],
       {
+        seq: 2,
+        kind: "turn-stop",
+        targetId: turnId,
         sessionDbId: sessionId,
-        processingLock: Promise.resolve(),
-        pushMessage,
-        querySession: null,
-        contentSessionId: null,
-        project: null,
-        initialized: false,
-        lastPushAt: 0,
-        lastMessageAt: 0,
-        lastActivity: 0,
+        claimedAtEpoch: 1,
+        enqueuedAtEpoch: 1,
       },
-      observationId,
     );
 
-    expect(pushMessage).toHaveBeenCalledTimes(1);
-    const prompt = String(pushMessage.mock.calls[0]?.[0]);
-    expect(prompt).toContain(`<obs id="O${observationId}">`);
-    expect(prompt).toContain("🔧 Read");
-    expect(prompt).toContain("in: src/auth.ts");
-    expect(prompt).toContain("out: file contents");
-    expect(prompt).toContain("<prior_session>");
-    expect(prompt).toContain("title: Auth race");
-    expect(prompt).toContain("content: Current summary");
-    expect(prompt).toContain("insight: - current insight");
-    expect(prompt).toContain("next_steps: Ship it");
-    // Rules now live in the system prompt — no per-message instruction block.
-    expect(prompt).not.toContain("<instruction>");
-  });
-
-  test("processObs omits prior_session when the session has no prior summary", async () => {
-    db.query(
-      `
-        UPDATE sessions
-        SET title = NULL,
-            content = NULL,
-            insight = NULL,
-            next_steps = NULL
-        WHERE id = ?
-      `,
-    ).run(sessionId);
-
-    const pushMessage = mock(async () => {});
-    const processors = createWorkerProcessors(db);
-
-    await processors.processObs(
-      {
-        sessionDbId: sessionId,
-        processingLock: Promise.resolve(),
-        pushMessage,
-        querySession: null,
-        contentSessionId: null,
-        project: null,
-        initialized: false,
-        lastPushAt: 0,
-        lastMessageAt: 0,
-        lastActivity: 0,
-      },
-      observationId,
-    );
-
-    const prompt = String(pushMessage.mock.calls[0]?.[0]);
-    expect(prompt).not.toContain("<prior_session>");
-    expect(prompt).not.toContain("<instruction>");
-  });
-
-  test("processObs emits a pure <obs> block on the subsequent (initialized) path", async () => {
-    const pushMessage = mock(async () => {});
-    const processors = createWorkerProcessors(db);
-
-    await processors.processObs(
-      {
-        sessionDbId: sessionId,
-        processingLock: Promise.resolve(),
-        pushMessage,
-        querySession: null,
-        contentSessionId: null,
-        project: null,
-        initialized: true,
-        lastPushAt: 0,
-        lastMessageAt: 0,
-        lastActivity: 0,
-      },
-      observationId,
-    );
-
-    expect(pushMessage).toHaveBeenCalledTimes(1);
-    // Strict equality: once the query session is initialized, subsequent obs
-    // messages must contain the <obs> block and nothing else — no instruction,
-    // no narration, no prefix/suffix. All recurring rules live in the system
-    // prompt, so any extra bytes here are duplicated context-bloat.
-    const expected = `<obs id="O${observationId}">
+    expect(payload?.turnId).toBe(turnId);
+    expect(payload?.obsBlocks).toEqual([
+      `<obs id="O${observationId}">
   🔧 Read
   in: src/auth.ts
   out: file contents
-</obs>`;
-    expect(String(pushMessage.mock.calls[0]?.[0])).toBe(expected);
+</obs>`,
+    ]);
   });
 
-  test("processObs truncates cleaned obs payloads to the 300-char head-tail limit", async () => {
+  test("buildTurnPayload truncates cleaned obs payloads to the 300-char head-tail limit", () => {
     db.query(
       `
         UPDATE observations
@@ -367,54 +298,64 @@ describe("worker processors", () => {
       observationId,
     );
 
-    const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
 
-    await processors.processObs(
+    const payload = processors.buildTurnPayload(
+      turnId,
+      [
+        {
+          seq: 1,
+          kind: "obs",
+          targetId: observationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+      ],
       {
+        seq: 2,
+        kind: "turn-stop",
+        targetId: turnId,
         sessionDbId: sessionId,
-        processingLock: Promise.resolve(),
-        pushMessage,
-        querySession: null,
-        contentSessionId: null,
-        project: null,
-        initialized: true,
-        lastPushAt: 0,
-        lastMessageAt: 0,
-        lastActivity: 0,
+        claimedAtEpoch: 1,
+        enqueuedAtEpoch: 1,
       },
-      observationId,
     );
 
-    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    const prompt = String(payload?.obsBlocks[0]);
     expect(prompt).toContain("in: npm test");
     expect(prompt).toContain("[...160 chars truncated...]");
     expect(prompt).toContain("aaaaaaaaaa");
     expect(prompt).toContain("bbbbbbbbbb");
   });
 
-  test("processObs skips already-finalized observations", async () => {
+  test("buildTurnPayload skips already-finalized observations", () => {
     db.query("UPDATE observations SET status = 'extracted' WHERE id = ?").run(observationId);
-    const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
 
-    await processors.processObs(
+    const payload = processors.buildTurnPayload(
+      turnId,
+      [
+        {
+          seq: 1,
+          kind: "obs",
+          targetId: observationId,
+          sessionDbId: sessionId,
+          claimedAtEpoch: 1,
+          enqueuedAtEpoch: 1,
+        },
+      ],
       {
+        seq: 2,
+        kind: "turn-stop",
+        targetId: turnId,
         sessionDbId: sessionId,
-        processingLock: Promise.resolve(),
-        pushMessage,
-        querySession: null,
-        contentSessionId: null,
-        project: null,
-        initialized: false,
-        lastPushAt: 0,
-        lastMessageAt: 0,
-        lastActivity: 0,
+        claimedAtEpoch: 1,
+        enqueuedAtEpoch: 1,
       },
-      observationId,
     );
 
-    expect(pushMessage).not.toHaveBeenCalled();
+    expect(payload?.obsBlocks).toEqual([]);
   });
 
   test("processTurnStop invokes Mnemosyne for active turns", async () => {
@@ -429,7 +370,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -461,7 +401,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -484,7 +423,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -515,7 +453,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -538,7 +475,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -552,7 +488,7 @@ describe("worker processors", () => {
     expect(String(pushMessage.mock.calls[0]?.[0])).toContain("files_read:\n  src/auth.ts");
   });
 
-  test("processBatch injects prior_session on the first batch and records the injected summary epoch", async () => {
+  test("processBatch injects prior_session when sessionUpdated is requested and records the injected summary epoch", async () => {
     db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
@@ -563,7 +499,6 @@ describe("worker processors", () => {
       querySession: null,
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: 0,
@@ -577,13 +512,13 @@ describe("worker processors", () => {
         turnStopItems: [
           { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
         ],
+        sessionUpdated: true,
       },
     );
 
     const prompt = String(pushMessage.mock.calls[0]?.[0]);
     expect(prompt).toContain("<prior_session>");
-    expect(prompt).not.toContain("<session-updated>");
-    expect(state.initialized).toBe(true);
+    expect(prompt).toContain("<session-updated>");
     expect(state.lastInjectedSummaryEpoch).toBe(
       getSession(db, sessionId)?.summaryUpdatedAtEpoch ?? 0,
     );
@@ -603,7 +538,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: true,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -614,6 +548,7 @@ describe("worker processors", () => {
         turnStopItems: [
           { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
         ],
+        sessionUpdated: false,
       },
     );
 
@@ -639,7 +574,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: true,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -650,6 +584,7 @@ describe("worker processors", () => {
         turnStopItems: [
           { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
         ],
+        sessionUpdated: true,
       },
     );
 
@@ -677,7 +612,6 @@ describe("worker processors", () => {
       querySession: null,
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: 0,
@@ -691,6 +625,7 @@ describe("worker processors", () => {
         turnStopItems: [
           { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
         ],
+        sessionUpdated: true,
       },
     );
 
@@ -722,7 +657,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -764,7 +698,7 @@ describe("worker processors", () => {
     expect(getObservation(db, skippedObservationId)?.status).toBe("skipped");
   });
 
-  test("processBatch does not auto-skip untouched observation records in partial-turn keepalive batches", async () => {
+  test("processBatch does not auto-skip untouched observation records when no completed turns are present", async () => {
     const keepaliveObservationId = createObservation(db, {
       turnId,
       toolName: "Bash",
@@ -783,7 +717,6 @@ describe("worker processors", () => {
         querySession: null,
         contentSessionId: null,
         project: null,
-        initialized: false,
         lastPushAt: 0,
         lastMessageAt: 0,
         lastActivity: 0,
@@ -801,13 +734,7 @@ describe("worker processors", () => {
       ],
       {
         turnStopItems: [],
-        partialTurns: [
-          {
-            turnId,
-            totalObsCount: 2,
-            contextObservationIds: [observationId, keepaliveObservationId],
-          },
-        ],
+        sessionUpdated: false,
       },
     );
 

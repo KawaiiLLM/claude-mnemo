@@ -20,6 +20,7 @@ import {
 } from "./agent-session";
 import { getSession } from "../db/sessions";
 import { buildIsolatedEnv } from "../mnemosyne/env";
+import type { MnemoConfig } from "../shared/config";
 import { DATA_DIR, resolveTranscriptPath } from "../shared/paths";
 
 type Deferred<T> = {
@@ -38,6 +39,7 @@ export interface WorkerQuerySessionInput {
   sessionDbId: number;
   contentSessionId: string;
   project: string;
+  config?: MnemoConfig;
   resumeAgentSessionId?: string | null;
   systemPrompt?: string;
 }
@@ -300,6 +302,12 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
 - Never update any record not named in the current message's block headers.`,
       env: {
         ...buildIsolatedEnv(),
+        ...(input.config?.cacheMode === "5m"
+          ? { FORCE_PROMPT_CACHING_5M: "1" }
+          : {}),
+        ...(input.config?.cacheMode === "1h"
+          ? { ENABLE_PROMPT_CACHING_1H: "1" }
+          : {}),
         ENABLE_TOOL_SEARCH: "false",
       },
       spawnClaudeCodeProcess: (spawnOptions) => {

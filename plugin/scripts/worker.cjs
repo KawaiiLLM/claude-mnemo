@@ -42,12 +42,12 @@ __export(server_exports, {
   shutdownGracefully: () => shutdownGracefully
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_fs5 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path4 = require("node:path");
+var import_node_fs7 = require("node:fs");
+var import_node_os3 = require("node:os");
+var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.6-mnyt5abe" : "dev";
+var BUILD_ID = true ? "0.2.7-mnzojg52" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1283,8 +1283,37 @@ function initializeDatabase(db) {
   }
 }
 
-// src/shared/transcript-parser.ts
+// src/shared/config.ts
 var import_node_fs2 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path3 = require("node:path");
+var DEFAULT_CONFIG = {
+  mergeThresholdChars: 1e3,
+  maxQueuedBatches: 3,
+  keepaliveLeadMs: 6e4,
+  cacheMode: "auto"
+};
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)()) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    return {
+      ...DEFAULT_CONFIG,
+      ...raw
+    };
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+
+// src/shared/transcript-parser.ts
+var import_node_fs3 = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -1345,10 +1374,10 @@ function stringifyToolResultContent(content) {
   return JSON.stringify(content);
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs2.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs2.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -1675,8 +1704,46 @@ function markRollbackTurnsNotified(db, turns, updatedAtEpoch) {
   }
 }
 
+// src/worker/cache-ttl.ts
+var import_node_fs4 = require("node:fs");
+var DEFAULT_TAIL_LINES = 30;
+function detectCacheTtlFromLines(lines) {
+  for (const line of [...lines].reverse()) {
+    try {
+      const entry = JSON.parse(line);
+      const cacheCreation = entry.message?.usage?.cache_creation;
+      if (!cacheCreation) {
+        continue;
+      }
+      if ((cacheCreation.ephemeral_1h_input_tokens ?? 0) > 0) {
+        return 36e5;
+      }
+      if ((cacheCreation.ephemeral_5m_input_tokens ?? 0) > 0) {
+        return 3e5;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+async function detectCacheTtl(agentSessionId, projectPath, tailLines = DEFAULT_TAIL_LINES, deps = {}) {
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs4.readFileSync;
+  const resolveTranscriptPathImpl = deps.resolveTranscriptPathImpl ?? resolveTranscriptPath;
+  const transcriptPath = resolveTranscriptPathImpl(projectPath, agentSessionId);
+  if (!existsSyncImpl(transcriptPath)) {
+    return null;
+  }
+  try {
+    const lines = readFileSyncImpl(transcriptPath, "utf8").split("\n").map((line) => line.trim()).filter((line) => line.length > 0).slice(-tailLines);
+    return detectCacheTtlFromLines(lines);
+  } catch {
+    return null;
+  }
+}
+
 // src/shared/file-tree.ts
-var import_node_path3 = __toESM(require("node:path"), 1);
+var import_node_path4 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -1740,7 +1807,7 @@ function renderFileTree(paths) {
   const root2 = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path3.default.posix.relative(root2, value);
+    const relative = import_node_path4.default.posix.relative(root2, value);
     if (!relative || relative === "") {
       continue;
     }
@@ -1876,24 +1943,15 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
 </obs>`;
 }
-function buildInitialObsPrompt(sessionId, project, firstUserPrompt, priorTitle, priorContent, priorInsight, priorNextSteps, obsBlock) {
-  const priorSessionBlock = priorTitle || priorContent || priorInsight || priorNextSteps ? `
-<prior_session>
-  title: ${priorTitle ?? ""}
-  content: ${priorContent ?? ""}
-  insight: ${priorInsight ?? ""}
-  next_steps: ${priorNextSteps ?? ""}
-</prior_session>
-` : "";
-  return `<session id="S${sessionId}">
-  project: ${project}
-  user_request: ${firstUserPrompt ?? ""}
-</session>
-${priorSessionBlock}
-${obsBlock}`;
-}
-function buildObsPrompt(observationId, toolName, toolInput, toolResult) {
-  return buildObsBlock(observationId, toolName, toolInput, toolResult);
+function computeTurnPayloadSize(prompt, response, obsBlocks, filesRead, filesModified, toolCallCount) {
+  return [
+    prompt ?? "",
+    response ?? "",
+    ...obsBlocks,
+    ...filesRead,
+    ...filesModified,
+    String(toolCallCount)
+  ].join("\n").length;
 }
 function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSteps, turnId, prompt, response, filesRead, filesModified) {
   const renderedFilesRead = renderFileTree(filesRead);
@@ -1932,24 +1990,6 @@ function buildBatchTurnBlock(turnId, obsBlocks, prompt, response, filesRead, fil
   lines.push("  </turn>");
   return lines.join("\n");
 }
-function buildPartialTurnBlock(args) {
-  const renderedFilesRead = renderFileTree(args.filesRead);
-  const renderedFilesModified = renderFileTree(args.filesModified);
-  const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
-  for (const obsBlock of args.obsBlocks) {
-    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
-  }
-  lines.push(`    prompt: ${truncateMiddle(args.prompt, 1e3)}`);
-  lines.push("    files_read:");
-  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
-  lines.push("    files_modified:");
-  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
-  lines.push(
-    `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`
-  );
-  lines.push("  </partial-turn>");
-  return lines.join("\n");
-}
 function buildBatchPrompt(args) {
   const sessionUpdatedBlock = args.sessionUpdated ? `<session-updated>
 Session summary was refreshed since your last message.
@@ -1964,10 +2004,7 @@ Session summary was refreshed since your last message.
   next_steps: ${args.priorNextSteps ?? ""}
 </prior_session>
 ` : "";
-  const body = [
-    ...args.completedTurnBlocks,
-    ...args.partialTurnBlocks ?? []
-  ].filter(Boolean).join("\n");
+  const body = args.completedTurnBlocks.filter(Boolean).join("\n");
   return `<session id="S${args.sessionId}">
   project: ${args.project}
   user_request: ${args.firstUserPrompt ?? ""}
@@ -2070,58 +2107,50 @@ If no material change, respond with no tool calls. An empty response is the "lea
 }
 function createWorkerProcessors(db) {
   return {
-    async processObs(state, observationId) {
-      const observation = getObservation(db, observationId);
-      if (!observation || observation.status !== "pending") {
-        return;
+    buildTurnPayload(turnId, obsItems, turnStopItem) {
+      const turn = getTurnById(db, turnId);
+      if (!turn || turn.status === "undone") {
+        return null;
       }
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn) {
-        return;
-      }
-      const session = getSession(db, turn.sessionId);
-      if (!session) {
-        return;
-      }
-      const obsBlock = buildObsBlock(
-        observation.id,
-        observation.toolName ?? "Tool",
-        observation.toolInput,
-        observation.toolResult
-      );
-      if (state.initialized) {
-        await state.pushMessage(
-          buildObsPrompt(
-            observation.id,
-            observation.toolName ?? "Tool",
-            observation.toolInput,
-            observation.toolResult
-          )
+      const aggregate = aggregateTurnFiles(db, turn.id);
+      updateTurnById(db, turn.id, {
+        filesRead: aggregate.filesRead,
+        filesModified: aggregate.filesModified,
+        toolCallCount: aggregate.toolCallCount,
+        updatedAtEpoch: Math.floor(Date.now() / 1e3)
+      });
+      const obsBlocks = obsItems.map((item) => {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          return null;
+        }
+        return buildObsBlock(
+          observation.id,
+          observation.toolName ?? "Tool",
+          observation.toolInput,
+          observation.toolResult
         );
-      } else {
-        const firstTurn = db.query(
-          `
-              SELECT user_prompt
-              FROM turns
-              WHERE session_id = ?
-              ORDER BY prompt_number ASC
-              LIMIT 1
-            `
-        ).get(session.id);
-        await state.pushMessage(
-          buildInitialObsPrompt(
-            session.id,
-            session.project,
-            firstTurn?.user_prompt ?? null,
-            session.title,
-            session.content,
-            session.insight,
-            session.nextSteps,
-            obsBlock
-          )
-        );
-        state.initialized = true;
-      }
+      }).filter((block) => block !== null);
+      return {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        prompt: turn.userPrompt,
+        response: turn.assistantResponse,
+        obsBlocks,
+        filesRead: aggregate.filesRead,
+        filesModified: aggregate.filesModified,
+        toolCallCount: aggregate.toolCallCount,
+        size: computeTurnPayloadSize(
+          turn.userPrompt,
+          turn.assistantResponse,
+          obsBlocks,
+          aggregate.filesRead,
+          aggregate.filesModified,
+          aggregate.toolCallCount
+        ),
+        obsItems,
+        turnStopItem
+      };
     },
     async processTurnStop(state, turnId) {
       const turn = getTurnById(db, turnId);
@@ -2154,10 +2183,9 @@ function createWorkerProcessors(db) {
           aggregate.filesModified
         )
       );
-      state.initialized = true;
     },
     async processBatch(state, items, options) {
-      if (items.length === 0 && (options?.turnStopItems?.length ?? 0) === 0 && (options?.partialTurns?.length ?? 0) === 0) {
+      if (items.length === 0 && (options?.turnStopItems?.length ?? 0) === 0) {
         return;
       }
       const sessionId = options?.turnStopItems?.[0]?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
@@ -2219,41 +2247,11 @@ function createWorkerProcessors(db) {
           aggregate.toolCallCount
         );
       }).filter((block) => block !== null);
-      const partialTurnBlocks = (options?.partialTurns ?? []).map((partialTurn) => {
-        const turn = getTurnById(db, partialTurn.turnId);
-        if (!turn || turn.status === "undone") {
-          return null;
-        }
-        const contextObservations = partialTurn.contextObservationIds.map((observationId) => getObservation(db, observationId)).filter(
-          (observation) => observation !== null
-        );
-        const aggregate = aggregateFilesFromObservations(contextObservations);
-        const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map(
-          (observation) => buildObsBlock(
-            observation.observationId,
-            observation.toolName,
-            observation.toolInput,
-            observation.toolResult
-          )
-        );
-        if (obsBlocks.length === 0) {
-          return null;
-        }
-        return buildPartialTurnBlock({
-          turnId: turn.id,
-          obsBlocks,
-          prompt: turn.userPrompt,
-          filesRead: aggregate.filesRead,
-          filesModified: aggregate.filesModified,
-          includedObsCount: obsBlocks.length,
-          totalObsCount: partialTurn.totalObsCount
-        });
-      }).filter((block) => block !== null);
-      if (completedTurnBlocks.length === 0 && partialTurnBlocks.length === 0) {
+      if (completedTurnBlocks.length === 0) {
         return;
       }
-      const needsSessionContext = !state.initialized || (session.summaryUpdatedAtEpoch ?? 0) > (state.lastInjectedSummaryEpoch ?? 0);
-      const sessionUpdated = state.initialized && needsSessionContext;
+      const needsSessionContext = options?.sessionUpdated ?? false;
+      const sessionUpdated = options?.sessionUpdated ?? false;
       await state.pushMessage(
         buildBatchPrompt({
           sessionId: session.id,
@@ -2264,8 +2262,7 @@ function createWorkerProcessors(db) {
           priorInsight: needsSessionContext ? session.insight : null,
           priorNextSteps: needsSessionContext ? session.nextSteps : null,
           sessionUpdated,
-          completedTurnBlocks,
-          partialTurnBlocks
+          completedTurnBlocks
         })
       );
       if ((options?.turnStopItems?.length ?? 0) > 0) {
@@ -2282,7 +2279,6 @@ function createWorkerProcessors(db) {
       }
       const freshSession = getSession(db, session.id);
       state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
-      state.initialized = true;
     },
     async pushSessionSummaryPrompt(state, sessionId) {
       const session = getSession(db, sessionId);
@@ -2299,14 +2295,13 @@ function createWorkerProcessors(db) {
           session.nextSteps
         )
       );
-      state.initialized = true;
     }
   };
 }
 
 // src/worker/query-session.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs4 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
@@ -36929,7 +36924,7 @@ var MNEMO_ALLOWED_TOOLS = [
 ];
 
 // src/worker/agent-session.ts
-var import_node_fs3 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 
 // src/db/memories.ts
@@ -39572,7 +39567,7 @@ function findClaudeOnPath() {
   return candidate || null;
 }
 function resolveClaudeCodeExecutablePath(sourceEnv = process.env, deps = {
-  existsSync: import_node_fs3.existsSync,
+  existsSync: import_node_fs5.existsSync,
   findOnPath: findClaudeOnPath
 }) {
   const explicitPath = sourceEnv.CLAUDE_CODE_PATH || sourceEnv.CLAUDE_CODE_EXECUTABLE;
@@ -39594,7 +39589,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.6",
+    version: "0.2.7",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39717,8 +39712,8 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const createSdkMcpServerImpl = deps.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = deps.toolImpl ?? tool;
   const spawnImpl = deps.spawnImpl ?? import_node_child_process2.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs4.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs6.existsSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs6.mkdirSync;
   const killImpl = deps.killImpl ?? process.kill;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable();
@@ -39818,6 +39813,8 @@ When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is
 - Never update any record not named in the current message's block headers.`,
       env: {
         ...buildIsolatedEnv(),
+        ...input.config?.cacheMode === "5m" ? { FORCE_PROMPT_CACHING_5M: "1" } : {},
+        ...input.config?.cacheMode === "1h" ? { ENABLE_PROMPT_CACHING_1H: "1" } : {},
         ENABLE_TOOL_SEARCH: "false"
       },
       spawnClaudeCodeProcess: (spawnOptions) => {
@@ -39948,11 +39945,7 @@ var WATCHDOG_INTERVAL_MS = 1e4;
 var STALLED_QUERY_MS = 3e4;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
-var OBS_TIMEOUT_MS = 15e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
-var RESERVE_TURNS = 3;
-var KEEPALIVE_MS = 24e4;
-var CACHE_TTL_MS = 3e5;
 function defaultNoopDrain() {
   return Promise.resolve();
 }
@@ -40028,17 +40021,14 @@ function createWorkerCore(deps) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1e3));
   const nowMs = deps.nowMs ?? Date.now;
   const logger = deps.logger ?? console;
+  const config3 = deps.config ?? DEFAULT_CONFIG;
   const sessions = /* @__PURE__ */ new Map();
   const buffers = /* @__PURE__ */ new Map();
   const compactingSessions = /* @__PURE__ */ new Set();
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const processObsImpl = deps.processObsImpl ?? (async (_state, observationId) => {
-    throw new Error(`processObs not implemented for O${observationId}`);
-  });
-  const processTurnStopImpl = deps.processTurnStopImpl ?? (async (_state, turnId) => {
-    throw new Error(`processTurnStop not implemented for T${turnId}`);
-  });
+  const fallbackProcessors = deps.buildTurnPayloadImpl ? null : createWorkerProcessors(deps.db);
+  const buildTurnPayloadImpl = deps.buildTurnPayloadImpl ?? fallbackProcessors.buildTurnPayload;
   const processBatchImpl = deps.processBatchImpl ?? (async () => {
     throw new Error("processBatch not implemented");
   });
@@ -40046,6 +40036,13 @@ function createWorkerCore(deps) {
   });
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {
   });
+  function hasPriorSessionSummary(sessionId) {
+    const session = getSession(deps.db, sessionId);
+    if (!session) {
+      return false;
+    }
+    return (session.title ?? "") !== "" || (session.content ?? "") !== "" || (session.insight ?? "") !== "" || (session.nextSteps ?? "") !== "";
+  }
   function getOrCreateBuffer(sessionDbId) {
     let buffer = buffers.get(sessionDbId);
     if (buffer) {
@@ -40079,51 +40076,96 @@ function createWorkerCore(deps) {
     const buffer = getOrCreateBuffer(sessionDbId);
     buffer.items = items;
   }
-  function buildTurnGroups(items) {
-    const groups = /* @__PURE__ */ new Map();
-    for (const item of items) {
-      let turnId = null;
-      if (item.kind === "turn-stop") {
-        turnId = item.targetId;
+  function refreshPendingSessionContextFlag(state) {
+    const session = getSession(deps.db, state.sessionDbId);
+    if (!session) {
+      return;
+    }
+    const summaryEpoch = session.summaryUpdatedAtEpoch ?? 0;
+    if (summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0) && !state.batchQueue.some((batch) => batch.sessionUpdated)) {
+      state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+    }
+  }
+  function recalculateBatchSize(batch) {
+    batch.size = batch.turns.reduce((total, turn) => total + turn.size, 0);
+  }
+  function releaseBatchClaims(batch) {
+    for (const turn of batch.turns) {
+      for (const item of turn.obsItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      releaseQueueClaim(deps.db, turn.turnStopItem.seq);
+    }
+  }
+  function pruneInProgressBuffer(sessionDbId) {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    const activeItems = [];
+    const prunedSeqs = /* @__PURE__ */ new Set();
+    const { activeItems: prunedItems, prunedSeqs: deletedSeqs } = pruneBufferedUndoneItems(deps.db, buffer.items);
+    for (const item of prunedItems) {
+      if (item.kind === "obs") {
+        activeItems.push(item);
       } else {
-        turnId = getObservation(deps.db, item.targetId)?.turnId ?? null;
-      }
-      if (turnId === null) {
-        continue;
-      }
-      const turn = getTurnById(deps.db, turnId);
-      if (!turn) {
-        continue;
-      }
-      let group = groups.get(turnId);
-      if (!group) {
-        group = {
-          turnId,
-          promptNumber: turn.promptNumber,
-          obsItems: []
-        };
-        groups.set(turnId, group);
-      }
-      if (item.kind === "turn-stop") {
-        group.turnStopItem = item;
-      } else {
-        group.obsItems.push(item);
+        deleteQueueItem(deps.db, item.seq);
+        prunedSeqs.add(item.seq);
       }
     }
-    return Array.from(groups.values()).sort((left, right) => {
-      if (left.promptNumber !== right.promptNumber) {
-        return left.promptNumber - right.promptNumber;
+    if (deletedSeqs.size > 0 || prunedSeqs.size > 0) {
+      replaceBufferItems(sessionDbId, activeItems);
+      return;
+    }
+    buffer.items = activeItems;
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+  function pruneBatchQueueLocked(state) {
+    const nextQueue = [];
+    for (const batch of state.batchQueue) {
+      const keptTurns = batch.turns.filter((turnPayload) => {
+        const turn = getTurnById(deps.db, turnPayload.turnId);
+        if (!turn || turn.status === "undone") {
+          for (const item of turnPayload.obsItems) {
+            deleteQueueItem(deps.db, item.seq);
+          }
+          deleteQueueItem(deps.db, turnPayload.turnStopItem.seq);
+          return false;
+        }
+        return true;
+      });
+      if (keptTurns.length === 0) {
+        continue;
       }
-      const leftSeq = Math.min(
-        left.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
-        ...left.obsItems.map((item) => item.seq)
-      );
-      const rightSeq = Math.min(
-        right.turnStopItem?.seq ?? Number.POSITIVE_INFINITY,
-        ...right.obsItems.map((item) => item.seq)
-      );
-      return leftSeq - rightSeq;
+      const nextBatch = {
+        ...batch,
+        turns: keptTurns
+      };
+      recalculateBatchSize(nextBatch);
+      nextQueue.push(nextBatch);
+    }
+    state.batchQueue = nextQueue;
+  }
+  function collectTurnObsItemsLocked(sessionDbId, turnId) {
+    pruneInProgressBuffer(sessionDbId);
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return [];
+    }
+    const selected = buffer.items.filter((item) => {
+      const observation = getObservation(deps.db, item.targetId);
+      return observation?.turnId === turnId;
     });
+    if (selected.length === 0) {
+      return [];
+    }
+    removeBufferedItemsBySeq(
+      sessionDbId,
+      new Set(selected.map((item) => item.seq))
+    );
+    return selected;
   }
   function getOrCreateSessionState(sessionDbId) {
     let state = sessions.get(sessionDbId);
@@ -40135,8 +40177,10 @@ function createWorkerCore(deps) {
       querySession: null,
       contentSessionId: null,
       project: null,
-      initialized: false,
+      batchQueue: [],
+      cacheTtlMs: 3e5,
       lastInjectedSummaryEpoch: 0,
+      nextBatchNeedsSessionContext: hasPriorSessionSummary(sessionDbId),
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
@@ -40158,7 +40202,12 @@ ${prompt}` : prompt;
         state.lastMessageAt = nowMs();
         state.queryPid = runtime.queryPid;
         state.agentSessionId = result.session_id;
-        state.initialized = true;
+        void detectCacheTtl(result.session_id, runtimeProjectPath).then((ttlMs) => {
+          if (ttlMs) {
+            state.cacheTtlMs = ttlMs;
+          }
+        }).catch(() => {
+        });
         if (pendingRollbacks.length > 0) {
           try {
             markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
@@ -40171,6 +40220,7 @@ ${prompt}` : prompt;
         }
       }
     };
+    const runtimeProjectPath = DATA_DIR;
     sessions.set(sessionDbId, state);
     return state;
   }
@@ -40184,6 +40234,7 @@ ${prompt}` : prompt;
     }
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    state.nextBatchNeedsSessionContext = state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
     if (session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
@@ -40193,6 +40244,7 @@ ${prompt}` : prompt;
         sessionDbId: state.sessionDbId,
         contentSessionId: session.contentSessionId,
         project: session.project,
+        config: config3,
         resumeAgentSessionId: session.lastAgentSessionId
       },
       {
@@ -40272,95 +40324,126 @@ ${prompt}` : prompt;
     return workPromise;
   }
   async function processClaimedItem(item) {
-    const timeoutMs = item.kind === "obs" ? OBS_TIMEOUT_MS : TURN_STOP_TIMEOUT_MS;
-    const workPromise = withSessionProcessingLock(
-      item.sessionDbId,
-      (state) => item.kind === "obs" ? processObsImpl(state, item.targetId) : processTurnStopImpl(state, item.targetId)
-    );
+    if (item.kind === "obs") {
+      throw new Error("processClaimedItem no longer supports standalone obs pushes");
+    }
+    const workPromise = withSessionProcessingLock(item.sessionDbId, async (state) => {
+      await processTurnStopLocked(state, item);
+    });
     await withTimeout(
       workPromise,
-      timeoutMs,
-      `${item.kind} ${item.targetId} timeout after ${timeoutMs}ms`
+      TURN_STOP_TIMEOUT_MS,
+      `${item.kind} ${item.targetId} timeout after ${TURN_STOP_TIMEOUT_MS}ms`
     );
   }
-  async function sendBatchSelectionLocked(state, sessionDbId, selection) {
-    if (selection.obsItems.length === 0 && selection.turnStopItems.length === 0 && (selection.partialTurns?.length ?? 0) === 0) {
+  async function flushOneBatchLocked(state) {
+    pruneBatchQueueLocked(state);
+    const batch = state.batchQueue[0];
+    if (!batch) {
       return;
     }
-    const sentSeqs = new Set(
-      [...selection.obsItems, ...selection.turnStopItems].map((item) => item.seq)
-    );
+    const obsItems = batch.turns.flatMap((turn) => turn.obsItems);
+    const turnStopItems = batch.turns.map((turn) => turn.turnStopItem);
     try {
-      await processBatchImpl(state, selection.obsItems, {
-        turnStopItems: selection.turnStopItems,
-        partialTurns: selection.partialTurns
+      await processBatchImpl(state, obsItems, {
+        turnStopItems,
+        sessionUpdated: batch.sessionUpdated
       });
-      for (const item of selection.obsItems) {
+      for (const item of obsItems) {
         deleteQueueItem(deps.db, item.seq);
       }
-      for (const item of selection.turnStopItems) {
+      for (const item of turnStopItems) {
         deleteQueueItem(deps.db, item.seq);
       }
     } catch (error49) {
-      for (const item of selection.obsItems) {
+      for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      for (const item of selection.turnStopItems) {
+      for (const item of turnStopItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
+      if (batch.sessionUpdated) {
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+      }
+      state.batchQueue.shift();
       throw error49;
-    } finally {
-      removeBufferedItemsBySeq(sessionDbId, sentSeqs);
+    }
+    state.batchQueue.shift();
+    refreshPendingSessionContextFlag(state);
+  }
+  async function flushAllBatchesLocked(state) {
+    while (true) {
+      pruneBatchQueueLocked(state);
+      if (state.batchQueue.length === 0) {
+        return;
+      }
+      await flushOneBatchLocked(state);
     }
   }
-  async function flushExcessTurns(sessionDbId) {
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
+  async function enqueueCompletedTurnLocked(state, turnPayload) {
+    refreshPendingSessionContextFlag(state);
+    const lastBatch = state.batchQueue[state.batchQueue.length - 1];
+    let targetBatch = lastBatch;
+    let createdBatch = false;
+    if (!lastBatch || lastBatch.size + turnPayload.size >= config3.mergeThresholdChars) {
+      targetBatch = {
+        turns: [],
+        size: 0,
+        sessionUpdated: false,
+        oldestTurnEpoch: turnPayload.turnStopItem.enqueuedAtEpoch
+      };
+      state.batchQueue.push(targetBatch);
+      createdBatch = true;
+    }
+    targetBatch.turns.push(turnPayload);
+    targetBatch.size += turnPayload.size;
+    const assignedSessionUpdated = !targetBatch.sessionUpdated && state.nextBatchNeedsSessionContext;
+    if (assignedSessionUpdated) {
+      targetBatch.sessionUpdated = true;
+      state.nextBatchNeedsSessionContext = false;
+    }
+    try {
+      if (state.batchQueue.length > config3.maxQueuedBatches) {
+        await flushOneBatchLocked(state);
       }
-      if (activeItems.length === 0) {
-        return;
+    } catch (error49) {
+      for (const batch of state.batchQueue) {
+        releaseBatchClaims(batch);
       }
-      const groups = buildTurnGroups(activeItems);
-      const completedGroups = groups.filter((group) => group.turnStopItem);
-      if (completedGroups.length <= RESERVE_TURNS) {
-        replaceBufferItems(sessionDbId, activeItems);
-        return;
+      state.batchQueue = [];
+      if (assignedSessionUpdated) {
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
       }
-      const groupsToFlush = completedGroups.slice(
-        0,
-        completedGroups.length - RESERVE_TURNS
-      );
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: groupsToFlush.flatMap((group) => group.obsItems),
-        turnStopItems: groupsToFlush.map((group) => group.turnStopItem).filter((item) => item !== void 0)
-      });
-    });
+      throw error49;
+    }
   }
-  async function flushBufferedItems(sessionDbId) {
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
-      }
-      if (activeItems.length === 0) {
+  async function processTurnStopLocked(state, turnStopItem) {
+    const turn = getTurnById(deps.db, turnStopItem.targetId);
+    if (!turn || turn.status === "undone") {
+      deleteQueueItem(deps.db, turnStopItem.seq);
+      return;
+    }
+    const obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
+    try {
+      const turnPayload = buildTurnPayloadImpl(turn.id, obsItems, turnStopItem);
+      if (!turnPayload) {
+        for (const item of obsItems) {
+          deleteQueueItem(deps.db, item.seq);
+        }
+        deleteQueueItem(deps.db, turnStopItem.seq);
         return;
       }
-      const groups = buildTurnGroups(activeItems);
-      const partialTurns = groups.filter((group) => !group.turnStopItem && group.obsItems.length > 0).map((group) => ({
-        turnId: group.turnId,
-        totalObsCount: group.obsItems.length,
-        contextObservationIds: group.obsItems.map((item) => item.targetId)
-      }));
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: activeItems.filter((item) => item.kind === "obs"),
-        turnStopItems: activeItems.filter((item) => item.kind === "turn-stop"),
-        partialTurns
-      });
-    });
+      await enqueueCompletedTurnLocked(state, turnPayload);
+    } catch (error49) {
+      for (const item of obsItems) {
+        releaseQueueClaim(deps.db, item.seq);
+      }
+      releaseQueueClaim(deps.db, turnStopItem.seq);
+      for (const item of obsItems) {
+        getOrCreateBuffer(state.sessionDbId).items.push(item);
+      }
+      throw error49;
+    }
   }
   async function scanAndDrainQueue(sessionFilter) {
     const skippedSeqs = /* @__PURE__ */ new Set();
@@ -40373,24 +40456,30 @@ ${prompt}` : prompt;
       if (!item) {
         return;
       }
-      const buffer = getOrCreateBuffer(item.sessionDbId);
-      buffer.items.push(item);
-      if (item.kind === "turn-stop") {
-        const bufferedSeqs = buffer.items.map((bufferedItem) => bufferedItem.seq);
-        try {
-          await flushExcessTurns(item.sessionDbId);
-        } catch (error49) {
-          skippedSeqs.add(item.seq);
-          for (const seq of bufferedSeqs) {
-            skippedSeqs.add(seq);
-          }
-          logger.error?.("queue item failed, skipping for this drain", {
-            seq: item.seq,
-            kind: item.kind,
-            targetId: item.targetId,
-            error: error49
-          });
+      if (item.kind === "obs") {
+        getOrCreateBuffer(item.sessionDbId).items.push(item);
+        continue;
+      }
+      const bufferedSeqs = [
+        item.seq,
+        ...(buffers.get(item.sessionDbId)?.items ?? []).map(
+          (bufferedItem) => bufferedItem.seq
+        )
+      ];
+      try {
+        await withSessionProcessingLock(item.sessionDbId, async (state) => {
+          await processTurnStopLocked(state, item);
+        });
+      } catch (error49) {
+        for (const seq of bufferedSeqs) {
+          skippedSeqs.add(seq);
         }
+        logger.error?.("queue item failed, skipping for this drain", {
+          seq: item.seq,
+          kind: item.kind,
+          targetId: item.targetId,
+          error: error49
+        });
       }
     }
   }
@@ -40398,7 +40487,9 @@ ${prompt}` : prompt;
     let previousCount = Number.POSITIVE_INFINITY;
     while (true) {
       try {
-        await flushBufferedItems(sessionDbId);
+        await withSessionProcessingLock(sessionDbId, async (state2) => {
+          await flushAllBatchesLocked(state2);
+        });
       } catch (error49) {
         logger.error?.("drainSessionCompletely failed to flush buffer", {
           sessionDbId,
@@ -40407,7 +40498,9 @@ ${prompt}` : prompt;
       }
       await scanAndDrainQueue(sessionDbId);
       try {
-        await flushBufferedItems(sessionDbId);
+        await withSessionProcessingLock(sessionDbId, async (state2) => {
+          await flushAllBatchesLocked(state2);
+        });
       } catch (error49) {
         logger.error?.("drainSessionCompletely failed to flush buffer", {
           sessionDbId,
@@ -40440,7 +40533,24 @@ ${prompt}` : prompt;
   }
   async function flushSession(sessionDbId) {
     await scanAndDrainQueue(sessionDbId);
-    await flushBufferedItems(sessionDbId);
+    await withSessionProcessingLock(sessionDbId, async (state) => {
+      await flushAllBatchesLocked(state);
+    });
+  }
+  async function tickKeepaliveSessionLocked(state, currentMs) {
+    pruneBatchQueueLocked(state);
+    if (state.batchQueue.length === 0 || state.lastPushAt <= 0) {
+      return;
+    }
+    const age = currentMs - state.lastPushAt;
+    const triggerAt = state.cacheTtlMs - config3.keepaliveLeadMs;
+    if (age < triggerAt || age >= state.cacheTtlMs) {
+      return;
+    }
+    if (state.lastPushAt > state.lastMessageAt) {
+      return;
+    }
+    await flushOneBatchLocked(state);
   }
   async function tryKeepaliveSession(sessionDbId, currentMs) {
     if (compactingSessions.has(sessionDbId)) {
@@ -40451,52 +40561,15 @@ ${prompt}` : prompt;
       return;
     }
     const age = currentMs - existingState.lastPushAt;
-    if (age < KEEPALIVE_MS || age >= CACHE_TTL_MS) {
+    const triggerAt = existingState.cacheTtlMs - config3.keepaliveLeadMs;
+    if (age < triggerAt || age >= existingState.cacheTtlMs) {
       return;
     }
     if (existingState.lastPushAt > existingState.lastMessageAt) {
       return;
     }
     await withSessionProcessingLock(sessionDbId, async (state) => {
-      const refreshedAge = currentMs - state.lastPushAt;
-      if (state.lastPushAt <= 0 || refreshedAge < KEEPALIVE_MS || refreshedAge >= CACHE_TTL_MS || state.lastPushAt > state.lastMessageAt) {
-        return;
-      }
-      const snapshot = [...buffers.get(sessionDbId)?.items ?? []];
-      const { activeItems, prunedSeqs } = pruneBufferedUndoneItems(deps.db, snapshot);
-      if (prunedSeqs.size > 0) {
-        removeBufferedItemsBySeq(sessionDbId, prunedSeqs);
-      }
-      if (activeItems.length === 0) {
-        return;
-      }
-      const groups = buildTurnGroups(activeItems);
-      const completedGroups = groups.filter((group) => group.turnStopItem);
-      if (completedGroups.length > 0) {
-        const group = completedGroups[0];
-        await sendBatchSelectionLocked(state, sessionDbId, {
-          obsItems: group.obsItems,
-          turnStopItems: group.turnStopItem ? [group.turnStopItem] : []
-        });
-        return;
-      }
-      const partialGroup = [...groups].filter((group) => !group.turnStopItem && group.obsItems.length > 0).sort((left, right) => right.promptNumber - left.promptNumber)[0];
-      if (!partialGroup) {
-        return;
-      }
-      const selectedCount = Math.max(1, Math.ceil(partialGroup.obsItems.length / 2));
-      const selectedObsItems = partialGroup.obsItems.slice(0, selectedCount);
-      await sendBatchSelectionLocked(state, sessionDbId, {
-        obsItems: selectedObsItems,
-        turnStopItems: [],
-        partialTurns: [
-          {
-            turnId: partialGroup.turnId,
-            totalObsCount: partialGroup.obsItems.length,
-            contextObservationIds: partialGroup.obsItems.map((item) => item.targetId)
-          }
-        ]
-      });
+      await tickKeepaliveSessionLocked(state, currentMs);
     });
   }
   function recoverFromCrash() {
@@ -40554,9 +40627,9 @@ ${prompt}` : prompt;
       compactingSessions.delete(sessionDbId);
       const state = sessions.get(sessionDbId);
       if (state) {
-        state.initialized = false;
         state.lastPushAt = 0;
         state.lastInjectedSummaryEpoch = 0;
+        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(sessionDbId);
       }
     }
   }
@@ -40615,7 +40688,7 @@ ${prompt}` : prompt;
     },
     async runKeepaliveTick(nowMsOverride) {
       const currentMs = nowMsOverride ?? nowMs();
-      for (const sessionDbId of buffers.keys()) {
+      for (const sessionDbId of sessions.keys()) {
         await tryKeepaliveSession(sessionDbId, currentMs);
       }
     }
@@ -40625,14 +40698,14 @@ function acquireWorkerSingleton(deps = {}) {
   const now = deps.now ?? Date.now;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs5.existsSync;
-  const statSyncImpl = deps.statSyncImpl ?? import_node_fs5.statSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs5.readFileSync;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs5.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs5.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs7.existsSync;
+  const statSyncImpl = deps.statSyncImpl ?? import_node_fs7.statSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs7.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs7.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs7.mkdirSync;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const dataDir = (0, import_node_path4.join)((0, import_node_os2.homedir)(), ".claude-mnemo");
+  const dataDir = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".claude-mnemo");
   if (!existsSyncImpl(dataDir)) {
     mkdirSyncImpl(dataDir, { recursive: true });
   }
@@ -40667,8 +40740,8 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     db: runtimeDb,
     now: deps.now,
     nowMs: deps.nowMs,
-    processObsImpl: deps.processObsImpl ?? runtimeProcessors?.processObs,
-    processTurnStopImpl: deps.processTurnStopImpl ?? runtimeProcessors?.processTurnStop,
+    config: deps.config,
+    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? runtimeProcessors?.buildTurnPayload,
     processBatchImpl: deps.processBatchImpl ?? runtimeProcessors?.processBatch,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? runtimeProcessors?.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
@@ -40751,7 +40824,7 @@ async function shutdownGracefully(deps = {}) {
 }
 function createShutdownCleanup(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
   const processImpl = deps.processImpl ?? process;
   return async () => {
     try {
@@ -40798,18 +40871,19 @@ async function main(deps = {}) {
   const BunServeImpl = deps.BunServeImpl ?? Bun.serve;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs5.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs5.unlinkSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs7.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
+  const config3 = deps.config ?? loadConfig();
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
   const core = createWorkerCore({
     db,
     now: deps.now,
     nowMs: deps.nowMs,
-    processObsImpl: deps.processObsImpl ?? processors.processObs,
-    processTurnStopImpl: deps.processTurnStopImpl ?? processors.processTurnStop,
+    config: config3,
+    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? processors.buildTurnPayload,
     processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
@@ -40825,6 +40899,7 @@ async function main(deps = {}) {
         {
           ...deps,
           db,
+          config: config3,
           scanAndDrainQueue: core.scanAndDrainQueue,
           handleFlushImpl: core.flushSession,
           handleCompactImpl: core.handleCompact

@@ -88,23 +88,51 @@ function primeSessionState(
   core: ReturnType<typeof createWorkerCore>,
   sessionId: number,
   overrides: Partial<{
-    initialized: boolean;
+    batchQueue: Array<{
+      turns: Array<{
+        turnId: number;
+        promptNumber: number;
+        prompt: string | null;
+        response: string | null;
+        obsBlocks: string[];
+        filesRead: string[];
+        filesModified: string[];
+        toolCallCount: number;
+        size: number;
+        obsItems: Array<{ seq: number; kind: "obs"; targetId: number; sessionDbId: number; claimedAtEpoch: number | null; enqueuedAtEpoch: number }>;
+        turnStopItem: { seq: number; kind: "turn-stop"; targetId: number; sessionDbId: number; claimedAtEpoch: number | null; enqueuedAtEpoch: number };
+      }>;
+      size: number;
+      sessionUpdated: boolean;
+      oldestTurnEpoch: number;
+    }>;
+    cacheTtlMs: number;
+    nextBatchNeedsSessionContext: boolean;
+    lastInjectedSummaryEpoch: number;
     lastPushAt: number;
     lastMessageAt: number;
     lastActivity: number;
   }> = {},
 ): void {
+  const existing = core.sessions.get(sessionId);
   core.sessions.set(sessionId, {
     sessionDbId: sessionId,
-    querySession: null,
-    contentSessionId: null,
-    project: null,
-    initialized: overrides.initialized ?? true,
+    querySession: existing?.querySession ?? null,
+    contentSessionId: existing?.contentSessionId ?? null,
+    project: existing?.project ?? null,
+    batchQueue: overrides.batchQueue ?? existing?.batchQueue ?? [],
+    cacheTtlMs: overrides.cacheTtlMs ?? existing?.cacheTtlMs ?? 300_000,
+    nextBatchNeedsSessionContext:
+      overrides.nextBatchNeedsSessionContext ??
+      existing?.nextBatchNeedsSessionContext ??
+      false,
+    lastInjectedSummaryEpoch:
+      overrides.lastInjectedSummaryEpoch ?? existing?.lastInjectedSummaryEpoch ?? 0,
     lastPushAt: overrides.lastPushAt ?? 0,
     lastMessageAt: overrides.lastMessageAt ?? 0,
     lastActivity: overrides.lastActivity ?? 0,
-    processingLock: Promise.resolve(),
-    pushMessage: async () => {},
+    processingLock: existing?.processingLock ?? Promise.resolve(),
+    pushMessage: existing?.pushMessage ?? (async () => {}),
   });
 }
 
@@ -264,12 +292,6 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => 123,
-      processObsImpl: async (state, observationId) => {
-        await state.pushMessage(`obs:${observationId}`);
-      },
-      processTurnStopImpl: async (state, queuedTurnId) => {
-        await state.pushMessage(`turn:${queuedTurnId}`);
-      },
       processBatchImpl: async () => {
         await compactBatchStarted;
       },
@@ -510,8 +532,6 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => 123,
-      processObsImpl: processors.processObs,
-      processTurnStopImpl: processors.processTurnStop,
       createWorkerQuerySessionImpl: ((_input) =>
         ({
           sessionId: "worker-query",
@@ -545,7 +565,7 @@ describe("worker server", () => {
     ).toHaveLength(2);
   });
 
-  test("scanAndDrainQueue keeps three completed turns buffered and flushes the oldest on the fourth turn-stop", async () => {
+  test("scanAndDrainQueue flushes the oldest completed batch when queue overflow exceeds the cap", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-batch",
       project: "/tmp/project-batch",
@@ -577,13 +597,13 @@ describe("worker server", () => {
     }> = [];
     const core = createWorkerCore({
       db,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
       now: () => 123,
-      processObsImpl: async (state, observationId) => {
-        await state.pushMessage(`obs:${observationId}`);
-      },
-      processTurnStopImpl: async (state, queuedTurnId) => {
-        await state.pushMessage(`turn:${queuedTurnId}`);
-      },
       createWorkerQuerySessionImpl: ((_input) =>
         ({
           sessionId: "worker-query",
@@ -629,20 +649,14 @@ describe("worker server", () => {
         ?.count,
     ).toBe(6);
     expect(
-      ((core as unknown as {
-        buffers?: Map<number, { items: Array<{ targetId: number }> }>;
-      }).buffers?.get(sessionId)?.items ?? []).map((item) => item.targetId),
-    ).toEqual([
-      observationIds[1]!,
-      observationIds[2]!,
-      observationIds[3]!,
-      turnIds[1]!,
-      turnIds[2]!,
-      turnIds[3]!,
-    ]);
+      core.sessions
+        .get(sessionId)
+        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
+    ).toEqual([[turnIds[1]!], [turnIds[2]!], [turnIds[3]!]]);
+    expect(core.buffers.get(sessionId)?.items ?? []).toEqual([]);
   });
 
-  test("scanAndDrainQueue releases only the overflow turn claims when reserve flush fails", async () => {
+  test("scanAndDrainQueue releases only the overflow batch claims when overflow flush fails", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-fail",
       project: "/tmp/project-fail",
@@ -659,8 +673,10 @@ describe("worker server", () => {
       createTurn(db, sessionId, 3),
       createTurn(db, sessionId, 4),
     ];
+    const observationIds = turnIds.map((turnId, index) =>
+      queueObs(db, sessionId, turnId, 101 + index, `fail-${index + 1}`),
+    );
     turnIds.forEach((turnId, index) => {
-      queueObs(db, sessionId, turnId, 101 + index, `fail-${index + 1}`);
       queueTurnStop(db, sessionId, turnId, 201 + index);
     });
 
@@ -671,14 +687,14 @@ describe("worker server", () => {
     const sentPrompts: string[] = [];
     const core = createWorkerCore({
       db,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
       now: () => 123,
       logger,
-      processObsImpl: async (state, observationId) => {
-        await state.pushMessage(`obs:${observationId}`);
-      },
-      processTurnStopImpl: async (state, queuedTurnId) => {
-        await state.pushMessage(`turn:${queuedTurnId}`);
-      },
       createWorkerQuerySessionImpl: ((_input) =>
         ({
           sessionId: "worker-query",
@@ -705,16 +721,19 @@ describe("worker server", () => {
         )
         .all()
         .map((row) => row.claimed_at_epoch),
-    ).toEqual([null, null, 123, 123, 123, 123, 123, 123]);
+    ).toEqual([123, 123, 123, null, 123, 123, 123, null]);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
     ).toBe(8);
     expect(
-      ((core as unknown as {
-        buffers?: Map<number, { items: Array<{ targetId: number }> }>;
-      }).buffers?.get(sessionId)?.items ?? []).map((item) => item.targetId),
-    ).toHaveLength(6);
+      core.sessions
+        .get(sessionId)
+        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
+    ).toEqual([[turnIds[0]!], [turnIds[1]!], [turnIds[2]!]]);
+    expect(
+      (core.buffers.get(sessionId)?.items ?? []).map((item) => item.targetId),
+    ).toEqual([observationIds[3]!]);
     expect(logger.error).toHaveBeenCalled();
   });
 
@@ -731,15 +750,13 @@ describe("worker server", () => {
     }).id;
     const turnId = createTurn(db, sessionId, 1);
     const observationId = queueObs(db, sessionId, turnId, 101, "compact-buffer");
+    queueTurnStop(db, sessionId, turnId, 201);
 
     const batchCalls: number[][] = [];
     const sentPrompts: string[] = [];
     const core = createWorkerCore({
       db,
       now: () => 123,
-      processObsImpl: async (state, queuedObservationId) => {
-        await state.pushMessage(`obs:${queuedObservationId}`);
-      },
       createWorkerQuerySessionImpl: ((_input) =>
         ({
           sessionId: "worker-query",
@@ -770,9 +787,7 @@ describe("worker server", () => {
         ?.count,
     ).toBe(0);
     expect(
-      ((core as unknown as {
-        buffers?: Map<number, { items: Array<{ targetId: number }> }>;
-      }).buffers?.get(sessionId)?.items ?? []).map((item) => item.targetId),
+      core.sessions.get(sessionId)?.batchQueue,
     ).toEqual([]);
   });
 
@@ -804,6 +819,12 @@ describe("worker server", () => {
     }> = [];
     const core = createWorkerCore({
       db,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 5,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
       processBatchImpl: async (_state, items, options) => {
         keepaliveCalls.push({
           itemIds: items.map((item) => item.targetId),
@@ -831,10 +852,14 @@ describe("worker server", () => {
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
     ).toBe(4);
-    expect(core.buffers.get(sessionId)?.items).toHaveLength(4);
+    expect(
+      core.sessions
+        .get(sessionId)
+        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
+    ).toEqual([[turnIds[1]!], [turnIds[2]!]]);
   });
 
-  test("runKeepaliveTick sends half of an in-progress turn as partial-turn keepalive", async () => {
+  test("runKeepaliveTick does not push standalone in-progress observations", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-keepalive-partial",
       project: "/tmp/project-keepalive-partial",
@@ -852,14 +877,14 @@ describe("worker server", () => {
 
     const partialCalls: Array<{
       itemIds: number[];
-      partialTurns: Array<{ turnId: number; totalObsCount: number; contextObservationIds: number[] }>;
+      turnStopTargetIds: number[];
     }> = [];
     const core = createWorkerCore({
       db,
       processBatchImpl: async (_state, items, options) => {
         partialCalls.push({
           itemIds: items.map((item) => item.targetId),
-          partialTurns: options?.partialTurns ?? [],
+          turnStopTargetIds: (options?.turnStopItems ?? []).map((item) => item.targetId),
         });
       },
     });
@@ -873,23 +898,12 @@ describe("worker server", () => {
 
     await core.runKeepaliveTick(2_240_000);
 
-    expect(partialCalls).toEqual([
-      {
-        itemIds: observationIds.slice(0, 3),
-        partialTurns: [
-          {
-            turnId,
-            totalObsCount: 6,
-            contextObservationIds: observationIds,
-          },
-        ],
-      },
-    ]);
+    expect(partialCalls).toEqual([]);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(3);
-    expect(core.buffers.get(sessionId)?.items).toHaveLength(3);
+    ).toBe(6);
+    expect(core.buffers.get(sessionId)?.items).toHaveLength(6);
   });
 
   test("runKeepaliveTick does nothing for cold sessions without an established cache", async () => {
@@ -927,7 +941,8 @@ describe("worker server", () => {
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
     ).toBe(2);
-    expect(core.buffers.get(sessionId)?.items).toHaveLength(2);
+    expect(core.buffers.get(sessionId)?.items).toBeUndefined();
+    expect(core.sessions.get(sessionId)?.batchQueue).toHaveLength(1);
   });
 
   test("runKeepaliveTick preserves concurrently buffered obs via seq-based removal", async () => {
@@ -958,6 +973,12 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 5,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
       processBatchImpl: async () => {
         await batchStarted;
       },
@@ -994,6 +1015,7 @@ describe("worker server", () => {
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
     ).toBe(5);
+    expect(core.sessions.get(sessionId)?.batchQueue).toHaveLength(2);
   });
 
   test("handleCompact drains the session, pushes summary, compacts the query, and resets it to cold without closing", async () => {
@@ -1077,7 +1099,6 @@ describe("worker server", () => {
       `summary:${compactSessionId}`,
     ]);
     const state = core.sessions.get(compactSessionId);
-    expect(state?.initialized).toBe(false);
     expect(state?.lastPushAt).toBe(0);
     expect(
       db
@@ -1133,7 +1154,6 @@ describe("worker server", () => {
 
     expect(compacted).toEqual([]);
     const state = core.sessions.get(compactSessionId);
-    expect(state?.initialized).toBe(false);
     expect(state?.lastPushAt).toBe(0);
     expect(state?.lastInjectedSummaryEpoch).toBe(0);
   });
@@ -1182,7 +1202,6 @@ describe("worker server", () => {
     await core.handleCompact(compactSessionId, null);
 
     const state = core.sessions.get(compactSessionId);
-    expect(state?.initialized).toBe(false);
     expect(state?.lastPushAt).toBe(0);
     expect(state?.lastInjectedSummaryEpoch).toBe(0);
     expect(errors.some((e) => String(e).includes("mnemosyne compact failed"))).toBe(true);
@@ -1262,8 +1281,6 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
-      processObsImpl: async () => {},
-      processTurnStopImpl: async () => {},
       pushSessionSummaryPromptImpl: async () => {},
       closeSessionQueryImpl: async () => {},
       createWorkerQuerySessionImpl: ((_input) =>
@@ -1321,8 +1338,6 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
-      processObsImpl: async () => {},
-      processTurnStopImpl: async () => {},
       processBatchImpl: async () => {
         db.query(
           `INSERT INTO turns (
@@ -1380,8 +1395,6 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
-      processObsImpl: async () => {},
-      processTurnStopImpl: async () => {},
       pushSessionSummaryPromptImpl: async () => {},
       closeSessionQueryImpl: async () => {},
       createWorkerQuerySessionImpl: ((_input) =>
@@ -1418,12 +1431,13 @@ describe("worker server", () => {
       completedAtEpoch: null,
     }).id;
     updateLastAgentSessionId(db, sessionId, "persisted-agent-session");
+    const turnId = createTurn(db, sessionId, 1);
 
     const createWorkerQuerySessionCalls: unknown[][] = [];
     const core = createWorkerCore({
       db,
-      processObsImpl: async (state, observationId) => {
-        await state.pushMessage(`obs:${observationId}`);
+      processBatchImpl: async (state) => {
+        await state.pushMessage("batch");
       },
       createWorkerQuerySessionImpl: ((...args: unknown[]) => {
         createWorkerQuerySessionCalls.push(args);
@@ -1451,12 +1465,13 @@ describe("worker server", () => {
 
     await core.processClaimedItem({
       seq: 1,
-      kind: "obs",
-      targetId: 1,
+      kind: "turn-stop",
+      targetId: turnId,
       sessionDbId: sessionId,
       claimedAtEpoch: 1,
       enqueuedAtEpoch: 1,
     });
+    await core.flushSession(sessionId);
 
     expect(createWorkerQuerySessionCalls).toHaveLength(1);
     expect(createWorkerQuerySessionCalls[0]?.[0]).toMatchObject({
@@ -1507,7 +1522,6 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 1_000,
       lastMessageAt: 0,
       lastActivity: 0,
@@ -1528,7 +1542,6 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 39_500,
       lastMessageAt: 39_000,
       lastActivity: 0,
@@ -1566,7 +1579,6 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 100,
       lastMessageAt: 100,
       lastActivity: 100,
@@ -1587,7 +1599,6 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 1_999_500,
       lastMessageAt: 1_999_500,
       lastActivity: 1_999_500,
@@ -1608,7 +1619,6 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      initialized: false,
       lastPushAt: 1_999_000,
       lastMessageAt: 1_998_000,
       lastActivity: 100,
@@ -1621,7 +1631,7 @@ describe("worker server", () => {
     expect(closed).toEqual([10]);
   });
 
-  test("processClaimedItem keeps same-session work serialized after a timeout", async () => {
+  test("processClaimedItem keeps same-session work serialized while a prior turn-stop is in flight", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-timeout",
       project: "/tmp/project-timeout",
@@ -1632,64 +1642,63 @@ describe("worker server", () => {
       updatedAtEpoch: 1,
       completedAtEpoch: null,
     }).id;
+    const firstTurnId = createTurn(db, sessionId, 1);
+    const secondTurnId = createTurn(db, sessionId, 2);
 
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
     const started: number[] = [];
-    const originalSetTimeout = globalThis.setTimeout;
+    const core = createWorkerCore({
+      db,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
+      processBatchImpl: async (_state, _items, options) => {
+        const turnId = options?.turnStopItems?.[0]?.targetId;
+        if (!turnId) {
+          return;
+        }
+        started.push(turnId);
+        if (turnId === firstTurnId) {
+          await firstGate;
+        }
+      },
+    });
 
-    globalThis.setTimeout = ((handler: TimerHandler, _timeout?: number, ...args: unknown[]) => {
-      if (typeof handler === "function") {
-        handler(...args);
-      }
-      return 0 as unknown as NodeJS.Timeout;
-    }) as typeof setTimeout;
+    const first = core.processClaimedItem({
+      seq: 1,
+      kind: "turn-stop",
+      targetId: firstTurnId,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 1,
+      enqueuedAtEpoch: 1,
+    });
 
-    try {
-      const core = createWorkerCore({
-        db,
-        processObsImpl: async (_state, observationId) => {
-          started.push(observationId);
-          if (observationId === 1) {
-            await firstGate;
-          }
-        },
-      });
+    await Promise.resolve();
+    await Promise.resolve();
 
-      const first = core.processClaimedItem({
-        seq: 1,
-        kind: "obs",
-        targetId: 1,
-        sessionDbId: sessionId,
-        claimedAtEpoch: 1,
-        enqueuedAtEpoch: 1,
-      });
+    const second = core.processClaimedItem({
+      seq: 2,
+      kind: "turn-stop",
+      targetId: secondTurnId,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 2,
+      enqueuedAtEpoch: 2,
+    });
 
-      await Promise.resolve();
-      await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
 
-      const second = core.processClaimedItem({
-        seq: 2,
-        kind: "obs",
-        targetId: 2,
-        sessionDbId: sessionId,
-        claimedAtEpoch: 2,
-        enqueuedAtEpoch: 2,
-      });
+    expect(started).toEqual([firstTurnId]);
 
-      await Promise.resolve();
-      await Promise.resolve();
-
-      expect(started).toEqual([1]);
-
-      releaseFirst();
-      await Promise.all([first.catch(() => {}), second.catch(() => {})]);
-      expect(started).toEqual([1, 2]);
-    } finally {
-      globalThis.setTimeout = originalSetTimeout;
-    }
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(started).toEqual([firstTurnId, secondTurnId]);
   });
 
   test("main clears the starting marker and exits cleanly when Bun.serve fails with EADDRINUSE", async () => {
@@ -1749,6 +1758,7 @@ describe("worker server", () => {
     }).id;
     const turnId = createTurn(db, sessionId, 1);
     queueObs(db, sessionId, turnId, 101, "flush-me");
+    queueTurnStop(db, sessionId, turnId, 201);
 
     let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
     const processBatchImpl = mock(async () => {});

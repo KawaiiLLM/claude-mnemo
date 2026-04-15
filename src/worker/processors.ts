@@ -11,6 +11,20 @@ import { renderFileTree } from "../shared/file-tree";
 import { getTurnById, updateTurnById } from "../db/turns";
 import type { SessionState } from "./server";
 
+export interface TurnPayload {
+  turnId: number;
+  promptNumber: number;
+  prompt: string | null;
+  response: string | null;
+  obsBlocks: string[];
+  filesRead: string[];
+  filesModified: string[];
+  toolCallCount: number;
+  size: number;
+  obsItems: PendingQueueItem[];
+  turnStopItem: PendingQueueItem;
+}
+
 function truncateMiddle(value: string | null | undefined, limit: number): string {
   const text = (value ?? "").trim();
   if (text.length <= limit) {
@@ -148,43 +162,22 @@ function buildObsBlock(
 </obs>`;
 }
 
-function buildInitialObsPrompt(
-  sessionId: number,
-  project: string,
-  firstUserPrompt: string | null,
-  priorTitle: string | null,
-  priorContent: string | null,
-  priorInsight: string | null,
-  priorNextSteps: string | null,
-  obsBlock: string,
-): string {
-  const priorSessionBlock =
-    priorTitle || priorContent || priorInsight || priorNextSteps
-      ? `
-<prior_session>
-  title: ${priorTitle ?? ""}
-  content: ${priorContent ?? ""}
-  insight: ${priorInsight ?? ""}
-  next_steps: ${priorNextSteps ?? ""}
-</prior_session>
-`
-      : "";
-
-  return `<session id="S${sessionId}">
-  project: ${project}
-  user_request: ${firstUserPrompt ?? ""}
-</session>
-${priorSessionBlock}
-${obsBlock}`;
-}
-
-function buildObsPrompt(
-  observationId: number,
-  toolName: string,
-  toolInput: string | null,
-  toolResult: string | null,
-): string {
-  return buildObsBlock(observationId, toolName, toolInput, toolResult);
+function computeTurnPayloadSize(
+  prompt: string | null,
+  response: string | null,
+  obsBlocks: string[],
+  filesRead: string[],
+  filesModified: string[],
+  toolCallCount: number,
+): number {
+  return [
+    prompt ?? "",
+    response ?? "",
+    ...obsBlocks,
+    ...filesRead,
+    ...filesModified,
+    String(toolCallCount),
+  ].join("\n").length;
 }
 
 function buildTurnStopPrompt(
@@ -252,33 +245,6 @@ function buildBatchTurnBlock(
   return lines.join("\n");
 }
 
-function buildPartialTurnBlock(args: {
-  turnId: number;
-  obsBlocks: string[];
-  prompt: string | null;
-  filesRead: string[];
-  filesModified: string[];
-  includedObsCount: number;
-  totalObsCount: number;
-}): string {
-  const renderedFilesRead = renderFileTree(args.filesRead);
-  const renderedFilesModified = renderFileTree(args.filesModified);
-  const lines = [`  <partial-turn id="T${args.turnId}" status="in-progress">`];
-  for (const obsBlock of args.obsBlocks) {
-    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
-  }
-  lines.push(`    prompt: ${truncateMiddle(args.prompt, 1000)}`);
-  lines.push("    files_read:");
-  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
-  lines.push("    files_modified:");
-  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
-  lines.push(
-    `    note: turn still in progress, ${args.includedObsCount} of ~${args.totalObsCount} obs included`,
-  );
-  lines.push("  </partial-turn>");
-  return lines.join("\n");
-}
-
 export function buildBatchPrompt(args: {
   sessionId: number;
   project: string;
@@ -289,7 +255,6 @@ export function buildBatchPrompt(args: {
   priorNextSteps: string | null;
   sessionUpdated?: boolean;
   completedTurnBlocks: string[];
-  partialTurnBlocks?: string[];
 }): string {
   const sessionUpdatedBlock = args.sessionUpdated
     ? `<session-updated>
@@ -309,12 +274,7 @@ Session summary was refreshed since your last message.
 </prior_session>
 `
       : "";
-  const body = [
-    ...args.completedTurnBlocks,
-    ...(args.partialTurnBlocks ?? []),
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const body = args.completedTurnBlocks.filter(Boolean).join("\n");
 
   return `<session id="S${args.sessionId}">
   project: ${args.project}
@@ -442,65 +402,60 @@ If no material change, respond with no tool calls. An empty response is the "lea
 
 export function createWorkerProcessors(db: Database) {
   return {
-    async processObs(state: SessionState, observationId: number): Promise<void> {
-      const observation = getObservation(db, observationId);
-      if (!observation || observation.status !== "pending") {
-        return;
+    buildTurnPayload(
+      turnId: number,
+      obsItems: PendingQueueItem[],
+      turnStopItem: PendingQueueItem,
+    ): TurnPayload | null {
+      const turn = getTurnById(db, turnId);
+      if (!turn || turn.status === "undone") {
+        return null;
       }
 
-      const turn = getTurnById(db, observation.turnId);
-      if (!turn) {
-        return;
-      }
+      const aggregate = aggregateTurnFiles(db, turn.id);
+      updateTurnById(db, turn.id, {
+        filesRead: aggregate.filesRead,
+        filesModified: aggregate.filesModified,
+        toolCallCount: aggregate.toolCallCount,
+        updatedAtEpoch: Math.floor(Date.now() / 1000),
+      });
 
-      const session = getSession(db, turn.sessionId);
-      if (!session) {
-        return;
-      }
+      const obsBlocks = obsItems
+        .map((item) => {
+          const observation = getObservation(db, item.targetId);
+          if (!observation || observation.status !== "pending") {
+            return null;
+          }
 
-      const obsBlock = buildObsBlock(
-        observation.id,
-        observation.toolName ?? "Tool",
-        observation.toolInput,
-        observation.toolResult,
-      );
-
-      if (state.initialized) {
-        await state.pushMessage(
-          buildObsPrompt(
+          return buildObsBlock(
             observation.id,
             observation.toolName ?? "Tool",
             observation.toolInput,
             observation.toolResult,
-          ),
-        );
-      } else {
-        const firstTurn = db
-          .query<{ user_prompt: string | null }, [number]>(
-            `
-              SELECT user_prompt
-              FROM turns
-              WHERE session_id = ?
-              ORDER BY prompt_number ASC
-              LIMIT 1
-            `,
-          )
-          .get(session.id);
+          );
+        })
+        .filter((block): block is string => block !== null);
 
-        await state.pushMessage(
-          buildInitialObsPrompt(
-            session.id,
-            session.project,
-            firstTurn?.user_prompt ?? null,
-            session.title,
-            session.content,
-            session.insight,
-            session.nextSteps,
-            obsBlock,
-          ),
-        );
-        state.initialized = true;
-      }
+      return {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        prompt: turn.userPrompt,
+        response: turn.assistantResponse,
+        obsBlocks,
+        filesRead: aggregate.filesRead,
+        filesModified: aggregate.filesModified,
+        toolCallCount: aggregate.toolCallCount,
+        size: computeTurnPayloadSize(
+          turn.userPrompt,
+          turn.assistantResponse,
+          obsBlocks,
+          aggregate.filesRead,
+          aggregate.filesModified,
+          aggregate.toolCallCount,
+        ),
+        obsItems,
+        turnStopItem,
+      };
     },
 
     async processTurnStop(state: SessionState, turnId: number): Promise<void> {
@@ -537,7 +492,6 @@ export function createWorkerProcessors(db: Database) {
           aggregate.filesModified,
         ),
       );
-      state.initialized = true;
     },
 
     async processBatch(
@@ -545,18 +499,10 @@ export function createWorkerProcessors(db: Database) {
       items: PendingQueueItem[],
       options?: {
         turnStopItems?: PendingQueueItem[];
-        partialTurns?: Array<{
-          turnId: number;
-          totalObsCount: number;
-          contextObservationIds: number[];
-        }>;
+        sessionUpdated?: boolean;
       },
     ): Promise<void> {
-      if (
-        items.length === 0 &&
-        (options?.turnStopItems?.length ?? 0) === 0 &&
-        (options?.partialTurns?.length ?? 0) === 0
-      ) {
+      if (items.length === 0 && (options?.turnStopItems?.length ?? 0) === 0) {
         return;
       }
 
@@ -643,55 +589,12 @@ export function createWorkerProcessors(db: Database) {
         })
         .filter((block): block is string => block !== null);
 
-      const partialTurnBlocks = (options?.partialTurns ?? [])
-        .map((partialTurn) => {
-          const turn = getTurnById(db, partialTurn.turnId);
-          if (!turn || turn.status === "undone") {
-            return null;
-          }
-
-          const contextObservations = partialTurn.contextObservationIds
-            .map((observationId) => getObservation(db, observationId))
-            .filter(
-              (
-                observation,
-              ): observation is NonNullable<typeof observation> => observation !== null,
-            );
-          const aggregate = aggregateFilesFromObservations(contextObservations);
-          const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map((observation) =>
-            buildObsBlock(
-              observation.observationId,
-              observation.toolName,
-              observation.toolInput,
-              observation.toolResult,
-            ),
-          );
-
-          if (obsBlocks.length === 0) {
-            return null;
-          }
-
-          return buildPartialTurnBlock({
-            turnId: turn.id,
-            obsBlocks,
-            prompt: turn.userPrompt,
-            filesRead: aggregate.filesRead,
-            filesModified: aggregate.filesModified,
-            includedObsCount: obsBlocks.length,
-            totalObsCount: partialTurn.totalObsCount,
-          });
-        })
-        .filter((block): block is string => block !== null);
-
-      if (completedTurnBlocks.length === 0 && partialTurnBlocks.length === 0) {
+      if (completedTurnBlocks.length === 0) {
         return;
       }
 
-      const needsSessionContext =
-        !state.initialized ||
-        (session.summaryUpdatedAtEpoch ?? 0) >
-          (state.lastInjectedSummaryEpoch ?? 0);
-      const sessionUpdated = state.initialized && needsSessionContext;
+      const needsSessionContext = options?.sessionUpdated ?? false;
+      const sessionUpdated = options?.sessionUpdated ?? false;
 
       await state.pushMessage(
         buildBatchPrompt({
@@ -704,7 +607,6 @@ export function createWorkerProcessors(db: Database) {
           priorNextSteps: needsSessionContext ? session.nextSteps : null,
           sessionUpdated,
           completedTurnBlocks,
-          partialTurnBlocks,
         }),
       );
       if ((options?.turnStopItems?.length ?? 0) > 0) {
@@ -725,7 +627,6 @@ export function createWorkerProcessors(db: Database) {
       }
       const freshSession = getSession(db, session.id);
       state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
-      state.initialized = true;
     },
 
     async pushSessionSummaryPrompt(
@@ -747,7 +648,6 @@ export function createWorkerProcessors(db: Database) {
           session.nextSteps,
         ),
       );
-      state.initialized = true;
     },
   };
 }
