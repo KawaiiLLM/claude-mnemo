@@ -8,6 +8,7 @@ import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 import { renderFileTree as renderSharedFileTree } from "../../src/shared/file-tree";
 import {
+  buildBatchPrompt,
   cleanInput,
   cleanOutput,
   createWorkerProcessors,
@@ -411,6 +412,41 @@ describe("worker processors", () => {
     expect(pushMessage).not.toHaveBeenCalled();
   });
 
+  test("buildBatchPrompt renders session title and current_prompt while omitting user_request", () => {
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: "Auth race",
+      currentPrompt: "Diagnose auth race",
+      priorTitle: null,
+      priorContent: null,
+      priorInsight: null,
+      priorNextSteps: null,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    expect(prompt).toContain("title: Auth race");
+    expect(prompt).toContain("current_prompt: Diagnose auth race");
+    expect(prompt).not.toContain("user_request:");
+  });
+
+  test("buildBatchPrompt omits current_prompt when it is null", () => {
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: "Auth race",
+      currentPrompt: null,
+      priorTitle: null,
+      priorContent: null,
+      priorInsight: null,
+      priorNextSteps: null,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    expect(prompt).toContain("title: Auth race");
+    expect(prompt).not.toContain("current_prompt:");
+  });
+
   test("pushSessionSummaryPrompt invokes Mnemosyne with current session state", async () => {
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
@@ -517,6 +553,9 @@ describe("worker processors", () => {
     );
 
     const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).toContain("title: Auth race");
+    expect(prompt).toContain("current_prompt: Diagnose auth race");
+    expect(prompt).not.toContain("user_request:");
     expect(prompt).toContain("<prior_session>");
     expect(prompt).toContain("<session-updated>");
     expect(state.lastInjectedSummaryEpoch).toBe(

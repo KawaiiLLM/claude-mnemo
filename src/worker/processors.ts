@@ -248,7 +248,8 @@ function buildBatchTurnBlock(
 export function buildBatchPrompt(args: {
   sessionId: number;
   project: string;
-  firstUserPrompt: string | null;
+  sessionTitle: string | null;
+  currentPrompt: string | null;
   priorTitle: string | null;
   priorContent: string | null;
   priorInsight: string | null;
@@ -275,10 +276,15 @@ Session summary was refreshed since your last message.
 `
       : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
+  const titleLine = args.sessionTitle
+    ? `\n  title: ${args.sessionTitle}`
+    : "";
+  const promptLine = args.currentPrompt
+    ? `\n  current_prompt: ${truncateMiddle(args.currentPrompt, 200)}`
+    : "";
 
   return `<session id="S${args.sessionId}">
-  project: ${args.project}
-  user_request: ${args.firstUserPrompt ?? ""}
+  project: ${args.project}${titleLine}${promptLine}
 </session>
 ${sessionUpdatedBlock}
 ${priorSessionBlock}
@@ -515,18 +521,6 @@ export function createWorkerProcessors(db: Database) {
         return;
       }
 
-      const firstTurn = db
-        .query<{ user_prompt: string | null }, [number]>(
-          `
-            SELECT user_prompt
-            FROM turns
-            WHERE session_id = ?
-            ORDER BY prompt_number ASC
-            LIMIT 1
-          `,
-        )
-        .get(session.id);
-
       const obsByTurnId = new Map<
         number,
         Array<{
@@ -553,6 +547,8 @@ export function createWorkerProcessors(db: Database) {
         obsByTurnId.set(observation.turnId, group);
       }
 
+      let currentPrompt: string | null = null;
+      let latestPromptNumber = Number.NEGATIVE_INFINITY;
       const completedTurnBlocks = (options?.turnStopItems ?? [])
         .map((turnStopItem) => {
           const turn = getTurnById(db, turnStopItem.targetId);
@@ -577,6 +573,11 @@ export function createWorkerProcessors(db: Database) {
             ),
           );
 
+          if (turn.promptNumber > latestPromptNumber) {
+            latestPromptNumber = turn.promptNumber;
+            currentPrompt = turn.userPrompt;
+          }
+
           return buildBatchTurnBlock(
             turn.id,
             obsBlocks,
@@ -600,7 +601,8 @@ export function createWorkerProcessors(db: Database) {
         buildBatchPrompt({
           sessionId: session.id,
           project: session.project,
-          firstUserPrompt: firstTurn?.user_prompt ?? null,
+          sessionTitle: session.title,
+          currentPrompt,
           priorTitle: needsSessionContext ? session.title : null,
           priorContent: needsSessionContext ? session.content : null,
           priorInsight: needsSessionContext ? session.insight : null,

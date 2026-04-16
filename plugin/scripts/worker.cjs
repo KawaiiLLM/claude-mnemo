@@ -47,7 +47,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.8-mnzusm4u" : "dev";
+var BUILD_ID = true ? "0.2.9-mo0xxzep" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2005,9 +2005,12 @@ Session summary was refreshed since your last message.
 </prior_session>
 ` : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
+  const titleLine = args.sessionTitle ? `
+  title: ${args.sessionTitle}` : "";
+  const promptLine = args.currentPrompt ? `
+  current_prompt: ${truncateMiddle(args.currentPrompt, 200)}` : "";
   return `<session id="S${args.sessionId}">
-  project: ${args.project}
-  user_request: ${args.firstUserPrompt ?? ""}
+  project: ${args.project}${titleLine}${promptLine}
 </session>
 ${sessionUpdatedBlock}
 ${priorSessionBlock}
@@ -2193,15 +2196,6 @@ function createWorkerProcessors(db) {
       if (!session) {
         return;
       }
-      const firstTurn = db.query(
-        `
-            SELECT user_prompt
-            FROM turns
-            WHERE session_id = ?
-            ORDER BY prompt_number ASC
-            LIMIT 1
-          `
-      ).get(session.id);
       const obsByTurnId = /* @__PURE__ */ new Map();
       for (const item of items) {
         const observation = getObservation(db, item.targetId);
@@ -2217,6 +2211,8 @@ function createWorkerProcessors(db) {
         });
         obsByTurnId.set(observation.turnId, group);
       }
+      let currentPrompt = null;
+      let latestPromptNumber = Number.NEGATIVE_INFINITY;
       const completedTurnBlocks = (options?.turnStopItems ?? []).map((turnStopItem) => {
         const turn = getTurnById(db, turnStopItem.targetId);
         if (!turn || turn.status === "undone") {
@@ -2237,6 +2233,10 @@ function createWorkerProcessors(db) {
             observation.toolResult
           )
         );
+        if (turn.promptNumber > latestPromptNumber) {
+          latestPromptNumber = turn.promptNumber;
+          currentPrompt = turn.userPrompt;
+        }
         return buildBatchTurnBlock(
           turn.id,
           obsBlocks,
@@ -2256,7 +2256,8 @@ function createWorkerProcessors(db) {
         buildBatchPrompt({
           sessionId: session.id,
           project: session.project,
-          firstUserPrompt: firstTurn?.user_prompt ?? null,
+          sessionTitle: session.title,
+          currentPrompt,
           priorTitle: needsSessionContext ? session.title : null,
           priorContent: needsSessionContext ? session.content : null,
           priorInsight: needsSessionContext ? session.insight : null,
@@ -39589,7 +39590,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.8",
+    version: "0.2.9",
     tools: [
       deps.toolImpl(
         "remember",

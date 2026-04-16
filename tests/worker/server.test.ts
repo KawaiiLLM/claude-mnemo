@@ -656,6 +656,62 @@ describe("worker server", () => {
     expect(core.buffers.get(sessionId)?.items ?? []).toEqual([]);
   });
 
+  test("flushSession uses the highest prompt_number in a merged batch as current_prompt", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-merged-prompt",
+      project: "/tmp/project-merged-prompt",
+      title: "Merged title",
+      content: "Prior content",
+      insight: "- prior insight",
+      nextSteps: "Keep going",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnIds = [
+      createTurn(db, sessionId, 1, "Earlier prompt", "Reply 1"),
+      createTurn(db, sessionId, 2, "Latest prompt", "Reply 2"),
+    ];
+    turnIds.forEach((turnId, index) => {
+      queueObs(db, sessionId, turnId, 101 + index, `merged-${index + 1}`);
+      queueTurnStop(db, sessionId, turnId, 201 + index);
+    });
+
+    const sentPrompts: string[] = [];
+    const processors = createWorkerProcessors(db);
+    const core = createWorkerCore({
+      db,
+      config: {
+        mergeThresholdChars: 10_000,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+      },
+      now: () => 123,
+      buildTurnPayloadImpl: processors.buildTurnPayload,
+      processBatchImpl: processors.processBatch,
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+    });
+
+    await core.scanAndDrainQueue();
+    await core.flushSession(sessionId);
+
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).toContain("title: Merged title");
+    expect(sentPrompts[0]).toContain("current_prompt: Latest prompt");
+    expect(sentPrompts[0]).not.toContain("current_prompt: Earlier prompt");
+    expect(sentPrompts[0]).not.toContain("user_request:");
+  });
+
   test("scanAndDrainQueue releases only the overflow batch claims when overflow flush fails", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-fail",
