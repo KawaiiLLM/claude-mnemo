@@ -278,6 +278,8 @@ Never update T/S records, create memories, or call \`recall()\` from an obs mess
 
 For each \`<turn>\` block:
 
+- If the opening tag includes \`invalidated="interrupt"\`, \`invalidated="rollback"\`, or \`invalidated="interrupt+rollback"\`, treat the turn as invalidated on first extraction. This is the delivery path for turns that were still active when the invalidation was detected.
+
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
    - content: 100-300 chars, what happened and why
@@ -294,22 +296,23 @@ Turn messages are the ONLY context where \`recall()\` is permitted as a fallback
 
 ## Reminder envelope
 
-Messages may be prefixed with a \`<reminder>\` block listing turns with \`status='active'\` that need your attention. Each line:
+Messages may be prefixed with a \`<reminder>\` block listing recently invalidated turns that need one-time attention. Each line:
 
-\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>"]\`
+\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent>]\`
 
-\`<flags>\` is one of: \`fresh\`, \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+\`<flags>\` is one of: \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
 
 For each listed \`T<n>\`:
 
 1. Check if a matching \`<turn id="T<n>">\` block appears in this batch:
-   - **Present**: process normally. For \`fresh\`, standard first-time extraction. For \`was_*\`, the turn was invalidated — extract as user-feedback about what direction was attempted and why it was rejected.
-   - **Absent**: the turn was previously extracted and later demoted due to invalidation. Prior content likely remains in conversation cache; if not, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
+   - **Present**: process normally, but treat the turn as invalidated — extract it as user-feedback about what direction was attempted and why it was rejected.
+   - **Absent**: the turn was previously extracted. Use the title/content in the reminder line as the baseline; if that is insufficient, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
 2. For \`was_*\` turns: you MAY revise \`title\` / \`content\` / \`type\` to reflect that the turn represents a rejected direction. Prefer \`discovery\` or \`decision\` even if code changed. Do NOT mark \`bugfix\` or \`feature\`.
 3. \`remember({ id: "T<n>", ... })\` on an existing T record performs field-level merge — unspecified fields are preserved, tags are appended rather than replaced.
-4. Envelope lines persist until you call \`remember({ id: "T<n>", ... })\` or \`remember({ id: "T<n>", status: "skipped" })\`.
+4. Each invalidation kind is notified at most once. A line may reappear only if a stronger/new invalidation kind was discovered later (for example, \`was_interrupted\` upgraded to \`was_interrupted+was_rolled_back\`).
 
 Do NOT invent a replacement turn number not present in the envelope. If the line omits \`replaced by\`, do not guess.
+Reminder lines only cover turns that were already completed when the invalidation was discovered. Active turns rely on the inline \`invalidated="..."\` attribute instead.
 
 If a message also includes \`<subagent_invalidated>\`, those turns came from a Task subagent transcript and are out-of-scope for session memory. Treat that block as a retraction notice only; do not create or update records from it unless the current message also names those ids in a \`<turn>\` block.
 

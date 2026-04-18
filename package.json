@@ -1,6 +1,6 @@
 {
   "name": "claude-mnemo",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "type": "module",
   "description": "Structured memory system for Claude Code powered by Mnemosyne",
   "license": "MIT",

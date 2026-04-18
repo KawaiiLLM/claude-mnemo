@@ -664,7 +664,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.10-mo4dtcvd" : "dev";
+var BUILD_ID = true ? "0.2.11-mo4l1ifu" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1680,7 +1680,7 @@ function updateTurnById(db, turnId, input) {
     return null;
   }
   const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
-  const nextTags = mergeTags(existing.tags, input.tags);
+  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
@@ -3400,6 +3400,20 @@ function createSessionEndHandler(dependencies) {
 }
 
 // src/worker/invalidation.ts
+var PENDING_TAGS = {
+  interrupt: "invalidated:notify-pending:interrupt",
+  rollback: "invalidated:notify-pending:rollback"
+};
+var NOTIFIED_TAGS = {
+  interrupt: "invalidated:notified:interrupt",
+  rollback: "invalidated:notified:rollback"
+};
+function addPendingKind(tags, kind) {
+  if (tags.includes(PENDING_TAGS[kind]) || tags.includes(NOTIFIED_TAGS[kind])) {
+    return tags;
+  }
+  return [...tags, PENDING_TAGS[kind]];
+}
 function selectLatestMainLeaf(entries) {
   const parentSet = new Set(
     entries.map((entry) => entry.parentUuid).filter((uuid) => Boolean(uuid))
@@ -3422,10 +3436,13 @@ function selectLatestMainLeaf(entries) {
     return latest;
   });
 }
-function detectRolledBackPromptIds(transcriptPath) {
+function detectRollbackTopology(transcriptPath) {
   const entries = readAllTranscriptEntries(transcriptPath);
   if (entries.length === 0) {
-    return /* @__PURE__ */ new Set();
+    return {
+      rolledBackPromptIds: /* @__PURE__ */ new Set(),
+      replacementByPromptId: /* @__PURE__ */ new Map()
+    };
   }
   const byUuid = new Map(
     entries.filter(
@@ -3443,7 +3460,10 @@ function detectRolledBackPromptIds(transcriptPath) {
   }
   const tip = selectLatestMainLeaf(entries);
   if (!tip?.uuid) {
-    return /* @__PURE__ */ new Set();
+    return {
+      rolledBackPromptIds: /* @__PURE__ */ new Set(),
+      replacementByPromptId: /* @__PURE__ */ new Map()
+    };
   }
   const mainChainUuids = /* @__PURE__ */ new Set();
   let cursor = tip;
@@ -3452,33 +3472,67 @@ function detectRolledBackPromptIds(transcriptPath) {
     cursor = cursor.parentUuid ? byUuid.get(cursor.parentUuid) : void 0;
   }
   const rolledBackPromptIds = /* @__PURE__ */ new Set();
+  const replacementByPromptId = /* @__PURE__ */ new Map();
   for (const children of childrenByParent.values()) {
-    for (const child of children) {
-      if (child.role === "user" && child.promptId && child.isSidechain !== true && isChainParticipant(child) && !mainChainUuids.has(child.uuid ?? "")) {
-        rolledBackPromptIds.add(child.promptId);
+    const userChildren = children.filter(
+      (child) => child.role === "user" && child.promptId && child.isSidechain !== true && isChainParticipant(child)
+    );
+    if (userChildren.length < 2) {
+      continue;
+    }
+    const mainChild = userChildren.find(
+      (child) => mainChainUuids.has(child.uuid ?? "")
+    );
+    if (!mainChild?.promptId) {
+      continue;
+    }
+    for (const child of userChildren) {
+      const childPromptId = child.promptId;
+      if (!childPromptId) {
+        continue;
       }
+      if (childPromptId === mainChild.promptId) {
+        continue;
+      }
+      if (mainChainUuids.has(child.uuid ?? "")) {
+        continue;
+      }
+      rolledBackPromptIds.add(childPromptId);
+      replacementByPromptId.set(childPromptId, mainChild.promptId);
     }
   }
-  return rolledBackPromptIds;
+  return {
+    rolledBackPromptIds,
+    replacementByPromptId
+  };
 }
 function applyInvalidation(db, sessionDbId, transcriptPath, epoch) {
   const interruptedPromptIds = detectInterruptedPromptIds(transcriptPath);
-  const rolledBackPromptIds = detectRolledBackPromptIds(transcriptPath);
+  const { rolledBackPromptIds } = detectRollbackTopology(transcriptPath);
   const turns = getTurnsForSession(db, sessionDbId);
   for (const turn of turns) {
     if (!turn.contentPromptId) {
       continue;
     }
-    const nextWasInterrupted = turn.wasInterrupted || interruptedPromptIds.has(turn.contentPromptId);
-    const nextWasRolledBack = turn.wasRolledBack || rolledBackPromptIds.has(turn.contentPromptId);
-    if (nextWasInterrupted === turn.wasInterrupted && nextWasRolledBack === turn.wasRolledBack) {
+    const detectedInterrupt = interruptedPromptIds.has(turn.contentPromptId);
+    const detectedRollback = rolledBackPromptIds.has(turn.contentPromptId);
+    const nextWasInterrupted = turn.wasInterrupted || detectedInterrupt;
+    const nextWasRolledBack = turn.wasRolledBack || detectedRollback;
+    let nextTags = turn.tags;
+    if (detectedInterrupt && !turn.wasInterrupted) {
+      nextTags = addPendingKind(nextTags, "interrupt");
+    }
+    if (detectedRollback && !turn.wasRolledBack) {
+      nextTags = addPendingKind(nextTags, "rollback");
+    }
+    if (nextWasInterrupted === turn.wasInterrupted && nextWasRolledBack === turn.wasRolledBack && nextTags === turn.tags) {
       continue;
     }
-    const nextStatus = turn.status === "extracted" || turn.status === "skipped" ? "active" : turn.status;
     updateTurnById(db, turn.id, {
-      status: nextStatus,
+      status: turn.status,
       wasInterrupted: nextWasInterrupted,
       wasRolledBack: nextWasRolledBack,
+      replaceTags: nextTags,
       updatedAtEpoch: epoch
     });
   }
@@ -3598,7 +3652,7 @@ function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtE
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addSubagentPendingTag(turn.tags),
+        replaceTags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch
       });
     }

@@ -489,17 +489,23 @@ describe("worker query session", () => {
       "Turn messages are the ONLY context where `recall()` is permitted as a fallback",
     );
     expect(prompt).toContain(
-      "Messages may be prefixed with a `<reminder>` block listing turns with `status='active'`",
+      "Messages may be prefixed with a `<reminder>` block listing recently invalidated turns that need one-time attention",
     );
     expect(prompt).toContain(
-      "`fresh`, `was_interrupted`, `was_rolled_back`, `was_interrupted+was_rolled_back`",
+      '**Present**: process normally, but treat the turn as invalidated',
     );
     expect(prompt).toContain(
-      "For `was_*` turns: you MAY revise `title` / `content` / `type`",
+      '`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent>]' ,
+    );
+    expect(prompt).toContain(
+      "Each invalidation kind is notified at most once",
     );
     expect(prompt).toContain(
       "Do NOT invent a replacement turn number not present in the envelope.",
     );
+    expect(prompt).toContain('invalidated="interrupt"');
+    expect(prompt).not.toContain("status='active'");
+    expect(prompt).not.toContain("Envelope lines persist until you call `remember()`");
     expect(prompt).toContain("<subagent_invalidated>");
     expect(prompt).not.toContain('invalidated="<kinds>"');
     expect(prompt).not.toContain("<invalidated>");

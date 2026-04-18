@@ -708,6 +708,43 @@ describe("worker processors", () => {
     expect(state.lastInjectedSummaryEpoch).toBe(999);
   });
 
+  test("processBatch adds inline invalidation marker for active invalidated turns", async () => {
+    db.query(
+      `
+        UPDATE turns
+        SET was_interrupted = 1
+        WHERE id = ?
+      `,
+    ).run(turnId);
+
+    const pushMessage = mock(async () => {});
+    const processors = createWorkerProcessors(db);
+
+    await processors.processBatch(
+      {
+        sessionDbId: sessionId,
+        processingLock: Promise.resolve(),
+        pushMessage,
+        querySession: null,
+        contentSessionId: null,
+        project: null,
+        lastPushAt: 0,
+        lastMessageAt: 0,
+        lastActivity: 0,
+        lastInjectedSummaryEpoch: 0,
+      },
+      [{ seq: 1, kind: "obs", targetId: observationId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 }],
+      {
+        turnStopItems: [
+          { seq: 2, kind: "turn-stop", targetId: turnId, sessionDbId: sessionId, claimedAtEpoch: 1, enqueuedAtEpoch: 1 },
+        ],
+      },
+    );
+
+    const prompt = String(pushMessage.mock.calls[0]?.[0]);
+    expect(prompt).toContain(`<turn id="T${turnId}" invalidated="interrupt">`);
+  });
+
   test("processBatch auto-skips untouched observation records in completed-turn batches", async () => {
     db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
     const skippedObservationId = createObservation(db, {

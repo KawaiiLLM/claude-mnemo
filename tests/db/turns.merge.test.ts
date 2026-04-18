@@ -99,6 +99,33 @@ describe("turn merge semantics", () => {
     ]);
   });
 
+  test("replaceTags overwrites the stored tag set instead of unioning with existing tags", () => {
+    const turn = saveTurn(db, {
+      sessionId,
+      promptNumber: 2,
+      userPrompt: "Original prompt",
+      assistantResponse: "Original answer",
+      title: "Original title",
+      content: "Original content",
+      insight: "- original insight",
+      type: "decision",
+      tags: ["existing", "subagent:pending"],
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 20,
+      updatedAtEpoch: 21,
+      observations: [],
+    });
+
+    const updated = updateTurnById(db, turn.id, {
+      replaceTags: ["existing", "subagent:notified"],
+      updatedAtEpoch: 22,
+    });
+
+    expect(updated?.tags).toEqual(["existing", "subagent:notified"]);
+    expect(updated?.status).toBe("extracted");
+  });
+
   test("tag-only updates promote active turns to extracted", () => {
     const turnId = db
       .query<{ id: number }, [number]>(

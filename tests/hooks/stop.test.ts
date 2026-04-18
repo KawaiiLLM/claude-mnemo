@@ -624,7 +624,7 @@ describe("handleStopHook", () => {
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });
 
-  test("stop hook demotes newly invalidated extracted turns back to active", async () => {
+  test("stop hook preserves extracted status for newly invalidated turns and schedules a reminder", async () => {
     db.query(
       `INSERT INTO turns (
         session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, title, created_at_epoch, updated_at_epoch
@@ -703,8 +703,13 @@ describe("handleStopHook", () => {
 
     expect(getTurn(db, sessionId, 1)).toEqual(
       expect.objectContaining({
-        status: "active",
+        status: "extracted",
         wasInterrupted: true,
+        wasRolledBack: true,
+        tags: [
+          "invalidated:notify-pending:interrupt",
+          "invalidated:notify-pending:rollback",
+        ],
       }),
     );
 

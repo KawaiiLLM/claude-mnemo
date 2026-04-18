@@ -152,6 +152,7 @@ export interface UpdateTurnByIdInput {
   type?: string | null;
   transcriptLineStart?: number | null;
   tags?: string[];
+  replaceTags?: string[];
   filesRead?: string[];
   filesModified?: string[];
   toolCallCount?: number | null;
@@ -172,7 +173,7 @@ export function updateTurnById(
   const nextStatus =
     input.status ??
     (existing.status === "active" ? "extracted" : existing.status);
-  const nextTags = mergeTags(existing.tags, input.tags);
+  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
 
   const updated = mapTurnRow(
     db

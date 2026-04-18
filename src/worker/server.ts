@@ -30,10 +30,17 @@ import {
   type PendingQueueItem,
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
-import { DATA_DIR, WORKER_PID_PATH, WORKER_STARTING_PATH } from "../shared/paths";
+import {
+  DATA_DIR,
+  WORKER_PID_PATH,
+  WORKER_STARTING_PATH,
+  resolveTranscriptPath,
+} from "../shared/paths";
 import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import {
   getReminderItems,
+  getSilencedReminderItems,
+  markReminderItemsNotified,
 } from "./invalidation";
 import {
   detectAndCleanSubagentTurns,
@@ -231,9 +238,21 @@ function buildReminderEnvelope(
     wasInterrupted: boolean;
     wasRolledBack: boolean;
     priorTitle: string | null;
+    priorContent: string | null;
     replacementPromptNumber: number | null;
   }>,
 ): string {
+  function truncateReminderContent(value: string | null): string | null {
+    const text = value?.trim().replace(/\s+/g, " ");
+    if (!text) {
+      return null;
+    }
+    if (text.length <= 120) {
+      return text;
+    }
+    return `${text.slice(0, 117)}...`;
+  }
+
   const lines = items.map((item) => {
     const flags =
       item.wasInterrupted && item.wasRolledBack
@@ -247,12 +266,21 @@ function buildReminderEnvelope(
       item.replacementPromptNumber !== null
         ? `, replaced by T${item.replacementPromptNumber}`
         : "";
-    const titleClause = item.priorTitle ? `: "${item.priorTitle}"` : "";
-    return `  - T${item.promptNumber} (${flags}${replacementClause})${titleClause}`;
+    const summaryParts: string[] = [];
+    if (item.priorTitle) {
+      summaryParts.push(`"${item.priorTitle}"`);
+    }
+    const truncatedContent = truncateReminderContent(item.priorContent);
+    if (truncatedContent) {
+      summaryParts.push(truncatedContent);
+    }
+    const summaryClause =
+      summaryParts.length > 0 ? `: ${summaryParts.join(" -- ")}` : "";
+    return `  - T${item.promptNumber} (${flags}${replacementClause})${summaryClause}`;
   });
 
   return `<reminder>
-  The following turns have status='active' and need your attention.
+  The following turns were invalidated and need one-time attention.
 ${lines.join("\n")}
 </reminder>`;
 }
@@ -519,6 +547,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       processingLock: Promise.resolve(),
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
+        const mainTranscriptPath =
+          state!.contentSessionId && state!.project
+            ? resolveTranscriptPath(state!.project, state!.contentSessionId)
+            : undefined;
         const pendingSubagentTurns = getPendingSubagentTurns(
           deps.db,
           state!.sessionDbId,
@@ -526,6 +558,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         const reminderItems = getReminderItems(
           deps.db,
           state!.sessionDbId,
+          mainTranscriptPath,
+        );
+        const silencedReminderItems = getSilencedReminderItems(
+          deps.db,
+          state!.sessionDbId,
+          mainTranscriptPath,
         );
         const envelopeBlocks: string[] = [];
         if (pendingSubagentTurns.length > 0) {
@@ -560,6 +598,20 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             markSubagentTurnsNotified(deps.db, pendingSubagentTurns, now());
           } catch (error) {
             logger.error?.("failed to mark subagent turns notified", {
+              sessionDbId: state!.sessionDbId,
+              error,
+            });
+          }
+        }
+        if (reminderItems.length > 0 || silencedReminderItems.length > 0) {
+          try {
+            markReminderItemsNotified(
+              deps.db,
+              [...reminderItems, ...silencedReminderItems],
+              now(),
+            );
+          } catch (error) {
+            logger.error?.("failed to mark reminder items notified", {
               sessionDbId: state!.sessionDbId,
               error,
             });

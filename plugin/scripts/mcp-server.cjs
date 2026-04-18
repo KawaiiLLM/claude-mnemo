@@ -31476,7 +31476,7 @@ function updateTurnById(db, turnId, input) {
     return null;
   }
   const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
-  const nextTags = mergeTags(existing.tags, input.tags);
+  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
@@ -34112,7 +34112,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.10" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.11" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

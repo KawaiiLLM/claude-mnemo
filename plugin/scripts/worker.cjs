@@ -47,7 +47,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.10-mo4dtcvd" : "dev";
+var BUILD_ID = true ? "0.2.11-mo4l1ifu" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -902,7 +902,7 @@ function updateTurnById(db, turnId, input) {
     return null;
   }
   const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
-  const nextTags = mergeTags(existing.tags, input.tags);
+  const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
@@ -1422,6 +1422,9 @@ function stringifyToolResultContent(content) {
   }
   return JSON.stringify(content);
 }
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
 function collectInterruptedPromptIds(entries) {
   const interruptedPromptIds = /* @__PURE__ */ new Set();
   for (const entry of entries) {
@@ -1624,22 +1627,173 @@ ${assistantText}` : assistantText;
 }
 
 // src/worker/invalidation.ts
-function getReminderItems(db, sessionDbId) {
-  const turns = getTurnsForSession(db, sessionDbId);
-  const reminderTurns = turns.filter((turn) => turn.status === "active");
-  return reminderTurns.map((turn) => {
-    const replacement = turns.find(
-      (candidate) => candidate.promptNumber > turn.promptNumber && candidate.status !== "undone" && !candidate.wasInterrupted && !candidate.wasRolledBack
+var REMINDER_LIMIT = 10;
+var PENDING_TAGS = {
+  interrupt: "invalidated:notify-pending:interrupt",
+  rollback: "invalidated:notify-pending:rollback"
+};
+var NOTIFIED_TAGS = {
+  interrupt: "invalidated:notified:interrupt",
+  rollback: "invalidated:notified:rollback"
+};
+function getPendingKinds(tags) {
+  return ["interrupt", "rollback"].filter(
+    (kind) => tags.includes(PENDING_TAGS[kind])
+  );
+}
+function markKindsNotified(tags, kinds) {
+  let nextTags = tags.filter(
+    (tag) => !kinds.some((kind) => tag === PENDING_TAGS[kind])
+  );
+  for (const kind of kinds) {
+    if (!nextTags.includes(NOTIFIED_TAGS[kind])) {
+      nextTags = [...nextTags, NOTIFIED_TAGS[kind]];
+    }
+  }
+  return nextTags;
+}
+function selectLatestMainLeaf(entries) {
+  const parentSet = new Set(
+    entries.map((entry) => entry.parentUuid).filter((uuid5) => Boolean(uuid5))
+  );
+  const leaves = entries.filter(
+    (entry) => entry.uuid && !parentSet.has(entry.uuid) && entry.isSidechain !== true && isChainParticipant(entry)
+  );
+  if (leaves.length === 0) {
+    return null;
+  }
+  return leaves.reduce((latest, entry) => {
+    const latestTime = latest.timestamp ?? "";
+    const entryTime = entry.timestamp ?? "";
+    if (entryTime > latestTime) {
+      return entry;
+    }
+    if (entryTime === latestTime && entry.lineNumber > latest.lineNumber) {
+      return entry;
+    }
+    return latest;
+  });
+}
+function detectRollbackTopology(transcriptPath) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  if (entries.length === 0) {
+    return {
+      rolledBackPromptIds: /* @__PURE__ */ new Set(),
+      replacementByPromptId: /* @__PURE__ */ new Map()
+    };
+  }
+  const byUuid = new Map(
+    entries.filter(
+      (entry) => typeof entry.uuid === "string"
+    ).map((entry) => [entry.uuid, entry])
+  );
+  const childrenByParent = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!entry.parentUuid) {
+      continue;
+    }
+    const children = childrenByParent.get(entry.parentUuid) ?? [];
+    children.push(entry);
+    childrenByParent.set(entry.parentUuid, children);
+  }
+  const tip = selectLatestMainLeaf(entries);
+  if (!tip?.uuid) {
+    return {
+      rolledBackPromptIds: /* @__PURE__ */ new Set(),
+      replacementByPromptId: /* @__PURE__ */ new Map()
+    };
+  }
+  const mainChainUuids = /* @__PURE__ */ new Set();
+  let cursor = tip;
+  while (cursor?.uuid) {
+    mainChainUuids.add(cursor.uuid);
+    cursor = cursor.parentUuid ? byUuid.get(cursor.parentUuid) : void 0;
+  }
+  const rolledBackPromptIds = /* @__PURE__ */ new Set();
+  const replacementByPromptId = /* @__PURE__ */ new Map();
+  for (const children of childrenByParent.values()) {
+    const userChildren = children.filter(
+      (child) => child.role === "user" && child.promptId && child.isSidechain !== true && isChainParticipant(child)
     );
+    if (userChildren.length < 2) {
+      continue;
+    }
+    const mainChild = userChildren.find(
+      (child) => mainChainUuids.has(child.uuid ?? "")
+    );
+    if (!mainChild?.promptId) {
+      continue;
+    }
+    for (const child of userChildren) {
+      const childPromptId = child.promptId;
+      if (!childPromptId) {
+        continue;
+      }
+      if (childPromptId === mainChild.promptId) {
+        continue;
+      }
+      if (mainChainUuids.has(child.uuid ?? "")) {
+        continue;
+      }
+      rolledBackPromptIds.add(childPromptId);
+      replacementByPromptId.set(childPromptId, mainChild.promptId);
+    }
+  }
+  return {
+    rolledBackPromptIds,
+    replacementByPromptId
+  };
+}
+function selectPendingReminderItems(db, sessionDbId, transcriptPath) {
+  const turns = getTurnsForSession(db, sessionDbId);
+  const promptNumberByPromptId = new Map(
+    turns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn.promptNumber])
+  );
+  const replacementByPromptId = transcriptPath ? detectRollbackTopology(transcriptPath).replacementByPromptId : /* @__PURE__ */ new Map();
+  const reminderTurns = turns.filter(
+    (turn) => turn.status !== "active" && turn.status !== "undone" && getPendingKinds(turn.tags).length > 0
+  ).sort((left, right) => {
+    const leftEpoch = left.updatedAtEpoch ?? left.createdAtEpoch;
+    const rightEpoch = right.updatedAtEpoch ?? right.createdAtEpoch;
+    if (rightEpoch !== leftEpoch) {
+      return rightEpoch - leftEpoch;
+    }
+    return right.promptNumber - left.promptNumber;
+  });
+  return reminderTurns.map((turn) => {
+    const replacementPromptId = turn.wasRolledBack && turn.contentPromptId ? replacementByPromptId.get(turn.contentPromptId) ?? null : null;
     return {
       turnId: turn.id,
       promptNumber: turn.promptNumber,
       wasInterrupted: turn.wasInterrupted,
       wasRolledBack: turn.wasRolledBack,
       priorTitle: turn.title,
-      replacementPromptNumber: replacement?.promptNumber ?? null
+      priorContent: turn.content,
+      replacementPromptNumber: replacementPromptId ? promptNumberByPromptId.get(replacementPromptId) ?? null : null,
+      pendingKinds: getPendingKinds(turn.tags)
     };
   });
+}
+function getReminderItems(db, sessionDbId, transcriptPath) {
+  return selectPendingReminderItems(db, sessionDbId, transcriptPath).slice(0, REMINDER_LIMIT).sort((left, right) => left.promptNumber - right.promptNumber);
+}
+function getSilencedReminderItems(db, sessionDbId, transcriptPath) {
+  return selectPendingReminderItems(db, sessionDbId, transcriptPath).slice(
+    REMINDER_LIMIT
+  );
+}
+function markReminderItemsNotified(db, items, updatedAtEpoch) {
+  for (const item of items) {
+    const turn = getTurnById(db, item.turnId);
+    if (!turn) {
+      continue;
+    }
+    updateTurnById(db, turn.id, {
+      status: turn.status,
+      replaceTags: markKindsNotified(turn.tags, item.pendingKinds),
+      updatedAtEpoch
+    });
+  }
 }
 
 // src/worker/subagent-filter.ts
@@ -1763,7 +1917,7 @@ function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtE
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addSubagentPendingTag(turn.tags),
+        replaceTags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch
       });
     }
@@ -1778,7 +1932,8 @@ function getPendingSubagentTurns(db, sessionDbId) {
 function markSubagentTurnsNotified(db, turns, updatedAtEpoch) {
   for (const turn of turns) {
     updateTurnById(db, turn.id, {
-      tags: markSubagentNotifiedTags(turn.tags),
+      status: turn.status,
+      replaceTags: markSubagentNotifiedTags(turn.tags),
       updatedAtEpoch
     });
   }
@@ -2053,10 +2208,11 @@ ${renderedFilesRead.split("\n").map((line) => `  ${line}`).join("\n")}
 ${renderedFilesModified.split("\n").map((line) => `  ${line}`).join("\n")}
 </session>`;
 }
-function buildBatchTurnBlock(turnId, obsBlocks, prompt, response, filesRead, filesModified, toolCallCount) {
+function buildBatchTurnBlock(turnId, invalidatedKinds, obsBlocks, prompt, response, filesRead, filesModified, toolCallCount) {
   const renderedFilesRead = renderFileTree(filesRead);
   const renderedFilesModified = renderFileTree(filesModified);
-  const lines = [`  <turn id="T${turnId}">`];
+  const invalidatedAttr = invalidatedKinds ? ` invalidated="${invalidatedKinds}"` : "";
+  const lines = [`  <turn id="T${turnId}"${invalidatedAttr}>`];
   for (const obsBlock of obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
@@ -2108,6 +2264,18 @@ function safeJsonParse(value) {
   } catch {
     return null;
   }
+}
+function formatInlineInvalidationKinds(args) {
+  if (args.wasInterrupted && args.wasRolledBack) {
+    return "interrupt+rollback";
+  }
+  if (args.wasInterrupted) {
+    return "interrupt";
+  }
+  if (args.wasRolledBack) {
+    return "rollback";
+  }
+  return null;
 }
 function collectPathValues(input, key) {
   const value = input[key];
@@ -2319,6 +2487,10 @@ function createWorkerProcessors(db) {
         }
         return buildBatchTurnBlock(
           turn.id,
+          formatInlineInvalidationKinds({
+            wasInterrupted: turn.wasInterrupted,
+            wasRolledBack: turn.wasRolledBack
+          }),
           obsBlocks,
           turn.userPrompt,
           turn.assistantResponse,
@@ -39670,7 +39842,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.10",
+    version: "0.2.11",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39870,6 +40042,8 @@ Never update T/S records, create memories, or call \`recall()\` from an obs mess
 
 For each \`<turn>\` block:
 
+- If the opening tag includes \`invalidated="interrupt"\`, \`invalidated="rollback"\`, or \`invalidated="interrupt+rollback"\`, treat the turn as invalidated on first extraction. This is the delivery path for turns that were still active when the invalidation was detected.
+
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
    - content: 100-300 chars, what happened and why
@@ -39886,22 +40060,23 @@ Turn messages are the ONLY context where \`recall()\` is permitted as a fallback
 
 ## Reminder envelope
 
-Messages may be prefixed with a \`<reminder>\` block listing turns with \`status='active'\` that need your attention. Each line:
+Messages may be prefixed with a \`<reminder>\` block listing recently invalidated turns that need one-time attention. Each line:
 
-\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>"]\`
+\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent>]\`
 
-\`<flags>\` is one of: \`fresh\`, \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+\`<flags>\` is one of: \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
 
 For each listed \`T<n>\`:
 
 1. Check if a matching \`<turn id="T<n>">\` block appears in this batch:
-   - **Present**: process normally. For \`fresh\`, standard first-time extraction. For \`was_*\`, the turn was invalidated \u2014 extract as user-feedback about what direction was attempted and why it was rejected.
-   - **Absent**: the turn was previously extracted and later demoted due to invalidation. Prior content likely remains in conversation cache; if not, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
+   - **Present**: process normally, but treat the turn as invalidated \u2014 extract it as user-feedback about what direction was attempted and why it was rejected.
+   - **Absent**: the turn was previously extracted. Use the title/content in the reminder line as the baseline; if that is insufficient, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
 2. For \`was_*\` turns: you MAY revise \`title\` / \`content\` / \`type\` to reflect that the turn represents a rejected direction. Prefer \`discovery\` or \`decision\` even if code changed. Do NOT mark \`bugfix\` or \`feature\`.
 3. \`remember({ id: "T<n>", ... })\` on an existing T record performs field-level merge \u2014 unspecified fields are preserved, tags are appended rather than replaced.
-4. Envelope lines persist until you call \`remember({ id: "T<n>", ... })\` or \`remember({ id: "T<n>", status: "skipped" })\`.
+4. Each invalidation kind is notified at most once. A line may reappear only if a stronger/new invalidation kind was discovered later (for example, \`was_interrupted\` upgraded to \`was_interrupted+was_rolled_back\`).
 
 Do NOT invent a replacement turn number not present in the envelope. If the line omits \`replaced by\`, do not guess.
+Reminder lines only cover turns that were already completed when the invalidation was discovered. Active turns rely on the inline \`invalidated="..."\` attribute instead.
 
 If a message also includes \`<subagent_invalidated>\`, those turns came from a Task subagent transcript and are out-of-scope for session memory. Treat that block as a retraction notice only; do not create or update records from it unless the current message also names those ids in a \`<turn>\` block.
 
@@ -40095,14 +40270,32 @@ function buildSubagentInvalidationEnvelope(promptNumbers) {
 </subagent_invalidated>`;
 }
 function buildReminderEnvelope(items) {
+  function truncateReminderContent(value) {
+    const text = value?.trim().replace(/\s+/g, " ");
+    if (!text) {
+      return null;
+    }
+    if (text.length <= 120) {
+      return text;
+    }
+    return `${text.slice(0, 117)}...`;
+  }
   const lines = items.map((item) => {
     const flags = item.wasInterrupted && item.wasRolledBack ? "was_interrupted+was_rolled_back" : item.wasInterrupted ? "was_interrupted" : item.wasRolledBack ? "was_rolled_back" : "fresh";
     const replacementClause = item.replacementPromptNumber !== null ? `, replaced by T${item.replacementPromptNumber}` : "";
-    const titleClause = item.priorTitle ? `: "${item.priorTitle}"` : "";
-    return `  - T${item.promptNumber} (${flags}${replacementClause})${titleClause}`;
+    const summaryParts = [];
+    if (item.priorTitle) {
+      summaryParts.push(`"${item.priorTitle}"`);
+    }
+    const truncatedContent = truncateReminderContent(item.priorContent);
+    if (truncatedContent) {
+      summaryParts.push(truncatedContent);
+    }
+    const summaryClause = summaryParts.length > 0 ? `: ${summaryParts.join(" -- ")}` : "";
+    return `  - T${item.promptNumber} (${flags}${replacementClause})${summaryClause}`;
   });
   return `<reminder>
-  The following turns have status='active' and need your attention.
+  The following turns were invalidated and need one-time attention.
 ${lines.join("\n")}
 </reminder>`;
 }
@@ -40301,13 +40494,20 @@ function createWorkerCore(deps) {
       processingLock: Promise.resolve(),
       async pushMessage(prompt) {
         const runtime = ensureQuerySession(state);
+        const mainTranscriptPath = state.contentSessionId && state.project ? resolveTranscriptPath(state.project, state.contentSessionId) : void 0;
         const pendingSubagentTurns = getPendingSubagentTurns(
           deps.db,
           state.sessionDbId
         );
         const reminderItems = getReminderItems(
           deps.db,
-          state.sessionDbId
+          state.sessionDbId,
+          mainTranscriptPath
+        );
+        const silencedReminderItems = getSilencedReminderItems(
+          deps.db,
+          state.sessionDbId,
+          mainTranscriptPath
         );
         const envelopeBlocks = [];
         if (pendingSubagentTurns.length > 0) {
@@ -40340,6 +40540,20 @@ ${prompt}` : prompt;
             markSubagentTurnsNotified(deps.db, pendingSubagentTurns, now());
           } catch (error49) {
             logger.error?.("failed to mark subagent turns notified", {
+              sessionDbId: state.sessionDbId,
+              error: error49
+            });
+          }
+        }
+        if (reminderItems.length > 0 || silencedReminderItems.length > 0) {
+          try {
+            markReminderItemsNotified(
+              deps.db,
+              [...reminderItems, ...silencedReminderItems],
+              now()
+            );
+          } catch (error49) {
+            logger.error?.("failed to mark reminder items notified", {
               sessionDbId: state.sessionDbId,
               error: error49
             });

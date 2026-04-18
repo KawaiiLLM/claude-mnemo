@@ -173,7 +173,7 @@ export function detectAndCleanSubagentTurns(
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addSubagentPendingTag(turn.tags),
+        replaceTags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch,
       });
     }
@@ -201,7 +201,8 @@ export function markSubagentTurnsNotified(
 ): void {
   for (const turn of turns) {
     updateTurnById(db, turn.id, {
-      tags: markSubagentNotifiedTags(turn.tags),
+      status: turn.status,
+      replaceTags: markSubagentNotifiedTags(turn.tags),
       updatedAtEpoch,
     });
   }

@@ -221,6 +221,7 @@ ${renderedFilesModified
 
 function buildBatchTurnBlock(
   turnId: number,
+  invalidatedKinds: string | null,
   obsBlocks: string[],
   prompt: string | null,
   response: string | null,
@@ -230,7 +231,10 @@ function buildBatchTurnBlock(
 ): string {
   const renderedFilesRead = renderFileTree(filesRead);
   const renderedFilesModified = renderFileTree(filesModified);
-  const lines = [`  <turn id="T${turnId}">`];
+  const invalidatedAttr = invalidatedKinds
+    ? ` invalidated="${invalidatedKinds}"`
+    : "";
+  const lines = [`  <turn id="T${turnId}"${invalidatedAttr}>`];
   for (const obsBlock of obsBlocks) {
     lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
   }
@@ -306,6 +310,22 @@ function safeJsonParse(value: string | null): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function formatInlineInvalidationKinds(args: {
+  wasInterrupted: boolean;
+  wasRolledBack: boolean;
+}): string | null {
+  if (args.wasInterrupted && args.wasRolledBack) {
+    return "interrupt+rollback";
+  }
+  if (args.wasInterrupted) {
+    return "interrupt";
+  }
+  if (args.wasRolledBack) {
+    return "rollback";
+  }
+  return null;
 }
 
 function collectPathValues(input: Record<string, unknown>, key: string): string[] {
@@ -580,6 +600,10 @@ export function createWorkerProcessors(db: Database) {
 
           return buildBatchTurnBlock(
             turn.id,
+            formatInlineInvalidationKinds({
+              wasInterrupted: turn.wasInterrupted,
+              wasRolledBack: turn.wasRolledBack,
+            }),
             obsBlocks,
             turn.userPrompt,
             turn.assistantResponse,

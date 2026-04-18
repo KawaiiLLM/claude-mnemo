@@ -9,6 +9,7 @@ import {
   updateLastAgentSessionId,
   upsertSession,
 } from "../../src/db/sessions";
+import { getTurn } from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
 import {
   checkForIdleWorkerShutdown,
@@ -1542,7 +1543,7 @@ describe("worker server", () => {
     );
   });
 
-  test("flushSession prepends reminder and subagent invalidation envelopes", async () => {
+  test("flushSession prepends one-shot reminder and subagent invalidation envelopes", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-reminder",
       project: "/tmp/project-reminder",
@@ -1565,13 +1566,14 @@ describe("worker server", () => {
           status,
           user_prompt,
           title,
+          content,
           tags,
           created_at_epoch,
           updated_at_epoch
         ) VALUES
-          (?, 1, 'p1', 1, 0, 'active', 'Interrupted draft', 'Interrupted draft', '[]', 100, 101),
-          (?, 2, 'p2', 0, 0, 'extracted', 'Replacement', 'Replacement', '[]', 110, 111),
-          (?, 3, 'p3', 0, 0, 'undone', 'Subagent draft', 'Subagent draft', '["subagent:pending"]', 120, 121)
+          (?, 1, 'p1', 1, 0, 'extracted', 'Interrupted draft', 'Interrupted draft', 'Interrupted content', '["invalidated:notify-pending:interrupt"]', 100, 101),
+          (?, 2, 'p2', 0, 0, 'extracted', 'Replacement', 'Replacement', 'Replacement content', '[]', 110, 111),
+          (?, 3, 'p3', 0, 0, 'undone', 'Subagent draft', 'Subagent draft', NULL, '["subagent:pending"]', 120, 121)
       `,
     ).run(sessionId, sessionId, sessionId);
     const turnId = createTurn(db, sessionId, 4);
@@ -1620,8 +1622,142 @@ describe("worker server", () => {
     expect(sentPrompts[0]).toContain("<subagent_invalidated>");
     expect(sentPrompts[0]).toContain("<reminder>");
     expect(sentPrompts[0]).toContain(
-      '- T1 (was_interrupted, replaced by T2): "Interrupted draft"',
+      '- T1 (was_interrupted): "Interrupted draft" -- Interrupted content',
     );
+    expect(getTurn(db, sessionId, 1)?.tags).toEqual(["invalidated:notified:interrupt"]);
+    expect(getTurn(db, sessionId, 3)?.tags).toEqual(["subagent:notified"]);
+  });
+
+  test("flushSession only sends the 10 most recent reminders once and silently clears older backlog", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reminder-cap",
+      project: "/tmp/project-reminder-cap",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    for (let promptNumber = 1; promptNumber <= 12; promptNumber += 1) {
+      db.query(
+        `
+          INSERT INTO turns (
+            session_id,
+            prompt_number,
+            content_prompt_id,
+            was_interrupted,
+            was_rolled_back,
+            status,
+            user_prompt,
+            title,
+            content,
+            tags,
+            created_at_epoch,
+            updated_at_epoch
+          ) VALUES (?, ?, ?, 0, 1, 'extracted', ?, ?, ?, '["invalidated:notify-pending:rollback"]', ?, ?)
+        `,
+      ).run(
+        sessionId,
+        promptNumber,
+        `p${promptNumber}`,
+        `Prompt ${promptNumber}`,
+        `Title ${promptNumber}`,
+        `Content ${promptNumber}`,
+        promptNumber,
+        promptNumber,
+      );
+    }
+
+    db.query(
+      `
+        INSERT INTO turns (
+          session_id,
+          prompt_number,
+          content_prompt_id,
+          was_interrupted,
+          was_rolled_back,
+          status,
+          user_prompt,
+          title,
+          content,
+          tags,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, 13, 'p13', 0, 0, 'extracted', 'Replacement', 'Replacement', 'Replacement content', '[]', 13, 13)
+      `,
+    ).run(sessionId);
+
+    const turnId = createTurn(db, sessionId, 14);
+    const nextTurnId = createTurn(db, sessionId, 15);
+
+    const sentPrompts: string[] = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async (state, _items, options) => {
+        const turnStopItems = options?.turnStopItems ?? [];
+        const turnId = turnStopItems[0]?.targetId;
+        await state.pushMessage(`<batch><turn id="T${turnId}"/></batch>`);
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps =
+          (args.length === 2 ? args[1] : args[3]) as
+            | {
+                onMessage?: (message: { session_id?: string }) => void;
+              }
+            | undefined;
+
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            deps?.onMessage?.({ session_id: "worker-query" });
+            return {
+              session_id: "worker-query",
+            };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.processClaimedItem({
+      seq: 1,
+      kind: "turn-stop",
+      targetId: turnId,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 1,
+      enqueuedAtEpoch: 1,
+    });
+    await core.flushSession(sessionId);
+
+    expect(sentPrompts[0]).toContain("<reminder>");
+    expect(sentPrompts[0]).not.toContain("T1 (");
+    expect(sentPrompts[0]).not.toContain("T2 (");
+    expect(sentPrompts[0]).toContain("T3 (was_rolled_back");
+    expect(sentPrompts[0]).toContain("T12 (was_rolled_back");
+
+    for (let promptNumber = 1; promptNumber <= 12; promptNumber += 1) {
+      expect(getTurn(db, sessionId, promptNumber)?.tags).toEqual([
+        "invalidated:notified:rollback",
+      ]);
+    }
+
+    await core.processClaimedItem({
+      seq: 2,
+      kind: "turn-stop",
+      targetId: nextTurnId,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 2,
+      enqueuedAtEpoch: 2,
+    });
+    await core.flushSession(sessionId);
+
+    expect(sentPrompts).toHaveLength(2);
+    expect(sentPrompts[1]).not.toContain("<reminder>");
   });
 
   test("abortStalledSessions closes only sessions with an overdue in-flight request", async () => {
