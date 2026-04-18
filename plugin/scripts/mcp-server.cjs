@@ -7436,6 +7436,7 @@ function initializeSchema(db) {
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -7456,6 +7457,18 @@ function ensureTurnTranscriptLineStartColumn(db) {
     return;
   }
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+function ensureTurnInvalidationColumns(db) {
+  if (!hasColumn(db, "turns", "was_interrupted")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "turns", "was_rolled_back")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -7589,6 +7602,8 @@ var init_schema = __esm({
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
+    was_interrupted INTEGER NOT NULL DEFAULT 0,
+    was_rolled_back INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -31392,6 +31407,8 @@ var TURN_SELECT = `
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
     transcript_line_start AS transcriptLineStart,
+    was_interrupted AS wasInterrupted,
+    was_rolled_back AS wasRolledBack,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -31422,10 +31439,24 @@ function mapTurnRow(row) {
   }
   return {
     ...row,
+    wasInterrupted: row.wasInterrupted === 1,
+    wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray3(row.tags),
     filesRead: parseJsonArray3(row.filesRead),
     filesModified: parseJsonArray3(row.filesModified)
   };
+}
+function mergeTags(existingTags, nextTags) {
+  if (!nextTags) {
+    return existingTags;
+  }
+  const merged = [...existingTags];
+  for (const tag of nextTags) {
+    if (!merged.includes(tag)) {
+      merged.push(tag);
+    }
+  }
+  return merged;
 }
 function getTurn(db, sessionId, promptNumber) {
   return mapTurnRow(
@@ -31444,12 +31475,16 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
+  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const nextTags = mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
           UPDATE turns
           SET
             status = ?,
+            was_interrupted = ?,
+            was_rolled_back = ?,
             title = ?,
             content = ?,
             insight = ?,
@@ -31466,6 +31501,8 @@ function updateTurnById(db, turnId, input) {
             session_id AS sessionId,
             prompt_number AS promptNumber,
             content_prompt_id AS contentPromptId,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -31482,13 +31519,15 @@ function updateTurnById(db, turnId, input) {
             updated_at_epoch AS updatedAtEpoch
         `
     ).get(
-      input.status ?? existing.status,
+      nextStatus,
+      input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
+      input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
       input.title ?? existing.title,
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
       input.transcriptLineStart ?? existing.transcriptLineStart,
-      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
       stringifyArray(input.filesModified ?? existing.filesModified),
       input.toolCallCount ?? existing.toolCallCount,
@@ -34073,7 +34112,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.9" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.10" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

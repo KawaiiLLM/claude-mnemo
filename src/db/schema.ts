@@ -24,6 +24,8 @@ const SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
+    was_interrupted INTEGER NOT NULL DEFAULT 0,
+    was_rolled_back INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -117,6 +119,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -143,6 +146,20 @@ function ensureTurnTranscriptLineStartColumn(db: Database): void {
   }
 
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+
+function ensureTurnInvalidationColumns(db: Database): void {
+  if (!hasColumn(db, "turns", "was_interrupted")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+
+  if (!hasColumn(db, "turns", "was_rolled_back")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 }
 
 function ensureSessionProjectIndex(db: Database): void {

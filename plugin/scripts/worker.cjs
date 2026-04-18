@@ -47,7 +47,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.9-mo0xxzep" : "dev";
+var BUILD_ID = true ? "0.2.10-mo4dtcvd" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -833,6 +833,8 @@ var TURN_SELECT = `
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
     transcript_line_start AS transcriptLineStart,
+    was_interrupted AS wasInterrupted,
+    was_rolled_back AS wasRolledBack,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -863,10 +865,24 @@ function mapTurnRow(row) {
   }
   return {
     ...row,
+    wasInterrupted: row.wasInterrupted === 1,
+    wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray2(row.tags),
     filesRead: parseJsonArray2(row.filesRead),
     filesModified: parseJsonArray2(row.filesModified)
   };
+}
+function mergeTags(existingTags, nextTags) {
+  if (!nextTags) {
+    return existingTags;
+  }
+  const merged = [...existingTags];
+  for (const tag of nextTags) {
+    if (!merged.includes(tag)) {
+      merged.push(tag);
+    }
+  }
+  return merged;
 }
 function getTurn(db, sessionId, promptNumber) {
   return mapTurnRow(
@@ -885,12 +901,16 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
+  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const nextTags = mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
           UPDATE turns
           SET
             status = ?,
+            was_interrupted = ?,
+            was_rolled_back = ?,
             title = ?,
             content = ?,
             insight = ?,
@@ -907,6 +927,8 @@ function updateTurnById(db, turnId, input) {
             session_id AS sessionId,
             prompt_number AS promptNumber,
             content_prompt_id AS contentPromptId,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -923,13 +945,15 @@ function updateTurnById(db, turnId, input) {
             updated_at_epoch AS updatedAtEpoch
         `
     ).get(
-      input.status ?? existing.status,
+      nextStatus,
+      input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
+      input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
       input.title ?? existing.title,
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
       input.transcriptLineStart ?? existing.transcriptLineStart,
-      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
       stringifyArray(input.filesModified ?? existing.filesModified),
       input.toolCallCount ?? existing.toolCallCount,
@@ -1064,6 +1088,8 @@ var SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
+    was_interrupted INTEGER NOT NULL DEFAULT 0,
+    was_rolled_back INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -1156,6 +1182,7 @@ function initializeSchema(db) {
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -1176,6 +1203,18 @@ function ensureTurnTranscriptLineStartColumn(db) {
     return;
   }
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+function ensureTurnInvalidationColumns(db) {
+  if (!hasColumn(db, "turns", "was_interrupted")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "turns", "was_rolled_back")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -1320,6 +1359,13 @@ function normalizeAssistantText(text) {
 function getContentBlocks(entry) {
   return Array.isArray(entry.content) ? entry.content : [];
 }
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
 function extractUserPrompt(entry) {
   if (typeof entry.content === "string") {
     return entry.content.trim();
@@ -1328,6 +1374,9 @@ function extractUserPrompt(entry) {
 }
 function isCountedUserPrompt(entry) {
   return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
 }
 function isKnownSystemInjectedContent(content) {
   return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
@@ -1372,6 +1421,15 @@ function stringifyToolResultContent(content) {
     return "";
   }
   return JSON.stringify(content);
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
 }
 function readAllTranscriptEntries(transcriptPath) {
   if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
@@ -1507,10 +1565,12 @@ function startsNewTurn(entry, currentPromptId) {
 }
 function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
   let promptNumber = 0;
   let currentTurn = null;
   let currentPromptId = null;
-  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of entries) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
@@ -1522,7 +1582,8 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
         userPrompt,
         assistantText: "",
         toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain)
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
       };
       turns.push(currentTurn);
       continue;
@@ -1562,21 +1623,40 @@ ${assistantText}` : assistantText;
   }));
 }
 
-// src/worker/rollback.ts
-var ROLLBACK_PENDING_TAG = "rollback:pending";
-var ROLLBACK_NOTIFIED_TAG = "rollback:notified";
-function addRollbackPendingTag(tags) {
-  if (tags.includes(ROLLBACK_PENDING_TAG) || tags.includes(ROLLBACK_NOTIFIED_TAG)) {
+// src/worker/invalidation.ts
+function getReminderItems(db, sessionDbId) {
+  const turns = getTurnsForSession(db, sessionDbId);
+  const reminderTurns = turns.filter((turn) => turn.status === "active");
+  return reminderTurns.map((turn) => {
+    const replacement = turns.find(
+      (candidate) => candidate.promptNumber > turn.promptNumber && candidate.status !== "undone" && !candidate.wasInterrupted && !candidate.wasRolledBack
+    );
+    return {
+      turnId: turn.id,
+      promptNumber: turn.promptNumber,
+      wasInterrupted: turn.wasInterrupted,
+      wasRolledBack: turn.wasRolledBack,
+      priorTitle: turn.title,
+      replacementPromptNumber: replacement?.promptNumber ?? null
+    };
+  });
+}
+
+// src/worker/subagent-filter.ts
+var SUBAGENT_PENDING_TAG = "subagent:pending";
+var SUBAGENT_NOTIFIED_TAG = "subagent:notified";
+function addSubagentPendingTag(tags) {
+  if (tags.includes(SUBAGENT_PENDING_TAG) || tags.includes(SUBAGENT_NOTIFIED_TAG)) {
     return tags;
   }
-  return [...tags, ROLLBACK_PENDING_TAG];
+  return [...tags, SUBAGENT_PENDING_TAG];
 }
-function markRollbackNotifiedTags(tags) {
-  const withoutPending = tags.filter((tag) => tag !== ROLLBACK_PENDING_TAG);
-  if (withoutPending.includes(ROLLBACK_NOTIFIED_TAG)) {
+function markSubagentNotifiedTags(tags) {
+  const withoutPending = tags.filter((tag) => tag !== SUBAGENT_PENDING_TAG);
+  if (withoutPending.includes(SUBAGENT_NOTIFIED_TAG)) {
     return withoutPending;
   }
-  return [...withoutPending, ROLLBACK_NOTIFIED_TAG];
+  return [...withoutPending, SUBAGENT_NOTIFIED_TAG];
 }
 function deleteObservationFtsRows(db, observationIds) {
   if (observationIds.length === 0) {
@@ -1639,17 +1719,17 @@ function deleteObservationsForTurns(db, turnIds) {
     `
   ).run(...turnIds);
 }
-function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
+function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
   const parsedTurns = parseReplayTranscript(transcriptPath);
-  const newestSidechainChain = [];
+  const newestSubagentChain = [];
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
     const parsedTurn = parsedTurns[index];
     if (!parsedTurn.isSidechain) {
       break;
     }
-    newestSidechainChain.unshift(parsedTurn);
+    newestSubagentChain.unshift(parsedTurn);
   }
-  if (newestSidechainChain.length === 0) {
+  if (newestSubagentChain.length === 0) {
     return [];
   }
   const liveTurns = getTurnsForSession(db, sessionDbId).filter(
@@ -1660,7 +1740,7 @@ function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
   );
   const byPromptNumber = new Map(liveTurns.map((turn) => [turn.promptNumber, turn]));
   const matched = /* @__PURE__ */ new Map();
-  for (const parsedTurn of newestSidechainChain) {
+  for (const parsedTurn of newestSubagentChain) {
     const turn = (parsedTurn.promptId ? byPromptId.get(parsedTurn.promptId) : void 0) ?? byPromptNumber.get(parsedTurn.promptNumber);
     if (turn) {
       matched.set(turn.id, turn);
@@ -1668,8 +1748,8 @@ function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
   }
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
-function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
-  const matchedTurns = resolveSidechainTurns(db, sessionDbId, transcriptPath);
+function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
+  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
   if (matchedTurns.length === 0) {
     return [];
   }
@@ -1683,22 +1763,22 @@ function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAt
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addRollbackPendingTag(turn.tags),
+        tags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch
       });
     }
   })();
   return matchedTurns.map((turn) => turn.promptNumber);
 }
-function getPendingRollbackTurns(db, sessionDbId) {
+function getPendingSubagentTurns(db, sessionDbId) {
   return getTurnsForSession(db, sessionDbId).filter(
-    (turn) => turn.status === "undone" && turn.tags.includes(ROLLBACK_PENDING_TAG)
+    (turn) => turn.status === "undone" && turn.tags.includes(SUBAGENT_PENDING_TAG)
   ).sort((left, right) => left.promptNumber - right.promptNumber);
 }
-function markRollbackTurnsNotified(db, turns, updatedAtEpoch) {
+function markSubagentTurnsNotified(db, turns, updatedAtEpoch) {
   for (const turn of turns) {
     updateTurnById(db, turn.id, {
-      tags: markRollbackNotifiedTags(turn.tags),
+      tags: markSubagentNotifiedTags(turn.tags),
       updatedAtEpoch
     });
   }
@@ -39590,7 +39670,7 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   };
   return deps.createSdkMcpServerImpl({
     name: "mnemo",
-    version: "0.2.9",
+    version: "0.2.10",
     tools: [
       deps.toolImpl(
         "remember",
@@ -39804,6 +39884,27 @@ Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worke
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
 
+## Reminder envelope
+
+Messages may be prefixed with a \`<reminder>\` block listing turns with \`status='active'\` that need your attention. Each line:
+
+\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>"]\`
+
+\`<flags>\` is one of: \`fresh\`, \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+
+For each listed \`T<n>\`:
+
+1. Check if a matching \`<turn id="T<n>">\` block appears in this batch:
+   - **Present**: process normally. For \`fresh\`, standard first-time extraction. For \`was_*\`, the turn was invalidated \u2014 extract as user-feedback about what direction was attempted and why it was rejected.
+   - **Absent**: the turn was previously extracted and later demoted due to invalidation. Prior content likely remains in conversation cache; if not, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
+2. For \`was_*\` turns: you MAY revise \`title\` / \`content\` / \`type\` to reflect that the turn represents a rejected direction. Prefer \`discovery\` or \`decision\` even if code changed. Do NOT mark \`bugfix\` or \`feature\`.
+3. \`remember({ id: "T<n>", ... })\` on an existing T record performs field-level merge \u2014 unspecified fields are preserved, tags are appended rather than replaced.
+4. Envelope lines persist until you call \`remember({ id: "T<n>", ... })\` or \`remember({ id: "T<n>", status: "skipped" })\`.
+
+Do NOT invent a replacement turn number not present in the envelope. If the line omits \`replaced by\`, do not guess.
+
+If a message also includes \`<subagent_invalidated>\`, those turns came from a Task subagent transcript and are out-of-scope for session memory. Treat that block as a retraction notice only; do not create or update records from it unless the current message also names those ids in a \`<turn>\` block.
+
 ## Session summary messages (<session> without <turn>)
 
 When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is a session summary refresh. Follow the length budget in the inline \`<instruction>\` block. Never call \`recall()\` from a session-summary message \u2014 the inline \`prior_*\` fields are the only state you should base the refresh decision on.
@@ -39986,12 +40087,24 @@ function isProcessAlive2(pid) {
     return error49.code !== "ESRCH";
   }
 }
-function buildRollbackEnvelope(promptNumbers) {
+function buildSubagentInvalidationEnvelope(promptNumbers) {
   const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
-  return `<rollback>
-  ${labels} were rolled back (sidechain). Observations extracted from
-  these turns should be considered invalid.
-</rollback>`;
+  return `<subagent_invalidated>
+  ${labels} originated from a Task subagent transcript and are out-of-scope
+  for session memory.
+</subagent_invalidated>`;
+}
+function buildReminderEnvelope(items) {
+  const lines = items.map((item) => {
+    const flags = item.wasInterrupted && item.wasRolledBack ? "was_interrupted+was_rolled_back" : item.wasInterrupted ? "was_interrupted" : item.wasRolledBack ? "was_rolled_back" : "fresh";
+    const replacementClause = item.replacementPromptNumber !== null ? `, replaced by T${item.replacementPromptNumber}` : "";
+    const titleClause = item.priorTitle ? `: "${item.priorTitle}"` : "";
+    return `  - T${item.promptNumber} (${flags}${replacementClause})${titleClause}`;
+  });
+  return `<reminder>
+  The following turns have status='active' and need your attention.
+${lines.join("\n")}
+</reminder>`;
 }
 function pruneBufferedUndoneItems(db, items) {
   const activeItems = [];
@@ -40188,18 +40301,31 @@ function createWorkerCore(deps) {
       processingLock: Promise.resolve(),
       async pushMessage(prompt) {
         const runtime = ensureQuerySession(state);
-        const pendingRollbacks = getPendingRollbackTurns(
+        const pendingSubagentTurns = getPendingSubagentTurns(
           deps.db,
           state.sessionDbId
         );
-        const promptWithRollback = pendingRollbacks.length > 0 ? `${buildRollbackEnvelope(
-          pendingRollbacks.map((turn) => turn.promptNumber)
-        )}
+        const reminderItems = getReminderItems(
+          deps.db,
+          state.sessionDbId
+        );
+        const envelopeBlocks = [];
+        if (pendingSubagentTurns.length > 0) {
+          envelopeBlocks.push(
+            buildSubagentInvalidationEnvelope(
+              pendingSubagentTurns.map((turn) => turn.promptNumber)
+            )
+          );
+        }
+        if (reminderItems.length > 0) {
+          envelopeBlocks.push(buildReminderEnvelope(reminderItems));
+        }
+        const promptWithEnvelopes = envelopeBlocks.length > 0 ? `${envelopeBlocks.join("\n\n")}
 
 ${prompt}` : prompt;
         state.lastActivity = nowMs();
         state.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(promptWithRollback);
+        const result = await runtime.sendPrompt(promptWithEnvelopes);
         state.lastMessageAt = nowMs();
         state.queryPid = runtime.queryPid;
         state.agentSessionId = result.session_id;
@@ -40209,11 +40335,11 @@ ${prompt}` : prompt;
           }
         }).catch(() => {
         });
-        if (pendingRollbacks.length > 0) {
+        if (pendingSubagentTurns.length > 0) {
           try {
-            markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
+            markSubagentTurnsNotified(deps.db, pendingSubagentTurns, now());
           } catch (error49) {
-            logger.error?.("failed to mark rollback turns notified", {
+            logger.error?.("failed to mark subagent turns notified", {
               sessionDbId: state.sessionDbId,
               error: error49
             });
@@ -40581,7 +40707,7 @@ ${prompt}` : prompt;
     compactingSessions.add(sessionDbId);
     try {
       if (transcriptPath) {
-        detectAndCleanSidechainTurns(
+        detectAndCleanSubagentTurns(
           deps.db,
           sessionDbId,
           transcriptPath,

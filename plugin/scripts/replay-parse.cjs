@@ -374,6 +374,13 @@ function normalizeAssistantText(text) {
 function getContentBlocks(entry) {
   return Array.isArray(entry.content) ? entry.content : [];
 }
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
 function extractUserPrompt(entry) {
   if (typeof entry.content === "string") {
     return entry.content.trim();
@@ -382,6 +389,9 @@ function extractUserPrompt(entry) {
 }
 function isCountedUserPrompt(entry) {
   return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
 }
 function isKnownSystemInjectedContent(content) {
   return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
@@ -426,6 +436,15 @@ function stringifyToolResultContent(content) {
     return "";
   }
   return JSON.stringify(content);
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
 }
 function readAllTranscriptEntries(transcriptPath) {
   if (!(0, import_node_fs.existsSync)(transcriptPath)) {
@@ -561,10 +580,12 @@ function startsNewTurn(entry, currentPromptId) {
 }
 function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
   let promptNumber = 0;
   let currentTurn = null;
   let currentPromptId = null;
-  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of entries) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
@@ -576,7 +597,8 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
         userPrompt,
         assistantText: "",
         toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain)
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
       };
       turns.push(currentTurn);
       continue;

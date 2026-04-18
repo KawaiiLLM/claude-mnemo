@@ -65,6 +65,7 @@ export interface ParsedReplayTurn {
   assistantText: string;
   toolCalls: ReplayToolCall[];
   isSidechain: boolean;
+  wasInterrupted: boolean;
 }
 
 interface RawTranscriptEntry {
@@ -102,6 +103,15 @@ function getContentBlocks(entry: TranscriptEntry): TranscriptContentBlock[] {
   return Array.isArray(entry.content) ? entry.content : [];
 }
 
+function getFirstTextContent(entry: TranscriptEntry): string {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+
 function extractUserPrompt(entry: TranscriptEntry): string {
   if (typeof entry.content === "string") {
     return entry.content.trim();
@@ -116,6 +126,13 @@ function extractUserPrompt(entry: TranscriptEntry): string {
 
 function isCountedUserPrompt(entry: TranscriptEntry): boolean {
   return entry.role === "user" && isRealUserPrompt(entry);
+}
+
+export function isInterruptedUserMarker(entry: TranscriptEntry): boolean {
+  return (
+    entry.role === "user" &&
+    getFirstTextContent(entry).startsWith("[Request interrupted by user")
+  );
 }
 
 function isKnownSystemInjectedContent(content: string): boolean {
@@ -197,6 +214,28 @@ export function readTranscriptEntries(transcriptPath: string): TranscriptEntry[]
   return readAllTranscriptEntries(transcriptPath).filter(
     (entry) => !entry.isSidechain && !entry.isApiErrorMessage,
   );
+}
+
+export function isChainParticipant(entry: { type?: string }): boolean {
+  return entry.type !== "progress";
+}
+
+function collectInterruptedPromptIds(
+  entries: TranscriptEntry[],
+): Set<string> {
+  const interruptedPromptIds = new Set<string>();
+
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+
+  return interruptedPromptIds;
+}
+
+export function detectInterruptedPromptIds(transcriptPath: string): Set<string> {
+  return collectInterruptedPromptIds(readAllTranscriptEntries(transcriptPath));
 }
 
 export function readAllTranscriptEntries(
@@ -488,11 +527,13 @@ export function parseReplayTranscript(
   preloadedEntries?: TranscriptEntryWithLineNumber[],
 ): ParsedReplayTurn[] {
   const turns: ParsedReplayTurn[] = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
   let promptNumber = 0;
   let currentTurn: ParsedReplayTurn | null = null;
   let currentPromptId: string | null = null;
 
-  for (const entry of (preloadedEntries ?? readAllTranscriptEntries(transcriptPath))) {
+  for (const entry of entries) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
 
@@ -506,6 +547,8 @@ export function parseReplayTranscript(
         assistantText: "",
         toolCalls: [],
         isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted:
+          entry.promptId !== undefined && interruptedPromptIds.has(entry.promptId),
       };
       turns.push(currentTurn);
       continue;

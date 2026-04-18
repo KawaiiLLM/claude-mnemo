@@ -447,6 +447,43 @@ describe("worker processors", () => {
     expect(prompt).not.toContain("current_prompt:");
   });
 
+  test("buildBatchPrompt omits title when it is null", () => {
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: null,
+      currentPrompt: "Diagnose auth race",
+      priorTitle: null,
+      priorContent: null,
+      priorInsight: null,
+      priorNextSteps: null,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    expect(prompt).not.toContain("title:");
+    expect(prompt).toContain("current_prompt: Diagnose auth race");
+  });
+
+  test("buildBatchPrompt truncates current_prompt at 200 chars", () => {
+    const longPrompt = `${"a".repeat(120)}${"b".repeat(120)}`;
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: "Auth race",
+      currentPrompt: longPrompt,
+      priorTitle: null,
+      priorContent: null,
+      priorInsight: null,
+      priorNextSteps: null,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    expect(prompt).toContain(`current_prompt: ${"a".repeat(90)}`);
+    expect(prompt).toContain("[...60 chars truncated...]");
+    expect(prompt).toContain(`${"b".repeat(90)}\n</session>`);
+    expect(prompt).not.toContain(longPrompt);
+  });
+
   test("pushSessionSummaryPrompt invokes Mnemosyne with current session state", async () => {
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
@@ -477,7 +514,7 @@ describe("worker processors", () => {
     expect(prompt).not.toContain("You are Mnemosyne");
   });
 
-  test("processTurnStop does not mutate the turn before Mnemosyne writes back", async () => {
+  test("processTurnStop only applies server bookkeeping before Mnemosyne writes back", async () => {
     const pushMessage = mock(async () => {});
     const processors = createWorkerProcessors(db);
 
@@ -496,7 +533,7 @@ describe("worker processors", () => {
       turnId,
     );
 
-    expect(getTurnById(db, turnId)?.status).toBe("active");
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
   });
 
   test("processTurnStop aggregates file paths from observation tool input", async () => {

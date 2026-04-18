@@ -610,7 +610,7 @@ describe("handleStopHook", () => {
 
     const turn = getTurn(db, sessionId, 1)!;
     expect(turn.status).toBe("undone");
-    expect(turn.tags).toContain("rollback:pending");
+    expect(turn.tags).toContain("subagent:pending");
     expect(getPendingQueueRows(db)).toEqual([]);
     expect(result.continue).toBe(true);
     expect(result.exitCode).toBe(0);
@@ -620,6 +620,93 @@ describe("handleStopHook", () => {
     await result.asyncWork?.();
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  test("stop hook demotes newly invalidated extracted turns back to active", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, assistant_response, title, created_at_epoch, updated_at_epoch
+      ) VALUES
+        (?, 1, 'p1', 'extracted', 'Interrupted prompt', 'Interrupted answer', 'Interrupted title', 120, 120),
+        (?, 2, 'p2', 'active', 'Current prompt', NULL, NULL, 121, 121)`,
+    ).run(sessionId, sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          uuid: "u1",
+          type: "user",
+          role: "user",
+          promptId: "p1",
+          permissionMode: "default",
+          message: { role: "user", content: "Interrupted prompt" },
+        }),
+        JSON.stringify({
+          uuid: "a1",
+          type: "assistant",
+          role: "assistant",
+          parentUuid: "u1",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Interrupted answer" }],
+          },
+        }),
+        JSON.stringify({
+          uuid: "i1",
+          type: "user",
+          role: "user",
+          parentUuid: "a1",
+          promptId: "p1",
+          message: { role: "user", content: "[Request interrupted by user]" },
+        }),
+        JSON.stringify({
+          uuid: "u2",
+          type: "user",
+          role: "user",
+          promptId: "p2",
+          permissionMode: "default",
+          parentUuid: "a1",
+          message: { role: "user", content: "Current prompt" },
+        }),
+        JSON.stringify({
+          uuid: "a2",
+          type: "assistant",
+          role: "assistant",
+          parentUuid: "u2",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Latest answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: {
+        fetchImpl: mock(async () => new Response(null, { status: 200 })),
+      },
+    });
+
+    await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Latest answer",
+      }),
+    );
+
+    expect(getTurn(db, sessionId, 1)).toEqual(
+      expect.objectContaining({
+        status: "active",
+        wasInterrupted: true,
+      }),
+    );
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });

@@ -451,6 +451,7 @@ describe("worker query session", () => {
     expect(prompt).toContain("## Tools");
     expect(prompt).toContain("## Observation messages");
     expect(prompt).toContain("## Turn messages");
+    expect(prompt).toContain("## Reminder envelope");
     expect(prompt).toContain("## Forbidden across all messages");
 
     // Turn-type enum — the single most load-bearing string; if this drifts,
@@ -487,6 +488,21 @@ describe("worker query session", () => {
     expect(prompt).toContain(
       "Turn messages are the ONLY context where `recall()` is permitted as a fallback",
     );
+    expect(prompt).toContain(
+      "Messages may be prefixed with a `<reminder>` block listing turns with `status='active'`",
+    );
+    expect(prompt).toContain(
+      "`fresh`, `was_interrupted`, `was_rolled_back`, `was_interrupted+was_rolled_back`",
+    );
+    expect(prompt).toContain(
+      "For `was_*` turns: you MAY revise `title` / `content` / `type`",
+    );
+    expect(prompt).toContain(
+      "Do NOT invent a replacement turn number not present in the envelope.",
+    );
+    expect(prompt).toContain("<subagent_invalidated>");
+    expect(prompt).not.toContain('invalidated="<kinds>"');
+    expect(prompt).not.toContain("<invalidated>");
     expect(prompt).toContain("recall({ id: \"<session id>/<turn id>\", depth: \"expanded\", truncate: 2000 })");
     expect(prompt).not.toContain("replay(");
     expect(prompt).not.toContain("replay()");

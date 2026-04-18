@@ -3,24 +3,24 @@ import type { Database } from "bun:sqlite";
 import { updateTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { parseReplayTranscript } from "../shared/transcript-parser";
 
-const ROLLBACK_PENDING_TAG = "rollback:pending";
-const ROLLBACK_NOTIFIED_TAG = "rollback:notified";
+const SUBAGENT_PENDING_TAG = "subagent:pending";
+const SUBAGENT_NOTIFIED_TAG = "subagent:notified";
 
-function addRollbackPendingTag(tags: string[]): string[] {
-  if (tags.includes(ROLLBACK_PENDING_TAG) || tags.includes(ROLLBACK_NOTIFIED_TAG)) {
+function addSubagentPendingTag(tags: string[]): string[] {
+  if (tags.includes(SUBAGENT_PENDING_TAG) || tags.includes(SUBAGENT_NOTIFIED_TAG)) {
     return tags;
   }
 
-  return [...tags, ROLLBACK_PENDING_TAG];
+  return [...tags, SUBAGENT_PENDING_TAG];
 }
 
-function markRollbackNotifiedTags(tags: string[]): string[] {
-  const withoutPending = tags.filter((tag) => tag !== ROLLBACK_PENDING_TAG);
-  if (withoutPending.includes(ROLLBACK_NOTIFIED_TAG)) {
+function markSubagentNotifiedTags(tags: string[]): string[] {
+  const withoutPending = tags.filter((tag) => tag !== SUBAGENT_PENDING_TAG);
+  if (withoutPending.includes(SUBAGENT_NOTIFIED_TAG)) {
     return withoutPending;
   }
 
-  return [...withoutPending, ROLLBACK_NOTIFIED_TAG];
+  return [...withoutPending, SUBAGENT_NOTIFIED_TAG];
 }
 
 function deleteObservationFtsRows(db: Database, observationIds: number[]): void {
@@ -93,10 +93,7 @@ function deleteObservationQueueItems(
   ).run(sessionDbId, ...observationIds);
 }
 
-function deleteObservationsForTurns(
-  db: Database,
-  turnIds: number[],
-): void {
+function deleteObservationsForTurns(db: Database, turnIds: number[]): void {
   if (turnIds.length === 0) {
     return;
   }
@@ -109,23 +106,23 @@ function deleteObservationsForTurns(
   ).run(...turnIds);
 }
 
-function resolveSidechainTurns(
+function resolveSubagentTurns(
   db: Database,
   sessionDbId: number,
   transcriptPath: string,
 ): TurnRecord[] {
   const parsedTurns = parseReplayTranscript(transcriptPath);
-  const newestSidechainChain: typeof parsedTurns = [];
+  const newestSubagentChain: typeof parsedTurns = [];
 
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
     const parsedTurn = parsedTurns[index]!;
     if (!parsedTurn.isSidechain) {
       break;
     }
-    newestSidechainChain.unshift(parsedTurn);
+    newestSubagentChain.unshift(parsedTurn);
   }
 
-  if (newestSidechainChain.length === 0) {
+  if (newestSubagentChain.length === 0) {
     return [];
   }
 
@@ -140,7 +137,7 @@ function resolveSidechainTurns(
   const byPromptNumber = new Map(liveTurns.map((turn) => [turn.promptNumber, turn] as const));
   const matched = new Map<number, TurnRecord>();
 
-  for (const parsedTurn of newestSidechainChain) {
+  for (const parsedTurn of newestSubagentChain) {
     const turn =
       (parsedTurn.promptId ? byPromptId.get(parsedTurn.promptId) : undefined) ??
       byPromptNumber.get(parsedTurn.promptNumber);
@@ -153,13 +150,13 @@ function resolveSidechainTurns(
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
 
-export function detectAndCleanSidechainTurns(
+export function detectAndCleanSubagentTurns(
   db: Database,
   sessionDbId: number,
   transcriptPath: string,
   updatedAtEpoch: number,
 ): number[] {
-  const matchedTurns = resolveSidechainTurns(db, sessionDbId, transcriptPath);
+  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
   if (matchedTurns.length === 0) {
     return [];
   }
@@ -176,7 +173,7 @@ export function detectAndCleanSidechainTurns(
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addRollbackPendingTag(turn.tags),
+        tags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch,
       });
     }
@@ -185,33 +182,26 @@ export function detectAndCleanSidechainTurns(
   return matchedTurns.map((turn) => turn.promptNumber);
 }
 
-export function getPendingRollbackTurns(
+export function getPendingSubagentTurns(
   db: Database,
   sessionDbId: number,
 ): TurnRecord[] {
   return getTurnsForSession(db, sessionDbId)
     .filter(
       (turn) =>
-        turn.status === "undone" && turn.tags.includes(ROLLBACK_PENDING_TAG),
+        turn.status === "undone" && turn.tags.includes(SUBAGENT_PENDING_TAG),
     )
     .sort((left, right) => left.promptNumber - right.promptNumber);
 }
 
-export function getPendingRollbackPromptNumbers(
-  db: Database,
-  sessionDbId: number,
-): number[] {
-  return getPendingRollbackTurns(db, sessionDbId).map((turn) => turn.promptNumber);
-}
-
-export function markRollbackTurnsNotified(
+export function markSubagentTurnsNotified(
   db: Database,
   turns: TurnRecord[],
   updatedAtEpoch: number,
 ): void {
   for (const turn of turns) {
     updateTurnById(db, turn.id, {
-      tags: markRollbackNotifiedTags(turn.tags),
+      tags: markSubagentNotifiedTags(turn.tags),
       updatedAtEpoch,
     });
   }

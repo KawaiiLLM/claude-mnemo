@@ -407,7 +407,7 @@ describe("handleSessionInitHook", () => {
     );
 
     expect(getTurn(db, session.id, 1)?.status).toBe("undone");
-    expect(getTurn(db, session.id, 1)?.tags).toContain("rollback:pending");
+    expect(getTurn(db, session.id, 1)?.tags).toContain("subagent:pending");
     expect(getTurn(db, session.id, 2)?.status).toBe("active");
     expect(getTurn(db, session.id, 2)?.userPrompt).toBe("Final approach");
   });

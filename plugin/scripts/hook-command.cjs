@@ -246,6 +246,8 @@ var SCHEMA_SQL = `
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     prompt_number INTEGER NOT NULL,
     content_prompt_id TEXT,
+    was_interrupted INTEGER NOT NULL DEFAULT 0,
+    was_rolled_back INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -338,6 +340,7 @@ function initializeSchema(db) {
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
 }
@@ -358,6 +361,18 @@ function ensureTurnTranscriptLineStartColumn(db) {
     return;
   }
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+function ensureTurnInvalidationColumns(db) {
+  if (!hasColumn(db, "turns", "was_interrupted")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "turns", "was_rolled_back")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -649,7 +664,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.9-mo0xxzep" : "dev";
+var BUILD_ID = true ? "0.2.10-mo4dtcvd" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1603,6 +1618,8 @@ var TURN_SELECT = `
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
     transcript_line_start AS transcriptLineStart,
+    was_interrupted AS wasInterrupted,
+    was_rolled_back AS wasRolledBack,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -1633,10 +1650,24 @@ function mapTurnRow(row) {
   }
   return {
     ...row,
+    wasInterrupted: row.wasInterrupted === 1,
+    wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray2(row.tags),
     filesRead: parseJsonArray2(row.filesRead),
     filesModified: parseJsonArray2(row.filesModified)
   };
+}
+function mergeTags(existingTags, nextTags) {
+  if (!nextTags) {
+    return existingTags;
+  }
+  const merged = [...existingTags];
+  for (const tag of nextTags) {
+    if (!merged.includes(tag)) {
+      merged.push(tag);
+    }
+  }
+  return merged;
 }
 function getTurnById(db, turnId) {
   return mapTurnRow(
@@ -1648,12 +1679,16 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
+  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const nextTags = mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
       `
           UPDATE turns
           SET
             status = ?,
+            was_interrupted = ?,
+            was_rolled_back = ?,
             title = ?,
             content = ?,
             insight = ?,
@@ -1670,6 +1705,8 @@ function updateTurnById(db, turnId, input) {
             session_id AS sessionId,
             prompt_number AS promptNumber,
             content_prompt_id AS contentPromptId,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -1686,13 +1723,15 @@ function updateTurnById(db, turnId, input) {
             updated_at_epoch AS updatedAtEpoch
         `
     ).get(
-      input.status ?? existing.status,
+      nextStatus,
+      input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
+      input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
       input.title ?? existing.title,
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
       input.transcriptLineStart ?? existing.transcriptLineStart,
-      stringifyArray(input.tags ?? existing.tags),
+      stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
       stringifyArray(input.filesModified ?? existing.filesModified),
       input.toolCallCount ?? existing.toolCallCount,
@@ -2824,6 +2863,13 @@ function normalizeAssistantText(text) {
 function getContentBlocks(entry) {
   return Array.isArray(entry.content) ? entry.content : [];
 }
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
 function extractUserPrompt(entry) {
   if (typeof entry.content === "string") {
     return entry.content.trim();
@@ -2832,6 +2878,9 @@ function extractUserPrompt(entry) {
 }
 function isCountedUserPrompt(entry) {
   return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
 }
 function isKnownSystemInjectedContent(content) {
   return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
@@ -2876,6 +2925,21 @@ function stringifyToolResultContent(content) {
     return "";
   }
   return JSON.stringify(content);
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function detectInterruptedPromptIds(transcriptPath) {
+  return collectInterruptedPromptIds(readAllTranscriptEntries(transcriptPath));
 }
 function readAllTranscriptEntries(transcriptPath) {
   if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
@@ -3011,10 +3075,12 @@ function startsNewTurn(entry, currentPromptId) {
 }
 function parseReplayTranscript(transcriptPath, preloadedEntries) {
   const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
   let promptNumber = 0;
   let currentTurn = null;
   let currentPromptId = null;
-  for (const entry of preloadedEntries ?? readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of entries) {
     if (startsNewTurn(entry, currentPromptId)) {
       const userPrompt = extractUserPrompt(entry);
       promptNumber += 1;
@@ -3026,7 +3092,8 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
         userPrompt,
         assistantText: "",
         toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain)
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
       };
       turns.push(currentTurn);
       continue;
@@ -3332,14 +3399,99 @@ function createSessionEndHandler(dependencies) {
   };
 }
 
-// src/worker/rollback.ts
-var ROLLBACK_PENDING_TAG = "rollback:pending";
-var ROLLBACK_NOTIFIED_TAG = "rollback:notified";
-function addRollbackPendingTag(tags) {
-  if (tags.includes(ROLLBACK_PENDING_TAG) || tags.includes(ROLLBACK_NOTIFIED_TAG)) {
+// src/worker/invalidation.ts
+function selectLatestMainLeaf(entries) {
+  const parentSet = new Set(
+    entries.map((entry) => entry.parentUuid).filter((uuid) => Boolean(uuid))
+  );
+  const leaves = entries.filter(
+    (entry) => entry.uuid && !parentSet.has(entry.uuid) && entry.isSidechain !== true && isChainParticipant(entry)
+  );
+  if (leaves.length === 0) {
+    return null;
+  }
+  return leaves.reduce((latest, entry) => {
+    const latestTime = latest.timestamp ?? "";
+    const entryTime = entry.timestamp ?? "";
+    if (entryTime > latestTime) {
+      return entry;
+    }
+    if (entryTime === latestTime && entry.lineNumber > latest.lineNumber) {
+      return entry;
+    }
+    return latest;
+  });
+}
+function detectRolledBackPromptIds(transcriptPath) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  if (entries.length === 0) {
+    return /* @__PURE__ */ new Set();
+  }
+  const byUuid = new Map(
+    entries.filter(
+      (entry) => typeof entry.uuid === "string"
+    ).map((entry) => [entry.uuid, entry])
+  );
+  const childrenByParent = /* @__PURE__ */ new Map();
+  for (const entry of entries) {
+    if (!entry.parentUuid) {
+      continue;
+    }
+    const children = childrenByParent.get(entry.parentUuid) ?? [];
+    children.push(entry);
+    childrenByParent.set(entry.parentUuid, children);
+  }
+  const tip = selectLatestMainLeaf(entries);
+  if (!tip?.uuid) {
+    return /* @__PURE__ */ new Set();
+  }
+  const mainChainUuids = /* @__PURE__ */ new Set();
+  let cursor = tip;
+  while (cursor?.uuid) {
+    mainChainUuids.add(cursor.uuid);
+    cursor = cursor.parentUuid ? byUuid.get(cursor.parentUuid) : void 0;
+  }
+  const rolledBackPromptIds = /* @__PURE__ */ new Set();
+  for (const children of childrenByParent.values()) {
+    for (const child of children) {
+      if (child.role === "user" && child.promptId && child.isSidechain !== true && isChainParticipant(child) && !mainChainUuids.has(child.uuid ?? "")) {
+        rolledBackPromptIds.add(child.promptId);
+      }
+    }
+  }
+  return rolledBackPromptIds;
+}
+function applyInvalidation(db, sessionDbId, transcriptPath, epoch) {
+  const interruptedPromptIds = detectInterruptedPromptIds(transcriptPath);
+  const rolledBackPromptIds = detectRolledBackPromptIds(transcriptPath);
+  const turns = getTurnsForSession(db, sessionDbId);
+  for (const turn of turns) {
+    if (!turn.contentPromptId) {
+      continue;
+    }
+    const nextWasInterrupted = turn.wasInterrupted || interruptedPromptIds.has(turn.contentPromptId);
+    const nextWasRolledBack = turn.wasRolledBack || rolledBackPromptIds.has(turn.contentPromptId);
+    if (nextWasInterrupted === turn.wasInterrupted && nextWasRolledBack === turn.wasRolledBack) {
+      continue;
+    }
+    const nextStatus = turn.status === "extracted" || turn.status === "skipped" ? "active" : turn.status;
+    updateTurnById(db, turn.id, {
+      status: nextStatus,
+      wasInterrupted: nextWasInterrupted,
+      wasRolledBack: nextWasRolledBack,
+      updatedAtEpoch: epoch
+    });
+  }
+}
+
+// src/worker/subagent-filter.ts
+var SUBAGENT_PENDING_TAG = "subagent:pending";
+var SUBAGENT_NOTIFIED_TAG = "subagent:notified";
+function addSubagentPendingTag(tags) {
+  if (tags.includes(SUBAGENT_PENDING_TAG) || tags.includes(SUBAGENT_NOTIFIED_TAG)) {
     return tags;
   }
-  return [...tags, ROLLBACK_PENDING_TAG];
+  return [...tags, SUBAGENT_PENDING_TAG];
 }
 function deleteObservationFtsRows(db, observationIds) {
   if (observationIds.length === 0) {
@@ -3402,17 +3554,17 @@ function deleteObservationsForTurns(db, turnIds) {
     `
   ).run(...turnIds);
 }
-function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
+function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
   const parsedTurns = parseReplayTranscript(transcriptPath);
-  const newestSidechainChain = [];
+  const newestSubagentChain = [];
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
     const parsedTurn = parsedTurns[index];
     if (!parsedTurn.isSidechain) {
       break;
     }
-    newestSidechainChain.unshift(parsedTurn);
+    newestSubagentChain.unshift(parsedTurn);
   }
-  if (newestSidechainChain.length === 0) {
+  if (newestSubagentChain.length === 0) {
     return [];
   }
   const liveTurns = getTurnsForSession(db, sessionDbId).filter(
@@ -3423,7 +3575,7 @@ function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
   );
   const byPromptNumber = new Map(liveTurns.map((turn) => [turn.promptNumber, turn]));
   const matched = /* @__PURE__ */ new Map();
-  for (const parsedTurn of newestSidechainChain) {
+  for (const parsedTurn of newestSubagentChain) {
     const turn = (parsedTurn.promptId ? byPromptId.get(parsedTurn.promptId) : void 0) ?? byPromptNumber.get(parsedTurn.promptNumber);
     if (turn) {
       matched.set(turn.id, turn);
@@ -3431,8 +3583,8 @@ function resolveSidechainTurns(db, sessionDbId, transcriptPath) {
   }
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
-function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
-  const matchedTurns = resolveSidechainTurns(db, sessionDbId, transcriptPath);
+function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
+  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
   if (matchedTurns.length === 0) {
     return [];
   }
@@ -3446,7 +3598,7 @@ function detectAndCleanSidechainTurns(db, sessionDbId, transcriptPath, updatedAt
     for (const turn of matchedTurns) {
       updateTurnById(db, turn.id, {
         status: "undone",
-        tags: addRollbackPendingTag(turn.tags),
+        tags: addSubagentPendingTag(turn.tags),
         updatedAtEpoch
       });
     }
@@ -3475,6 +3627,7 @@ function createSessionInitHandler(dependencies) {
         suppressOutput: true
       };
     }
+    const epoch = now();
     const existingSession = getSessionByContentId(dependencies.db, input.sessionId);
     const session = upsertSession(dependencies.db, {
       contentSessionId: input.sessionId,
@@ -3482,16 +3635,22 @@ function createSessionInitHandler(dependencies) {
       title: existingSession?.title ?? null,
       content: existingSession?.content ?? null,
       insight: existingSession?.insight ?? null,
-      createdAtEpoch: existingSession?.createdAtEpoch ?? now(),
-      updatedAtEpoch: now(),
+      createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
+      updatedAtEpoch: epoch,
       completedAtEpoch: existingSession?.completedAtEpoch ?? null
     });
     if (input.transcriptPath) {
-      detectAndCleanSidechainTurns(
+      applyInvalidation(
         dependencies.db,
         session.id,
         input.transcriptPath,
-        now()
+        epoch
+      );
+      detectAndCleanSubagentTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        epoch
       );
     }
     const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
@@ -3501,7 +3660,7 @@ function createSessionInitHandler(dependencies) {
       session.id,
       promptNumber,
       input.prompt,
-      now()
+      epoch
     );
     return {
       continue: true,
@@ -3652,6 +3811,12 @@ function createStopHandler(dependencies) {
           input.transcriptPath,
           assistantResponse ?? void 0
         );
+        applyInvalidation(
+          dependencies.db,
+          session.id,
+          input.transcriptPath,
+          epoch
+        );
       }
       for (const orphanTurn of orphanTurns) {
         dependencies.db.query(
@@ -3697,7 +3862,7 @@ function createStopHandler(dependencies) {
       completedAtEpoch: epoch
     });
     if (input.transcriptPath) {
-      detectAndCleanSidechainTurns(
+      detectAndCleanSubagentTurns(
         dependencies.db,
         session.id,
         input.transcriptPath,

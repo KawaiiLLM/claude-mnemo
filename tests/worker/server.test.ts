@@ -1542,6 +1542,88 @@ describe("worker server", () => {
     );
   });
 
+  test("flushSession prepends reminder and subagent invalidation envelopes", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reminder",
+      project: "/tmp/project-reminder",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    db.query(
+      `
+        INSERT INTO turns (
+          session_id,
+          prompt_number,
+          content_prompt_id,
+          was_interrupted,
+          was_rolled_back,
+          status,
+          user_prompt,
+          title,
+          tags,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES
+          (?, 1, 'p1', 1, 0, 'active', 'Interrupted draft', 'Interrupted draft', '[]', 100, 101),
+          (?, 2, 'p2', 0, 0, 'extracted', 'Replacement', 'Replacement', '[]', 110, 111),
+          (?, 3, 'p3', 0, 0, 'undone', 'Subagent draft', 'Subagent draft', '["subagent:pending"]', 120, 121)
+      `,
+    ).run(sessionId, sessionId, sessionId);
+    const turnId = createTurn(db, sessionId, 4);
+
+    const sentPrompts: string[] = [];
+    const core = createWorkerCore({
+      db,
+      processBatchImpl: async (state) => {
+        await state.pushMessage("<batch><turn id=\"T4\"/></batch>");
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps =
+          (args.length === 2 ? args[1] : args[3]) as
+            | {
+                onMessage?: (message: { session_id?: string }) => void;
+              }
+            | undefined;
+
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            deps?.onMessage?.({ session_id: "worker-query" });
+            return {
+              session_id: "worker-query",
+            };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.processClaimedItem({
+      seq: 1,
+      kind: "turn-stop",
+      targetId: turnId,
+      sessionDbId: sessionId,
+      claimedAtEpoch: 1,
+      enqueuedAtEpoch: 1,
+    });
+    await core.flushSession(sessionId);
+
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).toContain("<subagent_invalidated>");
+    expect(sentPrompts[0]).toContain("<reminder>");
+    expect(sentPrompts[0]).toContain(
+      '- T1 (was_interrupted, replaced by T2): "Interrupted draft"',
+    );
+  });
+
   test("abortStalledSessions closes only sessions with an overdue in-flight request", async () => {
     const closed: number[] = [];
     const stateCore = createWorkerCore({

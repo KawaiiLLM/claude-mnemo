@@ -33,10 +33,13 @@ import { initializeDatabase } from "../db/schema";
 import { DATA_DIR, WORKER_PID_PATH, WORKER_STARTING_PATH } from "../shared/paths";
 import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import {
-  detectAndCleanSidechainTurns,
-  getPendingRollbackTurns,
-  markRollbackTurnsNotified,
-} from "./rollback";
+  getReminderItems,
+} from "./invalidation";
+import {
+  detectAndCleanSubagentTurns,
+  getPendingSubagentTurns,
+  markSubagentTurnsNotified,
+} from "./subagent-filter";
 import { detectCacheTtl } from "./cache-ttl";
 import { createWorkerProcessors, type TurnPayload } from "./processors";
 import {
@@ -214,12 +217,44 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-function buildRollbackEnvelope(promptNumbers: number[]): string {
+function buildSubagentInvalidationEnvelope(promptNumbers: number[]): string {
   const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
-  return `<rollback>
-  ${labels} were rolled back (sidechain). Observations extracted from
-  these turns should be considered invalid.
-</rollback>`;
+  return `<subagent_invalidated>
+  ${labels} originated from a Task subagent transcript and are out-of-scope
+  for session memory.
+</subagent_invalidated>`;
+}
+
+function buildReminderEnvelope(
+  items: ReadonlyArray<{
+    promptNumber: number;
+    wasInterrupted: boolean;
+    wasRolledBack: boolean;
+    priorTitle: string | null;
+    replacementPromptNumber: number | null;
+  }>,
+): string {
+  const lines = items.map((item) => {
+    const flags =
+      item.wasInterrupted && item.wasRolledBack
+        ? "was_interrupted+was_rolled_back"
+        : item.wasInterrupted
+          ? "was_interrupted"
+          : item.wasRolledBack
+            ? "was_rolled_back"
+            : "fresh";
+    const replacementClause =
+      item.replacementPromptNumber !== null
+        ? `, replaced by T${item.replacementPromptNumber}`
+        : "";
+    const titleClause = item.priorTitle ? `: "${item.priorTitle}"` : "";
+    return `  - T${item.promptNumber} (${flags}${replacementClause})${titleClause}`;
+  });
+
+  return `<reminder>
+  The following turns have status='active' and need your attention.
+${lines.join("\n")}
+</reminder>`;
 }
 
 function pruneBufferedUndoneItems(
@@ -484,19 +519,32 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       processingLock: Promise.resolve(),
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
-        const pendingRollbacks = getPendingRollbackTurns(
+        const pendingSubagentTurns = getPendingSubagentTurns(
           deps.db,
           state!.sessionDbId,
         );
-        const promptWithRollback =
-          pendingRollbacks.length > 0
-            ? `${buildRollbackEnvelope(
-                pendingRollbacks.map((turn) => turn.promptNumber),
-              )}\n\n${prompt}`
+        const reminderItems = getReminderItems(
+          deps.db,
+          state!.sessionDbId,
+        );
+        const envelopeBlocks: string[] = [];
+        if (pendingSubagentTurns.length > 0) {
+          envelopeBlocks.push(
+            buildSubagentInvalidationEnvelope(
+              pendingSubagentTurns.map((turn) => turn.promptNumber),
+            ),
+          );
+        }
+        if (reminderItems.length > 0) {
+          envelopeBlocks.push(buildReminderEnvelope(reminderItems));
+        }
+        const promptWithEnvelopes =
+          envelopeBlocks.length > 0
+            ? `${envelopeBlocks.join("\n\n")}\n\n${prompt}`
             : prompt;
         state!.lastActivity = nowMs();
         state!.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(promptWithRollback);
+        const result = await runtime.sendPrompt(promptWithEnvelopes);
         state!.lastMessageAt = nowMs();
         state!.queryPid = runtime.queryPid;
         state!.agentSessionId = result.session_id;
@@ -507,11 +555,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             }
           })
           .catch(() => {});
-        if (pendingRollbacks.length > 0) {
+        if (pendingSubagentTurns.length > 0) {
           try {
-            markRollbackTurnsNotified(deps.db, pendingRollbacks, now());
+            markSubagentTurnsNotified(deps.db, pendingSubagentTurns, now());
           } catch (error) {
-            logger.error?.("failed to mark rollback turns notified", {
+            logger.error?.("failed to mark subagent turns notified", {
               sessionDbId: state!.sessionDbId,
               error,
             });
@@ -961,7 +1009,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     try {
       if (transcriptPath) {
-        detectAndCleanSidechainTurns(
+        detectAndCleanSubagentTurns(
           deps.db,
           sessionDbId,
           transcriptPath,

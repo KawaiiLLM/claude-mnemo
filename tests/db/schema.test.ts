@@ -138,6 +138,20 @@ describe("initializeSchema", () => {
     expect(turnColumns).toContain("assistant_response");
     expect(turnColumns).toContain("files_read");
     expect(turnColumns).toContain("files_modified");
+    expect(turnColumns).toContain("was_interrupted");
+    expect(turnColumns).toContain("was_rolled_back");
+  });
+
+  test("creates invalidation columns on turns", () => {
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+
+    expect(columns).toContain("was_interrupted");
+    expect(columns).toContain("was_rolled_back");
   });
 
   test("allows worker-style observations with only tool payload and pending status", () => {
@@ -568,6 +582,108 @@ describe("initializeSchema", () => {
     expect(turn).toEqual({
       promptNumber: 1,
       transcriptLineStart: null,
+    });
+  });
+
+  test("initializeSchema adds invalidation columns to an existing turns table without resetting data", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        next_steps TEXT,
+        last_compact_turn INTEGER,
+        last_agent_session_id TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    db.query(
+      `
+        INSERT INTO sessions (
+          content_session_id,
+          project,
+          created_at_epoch
+        ) VALUES (?, ?, ?)
+      `,
+    ).run("existing-session", "claude-mnemo", 1);
+    db.query(
+      `
+        INSERT INTO turns (
+          session_id,
+          prompt_number,
+          status,
+          user_prompt,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (
+          (SELECT id FROM sessions WHERE content_session_id = ?),
+          ?,
+          ?,
+          ?,
+          ?,
+          ?
+        )
+      `,
+    ).run("existing-session", 1, "active", "Legacy turn", 2, 3);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    const turn = db
+      .query<
+        {
+          userPrompt: string | null;
+          wasInterrupted: number;
+          wasRolledBack: number;
+        },
+        []
+      >(
+        `
+          SELECT
+            user_prompt AS userPrompt,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack
+          FROM turns
+        `,
+      )
+      .get();
+
+    expect(columns).toContain("was_interrupted");
+    expect(columns).toContain("was_rolled_back");
+    expect(turn).toEqual({
+      userPrompt: "Legacy turn",
+      wasInterrupted: 0,
+      wasRolledBack: 0,
     });
   });
 

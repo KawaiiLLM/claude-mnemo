@@ -292,6 +292,27 @@ Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worke
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
 
+## Reminder envelope
+
+Messages may be prefixed with a \`<reminder>\` block listing turns with \`status='active'\` that need your attention. Each line:
+
+\`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>"]\`
+
+\`<flags>\` is one of: \`fresh\`, \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+
+For each listed \`T<n>\`:
+
+1. Check if a matching \`<turn id="T<n>">\` block appears in this batch:
+   - **Present**: process normally. For \`fresh\`, standard first-time extraction. For \`was_*\`, the turn was invalidated — extract as user-feedback about what direction was attempted and why it was rejected.
+   - **Absent**: the turn was previously extracted and later demoted due to invalidation. Prior content likely remains in conversation cache; if not, call \`recall({ id: "T<n>" })\` first, then \`remember({ id: "T<n>", ... })\`.
+2. For \`was_*\` turns: you MAY revise \`title\` / \`content\` / \`type\` to reflect that the turn represents a rejected direction. Prefer \`discovery\` or \`decision\` even if code changed. Do NOT mark \`bugfix\` or \`feature\`.
+3. \`remember({ id: "T<n>", ... })\` on an existing T record performs field-level merge — unspecified fields are preserved, tags are appended rather than replaced.
+4. Envelope lines persist until you call \`remember({ id: "T<n>", ... })\` or \`remember({ id: "T<n>", status: "skipped" })\`.
+
+Do NOT invent a replacement turn number not present in the envelope. If the line omits \`replaced by\`, do not guess.
+
+If a message also includes \`<subagent_invalidated>\`, those turns came from a Task subagent transcript and are out-of-scope for session memory. Treat that block as a retraction notice only; do not create or update records from it unless the current message also names those ids in a \`<turn>\` block.
+
 ## Session summary messages (<session> without <turn>)
 
 When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is a session summary refresh. Follow the length budget in the inline \`<instruction>\` block. Never call \`recall()\` from a session-summary message — the inline \`prior_*\` fields are the only state you should base the refresh decision on.

@@ -3,7 +3,8 @@ import type { Database } from "bun:sqlite";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { getMaxPromptNumber } from "../../db/turns";
 import { countUserPromptsInTranscript } from "../../shared/transcript-parser";
-import { detectAndCleanSidechainTurns } from "../../worker/rollback";
+import { applyInvalidation } from "../../worker/invalidation";
+import { detectAndCleanSubagentTurns } from "../../worker/subagent-filter";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
@@ -44,6 +45,7 @@ export function createSessionInitHandler(
       };
     }
 
+    const epoch = now();
     const existingSession = getSessionByContentId(dependencies.db, input.sessionId);
     const session = upsertSession(dependencies.db, {
       contentSessionId: input.sessionId,
@@ -51,17 +53,23 @@ export function createSessionInitHandler(
       title: existingSession?.title ?? null,
       content: existingSession?.content ?? null,
       insight: existingSession?.insight ?? null,
-      createdAtEpoch: existingSession?.createdAtEpoch ?? now(),
-      updatedAtEpoch: now(),
+      createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
+      updatedAtEpoch: epoch,
       completedAtEpoch: existingSession?.completedAtEpoch ?? null,
     });
 
     if (input.transcriptPath) {
-      detectAndCleanSidechainTurns(
+      applyInvalidation(
         dependencies.db,
         session.id,
         input.transcriptPath,
-        now(),
+        epoch,
+      );
+      detectAndCleanSubagentTurns(
+        dependencies.db,
+        session.id,
+        input.transcriptPath,
+        epoch,
       );
     }
 
@@ -77,7 +85,7 @@ export function createSessionInitHandler(
       session.id,
       promptNumber,
       input.prompt,
-      now(),
+      epoch,
     );
 
     return {

@@ -5,7 +5,8 @@ import { enqueueQueueItem } from "../../db/pending-queue";
 import { getTurnsForSession } from "../../db/turns";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
-import { detectAndCleanSidechainTurns } from "../../worker/rollback";
+import { applyInvalidation } from "../../worker/invalidation";
+import { detectAndCleanSubagentTurns } from "../../worker/subagent-filter";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -128,6 +129,12 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           input.transcriptPath,
           assistantResponse ?? undefined,
         );
+        applyInvalidation(
+          dependencies.db,
+          session.id,
+          input.transcriptPath,
+          epoch,
+        );
       }
 
       for (const orphanTurn of orphanTurns) {
@@ -183,7 +190,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
     });
 
     if (input.transcriptPath) {
-      detectAndCleanSidechainTurns(
+      detectAndCleanSubagentTurns(
         dependencies.db,
         session.id,
         input.transcriptPath,

@@ -2,13 +2,17 @@ import type { Database } from "bun:sqlite";
 
 import { indexTurnToFTS } from "./search";
 
+export type TurnStatus = "active" | "extracted" | "skipped" | "undone";
+
 export interface TurnRecord {
   id: number;
   sessionId: number;
   promptNumber: number;
   contentPromptId: string | null;
   transcriptLineStart: number | null;
-  status: string;
+  wasInterrupted: boolean;
+  wasRolledBack: boolean;
+  status: TurnStatus;
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
@@ -29,7 +33,9 @@ interface TurnRow {
   promptNumber: number;
   contentPromptId: string | null;
   transcriptLineStart: number | null;
-  status: string;
+  wasInterrupted: number;
+  wasRolledBack: number;
+  status: TurnStatus;
   userPrompt: string | null;
   assistantResponse: string | null;
   title: string | null;
@@ -51,6 +57,8 @@ const TURN_SELECT = `
     prompt_number AS promptNumber,
     content_prompt_id AS contentPromptId,
     transcript_line_start AS transcriptLineStart,
+    was_interrupted AS wasInterrupted,
+    was_rolled_back AS wasRolledBack,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -86,10 +94,29 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
 
   return {
     ...row,
+    wasInterrupted: row.wasInterrupted === 1,
+    wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
   };
+}
+
+function mergeTags(
+  existingTags: string[],
+  nextTags: string[] | undefined,
+): string[] {
+  if (!nextTags) {
+    return existingTags;
+  }
+
+  const merged = [...existingTags];
+  for (const tag of nextTags) {
+    if (!merged.includes(tag)) {
+      merged.push(tag);
+    }
+  }
+  return merged;
 }
 
 export function getTurn(
@@ -116,7 +143,9 @@ export function getTurnById(
 }
 
 export interface UpdateTurnByIdInput {
-  status?: "active" | "extracted" | "skipped" | "undone";
+  status?: TurnStatus;
+  wasInterrupted?: boolean;
+  wasRolledBack?: boolean;
   title?: string | null;
   content?: string | null;
   insight?: string | null;
@@ -140,12 +169,19 @@ export function updateTurnById(
     return null;
   }
 
+  const nextStatus =
+    input.status ??
+    (existing.status === "active" ? "extracted" : existing.status);
+  const nextTags = mergeTags(existing.tags, input.tags);
+
   const updated = mapTurnRow(
     db
       .query<
         TurnRow,
         [
           string,
+          number,
+          number,
           string | null,
           string | null,
           string | null,
@@ -163,6 +199,8 @@ export function updateTurnById(
           UPDATE turns
           SET
             status = ?,
+            was_interrupted = ?,
+            was_rolled_back = ?,
             title = ?,
             content = ?,
             insight = ?,
@@ -179,6 +217,8 @@ export function updateTurnById(
             session_id AS sessionId,
             prompt_number AS promptNumber,
             content_prompt_id AS contentPromptId,
+            was_interrupted AS wasInterrupted,
+            was_rolled_back AS wasRolledBack,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -196,13 +236,15 @@ export function updateTurnById(
         `,
       )
       .get(
-        input.status ?? existing.status,
+        nextStatus,
+        input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
+        input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
         input.title ?? existing.title,
         input.content ?? existing.content,
         input.insight ?? existing.insight,
         input.type ?? existing.type,
         input.transcriptLineStart ?? existing.transcriptLineStart,
-        stringifyArray(input.tags ?? existing.tags),
+        stringifyArray(nextTags),
         stringifyArray(input.filesRead ?? existing.filesRead),
         stringifyArray(input.filesModified ?? existing.filesModified),
         input.toolCallCount ?? existing.toolCallCount,
