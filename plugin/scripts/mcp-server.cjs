@@ -6878,7 +6878,10 @@ function combineClauses(clauses) {
   return filtered.length > 0 ? ` WHERE ${filtered.join(" AND ")}` : "";
 }
 function buildSafeFtsQuery(query) {
-  const terms = query?.trim().split(/\s+/).filter(Boolean).map((term) => `"${term.replace(/"/g, '""')}"`);
+  const terms = query?.trim().split(/\s+/).filter(Boolean).map((term) => {
+    const sanitized = term.replace(/["\*]/g, "");
+    return sanitized ? `"${sanitized.replace(/"/g, '""')}"*` : null;
+  }).filter(Boolean);
   if (!terms || terms.length === 0) {
     return void 0;
   }
@@ -34112,7 +34115,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.11" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.12" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

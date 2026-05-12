@@ -47,33 +47,41 @@ ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0;
 
 ### Status 语义 & delivery flag
 
-**D3**: `status` 是**权威生命周期**字段，同时**兼任 delivery flag**。语义不重命名。
+**D3**: `status` 是**权威生命周期**字段。Invalidation delivery 采用 **双通道 + tag-based tracking**。
 
-| 值 | 含义 | 是否进 reminder |
+| 值 | 含义 | Delivery 通道 |
 |---|---|---|
-| `active` | 未被 agent 完整处理——新 turn，或 invalidation demote 回来 | ✅ |
-| `extracted` | agent 调 `remember({id,title,content,...})` 写过完整内容 | ❌ |
-| `skipped` | agent 调 `remember({id,status:"skipped"})` 明确跳过 | ❌ |
+| `active` | 未被 agent 完整处理 | Active turn 走 inline `invalidated` 属性（D9a），不进 reminder |
+| `extracted` | agent 调 `remember({id,title,content,...})` 写过完整内容 | 若有 pending tag → 进 `<reminder>` envelope |
+| `skipped` | agent 调 `remember({id,status:"skipped"})` 明确跳过 | 若有 pending tag → 进 `<reminder>` envelope |
 | `undone` | subagent 过滤掉，永不抽取 | ❌（独立生命周期） |
 
 **D3a — Agent 接口不变**: agent 仍通过 `remember({id,status:"skipped"})` 明确跳过、`remember({id,title,content,...})` 完成抽取（server 此时自动 set `status='extracted'`）。保留现有 `query-session.ts:287` 接口。
 
-**D3b — Status demotion on invalidation**: stop hook 检测到 turn 新命中 invalidation 时：
+**D3b — Status 保持 + tag 标注**: stop hook 检测到 turn 新命中 invalidation 时：
 
 ```sql
+-- was_* 按 MAX 合并（一旦置 1 不清零），status 保持原值
 UPDATE turns
 SET was_interrupted = MAX(was_interrupted, <new_i>),
     was_rolled_back  = MAX(was_rolled_back, <new_r>),
-    status = CASE WHEN status IN ('extracted', 'skipped') THEN 'active' ELSE status END,
+    tags = <追加 invalidated:notify-pending:{kind} tag>,
     updated_at_epoch = ?
 WHERE id = ?
 ```
 
-- `undone` 不 demote（subagent 生命周期独立）。
-- 已是 `active` 的 status 不变，was_* 按新值 `MAX` 合并。
-- 幂等：重复触发不会反复 demote 或翻转 was_*。
+- Status **不 demote**。`active` 的 turn 保持 `active`（走 D9a inline 属性首次抽取）；`extracted`/`skipped` 的 turn 保持原 status（走 `<reminder>` envelope 通知 agent 修订）。
+- `undone` 不动（subagent 生命周期独立）。
+- 幂等：已有 `notify-pending:{kind}` 或 `notified:{kind}` tag 的不重复添加。
 
-**D3c — 无独立"已通知"标志**: delivery state 完全由 status 推断——`status='active'` = 需 reminder；其它 = agent 已处理或无需处理。Agent 调 `remember()` 后 status 转终态，**自然**移出下次 reminder 查询。没有专门的 pending/notified tag 或 queue item。
+**D3c — Tag-based delivery tracking**: 每种 invalidation kind 有一对 delivery tag：
+
+| Tag | 含义 |
+|---|---|
+| `invalidated:notify-pending:{kind}` | 检测到 invalidation，尚未通知 agent |
+| `invalidated:notified:{kind}` | 已通过 `<reminder>` envelope 通知 agent |
+
+Agent 调 `remember()` 后 status 转终态（D12b），同时 `markReminderItemsNotified` 将 pending tag 转为 notified tag。双重条件（status 终态 + 无 pending tag）保证不重复通知。
 
 ### 检测算法
 
@@ -137,9 +145,11 @@ detectAndCleanSubagentTurns(...);  // 原 detectAndCleanSidechainTurns 改名
 
 ### Agent 通知 (`<reminder>` envelope)
 
-**D9 — 不渲染 inline 属性**: `<turn>` 块**不**加 `invalidated` 或类似属性。所有 invalidation 信号统一走 `<reminder>` envelope——避免 agent 看到两处相互矛盾的信号源、也避免 `<turn>` 块 schema 膨胀。
+**D9a — Inline `invalidated` 属性（active turn 首次抽取通道）**: 当 `status='active'` 的 turn 被送入 batch 时，若 `was_interrupted` 或 `was_rolled_back` 为真，`buildBatchTurnBlock` 在 `<turn>` 开标签渲染 `invalidated="interrupt"` / `"rollback"` / `"interrupt+rollback"` 属性。Agent 在首次抽取时即可知晓 turn 已被否决。
 
-**D10 — `<reminder>` envelope**: `src/worker/server.ts` 加 `buildReminderEnvelope(items: ReminderItem[]): string`，schema：
+该通道仅覆盖**尚未抽取**的 active turn。已 extracted/skipped 的 turn 走 `<reminder>` envelope（D10）。两个通道不重叠：active turn 不进 reminder，终态 turn 不带 inline 属性。
+
+**D10 — `<reminder>` envelope（已抽取 turn 修订通道）**: `src/worker/server.ts` 的 `buildReminderEnvelope` + `invalidation.ts` 的 `getReminderItems`。
 
 ```ts
 interface ReminderItem {
@@ -147,73 +157,47 @@ interface ReminderItem {
   promptNumber: number;
   wasInterrupted: boolean;
   wasRolledBack: boolean;
-  priorTitle: string | null;               // turn.title（若 agent 此前 extracted 过）
-  replacementPromptNumber: number | null;  // 下一个 status != 'undone' 且 was_*=0 的 turn
-                                           // 已 extracted / skipped 的干净 turn 也算——它们很可能就是 invalidation 被检测之前就已处理完的替代 turn
+  priorTitle: string | null;               // turn.title（已 extracted 的 turn 有）
+  priorContent: string | null;             // turn.content（截至 120 字符渲染在 envelope 中）
+  replacementPromptNumber: number | null;  // rollback 时从 parentUuid 树拓扑直接识别的 main-chain sibling
+                                           // interrupt-only turn 此字段始终为 null（interrupt 无树分叉，无法确定 replacement）
+  pendingKinds: InvalidationKind[];        // 本次通知的 kind(s)
 }
 ```
 
-**查询**（`getReminderItems(db, sessionDbId): ReminderItem[]` 新 export 自 `invalidation.ts`）：
+**查询**: `getReminderItems(db, sessionDbId, transcriptPath?)` 拉 `status NOT IN ('active','undone')` 且有 `invalidated:notify-pending:*` tag 的 turn，按 `updated_at_epoch DESC` 排序，**上限 10 条**（`REMINDER_LIMIT`）。超出部分由 `getSilencedReminderItems` 返回，用于 `markReminderItemsNotified` 静默清理。
 
-```sql
--- step 1: 拉非终态 turn
-SELECT id, prompt_number, was_interrupted, was_rolled_back, title
-FROM turns
-WHERE session_id = ? AND status = 'active'
-ORDER BY prompt_number ASC;
-
--- step 2: per item 派生 replacementPromptNumber
-SELECT MIN(prompt_number) FROM turns
-WHERE session_id = ?
-  AND prompt_number > <N>
-  AND status != 'undone'
-  AND was_interrupted = 0
-  AND was_rolled_back = 0;
-```
-
-无命中（例如最末 turn 刚被 invalidate、还没有干净的后继）→ `null`。
+**Replacement 派生**：rollback turn 的 replacement 从 `detectRollbackTopology().replacementByPromptId` 获取——即 parentUuid 树中同 parent 的 main-chain user sibling 的 promptId，再通过 DB 映射到 promptNumber。不走 SQL 扫描。Interrupt-only turn 固定 `null`。
 
 **Envelope 文案**：
 
 ```xml
 <reminder>
-  The following turns have status='active' and need your attention.
-  For each, check whether a matching <turn id="T<n>"> block is in this batch:
-    - Present: process it using the flags as context.
-    - Absent: prior content likely in your conversation cache; if not, call
-      recall({id:"T<n>"}) first. Then remember({id:"T<n>", ...}) to update.
-
-  Flags:
-    - fresh: new turn, first-time extraction
-    - was_interrupted: user pressed ESC mid-response to abort this direction
-    - was_rolled_back: user navigated back and replaced this turn entirely
-    - Both flags can coexist — user rejected this turn in more than one way
-
-  - T42 (was_interrupted, replaced by T43): "Review Codex branch"
-  - T55 (was_rolled_back, replaced by T58): "Write session-init spec"
+  The following turns were invalidated and need one-time attention.
+  - T42 (was_interrupted, replaced by T43): "Review Codex branch" -- user pressed ESC mid-response
+  - T55 (was_rolled_back, replaced by T58): "Write session-init spec" -- user navigated back
   - T61 (was_interrupted+was_rolled_back, replaced by T62): "Draft sample"
   - T77 (was_interrupted): "Compare MCP tools"
-  - T80 (fresh)
 </reminder>
 ```
 
-行级格式：`T<promptNumber> (<flags>[, replaced by T<m>])[: "<priorTitle>"]`
+行级格式：`T<promptNumber> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent truncated>]`
 
-- `<flags>`：两 flag 都 0 → `fresh`；单 flag → `was_interrupted` 或 `was_rolled_back`；两 flag 都 1 → `was_interrupted+was_rolled_back`（固定顺序）。
+- `<flags>`：`was_interrupted` / `was_rolled_back` / `was_interrupted+was_rolled_back`（不再有 `fresh`——active turn 走 D9a inline 属性，不进 reminder）。
 - `, replaced by T<m>`：仅在 `replacementPromptNumber !== null` 时出现。
-- `: "<priorTitle>"`：仅在 `priorTitle !== null` 时出现（通常 was_* turn 有、fresh turn 无）。
+- `: "<priorTitle>" -- <content>`：仅在有 priorTitle/priorContent 时出现（截至 120 字符）。
 
-**Drain 集成点**（`server.ts:485-520` 的 `pushMessage`）：
+**Drain 集成点**（`server.ts` 的 `pushMessage`）：
 
-- 与现有 `getPendingSubagentTurns`（subagent envelope 驱动）**并列**，新增 `getReminderItems(db, sessionDbId)` 调用。
+- 与现有 `getPendingSubagentTurns`（subagent envelope 驱动）**并列**，新增 `getReminderItems(db, sessionDbId, transcriptPath)` 调用。
 - 两个 envelope 独立拼接（subagent 在前、reminder 在后）放到 prompt 前。
-- **无需 cleanup 调用**：agent 调 `remember()` 后 status 自动转终态（D3a），下次 reminder 查询不再包含。失败则 status 保持 active，下次自然重试。
+- **Notification cleanup**: `markReminderItemsNotified` 在 push 成功后将 `notify-pending:{kind}` tag 转为 `notified:{kind}`，包括超出 REMINDER_LIMIT 的静默条目。Agent 调 `remember()` 后 status 转终态（D12b），与 notified tag 共同保证不重复通知。
 
 ### Agent 指令
 
 **D11**: `src/worker/query-session.ts` 新增 `## Reminder envelope` 章节：
 
-> Messages may be prefixed with a `<reminder>` block listing turns with `status='active'` that need your attention. Each line:
+> Messages may be prefixed with a `<reminder>` block listing recently invalidated turns that need one-time attention. Each line:
 >
 > `- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>"]`
 >
@@ -338,7 +322,8 @@ WHERE tags LIKE '%rollback:%';
 - 逻辑 0 改动
 
 ### `src/worker/processors.ts`
-- **不**改 `buildBatchTurnBlock` / `buildTurnSummaryPrompt`（D9 不加 inline 属性）
+- `buildBatchTurnBlock` 加 `invalidatedKinds` 参数，渲染 `invalidated="..."` inline 属性（D9a）
+- `formatInlineInvalidationKinds` helper 将 `was_*` flag 转为 `"interrupt"` / `"rollback"` / `"interrupt+rollback"` / `null`
 
 ### `src/hooks/handlers/stop.ts`
 - import `applyInvalidation`，按 D7 位置调用
@@ -351,7 +336,7 @@ WHERE tags LIKE '%rollback:%';
 ### `src/worker/server.ts`
 - D14/D15 符号与 subagent envelope 改名
 - `pushMessage` 内：在现有 subagent envelope 相邻位置加 `getReminderItems` + `buildReminderEnvelope`；两个 envelope 顺序拼接（subagent 在前）放到 prompt 前
-- 无需成功后 cleanup 调用（D10 末段）
+- Push 成功后调 `markReminderItemsNotified`（含 silenced items），将 `notify-pending` tag 转为 `notified`
 
 ### `src/worker/query-session.ts`
 - 新增 `## Reminder envelope` 章节（D11）

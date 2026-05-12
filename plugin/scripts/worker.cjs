@@ -47,7 +47,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.11-mo4l1ifu" : "dev";
+var BUILD_ID = true ? "0.2.12-mp2pzd6c" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -188,7 +188,10 @@ function combineClauses(clauses) {
   return filtered.length > 0 ? ` WHERE ${filtered.join(" AND ")}` : "";
 }
 function buildSafeFtsQuery(query2) {
-  const terms = query2?.trim().split(/\s+/).filter(Boolean).map((term) => `"${term.replace(/"/g, '""')}"`);
+  const terms = query2?.trim().split(/\s+/).filter(Boolean).map((term) => {
+    const sanitized = term.replace(/["\*]/g, "");
+    return sanitized ? `"${sanitized.replace(/"/g, '""')}"*` : null;
+  }).filter(Boolean);
   if (!terms || terms.length === 0) {
     return void 0;
   }

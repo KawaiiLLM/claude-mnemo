@@ -183,7 +183,11 @@ function buildSafeFtsQuery(query?: string): string | undefined {
     ?.trim()
     .split(/\s+/)
     .filter(Boolean)
-    .map((term) => `"${term.replace(/"/g, '""')}"`);
+    .map((term) => {
+      const sanitized = term.replace(/["\*]/g, "");
+      return sanitized ? `"${sanitized.replace(/"/g, '""')}"*` : null;
+    })
+    .filter(Boolean);
 
   if (!terms || terms.length === 0) {
     return undefined;
