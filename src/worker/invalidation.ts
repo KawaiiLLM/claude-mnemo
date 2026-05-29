@@ -111,9 +111,51 @@ const rollbackReason: ReminderReason<RollbackData> = {
       : null,
 };
 
+function truncatePrompt(value: string | null, limit: number): string {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit - 3)}...`;
+}
+
+export const DELIVERY_DROPPED_PENDING_TAG = "delivery:dropped:notify-pending";
+export const DELIVERY_DROPPED_NOTIFIED_TAG = "delivery:dropped:notified";
+
+interface DeliveryDroppedData {
+  notExtracted: boolean;
+  prompt: string | null;
+}
+
+// A flush unit (slice or merged batch) failed maxFlushAttempts times and was
+// dropped; the turn's memory may be incomplete (D9). qualifies keeps `active`
+// (a never-extracted turn whose only delivery failed still warrants a notice).
+const deliveryDroppedReason: ReminderReason<DeliveryDroppedData> = {
+  key: "delivery-dropped",
+  pendingTag: DELIVERY_DROPPED_PENDING_TAG,
+  notifiedTag: DELIVERY_DROPPED_NOTIFIED_TAG,
+  qualifies: (turn) => turn.status !== "undone",
+  data: (turn) => ({
+    notExtracted: turn.status === "active",
+    prompt: turn.status === "active" ? truncatePrompt(turn.userPrompt, 200) : null,
+  }),
+  flagToken: () => "delivery_dropped",
+  parenExtra: (_turn, data) => (data.notExtracted ? "not yet extracted" : null),
+  bodyLead: (_turn, data) =>
+    data.notExtracted && data.prompt ? `prompt="${data.prompt}"` : null,
+  tail: (_turn, data) =>
+    data.notExtracted
+      ? "one or more parts of this turn could not be delivered; record intent if possible"
+      : "record may be incomplete, one or more parts could not be delivered after repeated failures",
+};
+
 // Registered reasons. Adding a reason is array-only — collection, notification,
 // limit/silenced splitting, and envelope grammar all become available for free.
-const REMINDER_REASONS: ReminderReason<any>[] = [interruptReason, rollbackReason];
+const REMINDER_REASONS: ReminderReason<any>[] = [
+  interruptReason,
+  rollbackReason,
+  deliveryDroppedReason,
+];
 
 function renderReasonHit<D>(
   reason: ReminderReason<D>,
@@ -321,6 +363,30 @@ export function applyInvalidation(
       updatedAtEpoch: epoch,
     });
   }
+}
+
+// Mark a turn whose flush unit was dropped (D8). Passes `status: turn.status`
+// explicitly so updateTurnById does NOT auto-promote an active (never-extracted)
+// turn to extracted — which would both corrupt status and suppress the
+// "not yet extracted" reminder branch (turns.ts auto-promote trap).
+export function flagDeliveryDropped(
+  db: Database,
+  turnId: number,
+  updatedAtEpoch: number,
+): void {
+  const turn = getTurnById(db, turnId);
+  if (!turn) {
+    return;
+  }
+  const nextTags = addPendingReason(turn.tags, deliveryDroppedReason);
+  if (nextTags === turn.tags) {
+    return;
+  }
+  updateTurnById(db, turnId, {
+    status: turn.status,
+    replaceTags: nextTags,
+    updatedAtEpoch,
+  });
 }
 
 function buildReminderContext(
