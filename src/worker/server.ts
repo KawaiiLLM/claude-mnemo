@@ -1320,6 +1320,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   function recoverFromCrash(): void {
     buffers.clear();
+    // Drop in-memory batch/streaming state so reclaimed obs re-stream from
+    // scratch with attempts reset (a clean retry, D8).
+    for (const state of sessions.values()) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
     resetClaimedQueueItems(deps.db);
   }
 

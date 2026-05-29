@@ -1,0 +1,183 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+
+import { createDatabase } from "../../src/db/database";
+import { createObservation, getObservation } from "../../src/db/observations";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import { getTurnById } from "../../src/db/turns";
+import { getPendingQueueCount } from "../../src/db/pending-queue";
+import { DELIVERY_DROPPED_PENDING_TAG } from "../../src/worker/invalidation";
+import { createWorkerCore } from "../../src/worker/server";
+import type { WorkerQuerySession } from "../../src/worker/query-session";
+import type { MnemoConfig } from "../../src/shared/config";
+
+const RETRY_CONFIG: MnemoConfig = {
+  mergeThresholdChars: 1000,
+  maxQueuedBatches: 5,
+  keepaliveLeadMs: 60_000,
+  cacheMode: "auto",
+  maxMiniTurnChars: 8192,
+  maxFlushAttempts: 3,
+};
+
+describe("flush retry / drop (D8)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnId: number;
+  let observationId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "retry-session",
+      project: "/proj",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    turnId = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch)
+         VALUES (?, 1, 'active', 'A prompt', 'A reply', 10) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    observationId = createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: '{"file_path":"a.ts"}',
+      toolResult: "result",
+      status: "pending",
+      createdAtEpoch: 100,
+    }).id;
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch) VALUES ('obs', ?, ?, 100)`,
+    ).run(observationId, sessionId);
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch) VALUES ('turn-stop', ?, ?, 200)`,
+    ).run(turnId, sessionId);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function failingCore(failTimes: number, attempts: { n: number }) {
+    return createWorkerCore({
+      db,
+      config: RETRY_CONFIG,
+      now: () => 123,
+      logger: { warn: () => {}, error: () => {} },
+      createWorkerQuerySessionImpl: ((..._args: unknown[]) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            attempts.n += 1;
+            if (attempts.n <= failTimes) {
+              throw new Error("push failed");
+            }
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+  }
+
+  test("first failure returns retryLater: batch + claims retained, attempts=1", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    await core.flushSession(sessionId);
+
+    // One attempt burned; the batch and its claimed queue rows remain.
+    expect(attempts.n).toBe(1);
+    const state = core.sessions.get(sessionId);
+    expect(state?.batchQueue).toHaveLength(1);
+    expect(state?.batchQueue[0]?.attempts).toBe(1);
+    expect(getPendingQueueCount(db)).toBe(2);
+  });
+
+  test("flushSession does not burn attempts to the limit in one drain", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    await core.flushSession(sessionId);
+    // A second drain triggers exactly one more attempt (no hot loop).
+    await core.flushSession(sessionId);
+
+    expect(attempts.n).toBe(2);
+    expect(core.sessions.get(sessionId)?.batchQueue[0]?.attempts).toBe(2);
+  });
+
+  test("after maxFlushAttempts the batch drops: obs skipped, turn flagged, turn-stop removed", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    // attempt 1 (drain) -> retryLater; retry tick attempts 2 and 3 -> dropped.
+    await core.flushSession(sessionId);
+    await core.runRetryTick();
+    await core.runRetryTick();
+
+    expect(attempts.n).toBe(3);
+    expect(core.sessions.get(sessionId)?.batchQueue).toHaveLength(0);
+    // Dropped runs the same side effects as flushed + a delivery-dropped tag.
+    expect(getObservation(db, observationId)?.status).toBe("skipped");
+    expect(getPendingQueueCount(db)).toBe(0);
+    expect(getTurnById(db, turnId)?.tags).toContain(DELIVERY_DROPPED_PENDING_TAG);
+  });
+
+  test("retry tick bypasses the cache-age gate and re-flushes a retry-pending head", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(1, attempts); // only the first push fails
+
+    await core.flushSession(sessionId);
+    expect(core.sessions.get(sessionId)?.batchQueue[0]?.attempts).toBe(1);
+
+    // Cache is cold (no successful push yet); the retry tick still re-flushes.
+    await core.runRetryTick();
+    expect(attempts.n).toBe(2);
+    expect(core.sessions.get(sessionId)?.batchQueue ?? []).toHaveLength(0);
+    expect(getPendingQueueCount(db)).toBe(0);
+  });
+
+  test("retry tick skips compacting sessions", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    await core.flushSession(sessionId);
+    expect(attempts.n).toBe(1);
+
+    core.compactingSessions.add(sessionId);
+    await core.runRetryTick();
+    // No additional attempt while compacting.
+    expect(attempts.n).toBe(1);
+  });
+
+  test("recoverFromCrash resets claims and in-memory streaming state", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    await core.flushSession(sessionId);
+    const state = core.sessions.get(sessionId)!;
+    state.streamedParts.set(turnId, 3);
+    expect(state.batchQueue.length).toBe(1);
+
+    core.recoverFromCrash();
+
+    expect(state.batchQueue).toHaveLength(0);
+    expect(state.streamedParts.has(turnId)).toBe(false);
+    // Queue rows are un-claimed (available for a fresh drain).
+    const claimed = db
+      .query<{ claimed_at_epoch: number | null }, []>(
+        "SELECT claimed_at_epoch FROM pending_queue",
+      )
+      .all();
+    expect(claimed.every((row) => row.claimed_at_epoch === null)).toBe(true);
+  });
+});
