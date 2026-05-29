@@ -451,8 +451,17 @@ describe("worker query session", () => {
     expect(prompt).toContain("## Tools");
     expect(prompt).toContain("## Observation messages");
     expect(prompt).toContain("## Turn messages");
+    expect(prompt).toContain("## Streamed turns (mini-turns)");
     expect(prompt).toContain("## Reminder envelope");
     expect(prompt).toContain("## Forbidden across all messages");
+
+    // Streaming exemption: slices may revisit the same record; non-sliced
+    // turns still extract once.
+    expect(prompt).toContain('slice="<n>"');
+    expect(prompt).toContain('final="true"');
+    expect(prompt).toContain("<prior_turn id=\"T<n>\">");
+    expect(prompt).toContain("ONLY case where updating the same record across multiple messages is allowed");
+    expect(prompt).toContain("delivery_dropped");
 
     // Turn-type enum — the single most load-bearing string; if this drifts,
     // `recall(query="type:bugfix")` silently stops matching new records.

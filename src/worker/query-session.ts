@@ -253,7 +253,7 @@ export function createWorkerQuerySession(
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: an \`<obs>\` means update that single observation; a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed — usually one, sometimes zero (no material change → no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages. The conversation history exists for LLM continuity, not for re-extraction.
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: an \`<obs>\` means update that single observation; a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed — usually one, sometimes zero (no material change → no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages — the lone exception is a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice. The conversation history exists for LLM continuity, not for re-extraction.
 
 ## Tools
 
@@ -294,13 +294,25 @@ Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worke
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
 
+## Streamed turns (mini-turns)
+
+A long turn is delivered in pieces. A \`<turn>\` whose opening tag carries a \`slice="<n>"\` attribute is one slice of an ongoing turn:
+
+- \`slice="<n>"\` without \`final="true"\`: a mid-turn slice carrying the repeated \`prompt:\` and a subset of this turn's \`<obs>\`. More slices will follow; extract what is known so far.
+- \`slice="<n>" final="true"\`: the last slice. The turn is complete — \`response\`, \`files_*\`, and \`tool_call_count\` are now present. Produce the most complete T record here.
+- Every slice after the first is followed by a \`<prior_turn id="T<n>">\` block holding the record's current persisted \`title\`/\`content\`/\`insight\`. Refine on top of it: base your update on \`<prior_turn>\` plus this slice's new \`<obs>\`, not on conversation history (which may have been compacted away).
+
+For a sliced turn you SHOULD call \`remember({ id: "T<n>", ... })\` on each slice to refine the SAME record. Field-level merge applies — later content overwrites, unspecified fields are preserved, tags append. If a slice adds nothing new, respond with no tool calls; an empty response is the valid "leave alone" signal.
+
+This is the ONLY case where updating the same record across multiple messages is allowed, and it applies ONLY while the \`<turn>\` carries a \`slice\` attribute. A \`<turn>\` WITHOUT a \`slice\` attribute is a normal, complete turn — extract it once and never revisit it.
+
 ## Reminder envelope
 
 Messages may be prefixed with a \`<reminder>\` block listing recently invalidated turns that need one-time attention. Each line:
 
 \`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent>]\`
 
-\`<flags>\` is one of: \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+\`<flags>\` combines one or more of \`was_interrupted\`, \`was_rolled_back\`, and \`delivery_dropped\` joined with \`+\`. \`delivery_dropped\` means one or more parts of the turn could not be delivered after repeated failures, so the record may be incomplete; if the line also reads \`not yet extracted\` with a \`prompt="..."\`, the turn was never recorded — capture its intent from that prompt if you can.
 
 For each listed \`T<n>\`:
 
