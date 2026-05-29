@@ -68,7 +68,48 @@ function renderTreeNode(
   return lines;
 }
 
-export function renderFileTree(paths: string[]): string {
+// A content (file) line never ends with "/"; structural (directory) lines and
+// the root prefix line do. The root prefix is line 0, which is not a file.
+function isFileLine(line: string, index: number): boolean {
+  return index > 0 && !line.endsWith("/");
+}
+
+// Truncate the rendered tree to <= maxChars, appending "...(+N more files)"
+// where N is the number of files dropped. Kept lines plus the worst-case
+// suffix always fit, so the cap holds by construction (D2).
+function capRenderedTree(
+  lines: string[],
+  totalFiles: number,
+  maxChars: number,
+): string {
+  const suffixBudget = `\n  ...(+${totalFiles} more files)`.length;
+  const lineBudget = Math.max(0, maxChars - suffixBudget);
+
+  const kept: string[] = [];
+  let keptFiles = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    const candidate = kept.length === 0 ? line : `${kept.join("\n")}\n${line}`;
+    if (candidate.length > lineBudget) {
+      break;
+    }
+    kept.push(line);
+    if (isFileLine(line, index)) {
+      keptFiles += 1;
+    }
+  }
+
+  const omitted = totalFiles - keptFiles;
+  if (omitted <= 0) {
+    return lines.join("\n");
+  }
+  return `${kept.join("\n")}\n  ...(+${omitted} more files)`;
+}
+
+export function renderFileTree(
+  paths: string[],
+  opts?: { maxChars?: number },
+): string {
   const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
     (left, right) => left.localeCompare(right),
   );
@@ -116,6 +157,11 @@ export function renderFileTree(paths: string[]): string {
   )) {
     lines.push(...renderTreeNode(childName, childNode, ""));
   }
-  return lines.join("\n");
+
+  const rendered = lines.join("\n");
+  if (opts?.maxChars !== undefined && rendered.length > opts.maxChars) {
+    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
+  }
+  return rendered;
 }
 

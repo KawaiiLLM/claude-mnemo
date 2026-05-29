@@ -40,4 +40,43 @@ describe("shared config", () => {
 
     expect(loadConfig(home)).toEqual(DEFAULT_CONFIG);
   });
+
+  test("loadConfig backfills new streaming knobs for legacy config files", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ mergeThresholdChars: 1500 }),
+    );
+
+    const config = loadConfig(home);
+    expect(config.maxMiniTurnChars).toBe(24_000);
+    expect(config.maxFlushAttempts).toBe(3);
+  });
+
+  test("loadConfig honors explicit streaming overrides", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ maxMiniTurnChars: 16_000, maxFlushAttempts: 5 }),
+    );
+
+    const config = loadConfig(home);
+    expect(config.maxMiniTurnChars).toBe(16_000);
+    expect(config.maxFlushAttempts).toBe(5);
+  });
+
+  test("loadConfig clamps streaming knobs to their floors", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ maxMiniTurnChars: 500, maxFlushAttempts: 0 }),
+    );
+
+    const config = loadConfig(home);
+    expect(config.maxMiniTurnChars).toBe(8192);
+    expect(config.maxFlushAttempts).toBe(1);
+  });
 });
