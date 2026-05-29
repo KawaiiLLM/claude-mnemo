@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-import type { PendingQueueItem } from "../db/pending-queue";
+import { deleteQueueItem, type PendingQueueItem } from "../db/pending-queue";
 import {
   getObservation,
   getObservationsForTurn,
@@ -9,6 +9,7 @@ import {
 import { getSession } from "../db/sessions";
 import { renderFileTree } from "../shared/file-tree";
 import { getTurnById, updateTurnById } from "../db/turns";
+import type { MnemoConfig } from "../shared/config";
 import type { SessionState } from "./server";
 
 export interface TurnPayload {
@@ -426,8 +427,254 @@ If no material change, respond with no tool calls. An empty response is the "lea
 </instruction>`;
 }
 
+// --- Mini-turn streaming primitives (D1-D7) -------------------------------
+//
+// A turn streams >=1 mini-turns. Per-field caps keep each mini-turn bounded;
+// the file tree is the only previously-uncapped field, so it is capped here.
+
+const PROMPT_CAP = 1000;
+const RESPONSE_CAP = 1000;
+export const FILE_TREE_CAP = 1500;
+const PRIOR_TITLE_CAP = 100;
+const PRIOR_CONTENT_CAP = 300;
+const PRIOR_INSIGHT_CAP = 150;
+// Worst-case rendered <prior_turn> block (capped fields + structure) <= this.
+export const PRIOR_TURN_RESERVE = 700;
+
+// Conservative fixed-overhead upper bounds. The obs budget for a slice is
+// maxMiniTurnChars minus these, so the rendered mini-turn is <= maxMiniTurnChars
+// by construction (D2). Streaming slices carry no tail (response/files/count);
+// final slices carry the full tail with two capped file trees.
+export const STREAMING_SLICE_OVERHEAD = PROMPT_CAP + PRIOR_TURN_RESERVE + 256;
+export const FINAL_SLICE_OVERHEAD =
+  PROMPT_CAP + RESPONSE_CAP + PRIOR_TURN_RESERVE + 2 * FILE_TREE_CAP + 512;
+
+// A streamed slice (mid-turn) renders slice="n" and no tail; a final slice
+// (turn-stop, turn was streamed) renders slice="n" final="true" + tail; a short
+// turn (never streamed) renders no slice/final attrs + tail (== today's block,
+// mergeable with other short turns).
+export type MiniTurnRole = "streaming" | "final" | "short";
+
+export interface MiniTurnPriorTurn {
+  title: string | null;
+  content: string | null;
+  insight: string | null;
+}
+
+export interface MiniTurnPayload {
+  turnId: number;
+  promptNumber: number;
+  role: MiniTurnRole;
+  partIndex: number;
+  isFinal: boolean;
+  needsPriorTurn: boolean;
+  prompt: string | null;
+  response: string | null;
+  obsBlocks: string[];
+  filesRead: string[];
+  filesModified: string[];
+  toolCallCount: number;
+  invalidatedKinds: string | null;
+  obsItems: PendingQueueItem[];
+  turnStopItem: PendingQueueItem | null;
+  size: number;
+}
+
+export interface BuildMiniTurnOptions {
+  role: MiniTurnRole;
+  partIndex: number;
+  needsPriorTurn: boolean;
+  turnStopItem: PendingQueueItem | null;
+}
+
+// Pure render of a single mini-turn. `priorTurn` is injected only when
+// needsPriorTurn (read fresh at flush time, never baked into the payload, D4).
+export function renderMiniTurn(
+  payload: MiniTurnPayload,
+  priorTurn: MiniTurnPriorTurn | null,
+): string {
+  const sliceAttr =
+    payload.role !== "short" ? ` slice="${payload.partIndex}"` : "";
+  const finalAttr = payload.role === "final" ? ` final="true"` : "";
+  const invalidatedAttr = payload.invalidatedKinds
+    ? ` invalidated="${payload.invalidatedKinds}"`
+    : "";
+  const hasTail = payload.role !== "streaming";
+
+  const lines = [
+    `  <turn id="T${payload.turnId}"${sliceAttr}${finalAttr}${invalidatedAttr}>`,
+  ];
+  for (const obsBlock of payload.obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(payload.prompt, PROMPT_CAP)}`);
+  if (hasTail) {
+    lines.push(`    response: ${truncateMiddle(payload.response, RESPONSE_CAP)}`);
+    lines.push("    files_read:");
+    lines.push(
+      ...renderFileTree(payload.filesRead, { maxChars: FILE_TREE_CAP })
+        .split("\n")
+        .map((line) => `      ${line}`),
+    );
+    lines.push("    files_modified:");
+    lines.push(
+      ...renderFileTree(payload.filesModified, { maxChars: FILE_TREE_CAP })
+        .split("\n")
+        .map((line) => `      ${line}`),
+    );
+    lines.push(`    tool_call_count: ${payload.toolCallCount}`);
+  }
+  lines.push("  </turn>");
+
+  if (payload.needsPriorTurn && priorTurn) {
+    // Caps keep the block within PRIOR_TURN_RESERVE so the budget holds (D2/D4).
+    lines.push(`  <prior_turn id="T${payload.turnId}">`);
+    lines.push(`    title: ${truncateMiddle(priorTurn.title, PRIOR_TITLE_CAP)}`);
+    lines.push(`    content: ${truncateMiddle(priorTurn.content, PRIOR_CONTENT_CAP)}`);
+    lines.push(`    insight: ${truncateMiddle(priorTurn.insight, PRIOR_INSIGHT_CAP)}`);
+    lines.push("  </prior_turn>");
+  }
+
+  return lines.join("\n");
+}
+
 export function createWorkerProcessors(db: Database) {
+  function buildObsBlocksFromItems(obsItems: PendingQueueItem[]): string[] {
+    return obsItems
+      .map((item) => {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          return null;
+        }
+        return buildObsBlock(
+          observation.id,
+          observation.toolName ?? "Tool",
+          observation.toolInput,
+          observation.toolResult,
+        );
+      })
+      .filter((block): block is string => block !== null);
+  }
+
   return {
+    // Build one mini-turn payload (streaming / final / short). For final/short
+    // the full-turn files are aggregated and persisted (as today); streaming
+    // slices carry no tail. Role booleans are computed once here (D6).
+    buildMiniTurn(
+      turnId: number,
+      obsItems: PendingQueueItem[],
+      opts: BuildMiniTurnOptions,
+    ): MiniTurnPayload | null {
+      const turn = getTurnById(db, turnId);
+      if (!turn || turn.status === "undone") {
+        return null;
+      }
+
+      const hasTail = opts.role !== "streaming";
+      const obsBlocks = buildObsBlocksFromItems(obsItems);
+
+      let filesRead: string[] = [];
+      let filesModified: string[] = [];
+      let toolCallCount = 0;
+      let invalidatedKinds: string | null = null;
+
+      if (hasTail) {
+        const aggregate = aggregateTurnFiles(db, turn.id);
+        updateTurnById(db, turn.id, {
+          filesRead: aggregate.filesRead,
+          filesModified: aggregate.filesModified,
+          toolCallCount: aggregate.toolCallCount,
+          updatedAtEpoch: Math.floor(Date.now() / 1000),
+        });
+        filesRead = aggregate.filesRead;
+        filesModified = aggregate.filesModified;
+        toolCallCount = aggregate.toolCallCount;
+        invalidatedKinds = formatInlineInvalidationKinds({
+          wasInterrupted: turn.wasInterrupted,
+          wasRolledBack: turn.wasRolledBack,
+        });
+      }
+
+      const payload: MiniTurnPayload = {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        role: opts.role,
+        partIndex: opts.partIndex,
+        isFinal: opts.role === "final",
+        needsPriorTurn: opts.needsPriorTurn,
+        prompt: turn.userPrompt,
+        response: turn.assistantResponse,
+        obsBlocks,
+        filesRead,
+        filesModified,
+        toolCallCount,
+        invalidatedKinds,
+        obsItems,
+        turnStopItem: opts.turnStopItem,
+        size: 0,
+      };
+      payload.size =
+        renderMiniTurn(payload, null).length +
+        (opts.needsPriorTurn ? PRIOR_TURN_RESERVE : 0);
+      return payload;
+    },
+
+    // Peel a budget-bounded prefix of buffered obs from the head. Always takes
+    // at least one obs (a single obs is <= ~720 chars < any floored budget), so
+    // the buffer always drains. chunk + rest partitions the input by seq.
+    peelMiniTurnObs(
+      bufferedObs: PendingQueueItem[],
+      budget: number,
+    ): { chunk: PendingQueueItem[]; rest: PendingQueueItem[] } {
+      const chunk: PendingQueueItem[] = [];
+      const rest: PendingQueueItem[] = [];
+      let used = 0;
+      let chunkClosed = false;
+      for (const item of bufferedObs) {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          // Stale/undone obs are dropped from the buffer (not carried to rest).
+          continue;
+        }
+        if (chunkClosed) {
+          rest.push(item);
+          continue;
+        }
+        const block = buildObsBlock(
+          observation.id,
+          observation.toolName ?? "Tool",
+          observation.toolInput,
+          observation.toolResult,
+        );
+        // +4 spaces of indentation per line under <turn>, approximated.
+        const blockSize = block.length + block.split("\n").length * 4;
+        if (chunk.length > 0 && used + blockSize > budget) {
+          chunkClosed = true;
+          rest.push(item);
+          continue;
+        }
+        chunk.push(item);
+        used += blockSize;
+      }
+      return { chunk, rest };
+    },
+
+    // The single side-effector (D7): mark this slice's obs skipped + delete its
+    // obs queue rows, and delete the turn-stop queue row when the slice carries
+    // it (final/short). Run identically on flushed and dropped (D8).
+    applyMiniTurnSideEffects(payload: MiniTurnPayload): void {
+      for (const item of payload.obsItems) {
+        const observation = getObservation(db, item.targetId);
+        if (observation && observation.status === "pending") {
+          updateObservation(db, observation.id, { status: "skipped" });
+        }
+        deleteQueueItem(db, item.seq);
+      }
+      if (payload.turnStopItem) {
+        deleteQueueItem(db, payload.turnStopItem.seq);
+      }
+    },
+
     buildTurnPayload(
       turnId: number,
       obsItems: PendingQueueItem[],
