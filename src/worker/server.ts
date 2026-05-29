@@ -38,6 +38,7 @@ import {
 } from "../shared/paths";
 import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import {
+  flagDeliveryDropped,
   getReminderItems,
   getSilencedReminderItems,
   markReminderItemsNotified,
@@ -49,7 +50,14 @@ import {
   markSubagentTurnsNotified,
 } from "./subagent-filter";
 import { detectCacheTtl } from "./cache-ttl";
-import { createWorkerProcessors, type TurnPayload } from "./processors";
+import {
+  buildBatchPrompt,
+  createWorkerProcessors,
+  FINAL_SLICE_OVERHEAD,
+  renderMiniTurn,
+  STREAMING_SLICE_OVERHEAD,
+  type MiniTurnPayload,
+} from "./processors";
 import {
   createWorkerQuerySession,
   type WorkerQuerySession,
@@ -72,12 +80,34 @@ export interface BufferState {
   items: PendingQueueItem[];
 }
 
-interface BatchEntry {
-  turns: TurnPayload[];
-  size: number;
-  sessionUpdated: boolean;
-  oldestTurnEpoch: number;
+// A flush unit = one outgoing message (D6). The discriminant pins the two
+// shapes at the type level: "merged" carries multiple short-turn mini-turns
+// that may be merged up to mergeThresholdChars; "slice" carries exactly one
+// mini-turn (streaming or final) from a turn that has streamed, never merged.
+type BatchEntry =
+  | {
+      kind: "merged";
+      miniTurns: MiniTurnPayload[];
+      attempts: number;
+      sessionUpdated: boolean;
+      size: number;
+      oldestTurnEpoch: number;
+    }
+  | {
+      kind: "slice";
+      miniTurn: MiniTurnPayload;
+      attempts: number;
+      sessionUpdated: boolean;
+      size: number;
+      oldestTurnEpoch: number;
+    };
+
+function batchMiniTurns(batch: BatchEntry): MiniTurnPayload[] {
+  return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
 }
+
+// Result state machine (D8) — flushOneBatchLocked never throws for control flow.
+type FlushOutcome = "flushed" | "retryLater" | "dropped" | "empty";
 
 export interface SessionState {
   sessionDbId: number;
@@ -85,6 +115,10 @@ export interface SessionState {
   contentSessionId: string | null;
   project: string | null;
   batchQueue: BatchEntry[];
+  // turnId -> next streaming partIndex. Presence means the turn has streamed
+  // at least one slice this process lifetime (D2/D6). Lost on restart; the
+  // turn-stop role decision also consults turn.status as a durable signal.
+  streamedParts: Map<number, number>;
   cacheTtlMs: number;
   lastInjectedSummaryEpoch?: number;
   nextBatchNeedsSessionContext: boolean;
@@ -102,19 +136,6 @@ export interface WorkerCoreDeps {
   db: Database;
   now?: () => number;
   nowMs?: () => number;
-  buildTurnPayloadImpl?: (
-    turnId: number,
-    obsItems: PendingQueueItem[],
-    turnStopItem: PendingQueueItem,
-  ) => TurnPayload | null;
-  processBatchImpl?: (
-    state: SessionState,
-    items: PendingQueueItem[],
-    options?: {
-      turnStopItems?: PendingQueueItem[];
-      sessionUpdated?: boolean;
-    },
-  ) => Promise<void>;
   pushSessionSummaryPromptImpl?: (
     state: SessionState,
     sessionId: number,
@@ -171,6 +192,7 @@ export interface WorkerCore {
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
+  runRetryTick(nowMs?: number): Promise<void>;
 }
 
 function defaultNoopDrain(): Promise<void> {
@@ -336,17 +358,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
 
-  const fallbackProcessors = deps.buildTurnPayloadImpl
-    ? null
-    : createWorkerProcessors(deps.db);
-  const buildTurnPayloadImpl =
-    deps.buildTurnPayloadImpl ??
-    fallbackProcessors!.buildTurnPayload;
-  const processBatchImpl =
-    deps.processBatchImpl ??
-    (async () => {
-      throw new Error("processBatch not implemented");
-    });
+  const processors = createWorkerProcessors(deps.db);
   const pushSessionSummaryPromptImpl =
     deps.pushSessionSummaryPromptImpl ?? (async () => {});
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {});
@@ -428,15 +440,56 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   function recalculateBatchSize(batch: BatchEntry): void {
-    batch.size = batch.turns.reduce((total, turn) => total + turn.size, 0);
+    batch.size = batchMiniTurns(batch).reduce(
+      (total, miniTurn) => total + miniTurn.size,
+      0,
+    );
   }
 
   function releaseBatchClaims(batch: BatchEntry): void {
-    for (const turn of batch.turns) {
-      for (const item of turn.obsItems) {
+    for (const miniTurn of batchMiniTurns(batch)) {
+      for (const item of miniTurn.obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      releaseQueueClaim(deps.db, turn.turnStopItem.seq);
+      if (miniTurn.turnStopItem) {
+        releaseQueueClaim(deps.db, miniTurn.turnStopItem.seq);
+      }
+    }
+  }
+
+  function deleteMiniTurnQueueItems(miniTurn: MiniTurnPayload): void {
+    for (const item of miniTurn.obsItems) {
+      deleteQueueItem(deps.db, item.seq);
+    }
+    if (miniTurn.turnStopItem) {
+      deleteQueueItem(deps.db, miniTurn.turnStopItem.seq);
+    }
+  }
+
+  // Assign the pending session-context flag to a batch (at most one batch
+  // carries it). Returns whether it was assigned, so the caller can restore it
+  // if the batch is later dropped (D6).
+  function assignSessionContextLocked(
+    state: SessionState,
+    batch: BatchEntry,
+  ): boolean {
+    if (!batch.sessionUpdated && state.nextBatchNeedsSessionContext) {
+      batch.sessionUpdated = true;
+      state.nextBatchNeedsSessionContext = false;
+      return true;
+    }
+    return false;
+  }
+
+  // A turn's streaming state is done once its final slice leaves the queue.
+  function clearStreamedPartsForBatch(
+    state: SessionState,
+    batch: BatchEntry,
+  ): void {
+    for (const miniTurn of batchMiniTurns(batch)) {
+      if (miniTurn.isFinal) {
+        state.streamedParts.delete(miniTurn.turnId);
+      }
     }
   }
 
@@ -475,25 +528,32 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const nextQueue: BatchEntry[] = [];
 
     for (const batch of state.batchQueue) {
-      const keptTurns = batch.turns.filter((turnPayload) => {
-        const turn = getTurnById(deps.db, turnPayload.turnId);
+      if (batch.kind === "slice") {
+        const turn = getTurnById(deps.db, batch.miniTurn.turnId);
         if (!turn || turn.status === "undone") {
-          for (const item of turnPayload.obsItems) {
-            deleteQueueItem(deps.db, item.seq);
-          }
-          deleteQueueItem(deps.db, turnPayload.turnStopItem.seq);
+          deleteMiniTurnQueueItems(batch.miniTurn);
+          continue;
+        }
+        nextQueue.push(batch);
+        continue;
+      }
+
+      const keptMiniTurns = batch.miniTurns.filter((miniTurn) => {
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (!turn || turn.status === "undone") {
+          deleteMiniTurnQueueItems(miniTurn);
           return false;
         }
         return true;
       });
 
-      if (keptTurns.length === 0) {
+      if (keptMiniTurns.length === 0) {
         continue;
       }
 
       const nextBatch: BatchEntry = {
         ...batch,
-        turns: keptTurns,
+        miniTurns: keptMiniTurns,
       };
       recalculateBatchSize(nextBatch);
       nextQueue.push(nextBatch);
@@ -542,6 +602,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       contentSessionId: null,
       project: null,
       batchQueue: [],
+      streamedParts: new Map<number, number>(),
       cacheTtlMs: 300_000,
       lastInjectedSummaryEpoch: 0,
       nextBatchNeedsSessionContext: hasPriorSessionSummary(sessionDbId),
@@ -763,44 +824,107 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     );
   }
 
-  async function flushOneBatchLocked(state: SessionState): Promise<void> {
-    pruneBatchQueueLocked(state);
-    const batch = state.batchQueue[0];
-    if (!batch) {
+  // Render a flush unit (one or more mini-turns) and push it as one message.
+  // prior_turn is read fresh here (D4) so each slice reflects the latest T
+  // record written by earlier slices. Throws on push failure (caller decides
+  // retry vs drop).
+  async function pushMiniTurnBatch(
+    state: SessionState,
+    batch: BatchEntry,
+  ): Promise<void> {
+    const session = getSession(deps.db, state.sessionDbId);
+    if (!session) {
       return;
     }
 
-    const obsItems = batch.turns.flatMap((turn) => turn.obsItems);
-    const turnStopItems = batch.turns.map((turn) => turn.turnStopItem);
+    const miniTurns = batchMiniTurns(batch);
+    let currentPrompt: string | null = null;
+    let latestPromptNumber = Number.NEGATIVE_INFINITY;
+    const blocks = miniTurns.map((miniTurn) => {
+      let priorTurn = null;
+      if (miniTurn.needsPriorTurn) {
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (turn) {
+          priorTurn = {
+            title: turn.title,
+            content: turn.content,
+            insight: turn.insight,
+          };
+        }
+      }
+      if (miniTurn.promptNumber > latestPromptNumber) {
+        latestPromptNumber = miniTurn.promptNumber;
+        currentPrompt = miniTurn.prompt;
+      }
+      return renderMiniTurn(miniTurn, priorTurn);
+    });
+
+    const sessionUpdated = batch.sessionUpdated;
+    await state.pushMessage(
+      buildBatchPrompt({
+        sessionId: session.id,
+        project: session.project,
+        sessionTitle: session.title,
+        currentPrompt,
+        priorTitle: sessionUpdated ? session.title : null,
+        priorContent: sessionUpdated ? session.content : null,
+        priorInsight: sessionUpdated ? session.insight : null,
+        priorNextSteps: sessionUpdated ? session.nextSteps : null,
+        sessionUpdated,
+        completedTurnBlocks: blocks,
+      }),
+    );
+
+    const freshSession = getSession(deps.db, session.id);
+    state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
+  }
+
+  async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
+    pruneBatchQueueLocked(state);
+    const batch = state.batchQueue[0];
+    if (!batch) {
+      return "empty";
+    }
 
     try {
-      await processBatchImpl(state, obsItems, {
-        turnStopItems,
-        sessionUpdated: batch.sessionUpdated,
-      });
-
-      for (const item of obsItems) {
-        deleteQueueItem(deps.db, item.seq);
-      }
-      for (const item of turnStopItems) {
-        deleteQueueItem(deps.db, item.seq);
-      }
+      await pushMiniTurnBatch(state, batch);
     } catch (error) {
-      for (const item of obsItems) {
-        releaseQueueClaim(deps.db, item.seq);
+      batch.attempts += 1;
+      if (batch.attempts < config.maxFlushAttempts) {
+        // Keep the batch at the head with its claims; retry tick re-flushes.
+        logger.warn?.("mini-turn flush failed, will retry", {
+          sessionDbId: state.sessionDbId,
+          attempts: batch.attempts,
+          error,
+        });
+        return "retryLater";
       }
-      for (const item of turnStopItems) {
-        releaseQueueClaim(deps.db, item.seq);
+      // Dropped: same side effects as a successful flush (so the queue
+      // lifecycle is identical) plus a delivery-dropped reminder per turn (D8).
+      logger.error?.("mini-turn flush dropped after repeated failures", {
+        sessionDbId: state.sessionDbId,
+        attempts: batch.attempts,
+        error,
+      });
+      for (const miniTurn of batchMiniTurns(batch)) {
+        processors.applyMiniTurnSideEffects(miniTurn);
+        flagDeliveryDropped(deps.db, miniTurn.turnId, now());
       }
       if (batch.sessionUpdated) {
         state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
       }
+      clearStreamedPartsForBatch(state, batch);
       state.batchQueue.shift();
-      throw error;
+      return "dropped";
     }
 
+    for (const miniTurn of batchMiniTurns(batch)) {
+      processors.applyMiniTurnSideEffects(miniTurn);
+    }
+    clearStreamedPartsForBatch(state, batch);
     state.batchQueue.shift();
     refreshPendingSessionContextFlag(state);
+    return "flushed";
   }
 
   async function flushAllBatchesLocked(state: SessionState): Promise<void> {
@@ -809,56 +933,140 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       if (state.batchQueue.length === 0) {
         return;
       }
-      await flushOneBatchLocked(state);
+      const outcome = await flushOneBatchLocked(state);
+      // retryLater leaves the blocking batch at the head (FIFO order holds);
+      // stop draining now so we don't burn attempts in a hot loop (D8).
+      if (outcome === "retryLater" || outcome === "empty") {
+        return;
+      }
     }
   }
 
-  async function enqueueCompletedTurnLocked(
+  function enqueueSliceLocked(
     state: SessionState,
-    turnPayload: TurnPayload,
-  ): Promise<void> {
+    miniTurn: MiniTurnPayload,
+    oldestTurnEpoch: number,
+  ): void {
+    const batch: BatchEntry = {
+      kind: "slice",
+      miniTurn,
+      attempts: 0,
+      size: miniTurn.size,
+      sessionUpdated: false,
+      oldestTurnEpoch,
+    };
+    assignSessionContextLocked(state, batch);
+    state.batchQueue.push(batch);
+  }
+
+  // Short turns (never streamed) merge into a trailing "merged" batch up to
+  // mergeThresholdChars, exactly as before. A slice batch is never a merge
+  // target (slices are solo).
+  function enqueueMergedTurnLocked(
+    state: SessionState,
+    miniTurn: MiniTurnPayload,
+  ): void {
     refreshPendingSessionContextFlag(state);
     const lastBatch = state.batchQueue[state.batchQueue.length - 1];
-    let targetBatch = lastBatch;
-    let createdBatch = false;
+    let targetBatch =
+      lastBatch && lastBatch.kind === "merged" ? lastBatch : undefined;
 
-    if (
-      !lastBatch ||
-      lastBatch.size + turnPayload.size >= config.mergeThresholdChars
-    ) {
+    if (!targetBatch || targetBatch.size + miniTurn.size >= config.mergeThresholdChars) {
       targetBatch = {
-        turns: [],
+        kind: "merged",
+        miniTurns: [],
+        attempts: 0,
         size: 0,
         sessionUpdated: false,
-        oldestTurnEpoch: turnPayload.turnStopItem.enqueuedAtEpoch,
+        oldestTurnEpoch: miniTurn.turnStopItem?.enqueuedAtEpoch ?? now(),
       };
       state.batchQueue.push(targetBatch);
-      createdBatch = true;
     }
 
-    targetBatch.turns.push(turnPayload);
-    targetBatch.size += turnPayload.size;
-    const assignedSessionUpdated =
-      !targetBatch.sessionUpdated && state.nextBatchNeedsSessionContext;
-    if (assignedSessionUpdated) {
-      targetBatch.sessionUpdated = true;
-      state.nextBatchNeedsSessionContext = false;
-    }
+    targetBatch.miniTurns.push(miniTurn);
+    targetBatch.size += miniTurn.size;
+    assignSessionContextLocked(state, targetBatch);
+  }
 
-    try {
-      if (state.batchQueue.length > config.maxQueuedBatches) {
-        await flushOneBatchLocked(state);
-      }
-    } catch (error) {
-      for (const batch of state.batchQueue) {
-        releaseBatchClaims(batch);
-      }
-      state.batchQueue = [];
-      if (assignedSessionUpdated) {
-        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
-      }
-      throw error;
+  // Peel a streaming slice out of the buffer and flush it immediately (D2).
+  async function enqueueAndFlushStreamingSliceLocked(
+    state: SessionState,
+    turnId: number,
+    chunk: PendingQueueItem[],
+  ): Promise<void> {
+    if (chunk.length === 0) {
+      return;
     }
+    const turn = getTurnById(deps.db, turnId);
+    const hadPriorDelivery =
+      state.streamedParts.has(turnId) || (turn ? turn.status !== "active" : false);
+    const partIndex = state.streamedParts.get(turnId) ?? 1;
+    const miniTurn = processors.buildMiniTurn(turnId, chunk, {
+      role: "streaming",
+      partIndex,
+      needsPriorTurn: hadPriorDelivery,
+      turnStopItem: null,
+    });
+    if (!miniTurn) {
+      for (const item of chunk) {
+        deleteQueueItem(deps.db, item.seq);
+      }
+      return;
+    }
+    state.streamedParts.set(turnId, partIndex + 1);
+    enqueueSliceLocked(state, miniTurn, chunk[0]?.enqueuedAtEpoch ?? now());
+    await flushAllBatchesLocked(state);
+  }
+
+  // Cheap synchronous pre-check (no lock): do buffered obs for this turn cross
+  // the streaming threshold? Authoritative re-check happens inside the lock.
+  function bufferedTurnObsExceedThreshold(
+    sessionDbId: number,
+    turnId: number,
+  ): boolean {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return false;
+    }
+    const turnObs = buffer.items.filter(
+      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId,
+    );
+    if (turnObs.length === 0) {
+      return false;
+    }
+    const threshold = config.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
+    return processors.peelMiniTurnObs(turnObs, threshold).rest.length > 0;
+  }
+
+  // During a turn: once buffered obs for the in-progress turn cross the
+  // streaming threshold, peel a chunk and flush it as a streaming slice (D2).
+  async function maybeStreamInProgressTurnLocked(
+    state: SessionState,
+    turnId: number,
+  ): Promise<void> {
+    pruneInProgressBuffer(state.sessionDbId);
+    const buffer = buffers.get(state.sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    const turnObs = buffer.items.filter(
+      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId,
+    );
+    if (turnObs.length === 0) {
+      return;
+    }
+    const threshold = config.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
+    const { chunk, rest } = processors.peelMiniTurnObs(turnObs, threshold);
+    if (rest.length === 0) {
+      // Buffered obs still fit under the threshold; keep accumulating.
+      return;
+    }
+    const chunkSeqs = new Set(chunk.map((item) => item.seq));
+    buffer.items = buffer.items.filter((item) => !chunkSeqs.has(item.seq));
+    if (buffer.items.length === 0) {
+      buffers.delete(state.sessionDbId);
+    }
+    await enqueueAndFlushStreamingSliceLocked(state, turnId, chunk);
   }
 
   async function processTurnStopLocked(
@@ -871,10 +1079,35 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return;
     }
 
-    const obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
+    let obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
     try {
-      const turnPayload = buildTurnPayloadImpl(turn.id, obsItems, turnStopItem);
-      if (!turnPayload) {
+      // Peel streaming slices until the remaining obs fit a final-slice render.
+      // A never-streamed short turn can still overflow once the tail is added,
+      // so peeling here is the budget-correctness backstop (D2).
+      const finalBudget = config.maxMiniTurnChars - FINAL_SLICE_OVERHEAD;
+      while (true) {
+        const { chunk, rest } = processors.peelMiniTurnObs(obsItems, finalBudget);
+        if (rest.length === 0) {
+          obsItems = chunk;
+          break;
+        }
+        await enqueueAndFlushStreamingSliceLocked(state, turn.id, chunk);
+        obsItems = rest;
+      }
+
+      // status !== active is the restart-durable "already streamed" signal:
+      // a short turn is still active at its own turn-stop; only a turn whose
+      // slice was remembered is non-active (D6).
+      const hadPriorDelivery =
+        state.streamedParts.has(turn.id) || turn.status !== "active";
+
+      const miniTurn = processors.buildMiniTurn(turn.id, obsItems, {
+        role: hadPriorDelivery ? "final" : "short",
+        partIndex: hadPriorDelivery ? state.streamedParts.get(turn.id) ?? 1 : 1,
+        needsPriorTurn: hadPriorDelivery,
+        turnStopItem,
+      });
+      if (!miniTurn) {
         for (const item of obsItems) {
           deleteQueueItem(deps.db, item.seq);
         }
@@ -882,7 +1115,18 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
 
-      await enqueueCompletedTurnLocked(state, turnPayload);
+      if (hadPriorDelivery) {
+        enqueueSliceLocked(state, miniTurn, turnStopItem.enqueuedAtEpoch);
+      } else {
+        enqueueMergedTurnLocked(state, miniTurn);
+      }
+
+      while (state.batchQueue.length > config.maxQueuedBatches) {
+        const outcome = await flushOneBatchLocked(state);
+        if (outcome === "retryLater" || outcome === "empty") {
+          break;
+        }
+      }
     } catch (error) {
       for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
@@ -912,6 +1156,28 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       if (item.kind === "obs") {
         getOrCreateBuffer(item.sessionDbId).items.push(item);
+        // Streaming trigger (D2): each per-tool wake buffers the obs, then we
+        // check whether the in-progress turn has crossed the slice threshold.
+        // A cheap lock-free pre-check avoids acquiring the session lock (and
+        // blocking the drain behind an in-flight flush) for the common
+        // under-threshold case; maybeStream re-checks authoritatively.
+        const observation = getObservation(deps.db, item.targetId);
+        if (
+          observation &&
+          !compactingSessions.has(item.sessionDbId) &&
+          bufferedTurnObsExceedThreshold(item.sessionDbId, observation.turnId)
+        ) {
+          try {
+            await withSessionProcessingLock(item.sessionDbId, async (state) => {
+              await maybeStreamInProgressTurnLocked(state, observation.turnId);
+            });
+          } catch (error) {
+            logger.error?.("streaming slice flush failed during drain", {
+              seq: item.seq,
+              error,
+            });
+          }
+        }
         continue;
       }
 
@@ -1192,6 +1458,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await tryKeepaliveSession(sessionDbId, currentMs);
       }
     },
+    // Reliable >=10s retry beat for flush units left in "retryLater" (D8).
+    // Mirrors the keepalive concurrency discipline: skip compacting sessions
+    // and do all queue work inside the session processing lock.
+    async runRetryTick(): Promise<void> {
+      for (const sessionDbId of [...sessions.keys()]) {
+        if (compactingSessions.has(sessionDbId)) {
+          continue;
+        }
+        await withSessionProcessingLock(sessionDbId, async (state) => {
+          pruneBatchQueueLocked(state);
+          const head = state.batchQueue[0];
+          if (head && head.attempts > 0 && head.attempts < config.maxFlushAttempts) {
+            // Bypass the keepalive cache-age gate: this is a failure retry.
+            await flushOneBatchLocked(state);
+          }
+        });
+      }
+    },
   };
 }
 
@@ -1262,10 +1546,6 @@ export function createWorkerFetchHandler(
           now: deps.now,
           nowMs: deps.nowMs,
           config: deps.config,
-          buildTurnPayloadImpl:
-            deps.buildTurnPayloadImpl ?? runtimeProcessors?.buildTurnPayload,
-          processBatchImpl:
-            deps.processBatchImpl ?? runtimeProcessors?.processBatch,
           pushSessionSummaryPromptImpl:
             deps.pushSessionSummaryPromptImpl ??
             runtimeProcessors?.pushSessionSummaryPrompt,
@@ -1451,8 +1731,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     now: deps.now,
     nowMs: deps.nowMs,
     config,
-    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? processors.buildTurnPayload,
-    processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl:
       deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
@@ -1514,6 +1792,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   setInterval(() => {
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
+    void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void checkForIdleWorkerShutdown(serverState, {

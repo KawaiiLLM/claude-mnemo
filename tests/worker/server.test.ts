@@ -45,6 +45,23 @@ function createTurn(
     .get(sessionId, promptNumber, userPrompt, assistantResponse)!.id;
 }
 
+// Streaming knobs default to large/quiet values so legacy batching tests
+// (tiny obs) never cross the slice threshold and exercise the short-turn path.
+const QUIET_STREAMING = { maxMiniTurnChars: 24_000, maxFlushAttempts: 3 };
+
+// Read the turn ids carried by a batch regardless of kind (merged | slice).
+function batchTurnIds(batch: {
+  kind: "merged" | "slice";
+  miniTurns?: Array<{ turnId: number }>;
+  miniTurn?: { turnId: number };
+}): number[] {
+  return batch.kind === "merged"
+    ? (batch.miniTurns ?? []).map((miniTurn) => miniTurn.turnId)
+    : batch.miniTurn
+      ? [batch.miniTurn.turnId]
+      : [];
+}
+
 function queueObs(
   db: Database,
   sessionId: number,
@@ -122,6 +139,7 @@ function primeSessionState(
     contentSessionId: existing?.contentSessionId ?? null,
     project: existing?.project ?? null,
     batchQueue: overrides.batchQueue ?? existing?.batchQueue ?? [],
+    streamedParts: existing?.streamedParts ?? new Map<number, number>(),
     cacheTtlMs: overrides.cacheTtlMs ?? existing?.cacheTtlMs ?? 300_000,
     nextBatchNeedsSessionContext:
       overrides.nextBatchNeedsSessionContext ??
@@ -592,10 +610,6 @@ describe("worker server", () => {
     });
 
     const sentPrompts: string[] = [];
-    const batchCalls: Array<{
-      itemIds: number[];
-      turnStopTargetIds: number[];
-    }> = [];
     const core = createWorkerCore({
       db,
       config: {
@@ -603,6 +617,7 @@ describe("worker server", () => {
         maxQueuedBatches: 3,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
+        ...QUIET_STREAMING,
       },
       now: () => 123,
       createWorkerQuerySessionImpl: ((_input) =>
@@ -615,33 +630,12 @@ describe("worker server", () => {
           },
           async close() {},
         }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      ...( {
-        processBatchImpl: async (
-          state: { pushMessage(prompt: string): Promise<void> },
-          items: Array<{ targetId: number }>,
-          options?: { turnStopItems?: Array<{ targetId: number }> },
-        ) => {
-          batchCalls.push({
-            itemIds: items.map((item) => item.targetId),
-            turnStopTargetIds: (options?.turnStopItems ?? []).map(
-              (item) => item.targetId,
-            ),
-          });
-          await state.pushMessage(
-            `<batch>${items.map((item) => `<obs id="O${item.targetId}"/>`).join("")}</batch>`,
-          );
-        },
-      } as Record<string, unknown>),
-    } as Parameters<typeof createWorkerCore>[0]);
+    });
 
     await core.scanAndDrainQueue();
 
-    expect(batchCalls).toEqual([
-      {
-        itemIds: [observationIds[0]!],
-        turnStopTargetIds: [turnIds[0]!],
-      },
-    ]);
+    // mergeThresholdChars=1 => each short turn its own merged batch; overflow
+    // beyond maxQueuedBatches=3 flushes the oldest (turn 1) as one message.
     expect(sentPrompts).toHaveLength(1);
     expect(sentPrompts[0]).toContain("<batch>");
     expect(sentPrompts[0]).toContain(`<obs id="O${observationIds[0]}"`);
@@ -650,9 +644,7 @@ describe("worker server", () => {
         ?.count,
     ).toBe(6);
     expect(
-      core.sessions
-        .get(sessionId)
-        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
+      core.sessions.get(sessionId)?.batchQueue.map(batchTurnIds),
     ).toEqual([[turnIds[1]!], [turnIds[2]!], [turnIds[3]!]]);
     expect(core.buffers.get(sessionId)?.items ?? []).toEqual([]);
   });
@@ -713,87 +705,6 @@ describe("worker server", () => {
     expect(sentPrompts[0]).not.toContain("user_request:");
   });
 
-  test("scanAndDrainQueue releases only the overflow batch claims when overflow flush fails", async () => {
-    const sessionId = upsertSession(db, {
-      contentSessionId: "worker-session-fail",
-      project: "/tmp/project-fail",
-      title: null,
-      content: null,
-      insight: null,
-      createdAtEpoch: 1,
-      updatedAtEpoch: 1,
-      completedAtEpoch: null,
-    }).id;
-    const turnIds = [
-      createTurn(db, sessionId, 1),
-      createTurn(db, sessionId, 2),
-      createTurn(db, sessionId, 3),
-      createTurn(db, sessionId, 4),
-    ];
-    const observationIds = turnIds.map((turnId, index) =>
-      queueObs(db, sessionId, turnId, 101 + index, `fail-${index + 1}`),
-    );
-    turnIds.forEach((turnId, index) => {
-      queueTurnStop(db, sessionId, turnId, 201 + index);
-    });
-
-    const logger = {
-      warn: mock(() => {}),
-      error: mock(() => {}),
-    };
-    const sentPrompts: string[] = [];
-    const core = createWorkerCore({
-      db,
-      config: {
-        mergeThresholdChars: 1,
-        maxQueuedBatches: 3,
-        keepaliveLeadMs: 60_000,
-        cacheMode: "auto",
-      },
-      now: () => 123,
-      logger,
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      ...( {
-        processBatchImpl: async () => {
-          throw new Error("batch failed");
-        },
-      } as Record<string, unknown>),
-    } as Parameters<typeof createWorkerCore>[0]);
-
-    await core.scanAndDrainQueue();
-
-    expect(
-      db
-        .query<{ claimed_at_epoch: number | null }, []>(
-          "SELECT claimed_at_epoch FROM pending_queue ORDER BY seq ASC",
-        )
-        .all()
-        .map((row) => row.claimed_at_epoch),
-    ).toEqual([123, 123, 123, null, 123, 123, 123, null]);
-    expect(
-      db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
-        ?.count,
-    ).toBe(8);
-    expect(
-      core.sessions
-        .get(sessionId)
-        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
-    ).toEqual([[turnIds[0]!], [turnIds[1]!], [turnIds[2]!]]);
-    expect(
-      (core.buffers.get(sessionId)?.items ?? []).map((item) => item.targetId),
-    ).toEqual([observationIds[3]!]);
-    expect(logger.error).toHaveBeenCalled();
-  });
-
   test("drainSessionCompletely flushes an already-buffered session before continuing compact drain", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-compact-buffer",
@@ -809,7 +720,6 @@ describe("worker server", () => {
     const observationId = queueObs(db, sessionId, turnId, 101, "compact-buffer");
     queueTurnStop(db, sessionId, turnId, 201);
 
-    const batchCalls: number[][] = [];
     const sentPrompts: string[] = [];
     const core = createWorkerCore({
       db,
@@ -824,21 +734,13 @@ describe("worker server", () => {
           },
           async close() {},
         }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      ...( {
-        processBatchImpl: async (
-          state: { pushMessage(prompt: string): Promise<void> },
-          items: Array<{ targetId: number }>,
-        ) => {
-          batchCalls.push(items.map((item) => item.targetId));
-          await state.pushMessage(`batch:${items.map((item) => item.targetId).join(",")}`);
-        },
-      } as Record<string, unknown>),
-    } as Parameters<typeof createWorkerCore>[0]);
+    });
 
     await core.scanAndDrainQueue();
     await core.drainSessionCompletely(sessionId);
 
-    expect(batchCalls).toEqual([[observationId]]);
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).toContain(`<obs id="O${observationId}"`);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
@@ -870,10 +772,7 @@ describe("worker server", () => {
       queueTurnStop(db, sessionId, turnId, 200 + index);
     });
 
-    const keepaliveCalls: Array<{
-      itemIds: number[];
-      turnStopTargetIds: number[];
-    }> = [];
+    const sentPrompts: string[] = [];
     const core = createWorkerCore({
       db,
       config: {
@@ -881,13 +780,18 @@ describe("worker server", () => {
         maxQueuedBatches: 5,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
+        ...QUIET_STREAMING,
       },
-      processBatchImpl: async (_state, items, options) => {
-        keepaliveCalls.push({
-          itemIds: items.map((item) => item.targetId),
-          turnStopTargetIds: (options?.turnStopItems ?? []).map((item) => item.targetId),
-        });
-      },
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
     await core.scanAndDrainQueue();
@@ -899,20 +803,15 @@ describe("worker server", () => {
 
     await core.runKeepaliveTick(1_240_000);
 
-    expect(keepaliveCalls).toEqual([
-      {
-        itemIds: [observationIds[0]!],
-        turnStopTargetIds: [turnIds[0]!],
-      },
-    ]);
+    // One reserve push flushes the oldest batch (turn 1) to keep cache warm.
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).toContain(`<obs id="O${observationIds[0]}"`);
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
     ).toBe(4);
     expect(
-      core.sessions
-        .get(sessionId)
-        ?.batchQueue.map((batch) => batch.turns.map((turn) => turn.turnId)),
+      core.sessions.get(sessionId)?.batchQueue.map(batchTurnIds),
     ).toEqual([[turnIds[1]!], [turnIds[2]!]]);
   });
 
@@ -1035,10 +934,18 @@ describe("worker server", () => {
         maxQueuedBatches: 5,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
+        ...QUIET_STREAMING,
       },
-      processBatchImpl: async () => {
-        await batchStarted;
-      },
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            await batchStarted;
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
     await core.scanAndDrainQueue();
@@ -1104,7 +1011,6 @@ describe("worker server", () => {
     const otherTurnId = createTurn(db, otherSessionId, 1);
     queueObs(db, otherSessionId, otherTurnId, 3, "other");
 
-    const processed: string[] = [];
     const pushed: number[] = [];
     const compacted: number[] = [];
     const closed: number[] = [];
@@ -1112,14 +1018,6 @@ describe("worker server", () => {
 
     const core = createWorkerCore({
       db,
-      processBatchImpl: async (_state, items, options) => {
-        processed.push(
-          `batch:${items.map((item) => item.targetId).join(",")}:${(options?.turnStopItems ?? []).map((item) => item.targetId).join(",") || "none"}`,
-        );
-        await _state.pushMessage(
-          `batch:${items.map((item) => item.targetId).join(",")}:${(options?.turnStopItems ?? []).map((item) => item.targetId).join(",") || "none"}`,
-        );
-      },
       pushSessionSummaryPromptImpl: async (_state, sessionId) => {
         pushed.push(sessionId);
         await _state.pushMessage(`summary:${sessionId}`);
@@ -1147,14 +1045,13 @@ describe("worker server", () => {
 
     await core.handleCompact(compactSessionId, "/tmp/session.jsonl");
 
-    expect(processed).toEqual([`batch:${compactObservationId}:${compactTurnId}`]);
     expect(pushed).toEqual([compactSessionId]);
     expect(compacted).toEqual([compactSessionId]);
     expect(closed).toEqual([]);
-    expect(sentPrompts).toEqual([
-      `batch:${compactObservationId}:${compactTurnId}`,
-      `summary:${compactSessionId}`,
-    ]);
+    // One rendered batch (the drained turn) then the summary push, in order.
+    expect(sentPrompts).toHaveLength(2);
+    expect(sentPrompts[0]).toContain(`<obs id="O${compactObservationId}"`);
+    expect(sentPrompts[1]).toBe(`summary:${compactSessionId}`);
     const state = core.sessions.get(compactSessionId);
     expect(state?.lastPushAt).toBe(0);
     expect(
@@ -1923,7 +1820,7 @@ describe("worker server", () => {
     const firstGate = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const started: number[] = [];
+    const started: string[] = [];
     const core = createWorkerCore({
       db,
       config: {
@@ -1931,17 +1828,22 @@ describe("worker server", () => {
         maxQueuedBatches: 0,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
+        ...QUIET_STREAMING,
       },
-      processBatchImpl: async (_state, _items, options) => {
-        const turnId = options?.turnStopItems?.[0]?.targetId;
-        if (!turnId) {
-          return;
-        }
-        started.push(turnId);
-        if (turnId === firstTurnId) {
-          await firstGate;
-        }
-      },
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            const tag = prompt.includes('id="T1"') ? "T1" : "T2";
+            started.push(tag);
+            if (tag === "T1") {
+              await firstGate;
+            }
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
     const first = core.processClaimedItem({
@@ -1968,11 +1870,11 @@ describe("worker server", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(started).toEqual([firstTurnId]);
+    expect(started).toEqual(["T1"]);
 
     releaseFirst();
     await Promise.all([first, second]);
-    expect(started).toEqual([firstTurnId, secondTurnId]);
+    expect(started).toEqual(["T1", "T2"]);
   });
 
   test("main clears the starting marker and exits cleanly when Bun.serve fails with EADDRINUSE", async () => {
@@ -2035,7 +1937,7 @@ describe("worker server", () => {
     queueTurnStop(db, sessionId, turnId, 201);
 
     let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
-    const processBatchImpl = mock(async () => {});
+    const sentPrompts: string[] = [];
     const originalSetInterval = globalThis.setInterval;
 
     globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
@@ -2047,7 +1949,17 @@ describe("worker server", () => {
           fetchHandler = options.fetch;
           return { stop() {} };
         }) as typeof Bun.serve),
-        processBatchImpl,
+        createWorkerQuerySessionImpl: ((_input) =>
+          ({
+            sessionId: "worker-query",
+            queryPid: 1234,
+            async sendPrompt(prompt: string) {
+              sentPrompts.push(prompt);
+              return { session_id: "worker-query" };
+            },
+            async close() {},
+          }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        isProcessAliveImpl: () => false,
         existsSyncImpl: () => false,
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
         writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
@@ -2068,7 +1980,9 @@ describe("worker server", () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(processBatchImpl).toHaveBeenCalledTimes(1);
+      // /flush -> core.flushSession drains + renders the buffered turn as one push.
+      expect(sentPrompts).toHaveLength(1);
+      expect(sentPrompts[0]).toContain(`<obs id="O`);
     } finally {
       globalThis.setInterval = originalSetInterval;
     }

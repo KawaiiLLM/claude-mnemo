@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_claude-mnemo_mnemo__recall",
+      "mcp__plugin_claude-mnemo_mnemo__timeline",
+      "mcp__mnemo__recall"
+    ]
+  }
+}
