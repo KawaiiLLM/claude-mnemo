@@ -216,6 +216,28 @@ export function readTranscriptEntries(transcriptPath: string): TranscriptEntry[]
   );
 }
 
+// The most recent assistant turn's prompt size = the session's *current*
+// context. Each API call's usage is a snapshot of the whole conversation
+// prefix (input + cache_read + cache_creation all count toward that one
+// request's prompt), so the last assistant entry's sum is the live context
+// size — not a running total across calls. Returns null when no usage is found
+// (missing/empty transcript), letting callers fall back to their default.
+export function readLatestContextTokens(transcriptPath: string): number | null {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role === "assistant" && entry.usage) {
+      const { inputTokens, cacheReadTokens, cacheCreationTokens } = entry.usage;
+      return (
+        (inputTokens ?? 0) +
+        (cacheReadTokens ?? 0) +
+        (cacheCreationTokens ?? 0)
+      );
+    }
+  }
+  return null;
+}
+
 export function isChainParticipant(entry: { type?: string }): boolean {
   return entry.type !== "progress";
 }

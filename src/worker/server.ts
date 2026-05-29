@@ -23,7 +23,10 @@ import {
   hasSkippedObservationsForTurn,
 } from "../db/observations";
 import { getTurnById } from "../db/turns";
-import { parseReplayTranscript } from "../shared/transcript-parser";
+import {
+  parseReplayTranscript,
+  readLatestContextTokens,
+} from "../shared/transcript-parser";
 import {
   claimNextItem,
   countQueueItemsForSession,
@@ -40,6 +43,7 @@ import {
   resolveTranscriptPath,
 } from "../shared/paths";
 import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
+import { createLogger } from "../shared/logger";
 import {
   flagDeliveryDropped,
   getReminderItems,
@@ -74,6 +78,9 @@ const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
 const TURN_STOP_TIMEOUT_MS = 30_000;
+// Memory agent runs on claude-sonnet-4-6 (200K window, no 1M beta). Used to
+// turn config.compactContextRatio into an absolute token gate for /compact.
+const AGENT_CONTEXT_WINDOW_TOKENS = 200_000;
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
@@ -146,6 +153,8 @@ export interface WorkerCoreDeps {
   closeSessionQueryImpl?: (sessionId: number) => Promise<void>;
   createWorkerQuerySessionImpl?: typeof createWorkerQuerySession;
   isProcessAliveImpl?: typeof isProcessAlive;
+  /** Live context size (tokens) of the memory agent, by agent session id. */
+  readAgentContextTokensImpl?: (agentSessionId: string) => number | null;
   logger?: Pick<Console, "warn" | "error">;
   config?: MnemoConfig;
 }
@@ -360,6 +369,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
+  const readAgentContextTokensImpl =
+    deps.readAgentContextTokensImpl ??
+    ((agentSessionId: string) =>
+      readLatestContextTokens(resolveTranscriptPath(DATA_DIR, agentSessionId)));
 
   const processors = createWorkerProcessors(deps.db);
   const pushSessionSummaryPromptImpl =
@@ -1338,6 +1351,32 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     resetClaimedQueueItems(deps.db);
   }
 
+  // Gate the worker-driven /compact on the agent's live context size. The most
+  // recent assistant turn's prompt (read from the agent transcript) is the true
+  // context gauge; we only compact once it reaches config.compactContextRatio of
+  // the window, so a small agent session is never needlessly compressed. When
+  // the context can't be read we default to compacting (prior behavior).
+  function shouldCompactAgent(state: SessionState): boolean {
+    if (!state.agentSessionId) {
+      return true;
+    }
+    let contextTokens: number | null;
+    try {
+      contextTokens = readAgentContextTokensImpl(state.agentSessionId);
+    } catch {
+      // Unreadable / concurrently-deleted transcript: unknown context, so
+      // fall back to compacting (prior behavior) rather than the outer catch
+      // mislabeling it "mnemosyne compact failed".
+      return true;
+    }
+    if (contextTokens === null) {
+      return true;
+    }
+    return (
+      contextTokens >= AGENT_CONTEXT_WINDOW_TOKENS * config.compactContextRatio
+    );
+  }
+
   async function handleCompact(
     sessionDbId: number,
     transcriptPath?: string | null,
@@ -1384,7 +1423,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       try {
         const state = sessions.get(sessionDbId);
-        if (state?.querySession) {
+        if (state?.querySession && shouldCompactAgent(state)) {
           await state.querySession.compact?.();
         }
       } catch (error) {
@@ -1536,6 +1575,32 @@ export function acquireWorkerSingleton(
 
   writeFileSyncImpl(startingPath, String(process.pid));
   return "acquired";
+}
+
+// Re-assert our pid handle. The initial write in `main` happens once, but a
+// peer worker's shutdown cleanup unlinks the *shared* pid path, and idle churn
+// can leave the live listener with no pid file (the port bind + starting marker
+// remain the real singleton guard; the pid file is only `client`'s kill
+// fallback). Called at boot and on every watchdog tick so the file tracks the
+// process that actually holds the port.
+export function ensureWorkerPidFile(deps: WorkerServerDeps = {}): void {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? writeFileSync;
+  const processImpl = deps.processImpl ?? process;
+  const ownPid = String(processImpl.pid);
+
+  if (existsSyncImpl(pidPath)) {
+    try {
+      if (readFileSyncImpl(pidPath, "utf8").trim() === ownPid) {
+        return;
+      }
+    } catch {
+      // Unreadable pid file — fall through and rewrite it.
+    }
+  }
+  writeFileSyncImpl(pidPath, ownPid);
 }
 
 export function createWorkerFetchHandler(
@@ -1730,9 +1795,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   }
 
   const BunServeImpl = deps.BunServeImpl ?? Bun.serve;
-  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? writeFileSync;
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
@@ -1751,6 +1814,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl,
+    logger: deps.logger ?? createLogger("MNEMOSYNE"),
   });
 
   core.recoverFromCrash();
@@ -1785,11 +1849,21 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   }
 
   try {
-    writeFileSyncImpl(pidPath, String(process.pid));
+    ensureWorkerPidFile(deps);
   } finally {
     try {
       unlinkSyncImpl(startingPath);
     } catch {}
+  }
+
+  // Heartbeat so the log file exists on a healthy boot (otherwise it only
+  // appears once a warn/error fires). Skipped when a logger is injected (tests).
+  if (!deps.logger) {
+    createLogger("MNEMOSYNE").info("worker started", {
+      pid: process.pid,
+      buildId: BUILD_ID,
+      port: WORKER_PORT,
+    });
   }
 
   const startupFlushSessionId = getStartupFlushSessionId(env);
@@ -1805,6 +1879,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     void core.scanAndDrainQueue();
   }
   setInterval(() => {
+    ensureWorkerPidFile(deps);
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
     void core.runRetryTick();

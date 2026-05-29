@@ -37,18 +37,19 @@ __export(server_exports, {
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
   createWorkerServerState: () => createWorkerServerState,
+  ensureWorkerPidFile: () => ensureWorkerPidFile,
   isProcessAlive: () => isProcessAlive2,
   main: () => main,
   registerShutdownCleanup: () => registerShutdownCleanup,
   shutdownGracefully: () => shutdownGracefully
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 var import_node_os3 = require("node:os");
-var import_node_path5 = require("node:path");
+var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.13-mpqommoa" : "dev";
+var BUILD_ID = true ? "0.2.14-mpqrjh81" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -989,6 +990,292 @@ function getTurnsForSession(db, sessionId) {
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 
+// src/shared/transcript-parser.ts
+var import_node_fs2 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function readLatestContextTokens(transcriptPath) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role === "assistant" && entry.usage) {
+      const { inputTokens, cacheReadTokens, cacheCreationTokens } = entry.usage;
+      return (inputTokens ?? 0) + (cacheReadTokens ?? 0) + (cacheCreationTokens ?? 0);
+    }
+  }
+  return null;
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs2.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs2.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  const entries = [];
+  rawTranscript.split("\n").forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: index + 1
+    });
+  });
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of entries) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+
 // src/db/pending-queue.ts
 var PENDING_QUEUE_SELECT = `
   SELECT
@@ -1333,7 +1620,7 @@ function initializeDatabase(db) {
 }
 
 // src/shared/config.ts
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 var DEFAULT_CONFIG = {
@@ -1342,27 +1629,52 @@ var DEFAULT_CONFIG = {
   keepaliveLeadMs: 6e4,
   cacheMode: "auto",
   maxMiniTurnChars: 24e3,
-  maxFlushAttempts: 3
+  maxFlushAttempts: 3,
+  compactContextRatio: 0.5
 };
 var MIN_MINI_TURN_CHARS = 8192;
 var MIN_FLUSH_ATTEMPTS = 1;
+var MIN_COMPACT_CONTEXT_RATIO = 0.1;
+var MAX_COMPACT_CONTEXT_RATIO = 0.95;
 function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
   return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function clampNumber(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
 }
 function clampConfig(config3) {
   return {
     ...config3,
-    maxMiniTurnChars: Math.max(config3.maxMiniTurnChars, MIN_MINI_TURN_CHARS),
-    maxFlushAttempts: Math.max(config3.maxFlushAttempts, MIN_FLUSH_ATTEMPTS)
+    maxMiniTurnChars: clampNumber(
+      config3.maxMiniTurnChars,
+      MIN_MINI_TURN_CHARS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxMiniTurnChars
+    ),
+    maxFlushAttempts: clampNumber(
+      config3.maxFlushAttempts,
+      MIN_FLUSH_ATTEMPTS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    compactContextRatio: clampNumber(
+      config3.compactContextRatio,
+      MIN_COMPACT_CONTEXT_RATIO,
+      MAX_COMPACT_CONTEXT_RATIO,
+      DEFAULT_CONFIG.compactContextRatio
+    )
   };
 }
 function loadConfig(homePath = (0, import_node_os2.homedir)()) {
   const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
+  if (!(0, import_node_fs3.existsSync)(path2)) {
     return DEFAULT_CONFIG;
   }
   try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const raw = JSON.parse((0, import_node_fs3.readFileSync)(path2, "utf8"));
     return clampConfig({
       ...DEFAULT_CONFIG,
       ...raw
@@ -1372,279 +1684,49 @@ function loadConfig(homePath = (0, import_node_os2.homedir)()) {
   }
 }
 
-// src/shared/transcript-parser.ts
-var import_node_fs3 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function getFirstTextContent(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
+// src/shared/logger.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+var LOG_PATH = (0, import_node_path4.join)(DATA_DIR, "claude-mnemo.log");
+var dirEnsured = false;
+function ensureLogDir() {
+  if (!dirEnsured) {
+    (0, import_node_fs4.mkdirSync)(DATA_DIR, { recursive: true });
+    dirEnsured = true;
   }
-  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
-  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
 }
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isInterruptedUserMarker(entry) {
-  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function isChainParticipant(entry) {
-  return entry.type !== "progress";
-}
-function collectInterruptedPromptIds(entries) {
-  const interruptedPromptIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry.promptId && isInterruptedUserMarker(entry)) {
-      interruptedPromptIds.add(entry.promptId);
-    }
-  }
-  return interruptedPromptIds;
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  const entries = [];
-  rawTranscript.split("\n").forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: index + 1
-    });
+function writeLog(level, component, message, context) {
+  const line = JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    component,
+    message,
+    context: context ?? null
   });
-  const uuidToIndex = /* @__PURE__ */ new Map();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      const existingIndex = uuidToIndex.get(entry.uuid);
-      if (existingIndex !== void 0) {
-        deduped[existingIndex] = mergeTranscriptEntries(
-          deduped[existingIndex],
-          entry
-        );
-        continue;
-      }
-      uuidToIndex.set(entry.uuid, deduped.length);
-    }
-    deduped.push(entry);
+  try {
+    ensureLogDir();
+    (0, import_node_fs4.appendFileSync)(LOG_PATH, `${line}
+`);
+  } catch {
+    process.stderr.write(`${line}
+`);
   }
-  return deduped;
 }
-function mergeUsage(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
+function createLogger(component) {
   return {
-    inputTokens: later?.inputTokens ?? first?.inputTokens,
-    outputTokens: later?.outputTokens ?? first?.outputTokens,
-    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
-    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
-  };
-}
-function mergeCompactMetadata(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    trigger: later?.trigger ?? first?.trigger,
-    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
-    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
-  };
-}
-function mergeTranscriptEntries(first, later) {
-  return {
-    type: later.type ?? first.type,
-    subtype: later.subtype ?? first.subtype,
-    role: later.role ?? first.role,
-    content: later.content ?? first.content,
-    promptId: first.promptId ?? later.promptId,
-    permissionMode: later.permissionMode ?? first.permissionMode,
-    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
-    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
-    isSidechain: later.isSidechain ?? first.isSidechain,
-    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
-    uuid: first.uuid ?? later.uuid,
-    parentUuid: later.parentUuid ?? first.parentUuid,
-    timestamp: first.timestamp ?? later.timestamp,
-    usage: mergeUsage(first.usage, later.usage),
-    durationMs: later.durationMs ?? first.durationMs,
-    messageCount: later.messageCount ?? first.messageCount,
-    compactMetadata: mergeCompactMetadata(
-      first.compactMetadata,
-      later.compactMetadata
-    ),
-    lineNumber: first.lineNumber
-  };
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
-    // an earlier true flag only because mergeTranscriptEntries uses ??.
-    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
-    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
-  };
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
-  const interruptedPromptIds = collectInterruptedPromptIds(entries);
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of entries) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
-      };
-      turns.push(currentTurn);
-      continue;
+    debug(message, context) {
+      writeLog("debug", component, message, context);
+    },
+    info(message, context) {
+      writeLog("info", component, message, context);
+    },
+    warn(message, context) {
+      writeLog("warn", component, message, context);
+    },
+    error(message, context) {
+      writeLog("error", component, message, context);
     }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
+  };
 }
 
 // src/worker/invalidation.ts
@@ -2041,7 +2123,7 @@ function markSubagentTurnsNotified(db, turns, updatedAtEpoch) {
 }
 
 // src/worker/cache-ttl.ts
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var DEFAULT_TAIL_LINES = 30;
 function detectCacheTtlFromLines(lines) {
   for (const line of [...lines].reverse()) {
@@ -2063,8 +2145,8 @@ function detectCacheTtlFromLines(lines) {
   return null;
 }
 async function detectCacheTtl(agentSessionId, projectPath, tailLines = DEFAULT_TAIL_LINES, deps = {}) {
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs4.readFileSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs5.existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs5.readFileSync;
   const resolveTranscriptPathImpl = deps.resolveTranscriptPathImpl ?? resolveTranscriptPath;
   const transcriptPath = resolveTranscriptPathImpl(projectPath, agentSessionId);
   if (!existsSyncImpl(transcriptPath)) {
@@ -2079,7 +2161,7 @@ async function detectCacheTtl(agentSessionId, projectPath, tailLines = DEFAULT_T
 }
 
 // src/shared/file-tree.ts
-var import_node_path4 = __toESM(require("node:path"), 1);
+var import_node_path5 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -2176,7 +2258,7 @@ function renderFileTree(paths, opts) {
   const root2 = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path4.default.posix.relative(root2, value);
+    const relative = import_node_path5.default.posix.relative(root2, value);
     if (!relative || relative === "") {
       continue;
     }
@@ -2627,7 +2709,7 @@ function createWorkerProcessors(db) {
 
 // src/worker/query-session.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
@@ -37250,7 +37332,7 @@ var MNEMO_ALLOWED_TOOLS = [
 ];
 
 // src/worker/agent-session.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 
 // src/db/memories.ts
@@ -39893,7 +39975,7 @@ function findClaudeOnPath() {
   return candidate || null;
 }
 function resolveClaudeCodeExecutablePath(sourceEnv = process.env, deps = {
-  existsSync: import_node_fs5.existsSync,
+  existsSync: import_node_fs6.existsSync,
   findOnPath: findClaudeOnPath
 }) {
   const explicitPath = sourceEnv.CLAUDE_CODE_PATH || sourceEnv.CLAUDE_CODE_EXECUTABLE;
@@ -40038,8 +40120,8 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const createSdkMcpServerImpl = deps.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = deps.toolImpl ?? tool;
   const spawnImpl = deps.spawnImpl ?? import_node_child_process2.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs6.existsSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs6.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs7.existsSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs7.mkdirSync;
   const killImpl = deps.killImpl ?? process.kill;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable();
@@ -40308,6 +40390,7 @@ var STALLED_QUERY_MS = 3e4;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
+var AGENT_CONTEXT_WINDOW_TOKENS = 2e5;
 function batchMiniTurns(batch) {
   return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
 }
@@ -40428,6 +40511,7 @@ function createWorkerCore(deps) {
   const compactingSessions = /* @__PURE__ */ new Set();
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
+  const readAgentContextTokensImpl = deps.readAgentContextTokensImpl ?? ((agentSessionId) => readLatestContextTokens(resolveTranscriptPath(DATA_DIR, agentSessionId)));
   const processors = createWorkerProcessors(deps.db);
   const pushSessionSummaryPromptImpl = deps.pushSessionSummaryPromptImpl ?? (async () => {
   });
@@ -41194,6 +41278,21 @@ ${prompt}` : prompt;
     }
     resetClaimedQueueItems(deps.db);
   }
+  function shouldCompactAgent(state) {
+    if (!state.agentSessionId) {
+      return true;
+    }
+    let contextTokens;
+    try {
+      contextTokens = readAgentContextTokensImpl(state.agentSessionId);
+    } catch {
+      return true;
+    }
+    if (contextTokens === null) {
+      return true;
+    }
+    return contextTokens >= AGENT_CONTEXT_WINDOW_TOKENS * config3.compactContextRatio;
+  }
   async function handleCompact(sessionDbId, transcriptPath) {
     compactingSessions.add(sessionDbId);
     try {
@@ -41232,7 +41331,7 @@ ${prompt}` : prompt;
       }
       try {
         const state = sessions.get(sessionDbId);
-        if (state?.querySession) {
+        if (state?.querySession && shouldCompactAgent(state)) {
           await state.querySession.compact?.();
         }
       } catch (error49) {
@@ -41333,14 +41432,14 @@ function acquireWorkerSingleton(deps = {}) {
   const now = deps.now ?? Date.now;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs7.existsSync;
-  const statSyncImpl = deps.statSyncImpl ?? import_node_fs7.statSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs7.readFileSync;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs7.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs7.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs8.existsSync;
+  const statSyncImpl = deps.statSyncImpl ?? import_node_fs8.statSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs8.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs8.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs8.unlinkSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs8.mkdirSync;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const dataDir = (0, import_node_path5.join)((0, import_node_os3.homedir)(), ".claude-mnemo");
+  const dataDir = (0, import_node_path6.join)((0, import_node_os3.homedir)(), ".claude-mnemo");
   if (!existsSyncImpl(dataDir)) {
     mkdirSyncImpl(dataDir, { recursive: true });
   }
@@ -41367,6 +41466,23 @@ function acquireWorkerSingleton(deps = {}) {
   }
   writeFileSyncImpl(startingPath, String(process.pid));
   return "acquired";
+}
+function ensureWorkerPidFile(deps = {}) {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs8.existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs8.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs8.writeFileSync;
+  const processImpl = deps.processImpl ?? process;
+  const ownPid = String(processImpl.pid);
+  if (existsSyncImpl(pidPath)) {
+    try {
+      if (readFileSyncImpl(pidPath, "utf8").trim() === ownPid) {
+        return;
+      }
+    } catch {
+    }
+  }
+  writeFileSyncImpl(pidPath, ownPid);
 }
 function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(deps.nowMs?.() ?? Date.now())) {
   const runtimeDb = deps.db ?? createDatabase();
@@ -41457,7 +41573,7 @@ async function shutdownGracefully(deps = {}) {
 }
 function createShutdownCleanup(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs8.unlinkSync;
   const processImpl = deps.processImpl ?? process;
   return async () => {
     try {
@@ -41502,10 +41618,8 @@ async function main(deps = {}) {
     process.exit(0);
   }
   const BunServeImpl = deps.BunServeImpl ?? Bun.serve;
-  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs7.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs7.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs8.unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config3 = deps.config ?? loadConfig();
@@ -41519,7 +41633,8 @@ async function main(deps = {}) {
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
-    isProcessAliveImpl: deps.isProcessAliveImpl
+    isProcessAliveImpl: deps.isProcessAliveImpl,
+    logger: deps.logger ?? createLogger("MNEMOSYNE")
   });
   core.recoverFromCrash();
   let server;
@@ -41550,12 +41665,19 @@ async function main(deps = {}) {
     throw error49;
   }
   try {
-    writeFileSyncImpl(pidPath, String(process.pid));
+    ensureWorkerPidFile(deps);
   } finally {
     try {
       unlinkSyncImpl(startingPath);
     } catch {
     }
+  }
+  if (!deps.logger) {
+    createLogger("MNEMOSYNE").info("worker started", {
+      pid: process.pid,
+      buildId: BUILD_ID,
+      port: WORKER_PORT
+    });
   }
   const startupFlushSessionId = getStartupFlushSessionId(env);
   if (startupFlushSessionId !== null) {
@@ -41570,6 +41692,7 @@ async function main(deps = {}) {
     void core.scanAndDrainQueue();
   }
   setInterval(() => {
+    ensureWorkerPidFile(deps);
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
     void core.runRetryTick();
@@ -41606,6 +41729,7 @@ if (isDirectExecution()) {
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,
+  ensureWorkerPidFile,
   isProcessAlive,
   main,
   registerShutdownCleanup,

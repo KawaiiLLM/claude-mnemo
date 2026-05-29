@@ -22,6 +22,7 @@ const RETRY_CONFIG: MnemoConfig = {
   cacheMode: "auto",
   maxMiniTurnChars: 8192,
   maxFlushAttempts: 3,
+  compactContextRatio: 0.5,
 };
 
 describe("flush retry / drop (D8)", () => {

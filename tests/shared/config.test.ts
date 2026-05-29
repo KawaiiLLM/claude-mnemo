@@ -79,4 +79,58 @@ describe("shared config", () => {
     expect(config.maxMiniTurnChars).toBe(8192);
     expect(config.maxFlushAttempts).toBe(1);
   });
+
+  test("compactContextRatio defaults to 0.5", () => {
+    expect(DEFAULT_CONFIG.compactContextRatio).toBe(0.5);
+    expect(loadConfig("/definitely-missing").compactContextRatio).toBe(0.5);
+  });
+
+  test("loadConfig clamps compactContextRatio into [0.1, 0.95]", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ compactContextRatio: 5 }),
+    );
+    expect(loadConfig(home).compactContextRatio).toBe(0.95);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ compactContextRatio: 0 }),
+    );
+    expect(loadConfig(home).compactContextRatio).toBe(0.1);
+  });
+
+  test("loadConfig honors an in-range compactContextRatio override", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ compactContextRatio: 0.7 }),
+    );
+
+    expect(loadConfig(home).compactContextRatio).toBe(0.7);
+  });
+
+  test("loadConfig falls back to defaults for non-finite numeric knobs", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    // Strings / junk must not become NaN (which would silently disable the
+    // compact gate and clamp comparisons everywhere).
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({
+        compactContextRatio: "bad",
+        maxMiniTurnChars: "nope",
+        maxFlushAttempts: null,
+      }),
+    );
+
+    const config = loadConfig(home);
+    expect(config.compactContextRatio).toBe(DEFAULT_CONFIG.compactContextRatio);
+    expect(config.maxMiniTurnChars).toBe(DEFAULT_CONFIG.maxMiniTurnChars);
+    expect(config.maxFlushAttempts).toBe(DEFAULT_CONFIG.maxFlushAttempts);
+    expect(Number.isFinite(config.compactContextRatio)).toBe(true);
+  });
 });

@@ -17,6 +17,7 @@ import {
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,
+  ensureWorkerPidFile,
   main,
 } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
@@ -47,7 +48,11 @@ function createTurn(
 
 // Streaming knobs default to large/quiet values so legacy batching tests
 // (tiny obs) never cross the slice threshold and exercise the short-turn path.
-const QUIET_STREAMING = { maxMiniTurnChars: 24_000, maxFlushAttempts: 3 };
+const QUIET_STREAMING = {
+  maxMiniTurnChars: 24_000,
+  maxFlushAttempts: 3,
+  compactContextRatio: 0.5,
+};
 
 // Read the turn ids carried by a batch regardless of kind (merged | slice).
 function batchTurnIds(batch: {
@@ -184,6 +189,47 @@ describe("worker server", () => {
     expect(writes).toEqual([
       { path: "/tmp/worker.starting", value: String(process.pid) },
     ]);
+  });
+
+  test("ensureWorkerPidFile writes our pid when the file is missing", () => {
+    const writes: Array<{ path: string; value: string }> = [];
+    ensureWorkerPidFile({
+      pidPath: "/tmp/worker.pid",
+      existsSyncImpl: () => false,
+      writeFileSyncImpl: ((path: string, value: string) => {
+        writes.push({ path, value });
+      }) as typeof import("node:fs").writeFileSync,
+      processImpl: { pid: 4242 } as NodeJS.Process,
+    });
+    expect(writes).toEqual([{ path: "/tmp/worker.pid", value: "4242" }]);
+  });
+
+  test("ensureWorkerPidFile rewrites a pid file that holds a different pid", () => {
+    const writes: Array<{ path: string; value: string }> = [];
+    ensureWorkerPidFile({
+      pidPath: "/tmp/worker.pid",
+      existsSyncImpl: () => true,
+      readFileSyncImpl: (() => "999\n") as typeof import("node:fs").readFileSync,
+      writeFileSyncImpl: ((path: string, value: string) => {
+        writes.push({ path, value });
+      }) as typeof import("node:fs").writeFileSync,
+      processImpl: { pid: 4242 } as NodeJS.Process,
+    });
+    expect(writes).toEqual([{ path: "/tmp/worker.pid", value: "4242" }]);
+  });
+
+  test("ensureWorkerPidFile is a no-op when the file already holds our pid", () => {
+    const writes: Array<{ path: string; value: string }> = [];
+    ensureWorkerPidFile({
+      pidPath: "/tmp/worker.pid",
+      existsSyncImpl: () => true,
+      readFileSyncImpl: (() => "4242") as typeof import("node:fs").readFileSync,
+      writeFileSyncImpl: ((path: string, value: string) => {
+        writes.push({ path, value });
+      }) as typeof import("node:fs").writeFileSync,
+      processImpl: { pid: 4242 } as NodeJS.Process,
+    });
+    expect(writes).toEqual([]);
   });
 
   test("createWorkerFetchHandler deduplicates concurrent wake scans", async () => {
@@ -1070,6 +1116,141 @@ describe("worker server", () => {
     ).toBe(1);
   });
 
+  function compactGateCore(
+    sessionId: number,
+    contextTokens: number | null,
+    compacted: number[],
+  ) {
+    return createWorkerCore({
+      db,
+      pushSessionSummaryPromptImpl: async (state) => {
+        await state.pushMessage("summary");
+      },
+      readAgentContextTokensImpl: () => contextTokens,
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "agent-sess" };
+          },
+          async compact() {
+            compacted.push(sessionId);
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+  }
+
+  test("handleCompact skips the agent /compact when context is below the ratio threshold", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "compact-low-ctx",
+      project: "/tmp/p-low",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    // 50K < 0.5 * 200K window → below threshold, skip.
+    await compactGateCore(sessionId, 50_000, compacted).handleCompact(
+      sessionId,
+      null,
+    );
+
+    expect(compacted).toEqual([]);
+  });
+
+  test("handleCompact runs the agent /compact when context is at/above the threshold", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "compact-high-ctx",
+      project: "/tmp/p-high",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    // 150K >= 0.5 * 200K window → compact.
+    await compactGateCore(sessionId, 150_000, compacted).handleCompact(
+      sessionId,
+      null,
+    );
+
+    expect(compacted).toEqual([sessionId]);
+  });
+
+  test("handleCompact compacts when the agent context size is unknown (null)", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "compact-null-ctx",
+      project: "/tmp/p-null",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    // Unknown context (no transcript) → fall back to compacting (prior behavior).
+    await compactGateCore(sessionId, null, compacted).handleCompact(
+      sessionId,
+      null,
+    );
+
+    expect(compacted).toEqual([sessionId]);
+  });
+
+  test("handleCompact still compacts when the context read throws (unreadable transcript)", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "compact-throw-ctx",
+      project: "/tmp/p-throw",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    const core = createWorkerCore({
+      db,
+      pushSessionSummaryPromptImpl: async (state) => {
+        await state.pushMessage("summary");
+      },
+      readAgentContextTokensImpl: () => {
+        throw new Error("EACCES");
+      },
+      createWorkerQuerySessionImpl: ((_input) =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(_prompt: string) {
+            return { session_id: "agent-sess" };
+          },
+          async compact() {
+            compacted.push(sessionId);
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.handleCompact(sessionId, null);
+
+    // A read error is treated as unknown context → compact (not skipped).
+    expect(compacted).toEqual([sessionId]);
+  });
+
   test("handleCompact skips compact step when querySession is null", async () => {
     const compactSessionId = upsertSession(db, {
       contentSessionId: "worker-session-compact-no-qs",
@@ -1890,6 +2071,7 @@ describe("worker server", () => {
     try {
       await main({
         db: createDatabase(":memory:"),
+        logger: { warn() {}, error() {} },
         BunServeImpl: mock(() => {
           const error = new Error("bind failed") as NodeJS.ErrnoException;
           error.code = "EADDRINUSE";
@@ -1945,6 +2127,7 @@ describe("worker server", () => {
     try {
       await main({
         db,
+        logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
           fetchHandler = options.fetch;
           return { stop() {} };

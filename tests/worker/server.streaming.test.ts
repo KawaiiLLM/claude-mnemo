@@ -26,6 +26,7 @@ const STREAM_CONFIG: MnemoConfig = {
   cacheMode: "auto",
   maxMiniTurnChars: 8192,
   maxFlushAttempts: 3,
+  compactContextRatio: 0.5,
 };
 
 function makeCore(

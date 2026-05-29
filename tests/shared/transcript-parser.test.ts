@@ -10,6 +10,7 @@ import {
   parseReplayTranscript,
   parseTranscript,
   readAllTranscriptEntries,
+  readLatestContextTokens,
 } from "../../src/shared/transcript-parser";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
@@ -909,5 +910,65 @@ describe("parseTranscript", () => {
     expect(entries[0].lineNumber).toBe(1);
     expect(entries[1].uuid).toBe("u2");
     expect(entries[1].lineNumber).toBe(3);
+  });
+});
+
+describe("readLatestContextTokens", () => {
+  const directories: string[] = [];
+
+  afterEach(() => {
+    for (const directory of directories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  function assistant(usage: Record<string, number>): Record<string, unknown> {
+    return {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        usage,
+      },
+    };
+  }
+
+  test("sums input + cache_read + cache_creation of the LAST assistant turn", () => {
+    const transcript = writeTranscript([
+      makeEntry({ promptId: "p1" }),
+      assistant({
+        input_tokens: 3,
+        cache_creation_input_tokens: 24061,
+        cache_read_input_tokens: 0,
+      }),
+      makeEntry({ promptId: "p2" }),
+      // The live context snapshot is this last assistant turn's prompt size.
+      assistant({
+        input_tokens: 3,
+        cache_creation_input_tokens: 1090,
+        cache_read_input_tokens: 140003,
+      }),
+      // A trailing user turn must not hide the last assistant usage.
+      makeEntry({ promptId: "p3" }),
+    ]);
+    directories.push(transcript.directory);
+
+    expect(readLatestContextTokens(transcript.path)).toBe(141096);
+  });
+
+  test("returns null when the transcript is missing", () => {
+    expect(
+      readLatestContextTokens("/definitely/missing/session.jsonl"),
+    ).toBeNull();
+  });
+
+  test("returns null when no assistant turn carries usage", () => {
+    const transcript = writeTranscript([
+      makeEntry({ promptId: "p1" }),
+      { type: "assistant", message: { role: "assistant", content: [] } },
+    ]);
+    directories.push(transcript.directory);
+
+    expect(readLatestContextTokens(transcript.path)).toBeNull();
   });
 });
