@@ -41,6 +41,7 @@ import {
   getReminderItems,
   getSilencedReminderItems,
   markReminderItemsNotified,
+  type ReminderItem,
 } from "./invalidation";
 import {
   detectAndCleanSubagentTurns,
@@ -232,15 +233,11 @@ function buildSubagentInvalidationEnvelope(promptNumbers: number[]): string {
 </subagent_invalidated>`;
 }
 
-function buildReminderEnvelope(
-  items: ReadonlyArray<{
-    promptNumber: number;
-    wasInterrupted: boolean;
-    wasRolledBack: boolean;
-    priorTitle: string | null;
-    priorContent: string | null;
-    replacementPromptNumber: number | null;
-  }>,
+// Pure line grammar over resolved reason hits — never names a concrete reason.
+// Each reason on a turn contributes its own render fragments (flagToken /
+// parenExtra / bodyLead / tail); this function only assembles them (D0).
+export function buildReminderEnvelope(
+  items: ReadonlyArray<ReminderItem>,
 ): string {
   function truncateReminderContent(value: string | null): string | null {
     const text = value?.trim().replace(/\s+/g, " ");
@@ -254,29 +251,36 @@ function buildReminderEnvelope(
   }
 
   const lines = items.map((item) => {
-    const flags =
-      item.wasInterrupted && item.wasRolledBack
-        ? "was_interrupted+was_rolled_back"
-        : item.wasInterrupted
-          ? "was_interrupted"
-          : item.wasRolledBack
-            ? "was_rolled_back"
-            : "fresh";
-    const replacementClause =
-      item.replacementPromptNumber !== null
-        ? `, replaced by T${item.replacementPromptNumber}`
-        : "";
-    const summaryParts: string[] = [];
+    const flags = item.reasons.map((reason) => reason.flagToken).join("+");
+    const parenExtras = item.reasons
+      .map((reason) => reason.parenExtra)
+      .filter((extra): extra is string => extra !== null);
+    const parenInner = [flags, ...parenExtras].join(", ");
+
+    const leadParts: string[] = [];
     if (item.priorTitle) {
-      summaryParts.push(`"${item.priorTitle}"`);
+      leadParts.push(`"${item.priorTitle}"`);
     }
+    for (const reason of item.reasons) {
+      if (reason.bodyLead) {
+        leadParts.push(reason.bodyLead);
+      }
+    }
+
+    const reasonTails = item.reasons
+      .map((reason) => reason.tail)
+      .filter((tail): tail is string => tail !== null);
     const truncatedContent = truncateReminderContent(item.priorContent);
-    if (truncatedContent) {
-      summaryParts.push(truncatedContent);
-    }
-    const summaryClause =
-      summaryParts.length > 0 ? `: ${summaryParts.join(" -- ")}` : "";
-    return `  - T${item.promptNumber} (${flags}${replacementClause})${summaryClause}`;
+    const tailParts =
+      reasonTails.length > 0
+        ? reasonTails
+        : truncatedContent
+          ? [truncatedContent]
+          : [];
+
+    const bodyParts = [...leadParts, ...tailParts];
+    const bodyClause = bodyParts.length > 0 ? `: ${bodyParts.join(" -- ")}` : "";
+    return `  - T${item.promptNumber} (${parenInner})${bodyClause}`;
   });
 
   return `<reminder>

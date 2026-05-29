@@ -208,11 +208,15 @@ describe("worker invalidation", () => {
     expect(getReminderItems(db, sessionId)).toEqual([
       expect.objectContaining({
         promptNumber: 3,
-        wasInterrupted: false,
-        wasRolledBack: true,
         priorTitle: "Title 3",
         priorContent: "Content 3",
-        replacementPromptNumber: null,
+        reasons: [
+          expect.objectContaining({
+            key: "rollback",
+            flagToken: "was_rolled_back",
+            parenExtra: null,
+          }),
+        ],
       }),
       expect.objectContaining({ promptNumber: 4 }),
       expect.objectContaining({ promptNumber: 5 }),
@@ -226,7 +230,12 @@ describe("worker invalidation", () => {
         promptNumber: 12,
         priorTitle: "Title 12",
         priorContent: "Content 12",
-        replacementPromptNumber: null,
+        reasons: [
+          expect.objectContaining({
+            key: "rollback",
+            parenExtra: null,
+          }),
+        ],
       }),
     ]);
   });
@@ -246,9 +255,13 @@ describe("worker invalidation", () => {
     expect(getReminderItems(db, sessionId)).toEqual([
       expect.objectContaining({
         promptNumber: 1,
-        wasInterrupted: true,
-        wasRolledBack: false,
-        replacementPromptNumber: null,
+        reasons: [
+          expect.objectContaining({
+            key: "interrupt",
+            flagToken: "was_interrupted",
+            parenExtra: null,
+          }),
+        ],
       }),
     ]);
   });
@@ -319,9 +332,13 @@ describe("worker invalidation", () => {
     expect(getReminderItems(db, sessionId, transcript.path)).toEqual([
       expect.objectContaining({
         promptNumber: 1,
-        wasInterrupted: false,
-        wasRolledBack: true,
-        replacementPromptNumber: 2,
+        reasons: [
+          expect.objectContaining({
+            key: "rollback",
+            flagToken: "was_rolled_back",
+            parenExtra: "replaced by T2",
+          }),
+        ],
       }),
     ]);
   });
@@ -341,10 +358,14 @@ describe("worker invalidation", () => {
     expect(getReminderItems(db, sessionId)).toEqual([
       expect.objectContaining({
         promptNumber: 2,
-        wasInterrupted: false,
-        wasRolledBack: true,
         priorTitle: "Completed title",
         priorContent: "Completed content",
+        reasons: [
+          expect.objectContaining({
+            key: "rollback",
+            flagToken: "was_rolled_back",
+          }),
+        ],
       }),
     ]);
   });

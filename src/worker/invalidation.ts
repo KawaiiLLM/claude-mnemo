@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { getTurnById, getTurnsForSession, updateTurnById } from "../db/turns";
+import type { TurnRecord } from "../db/turns";
 import {
   detectInterruptedPromptIds,
   isChainParticipant,
@@ -8,18 +9,65 @@ import {
   type TranscriptEntryWithLineNumber,
 } from "../shared/transcript-parser";
 
+// --- Reminder reason registry (D0) ----------------------------------------
+//
+// A reminder reason is a first-class descriptor that owns its *selection*
+// (which turns qualify), its *tag lifecycle* (pending -> notified), its
+// *private render data*, and its *render fragments*. `buildReminderEnvelope`
+// (in server.ts) only owns the line grammar and never names a concrete reason.
+//
+// Tag namespace invariant: internal reminder tags are ALWAYS colon-namespaced
+// (`reason:sub:kind`). The agent's freeform topic tags are hyphenated keywords.
+// The two coexist in `turns.tags` and stay disjoint by convention — a reason's
+// `key` is a registry identifier only and is NEVER written to or compared
+// against the `tags` column. Only `pendingTag`/`notifiedTag` (colon strings)
+// are written.
+
+/** Cross-turn context computed once per collection pass, handed to `data()`. */
+export interface ReminderContext {
+  replacementByPromptId: Map<string, string>;
+  promptNumberByPromptId: Map<string, number>;
+}
+
+export interface ReminderReason<D = unknown> {
+  /** Registry identifier. Never written to or compared against `tags`. */
+  key: string;
+  /** Colon-namespaced tag written while the reminder is awaiting delivery. */
+  pendingTag: string;
+  /** Colon-namespaced tag written once the reminder has been delivered. */
+  notifiedTag: string;
+  /** Per-reason status policy (no longer hard-coded in the selector). */
+  qualifies(turn: TurnRecord): boolean;
+  /** Private render data; never flattened onto `ReminderItem`. */
+  data(turn: TurnRecord, ctx: ReminderContext): D;
+  /** Flag token inside the `(...)`, joined by `+` (e.g. "was_rolled_back"). */
+  flagToken(turn: TurnRecord, data: D): string;
+  /** Extra clause inside the `(...)`, after flags (e.g. "replaced by T43"). */
+  parenExtra?(turn: TurnRecord, data: D): string | null;
+  /** Lead body segment before content (e.g. `prompt="..."` when no title). */
+  bodyLead?(turn: TurnRecord, data: D): string | null;
+  /** Tail body segment; when present it replaces `priorContent` after `--`. */
+  tail?(turn: TurnRecord, data: D): string | null;
+}
+
+/** A reason that fired on a specific turn, with its render fragments resolved. */
+export interface ReminderReasonHit {
+  key: string;
+  pendingTag: string;
+  notifiedTag: string;
+  flagToken: string;
+  parenExtra: string | null;
+  bodyLead: string | null;
+  tail: string | null;
+}
+
 export interface ReminderItem {
   turnId: number;
   promptNumber: number;
-  wasInterrupted: boolean;
-  wasRolledBack: boolean;
   priorTitle: string | null;
   priorContent: string | null;
-  replacementPromptNumber: number | null;
-  pendingKinds: InvalidationKind[];
+  reasons: ReminderReasonHit[];
 }
-
-type InvalidationKind = "interrupt" | "rollback";
 
 interface RollbackDetection {
   rolledBackPromptIds: Set<string>;
@@ -27,40 +75,79 @@ interface RollbackDetection {
 }
 
 const REMINDER_LIMIT = 10;
-const PENDING_TAGS: Record<InvalidationKind, string> = {
-  interrupt: "invalidated:notify-pending:interrupt",
-  rollback: "invalidated:notify-pending:rollback",
-};
-const NOTIFIED_TAGS: Record<InvalidationKind, string> = {
-  interrupt: "invalidated:notified:interrupt",
-  rollback: "invalidated:notified:rollback",
+
+const interruptReason: ReminderReason = {
+  key: "interrupt",
+  pendingTag: "invalidated:notify-pending:interrupt",
+  notifiedTag: "invalidated:notified:interrupt",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: () => null,
+  flagToken: () => "was_interrupted",
 };
 
-function getPendingKinds(tags: string[]): InvalidationKind[] {
-  return (["interrupt", "rollback"] as const).filter((kind) =>
-    tags.includes(PENDING_TAGS[kind]),
-  );
+interface RollbackData {
+  replacementPromptNumber: number | null;
 }
 
-function addPendingKind(tags: string[], kind: InvalidationKind): string[] {
-  if (tags.includes(PENDING_TAGS[kind]) || tags.includes(NOTIFIED_TAGS[kind])) {
+const rollbackReason: ReminderReason<RollbackData> = {
+  key: "rollback",
+  pendingTag: "invalidated:notify-pending:rollback",
+  notifiedTag: "invalidated:notified:rollback",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: (turn, ctx) => {
+    const replacementPromptId = turn.contentPromptId
+      ? ctx.replacementByPromptId.get(turn.contentPromptId)
+      : undefined;
+    return {
+      replacementPromptNumber: replacementPromptId
+        ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null
+        : null,
+    };
+  },
+  flagToken: () => "was_rolled_back",
+  parenExtra: (_turn, data) =>
+    data.replacementPromptNumber !== null
+      ? `replaced by T${data.replacementPromptNumber}`
+      : null,
+};
+
+// Registered reasons. Adding a reason is array-only — collection, notification,
+// limit/silenced splitting, and envelope grammar all become available for free.
+const REMINDER_REASONS: ReminderReason<any>[] = [interruptReason, rollbackReason];
+
+function renderReasonHit<D>(
+  reason: ReminderReason<D>,
+  turn: TurnRecord,
+  ctx: ReminderContext,
+): ReminderReasonHit {
+  const data = reason.data(turn, ctx);
+  return {
+    key: reason.key,
+    pendingTag: reason.pendingTag,
+    notifiedTag: reason.notifiedTag,
+    flagToken: reason.flagToken(turn, data),
+    parenExtra: reason.parenExtra?.(turn, data) ?? null,
+    bodyLead: reason.bodyLead?.(turn, data) ?? null,
+    tail: reason.tail?.(turn, data) ?? null,
+  };
+}
+
+function addPendingReason(tags: string[], reason: ReminderReason): string[] {
+  if (tags.includes(reason.pendingTag) || tags.includes(reason.notifiedTag)) {
     return tags;
   }
-
-  return [...tags, PENDING_TAGS[kind]];
+  return [...tags, reason.pendingTag];
 }
 
-function markKindsNotified(tags: string[], kinds: InvalidationKind[]): string[] {
+function markHitsNotified(tags: string[], hits: ReminderReasonHit[]): string[] {
   let nextTags = tags.filter(
-    (tag) => !kinds.some((kind) => tag === PENDING_TAGS[kind]),
+    (tag) => !hits.some((hit) => tag === hit.pendingTag),
   );
-
-  for (const kind of kinds) {
-    if (!nextTags.includes(NOTIFIED_TAGS[kind])) {
-      nextTags = [...nextTags, NOTIFIED_TAGS[kind]];
+  for (const hit of hits) {
+    if (!nextTags.includes(hit.notifiedTag)) {
+      nextTags = [...nextTags, hit.notifiedTag];
     }
   }
-
   return nextTags;
 }
 
@@ -212,10 +299,10 @@ export function applyInvalidation(
     let nextTags = turn.tags;
 
     if (detectedInterrupt && !turn.wasInterrupted) {
-      nextTags = addPendingKind(nextTags, "interrupt");
+      nextTags = addPendingReason(nextTags, interruptReason);
     }
     if (detectedRollback && !turn.wasRolledBack) {
-      nextTags = addPendingKind(nextTags, "rollback");
+      nextTags = addPendingReason(nextTags, rollbackReason);
     }
 
     if (
@@ -236,55 +323,60 @@ export function applyInvalidation(
   }
 }
 
-function selectPendingReminderItems(
-  db: Database,
-  sessionDbId: number,
+function buildReminderContext(
+  turns: TurnRecord[],
   transcriptPath?: string,
-): ReminderItem[] {
-  const turns = getTurnsForSession(db, sessionDbId);
+): ReminderContext {
   const promptNumberByPromptId = new Map(
     turns
       .filter((turn) => turn.contentPromptId)
       .map((turn) => [turn.contentPromptId!, turn.promptNumber] as const),
   );
-  const replacementByPromptId =
-    transcriptPath ? detectRollbackTopology(transcriptPath).replacementByPromptId : new Map<string, string>();
-  const reminderTurns = turns
-    .filter(
-      (turn) =>
-        turn.status !== "active" &&
-        turn.status !== "undone" &&
-        getPendingKinds(turn.tags).length > 0,
-    )
-    .sort((left, right) => {
-      const leftEpoch = left.updatedAtEpoch ?? left.createdAtEpoch;
-      const rightEpoch = right.updatedAtEpoch ?? right.createdAtEpoch;
-      if (rightEpoch !== leftEpoch) {
-        return rightEpoch - leftEpoch;
+  const replacementByPromptId = transcriptPath
+    ? detectRollbackTopology(transcriptPath).replacementByPromptId
+    : new Map<string, string>();
+  return { replacementByPromptId, promptNumberByPromptId };
+}
+
+function collectReminderItems(
+  db: Database,
+  sessionDbId: number,
+  transcriptPath?: string,
+): ReminderItem[] {
+  const turns = getTurnsForSession(db, sessionDbId);
+  const ctx = buildReminderContext(turns, transcriptPath);
+
+  const ranked: Array<{ item: ReminderItem; sortEpoch: number }> = [];
+  for (const turn of turns) {
+    const hits: ReminderReasonHit[] = [];
+    for (const reason of REMINDER_REASONS) {
+      if (turn.tags.includes(reason.pendingTag) && reason.qualifies(turn)) {
+        hits.push(renderReasonHit(reason, turn, ctx));
       }
-      return right.promptNumber - left.promptNumber;
+    }
+    if (hits.length === 0) {
+      continue;
+    }
+    ranked.push({
+      item: {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        priorTitle: turn.title,
+        priorContent: turn.content,
+        reasons: hits,
+      },
+      sortEpoch: turn.updatedAtEpoch ?? turn.createdAtEpoch,
     });
+  }
 
-  return reminderTurns.map((turn) => {
-    const replacementPromptId =
-      turn.wasRolledBack && turn.contentPromptId
-        ? replacementByPromptId.get(turn.contentPromptId) ?? null
-        : null;
-
-    return {
-      turnId: turn.id,
-      promptNumber: turn.promptNumber,
-      wasInterrupted: turn.wasInterrupted,
-      wasRolledBack: turn.wasRolledBack,
-      priorTitle: turn.title,
-      priorContent: turn.content,
-      replacementPromptNumber:
-        replacementPromptId
-          ? promptNumberByPromptId.get(replacementPromptId) ?? null
-          : null,
-      pendingKinds: getPendingKinds(turn.tags),
-    };
+  ranked.sort((left, right) => {
+    if (right.sortEpoch !== left.sortEpoch) {
+      return right.sortEpoch - left.sortEpoch;
+    }
+    return right.item.promptNumber - left.item.promptNumber;
   });
+
+  return ranked.map((entry) => entry.item);
 }
 
 export function getReminderItems(
@@ -292,7 +384,7 @@ export function getReminderItems(
   sessionDbId: number,
   transcriptPath?: string,
 ): ReminderItem[] {
-  return selectPendingReminderItems(db, sessionDbId, transcriptPath)
+  return collectReminderItems(db, sessionDbId, transcriptPath)
     .slice(0, REMINDER_LIMIT)
     .sort((left, right) => left.promptNumber - right.promptNumber);
 }
@@ -302,7 +394,7 @@ export function getSilencedReminderItems(
   sessionDbId: number,
   transcriptPath?: string,
 ): ReminderItem[] {
-  return selectPendingReminderItems(db, sessionDbId, transcriptPath).slice(
+  return collectReminderItems(db, sessionDbId, transcriptPath).slice(
     REMINDER_LIMIT,
   );
 }
@@ -320,7 +412,7 @@ export function markReminderItemsNotified(
 
     updateTurnById(db, turn.id, {
       status: turn.status,
-      replaceTags: markKindsNotified(turn.tags, item.pendingKinds),
+      replaceTags: markHitsNotified(turn.tags, item.reasons),
       updatedAtEpoch,
     });
   }
