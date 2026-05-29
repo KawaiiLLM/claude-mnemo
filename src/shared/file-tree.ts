@@ -118,7 +118,13 @@ export function renderFileTree(
   }
 
   if (uniquePaths.length === 1) {
-    return uniquePaths[0] ?? "(none)";
+    const only = uniquePaths[0] ?? "(none)";
+    // Honor the maxChars contract even for a single (pathologically long) path.
+    if (opts?.maxChars !== undefined && only.length > opts.maxChars) {
+      const marker = "...";
+      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
+    }
+    return only;
   }
 
   const root = commonPathPrefix(uniquePaths);

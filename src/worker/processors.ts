@@ -479,7 +479,13 @@ export function createWorkerProcessors(db: Database) {
 
       if (hasTail) {
         const aggregate = aggregateTurnFiles(db, turn.id);
+        // Pass status explicitly so persisting the file aggregation does NOT
+        // auto-promote an active turn to extracted (turns.ts auto-promote).
+        // Status changes only when the agent remembers; otherwise a dropped
+        // flush would wrongly render "partially extracted" instead of "not yet
+        // extracted" (delivery-dropped reminder, D8/D9).
         updateTurnById(db, turn.id, {
+          status: turn.status,
           filesRead: aggregate.filesRead,
           filesModified: aggregate.filesModified,
           toolCallCount: aggregate.toolCallCount,

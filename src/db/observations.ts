@@ -202,6 +202,22 @@ export function getObservationsForTurn(
     .filter((observation): observation is ObservationRecord => observation !== null);
 }
 
+// A turn has at least one skipped observation iff a mini-turn for it was
+// already delivered (obs are skipped only by applyMiniTurnSideEffects). This
+// survives a worker restart (recoverFromCrash resets queue claims, not obs
+// status), so it is the durable "already streamed/delivered" signal.
+export function hasSkippedObservationsForTurn(
+  db: Database,
+  turnId: number,
+): boolean {
+  const row = db
+    .query<{ count: number }, [number]>(
+      "SELECT COUNT(*) AS count FROM observations WHERE turn_id = ? AND status = 'skipped'",
+    )
+    .get(turnId);
+  return (row?.count ?? 0) > 0;
+}
+
 export function getObservation(
   db: Database,
   observationId: number,

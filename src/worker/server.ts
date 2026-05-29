@@ -18,7 +18,10 @@ import {
   updateCompactAnchor,
   updateLastAgentSessionId,
 } from "../db/sessions";
-import { getObservation } from "../db/observations";
+import {
+  getObservation,
+  hasSkippedObservationsForTurn,
+} from "../db/observations";
 import { getTurnById } from "../db/turns";
 import { parseReplayTranscript } from "../shared/transcript-parser";
 import {
@@ -999,7 +1002,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
     const turn = getTurnById(deps.db, turnId);
     const hadPriorDelivery =
-      state.streamedParts.has(turnId) || (turn ? turn.status !== "active" : false);
+      state.streamedParts.has(turnId) ||
+      (turn ? turn.status !== "active" : false) ||
+      hasSkippedObservationsForTurn(deps.db, turnId);
     const partIndex = state.streamedParts.get(turnId) ?? 1;
     const miniTurn = processors.buildMiniTurn(turnId, chunk, {
       role: "streaming",
@@ -1095,11 +1100,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         obsItems = rest;
       }
 
-      // status !== active is the restart-durable "already streamed" signal:
-      // a short turn is still active at its own turn-stop; only a turn whose
-      // slice was remembered is non-active (D6).
+      // hadPriorDelivery decides final-slice vs short-turn. streamedParts is
+      // the in-memory signal; turn.status !== "active" and "has skipped obs"
+      // are restart-durable. Skipped obs is the strongest: it is set whenever a
+      // slice was delivered, even if the agent chose not to remember it, so a
+      // restart can't misjudge a streamed turn as a fresh short turn (D6).
       const hadPriorDelivery =
-        state.streamedParts.has(turn.id) || turn.status !== "active";
+        state.streamedParts.has(turn.id) ||
+        turn.status !== "active" ||
+        hasSkippedObservationsForTurn(deps.db, turn.id);
 
       const miniTurn = processors.buildMiniTurn(turn.id, obsItems, {
         role: hadPriorDelivery ? "final" : "short",

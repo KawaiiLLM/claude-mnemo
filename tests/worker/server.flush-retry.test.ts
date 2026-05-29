@@ -7,8 +7,11 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById } from "../../src/db/turns";
 import { getPendingQueueCount } from "../../src/db/pending-queue";
-import { DELIVERY_DROPPED_PENDING_TAG } from "../../src/worker/invalidation";
-import { createWorkerCore } from "../../src/worker/server";
+import {
+  DELIVERY_DROPPED_PENDING_TAG,
+  getReminderItems,
+} from "../../src/worker/invalidation";
+import { buildReminderEnvelope, createWorkerCore } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 import type { MnemoConfig } from "../../src/shared/config";
 
@@ -130,6 +133,23 @@ describe("flush retry / drop (D8)", () => {
     expect(getObservation(db, observationId)?.status).toBe("skipped");
     expect(getPendingQueueCount(db)).toBe(0);
     expect(getTurnById(db, turnId)?.tags).toContain(DELIVERY_DROPPED_PENDING_TAG);
+  });
+
+  test("a dropped, never-extracted turn stays active and reminds 'not yet extracted'", async () => {
+    const attempts = { n: 0 };
+    const core = failingCore(Infinity, attempts);
+
+    await core.flushSession(sessionId);
+    await core.runRetryTick();
+    await core.runRetryTick();
+
+    // buildMiniTurn must NOT have auto-promoted the active turn at build time,
+    // so the delivery-dropped reminder takes the "not yet extracted" branch.
+    expect(getTurnById(db, turnId)?.status).toBe("active");
+    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    expect(envelope).toContain("not yet extracted");
+    expect(envelope).toContain('prompt="A prompt"');
+    expect(envelope).not.toContain("record may be incomplete");
   });
 
   test("retry tick bypasses the cache-age gate and re-flushes a retry-pending head", async () => {

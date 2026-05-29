@@ -43,6 +43,15 @@ describe("renderFileTree maxChars cap", () => {
     expect(omitted).toBeGreaterThan(0);
   });
 
+  test("a single pathologically long path still honors maxChars", () => {
+    const longPath = `/proj/${"a".repeat(3000)}/file.ts`;
+    const capped = renderFileTree([longPath], { maxChars: 200 });
+    expect(capped.length).toBeLessThanOrEqual(200);
+    expect(capped.endsWith("...")).toBe(true);
+    // A single short path is returned verbatim.
+    expect(renderFileTree(["/proj/a.ts"], { maxChars: 200 })).toBe("/proj/a.ts");
+  });
+
   test("maxChars larger than the rendered tree leaves it intact", () => {
     const paths = Array.from(
       { length: 5 },

@@ -222,6 +222,34 @@ describe("mini-turn streaming orchestration", () => {
     expect(finalMsg!).toContain("<prior_turn");
   });
 
+  test("restart-safe even if the agent never remembered: skipped obs still force a final slice", async () => {
+    const sentPrompts: string[] = [];
+    const core = makeCore(db, sentPrompts);
+
+    // Stream a slice. The mock never calls remember(), so the turn stays
+    // active — but the delivered slice's obs are marked skipped (durable).
+    queueBigObs(14);
+    await core.scanAndDrainQueue();
+    expect(sentPrompts.some((p) => p.includes('slice="1"'))).toBe(true);
+    expect(getTurnById(db, turnId)?.status).toBe("active");
+
+    // Simulate a restart: in-memory streamedParts is lost.
+    core.sessions.get(sessionId)?.streamedParts.delete(turnId);
+
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch) VALUES ('turn-stop', ?, ?, 900)`,
+    ).run(turnId, sessionId);
+    await core.scanAndDrainQueue();
+    await core.flushSession(sessionId);
+
+    // Despite status=active and empty streamedParts, the skipped obs prove a
+    // slice was delivered, so turn-stop emits a final slice (not a short turn).
+    const finalMsg = sentPrompts.find((p) => p.includes('final="true"'));
+    expect(finalMsg).toBeDefined();
+    expect(finalMsg!).toContain('slice="');
+    expect(finalMsg!).toContain("<prior_turn");
+  });
+
   test("non-first slices inject a fresh <prior_turn>; the first does not", async () => {
     const sentPrompts: string[] = [];
     const core = makeCore(db, sentPrompts);
