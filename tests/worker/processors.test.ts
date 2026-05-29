@@ -294,10 +294,48 @@ describe("worker processors", () => {
     expect(prompt).toContain("<session-updated>");
     expect(prompt).not.toContain("stale_turns=");
     expect(prompt).toContain("<prior_session>");
-    expect(prompt).toContain("prior_decision: Mutex over queue");
-    expect(prompt).toContain("prior_done: Diagnosed the race");
-    expect(prompt).toContain("prior_current: Applying the patch");
-    expect(prompt).toContain("prior_next: Run the suite");
+    // Bullet fields render as label + indented bullet(s), even single items.
+    expect(prompt).toContain(["  prior_decision:", "    - Mutex over queue"].join("\n"));
+    expect(prompt).toContain(["  prior_done:", "    - Diagnosed the race"].join("\n"));
+    // Single-line fields stay inline.
+    expect(prompt).toContain("  prior_current: Applying the patch");
+    expect(prompt).toContain("  prior_next: Run the suite");
+  });
+
+  test("buildBatchPrompt renders multi-line bullet prior fields as indented blocks", () => {
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: "Auth race",
+      currentPrompt: "Keep going",
+      prior: {
+        title: "Auth race",
+        content: "Fixing the refresh race",
+        decision: "- Mutex over queue [T440]\n- Serialize refresh [T441]",
+        done: "- Diagnosed the race [T438]",
+        current: "Applying the patch",
+        nextSteps: "Run the suite",
+        reference: "",
+      },
+      sessionUpdated: true,
+      staleTurns: 0,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    // Bullet fields expand to label + indented bullets.
+    expect(prompt).toContain(
+      [
+        "  prior_decision:",
+        "    - Mutex over queue [T440]",
+        "    - Serialize refresh [T441]",
+      ].join("\n"),
+    );
+    expect(prompt).toContain(
+      ["  prior_done:", "    - Diagnosed the race [T438]"].join("\n"),
+    );
+    // Single-line fields stay inline.
+    expect(prompt).toContain("  prior_current: Applying the patch");
+    expect(prompt).toContain("  prior_next: Run the suite");
   });
 
   test("buildBatchPrompt still renders the prior scaffold for a never-refreshed stale session", () => {

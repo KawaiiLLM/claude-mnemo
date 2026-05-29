@@ -237,12 +237,15 @@ describe("MCP format renderer", () => {
       project: "claude-mnemo",
       createdAtEpoch,
       content: "Reworking the session summary schema",
-      // [T<n>] markers arrive already resolved from the recall layer.
-      decision: 'Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
-      done: 'Shipped migration [S200/T1] "Add columns"',
-      current: "Wiring the read side",
-      nextSteps: "Run the test suite",
-      reference: "github.com/anthropics/claude-code",
+      // decision/done/reference are markdown bullet lists; [T<n>] markers
+      // arrive already resolved from the recall layer. current/next stay inline.
+      decision:
+        '- Whole-rewrite over field-merge [S200/T3] "Pick rewrite"\n- DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
+      done:
+        '- Shipped migration [S200/T1] "Add columns"\n- Wired read side [S200/T5] "Render fields"',
+      current: "Running the test suite",
+      nextSteps: "Release 0.2.16",
+      reference: "- docs/plans/redesign.md\n- github.com/anthropics/claude-code",
       turnCount: 5,
       observationCount: 12,
     };
@@ -251,12 +254,59 @@ describe("MCP format renderer", () => {
       [
         "- [S200] Session redesign | 💬5 💡12 | 2026-04-05 | claude-mnemo",
         "  - desc: Reworking the session summary schema",
-        '  - decision: Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
-        '  - done: Shipped migration [S200/T1] "Add columns"',
-        "  - current: Wiring the read side",
-        "  - next: Run the test suite",
-        "  - reference: github.com/anthropics/claude-code",
+        "  - decision:",
+        '    - Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
+        '    - DB id for [T<n>] markers [S200/T4] "Pointer semantics"',
+        "  - done:",
+        '    - Shipped migration [S200/T1] "Add columns"',
+        '    - Wired read side [S200/T5] "Render fields"',
+        "  - current: Running the test suite",
+        "  - next: Release 0.2.16",
+        "  - reference:",
+        "    - docs/plans/redesign.md",
+        "    - github.com/anthropics/claude-code",
       ].join("\n"),
+    );
+  });
+
+  test("a bullet field shares one truncate budget across all bullets", () => {
+    const session: FormattedSession = {
+      id: 202,
+      title: "Big decision",
+      project: "claude-mnemo",
+      createdAtEpoch,
+      // 3 long bullets (~100 chars each, ~306 total). Under the default 200
+      // budget the whole field is capped — not 200 per bullet.
+      decision: `- ${"X".repeat(100)}\n- ${"Y".repeat(100)}\n- ${"Z".repeat(100)}`,
+      turnCount: 1,
+      observationCount: 0,
+    };
+
+    // unified mode surfaces the truncation hint; default truncate = 200.
+    const out = renderNode(
+      { type: "session", value: session },
+      { depth: "expanded", mode: "unified" },
+    );
+
+    expect(out).toContain("X".repeat(50)); // first bullet survives
+    expect(out).not.toContain("Z".repeat(50)); // third bullet dropped by the cap
+    expect(out).toContain("[use mnemo-replay skill");
+  });
+
+  test("a single-line bullet field renders as one bullet", () => {
+    const session: FormattedSession = {
+      id: 201,
+      title: "Single",
+      project: "claude-mnemo",
+      createdAtEpoch,
+      content: "x",
+      decision: "Only one decision [S201/T2] \"the call\"",
+      turnCount: 1,
+      observationCount: 0,
+    };
+
+    expect(formatSessionExpanded(session)).toContain(
+      ["  - decision:", '    - Only one decision [S201/T2] "the call"'].join("\n"),
     );
   });
 

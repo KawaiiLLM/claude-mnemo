@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.15-mpr27cdi" : "dev";
+var BUILD_ID = true ? "0.2.16-mpr4kr47" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2442,13 +2442,7 @@ Session summary was refreshed since your last message.
   const showPrior = prior !== null && (Boolean(args.sessionUpdated) || isStale);
   const priorSessionBlock = showPrior ? `
 <prior_session>
-  prior_title: ${prior.title ?? ""}
-  prior_content: ${prior.content ?? ""}
-  prior_decision: ${prior.decision ?? ""}
-  prior_done: ${prior.done ?? ""}
-  prior_current: ${prior.current ?? ""}
-  prior_next: ${prior.nextSteps ?? ""}
-  prior_reference: ${prior.reference ?? ""}
+${renderPriorSession(prior)}
 </prior_session>
 ` : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
@@ -2539,6 +2533,26 @@ function aggregateFilesFromObservations(observations) {
     toolCallCount: observations.length
   };
 }
+var BULLET_SUMMARY_FIELDS = /* @__PURE__ */ new Set(["decision", "done", "reference"]);
+function renderPriorField(label, field, value) {
+  const text = (value ?? "").trim();
+  if (BULLET_SUMMARY_FIELDS.has(field) && text !== "") {
+    const items = text.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+    return [`  ${label}:`, ...items.map((item) => `    - ${item}`)].join("\n");
+  }
+  return `  ${label}: ${value ?? ""}`;
+}
+function renderPriorSession(prior) {
+  return [
+    renderPriorField("prior_title", "title", prior.title),
+    renderPriorField("prior_content", "content", prior.content),
+    renderPriorField("prior_decision", "decision", prior.decision),
+    renderPriorField("prior_done", "done", prior.done),
+    renderPriorField("prior_current", "current", prior.current),
+    renderPriorField("prior_next", "next_steps", prior.nextSteps),
+    renderPriorField("prior_reference", "reference", prior.reference)
+  ].join("\n");
+}
 function sessionSummaryInstruction(sessionId) {
   return `<instruction>
 Refresh the session summary ONLY if material change since prior_*: a new goal, a completed milestone, a reversed decision, or a newly discovered constraint. Small incremental work does NOT qualify.
@@ -2549,13 +2563,13 @@ remember({ id: "S${sessionId}", title, content, decision, done, current, next_st
 Fields:
 - title: 20-50 chars, one line
 - content: 100-300 chars, what the session is about (browsing synopsis)
-- decision: key decisions and WHY they were made; cite pivotal turns inline as [T<n>] using the id from the <turn id="T..."> block. Keep prior [T<n>] markers.
-- done: completed work; cite milestone turns inline as [T<n>]. Keep prior [T<n>] markers.
-- current: where things stand right now
-- next_steps: 50-150 chars, what is pending / the next step
-- reference: external anchors only \u2014 reference repos, URLs, PRs, out-of-project paths. Empty string if none.
+- decision: a markdown bullet list \u2014 one "- " item per line, each a key decision and WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. \u22646 bullets. On refresh, append a new bullet (or tighten an existing one); keep prior bullets and their [T<n>] markers.
+- done: a markdown bullet list \u2014 one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
+- current: where things stand right now (one line)
+- next_steps: 50-150 chars, what is pending / the next step (one line)
+- reference: a markdown bullet list \u2014 one "- " item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
 
-Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here \u2014 those are the main agent's M-level memories.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here \u2014 those are the main agent's M-level memories.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
@@ -2563,13 +2577,7 @@ If no material change, respond with no tool calls. An empty response is the "lea
 function buildSessionSummaryPrompt(sessionId, project, prior) {
   return `<session id="S${sessionId}">
   project: ${project}
-  prior_title: ${prior.title ?? ""}
-  prior_content: ${prior.content ?? ""}
-  prior_decision: ${prior.decision ?? ""}
-  prior_done: ${prior.done ?? ""}
-  prior_current: ${prior.current ?? ""}
-  prior_next: ${prior.nextSteps ?? ""}
-  prior_reference: ${prior.reference ?? ""}
+${renderPriorSession(prior)}
 </session>
 
 ${sessionSummaryInstruction(sessionId)}`;
@@ -37636,6 +37644,12 @@ function pushBullets(lines, indent, values) {
     lines.push(`${indent}- ${value}`);
   }
 }
+function splitBulletField(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
 function truncateText(text, {
   limit,
   mode = "legacy",
@@ -37760,11 +37774,24 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
     }
     lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
   };
+  const pushBulletField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    const items = splitBulletField(
+      truncateText(value, { limit, mode, hintId })
+    );
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  - ${label}:`);
+    pushBullets(lines, "    ", items);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
   if (session.decision) {
-    pushField("decision", session.decision);
+    pushBulletField("decision", session.decision);
   } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -37773,10 +37800,10 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
       session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  pushField("done", session.done);
+  pushBulletField("done", session.done);
   pushField("current", session.current);
   pushField("next", session.nextSteps);
-  pushField("reference", session.reference);
+  pushBulletField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -40341,11 +40368,13 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 
 - title: 20-50 chars, one line
 - content: 100-300 chars, browsing synopsis of what the session is about
-- decision: key decisions and WHY they were made; cite pivotal turns inline as \`[T<n>]\` using the id from a \`<turn id="T...">\` block, and keep prior \`[T<n>]\` markers
-- done: completed work; cite milestone turns inline as \`[T<n>]\`, keep prior markers
-- current: where things stand right now
-- next_steps: 50-150 chars, what is pending / the next step
-- reference: external anchors only \u2014 reference repos, URLs, PRs, out-of-project paths. Empty string if none.
+- decision: a markdown bullet list \u2014 one \`- \` item per line, each a key decision and WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. \u22646 bullets. Append a bullet (or tighten one) on refresh; keep prior bullets and \`[T<n>]\` markers.
+- done: a markdown bullet list \u2014 one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
+- current: where things stand right now (one line)
+- next_steps: 50-150 chars, what is pending / the next step (one line)
+- reference: a markdown bullet list \u2014 one \`- \` item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+
+\`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
 Do not put file paths, tool counts, or code-level details anywhere but \`reference\` \u2014 those belong in turn records. Do not record durable cross-project lessons here; those are the main agent's M-level memories.
 

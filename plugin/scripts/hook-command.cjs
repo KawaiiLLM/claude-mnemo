@@ -703,7 +703,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.15-mpr27cdi" : "dev";
+var BUILD_ID = true ? "0.2.16-mpr4kr47" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1225,6 +1225,12 @@ function pushBullets(lines, indent, values) {
     lines.push(`${indent}- ${value}`);
   }
 }
+function splitBulletField(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
 function truncateText(text, {
   limit,
   mode = "legacy",
@@ -1349,11 +1355,24 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
     }
     lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
   };
+  const pushBulletField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    const items = splitBulletField(
+      truncateText(value, { limit, mode, hintId })
+    );
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  - ${label}:`);
+    pushBullets(lines, "    ", items);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
   if (session.decision) {
-    pushField("decision", session.decision);
+    pushBulletField("decision", session.decision);
   } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -1362,10 +1381,10 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
       session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  pushField("done", session.done);
+  pushBulletField("done", session.done);
   pushField("current", session.current);
   pushField("next", session.nextSteps);
-  pushField("reference", session.reference);
+  pushBulletField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -2760,22 +2779,33 @@ function buildCurrentSessionOutput(db, session, sessionRecord) {
       lines.push(`  ${label}: ${value}`);
     }
   };
+  const pushBulletLines = (items) => {
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    pushBulletLines(items);
+  };
   pushField("content", session.content);
   if (session.decision) {
-    pushField("decision", session.decision);
+    pushBulletField("decision", session.decision);
   } else {
     const insightLines = session.insight ?? [];
     if (insightLines.length > 0) {
       lines.push("  insight:");
-      for (const line of insightLines) {
-        lines.push(`  - ${line}`);
-      }
+      pushBulletLines(insightLines);
     }
   }
-  pushField("done", session.done);
+  pushBulletField("done", session.done);
   pushField("current", session.current);
   pushField("next", session.nextSteps);
-  pushField("reference", session.reference);
+  pushBulletField("reference", session.reference);
   try {
     const timelineView = buildContextTimelineView(db, sessionRecord.id);
     lines.push("");

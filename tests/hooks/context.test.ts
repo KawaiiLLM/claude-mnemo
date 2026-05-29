@@ -578,9 +578,10 @@ describe("handleContextHook", () => {
     );
     expect(output).not.toContain("Other project note");
     // D4: the current-session block injects every summary field. With no
-    // `decision`, the legacy `insight` bullets render as the fallback.
+    // `decision`, the legacy `insight` bullets render as the fallback (bullets
+    // indented 4 spaces to match recall/worker).
     expect(output).toContain("  insight:");
-    expect(output).toContain("  - Primary insight bullet for the current session");
+    expect(output).toContain("    - Primary insight bullet for the current session");
     expect(output).toContain("T#");
     expect(output).not.toContain("showing:");
     expect(output).toContain("phases (session-wide):");
@@ -649,6 +650,48 @@ describe("handleContextHook", () => {
       { depth: "collapsed", mode: "legacy" },
     );
     renderNodeSpy.mockRestore();
+  });
+
+  test("current-session block renders decision/done/reference as 4-space bullets with resolved [T<n>]", async () => {
+    const turnId = insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 1,
+      title: "Pick mutex",
+      content: "Chose a mutex",
+      userPrompt: "How to fix the race?",
+      assistantResponse: "Use a mutex.",
+      toolCallCount: 1,
+      createdAtEpoch: 300,
+    });
+    db.query(
+      `UPDATE sessions SET decision = ?, done = ?, "reference" = ? WHERE id = ?`,
+    ).run(
+      `- Chose a mutex over a queue [T${turnId}]\n- Serialized the refresh path`,
+      `- Shipped the auth fix [T${turnId}]`,
+      `- docs/plans/redesign.md`,
+      currentSessionId,
+    );
+
+    const handler = createContextHandler({ db });
+    const result = await handler(
+      createInput({ source: "resume", sessionId: "session-context" }),
+    );
+    const output = result.hookSpecificOutput ?? "";
+
+    // Bullet blocks at 4-space, with [T<n>] resolved to S/T + current title.
+    expect(output).toContain("  decision:");
+    expect(output).toContain(
+      `    - Chose a mutex over a queue [S${currentSessionId}/T1] "Pick mutex"`,
+    );
+    expect(output).toContain("    - Serialized the refresh path");
+    expect(output).toContain("  done:");
+    expect(output).toContain(
+      `    - Shipped the auth fix [S${currentSessionId}/T1] "Pick mutex"`,
+    );
+    expect(output).toContain("  reference:");
+    expect(output).toContain("    - docs/plans/redesign.md");
+    // decision present → legacy insight fallback is NOT used.
+    expect(output).not.toContain("Primary insight bullet");
   });
 
   test("startup shows current session id but skips Current Session timeline when there are no turns", async () => {

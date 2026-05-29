@@ -322,11 +322,13 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 
 - title: 20-50 chars, one line
 - content: 100-300 chars, browsing synopsis of what the session is about
-- decision: key decisions and WHY they were made; cite pivotal turns inline as \`[T<n>]\` using the id from a \`<turn id="T...">\` block, and keep prior \`[T<n>]\` markers
-- done: completed work; cite milestone turns inline as \`[T<n>]\`, keep prior markers
-- current: where things stand right now
-- next_steps: 50-150 chars, what is pending / the next step
-- reference: external anchors only — reference repos, URLs, PRs, out-of-project paths. Empty string if none.
+- decision: a markdown bullet list — one \`- \` item per line, each a key decision and WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. ≤6 bullets. Append a bullet (or tighten one) on refresh; keep prior bullets and \`[T<n>]\` markers.
+- done: a markdown bullet list — one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
+- current: where things stand right now (one line)
+- next_steps: 50-150 chars, what is pending / the next step (one line)
+- reference: a markdown bullet list — one \`- \` item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+
+\`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
 Do not put file paths, tool counts, or code-level details anywhere but \`reference\` — those belong in turn records. Do not record durable cross-project lessons here; those are the main agent's M-level memories.
 

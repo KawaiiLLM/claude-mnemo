@@ -188,13 +188,7 @@ Session summary was refreshed since your last message.
   const priorSessionBlock = showPrior
     ? `
 <prior_session>
-  prior_title: ${prior!.title ?? ""}
-  prior_content: ${prior!.content ?? ""}
-  prior_decision: ${prior!.decision ?? ""}
-  prior_done: ${prior!.done ?? ""}
-  prior_current: ${prior!.current ?? ""}
-  prior_next: ${prior!.nextSteps ?? ""}
-  prior_reference: ${prior!.reference ?? ""}
+${renderPriorSession(prior!)}
 </prior_session>
 `
     : "";
@@ -319,6 +313,46 @@ export interface PriorSessionSummary {
   reference: string | null;
 }
 
+// decision/done/reference are markdown bullet lists; the rest are single lines.
+const BULLET_SUMMARY_FIELDS = new Set(["decision", "done", "reference"]);
+
+// Render one prior_* field for injection. Bullet fields with multiple lines
+// expand to a label + indented bullets (matching how they are stored and
+// rendered) so the agent echo-and-edits a real list, not a mangled one-liner.
+function renderPriorField(
+  label: string,
+  field: string,
+  value: string | null,
+): string {
+  const text = (value ?? "").trim();
+  // Non-empty bullet fields always render as a label + indented bullets (even a
+  // single item), matching the read-side render so the agent echo-and-edits a
+  // consistent list. Empty bullet fields stay inline (`prior_x: `).
+  if (BULLET_SUMMARY_FIELDS.has(field) && text !== "") {
+    const items = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^-+\s*/, ""));
+    return [`  ${label}:`, ...items.map((item) => `    - ${item}`)].join("\n");
+  }
+  return `  ${label}: ${value ?? ""}`;
+}
+
+// The seven prior_* lines shared by the standalone summary message and the
+// inline <prior_session> block (D2).
+function renderPriorSession(prior: PriorSessionSummary): string {
+  return [
+    renderPriorField("prior_title", "title", prior.title),
+    renderPriorField("prior_content", "content", prior.content),
+    renderPriorField("prior_decision", "decision", prior.decision),
+    renderPriorField("prior_done", "done", prior.done),
+    renderPriorField("prior_current", "current", prior.current),
+    renderPriorField("prior_next", "next_steps", prior.nextSteps),
+    renderPriorField("prior_reference", "reference", prior.reference),
+  ].join("\n");
+}
+
 // Shared instruction body for a session-summary refresh (D1/D2). Used by both
 // the standalone summary message and the inline <prior_session> path so the
 // field set, all-or-nothing rule, and [T<n>] convention stay identical.
@@ -332,13 +366,13 @@ remember({ id: "S${sessionId}", title, content, decision, done, current, next_st
 Fields:
 - title: 20-50 chars, one line
 - content: 100-300 chars, what the session is about (browsing synopsis)
-- decision: key decisions and WHY they were made; cite pivotal turns inline as [T<n>] using the id from the <turn id="T..."> block. Keep prior [T<n>] markers.
-- done: completed work; cite milestone turns inline as [T<n>]. Keep prior [T<n>] markers.
-- current: where things stand right now
-- next_steps: 50-150 chars, what is pending / the next step
-- reference: external anchors only — reference repos, URLs, PRs, out-of-project paths. Empty string if none.
+- decision: a markdown bullet list — one "- " item per line, each a key decision and WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. ≤6 bullets. On refresh, append a new bullet (or tighten an existing one); keep prior bullets and their [T<n>] markers.
+- done: a markdown bullet list — one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
+- current: where things stand right now (one line)
+- next_steps: 50-150 chars, what is pending / the next step (one line)
+- reference: a markdown bullet list — one "- " item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
 
-Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — those are the main agent's M-level memories.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — those are the main agent's M-level memories.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
@@ -351,13 +385,7 @@ function buildSessionSummaryPrompt(
 ): string {
   return `<session id="S${sessionId}">
   project: ${project}
-  prior_title: ${prior.title ?? ""}
-  prior_content: ${prior.content ?? ""}
-  prior_decision: ${prior.decision ?? ""}
-  prior_done: ${prior.done ?? ""}
-  prior_current: ${prior.current ?? ""}
-  prior_next: ${prior.nextSteps ?? ""}
-  prior_reference: ${prior.reference ?? ""}
+${renderPriorSession(prior)}
 </session>
 
 ${sessionSummaryInstruction(sessionId)}`;

@@ -220,6 +220,19 @@ function pushBullets(lines: string[], indent: string, values: string[]): void {
   }
 }
 
+// Split a stored bullet-list field (newline-separated "- " items) into its
+// items, stripping the leading dash. A single-line value yields one item.
+export function splitBulletField(value: string | null | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^-+\s*/, ""));
+}
+
 function joinHint(sessionId: number | undefined, turnPromptNumber: number | undefined): string {
   if (sessionId === undefined && turnPromptNumber === undefined) {
     return "";
@@ -430,6 +443,23 @@ function formatSessionExpandedWithMode(
     }
     lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
   };
+  // decision/done/reference are markdown bullet lists: render a label line +
+  // indented bullets (one per stored "- " line). Single-line values render as
+  // one bullet. The WHOLE field shares one `limit` budget (truncate before
+  // splitting) so a multi-bullet field can't balloon to bulletCount * limit.
+  const pushBulletField = (label: string, value: string | null | undefined): void => {
+    if (!value) {
+      return;
+    }
+    const items = splitBulletField(
+      truncateText(value, { limit, mode, hintId }),
+    );
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  - ${label}:`);
+    pushBullets(lines, "    ", items);
+  };
 
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
@@ -437,9 +467,10 @@ function formatSessionExpandedWithMode(
 
   // D4: render the redesigned summary fields. `decision` falls back to the
   // legacy `insight` bullets for old sessions (decision NULL); empty
-  // done/current/reference are skipped.
+  // done/current/reference are skipped. decision/done/reference are bullet
+  // lists; current/next are single lines.
   if (session.decision) {
-    pushField("decision", session.decision);
+    pushBulletField("decision", session.decision);
   } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -449,10 +480,10 @@ function formatSessionExpandedWithMode(
     );
   }
 
-  pushField("done", session.done);
+  pushBulletField("done", session.done);
   pushField("current", session.current);
   pushField("next", session.nextSteps);
-  pushField("reference", session.reference);
+  pushBulletField("reference", session.reference);
 
   return lines.join("\n");
 }

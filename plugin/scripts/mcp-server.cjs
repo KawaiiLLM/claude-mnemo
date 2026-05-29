@@ -31802,6 +31802,12 @@ function pushBullets(lines, indent, values) {
     lines.push(`${indent}- ${value}`);
   }
 }
+function splitBulletField(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
 function truncateText(text, {
   limit,
   mode = "legacy",
@@ -31926,11 +31932,24 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
     }
     lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
   };
+  const pushBulletField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    const items = splitBulletField(
+      truncateText(value, { limit, mode, hintId })
+    );
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  - ${label}:`);
+    pushBullets(lines, "    ", items);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
   if (session.decision) {
-    pushField("decision", session.decision);
+    pushBulletField("decision", session.decision);
   } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
@@ -31939,10 +31958,10 @@ function formatSessionExpandedWithMode(session, mode, truncate) {
       session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  pushField("done", session.done);
+  pushBulletField("done", session.done);
   pushField("current", session.current);
   pushField("next", session.nextSteps);
-  pushField("reference", session.reference);
+  pushBulletField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -34232,7 +34251,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.15" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.16" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
