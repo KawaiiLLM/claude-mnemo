@@ -6897,13 +6897,27 @@ function indexFtsRecord(db, layer, sourceId, title, content, extra) {
   ).run(layer, sourceId, title, content, extra);
 }
 function indexSessionToFTS(db, session) {
+  const hasNewFields = [
+    session.decision,
+    session.done,
+    session.current,
+    session.reference
+  ].some((value) => Boolean(value && value.trim()));
+  const hasLegacyInsight = Boolean(session.insight && session.insight.trim());
+  const extra = !hasNewFields && hasLegacyInsight ? session.insight : [
+    session.decision,
+    session.done,
+    session.current,
+    session.nextSteps,
+    session.reference
+  ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
     db,
     "session",
     session.id,
     session.title,
     session.content,
-    session.insight ?? ""
+    extra
   );
 }
 function indexTurnToFTS(db, turn) {
@@ -6944,7 +6958,12 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          insight
+          insight,
+          decision,
+          done,
+          "current" AS current,
+          next_steps AS nextSteps,
+          "reference" AS reference
         FROM sessions
       `
   ).all();
@@ -7438,6 +7457,7 @@ function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
+  ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
@@ -7454,6 +7474,13 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+}
+function ensureSessionSummaryFieldColumns(db) {
+  for (const column of ["decision", "done", "current", "reference"]) {
+    if (!hasColumn(db, "sessions", column)) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
+    }
+  }
 }
 function ensureTurnTranscriptLineStartColumn(db) {
   if (hasColumn(db, "turns", "transcript_line_start")) {
@@ -7592,6 +7619,10 @@ var init_schema = __esm({
     content TEXT,
     insight TEXT,
     next_steps TEXT,
+    decision TEXT,
+    done TEXT,
+    current TEXT,
+    reference TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
@@ -31056,6 +31087,12 @@ var rememberInputShape = {
     "archived"
   ]).optional(),
   next_steps: external_exports3.string().optional(),
+  // Session-summary fields (D1). `next_steps` above doubles as the displayed
+  // "next" field; these four are session-only and rewritten whole each refresh.
+  decision: external_exports3.string().optional(),
+  done: external_exports3.string().optional(),
+  current: external_exports3.string().optional(),
+  reference: external_exports3.string().optional(),
   source: external_exports3.string().optional()
 };
 var timelineInputShape = {
@@ -31330,6 +31367,10 @@ var SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -31338,32 +31379,21 @@ var SESSION_SELECT = `
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
-function upsertSession(db, input) {
+function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
+  const toNull = (value) => value.trim() === "" ? null : value;
   const session = db.query(`
-      INSERT INTO sessions (
-        content_session_id,
-        project,
-        title,
-        content,
-        insight,
-        next_steps,
-        last_compact_turn,
-        summary_updated_at_epoch,
-        created_at_epoch,
-        updated_at_epoch,
-        completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(content_session_id) DO UPDATE SET
-        project = excluded.project,
-        title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, sessions.content),
-        insight = COALESCE(excluded.insight, sessions.insight),
-        next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
-        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
-        created_at_epoch = excluded.created_at_epoch,
-        updated_at_epoch = excluded.updated_at_epoch,
-        completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
+      UPDATE sessions SET
+        title = ?,
+        content = ?,
+        decision = ?,
+        done = ?,
+        "current" = ?,
+        next_steps = ?,
+        "reference" = ?,
+        insight = NULL,
+        summary_updated_at_epoch = ?,
+        updated_at_epoch = ?
+      WHERE id = ?
       RETURNING
         id,
         content_session_id AS contentSessionId,
@@ -31372,6 +31402,10 @@ function upsertSession(db, input) {
         content,
         insight,
         next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -31379,20 +31413,19 @@ function upsertSession(db, input) {
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
     `).get(
-    input.contentSessionId,
-    input.project,
-    input.title,
-    input.content ?? null,
-    input.insight,
-    input.nextSteps ?? null,
-    input.lastCompactTurn ?? null,
-    input.summaryUpdatedAtEpoch ?? null,
-    input.createdAtEpoch,
-    input.updatedAtEpoch,
-    input.completedAtEpoch
+    toNull(fields.title),
+    toNull(fields.content),
+    toNull(fields.decision),
+    toNull(fields.done),
+    toNull(fields.current),
+    toNull(fields.nextSteps),
+    toNull(fields.reference),
+    nowEpoch,
+    nowEpoch,
+    sessionId
   );
   if (!session) {
-    throw new Error("Failed to upsert session.");
+    return null;
   }
   indexSessionToFTS(db, session);
   return session;
@@ -31886,33 +31919,30 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
 function formatSessionExpandedWithMode(session, mode, truncate) {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  const hintId = buildSessionHintId(session.id);
+  const pushField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-  if (session.insight && session.insight.length > 0) {
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map(
-        (line) => truncateText(line, {
-          limit,
-          mode,
-          hintId: buildSessionHintId(session.id)
-        })
-      )
+      session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  if (session.nextSteps) {
-    lines.push("  - next_steps:");
-    lines.push(
-      `    - ${truncateText(session.nextSteps, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id)
-      })}`
-    );
-  }
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -32253,6 +32283,21 @@ function expandNumericSelector(value) {
   return values;
 }
 
+// src/mcp/turn-pointers.ts
+var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
+function resolveTurnPointers(db, sessionId, text) {
+  if (!text || !text.includes("[T")) {
+    return text;
+  }
+  return text.replace(TURN_POINTER_PATTERN, (literal2, idDigits) => {
+    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
+    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
+      return literal2;
+    }
+    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
+  });
+}
+
 // src/mcp/recall.ts
 var CHILD_PREVIEW_SIZE = 5;
 function splitInsight(insight) {
@@ -32260,6 +32305,17 @@ function splitInsight(insight) {
     return [];
   }
   return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
+function buildSessionSummaryFields(db, session) {
+  return {
+    content: session.content,
+    insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    decision: resolveTurnPointers(db, session.id, session.decision),
+    done: resolveTurnPointers(db, session.id, session.done),
+    current: session.current,
+    reference: session.reference
+  };
 }
 function formatParameterError(message) {
   return `Parameter error: ${message}`;
@@ -32356,6 +32412,13 @@ function parseRoutedId(value) {
       observationId: Number(observationMatch[1])
     };
   }
+  const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
+  if (turnByIdMatch) {
+    return {
+      kind: "turn-by-id",
+      turnId: Number(turnByIdMatch[1])
+    };
+  }
   const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
   if (sessionMatch) {
     const sessionIds = expandNumericSelector(sessionMatch[1]);
@@ -32436,9 +32499,7 @@ function buildSessionView(db, session) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -32467,9 +32528,7 @@ function buildSessionSummary(db, sessionId) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount,
     observationCount,
     jsonlPath: void 0
@@ -32955,6 +33014,10 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
       paged.pageCount
     );
   }
+  if (routed.kind === "turn-by-id") {
+    const turn = getTurnById(db, routed.turnId);
+    return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
+  }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
     if (!turn) {
@@ -33119,6 +33182,15 @@ var OBSERVATION_REMEMBER_STATUSES = [
   "skipped"
 ];
 var MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"];
+var SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference"
+];
 function textResult(text) {
   return {
     content: [{ type: "text", text }]
@@ -33212,7 +33284,7 @@ function handleObservationRemember(db, observationId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (input.type !== void 0 || input.scope !== void 0 || input.insight !== void 0 || input.reasoning !== void 0 || input.application !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.source !== void 0) {
+  if (input.type !== void 0 || input.scope !== void 0 || input.insight !== void 0 || input.reasoning !== void 0 || input.application !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0 || input.source !== void 0) {
     return parameterError(
       "observation remember only accepts title, content, and status."
     );
@@ -33298,23 +33370,31 @@ function handleSessionRemember(db, sessionId, input) {
   if (!session) {
     return textResult(`Session ${sessionId} not found.`);
   }
-  const nextTitle = input.title ?? session.title;
-  const nextContent = input.content ?? session.content;
-  const nextInsight = input.insight ?? session.insight;
-  const nextNextSteps = input.next_steps ?? session.nextSteps;
-  const summaryChanged = nextTitle !== session.title || nextContent !== session.content || nextInsight !== session.insight || nextNextSteps !== session.nextSteps;
-  upsertSession(db, {
-    contentSessionId: session.contentSessionId,
-    project: session.project,
-    title: nextTitle,
-    content: nextContent,
-    insight: nextInsight,
-    nextSteps: nextNextSteps,
-    summaryUpdatedAtEpoch: summaryChanged ? Math.floor(Date.now() / 1e3) : session.summaryUpdatedAtEpoch,
-    createdAtEpoch: session.createdAtEpoch,
-    updatedAtEpoch: Math.floor(Date.now() / 1e3),
-    completedAtEpoch: session.completedAtEpoch
-  });
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  if (missing.length > 0) {
+    return parameterError(
+      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", "
+      )}). Missing: ${missing.join(", ")}.`
+    );
+  }
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? ""
+    },
+    Math.floor(Date.now() / 1e3)
+  );
+  if (!updated) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
   return textResult(`Updated session ${sessionId}.`);
 }
 function rememberTool(db, input) {
@@ -34152,7 +34232,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.14" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.15" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

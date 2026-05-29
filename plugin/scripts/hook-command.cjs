@@ -117,13 +117,27 @@ function indexFtsRecord(db, layer, sourceId, title, content, extra) {
   ).run(layer, sourceId, title, content, extra);
 }
 function indexSessionToFTS(db, session) {
+  const hasNewFields = [
+    session.decision,
+    session.done,
+    session.current,
+    session.reference
+  ].some((value) => Boolean(value && value.trim()));
+  const hasLegacyInsight = Boolean(session.insight && session.insight.trim());
+  const extra = !hasNewFields && hasLegacyInsight ? session.insight : [
+    session.decision,
+    session.done,
+    session.current,
+    session.nextSteps,
+    session.reference
+  ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
     db,
     "session",
     session.id,
     session.title,
     session.content,
-    session.insight ?? ""
+    extra
   );
 }
 function indexTurnToFTS(db, turn) {
@@ -164,7 +178,12 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          insight
+          insight,
+          decision,
+          done,
+          "current" AS current,
+          next_steps AS nextSteps,
+          "reference" AS reference
         FROM sessions
       `
   ).all();
@@ -233,6 +252,10 @@ var SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     next_steps TEXT,
+    decision TEXT,
+    done TEXT,
+    current TEXT,
+    reference TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
@@ -339,6 +362,7 @@ function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
+  ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
@@ -355,6 +379,13 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+}
+function ensureSessionSummaryFieldColumns(db) {
+  for (const column of ["decision", "done", "current", "reference"]) {
+    if (!hasColumn(db, "sessions", column)) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
+    }
+  }
 }
 function ensureTurnTranscriptLineStartColumn(db) {
   if (hasColumn(db, "turns", "transcript_line_start")) {
@@ -569,6 +600,10 @@ var SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -611,6 +646,10 @@ function upsertSession(db, input) {
         content,
         insight,
         next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -664,7 +703,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.14-mpqrjh81" : "dev";
+var BUILD_ID = true ? "0.2.15-mpr27cdi" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1303,33 +1342,30 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
 function formatSessionExpandedWithMode(session, mode, truncate) {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  const hintId = buildSessionHintId(session.id);
+  const pushField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-  if (session.insight && session.insight.length > 0) {
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map(
-        (line) => truncateText(line, {
-          limit,
-          mode,
-          hintId: buildSessionHintId(session.id)
-        })
-      )
+      session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  if (session.nextSteps) {
-    lines.push("  - next_steps:");
-    lines.push(
-      `    - ${truncateText(session.nextSteps, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id)
-      })}`
-    );
-  }
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -2628,6 +2664,21 @@ function renderTimeline(view, options = {}) {
   ].join("\n");
 }
 
+// src/mcp/turn-pointers.ts
+var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
+function resolveTurnPointers(db, sessionId, text) {
+  if (!text || !text.includes("[T")) {
+    return text;
+  }
+  return text.replace(TURN_POINTER_PATTERN, (literal, idDigits) => {
+    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
+    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
+      return literal;
+    }
+    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
+  });
+}
+
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 function splitInsight(insight) {
@@ -2684,7 +2735,7 @@ function buildSessionMetricMap(db, sessionIds) {
   }
   return metrics;
 }
-function buildSessionView(session, metrics) {
+function buildSessionView(db, session, metrics) {
   return {
     id: session.id,
     title: session.title,
@@ -2693,6 +2744,10 @@ function buildSessionView(session, metrics) {
     content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
+    decision: resolveTurnPointers(db, session.id, session.decision),
+    done: resolveTurnPointers(db, session.id, session.done),
+    current: session.current,
+    reference: session.reference,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
     jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId)
@@ -2700,13 +2755,27 @@ function buildSessionView(session, metrics) {
 }
 function buildCurrentSessionOutput(db, session, sessionRecord) {
   const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const insightLines = session.insight ?? [];
-  if (insightLines.length > 0) {
-    lines.push("  insight:");
-    for (const line of insightLines) {
-      lines.push(`  - ${line}`);
+  const pushField = (label, value) => {
+    if (value) {
+      lines.push(`  ${label}: ${value}`);
+    }
+  };
+  pushField("content", session.content);
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else {
+    const insightLines = session.insight ?? [];
+    if (insightLines.length > 0) {
+      lines.push("  insight:");
+      for (const line of insightLines) {
+        lines.push(`  - ${line}`);
+      }
     }
   }
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
   try {
     const timelineView = buildContextTimelineView(db, sessionRecord.id);
     lines.push("");
@@ -2736,7 +2805,7 @@ function classifyTimeGroup(epochSeconds, now) {
   }
   return "Earlier";
 }
-function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessionId) {
+function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, primarySessionId) {
   const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 10);
   if (others.length === 0) {
     return [];
@@ -2752,7 +2821,7 @@ function buildRecentSessionsOutput(recentSessions, sessionMetrics, primarySessio
     }
     lines.push(
       renderNode(
-        { type: "session", value: buildSessionView(session, sessionMetrics.get(session.id)) },
+        { type: "session", value: buildSessionView(db, session, sessionMetrics.get(session.id)) },
         { depth: "collapsed", truncate: 120, mode: "unified" }
       )
     );
@@ -2853,6 +2922,7 @@ function buildContextOutput(db, input) {
   );
   const sessionMetrics = buildSessionMetricMap(db, sessionIds);
   const primarySession = buildSessionView(
+    db,
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id)
   );
@@ -2861,6 +2931,7 @@ function buildContextOutput(db, input) {
     primarySessionRecord.project
   );
   const recentSessionOutputs = buildRecentSessionsOutput(
+    db,
     recentSessions,
     sessionMetrics,
     primarySessionRecord.id
@@ -3453,11 +3524,11 @@ var rollbackReason = {
   data: (turn, ctx) => {
     const replacementPromptId = turn.contentPromptId ? ctx.replacementByPromptId.get(turn.contentPromptId) : void 0;
     return {
-      replacementPromptNumber: replacementPromptId ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null : null
+      replacementTurnId: replacementPromptId ? ctx.turnIdByPromptId.get(replacementPromptId) ?? null : null
     };
   },
   flagToken: () => "was_rolled_back",
-  parenExtra: (_turn, data) => data.replacementPromptNumber !== null ? `replaced by T${data.replacementPromptNumber}` : null
+  parenExtra: (_turn, data) => data.replacementTurnId !== null ? `replaced by T${data.replacementTurnId}` : null
 };
 function addPendingReason(tags, reason) {
   if (tags.includes(reason.pendingTag) || tags.includes(reason.notifiedTag)) {

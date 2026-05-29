@@ -1,6 +1,6 @@
 ---
 name: mnemo-replay
-description: Read raw Claude Code session transcripts and the mnemo SQLite database directly. Use when recall output is truncated, when you need exact user wording or full tool output, or when you want to reconstruct a session from the source bytes.
+description: Read raw Claude Code session transcripts and the mnemo SQLite database directly. Use when recall output is truncated, when you need exact user wording, the full assistant response, or full tool output, or when you want to reconstruct a session from the source bytes.
 ---
 
 # Mnemo Replay
@@ -104,7 +104,7 @@ Do not write through `sqlite3`. Writes still go through `remember`.
 | Table | Row = | Useful columns |
 |---|---|---|
 | `sessions` | One Claude Code conversation | `id`, `content_session_id`, `project`, `title`, `content`, `insight`, `next_steps`, `last_compact_turn` |
-| `turns` | One user prompt in a session | `id`, `session_id`, `prompt_number`, `status`, `title`, `content`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count` |
+| `turns` | One user prompt in a session | `id`, `session_id`, `prompt_number`, `status`, `title`, `content`, `user_prompt`, `assistant_response`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count` |
 | `observations` | One tool call in a turn | `id`, `turn_id`, `tool_name`, `tool_input`, `tool_result`, `status`, `title`, `content` |
 | `memories` | Durable cross-session knowledge | `id`, `type`, `scope`, `title`, `content`, `reasoning`, `application`, `tags`, `status` |
 
@@ -125,6 +125,14 @@ SELECT prompt_number, type, title, status
 FROM turns
 WHERE session_id = 12
 ORDER BY prompt_number;
+```
+
+**Full prompt + response for one turn** (these columns hold the complete text; `recall` and the memory agent only ever see a truncated view of them)
+
+```sql
+SELECT user_prompt, assistant_response
+FROM turns
+WHERE session_id = 12 AND prompt_number = 3;
 ```
 
 **Recent turns that touched a file**
@@ -155,4 +163,5 @@ LIMIT 20;
 - Use the `raw:` line from expanded session output as the copy-paste handoff.
 - Prefer `replay-parse.cjs schema/query/show` over hand-written `Read`/`Grep` flows.
 - Treat SQLite as read-only unless you are going through `remember`.
+- For the full assistant response (or user prompt): the `turns.assistant_response` / `turns.user_prompt` columns hold the complete text — `recall` and the memory agent only see a capped slice. Read the column directly, or for the verbatim original use the JSONL `assistantText` field without a `:N` cap.
 - If you need exact bytes, prefer the JSONL over the indexed mirror.

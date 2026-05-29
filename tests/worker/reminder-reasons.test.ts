@@ -152,15 +152,46 @@ describe("reminder reason registry (D0)", () => {
       epoch: 30,
     });
 
-    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    // The envelope addresses turns by DB id (consistent with <turn> blocks and
+    // remember/recall). Derive the ids from the items so the format check stays
+    // robust to autoincrement ordering. Items sort ascending by prompt_number,
+    // i.e. prompts 2, 3, 4.
+    const items = getReminderItems(db, sessionId);
+    const [interrupted, rolledBack, both] = items;
+    const envelope = buildReminderEnvelope(items);
     expect(envelope).toBe(
       `<reminder>
   The following turns were invalidated and need one-time attention.
-  - T2 (was_interrupted): "Interrupted title" -- Interrupted content
-  - T3 (was_rolled_back): "Rolled-back title" -- Rolled-back content
-  - T4 (was_interrupted+was_rolled_back): "Both title" -- Both content
+  - T${interrupted!.turnId} (was_interrupted): "Interrupted title" -- Interrupted content
+  - T${rolledBack!.turnId} (was_rolled_back): "Rolled-back title" -- Rolled-back content
+  - T${both!.turnId} (was_interrupted+was_rolled_back): "Both title" -- Both content
 </reminder>`,
     );
+  });
+
+  test("renders the DB turn id, not the prompt number, when they diverge", () => {
+    // Adopted/gapped session: prompt_number is 48 but the DB id is small. The
+    // reminder must address the turn by DB id so remember()/recall() hit the
+    // right row (the prompt number is not a valid id for those).
+    seedTurn(db, sessionId, {
+      promptNumber: 48,
+      status: "extracted",
+      title: "Adopted invalidated turn",
+      content: "Body",
+      wasInterrupted: 1,
+      tags: ["invalidated:notify-pending:interrupt"],
+      epoch: 10,
+    });
+
+    const items = getReminderItems(db, sessionId);
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    expect(item.promptNumber).toBe(48);
+    expect(item.turnId).not.toBe(48);
+
+    const envelope = buildReminderEnvelope(items);
+    expect(envelope).toContain(`- T${item.turnId} (was_interrupted)`);
+    expect(envelope).not.toContain("T48");
   });
 
   test("rollback replacement clause stays inside the parens", () => {
@@ -182,10 +213,11 @@ describe("reminder reason registry (D0)", () => {
       ],
     };
 
+    // The line is addressed by DB turn id (turnId: 1), not prompt_number (5).
     expect(buildReminderEnvelope([item])).toBe(
       `<reminder>
   The following turns were invalidated and need one-time attention.
-  - T5 (was_rolled_back, replaced by T7): "Rolled-back title" -- Rolled-back content
+  - T1 (was_rolled_back, replaced by T7): "Rolled-back title" -- Rolled-back content
 </reminder>`,
     );
   });
@@ -226,10 +258,11 @@ describe("reminder reason registry (D0)", () => {
       ],
     };
 
+    // Addressed by DB turn id (turnId: 1), not prompt_number (9).
     expect(buildReminderEnvelope([item])).toBe(
       `<reminder>
   The following turns were invalidated and need one-time attention.
-  - T9 (custom_flag, extra clause): prompt="hi there" -- a tail note
+  - T1 (custom_flag, extra clause): prompt="hi there" -- a tail note
 </reminder>`,
     );
   });

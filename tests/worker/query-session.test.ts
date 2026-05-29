@@ -449,8 +449,12 @@ describe("worker query session", () => {
     // Section structure — if someone regresses the prompt back to a one-liner,
     // these markers all disappear.
     expect(prompt).toContain("## Tools");
-    expect(prompt).toContain("## Observation messages");
+    // D6: the standalone obs-extraction section is gone (obs are bundled into
+    // turn mini-turns now); the session-summary field spec replaces it.
+    expect(prompt).not.toContain("## Observation messages");
+    expect(prompt).not.toContain("## Observation messages (<obs id=");
     expect(prompt).toContain("## Turn messages");
+    expect(prompt).toContain("## Session summary fields");
     expect(prompt).toContain("## Streamed turns (mini-turns)");
     expect(prompt).toContain("## Reminder envelope");
     expect(prompt).toContain("## Forbidden across all messages");
@@ -474,20 +478,24 @@ describe("worker query session", () => {
       "mcp__mnemo__recall",
     ]);
 
-    // Tool scope rules — obs path must explicitly forbid recall from the
-    // wrong contexts, and the memory-creation boundary must be present.
+    // Tool scope rules — the memory-creation boundary must be present, and the
+    // dead obs-extraction guidance must be gone (D6).
     expect(prompt).toContain("`remember()` — your only output");
     expect(prompt).toContain("`recall()` — the only read fallback");
     expect(prompt).toContain(
       "`recall()` is usually unnecessary — the inline data and conversation history usually suffice. Only escalate when they genuinely do not.",
     );
-    expect(prompt).toContain(
-      "Never update T/S records, create memories, or call `recall()` from an obs message.",
-    );
-    expect(prompt).toContain(
+    expect(prompt).not.toContain("from an obs message");
+    expect(prompt).not.toContain(
       "Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored",
     );
     expect(prompt).not.toContain('remember({ id: "O<n>", status: "skipped" })');
+
+    // Session-summary refresh contract (D1/D2): whole-rewrite, all seven fields.
+    expect(prompt).toContain("rewritten WHOLE on every refresh");
+    expect(prompt).toContain(
+      'remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })',
+    );
     expect(prompt).toContain(
       "Never call `remember()` without an `id` field",
     );
@@ -518,7 +526,7 @@ describe("worker query session", () => {
     expect(prompt).toContain("<subagent_invalidated>");
     expect(prompt).not.toContain('invalidated="<kinds>"');
     expect(prompt).not.toContain("<invalidated>");
-    expect(prompt).toContain("recall({ id: \"<session id>/<turn id>\", depth: \"expanded\", truncate: 2000 })");
+    expect(prompt).toContain("recall({ id: \"T<n>\", depth: \"expanded\", truncate: 2000 })");
     expect(prompt).not.toContain("replay(");
     expect(prompt).not.toContain("replay()");
 

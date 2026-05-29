@@ -11,6 +11,10 @@ const SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     next_steps TEXT,
+    decision TEXT,
+    done TEXT,
+    current TEXT,
+    reference TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
@@ -118,6 +122,7 @@ export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
+  ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
@@ -138,6 +143,18 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
   }
 
   db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+}
+
+// D7: the redesigned session summary splits into a time-axis (done/current/
+// next_steps) plus decision + reference. next_steps already exists; the four
+// new columns are added in place and never backfilled — old sessions keep NULL
+// and fall back to the legacy `insight` column on read.
+function ensureSessionSummaryFieldColumns(db: Database): void {
+  for (const column of ["decision", "done", "current", "reference"]) {
+    if (!hasColumn(db, "sessions", column)) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
+    }
+  }
 }
 
 function ensureTurnTranscriptLineStartColumn(db: Database): void {

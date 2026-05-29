@@ -209,7 +209,11 @@ describe("claude-mnemo smoke test", () => {
       id: `S${session.id}`,
       title: "Auth race fix",
       content: "Diagnosed and fixed the refresh race",
-      insight: "- durable memory extracted",
+      decision: "Chose a mutex over a retry queue [T2]",
+      done: "Serialized refresh with a mutex [T2]",
+      current: "Fix landed; regression green",
+      next_steps: "Backport to the release branch",
+      reference: "",
     });
 
     expect(getTurnById(db, firstTurnId)?.status).toBe("extracted");

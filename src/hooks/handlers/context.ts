@@ -9,6 +9,7 @@ import {
 } from "../../db/sessions";
 import * as formatModule from "../../mcp/format";
 import { buildContextTimelineView, renderTimeline } from "../../mcp/timeline";
+import { resolveTurnPointers } from "../../mcp/turn-pointers";
 import type {
   FormattedMemory,
   FormattedSession,
@@ -112,6 +113,7 @@ function buildSessionMetricMap(
 }
 
 function buildSessionView(
+  db: Database,
   session: SessionRecord,
   metrics: { turnCount: number; observationCount: number } | undefined,
 ): FormattedSession {
@@ -123,6 +125,10 @@ function buildSessionView(
     content: session.content,
     insight: splitInsight(session.insight),
     nextSteps: session.nextSteps,
+    decision: resolveTurnPointers(db, session.id, session.decision),
+    done: resolveTurnPointers(db, session.id, session.done),
+    current: session.current,
+    reference: session.reference,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
     jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
@@ -135,14 +141,32 @@ function buildCurrentSessionOutput(
   sessionRecord: SessionRecord,
 ): string {
   const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const insightLines = session.insight ?? [];
+  const pushField = (label: string, value: string | null | undefined): void => {
+    if (value) {
+      lines.push(`  ${label}: ${value}`);
+    }
+  };
 
-  if (insightLines.length > 0) {
-    lines.push("  insight:");
-    for (const line of insightLines) {
-      lines.push(`  - ${line}`);
+  // D4: inject the full redesigned summary. `decision` falls back to legacy
+  // `insight` bullets for old sessions; empty fields are skipped.
+  pushField("content", session.content);
+
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else {
+    const insightLines = session.insight ?? [];
+    if (insightLines.length > 0) {
+      lines.push("  insight:");
+      for (const line of insightLines) {
+        lines.push(`  - ${line}`);
+      }
     }
   }
+
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
 
   try {
     const timelineView = buildContextTimelineView(db, sessionRecord.id);
@@ -182,6 +206,7 @@ function classifyTimeGroup(epochSeconds: number, now: Date): string {
 }
 
 function buildRecentSessionsOutput(
+  db: Database,
   recentSessions: SessionRecord[],
   sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
   primarySessionId: number,
@@ -205,7 +230,7 @@ function buildRecentSessionsOutput(
 
     lines.push(
       formatModule.renderNode(
-        { type: "session", value: buildSessionView(session, sessionMetrics.get(session.id)) },
+        { type: "session", value: buildSessionView(db, session, sessionMetrics.get(session.id)) },
         { depth: "collapsed", truncate: 120, mode: "unified" },
       ),
     );
@@ -328,6 +353,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   );
   const sessionMetrics = buildSessionMetricMap(db, sessionIds);
   const primarySession = buildSessionView(
+    db,
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id),
   );
@@ -337,6 +363,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   );
 
   const recentSessionOutputs = buildRecentSessionsOutput(
+    db,
     recentSessions,
     sessionMetrics,
     primarySessionRecord.id,

@@ -26,7 +26,10 @@ import {
 /** Cross-turn context computed once per collection pass, handed to `data()`. */
 export interface ReminderContext {
   replacementByPromptId: Map<string, string>;
-  promptNumberByPromptId: Map<string, number>;
+  // promptId -> DB turn id. The reminder envelope addresses turns by DB id
+  // (matching the <turn id="T..."> blocks, remember(), recall(), and [T<n>]
+  // markers) so the agent acts on a single, consistent id space.
+  turnIdByPromptId: Map<string, number>;
 }
 
 export interface ReminderReason<D = unknown> {
@@ -86,7 +89,7 @@ const interruptReason: ReminderReason = {
 };
 
 interface RollbackData {
-  replacementPromptNumber: number | null;
+  replacementTurnId: number | null;
 }
 
 const rollbackReason: ReminderReason<RollbackData> = {
@@ -99,15 +102,15 @@ const rollbackReason: ReminderReason<RollbackData> = {
       ? ctx.replacementByPromptId.get(turn.contentPromptId)
       : undefined;
     return {
-      replacementPromptNumber: replacementPromptId
-        ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null
+      replacementTurnId: replacementPromptId
+        ? ctx.turnIdByPromptId.get(replacementPromptId) ?? null
         : null,
     };
   },
   flagToken: () => "was_rolled_back",
   parenExtra: (_turn, data) =>
-    data.replacementPromptNumber !== null
-      ? `replaced by T${data.replacementPromptNumber}`
+    data.replacementTurnId !== null
+      ? `replaced by T${data.replacementTurnId}`
       : null,
 };
 
@@ -393,15 +396,15 @@ function buildReminderContext(
   turns: TurnRecord[],
   transcriptPath?: string,
 ): ReminderContext {
-  const promptNumberByPromptId = new Map(
+  const turnIdByPromptId = new Map(
     turns
       .filter((turn) => turn.contentPromptId)
-      .map((turn) => [turn.contentPromptId!, turn.promptNumber] as const),
+      .map((turn) => [turn.contentPromptId!, turn.id] as const),
   );
   const replacementByPromptId = transcriptPath
     ? detectRollbackTopology(transcriptPath).replacementByPromptId
     : new Map<string, string>();
-  return { replacementByPromptId, promptNumberByPromptId };
+  return { replacementByPromptId, turnIdByPromptId };
 }
 
 function collectReminderItems(

@@ -5,7 +5,7 @@ description: Search and read structured memory from past sessions in this projec
 
 # Mnemo Recall
 
-`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, observation summaries, and durable memories. For exact prompts, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
+`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, observation summaries, and durable memories. For exact prompts, full responses, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
 
 **Three axes of read access**:
 - `recall` — content index: what happened, where, and what to inspect next
@@ -86,7 +86,7 @@ If a field is truncated, raise `truncate` first:
 recall(id="S12/T3", depth="expanded", truncate=2000)
 ```
 
-If the result still is not enough, or you need exact wording / full tool output, switch to the `mnemo-replay` skill. There is no unlimited `recall` mode.
+If the result still is not enough, or you need exact wording, the full response, or full tool output, switch to the `mnemo-replay` skill. There is no unlimited `recall` mode.
 
 ## `recall` Parameter Reference
 
@@ -113,9 +113,10 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | `S12/T3/O*` | Observations for one turn |
 | `S12/T*/O*` | Observations for an entire session |
 | `O87` | Single observation (global DB id) |
+| `T418` | Single turn (global DB id) |
 | `M*` / `M4` / `M1..20` | Memories |
 
-Turn IDs are session-scoped prompt numbers, not global DB ids.
+In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id instead (the same id the memory worker writes through `remember`); prefer the `S/T` form unless you already hold a DB id.
 
 ### Query Filters
 

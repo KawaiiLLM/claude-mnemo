@@ -104,7 +104,7 @@ describe("delivery-dropped reminder reason (D9)", () => {
 
     const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
     expect(envelope).toContain(
-      `- T7 (delivery_dropped, not yet extracted): prompt="Run /goal migration" -- one or more parts of this turn could not be delivered; record intent if possible`,
+      `- T${turnId} (delivery_dropped, not yet extracted): prompt="Run /goal migration" -- one or more parts of this turn could not be delivered; record intent if possible`,
     );
     expect(envelope).not.toMatch(/\d+ parts/);
   });
@@ -120,7 +120,7 @@ describe("delivery-dropped reminder reason (D9)", () => {
 
     const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
     expect(envelope).toContain(
-      `- T7 (delivery_dropped): "Migrate goal pipeline" -- record may be incomplete, one or more parts could not be delivered after repeated failures`,
+      `- T${turnId} (delivery_dropped): "Migrate goal pipeline" -- record may be incomplete, one or more parts could not be delivered after repeated failures`,
     );
   });
 

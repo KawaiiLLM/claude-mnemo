@@ -560,8 +560,99 @@ describe("recallMemory", () => {
     expect(turnOutput).toContain("+55 more");
   });
 
-  test("rejects invalid time and legacy-style ids", () => {
+  test("rejects invalid time and unparseable ids", () => {
     expect(recallMemory(db, { time: "yesterday" })).toContain("Parameter error:");
-    expect(recallMemory(db, { id: "T1" })).toContain("Parameter error:");
+    expect(recallMemory(db, { id: "Z9" })).toContain("Parameter error:");
+  });
+
+  test("global T<n> route resolves a turn by DB id (worker recall fallback)", () => {
+    const lateSession = upsertSession(db, {
+      contentSessionId: "session-late",
+      project: "claude-mnemo",
+      title: "Late session",
+      content: "A session created after several others",
+      insight: null,
+      createdAtEpoch: 90_000,
+      updatedAtEpoch: 90_010,
+      completedAtEpoch: null,
+    });
+
+    const turn = saveTurn(db, {
+      sessionId: lateSession.id,
+      promptNumber: 1,
+      userPrompt: "What broke the build?",
+      assistantResponse: "A missing import.",
+      title: "Diagnose build break",
+      content: "Tracked the failure to a missing import.",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 90_001,
+      updatedAtEpoch: 90_002,
+      observations: [],
+    });
+
+    // The DB id is global and far past this session's prompt_number 1.
+    expect(turn.id).toBeGreaterThan(1);
+    expect(turn.id).not.toBe(turn.promptNumber);
+
+    // Worker style: the same T<n> DB id it uses for remember().
+    const byDbId = recallMemory(db, {
+      id: `T${turn.id}`,
+      depth: "expanded",
+    });
+    // Main-agent style: session-scoped prompt_number.
+    const byPromptNumber = recallMemory(db, {
+      id: `S${lateSession.id}/T${turn.promptNumber}`,
+      depth: "expanded",
+    });
+
+    expect(byDbId).toContain("Diagnose build break");
+    expect(byPromptNumber).toContain("Diagnose build break");
+  });
+
+  test("S/T stays prompt_number-scoped and never falls back to a DB id", () => {
+    // Adopted/resumed sessions can start at high prompt numbers, so a turn's DB
+    // id and prompt_number diverge. S/T must address prompt_number only.
+    const adopted = upsertSession(db, {
+      contentSessionId: "session-adopted",
+      project: "claude-mnemo",
+      title: "Adopted session",
+      content: "Resumed mid-stream",
+      insight: null,
+      createdAtEpoch: 91_000,
+      updatedAtEpoch: 91_010,
+      completedAtEpoch: null,
+    });
+
+    const turn = saveTurn(db, {
+      sessionId: adopted.id,
+      promptNumber: 48,
+      userPrompt: "Resume work",
+      assistantResponse: "Resumed.",
+      title: "Resumed adopted turn",
+      content: "Picked up the adopted session.",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 91_001,
+      updatedAtEpoch: 91_002,
+      observations: [],
+    });
+    expect(turn.id).not.toBe(48);
+
+    // Passing the DB id as if it were a prompt number must NOT resolve — S/T is
+    // prompt_number-scoped, with no DB-id fallback.
+    expect(
+      recallMemory(db, { id: `S${adopted.id}/T${turn.id}`, depth: "expanded" }),
+    ).not.toContain("Resumed adopted turn");
+    // The real prompt_number resolves through S/T.
+    expect(
+      recallMemory(db, { id: `S${adopted.id}/T48`, depth: "expanded" }),
+    ).toContain("Resumed adopted turn");
+    // The global T<dbid> route resolves it for the worker.
+    expect(
+      recallMemory(db, { id: `T${turn.id}`, depth: "expanded" }),
+    ).toContain("Resumed adopted turn");
   });
 });

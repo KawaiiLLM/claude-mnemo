@@ -89,6 +89,10 @@ export interface FormattedSession {
   content?: string | null;
   insight?: string[];
   nextSteps?: string | null;
+  decision?: string | null;
+  done?: string | null;
+  current?: string | null;
+  reference?: string | null;
   turnCount?: number | null;
   observationCount?: number | null;
   jsonlPath?: string;
@@ -419,36 +423,36 @@ function formatSessionExpandedWithMode(
 ): string {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  const hintId = buildSessionHintId(session.id);
+  const pushField = (label: string, value: string | null | undefined): void => {
+    if (!value) {
+      return;
+    }
+    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+  };
 
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
 
-  if (session.insight && session.insight.length > 0) {
+  // D4: render the redesigned summary fields. `decision` falls back to the
+  // legacy `insight` bullets for old sessions (decision NULL); empty
+  // done/current/reference are skipped.
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map((line) =>
-        truncateText(line, {
-          limit,
-          mode,
-          hintId: buildSessionHintId(session.id),
-        }),
-      ),
+      session.insight.map((line) => truncateText(line, { limit, mode, hintId })),
     );
   }
 
-  if (session.nextSteps) {
-    lines.push("  - next_steps:");
-    lines.push(
-      `    - ${truncateText(session.nextSteps, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id),
-      })}`,
-    );
-  }
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
 
   return lines.join("\n");
 }

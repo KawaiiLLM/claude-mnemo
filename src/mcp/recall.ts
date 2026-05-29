@@ -21,6 +21,7 @@ import {
   type FormattedTurn,
 } from "./format";
 import { expandNumericSelector } from "./selectors";
+import { resolveTurnPointers } from "./turn-pointers";
 
 export interface RecallInput {
   id?: string;
@@ -50,6 +51,7 @@ const CHILD_PREVIEW_SIZE = 5;
 type RoutedRecallId =
   | { kind: "sessions"; sessionIds?: number[] }
   | { kind: "turns"; sessionId: number; promptNumbers?: number[] }
+  | { kind: "turn-by-id"; turnId: number }
   | { kind: "session-observation-list"; sessionId: number }
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
   | { kind: "observation"; observationId: number }
@@ -66,6 +68,27 @@ function splitInsight(insight: string | null): string[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => line.replace(/^-+\s*/, ""));
+}
+
+// D4: the redesigned summary fields, with [T<n>] markers resolved to current
+// turn titles. `insight` is carried for the legacy read-side fallback (old
+// sessions whose `decision` is empty). decision/done hold the inline pointers.
+function buildSessionSummaryFields(
+  db: Database,
+  session: NonNullable<ReturnType<typeof getSession>>,
+): Pick<
+  FormattedSession,
+  "content" | "insight" | "nextSteps" | "decision" | "done" | "current" | "reference"
+> {
+  return {
+    content: session.content,
+    insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    decision: resolveTurnPointers(db, session.id, session.decision),
+    done: resolveTurnPointers(db, session.id, session.done),
+    current: session.current,
+    reference: session.reference,
+  };
 }
 
 function formatParameterError(message: string): string {
@@ -185,6 +208,19 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
+  // Global turn-by-DB-id route. Symmetric with `remember({ id: "T<n>" })` (which
+  // also uses the DB id) and with the `<turn id="T<n>">` blocks the memory
+  // worker sees, so the worker can recall a truncated turn it is extracting. The
+  // main agent never uses bare `T<n>` — its output always scopes turns as
+  // `S<id>/T<promptNumber>` — so this does not affect the session-scoped route.
+  const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
+  if (turnByIdMatch) {
+    return {
+      kind: "turn-by-id",
+      turnId: Number(turnByIdMatch[1]),
+    };
+  }
+
   const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
   if (sessionMatch) {
     const sessionIds = expandNumericSelector(sessionMatch[1]!);
@@ -284,9 +320,7 @@ function buildSessionView(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -348,9 +382,7 @@ export function buildSessionSummary(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount,
     observationCount,
     jsonlPath: undefined,
@@ -400,9 +432,7 @@ export function buildFormattedSession(
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -887,6 +917,11 @@ function applyTurnSelector(
     return turns;
   }
 
+  // `S<id>/T<n>` is strictly a session-scoped prompt_number selector. The worker
+  // addresses turns by DB id, but it uses the separate global `T<n>` route for
+  // that — never overload prompt numbers here (adopted sessions can start at
+  // high/gapped prompt numbers, so a DB-id fallback would silently return the
+  // wrong turn).
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
@@ -1093,6 +1128,13 @@ function renderRoutedId(
       renderTurnScope(db, paged.items, depth, truncate),
       paged.pageCount,
     );
+  }
+
+  if (routed.kind === "turn-by-id") {
+    const turn = getTurnById(db, routed.turnId);
+    return turn
+      ? renderTurnScope(db, [turn], depth, truncate)
+      : "Turn not found.";
   }
 
   if (routed.kind === "observation-list") {

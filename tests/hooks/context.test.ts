@@ -577,15 +577,21 @@ describe("handleContextHook", () => {
       `[M2] project//Users/zhaoqixuan/Projects/claude-mnemo: Auth mutex policy | 1970-01-01`,
     );
     expect(output).not.toContain("Other project note");
+    // D4: the current-session block injects every summary field. With no
+    // `decision`, the legacy `insight` bullets render as the fallback.
     expect(output).toContain("  insight:");
     expect(output).toContain("  - Primary insight bullet for the current session");
     expect(output).toContain("T#");
     expect(output).not.toContain("showing:");
     expect(output).toContain("phases (session-wide):");
     expect(output).toContain("shape signals (window T1-T6");
+    // next_steps renders under its display label "next".
     expect(output).not.toContain("next_steps:");
-    expect(output).not.toContain(
-      "Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
+    expect(output).toContain(
+      "  next: Implement the mutex fix before the next session begins.",
+    );
+    expect(output).toContain(
+      "  content: Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
     );
 
     expect(output).toContain(

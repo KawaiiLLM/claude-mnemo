@@ -149,36 +149,55 @@ function buildObsBlock(
 </obs>`;
 }
 
+// D5: a session whose summary is this many extracted turns behind is flagged
+// stale, and the next injected batch nudges a full refresh.
+export const STALE_TURN_THRESHOLD = 10;
+
 export function buildBatchPrompt(args: {
   sessionId: number;
   project: string;
   sessionTitle: string | null;
   currentPrompt: string | null;
-  priorTitle: string | null;
-  priorContent: string | null;
-  priorInsight: string | null;
-  priorNextSteps: string | null;
+  prior: PriorSessionSummary | null;
   sessionUpdated?: boolean;
+  staleTurns?: number;
   completedTurnBlocks: string[];
 }): string {
-  const sessionUpdatedBlock = args.sessionUpdated
-    ? `<session-updated>
+  const isStale = (args.staleTurns ?? 0) >= STALE_TURN_THRESHOLD;
+  const staleAttr = isStale ? ` stale_turns="${args.staleTurns}"` : "";
+  const noticeBlock = isStale
+    ? `<session-stale>
+The session summary is ${args.staleTurns} extracted turns behind. Re-supply ALL session fields (title, content, decision, done, current, next_steps, reference) for a complete refresh — edit on top of prior_* below.
+</session-stale>
+
+`
+    : args.sessionUpdated
+      ? `<session-updated>
 Session summary was refreshed since your last message.
 </session-updated>
 
 `
-    : "";
-  const priorSessionBlock =
-    args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps
-      ? `
+      : "";
+  const prior = args.prior;
+  // Render the FULL prior scaffold whenever a refresh is invited (summary
+  // changed elsewhere, or stale) — even if every field is empty. A
+  // never-refreshed stale session must still see the labelled prior_* fields
+  // the instruction tells the agent to edit on top of. Labels mirror the
+  // standalone summary message's `prior_*` wording.
+  const showPrior = prior !== null && (Boolean(args.sessionUpdated) || isStale);
+  const priorSessionBlock = showPrior
+    ? `
 <prior_session>
-  title: ${args.priorTitle ?? ""}
-  content: ${args.priorContent ?? ""}
-  insight: ${args.priorInsight ?? ""}
-  next_steps: ${args.priorNextSteps ?? ""}
+  prior_title: ${prior!.title ?? ""}
+  prior_content: ${prior!.content ?? ""}
+  prior_decision: ${prior!.decision ?? ""}
+  prior_done: ${prior!.done ?? ""}
+  prior_current: ${prior!.current ?? ""}
+  prior_next: ${prior!.nextSteps ?? ""}
+  prior_reference: ${prior!.reference ?? ""}
 </prior_session>
 `
-      : "";
+    : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
   const titleLine = args.sessionTitle
     ? `\n  title: ${args.sessionTitle}`
@@ -187,11 +206,10 @@ Session summary was refreshed since your last message.
     ? `\n  current_prompt: ${truncateMiddle(args.currentPrompt, 200)}`
     : "";
 
-  return `<session id="S${args.sessionId}">
+  return `<session id="S${args.sessionId}"${staleAttr}>
   project: ${args.project}${titleLine}${promptLine}
 </session>
-${sessionUpdatedBlock}
-${priorSessionBlock}
+${noticeBlock}${priorSessionBlock}
 <batch>
 ${body}
 </batch>`;
@@ -291,39 +309,58 @@ function aggregateFilesFromObservations(
   };
 }
 
-function buildSessionSummaryPrompt(
-  sessionId: number,
-  project: string,
-  title: string | null,
-  content: string | null,
-  insight: string | null,
-  nextSteps: string | null,
-): string {
-  return `<session id="S${sessionId}">
-  project: ${project}
-  prior_title: ${title ?? ""}
-  prior_content: ${content ?? ""}
-  prior_insight: ${insight ?? ""}
-  prior_next_steps: ${nextSteps ?? ""}
-</session>
+export interface PriorSessionSummary {
+  title: string | null;
+  content: string | null;
+  decision: string | null;
+  done: string | null;
+  current: string | null;
+  nextSteps: string | null;
+  reference: string | null;
+}
 
-<instruction>
+// Shared instruction body for a session-summary refresh (D1/D2). Used by both
+// the standalone summary message and the inline <prior_session> path so the
+// field set, all-or-nothing rule, and [T<n>] convention stay identical.
+function sessionSummaryInstruction(sessionId: number): string {
+  return `<instruction>
 Refresh the session summary ONLY if material change since prior_*: a new goal, a completed milestone, a reversed decision, or a newly discovered constraint. Small incremental work does NOT qualify.
 
-If updating, call:
-remember({ id: "S${sessionId}", title, content, insight, next_steps })
+If updating, you MUST re-supply ALL seven fields — the summary is rewritten whole, never merged, so omitting any field is rejected. Edit each field on top of its prior_* value (echo-and-edit), do not regenerate from scratch:
+remember({ id: "S${sessionId}", title, content, decision, done, current, next_steps, reference })
 
-Length budget (strict):
+Fields:
 - title: 20-50 chars, one line
-- content: 100-300 chars, what the session is about
-- insight: 2-5 bullet lines, each ≤50 chars, prefixed "- "
-- next_steps: 50-150 chars, what's pending
-- Total: <500 chars
+- content: 100-300 chars, what the session is about (browsing synopsis)
+- decision: key decisions and WHY they were made; cite pivotal turns inline as [T<n>] using the id from the <turn id="T..."> block. Keep prior [T<n>] markers.
+- done: completed work; cite milestone turns inline as [T<n>]. Keep prior [T<n>] markers.
+- current: where things stand right now
+- next_steps: 50-150 chars, what is pending / the next step
+- reference: external anchors only — reference repos, URLs, PRs, out-of-project paths. Empty string if none.
 
-Do NOT mention file paths, tool counts, or code-level details. Those belong in turn records.
+Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — those are the main agent's M-level memories.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
+}
+
+function buildSessionSummaryPrompt(
+  sessionId: number,
+  project: string,
+  prior: PriorSessionSummary,
+): string {
+  return `<session id="S${sessionId}">
+  project: ${project}
+  prior_title: ${prior.title ?? ""}
+  prior_content: ${prior.content ?? ""}
+  prior_decision: ${prior.decision ?? ""}
+  prior_done: ${prior.done ?? ""}
+  prior_current: ${prior.current ?? ""}
+  prior_next: ${prior.nextSteps ?? ""}
+  prior_reference: ${prior.reference ?? ""}
+</session>
+
+${sessionSummaryInstruction(sessionId)}`;
 }
 
 // --- Mini-turn streaming primitives (D1-D7) -------------------------------
@@ -332,7 +369,7 @@ If no material change, respond with no tool calls. An empty response is the "lea
 // the file tree is the only previously-uncapped field, so it is capped here.
 
 const PROMPT_CAP = 1000;
-const RESPONSE_CAP = 1000;
+const RESPONSE_CAP = 2000;
 export const FILE_TREE_CAP = 1500;
 const PRIOR_TITLE_CAP = 100;
 const PRIOR_CONTENT_CAP = 300;
@@ -590,14 +627,15 @@ export function createWorkerProcessors(db: Database) {
       }
 
       await state.pushMessage(
-        buildSessionSummaryPrompt(
-          session.id,
-          session.project,
-          session.title,
-          session.content,
-          session.insight,
-          session.nextSteps,
-        ),
+        buildSessionSummaryPrompt(session.id, session.project, {
+          title: session.title,
+          content: session.content,
+          decision: session.decision,
+          done: session.done,
+          current: session.current,
+          nextSteps: session.nextSteps,
+          reference: session.reference,
+        }),
       );
     },
   };

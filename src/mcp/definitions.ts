@@ -40,6 +40,12 @@ export const rememberInputShape = {
     ])
     .optional(),
   next_steps: z.string().optional(),
+  // Session-summary fields (D1). `next_steps` above doubles as the displayed
+  // "next" field; these four are session-only and rewritten whole each refresh.
+  decision: z.string().optional(),
+  done: z.string().optional(),
+  current: z.string().optional(),
+  reference: z.string().optional(),
   source: z.string().optional(),
 };
 

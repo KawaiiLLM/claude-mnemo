@@ -62,6 +62,7 @@ import {
   createWorkerProcessors,
   FINAL_SLICE_OVERHEAD,
   renderMiniTurn,
+  STALE_TURN_THRESHOLD,
   STREAMING_SLICE_OVERHEAD,
   type MiniTurnPayload,
 } from "./processors";
@@ -259,8 +260,10 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-function buildSubagentInvalidationEnvelope(promptNumbers: number[]): string {
-  const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
+function buildSubagentInvalidationEnvelope(turnIds: number[]): string {
+  // DB turn ids — consistent with the <turn id="T..."> blocks the agent matches
+  // these against.
+  const labels = turnIds.map((turnId) => `T${turnId}`).join(", ");
   return `<subagent_invalidated>
   ${labels} originated from a Task subagent transcript and are out-of-scope
   for session memory.
@@ -314,7 +317,10 @@ export function buildReminderEnvelope(
 
     const bodyParts = [...leadParts, ...tailParts];
     const bodyClause = bodyParts.length > 0 ? `: ${bodyParts.join(" -- ")}` : "";
-    return `  - T${item.promptNumber} (${parenInner})${bodyClause}`;
+    // DB turn id — the same id the agent sees in <turn id="T..."> blocks and
+    // passes to remember()/recall(), so the reminder is actionable in sessions
+    // where prompt_number and DB id diverge (adopted/gapped sessions).
+    return `  - T${item.turnId} (${parenInner})${bodyClause}`;
   });
 
   return `<reminder>
@@ -389,8 +395,33 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       (session.title ?? "") !== "" ||
       (session.content ?? "") !== "" ||
       (session.insight ?? "") !== "" ||
-      (session.nextSteps ?? "") !== ""
+      (session.nextSteps ?? "") !== "" ||
+      (session.decision ?? "") !== "" ||
+      (session.done ?? "") !== "" ||
+      (session.current ?? "") !== "" ||
+      (session.reference ?? "") !== ""
     );
+  }
+
+  // D5: how many extracted turns have landed since the summary was last
+  // refreshed. baseline uses COALESCE so a never-refreshed summary (NULL epoch)
+  // measures against session creation instead of comparing against NULL (which
+  // would make the > comparison always false and never flag staleness).
+  function countTurnsSinceSummary(sessionId: number): number {
+    const row = deps.db
+      .query<{ n: number }, [number, number]>(
+        `SELECT COUNT(*) AS n
+         FROM turns
+         WHERE session_id = ?
+           AND status = 'extracted'
+           AND updated_at_epoch > (
+             SELECT COALESCE(summary_updated_at_epoch, created_at_epoch, 0)
+             FROM sessions WHERE id = ?
+           )`,
+      )
+      .get(sessionId, sessionId);
+
+    return row?.n ?? 0;
   }
 
   function getOrCreateBuffer(sessionDbId: number): BufferState {
@@ -446,12 +477,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return;
     }
 
+    // Skip if a queued batch already carries session context — avoid stacking.
+    if (state.batchQueue.some((batch) => batch.sessionUpdated)) {
+      return;
+    }
+
     const summaryEpoch = session.summaryUpdatedAtEpoch ?? 0;
-    if (
-      summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0) &&
-      !state.batchQueue.some((batch) => batch.sessionUpdated)
-    ) {
+    if (summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0)) {
+      // Summary was refreshed elsewhere — show the agent the new summary.
       state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+      return;
+    }
+
+    // D5: summary fell behind by >= threshold extracted turns. Nudge a full
+    // refresh even when no summary exists yet (a long pre-compact session).
+    if (countTurnsSinceSummary(state.sessionDbId) >= STALE_TURN_THRESHOLD) {
+      state.nextBatchNeedsSessionContext = true;
     }
   }
 
@@ -650,7 +691,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         if (pendingSubagentTurns.length > 0) {
           envelopeBlocks.push(
             buildSubagentInvalidationEnvelope(
-              pendingSubagentTurns.map((turn) => turn.promptNumber),
+              pendingSubagentTurns.map((turn) => turn.id),
             ),
           );
         }
@@ -876,17 +917,28 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     });
 
     const sessionUpdated = batch.sessionUpdated;
+    const staleTurns = sessionUpdated
+      ? countTurnsSinceSummary(session.id)
+      : 0;
     await state.pushMessage(
       buildBatchPrompt({
         sessionId: session.id,
         project: session.project,
         sessionTitle: session.title,
         currentPrompt,
-        priorTitle: sessionUpdated ? session.title : null,
-        priorContent: sessionUpdated ? session.content : null,
-        priorInsight: sessionUpdated ? session.insight : null,
-        priorNextSteps: sessionUpdated ? session.nextSteps : null,
+        prior: sessionUpdated
+          ? {
+              title: session.title,
+              content: session.content,
+              decision: session.decision,
+              done: session.done,
+              current: session.current,
+              nextSteps: session.nextSteps,
+              reference: session.reference,
+            }
+          : null,
         sessionUpdated,
+        staleTurns,
         completedTurnBlocks: blocks,
       }),
     );

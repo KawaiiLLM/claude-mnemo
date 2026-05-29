@@ -92,19 +92,23 @@ describe("MCP write tools", () => {
     expect(observation.content).toBe("auth.ts now locks refresh work.");
   });
 
-  test("rememberTool updates the session summary by S{id}", () => {
+  test("rememberTool rewrites the whole session summary by S{id}", () => {
     const result = rememberTool(db, {
       id: `S${sessionId}`,
       title: "After update",
       content: "Updated session summary",
-      insight: "- updated insight",
+      decision: "Chose a mutex over a channel",
+      done: "Shipped the auth fix",
+      current: "Awaiting review",
       next_steps: "Ship the follow-up cleanup",
+      reference: "",
     });
 
     const session = getSession(db, sessionId)!;
 
     expect(result.content[0]?.text).toContain(`Updated session ${sessionId}`);
     expect(session.title).toBe("After update");
+    expect(session.decision).toBe("Chose a mutex over a channel");
     expect(session.nextSteps).toBe("Ship the follow-up cleanup");
   });
 

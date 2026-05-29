@@ -5,9 +5,11 @@ import { createDatabase } from "../../src/db/database";
 import { getMemory, listMemories } from "../../src/db/memories";
 import { getObservation, getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
+import { searchMemory } from "../../src/db/search";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { rememberInputSchema } from "../../src/mcp/definitions";
+import { recallMemory } from "../../src/mcp/recall";
 import { rememberTool } from "../../src/mcp/remember";
 
 describe("remember tool routing and validation", () => {
@@ -137,6 +139,21 @@ describe("remember tool routing and validation", () => {
     );
   });
 
+  test("rejects session-only summary fields on the O{id} route", () => {
+    const result = rememberTool(db, {
+      id: `O${observationId}`,
+      title: "Read auth module",
+      decision: "should be rejected" as never,
+    });
+
+    expect(result.content[0]?.text).toContain("Parameter error:");
+    expect(result.content[0]?.text).toContain(
+      "observation remember only accepts title, content, and status.",
+    );
+    // The observation must be left untouched (no silent partial write).
+    expect(getObservation(db, observationId)?.title).toBeNull();
+  });
+
   test("rejects unsupported observation statuses", () => {
     const result = rememberTool(db, {
       id: `O${observationId}`,
@@ -202,13 +219,16 @@ describe("remember tool routing and validation", () => {
     ).toBe(0);
   });
 
-  test("updates the session summary by S{id}", () => {
+  test("rewrites the whole session summary by S{id}", () => {
     const result = rememberTool(db, {
       id: `S${sessionId}`,
       title: "After update",
       content: "Updated session summary",
-      insight: "- updated insight",
+      decision: "Chose a mutex over a channel [T1]",
+      done: "Shipped the auth fix [T1]",
+      current: "Awaiting review",
       next_steps: "Ship the follow-up cleanup",
+      reference: "",
     });
 
     const session = getSession(db, sessionId)!;
@@ -216,43 +236,126 @@ describe("remember tool routing and validation", () => {
     expect(result.content[0]?.text).toContain(`Updated session ${sessionId}`);
     expect(session.title).toBe("After update");
     expect(session.content).toBe("Updated session summary");
-    expect(session.insight).toBe("- updated insight");
+    expect(session.decision).toBe("Chose a mutex over a channel [T1]");
+    expect(session.done).toBe("Shipped the auth fix [T1]");
+    expect(session.current).toBe("Awaiting review");
     expect(session.nextSteps).toBe("Ship the follow-up cleanup");
+    // Empty fields persist as NULL so read-side legacy fallback stays uniform.
+    expect(session.reference).toBeNull();
     expect(session.summaryUpdatedAtEpoch).toBeGreaterThanOrEqual(110);
   });
 
-  test("does not advance summaryUpdatedAtEpoch when the session summary is unchanged", () => {
+  test("rejects a partial session summary and leaves the row untouched (all-or-nothing)", () => {
     const before = getSession(db, sessionId)!;
 
     const result = rememberTool(db, {
       id: `S${sessionId}`,
-      title: before.title ?? undefined,
-      content: before.content ?? undefined,
-      insight: before.insight ?? undefined,
-      next_steps: before.nextSteps ?? undefined,
+      title: "Only a title",
+      content: "Only content",
+      next_steps: "Only next",
+      // decision / done / current / reference omitted
     });
 
     const after = getSession(db, sessionId)!;
 
-    expect(result.content[0]?.text).toContain(`Updated session ${sessionId}`);
+    expect(result.content[0]?.text).toContain("Parameter error");
+    expect(result.content[0]?.text).toContain("decision");
+    // No partial write: the prior summary survives intact.
+    expect(after.title).toBe(before.title);
+    expect(after.content).toBe(before.content);
     expect(after.summaryUpdatedAtEpoch).toBe(before.summaryUpdatedAtEpoch);
   });
 
-  test("advances summaryUpdatedAtEpoch only when the summary payload changes", () => {
-    const before = getSession(db, sessionId)!;
-
+  test("indexes the new summary fields into FTS so recall can find them (D8)", () => {
     rememberTool(db, {
       id: `S${sessionId}`,
-      title: before.title ?? undefined,
-      content: "Summary changed materially",
-      insight: before.insight ?? undefined,
-      next_steps: before.nextSteps ?? undefined,
+      title: "Auth work",
+      content: "Session about the auth refactor",
+      decision: "Adopted the quorumlock strategy for refresh",
+      done: "Migrated the schema",
+      current: "Reviewing",
+      next_steps: "Ship it",
+      reference: "",
+    });
+
+    // A distinctive word that lives only in `decision` must hit the session.
+    const hits = searchMemory(db, {
+      scope: "sessions",
+      query: "quorumlock",
+    });
+
+    expect(hits.map((hit) => hit.sourceId)).toContain(sessionId);
+  });
+
+  test("legacy session with insight + next_steps keeps insight searchable (D8 no regression)", () => {
+    // Old-shape session: insight set, next_steps set, no new fields. The
+    // legacy `insight` must still land in FTS (next_steps must not suppress it).
+    const legacyId = upsertSession(db, {
+      contentSessionId: "legacy-fts",
+      project: "claude-mnemo",
+      title: "Legacy",
+      content: "Legacy session",
+      insight: "- distinctiveinsightword captured here",
+      nextSteps: "follow up later",
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+
+    const hits = searchMemory(db, {
+      scope: "sessions",
+      query: "distinctiveinsightword",
+    });
+
+    expect(hits.map((hit) => hit.sourceId)).toContain(legacyId);
+  });
+
+  test("a rewrite with empty decision clears stale legacy insight (no fallback leak)", () => {
+    // The fixture session carries a legacy insight from the old schema.
+    expect(getSession(db, sessionId)!.insight).toBe("- initial insight");
+
+    // A whole rewrite with an empty decision is valid. It must clear insight so
+    // the decision-empty read fallback does not resurface the stale value.
+    rememberTool(db, {
+      id: `S${sessionId}`,
+      title: "Reworked",
+      content: "Session reworked under the new model",
+      decision: "",
+      done: "Did the thing",
+      current: "Stable",
+      next_steps: "Next",
+      reference: "",
+    });
+
+    expect(getSession(db, sessionId)!.insight).toBeNull();
+
+    const expanded = recallMemory(db, {
+      id: `S${sessionId}`,
+      depth: "expanded",
+    });
+    expect(expanded).not.toContain("initial insight");
+    expect(expanded).toContain("Did the thing");
+  });
+
+  test("always advances summaryUpdatedAtEpoch on a successful rewrite (D5)", () => {
+    const before = getSession(db, sessionId)!;
+
+    // Re-supply byte-identical fields — the epoch must STILL advance so a
+    // stale-forced refresh clears the staleness reminder (no livelock).
+    rememberTool(db, {
+      id: `S${sessionId}`,
+      title: before.title ?? "",
+      content: before.content ?? "",
+      decision: before.decision ?? "",
+      done: before.done ?? "",
+      current: before.current ?? "",
+      next_steps: before.nextSteps ?? "",
+      reference: before.reference ?? "",
     });
 
     const after = getSession(db, sessionId)!;
 
-    expect(after.content).toBe("Summary changed materially");
-    expect(after.summaryUpdatedAtEpoch).toBeGreaterThan(
+    expect(after.summaryUpdatedAtEpoch ?? 0).toBeGreaterThan(
       before.summaryUpdatedAtEpoch ?? 0,
     );
   });

@@ -30,8 +30,8 @@ export const DEFAULT_CONFIG: MnemoConfig = {
 };
 
 // Floor for maxMiniTurnChars: guarantees a final slice's fixed overhead
-// (prompt + prior_turn + response + capped file trees ~5800) plus at least one
-// truncated obs (~720) always fits, so "rendered <= budget" holds by
+// (prompt + prior_turn + response(2000) + capped file trees ~7200) plus at
+// least one truncated obs (~720) always fits, so "rendered <= budget" holds by
 // construction (D10).
 const MIN_MINI_TURN_CHARS = 8192;
 const MIN_FLUSH_ATTEMPTS = 1;

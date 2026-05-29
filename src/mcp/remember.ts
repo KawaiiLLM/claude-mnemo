@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { createMemory, updateMemory } from "../db/memories";
 import { updateObservation } from "../db/observations";
-import { getSession, upsertSession } from "../db/sessions";
+import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
 import { getTurnById, updateTurnById } from "../db/turns";
 
 type ToolTextResult = {
@@ -44,8 +44,25 @@ export interface RememberToolInput {
   tags?: string[];
   status?: RememberStatus;
   next_steps?: string;
+  decision?: string;
+  done?: string;
+  current?: string;
+  reference?: string;
   source?: string;
 }
+
+// D1/D2: the seven session-summary fields. `next_steps` is the tool/DB name for
+// the displayed "next" field. A session remember must supply ALL of them
+// (empty string allowed) — summaries are rewritten whole, never merged.
+const SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference",
+] as const;
 
 function textResult(text: string): ToolTextResult {
   return {
@@ -187,6 +204,10 @@ function handleObservationRemember(
     input.application !== undefined ||
     input.tags !== undefined ||
     input.next_steps !== undefined ||
+    input.decision !== undefined ||
+    input.done !== undefined ||
+    input.current !== undefined ||
+    input.reference !== undefined ||
     input.source !== undefined
   ) {
     return parameterError(
@@ -314,30 +335,37 @@ function handleSessionRemember(
     return textResult(`Session ${sessionId} not found.`);
   }
 
-  const nextTitle = input.title ?? session.title;
-  const nextContent = input.content ?? session.content;
-  const nextInsight = input.insight ?? session.insight;
-  const nextNextSteps = input.next_steps ?? session.nextSteps;
-  const summaryChanged =
-    nextTitle !== session.title ||
-    nextContent !== session.content ||
-    nextInsight !== session.insight ||
-    nextNextSteps !== session.nextSteps;
+  // All-or-nothing (D2): every summary field must be present (empty allowed).
+  // A partial update would silently freeze the omitted fields — the exact
+  // staleness root cause this redesign removes. Reject rather than half-write.
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === undefined);
 
-  upsertSession(db, {
-    contentSessionId: session.contentSessionId,
-    project: session.project,
-    title: nextTitle,
-    content: nextContent,
-    insight: nextInsight,
-    nextSteps: nextNextSteps,
-    summaryUpdatedAtEpoch: summaryChanged
-      ? Math.floor(Date.now() / 1000)
-      : session.summaryUpdatedAtEpoch,
-    createdAtEpoch: session.createdAtEpoch,
-    updatedAtEpoch: Math.floor(Date.now() / 1000),
-    completedAtEpoch: session.completedAtEpoch,
-  });
+  if (missing.length > 0) {
+    return parameterError(
+      `session remember rewrites the whole summary — supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", ",
+      )}). Missing: ${missing.join(", ")}.`,
+    );
+  }
+
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? "",
+    },
+    Math.floor(Date.now() / 1000),
+  );
+
+  if (!updated) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
 
   return textResult(`Updated session ${sessionId}.`);
 }

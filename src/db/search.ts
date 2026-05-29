@@ -5,6 +5,11 @@ export interface SessionFtsRecord {
   title: string | null;
   content: string | null;
   insight: string | null;
+  decision?: string | null;
+  done?: string | null;
+  current?: string | null;
+  nextSteps?: string | null;
+  reference?: string | null;
 }
 
 export interface TurnFtsRecord {
@@ -215,13 +220,40 @@ function indexFtsRecord(
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
+  // D8: the redesigned summary fields go in the `extra` slot (freed by dropping
+  // session insight). The legacy-vs-new decision keys ONLY on the new columns
+  // (decision/done/current/reference) — NOT next_steps, which predates the
+  // redesign. A legacy session (new columns NULL, insight set) keeps extra =
+  // insight so its search behavior is unchanged; otherwise the redesigned
+  // fields (including next) are indexed.
+  const hasNewFields = [
+    session.decision,
+    session.done,
+    session.current,
+    session.reference,
+  ].some((value) => Boolean(value && value.trim()));
+  const hasLegacyInsight = Boolean(session.insight && session.insight.trim());
+
+  const extra =
+    !hasNewFields && hasLegacyInsight
+      ? session.insight!
+      : [
+          session.decision,
+          session.done,
+          session.current,
+          session.nextSteps,
+          session.reference,
+        ]
+          .filter((value): value is string => Boolean(value && value.trim()))
+          .join("\n");
+
   indexFtsRecord(
     db,
     "session",
     session.id,
     session.title,
     session.content,
-    session.insight ?? "",
+    extra,
   );
 }
 
@@ -271,7 +303,17 @@ export function rebuildSearchIndex(db: Database): void {
 
   const sessionRows = db
     .query<
-      { id: number; title: string | null; content: string | null; insight: string | null },
+      {
+        id: number;
+        title: string | null;
+        content: string | null;
+        insight: string | null;
+        decision: string | null;
+        done: string | null;
+        current: string | null;
+        nextSteps: string | null;
+        reference: string | null;
+      },
       []
     >(
       `
@@ -279,7 +321,12 @@ export function rebuildSearchIndex(db: Database): void {
           id,
           title,
           content,
-          insight
+          insight,
+          decision,
+          done,
+          "current" AS current,
+          next_steps AS nextSteps,
+          "reference" AS reference
         FROM sessions
       `,
     )

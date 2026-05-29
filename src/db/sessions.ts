@@ -10,6 +10,10 @@ export interface SessionRecord {
   content: string | null;
   insight: string | null;
   nextSteps: string | null;
+  decision: string | null;
+  done: string | null;
+  current: string | null;
+  reference: string | null;
   lastCompactTurn: number | null;
   lastAgentSessionId: string | null;
   summaryUpdatedAtEpoch: number | null;
@@ -46,6 +50,10 @@ const SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -94,6 +102,10 @@ export function upsertSession(
         content,
         insight,
         next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -117,6 +129,101 @@ export function upsertSession(
 
   if (!session) {
     throw new Error("Failed to upsert session.");
+  }
+
+  indexSessionToFTS(db, session);
+
+  return session;
+}
+
+export interface SessionSummaryRewrite {
+  title: string;
+  content: string;
+  decision: string;
+  done: string;
+  current: string;
+  nextSteps: string;
+  reference: string;
+}
+
+// D2: the dedicated session-summary write path. Unlike upsertSession (which
+// COALESCE-preserves omitted fields for the non-summary callers), this rewrites
+// all seven summary fields whole — no merge, no preservation. The caller has
+// already enforced that every field is present (all-or-nothing). The epoch is
+// advanced UNCONDITIONALLY so a stale-forced refresh clears the staleness
+// reminder even when the agent echoes byte-identical fields (D5). Empty strings
+// are written as NULL so read-side fallback (decision empty → legacy insight)
+// works uniformly for new and old sessions. The legacy `insight` column is
+// cleared on every rewrite (D3): once a session is on the new model the
+// deprecated insight must not resurface through the decision-empty fallback.
+export function updateSessionSummaryRewrite(
+  db: Database,
+  sessionId: number,
+  fields: SessionSummaryRewrite,
+  nowEpoch: number,
+): SessionRecord | null {
+  const toNull = (value: string): string | null =>
+    value.trim() === "" ? null : value;
+
+  const session = db
+    .query<SessionRecord, [
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      string | null,
+      number,
+      number,
+      number,
+    ]>(`
+      UPDATE sessions SET
+        title = ?,
+        content = ?,
+        decision = ?,
+        done = ?,
+        "current" = ?,
+        next_steps = ?,
+        "reference" = ?,
+        insight = NULL,
+        summary_updated_at_epoch = ?,
+        updated_at_epoch = ?
+      WHERE id = ?
+      RETURNING
+        id,
+        content_session_id AS contentSessionId,
+        project,
+        title,
+        content,
+        insight,
+        next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
+        last_compact_turn AS lastCompactTurn,
+        last_agent_session_id AS lastAgentSessionId,
+        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        created_at_epoch AS createdAtEpoch,
+        updated_at_epoch AS updatedAtEpoch,
+        completed_at_epoch AS completedAtEpoch
+    `)
+    .get(
+      toNull(fields.title),
+      toNull(fields.content),
+      toNull(fields.decision),
+      toNull(fields.done),
+      toNull(fields.current),
+      toNull(fields.nextSteps),
+      toNull(fields.reference),
+      nowEpoch,
+      nowEpoch,
+      sessionId,
+    );
+
+  if (!session) {
+    return null;
   }
 
   indexSessionToFTS(db, session);

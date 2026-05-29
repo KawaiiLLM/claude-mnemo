@@ -188,6 +188,8 @@ describe("MCP format renderer", () => {
       responsePreview: "r".repeat(260),
     };
 
+    // Legacy session (insight set, decision NULL): falls back to insight
+    // bullets, and next_steps renders under its display label "next".
     expect(formatSessionExpanded(session)).toBe(
       [
         "- [S142] Auth refactor | 💬3 💡8 | 2026-04-05 | claude-mnemo",
@@ -195,8 +197,7 @@ describe("MCP format renderer", () => {
         "  - insight:",
         "    - prompt cache preserved",
         "    - per-turn extraction is resilient",
-        "  - next_steps:",
-        "    - verify startup migration",
+        "  - next: verify startup migration",
       ].join("\n"),
     );
 
@@ -226,6 +227,36 @@ describe("MCP format renderer", () => {
     );
     expect(formatTurnExpanded(longTurn, { sessionId: 142 })).toContain(
       "r".repeat(200),
+    );
+  });
+
+  test("renders the redesigned session summary fields in expanded view", () => {
+    const session: FormattedSession = {
+      id: 200,
+      title: "Session redesign",
+      project: "claude-mnemo",
+      createdAtEpoch,
+      content: "Reworking the session summary schema",
+      // [T<n>] markers arrive already resolved from the recall layer.
+      decision: 'Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
+      done: 'Shipped migration [S200/T1] "Add columns"',
+      current: "Wiring the read side",
+      nextSteps: "Run the test suite",
+      reference: "github.com/anthropics/claude-code",
+      turnCount: 5,
+      observationCount: 12,
+    };
+
+    expect(formatSessionExpanded(session)).toBe(
+      [
+        "- [S200] Session redesign | 💬5 💡12 | 2026-04-05 | claude-mnemo",
+        "  - desc: Reworking the session summary schema",
+        '  - decision: Whole-rewrite over field-merge [S200/T3] "Pick rewrite"',
+        '  - done: Shipped migration [S200/T1] "Add columns"',
+        "  - current: Wiring the read side",
+        "  - next: Run the test suite",
+        "  - reference: github.com/anthropics/claude-code",
+      ].join("\n"),
     );
   });
 
@@ -261,8 +292,7 @@ describe("MCP format renderer", () => {
       [
         "- [S142] Auth refactor | 💬1 💡1 | 2026-04-05 | claude-mnemo",
         "  - desc: Fix race + add tests",
-        "  - next_steps:",
-        "    - verify startup migration",
+        "  - next: verify startup migration",
         "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
         "    - [O7] Mutex added",
       ].join("\n"),

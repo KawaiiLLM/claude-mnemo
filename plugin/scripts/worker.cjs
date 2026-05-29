@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.14-mpqrjh81" : "dev";
+var BUILD_ID = true ? "0.2.15-mpr27cdi" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -209,13 +209,27 @@ function indexFtsRecord(db, layer, sourceId, title, content, extra) {
   ).run(layer, sourceId, title, content, extra);
 }
 function indexSessionToFTS(db, session) {
+  const hasNewFields = [
+    session.decision,
+    session.done,
+    session.current,
+    session.reference
+  ].some((value) => Boolean(value && value.trim()));
+  const hasLegacyInsight = Boolean(session.insight && session.insight.trim());
+  const extra = !hasNewFields && hasLegacyInsight ? session.insight : [
+    session.decision,
+    session.done,
+    session.current,
+    session.nextSteps,
+    session.reference
+  ].filter((value) => Boolean(value && value.trim())).join("\n");
   indexFtsRecord(
     db,
     "session",
     session.id,
     session.title,
     session.content,
-    session.insight ?? ""
+    extra
   );
 }
 function indexTurnToFTS(db, turn) {
@@ -256,7 +270,12 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          insight
+          insight,
+          decision,
+          done,
+          "current" AS current,
+          next_steps AS nextSteps,
+          "reference" AS reference
         FROM sessions
       `
   ).all();
@@ -666,6 +685,10 @@ var SESSION_SELECT = `
     content,
     insight,
     next_steps AS nextSteps,
+    decision,
+    done,
+    "current" AS current,
+    "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -674,32 +697,21 @@ var SESSION_SELECT = `
     completed_at_epoch AS completedAtEpoch
   FROM sessions
 `;
-function upsertSession(db, input) {
+function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
+  const toNull = (value) => value.trim() === "" ? null : value;
   const session = db.query(`
-      INSERT INTO sessions (
-        content_session_id,
-        project,
-        title,
-        content,
-        insight,
-        next_steps,
-        last_compact_turn,
-        summary_updated_at_epoch,
-        created_at_epoch,
-        updated_at_epoch,
-        completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(content_session_id) DO UPDATE SET
-        project = excluded.project,
-        title = COALESCE(excluded.title, sessions.title),
-        content = COALESCE(excluded.content, sessions.content),
-        insight = COALESCE(excluded.insight, sessions.insight),
-        next_steps = COALESCE(excluded.next_steps, sessions.next_steps),
-        last_compact_turn = COALESCE(excluded.last_compact_turn, sessions.last_compact_turn),
-        summary_updated_at_epoch = COALESCE(excluded.summary_updated_at_epoch, sessions.summary_updated_at_epoch),
-        created_at_epoch = excluded.created_at_epoch,
-        updated_at_epoch = excluded.updated_at_epoch,
-        completed_at_epoch = COALESCE(excluded.completed_at_epoch, sessions.completed_at_epoch)
+      UPDATE sessions SET
+        title = ?,
+        content = ?,
+        decision = ?,
+        done = ?,
+        "current" = ?,
+        next_steps = ?,
+        "reference" = ?,
+        insight = NULL,
+        summary_updated_at_epoch = ?,
+        updated_at_epoch = ?
+      WHERE id = ?
       RETURNING
         id,
         content_session_id AS contentSessionId,
@@ -708,6 +720,10 @@ function upsertSession(db, input) {
         content,
         insight,
         next_steps AS nextSteps,
+        decision,
+        done,
+        "current" AS current,
+        "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
@@ -715,20 +731,19 @@ function upsertSession(db, input) {
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
     `).get(
-    input.contentSessionId,
-    input.project,
-    input.title,
-    input.content ?? null,
-    input.insight,
-    input.nextSteps ?? null,
-    input.lastCompactTurn ?? null,
-    input.summaryUpdatedAtEpoch ?? null,
-    input.createdAtEpoch,
-    input.updatedAtEpoch,
-    input.completedAtEpoch
+    toNull(fields.title),
+    toNull(fields.content),
+    toNull(fields.decision),
+    toNull(fields.done),
+    toNull(fields.current),
+    toNull(fields.nextSteps),
+    toNull(fields.reference),
+    nowEpoch,
+    nowEpoch,
+    sessionId
   );
   if (!session) {
-    throw new Error("Failed to upsert session.");
+    return null;
   }
   indexSessionToFTS(db, session);
   return session;
@@ -1372,6 +1387,10 @@ var SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     next_steps TEXT,
+    decision TEXT,
+    done TEXT,
+    current TEXT,
+    reference TEXT,
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
@@ -1478,6 +1497,7 @@ function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
+  ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
@@ -1494,6 +1514,13 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+}
+function ensureSessionSummaryFieldColumns(db) {
+  for (const column of ["decision", "done", "current", "reference"]) {
+    if (!hasColumn(db, "sessions", column)) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
+    }
+  }
 }
 function ensureTurnTranscriptLineStartColumn(db) {
   if (hasColumn(db, "turns", "transcript_line_start")) {
@@ -1747,11 +1774,11 @@ var rollbackReason = {
   data: (turn, ctx) => {
     const replacementPromptId = turn.contentPromptId ? ctx.replacementByPromptId.get(turn.contentPromptId) : void 0;
     return {
-      replacementPromptNumber: replacementPromptId ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null : null
+      replacementTurnId: replacementPromptId ? ctx.turnIdByPromptId.get(replacementPromptId) ?? null : null
     };
   },
   flagToken: () => "was_rolled_back",
-  parenExtra: (_turn, data) => data.replacementPromptNumber !== null ? `replaced by T${data.replacementPromptNumber}` : null
+  parenExtra: (_turn, data) => data.replacementTurnId !== null ? `replaced by T${data.replacementTurnId}` : null
 };
 function truncatePrompt(value, limit) {
   const text = (value ?? "").trim().replace(/\s+/g, " ");
@@ -1918,11 +1945,11 @@ function flagDeliveryDropped(db, turnId, updatedAtEpoch) {
   });
 }
 function buildReminderContext(turns, transcriptPath) {
-  const promptNumberByPromptId = new Map(
-    turns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn.promptNumber])
+  const turnIdByPromptId = new Map(
+    turns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn.id])
   );
   const replacementByPromptId = transcriptPath ? detectRollbackTopology(transcriptPath).replacementByPromptId : /* @__PURE__ */ new Map();
-  return { replacementByPromptId, promptNumberByPromptId };
+  return { replacementByPromptId, turnIdByPromptId };
 }
 function collectReminderItems(db, sessionDbId, transcriptPath) {
   const turns = getTurnsForSession(db, sessionDbId);
@@ -2398,18 +2425,30 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
 </obs>`;
 }
+var STALE_TURN_THRESHOLD = 10;
 function buildBatchPrompt(args) {
-  const sessionUpdatedBlock = args.sessionUpdated ? `<session-updated>
+  const isStale = (args.staleTurns ?? 0) >= STALE_TURN_THRESHOLD;
+  const staleAttr = isStale ? ` stale_turns="${args.staleTurns}"` : "";
+  const noticeBlock = isStale ? `<session-stale>
+The session summary is ${args.staleTurns} extracted turns behind. Re-supply ALL session fields (title, content, decision, done, current, next_steps, reference) for a complete refresh \u2014 edit on top of prior_* below.
+</session-stale>
+
+` : args.sessionUpdated ? `<session-updated>
 Session summary was refreshed since your last message.
 </session-updated>
 
 ` : "";
-  const priorSessionBlock = args.priorTitle || args.priorContent || args.priorInsight || args.priorNextSteps ? `
+  const prior = args.prior;
+  const showPrior = prior !== null && (Boolean(args.sessionUpdated) || isStale);
+  const priorSessionBlock = showPrior ? `
 <prior_session>
-  title: ${args.priorTitle ?? ""}
-  content: ${args.priorContent ?? ""}
-  insight: ${args.priorInsight ?? ""}
-  next_steps: ${args.priorNextSteps ?? ""}
+  prior_title: ${prior.title ?? ""}
+  prior_content: ${prior.content ?? ""}
+  prior_decision: ${prior.decision ?? ""}
+  prior_done: ${prior.done ?? ""}
+  prior_current: ${prior.current ?? ""}
+  prior_next: ${prior.nextSteps ?? ""}
+  prior_reference: ${prior.reference ?? ""}
 </prior_session>
 ` : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
@@ -2417,11 +2456,10 @@ Session summary was refreshed since your last message.
   title: ${args.sessionTitle}` : "";
   const promptLine = args.currentPrompt ? `
   current_prompt: ${truncateMiddle(args.currentPrompt, 200)}` : "";
-  return `<session id="S${args.sessionId}">
+  return `<session id="S${args.sessionId}"${staleAttr}>
   project: ${args.project}${titleLine}${promptLine}
 </session>
-${sessionUpdatedBlock}
-${priorSessionBlock}
+${noticeBlock}${priorSessionBlock}
 <batch>
 ${body}
 </batch>`;
@@ -2501,35 +2539,43 @@ function aggregateFilesFromObservations(observations) {
     toolCallCount: observations.length
   };
 }
-function buildSessionSummaryPrompt(sessionId, project, title, content, insight, nextSteps) {
-  return `<session id="S${sessionId}">
-  project: ${project}
-  prior_title: ${title ?? ""}
-  prior_content: ${content ?? ""}
-  prior_insight: ${insight ?? ""}
-  prior_next_steps: ${nextSteps ?? ""}
-</session>
-
-<instruction>
+function sessionSummaryInstruction(sessionId) {
+  return `<instruction>
 Refresh the session summary ONLY if material change since prior_*: a new goal, a completed milestone, a reversed decision, or a newly discovered constraint. Small incremental work does NOT qualify.
 
-If updating, call:
-remember({ id: "S${sessionId}", title, content, insight, next_steps })
+If updating, you MUST re-supply ALL seven fields \u2014 the summary is rewritten whole, never merged, so omitting any field is rejected. Edit each field on top of its prior_* value (echo-and-edit), do not regenerate from scratch:
+remember({ id: "S${sessionId}", title, content, decision, done, current, next_steps, reference })
 
-Length budget (strict):
+Fields:
 - title: 20-50 chars, one line
-- content: 100-300 chars, what the session is about
-- insight: 2-5 bullet lines, each \u226450 chars, prefixed "- "
-- next_steps: 50-150 chars, what's pending
-- Total: <500 chars
+- content: 100-300 chars, what the session is about (browsing synopsis)
+- decision: key decisions and WHY they were made; cite pivotal turns inline as [T<n>] using the id from the <turn id="T..."> block. Keep prior [T<n>] markers.
+- done: completed work; cite milestone turns inline as [T<n>]. Keep prior [T<n>] markers.
+- current: where things stand right now
+- next_steps: 50-150 chars, what is pending / the next step
+- reference: external anchors only \u2014 reference repos, URLs, PRs, out-of-project paths. Empty string if none.
 
-Do NOT mention file paths, tool counts, or code-level details. Those belong in turn records.
+Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here \u2014 those are the main agent's M-level memories.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
 }
+function buildSessionSummaryPrompt(sessionId, project, prior) {
+  return `<session id="S${sessionId}">
+  project: ${project}
+  prior_title: ${prior.title ?? ""}
+  prior_content: ${prior.content ?? ""}
+  prior_decision: ${prior.decision ?? ""}
+  prior_done: ${prior.done ?? ""}
+  prior_current: ${prior.current ?? ""}
+  prior_next: ${prior.nextSteps ?? ""}
+  prior_reference: ${prior.reference ?? ""}
+</session>
+
+${sessionSummaryInstruction(sessionId)}`;
+}
 var PROMPT_CAP = 1e3;
-var RESPONSE_CAP = 1e3;
+var RESPONSE_CAP = 2e3;
 var FILE_TREE_CAP = 1500;
 var PRIOR_TITLE_CAP = 100;
 var PRIOR_CONTENT_CAP = 300;
@@ -2694,14 +2740,15 @@ function createWorkerProcessors(db) {
         return;
       }
       await state.pushMessage(
-        buildSessionSummaryPrompt(
-          session.id,
-          session.project,
-          session.title,
-          session.content,
-          session.insight,
-          session.nextSteps
-        )
+        buildSessionSummaryPrompt(session.id, session.project, {
+          title: session.title,
+          content: session.content,
+          decision: session.decision,
+          done: session.done,
+          current: session.current,
+          nextSteps: session.nextSteps,
+          reference: session.reference
+        })
       );
     }
   };
@@ -37316,6 +37363,12 @@ var rememberInputShape = {
     "archived"
   ]).optional(),
   next_steps: external_exports.string().optional(),
+  // Session-summary fields (D1). `next_steps` above doubles as the displayed
+  // "next" field; these four are session-only and rewritten whole each refresh.
+  decision: external_exports.string().optional(),
+  done: external_exports.string().optional(),
+  current: external_exports.string().optional(),
+  reference: external_exports.string().optional(),
   source: external_exports.string().optional()
 };
 var timelineInputShape = {
@@ -37700,33 +37753,30 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
 function formatSessionExpandedWithMode(session, mode, truncate) {
   const limit = resolveExplicitTruncate(truncate);
   const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  const hintId = buildSessionHintId(session.id);
+  const pushField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+  };
   if (session.jsonlPath) {
     lines.push(`  raw: ${session.jsonlPath}`);
   }
-  if (session.insight && session.insight.length > 0) {
+  if (session.decision) {
+    pushField("decision", session.decision);
+  } else if (session.insight && session.insight.length > 0) {
     lines.push("  - insight:");
     pushBullets(
       lines,
       "    ",
-      session.insight.map(
-        (line) => truncateText(line, {
-          limit,
-          mode,
-          hintId: buildSessionHintId(session.id)
-        })
-      )
+      session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
     );
   }
-  if (session.nextSteps) {
-    lines.push("  - next_steps:");
-    lines.push(
-      `    - ${truncateText(session.nextSteps, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id)
-      })}`
-    );
-  }
+  pushField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushField("reference", session.reference);
   return lines.join("\n");
 }
 function formatTurnLabel(turn, {
@@ -38067,6 +38117,21 @@ function expandNumericSelector(value) {
   return values;
 }
 
+// src/mcp/turn-pointers.ts
+var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
+function resolveTurnPointers(db, sessionId, text) {
+  if (!text || !text.includes("[T")) {
+    return text;
+  }
+  return text.replace(TURN_POINTER_PATTERN, (literal3, idDigits) => {
+    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
+    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
+      return literal3;
+    }
+    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
+  });
+}
+
 // src/mcp/recall.ts
 var CHILD_PREVIEW_SIZE = 5;
 function splitInsight(insight) {
@@ -38074,6 +38139,17 @@ function splitInsight(insight) {
     return [];
   }
   return insight.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
+function buildSessionSummaryFields(db, session) {
+  return {
+    content: session.content,
+    insight: splitInsight(session.insight),
+    nextSteps: session.nextSteps,
+    decision: resolveTurnPointers(db, session.id, session.decision),
+    done: resolveTurnPointers(db, session.id, session.done),
+    current: session.current,
+    reference: session.reference
+  };
 }
 function formatParameterError(message) {
   return `Parameter error: ${message}`;
@@ -38170,6 +38246,13 @@ function parseRoutedId(value) {
       observationId: Number(observationMatch[1])
     };
   }
+  const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
+  if (turnByIdMatch) {
+    return {
+      kind: "turn-by-id",
+      turnId: Number(turnByIdMatch[1])
+    };
+  }
   const sessionMatch = /^S(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
   if (sessionMatch) {
     const sessionIds = expandNumericSelector(sessionMatch[1]);
@@ -38250,9 +38333,7 @@ function buildSessionView(db, session) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount: turns.length,
     observationCount: turns.reduce(
       (sum, turn) => sum + (turn.observationCount ?? 0),
@@ -38281,9 +38362,7 @@ function buildSessionSummary(db, sessionId) {
     title: session.title,
     project: session.project,
     createdAtEpoch: session.createdAtEpoch,
-    content: session.content,
-    insight: splitInsight(session.insight),
-    nextSteps: session.nextSteps,
+    ...buildSessionSummaryFields(db, session),
     turnCount,
     observationCount,
     jsonlPath: void 0
@@ -38769,6 +38848,10 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
       paged.pageCount
     );
   }
+  if (routed.kind === "turn-by-id") {
+    const turn = getTurnById(db, routed.turnId);
+    return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
+  }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
     if (!turn) {
@@ -38933,6 +39016,15 @@ var OBSERVATION_REMEMBER_STATUSES = [
   "skipped"
 ];
 var MEMORY_REMEMBER_STATUSES = ["active", "superseded", "archived"];
+var SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference"
+];
 function textResult(text) {
   return {
     content: [{ type: "text", text }]
@@ -39026,7 +39118,7 @@ function handleObservationRemember(db, observationId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (input.type !== void 0 || input.scope !== void 0 || input.insight !== void 0 || input.reasoning !== void 0 || input.application !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.source !== void 0) {
+  if (input.type !== void 0 || input.scope !== void 0 || input.insight !== void 0 || input.reasoning !== void 0 || input.application !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0 || input.source !== void 0) {
     return parameterError(
       "observation remember only accepts title, content, and status."
     );
@@ -39112,23 +39204,31 @@ function handleSessionRemember(db, sessionId, input) {
   if (!session) {
     return textResult(`Session ${sessionId} not found.`);
   }
-  const nextTitle = input.title ?? session.title;
-  const nextContent = input.content ?? session.content;
-  const nextInsight = input.insight ?? session.insight;
-  const nextNextSteps = input.next_steps ?? session.nextSteps;
-  const summaryChanged = nextTitle !== session.title || nextContent !== session.content || nextInsight !== session.insight || nextNextSteps !== session.nextSteps;
-  upsertSession(db, {
-    contentSessionId: session.contentSessionId,
-    project: session.project,
-    title: nextTitle,
-    content: nextContent,
-    insight: nextInsight,
-    nextSteps: nextNextSteps,
-    summaryUpdatedAtEpoch: summaryChanged ? Math.floor(Date.now() / 1e3) : session.summaryUpdatedAtEpoch,
-    createdAtEpoch: session.createdAtEpoch,
-    updatedAtEpoch: Math.floor(Date.now() / 1e3),
-    completedAtEpoch: session.completedAtEpoch
-  });
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  if (missing.length > 0) {
+    return parameterError(
+      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", "
+      )}). Missing: ${missing.join(", ")}.`
+    );
+  }
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? ""
+    },
+    Math.floor(Date.now() / 1e3)
+  );
+  if (!updated) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
   return textResult(`Updated session ${sessionId}.`);
 }
 function rememberTool(db, input) {
@@ -40168,30 +40268,18 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
       mcpServers,
       pathToClaudeCodeExecutable,
       abortController,
-      systemPrompt: input.systemPrompt ?? `You are Mnemosyne, a long-lived memory worker for Claude Code. You extract structured memory by updating SQLite records for observations (O), turns (T), and sessions (S).
+      systemPrompt: input.systemPrompt ?? `You are Mnemosyne, a long-lived memory worker for Claude Code. You extract structured memory by updating SQLite records for turns (T) and sessions (S).
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: an \`<obs>\` means update that single observation; a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the lone exception is a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice. The conversation history exists for LLM continuity, not for re-extraction.
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the lone exception is a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice. The conversation history exists for LLM continuity, not for re-extraction.
 
 ## Tools
 
 - \`remember()\` \u2014 your only output. Every record update is one remember() call.
-- \`recall()\` \u2014 the only read fallback, usable **only from turn messages**. Not usable from observation or session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "<session id>/<turn id>", depth: "expanded", truncate: 2000 })\` before the remember() call \u2014 read the session id from the \`<session id="S...">\` block and the turn id from the \`<turn id="T...">\` block of the current message; they are two different numbers. Concrete example: \`recall({ id: "S12/T3", depth: "expanded", truncate: 2000 })\`. \`recall()\` is usually unnecessary \u2014 the inline data and conversation history usually suffice. Only escalate when they genuinely do not.
+- \`recall()\` \u2014 the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call \u2014 use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. \`recall()\` is usually unnecessary \u2014 the inline data and conversation history usually suffice. Only escalate when they genuinely do not.
 
 Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only via tool calls.
-
-## Observation messages (<obs id="O<n>">)
-
-For each \`<obs>\` block, call \`remember({ id: "O<n>", title, content })\` only if the observation contains durable findings worth recording.
-
-- \`remember({ id: "O<n>", title, content })\`
-  - title: 3-12 words, verb-led (e.g. "Read auth middleware", "Grep for token usage")
-  - content: one paragraph, what the tool did and why it matters for this session. Do not restate tool arguments \u2014 they are already in the obs block.
-
-Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored \u2014 unprocessed observations are automatically marked as skipped.
-
-Never update T/S records, create memories, or call \`recall()\` from an obs message. Observation extraction is the high-volume path \u2014 tool-level summaries do not need transcript fidelity. The inline \`<obs>\` block is authoritative even when its \`in:\` / \`out:\` fields are truncated; write the summary from what is visible and note visibly-relevant truncation in the content (e.g. "truncated 1200-char grep output, 12 matches").
 
 ## Turn messages (<turn id="T<n>">)
 
@@ -40207,7 +40295,7 @@ For each \`<turn>\` block:
    - tags: 0-5 lowercase-hyphenated keywords
    - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
 
-2. Optionally: \`remember({ id: "S<n>", title, content, insight, next_steps })\` \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify.
+2. Optionally refresh the session summary \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) \u2014 omitting any is rejected \u2014 editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
 Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them). Never create memories.
 
@@ -40247,9 +40335,21 @@ Reminder lines only cover turns that were already completed when the invalidatio
 
 If a message also includes \`<subagent_invalidated>\`, those turns came from a Task subagent transcript and are out-of-scope for session memory. Treat that block as a retraction notice only; do not create or update records from it unless the current message also names those ids in a \`<turn>\` block.
 
-## Session summary messages (<session> without <turn>)
+## Session summary fields
 
-When you receive a \`<session>\` block without an accompanying \`<turn>\`, it is a session summary refresh. Follow the length budget in the inline \`<instruction>\` block. Never call \`recall()\` from a session-summary message \u2014 the inline \`prior_*\` fields are the only state you should base the refresh decision on.
+A session summary has seven fields, rewritten WHOLE on every refresh (never merged \u2014 omitting a field is rejected). Always edit on top of the \`prior_*\` values (echo-and-edit); never regenerate from scratch.
+
+- title: 20-50 chars, one line
+- content: 100-300 chars, browsing synopsis of what the session is about
+- decision: key decisions and WHY they were made; cite pivotal turns inline as \`[T<n>]\` using the id from a \`<turn id="T...">\` block, and keep prior \`[T<n>]\` markers
+- done: completed work; cite milestone turns inline as \`[T<n>]\`, keep prior markers
+- current: where things stand right now
+- next_steps: 50-150 chars, what is pending / the next step
+- reference: external anchors only \u2014 reference repos, URLs, PRs, out-of-project paths. Empty string if none.
+
+Do not put file paths, tool counts, or code-level details anywhere but \`reference\` \u2014 those belong in turn records. Do not record durable cross-project lessons here; those are the main agent's M-level memories.
+
+A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh \u2014 follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message \u2014 the \`prior_*\` fields are the only state to base the refresh decision on.
 
 ## Forbidden across all messages
 
@@ -40433,8 +40533,8 @@ function isProcessAlive2(pid) {
     return error49.code !== "ESRCH";
   }
 }
-function buildSubagentInvalidationEnvelope(promptNumbers) {
-  const labels = promptNumbers.map((promptNumber) => `T${promptNumber}`).join(", ");
+function buildSubagentInvalidationEnvelope(turnIds) {
+  const labels = turnIds.map((turnId) => `T${turnId}`).join(", ");
   return `<subagent_invalidated>
   ${labels} originated from a Task subagent transcript and are out-of-scope
   for session memory.
@@ -40469,7 +40569,7 @@ function buildReminderEnvelope(items) {
     const tailParts = reasonTails.length > 0 ? reasonTails : truncatedContent ? [truncatedContent] : [];
     const bodyParts = [...leadParts, ...tailParts];
     const bodyClause = bodyParts.length > 0 ? `: ${bodyParts.join(" -- ")}` : "";
-    return `  - T${item.promptNumber} (${parenInner})${bodyClause}`;
+    return `  - T${item.turnId} (${parenInner})${bodyClause}`;
   });
   return `<reminder>
   The following turns were invalidated and need one-time attention.
@@ -40522,7 +40622,20 @@ function createWorkerCore(deps) {
     if (!session) {
       return false;
     }
-    return (session.title ?? "") !== "" || (session.content ?? "") !== "" || (session.insight ?? "") !== "" || (session.nextSteps ?? "") !== "";
+    return (session.title ?? "") !== "" || (session.content ?? "") !== "" || (session.insight ?? "") !== "" || (session.nextSteps ?? "") !== "" || (session.decision ?? "") !== "" || (session.done ?? "") !== "" || (session.current ?? "") !== "" || (session.reference ?? "") !== "";
+  }
+  function countTurnsSinceSummary(sessionId) {
+    const row = deps.db.query(
+      `SELECT COUNT(*) AS n
+         FROM turns
+         WHERE session_id = ?
+           AND status = 'extracted'
+           AND updated_at_epoch > (
+             SELECT COALESCE(summary_updated_at_epoch, created_at_epoch, 0)
+             FROM sessions WHERE id = ?
+           )`
+    ).get(sessionId, sessionId);
+    return row?.n ?? 0;
   }
   function getOrCreateBuffer(sessionDbId) {
     let buffer = buffers.get(sessionDbId);
@@ -40562,9 +40675,16 @@ function createWorkerCore(deps) {
     if (!session) {
       return;
     }
+    if (state.batchQueue.some((batch) => batch.sessionUpdated)) {
+      return;
+    }
     const summaryEpoch = session.summaryUpdatedAtEpoch ?? 0;
-    if (summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0) && !state.batchQueue.some((batch) => batch.sessionUpdated)) {
+    if (summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0)) {
       state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
+      return;
+    }
+    if (countTurnsSinceSummary(state.sessionDbId) >= STALE_TURN_THRESHOLD) {
+      state.nextBatchNeedsSessionContext = true;
     }
   }
   function recalculateBatchSize(batch) {
@@ -40722,7 +40842,7 @@ function createWorkerCore(deps) {
         if (pendingSubagentTurns.length > 0) {
           envelopeBlocks.push(
             buildSubagentInvalidationEnvelope(
-              pendingSubagentTurns.map((turn) => turn.promptNumber)
+              pendingSubagentTurns.map((turn) => turn.id)
             )
           );
         }
@@ -40913,17 +41033,24 @@ ${prompt}` : prompt;
       return renderMiniTurn(miniTurn, priorTurn);
     });
     const sessionUpdated = batch.sessionUpdated;
+    const staleTurns = sessionUpdated ? countTurnsSinceSummary(session.id) : 0;
     await state.pushMessage(
       buildBatchPrompt({
         sessionId: session.id,
         project: session.project,
         sessionTitle: session.title,
         currentPrompt,
-        priorTitle: sessionUpdated ? session.title : null,
-        priorContent: sessionUpdated ? session.content : null,
-        priorInsight: sessionUpdated ? session.insight : null,
-        priorNextSteps: sessionUpdated ? session.nextSteps : null,
+        prior: sessionUpdated ? {
+          title: session.title,
+          content: session.content,
+          decision: session.decision,
+          done: session.done,
+          current: session.current,
+          nextSteps: session.nextSteps,
+          reference: session.reference
+        } : null,
         sessionUpdated,
+        staleTurns,
         completedTurnBlocks: blocks
       })
     );
