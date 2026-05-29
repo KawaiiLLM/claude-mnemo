@@ -13,14 +13,16 @@ import {
 } from "../../src/worker/invalidation";
 import { buildReminderEnvelope, createWorkerCore } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
-import type { MnemoConfig } from "../../src/shared/config";
+import { MIN_MINI_TURN_CHARS, type MnemoConfig } from "../../src/shared/config";
 
+// maxMiniTurnChars at the production floor (MIN_MINI_TURN_CHARS, what
+// loadConfig clamps to), so retry/drop coverage matches the tightest config.
 const RETRY_CONFIG: MnemoConfig = {
   mergeThresholdChars: 1000,
   maxQueuedBatches: 5,
   keepaliveLeadMs: 60_000,
   cacheMode: "auto",
-  maxMiniTurnChars: 8192,
+  maxMiniTurnChars: MIN_MINI_TURN_CHARS,
   maxFlushAttempts: 3,
   compactContextRatio: 0.5,
 };

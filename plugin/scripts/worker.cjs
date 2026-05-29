@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.16-mpr4kr47" : "dev";
+var BUILD_ID = true ? "0.2.17-mpr62tlr" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1659,7 +1659,7 @@ var DEFAULT_CONFIG = {
   maxFlushAttempts: 3,
   compactContextRatio: 0.5
 };
-var MIN_MINI_TURN_CHARS = 8192;
+var MIN_MINI_TURN_CHARS = 9216;
 var MIN_FLUSH_ATTEMPTS = 1;
 var MIN_COMPACT_CONTEXT_RATIO = 0.1;
 var MAX_COMPACT_CONTEXT_RATIO = 0.95;
@@ -2346,7 +2346,9 @@ var OUTPUT_ALLOW = {
   WebFetch: /* @__PURE__ */ new Set(["result", "code"]),
   WebSearch: /* @__PURE__ */ new Set(["results"]),
   ToolSearch: /* @__PURE__ */ new Set(["matches"]),
-  Skill: /* @__PURE__ */ new Set(["success", "commandName"])
+  Skill: /* @__PURE__ */ new Set(["success", "commandName"]),
+  TaskUpdate: /* @__PURE__ */ new Set(["success", "taskId", "statusChange"]),
+  TaskCreate: /* @__PURE__ */ new Set(["task"])
 };
 function formatJsonValue(value) {
   if (typeof value === "string") {
@@ -2372,13 +2374,39 @@ function cleanInput(toolName, rawJson) {
   );
   return formatJsonValue(unwrapSingleStringValue(cleaned)).trim();
 }
+var GENERIC_TEXT_KEYS = /* @__PURE__ */ new Set([
+  "result",
+  "output",
+  "content",
+  "text",
+  "message"
+]);
+function extractGenericMcpText(parsed) {
+  if (Array.isArray(parsed)) {
+    const texts = parsed.filter(
+      (item) => item !== null && typeof item === "object"
+    ).map((item) => item.text).filter(
+      (text) => typeof text === "string" && text.trim() !== ""
+    );
+    return texts.length > 0 ? texts.join("\n") : null;
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length === 1) {
+    const [key, value] = entries[0];
+    if (GENERIC_TEXT_KEYS.has(key) && typeof value === "string" && value.trim() !== "") {
+      return value;
+    }
+  }
+  return null;
+}
 function cleanOutput(toolName, rawJson) {
   const parsed = safeJsonParse(rawJson);
   if (!parsed) {
     return (rawJson ?? "").trim();
   }
   if (!(toolName in OUTPUT_ALLOW)) {
-    return (rawJson ?? "").trim();
+    const generic = extractGenericMcpText(parsed);
+    return (generic ?? rawJson ?? "").trim();
   }
   if (toolName === "Read") {
     const content = parsed.file;
@@ -2418,11 +2446,17 @@ function cleanOutput(toolName, rawJson) {
   }
   return formatJsonValue(unwrapSingleStringValue(filtered)).trim();
 }
+var TOOL_NAME_CAP = 64;
+var OBS_INPUT_CAP = 200;
+var OBS_OUTPUT_CAP = 800;
+function capToolName(toolName) {
+  return toolName.length > TOOL_NAME_CAP ? `${toolName.slice(0, TOOL_NAME_CAP - 1)}\u2026` : toolName;
+}
 function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   return `<obs id="O${observationId}">
-  \u{1F527} ${toolName}
-  in: ${truncateMiddle(cleanInput(toolName, toolInput), 300)}
-  out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
+  \u{1F527} ${capToolName(toolName)}
+  in: ${truncateMiddle(cleanInput(toolName, toolInput), OBS_INPUT_CAP)}
+  out: ${truncateMiddle(cleanOutput(toolName, toolResult), OBS_OUTPUT_CAP)}
 </obs>`;
 }
 var STALE_TURN_THRESHOLD = 10;
@@ -2694,7 +2728,8 @@ function createWorkerProcessors(db) {
       return payload;
     },
     // Peel a budget-bounded prefix of buffered obs from the head. Always takes
-    // at least one obs (a single obs is <= ~720 chars < any floored budget), so
+    // at least one obs (a single obs's blockSize is <= ~1178 chars < any
+    // floored final budget, given the capped tool name + in:200/out:800), so
     // the buffer always drains. chunk + rest partitions the input by seq.
     peelMiniTurnObs(bufferedObs, budget) {
       const chunk = [];

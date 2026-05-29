@@ -38,6 +38,8 @@ const OUTPUT_ALLOW: Record<string, Set<string>> = {
   WebSearch: new Set(["results"]),
   ToolSearch: new Set(["matches"]),
   Skill: new Set(["success", "commandName"]),
+  TaskUpdate: new Set(["success", "taskId", "statusChange"]),
+  TaskCreate: new Set(["task"]),
 };
 
 function formatJsonValue(value: unknown): string {
@@ -73,14 +75,64 @@ export function cleanInput(toolName: string, rawJson: string | null): string {
   return formatJsonValue(unwrapSingleStringValue(cleaned)).trim();
 }
 
+// Text keys recognized in a single-key MCP output object (e.g. blender's
+// {result: "..."}). Kept narrow so we never unwrap a structured payload.
+const GENERIC_TEXT_KEYS = new Set([
+  "result",
+  "output",
+  "content",
+  "text",
+  "message",
+]);
+
+// Shape-based extraction for the open-ended MCP long tail (D1). Two forms:
+// a content array [{type:"text", text:"..."}, ...] -> join all non-empty text
+// fields; a single-key text object {result|output|...: "..."} -> that value.
+// Returns null when neither shape yields usable text, so the caller can fall
+// back to the raw JSON instead of emitting an empty obs.
+function extractGenericMcpText(
+  parsed: Record<string, unknown>,
+): string | null {
+  if (Array.isArray(parsed)) {
+    const texts = parsed
+      .filter(
+        (item): item is Record<string, unknown> =>
+          item !== null && typeof item === "object",
+      )
+      .map((item) => item.text)
+      .filter(
+        (text): text is string =>
+          typeof text === "string" && text.trim() !== "",
+      );
+    return texts.length > 0 ? texts.join("\n") : null;
+  }
+
+  const entries = Object.entries(parsed);
+  if (entries.length === 1) {
+    const [key, value] = entries[0];
+    if (
+      GENERIC_TEXT_KEYS.has(key) &&
+      typeof value === "string" &&
+      value.trim() !== ""
+    ) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 export function cleanOutput(toolName: string, rawJson: string | null): string {
   const parsed = safeJsonParse(rawJson);
   if (!parsed) {
     return (rawJson ?? "").trim();
   }
 
+  // Non-whitelist tools (the MCP long tail): try shape-based extraction first,
+  // fall back to raw JSON. Whitelist tools skip this entirely (behavior frozen).
   if (!(toolName in OUTPUT_ALLOW)) {
-    return (rawJson ?? "").trim();
+    const generic = extractGenericMcpText(parsed);
+    return (generic ?? rawJson ?? "").trim();
   }
 
   if (toolName === "Read") {
@@ -136,16 +188,30 @@ export function cleanOutput(toolName: string, rawJson: string | null): string {
   return formatJsonValue(unwrapSingleStringValue(filtered)).trim();
 }
 
-function buildObsBlock(
+// Hard ceiling on the rendered tool name. MCP names (mcp__<server>__<tool>)
+// are open-ended; without this an arbitrarily long name would blow past the
+// per-obs blockSize bound that peelMiniTurnObs relies on. The longest current
+// MCP name is ~55 chars, so this never bites in practice.
+export const TOOL_NAME_CAP = 64;
+const OBS_INPUT_CAP = 200;
+const OBS_OUTPUT_CAP = 800;
+
+function capToolName(toolName: string): string {
+  return toolName.length > TOOL_NAME_CAP
+    ? `${toolName.slice(0, TOOL_NAME_CAP - 1)}…`
+    : toolName;
+}
+
+export function buildObsBlock(
   observationId: number,
   toolName: string,
   toolInput: string | null,
   toolResult: string | null,
 ): string {
   return `<obs id="O${observationId}">
-  🔧 ${toolName}
-  in: ${truncateMiddle(cleanInput(toolName, toolInput), 300)}
-  out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
+  🔧 ${capToolName(toolName)}
+  in: ${truncateMiddle(cleanInput(toolName, toolInput), OBS_INPUT_CAP)}
+  out: ${truncateMiddle(cleanOutput(toolName, toolResult), OBS_OUTPUT_CAP)}
 </obs>`;
 }
 
@@ -590,7 +656,8 @@ export function createWorkerProcessors(db: Database) {
     },
 
     // Peel a budget-bounded prefix of buffered obs from the head. Always takes
-    // at least one obs (a single obs is <= ~720 chars < any floored budget), so
+    // at least one obs (a single obs's blockSize is <= ~1178 chars < any
+    // floored final budget, given the capped tool name + in:200/out:800), so
     // the buffer always drains. chunk + rest partitions the input by seq.
     peelMiniTurnObs(
       bufferedObs: PendingQueueItem[],

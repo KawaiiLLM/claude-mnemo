@@ -11,13 +11,18 @@ import {
   type PendingQueueItem,
 } from "../../src/db/pending-queue";
 import {
+  buildObsBlock,
   createWorkerProcessors,
   renderMiniTurn,
   STREAMING_SLICE_OVERHEAD,
   FINAL_SLICE_OVERHEAD,
+  TOOL_NAME_CAP,
 } from "../../src/worker/processors";
+import { MIN_MINI_TURN_CHARS } from "../../src/shared/config";
 
-const MAX_MINI_TURN_CHARS = 8192;
+// Pin the budget tests to the actual configurable floor: the invariant must
+// hold at the tightest config a user can set.
+const MAX_MINI_TURN_CHARS = MIN_MINI_TURN_CHARS;
 
 describe("mini-turn rendering primitives", () => {
   let db: Database;
@@ -229,6 +234,32 @@ describe("mini-turn rendering primitives", () => {
     });
     expect(rendered).toContain("more files)");
     expect(rendered.length).toBeLessThanOrEqual(MAX_MINI_TURN_CHARS);
+  });
+
+  test("buildObsBlock caps an over-long MCP tool name (D3)", () => {
+    const longName = `mcp__${"x".repeat(80)}`;
+    const block = buildObsBlock(123, longName, '{"a":1}', '{"stdout":"ok"}');
+    const nameLine = block
+      .split("\n")
+      .find((line) => line.includes("🔧"))!
+      .replace("  🔧 ", "");
+    expect(nameLine.length).toBeLessThanOrEqual(TOOL_NAME_CAP);
+    expect(nameLine.endsWith("…")).toBe(true);
+  });
+
+  test("worst-case obs blockSize fits the floored final budget (D3 invariant)", () => {
+    // Adversarial single obs: over-long MCP name (capped), in/out filled past
+    // their caps, and a 10-digit O id. blockSize must stay under the smallest
+    // final-slice budget a user can configure, so peel always takes >= 1 obs.
+    const block = buildObsBlock(
+      9_999_999_999,
+      `mcp__${"x".repeat(80)}`,
+      JSON.stringify({ command: "z".repeat(2000) }),
+      JSON.stringify([{ type: "text", text: "y".repeat(10_000) }]),
+    );
+    const blockSize = block.length + block.split("\n").length * 4;
+    const flooredFinalBudget = MIN_MINI_TURN_CHARS - FINAL_SLICE_OVERHEAD;
+    expect(blockSize).toBeLessThanOrEqual(flooredFinalBudget);
   });
 
   test("applyMiniTurnSideEffects skips this slice's obs and deletes its queue rows", () => {

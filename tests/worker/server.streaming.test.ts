@@ -15,16 +15,17 @@ import {
   type WorkerCoreDeps,
 } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
-import type { MnemoConfig } from "../../src/shared/config";
+import { MIN_MINI_TURN_CHARS, type MnemoConfig } from "../../src/shared/config";
 
-// maxMiniTurnChars at the production floor keeps the budget invariant honest
-// (a final slice with >=1 obs always fits). ~10 large obs cross the threshold.
+// maxMiniTurnChars at the production floor (MIN_MINI_TURN_CHARS, what
+// loadConfig clamps to) keeps the budget invariant honest: a final slice with
+// >=1 obs always fits. ~10 large obs cross the threshold.
 const STREAM_CONFIG: MnemoConfig = {
   mergeThresholdChars: 1000,
   maxQueuedBatches: 5,
   keepaliveLeadMs: 60_000,
   cacheMode: "auto",
-  maxMiniTurnChars: 8192,
+  maxMiniTurnChars: MIN_MINI_TURN_CHARS,
   maxFlushAttempts: 3,
   compactContextRatio: 0.5,
 };
@@ -86,15 +87,15 @@ describe("mini-turn streaming orchestration", () => {
     db.close();
   });
 
-  // Each obs renders to ~640 chars (in/out capped at 300); ~10 cross the
-  // streaming threshold (8192 - ~1956 overhead).
+  // Each obs renders to ~700 chars (in caps at 200; out is 400 here, < 800
+  // cap); enough cross the streaming threshold (MIN_MINI_TURN_CHARS - ~1956).
   function queueBigObs(count: number, startEpoch = 100): PendingQueueItem[] {
     const items: PendingQueueItem[] = [];
     for (let index = 0; index < count; index += 1) {
       const observationId = createObservation(db, {
         turnId,
         toolName: "Bash",
-        // in + out both cap at 300 chars => each rendered obs block ~670 chars.
+        // in caps at 200, out at 800 (out is 400 here, untruncated) => ~700/obs.
         toolInput: JSON.stringify({ command: `${index}-${"y".repeat(400)}` }),
         toolResult: JSON.stringify({ stdout: "x".repeat(400) }),
         status: "pending",

@@ -141,6 +141,65 @@ describe("worker processors", () => {
     );
   });
 
+  test("cleanOutput extracts text from an MCP content array (D1)", () => {
+    expect(
+      cleanOutput(
+        "mcp__playwright__browser_snapshot",
+        '[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]',
+      ),
+    ).toBe("line one\nline two");
+  });
+
+  test("cleanOutput skips empty/non-text blocks in an MCP content array", () => {
+    expect(
+      cleanOutput(
+        "mcp__playwright__x",
+        '[{"type":"image","data":"AAAA"},{"type":"text","text":""},{"type":"text","text":"only this"}]',
+      ),
+    ).toBe("only this");
+  });
+
+  test("cleanOutput falls back to raw JSON for an MCP array with no usable text", () => {
+    const raw = '[{"type":"image","data":"AAAA"},{"type":"resource","uri":"x"}]';
+    expect(cleanOutput("mcp__blender__get_viewport_screenshot", raw)).toBe(raw);
+  });
+
+  test("cleanOutput unwraps a single-key text object for non-whitelist tools", () => {
+    expect(cleanOutput("mcp__blender__execute_code", '{"result":"done"}')).toBe(
+      "done",
+    );
+  });
+
+  test("cleanOutput falls back to raw for a single-key object with a non-string value", () => {
+    const raw = '{"result":{"nested":true}}';
+    expect(cleanOutput("mcp__blender__x", raw)).toBe(raw);
+  });
+
+  test("cleanOutput falls back to raw for a single-key object with an empty string", () => {
+    const raw = '{"result":""}';
+    expect(cleanOutput("mcp__blender__x", raw)).toBe(raw);
+  });
+
+  test("cleanOutput keeps TaskUpdate allowlist fields (D2)", () => {
+    expect(
+      cleanOutput(
+        "TaskUpdate",
+        '{"success":true,"taskId":"11","statusChange":{"from":"pending","to":"completed"},"extra":"drop"}',
+      ),
+    ).toBe(
+      '{"success":true,"taskId":"11","statusChange":{"from":"pending","to":"completed"}}',
+    );
+  });
+
+  test("cleanOutput keeps the TaskCreate task field (D2)", () => {
+    expect(
+      cleanOutput(
+        "TaskCreate",
+        '{"task":{"id":"11","subject":"do the thing"},"noise":1}',
+      ),
+    ).toBe('{"task":{"id":"11","subject":"do the thing"}}');
+  });
+
   test("cleanOutput returns the raw string when JSON parsing fails", () => {
     expect(cleanOutput("Bash", '{"stdout":"ok"')).toBe('{"stdout":"ok"');
   });

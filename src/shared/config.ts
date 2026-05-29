@@ -31,9 +31,10 @@ export const DEFAULT_CONFIG: MnemoConfig = {
 
 // Floor for maxMiniTurnChars: guarantees a final slice's fixed overhead
 // (prompt + prior_turn + response(2000) + capped file trees ~7200) plus at
-// least one truncated obs (~720) always fits, so "rendered <= budget" holds by
-// construction (D10).
-const MIN_MINI_TURN_CHARS = 8192;
+// least one truncated obs (~1178: capped tool name + in:200/out:800 + 9-line
+// indent) always fits, so "rendered <= budget" holds by construction (D10).
+// Raised from 8192 alongside the wider obs budget.
+export const MIN_MINI_TURN_CHARS = 9216;
 const MIN_FLUSH_ATTEMPTS = 1;
 // Keep the compact gate in a sane band: never below 10% (compacting an almost
 // empty session) nor above 95% (never compacting before the SDK auto-compacts).
