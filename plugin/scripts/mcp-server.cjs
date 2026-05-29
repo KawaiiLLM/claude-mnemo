@@ -31611,7 +31611,35 @@ function renderTreeNode(name, node, indent) {
   }
   return lines;
 }
-function renderFileTree(paths) {
+function isFileLine(line, index) {
+  return index > 0 && !line.endsWith("/");
+}
+function capRenderedTree(lines, totalFiles, maxChars) {
+  const suffixBudget = `
+  ...(+${totalFiles} more files)`.length;
+  const lineBudget = Math.max(0, maxChars - suffixBudget);
+  const kept = [];
+  let keptFiles = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const candidate = kept.length === 0 ? line : `${kept.join("\n")}
+${line}`;
+    if (candidate.length > lineBudget) {
+      break;
+    }
+    kept.push(line);
+    if (isFileLine(line, index)) {
+      keptFiles += 1;
+    }
+  }
+  const omitted = totalFiles - keptFiles;
+  if (omitted <= 0) {
+    return lines.join("\n");
+  }
+  return `${kept.join("\n")}
+  ...(+${omitted} more files)`;
+}
+function renderFileTree(paths, opts) {
   const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
     (left, right) => left.localeCompare(right)
   );
@@ -31619,7 +31647,12 @@ function renderFileTree(paths) {
     return "(none)";
   }
   if (uniquePaths.length === 1) {
-    return uniquePaths[0] ?? "(none)";
+    const only = uniquePaths[0] ?? "(none)";
+    if (opts?.maxChars !== void 0 && only.length > opts.maxChars) {
+      const marker = "...";
+      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
+    }
+    return only;
   }
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
@@ -31653,7 +31686,11 @@ function renderFileTree(paths) {
   )) {
     lines.push(...renderTreeNode(childName, childNode, ""));
   }
-  return lines.join("\n");
+  const rendered = lines.join("\n");
+  if (opts?.maxChars !== void 0 && rendered.length > opts.maxChars) {
+    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
+  }
+  return rendered;
 }
 
 // src/mcp/format.ts
@@ -34115,7 +34152,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.12" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.13" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

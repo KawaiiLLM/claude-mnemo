@@ -32,6 +32,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var server_exports = {};
 __export(server_exports, {
   acquireWorkerSingleton: () => acquireWorkerSingleton,
+  buildReminderEnvelope: () => buildReminderEnvelope,
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
@@ -47,7 +48,7 @@ var import_node_os3 = require("node:os");
 var import_node_path5 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.12-mp2pzd6c" : "dev";
+var BUILD_ID = true ? "0.2.13-mpqommoa" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -822,6 +823,12 @@ function getObservationsForTurn(db, turnId) {
     `${OBSERVATION_SELECT} WHERE turn_id = ? ORDER BY id ASC`
   ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
+function hasSkippedObservationsForTurn(db, turnId) {
+  const row = db.query(
+    "SELECT COUNT(*) AS count FROM observations WHERE turn_id = ? AND status = 'skipped'"
+  ).get(turnId);
+  return (row?.count ?? 0) > 0;
+}
 function getObservation(db, observationId) {
   return mapObservationRow(
     db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
@@ -1333,10 +1340,21 @@ var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
   keepaliveLeadMs: 6e4,
-  cacheMode: "auto"
+  cacheMode: "auto",
+  maxMiniTurnChars: 24e3,
+  maxFlushAttempts: 3
 };
+var MIN_MINI_TURN_CHARS = 8192;
+var MIN_FLUSH_ATTEMPTS = 1;
 function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
   return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function clampConfig(config3) {
+  return {
+    ...config3,
+    maxMiniTurnChars: Math.max(config3.maxMiniTurnChars, MIN_MINI_TURN_CHARS),
+    maxFlushAttempts: Math.max(config3.maxFlushAttempts, MIN_FLUSH_ATTEMPTS)
+  };
 }
 function loadConfig(homePath = (0, import_node_os2.homedir)()) {
   const path2 = resolveConfigPath(homePath);
@@ -1345,10 +1363,10 @@ function loadConfig(homePath = (0, import_node_os2.homedir)()) {
   }
   try {
     const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    return {
+    return clampConfig({
       ...DEFAULT_CONFIG,
       ...raw
-    };
+    });
   } catch {
     return DEFAULT_CONFIG;
   }
@@ -1631,26 +1649,81 @@ ${assistantText}` : assistantText;
 
 // src/worker/invalidation.ts
 var REMINDER_LIMIT = 10;
-var PENDING_TAGS = {
-  interrupt: "invalidated:notify-pending:interrupt",
-  rollback: "invalidated:notify-pending:rollback"
+var interruptReason = {
+  key: "interrupt",
+  pendingTag: "invalidated:notify-pending:interrupt",
+  notifiedTag: "invalidated:notified:interrupt",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: () => null,
+  flagToken: () => "was_interrupted"
 };
-var NOTIFIED_TAGS = {
-  interrupt: "invalidated:notified:interrupt",
-  rollback: "invalidated:notified:rollback"
+var rollbackReason = {
+  key: "rollback",
+  pendingTag: "invalidated:notify-pending:rollback",
+  notifiedTag: "invalidated:notified:rollback",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: (turn, ctx) => {
+    const replacementPromptId = turn.contentPromptId ? ctx.replacementByPromptId.get(turn.contentPromptId) : void 0;
+    return {
+      replacementPromptNumber: replacementPromptId ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null : null
+    };
+  },
+  flagToken: () => "was_rolled_back",
+  parenExtra: (_turn, data) => data.replacementPromptNumber !== null ? `replaced by T${data.replacementPromptNumber}` : null
 };
-function getPendingKinds(tags) {
-  return ["interrupt", "rollback"].filter(
-    (kind) => tags.includes(PENDING_TAGS[kind])
-  );
+function truncatePrompt(value, limit) {
+  const text = (value ?? "").trim().replace(/\s+/g, " ");
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit - 3)}...`;
 }
-function markKindsNotified(tags, kinds) {
+var DELIVERY_DROPPED_PENDING_TAG = "delivery:dropped:notify-pending";
+var DELIVERY_DROPPED_NOTIFIED_TAG = "delivery:dropped:notified";
+var deliveryDroppedReason = {
+  key: "delivery-dropped",
+  pendingTag: DELIVERY_DROPPED_PENDING_TAG,
+  notifiedTag: DELIVERY_DROPPED_NOTIFIED_TAG,
+  qualifies: (turn) => turn.status !== "undone",
+  data: (turn) => ({
+    notExtracted: turn.status === "active",
+    prompt: turn.status === "active" ? truncatePrompt(turn.userPrompt, 200) : null
+  }),
+  flagToken: () => "delivery_dropped",
+  parenExtra: (_turn, data) => data.notExtracted ? "not yet extracted" : null,
+  bodyLead: (_turn, data) => data.notExtracted && data.prompt ? `prompt="${data.prompt}"` : null,
+  tail: (_turn, data) => data.notExtracted ? "one or more parts of this turn could not be delivered; record intent if possible" : "record may be incomplete, one or more parts could not be delivered after repeated failures"
+};
+var REMINDER_REASONS = [
+  interruptReason,
+  rollbackReason,
+  deliveryDroppedReason
+];
+function renderReasonHit(reason, turn, ctx) {
+  const data = reason.data(turn, ctx);
+  return {
+    key: reason.key,
+    pendingTag: reason.pendingTag,
+    notifiedTag: reason.notifiedTag,
+    flagToken: reason.flagToken(turn, data),
+    parenExtra: reason.parenExtra?.(turn, data) ?? null,
+    bodyLead: reason.bodyLead?.(turn, data) ?? null,
+    tail: reason.tail?.(turn, data) ?? null
+  };
+}
+function addPendingReason(tags, reason) {
+  if (tags.includes(reason.pendingTag) || tags.includes(reason.notifiedTag)) {
+    return tags;
+  }
+  return [...tags, reason.pendingTag];
+}
+function markHitsNotified(tags, hits) {
   let nextTags = tags.filter(
-    (tag) => !kinds.some((kind) => tag === PENDING_TAGS[kind])
+    (tag) => !hits.some((hit) => tag === hit.pendingTag)
   );
-  for (const kind of kinds) {
-    if (!nextTags.includes(NOTIFIED_TAGS[kind])) {
-      nextTags = [...nextTags, NOTIFIED_TAGS[kind]];
+  for (const hit of hits) {
+    if (!nextTags.includes(hit.notifiedTag)) {
+      nextTags = [...nextTags, hit.notifiedTag];
     }
   }
   return nextTags;
@@ -1747,41 +1820,66 @@ function detectRollbackTopology(transcriptPath) {
     replacementByPromptId
   };
 }
-function selectPendingReminderItems(db, sessionDbId, transcriptPath) {
-  const turns = getTurnsForSession(db, sessionDbId);
+function flagDeliveryDropped(db, turnId, updatedAtEpoch) {
+  const turn = getTurnById(db, turnId);
+  if (!turn) {
+    return;
+  }
+  const nextTags = addPendingReason(turn.tags, deliveryDroppedReason);
+  if (nextTags === turn.tags) {
+    return;
+  }
+  updateTurnById(db, turnId, {
+    status: turn.status,
+    replaceTags: nextTags,
+    updatedAtEpoch
+  });
+}
+function buildReminderContext(turns, transcriptPath) {
   const promptNumberByPromptId = new Map(
     turns.filter((turn) => turn.contentPromptId).map((turn) => [turn.contentPromptId, turn.promptNumber])
   );
   const replacementByPromptId = transcriptPath ? detectRollbackTopology(transcriptPath).replacementByPromptId : /* @__PURE__ */ new Map();
-  const reminderTurns = turns.filter(
-    (turn) => turn.status !== "active" && turn.status !== "undone" && getPendingKinds(turn.tags).length > 0
-  ).sort((left, right) => {
-    const leftEpoch = left.updatedAtEpoch ?? left.createdAtEpoch;
-    const rightEpoch = right.updatedAtEpoch ?? right.createdAtEpoch;
-    if (rightEpoch !== leftEpoch) {
-      return rightEpoch - leftEpoch;
+  return { replacementByPromptId, promptNumberByPromptId };
+}
+function collectReminderItems(db, sessionDbId, transcriptPath) {
+  const turns = getTurnsForSession(db, sessionDbId);
+  const ctx = buildReminderContext(turns, transcriptPath);
+  const ranked = [];
+  for (const turn of turns) {
+    const hits = [];
+    for (const reason of REMINDER_REASONS) {
+      if (turn.tags.includes(reason.pendingTag) && reason.qualifies(turn)) {
+        hits.push(renderReasonHit(reason, turn, ctx));
+      }
     }
-    return right.promptNumber - left.promptNumber;
+    if (hits.length === 0) {
+      continue;
+    }
+    ranked.push({
+      item: {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        priorTitle: turn.title,
+        priorContent: turn.content,
+        reasons: hits
+      },
+      sortEpoch: turn.updatedAtEpoch ?? turn.createdAtEpoch
+    });
+  }
+  ranked.sort((left, right) => {
+    if (right.sortEpoch !== left.sortEpoch) {
+      return right.sortEpoch - left.sortEpoch;
+    }
+    return right.item.promptNumber - left.item.promptNumber;
   });
-  return reminderTurns.map((turn) => {
-    const replacementPromptId = turn.wasRolledBack && turn.contentPromptId ? replacementByPromptId.get(turn.contentPromptId) ?? null : null;
-    return {
-      turnId: turn.id,
-      promptNumber: turn.promptNumber,
-      wasInterrupted: turn.wasInterrupted,
-      wasRolledBack: turn.wasRolledBack,
-      priorTitle: turn.title,
-      priorContent: turn.content,
-      replacementPromptNumber: replacementPromptId ? promptNumberByPromptId.get(replacementPromptId) ?? null : null,
-      pendingKinds: getPendingKinds(turn.tags)
-    };
-  });
+  return ranked.map((entry) => entry.item);
 }
 function getReminderItems(db, sessionDbId, transcriptPath) {
-  return selectPendingReminderItems(db, sessionDbId, transcriptPath).slice(0, REMINDER_LIMIT).sort((left, right) => left.promptNumber - right.promptNumber);
+  return collectReminderItems(db, sessionDbId, transcriptPath).slice(0, REMINDER_LIMIT).sort((left, right) => left.promptNumber - right.promptNumber);
 }
 function getSilencedReminderItems(db, sessionDbId, transcriptPath) {
-  return selectPendingReminderItems(db, sessionDbId, transcriptPath).slice(
+  return collectReminderItems(db, sessionDbId, transcriptPath).slice(
     REMINDER_LIMIT
   );
 }
@@ -1793,7 +1891,7 @@ function markReminderItemsNotified(db, items, updatedAtEpoch) {
     }
     updateTurnById(db, turn.id, {
       status: turn.status,
-      replaceTags: markKindsNotified(turn.tags, item.pendingKinds),
+      replaceTags: markHitsNotified(turn.tags, item.reasons),
       updatedAtEpoch
     });
   }
@@ -2032,7 +2130,35 @@ function renderTreeNode(name, node, indent) {
   }
   return lines;
 }
-function renderFileTree(paths) {
+function isFileLine(line, index) {
+  return index > 0 && !line.endsWith("/");
+}
+function capRenderedTree(lines, totalFiles, maxChars) {
+  const suffixBudget = `
+  ...(+${totalFiles} more files)`.length;
+  const lineBudget = Math.max(0, maxChars - suffixBudget);
+  const kept = [];
+  let keptFiles = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const candidate = kept.length === 0 ? line : `${kept.join("\n")}
+${line}`;
+    if (candidate.length > lineBudget) {
+      break;
+    }
+    kept.push(line);
+    if (isFileLine(line, index)) {
+      keptFiles += 1;
+    }
+  }
+  const omitted = totalFiles - keptFiles;
+  if (omitted <= 0) {
+    return lines.join("\n");
+  }
+  return `${kept.join("\n")}
+  ...(+${omitted} more files)`;
+}
+function renderFileTree(paths, opts) {
   const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
     (left, right) => left.localeCompare(right)
   );
@@ -2040,7 +2166,12 @@ function renderFileTree(paths) {
     return "(none)";
   }
   if (uniquePaths.length === 1) {
-    return uniquePaths[0] ?? "(none)";
+    const only = uniquePaths[0] ?? "(none)";
+    if (opts?.maxChars !== void 0 && only.length > opts.maxChars) {
+      const marker = "...";
+      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
+    }
+    return only;
   }
   const root2 = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
@@ -2074,7 +2205,11 @@ function renderFileTree(paths) {
   )) {
     lines.push(...renderTreeNode(childName, childNode, ""));
   }
-  return lines.join("\n");
+  const rendered = lines.join("\n");
+  if (opts?.maxChars !== void 0 && rendered.length > opts.maxChars) {
+    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
+  }
+  return rendered;
 }
 
 // src/worker/processors.ts
@@ -2180,54 +2315,6 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
   in: ${truncateMiddle(cleanInput(toolName, toolInput), 300)}
   out: ${truncateMiddle(cleanOutput(toolName, toolResult), 300)}
 </obs>`;
-}
-function computeTurnPayloadSize(prompt, response, obsBlocks, filesRead, filesModified, toolCallCount) {
-  return [
-    prompt ?? "",
-    response ?? "",
-    ...obsBlocks,
-    ...filesRead,
-    ...filesModified,
-    String(toolCallCount)
-  ].join("\n").length;
-}
-function buildTurnStopPrompt(sessionId, project, title, content, insight, nextSteps, turnId, prompt, response, filesRead, filesModified) {
-  const renderedFilesRead = renderFileTree(filesRead);
-  const renderedFilesModified = renderFileTree(filesModified);
-  return `<turn id="T${turnId}">
-  prompt: ${truncateMiddle(prompt, 1e3)}
-  response: ${truncateMiddle(response, 1e3)}
-</turn>
-
-<session id="S${sessionId}">
-  project: ${project}
-  prior_title: ${title ?? ""}
-  prior_content: ${content ?? ""}
-  prior_insight: ${insight ?? ""}
-  prior_next_steps: ${nextSteps ?? ""}
-  files_read:
-${renderedFilesRead.split("\n").map((line) => `  ${line}`).join("\n")}
-  files_modified:
-${renderedFilesModified.split("\n").map((line) => `  ${line}`).join("\n")}
-</session>`;
-}
-function buildBatchTurnBlock(turnId, invalidatedKinds, obsBlocks, prompt, response, filesRead, filesModified, toolCallCount) {
-  const renderedFilesRead = renderFileTree(filesRead);
-  const renderedFilesModified = renderFileTree(filesModified);
-  const invalidatedAttr = invalidatedKinds ? ` invalidated="${invalidatedKinds}"` : "";
-  const lines = [`  <turn id="T${turnId}"${invalidatedAttr}>`];
-  for (const obsBlock of obsBlocks) {
-    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
-  }
-  lines.push(`    prompt: ${truncateMiddle(prompt, 1e3)}`);
-  lines.push(`    response: ${truncateMiddle(response, 1e3)}`);
-  lines.push("    files_read:");
-  lines.push(...renderedFilesRead.split("\n").map((line) => `      ${line}`));
-  lines.push("    files_modified:");
-  lines.push(...renderedFilesModified.split("\n").map((line) => `      ${line}`));
-  lines.push(`    tool_call_count: ${toolCallCount}`);
-  lines.push("  </turn>");
-  return lines.join("\n");
 }
 function buildBatchPrompt(args) {
   const sessionUpdatedBlock = args.sessionUpdated ? `<session-updated>
@@ -2359,182 +2446,165 @@ Do NOT mention file paths, tool counts, or code-level details. Those belong in t
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
 }
+var PROMPT_CAP = 1e3;
+var RESPONSE_CAP = 1e3;
+var FILE_TREE_CAP = 1500;
+var PRIOR_TITLE_CAP = 100;
+var PRIOR_CONTENT_CAP = 300;
+var PRIOR_INSIGHT_CAP = 150;
+var PRIOR_TURN_RESERVE = 700;
+var STREAMING_SLICE_OVERHEAD = PROMPT_CAP + PRIOR_TURN_RESERVE + 256;
+var FINAL_SLICE_OVERHEAD = PROMPT_CAP + RESPONSE_CAP + PRIOR_TURN_RESERVE + 2 * FILE_TREE_CAP + 512;
+function renderMiniTurn(payload, priorTurn) {
+  const sliceAttr = payload.role !== "short" ? ` slice="${payload.partIndex}"` : "";
+  const finalAttr = payload.role === "final" ? ` final="true"` : "";
+  const invalidatedAttr = payload.invalidatedKinds ? ` invalidated="${payload.invalidatedKinds}"` : "";
+  const hasTail = payload.role !== "streaming";
+  const lines = [
+    `  <turn id="T${payload.turnId}"${sliceAttr}${finalAttr}${invalidatedAttr}>`
+  ];
+  for (const obsBlock of payload.obsBlocks) {
+    lines.push(...obsBlock.split("\n").map((line) => `    ${line}`));
+  }
+  lines.push(`    prompt: ${truncateMiddle(payload.prompt, PROMPT_CAP)}`);
+  if (hasTail) {
+    lines.push(`    response: ${truncateMiddle(payload.response, RESPONSE_CAP)}`);
+    lines.push("    files_read:");
+    lines.push(
+      ...renderFileTree(payload.filesRead, { maxChars: FILE_TREE_CAP }).split("\n").map((line) => `      ${line}`)
+    );
+    lines.push("    files_modified:");
+    lines.push(
+      ...renderFileTree(payload.filesModified, { maxChars: FILE_TREE_CAP }).split("\n").map((line) => `      ${line}`)
+    );
+    lines.push(`    tool_call_count: ${payload.toolCallCount}`);
+  }
+  lines.push("  </turn>");
+  if (payload.needsPriorTurn && priorTurn) {
+    lines.push(`  <prior_turn id="T${payload.turnId}">`);
+    lines.push(`    title: ${truncateMiddle(priorTurn.title, PRIOR_TITLE_CAP)}`);
+    lines.push(`    content: ${truncateMiddle(priorTurn.content, PRIOR_CONTENT_CAP)}`);
+    lines.push(`    insight: ${truncateMiddle(priorTurn.insight, PRIOR_INSIGHT_CAP)}`);
+    lines.push("  </prior_turn>");
+  }
+  return lines.join("\n");
+}
 function createWorkerProcessors(db) {
+  function buildObsBlocksFromItems(obsItems) {
+    return obsItems.map((item) => {
+      const observation = getObservation(db, item.targetId);
+      if (!observation || observation.status !== "pending") {
+        return null;
+      }
+      return buildObsBlock(
+        observation.id,
+        observation.toolName ?? "Tool",
+        observation.toolInput,
+        observation.toolResult
+      );
+    }).filter((block) => block !== null);
+  }
   return {
-    buildTurnPayload(turnId, obsItems, turnStopItem) {
+    // Build one mini-turn payload (streaming / final / short). For final/short
+    // the full-turn files are aggregated and persisted (as today); streaming
+    // slices carry no tail. Role booleans are computed once here (D6).
+    buildMiniTurn(turnId, obsItems, opts) {
       const turn = getTurnById(db, turnId);
       if (!turn || turn.status === "undone") {
         return null;
       }
-      const aggregate = aggregateTurnFiles(db, turn.id);
-      updateTurnById(db, turn.id, {
-        filesRead: aggregate.filesRead,
-        filesModified: aggregate.filesModified,
-        toolCallCount: aggregate.toolCallCount,
-        updatedAtEpoch: Math.floor(Date.now() / 1e3)
-      });
-      const obsBlocks = obsItems.map((item) => {
-        const observation = getObservation(db, item.targetId);
-        if (!observation || observation.status !== "pending") {
-          return null;
-        }
-        return buildObsBlock(
-          observation.id,
-          observation.toolName ?? "Tool",
-          observation.toolInput,
-          observation.toolResult
-        );
-      }).filter((block) => block !== null);
-      return {
-        turnId: turn.id,
-        promptNumber: turn.promptNumber,
-        prompt: turn.userPrompt,
-        response: turn.assistantResponse,
-        obsBlocks,
-        filesRead: aggregate.filesRead,
-        filesModified: aggregate.filesModified,
-        toolCallCount: aggregate.toolCallCount,
-        size: computeTurnPayloadSize(
-          turn.userPrompt,
-          turn.assistantResponse,
-          obsBlocks,
-          aggregate.filesRead,
-          aggregate.filesModified,
-          aggregate.toolCallCount
-        ),
-        obsItems,
-        turnStopItem
-      };
-    },
-    async processTurnStop(state, turnId) {
-      const turn = getTurnById(db, turnId);
-      if (!turn || turn.status !== "active") {
-        return;
-      }
-      const session = getSession(db, turn.sessionId);
-      if (!session) {
-        return;
-      }
-      const aggregate = aggregateTurnFiles(db, turn.id);
-      updateTurnById(db, turn.id, {
-        filesRead: aggregate.filesRead,
-        filesModified: aggregate.filesModified,
-        toolCallCount: aggregate.toolCallCount,
-        updatedAtEpoch: Math.floor(Date.now() / 1e3)
-      });
-      await state.pushMessage(
-        buildTurnStopPrompt(
-          session.id,
-          session.project,
-          session.title,
-          session.content,
-          session.insight,
-          session.nextSteps,
-          turn.id,
-          turn.userPrompt,
-          turn.assistantResponse,
-          aggregate.filesRead,
-          aggregate.filesModified
-        )
-      );
-    },
-    async processBatch(state, items, options) {
-      if (items.length === 0 && (options?.turnStopItems?.length ?? 0) === 0) {
-        return;
-      }
-      const sessionId = options?.turnStopItems?.[0]?.sessionDbId ?? items[0]?.sessionDbId ?? state.sessionDbId;
-      const session = getSession(db, sessionId);
-      if (!session) {
-        return;
-      }
-      const obsByTurnId = /* @__PURE__ */ new Map();
-      for (const item of items) {
-        const observation = getObservation(db, item.targetId);
-        if (!observation || observation.status !== "pending") {
-          continue;
-        }
-        const group = obsByTurnId.get(observation.turnId) ?? [];
-        group.push({
-          observationId: observation.id,
-          toolName: observation.toolName ?? "Tool",
-          toolInput: observation.toolInput,
-          toolResult: observation.toolResult
-        });
-        obsByTurnId.set(observation.turnId, group);
-      }
-      let currentPrompt = null;
-      let latestPromptNumber = Number.NEGATIVE_INFINITY;
-      const completedTurnBlocks = (options?.turnStopItems ?? []).map((turnStopItem) => {
-        const turn = getTurnById(db, turnStopItem.targetId);
-        if (!turn || turn.status === "undone") {
-          return null;
-        }
+      const hasTail = opts.role !== "streaming";
+      const obsBlocks = buildObsBlocksFromItems(obsItems);
+      let filesRead = [];
+      let filesModified = [];
+      let toolCallCount = 0;
+      let invalidatedKinds = null;
+      if (hasTail) {
         const aggregate = aggregateTurnFiles(db, turn.id);
         updateTurnById(db, turn.id, {
+          status: turn.status,
           filesRead: aggregate.filesRead,
           filesModified: aggregate.filesModified,
           toolCallCount: aggregate.toolCallCount,
           updatedAtEpoch: Math.floor(Date.now() / 1e3)
         });
-        const obsBlocks = (obsByTurnId.get(turn.id) ?? []).map(
-          (observation) => buildObsBlock(
-            observation.observationId,
-            observation.toolName,
-            observation.toolInput,
-            observation.toolResult
-          )
-        );
-        if (turn.promptNumber > latestPromptNumber) {
-          latestPromptNumber = turn.promptNumber;
-          currentPrompt = turn.userPrompt;
-        }
-        return buildBatchTurnBlock(
-          turn.id,
-          formatInlineInvalidationKinds({
-            wasInterrupted: turn.wasInterrupted,
-            wasRolledBack: turn.wasRolledBack
-          }),
-          obsBlocks,
-          turn.userPrompt,
-          turn.assistantResponse,
-          aggregate.filesRead,
-          aggregate.filesModified,
-          aggregate.toolCallCount
-        );
-      }).filter((block) => block !== null);
-      if (completedTurnBlocks.length === 0) {
-        return;
+        filesRead = aggregate.filesRead;
+        filesModified = aggregate.filesModified;
+        toolCallCount = aggregate.toolCallCount;
+        invalidatedKinds = formatInlineInvalidationKinds({
+          wasInterrupted: turn.wasInterrupted,
+          wasRolledBack: turn.wasRolledBack
+        });
       }
-      const needsSessionContext = options?.sessionUpdated ?? false;
-      const sessionUpdated = options?.sessionUpdated ?? false;
-      await state.pushMessage(
-        buildBatchPrompt({
-          sessionId: session.id,
-          project: session.project,
-          sessionTitle: session.title,
-          currentPrompt,
-          priorTitle: needsSessionContext ? session.title : null,
-          priorContent: needsSessionContext ? session.content : null,
-          priorInsight: needsSessionContext ? session.insight : null,
-          priorNextSteps: needsSessionContext ? session.nextSteps : null,
-          sessionUpdated,
-          completedTurnBlocks
-        })
-      );
-      if ((options?.turnStopItems?.length ?? 0) > 0) {
-        const completedTurnIds = new Set(
-          (options?.turnStopItems ?? []).map((item) => item.targetId)
+      const payload = {
+        turnId: turn.id,
+        promptNumber: turn.promptNumber,
+        role: opts.role,
+        partIndex: opts.partIndex,
+        isFinal: opts.role === "final",
+        needsPriorTurn: opts.needsPriorTurn,
+        prompt: turn.userPrompt,
+        response: turn.assistantResponse,
+        obsBlocks,
+        filesRead,
+        filesModified,
+        toolCallCount,
+        invalidatedKinds,
+        obsItems,
+        turnStopItem: opts.turnStopItem,
+        size: 0
+      };
+      payload.size = renderMiniTurn(payload, null).length + (opts.needsPriorTurn ? PRIOR_TURN_RESERVE : 0);
+      return payload;
+    },
+    // Peel a budget-bounded prefix of buffered obs from the head. Always takes
+    // at least one obs (a single obs is <= ~720 chars < any floored budget), so
+    // the buffer always drains. chunk + rest partitions the input by seq.
+    peelMiniTurnObs(bufferedObs, budget) {
+      const chunk = [];
+      const rest = [];
+      let used = 0;
+      let chunkClosed = false;
+      for (const item of bufferedObs) {
+        const observation = getObservation(db, item.targetId);
+        if (!observation || observation.status !== "pending") {
+          continue;
+        }
+        if (chunkClosed) {
+          rest.push(item);
+          continue;
+        }
+        const block = buildObsBlock(
+          observation.id,
+          observation.toolName ?? "Tool",
+          observation.toolInput,
+          observation.toolResult
         );
-        for (const item of items) {
-          const observation = getObservation(db, item.targetId);
-          if (!observation || observation.status !== "pending" || !completedTurnIds.has(observation.turnId)) {
-            continue;
-          }
+        const blockSize = block.length + block.split("\n").length * 4;
+        if (chunk.length > 0 && used + blockSize > budget) {
+          chunkClosed = true;
+          rest.push(item);
+          continue;
+        }
+        chunk.push(item);
+        used += blockSize;
+      }
+      return { chunk, rest };
+    },
+    // The single side-effector (D7): mark this slice's obs skipped + delete its
+    // obs queue rows, and delete the turn-stop queue row when the slice carries
+    // it (final/short). Run identically on flushed and dropped (D8).
+    applyMiniTurnSideEffects(payload) {
+      for (const item of payload.obsItems) {
+        const observation = getObservation(db, item.targetId);
+        if (observation && observation.status === "pending") {
           updateObservation(db, observation.id, { status: "skipped" });
         }
+        deleteQueueItem(db, item.seq);
       }
-      const freshSession = getSession(db, session.id);
-      state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
+      if (payload.turnStopItem) {
+        deleteQueueItem(db, payload.turnStopItem.seq);
+      }
     },
     async pushSessionSummaryPrompt(state, sessionId) {
       const session = getSession(db, sessionId);
@@ -40020,7 +40090,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: an \`<obs>\` means update that single observation; a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages. The conversation history exists for LLM continuity, not for re-extraction.
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: an \`<obs>\` means update that single observation; a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the lone exception is a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice. The conversation history exists for LLM continuity, not for re-extraction.
 
 ## Tools
 
@@ -40061,13 +40131,25 @@ Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worke
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
 
+## Streamed turns (mini-turns)
+
+A long turn is delivered in pieces. A \`<turn>\` whose opening tag carries a \`slice="<n>"\` attribute is one slice of an ongoing turn:
+
+- \`slice="<n>"\` without \`final="true"\`: a mid-turn slice carrying the repeated \`prompt:\` and a subset of this turn's \`<obs>\`. More slices will follow; extract what is known so far.
+- \`slice="<n>" final="true"\`: the last slice. The turn is complete \u2014 \`response\`, \`files_*\`, and \`tool_call_count\` are now present. Produce the most complete T record here.
+- Every slice after the first is followed by a \`<prior_turn id="T<n>">\` block holding the record's current persisted \`title\`/\`content\`/\`insight\`. Refine on top of it: base your update on \`<prior_turn>\` plus this slice's new \`<obs>\`, not on conversation history (which may have been compacted away).
+
+For a sliced turn you SHOULD call \`remember({ id: "T<n>", ... })\` on each slice to refine the SAME record. Field-level merge applies \u2014 later content overwrites, unspecified fields are preserved, tags append. If a slice adds nothing new, respond with no tool calls; an empty response is the valid "leave alone" signal.
+
+This is the ONLY case where updating the same record across multiple messages is allowed, and it applies ONLY while the \`<turn>\` carries a \`slice\` attribute. A \`<turn>\` WITHOUT a \`slice\` attribute is a normal, complete turn \u2014 extract it once and never revisit it.
+
 ## Reminder envelope
 
 Messages may be prefixed with a \`<reminder>\` block listing recently invalidated turns that need one-time attention. Each line:
 
 \`- T<n> (<flags>[, replaced by T<m>])[: "<priorTitle>" -- <priorContent>]\`
 
-\`<flags>\` is one of: \`was_interrupted\`, \`was_rolled_back\`, \`was_interrupted+was_rolled_back\`.
+\`<flags>\` combines one or more of \`was_interrupted\`, \`was_rolled_back\`, and \`delivery_dropped\` joined with \`+\`. \`delivery_dropped\` means one or more parts of the turn could not be delivered after repeated failures, so the record may be incomplete; if the line also reads \`not yet extracted\` with a \`prompt="..."\`, the turn was never recorded \u2014 capture its intent from that prompt if you can.
 
 For each listed \`T<n>\`:
 
@@ -40226,6 +40308,9 @@ var STALLED_QUERY_MS = 3e4;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
+function batchMiniTurns(batch) {
+  return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
+}
 function defaultNoopDrain() {
   return Promise.resolve();
 }
@@ -40284,18 +40369,24 @@ function buildReminderEnvelope(items) {
     return `${text.slice(0, 117)}...`;
   }
   const lines = items.map((item) => {
-    const flags = item.wasInterrupted && item.wasRolledBack ? "was_interrupted+was_rolled_back" : item.wasInterrupted ? "was_interrupted" : item.wasRolledBack ? "was_rolled_back" : "fresh";
-    const replacementClause = item.replacementPromptNumber !== null ? `, replaced by T${item.replacementPromptNumber}` : "";
-    const summaryParts = [];
+    const flags = item.reasons.map((reason) => reason.flagToken).join("+");
+    const parenExtras = item.reasons.map((reason) => reason.parenExtra).filter((extra) => extra !== null);
+    const parenInner = [flags, ...parenExtras].join(", ");
+    const leadParts = [];
     if (item.priorTitle) {
-      summaryParts.push(`"${item.priorTitle}"`);
+      leadParts.push(`"${item.priorTitle}"`);
     }
+    for (const reason of item.reasons) {
+      if (reason.bodyLead) {
+        leadParts.push(reason.bodyLead);
+      }
+    }
+    const reasonTails = item.reasons.map((reason) => reason.tail).filter((tail) => tail !== null);
     const truncatedContent = truncateReminderContent(item.priorContent);
-    if (truncatedContent) {
-      summaryParts.push(truncatedContent);
-    }
-    const summaryClause = summaryParts.length > 0 ? `: ${summaryParts.join(" -- ")}` : "";
-    return `  - T${item.promptNumber} (${flags}${replacementClause})${summaryClause}`;
+    const tailParts = reasonTails.length > 0 ? reasonTails : truncatedContent ? [truncatedContent] : [];
+    const bodyParts = [...leadParts, ...tailParts];
+    const bodyClause = bodyParts.length > 0 ? `: ${bodyParts.join(" -- ")}` : "";
+    return `  - T${item.promptNumber} (${parenInner})${bodyClause}`;
   });
   return `<reminder>
   The following turns were invalidated and need one-time attention.
@@ -40337,11 +40428,7 @@ function createWorkerCore(deps) {
   const compactingSessions = /* @__PURE__ */ new Set();
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const fallbackProcessors = deps.buildTurnPayloadImpl ? null : createWorkerProcessors(deps.db);
-  const buildTurnPayloadImpl = deps.buildTurnPayloadImpl ?? fallbackProcessors.buildTurnPayload;
-  const processBatchImpl = deps.processBatchImpl ?? (async () => {
-    throw new Error("processBatch not implemented");
-  });
+  const processors = createWorkerProcessors(deps.db);
   const pushSessionSummaryPromptImpl = deps.pushSessionSummaryPromptImpl ?? (async () => {
   });
   const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {
@@ -40397,14 +40484,42 @@ function createWorkerCore(deps) {
     }
   }
   function recalculateBatchSize(batch) {
-    batch.size = batch.turns.reduce((total, turn) => total + turn.size, 0);
+    batch.size = batchMiniTurns(batch).reduce(
+      (total, miniTurn) => total + miniTurn.size,
+      0
+    );
   }
   function releaseBatchClaims(batch) {
-    for (const turn of batch.turns) {
-      for (const item of turn.obsItems) {
+    for (const miniTurn of batchMiniTurns(batch)) {
+      for (const item of miniTurn.obsItems) {
         releaseQueueClaim(deps.db, item.seq);
       }
-      releaseQueueClaim(deps.db, turn.turnStopItem.seq);
+      if (miniTurn.turnStopItem) {
+        releaseQueueClaim(deps.db, miniTurn.turnStopItem.seq);
+      }
+    }
+  }
+  function deleteMiniTurnQueueItems(miniTurn) {
+    for (const item of miniTurn.obsItems) {
+      deleteQueueItem(deps.db, item.seq);
+    }
+    if (miniTurn.turnStopItem) {
+      deleteQueueItem(deps.db, miniTurn.turnStopItem.seq);
+    }
+  }
+  function assignSessionContextLocked(state, batch) {
+    if (!batch.sessionUpdated && state.nextBatchNeedsSessionContext) {
+      batch.sessionUpdated = true;
+      state.nextBatchNeedsSessionContext = false;
+      return true;
+    }
+    return false;
+  }
+  function clearStreamedPartsForBatch(state, batch) {
+    for (const miniTurn of batchMiniTurns(batch)) {
+      if (miniTurn.isFinal) {
+        state.streamedParts.delete(miniTurn.turnId);
+      }
     }
   }
   function pruneInProgressBuffer(sessionDbId) {
@@ -40435,23 +40550,29 @@ function createWorkerCore(deps) {
   function pruneBatchQueueLocked(state) {
     const nextQueue = [];
     for (const batch of state.batchQueue) {
-      const keptTurns = batch.turns.filter((turnPayload) => {
-        const turn = getTurnById(deps.db, turnPayload.turnId);
+      if (batch.kind === "slice") {
+        const turn = getTurnById(deps.db, batch.miniTurn.turnId);
         if (!turn || turn.status === "undone") {
-          for (const item of turnPayload.obsItems) {
-            deleteQueueItem(deps.db, item.seq);
-          }
-          deleteQueueItem(deps.db, turnPayload.turnStopItem.seq);
+          deleteMiniTurnQueueItems(batch.miniTurn);
+          continue;
+        }
+        nextQueue.push(batch);
+        continue;
+      }
+      const keptMiniTurns = batch.miniTurns.filter((miniTurn) => {
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (!turn || turn.status === "undone") {
+          deleteMiniTurnQueueItems(miniTurn);
           return false;
         }
         return true;
       });
-      if (keptTurns.length === 0) {
+      if (keptMiniTurns.length === 0) {
         continue;
       }
       const nextBatch = {
         ...batch,
-        turns: keptTurns
+        miniTurns: keptMiniTurns
       };
       recalculateBatchSize(nextBatch);
       nextQueue.push(nextBatch);
@@ -40488,6 +40609,7 @@ function createWorkerCore(deps) {
       contentSessionId: null,
       project: null,
       batchQueue: [],
+      streamedParts: /* @__PURE__ */ new Map(),
       cacheTtlMs: 3e5,
       lastInjectedSummaryEpoch: 0,
       nextBatchNeedsSessionContext: hasPriorSessionSummary(sessionDbId),
@@ -40680,40 +40802,91 @@ ${prompt}` : prompt;
       `${item.kind} ${item.targetId} timeout after ${TURN_STOP_TIMEOUT_MS}ms`
     );
   }
+  async function pushMiniTurnBatch(state, batch) {
+    const session = getSession(deps.db, state.sessionDbId);
+    if (!session) {
+      return;
+    }
+    const miniTurns = batchMiniTurns(batch);
+    let currentPrompt = null;
+    let latestPromptNumber = Number.NEGATIVE_INFINITY;
+    const blocks = miniTurns.map((miniTurn) => {
+      let priorTurn = null;
+      if (miniTurn.needsPriorTurn) {
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (turn) {
+          priorTurn = {
+            title: turn.title,
+            content: turn.content,
+            insight: turn.insight
+          };
+        }
+      }
+      if (miniTurn.promptNumber > latestPromptNumber) {
+        latestPromptNumber = miniTurn.promptNumber;
+        currentPrompt = miniTurn.prompt;
+      }
+      return renderMiniTurn(miniTurn, priorTurn);
+    });
+    const sessionUpdated = batch.sessionUpdated;
+    await state.pushMessage(
+      buildBatchPrompt({
+        sessionId: session.id,
+        project: session.project,
+        sessionTitle: session.title,
+        currentPrompt,
+        priorTitle: sessionUpdated ? session.title : null,
+        priorContent: sessionUpdated ? session.content : null,
+        priorInsight: sessionUpdated ? session.insight : null,
+        priorNextSteps: sessionUpdated ? session.nextSteps : null,
+        sessionUpdated,
+        completedTurnBlocks: blocks
+      })
+    );
+    const freshSession = getSession(deps.db, session.id);
+    state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
+  }
   async function flushOneBatchLocked(state) {
     pruneBatchQueueLocked(state);
     const batch = state.batchQueue[0];
     if (!batch) {
-      return;
+      return "empty";
     }
-    const obsItems = batch.turns.flatMap((turn) => turn.obsItems);
-    const turnStopItems = batch.turns.map((turn) => turn.turnStopItem);
     try {
-      await processBatchImpl(state, obsItems, {
-        turnStopItems,
-        sessionUpdated: batch.sessionUpdated
-      });
-      for (const item of obsItems) {
-        deleteQueueItem(deps.db, item.seq);
-      }
-      for (const item of turnStopItems) {
-        deleteQueueItem(deps.db, item.seq);
-      }
+      await pushMiniTurnBatch(state, batch);
     } catch (error49) {
-      for (const item of obsItems) {
-        releaseQueueClaim(deps.db, item.seq);
+      batch.attempts += 1;
+      if (batch.attempts < config3.maxFlushAttempts) {
+        logger.warn?.("mini-turn flush failed, will retry", {
+          sessionDbId: state.sessionDbId,
+          attempts: batch.attempts,
+          error: error49
+        });
+        return "retryLater";
       }
-      for (const item of turnStopItems) {
-        releaseQueueClaim(deps.db, item.seq);
+      logger.error?.("mini-turn flush dropped after repeated failures", {
+        sessionDbId: state.sessionDbId,
+        attempts: batch.attempts,
+        error: error49
+      });
+      for (const miniTurn of batchMiniTurns(batch)) {
+        processors.applyMiniTurnSideEffects(miniTurn);
+        flagDeliveryDropped(deps.db, miniTurn.turnId, now());
       }
       if (batch.sessionUpdated) {
         state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
       }
+      clearStreamedPartsForBatch(state, batch);
       state.batchQueue.shift();
-      throw error49;
+      return "dropped";
     }
+    for (const miniTurn of batchMiniTurns(batch)) {
+      processors.applyMiniTurnSideEffects(miniTurn);
+    }
+    clearStreamedPartsForBatch(state, batch);
     state.batchQueue.shift();
     refreshPendingSessionContextFlag(state);
+    return "flushed";
   }
   async function flushAllBatchesLocked(state) {
     while (true) {
@@ -40721,45 +40894,103 @@ ${prompt}` : prompt;
       if (state.batchQueue.length === 0) {
         return;
       }
-      await flushOneBatchLocked(state);
+      const outcome = await flushOneBatchLocked(state);
+      if (outcome === "retryLater" || outcome === "empty") {
+        return;
+      }
     }
   }
-  async function enqueueCompletedTurnLocked(state, turnPayload) {
+  function enqueueSliceLocked(state, miniTurn, oldestTurnEpoch) {
+    const batch = {
+      kind: "slice",
+      miniTurn,
+      attempts: 0,
+      size: miniTurn.size,
+      sessionUpdated: false,
+      oldestTurnEpoch
+    };
+    assignSessionContextLocked(state, batch);
+    state.batchQueue.push(batch);
+  }
+  function enqueueMergedTurnLocked(state, miniTurn) {
     refreshPendingSessionContextFlag(state);
     const lastBatch = state.batchQueue[state.batchQueue.length - 1];
-    let targetBatch = lastBatch;
-    let createdBatch = false;
-    if (!lastBatch || lastBatch.size + turnPayload.size >= config3.mergeThresholdChars) {
+    let targetBatch = lastBatch && lastBatch.kind === "merged" ? lastBatch : void 0;
+    if (!targetBatch || targetBatch.size + miniTurn.size >= config3.mergeThresholdChars) {
       targetBatch = {
-        turns: [],
+        kind: "merged",
+        miniTurns: [],
+        attempts: 0,
         size: 0,
         sessionUpdated: false,
-        oldestTurnEpoch: turnPayload.turnStopItem.enqueuedAtEpoch
+        oldestTurnEpoch: miniTurn.turnStopItem?.enqueuedAtEpoch ?? now()
       };
       state.batchQueue.push(targetBatch);
-      createdBatch = true;
     }
-    targetBatch.turns.push(turnPayload);
-    targetBatch.size += turnPayload.size;
-    const assignedSessionUpdated = !targetBatch.sessionUpdated && state.nextBatchNeedsSessionContext;
-    if (assignedSessionUpdated) {
-      targetBatch.sessionUpdated = true;
-      state.nextBatchNeedsSessionContext = false;
+    targetBatch.miniTurns.push(miniTurn);
+    targetBatch.size += miniTurn.size;
+    assignSessionContextLocked(state, targetBatch);
+  }
+  async function enqueueAndFlushStreamingSliceLocked(state, turnId, chunk) {
+    if (chunk.length === 0) {
+      return;
     }
-    try {
-      if (state.batchQueue.length > config3.maxQueuedBatches) {
-        await flushOneBatchLocked(state);
+    const turn = getTurnById(deps.db, turnId);
+    const hadPriorDelivery = state.streamedParts.has(turnId) || (turn ? turn.status !== "active" : false) || hasSkippedObservationsForTurn(deps.db, turnId);
+    const partIndex = state.streamedParts.get(turnId) ?? 1;
+    const miniTurn = processors.buildMiniTurn(turnId, chunk, {
+      role: "streaming",
+      partIndex,
+      needsPriorTurn: hadPriorDelivery,
+      turnStopItem: null
+    });
+    if (!miniTurn) {
+      for (const item of chunk) {
+        deleteQueueItem(deps.db, item.seq);
       }
-    } catch (error49) {
-      for (const batch of state.batchQueue) {
-        releaseBatchClaims(batch);
-      }
-      state.batchQueue = [];
-      if (assignedSessionUpdated) {
-        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
-      }
-      throw error49;
+      return;
     }
+    state.streamedParts.set(turnId, partIndex + 1);
+    enqueueSliceLocked(state, miniTurn, chunk[0]?.enqueuedAtEpoch ?? now());
+    await flushAllBatchesLocked(state);
+  }
+  function bufferedTurnObsExceedThreshold(sessionDbId, turnId) {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return false;
+    }
+    const turnObs = buffer.items.filter(
+      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId
+    );
+    if (turnObs.length === 0) {
+      return false;
+    }
+    const threshold = config3.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
+    return processors.peelMiniTurnObs(turnObs, threshold).rest.length > 0;
+  }
+  async function maybeStreamInProgressTurnLocked(state, turnId) {
+    pruneInProgressBuffer(state.sessionDbId);
+    const buffer = buffers.get(state.sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    const turnObs = buffer.items.filter(
+      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId
+    );
+    if (turnObs.length === 0) {
+      return;
+    }
+    const threshold = config3.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
+    const { chunk, rest } = processors.peelMiniTurnObs(turnObs, threshold);
+    if (rest.length === 0) {
+      return;
+    }
+    const chunkSeqs = new Set(chunk.map((item) => item.seq));
+    buffer.items = buffer.items.filter((item) => !chunkSeqs.has(item.seq));
+    if (buffer.items.length === 0) {
+      buffers.delete(state.sessionDbId);
+    }
+    await enqueueAndFlushStreamingSliceLocked(state, turnId, chunk);
   }
   async function processTurnStopLocked(state, turnStopItem) {
     const turn = getTurnById(deps.db, turnStopItem.targetId);
@@ -40767,17 +40998,43 @@ ${prompt}` : prompt;
       deleteQueueItem(deps.db, turnStopItem.seq);
       return;
     }
-    const obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
+    let obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
     try {
-      const turnPayload = buildTurnPayloadImpl(turn.id, obsItems, turnStopItem);
-      if (!turnPayload) {
+      const finalBudget = config3.maxMiniTurnChars - FINAL_SLICE_OVERHEAD;
+      while (true) {
+        const { chunk, rest } = processors.peelMiniTurnObs(obsItems, finalBudget);
+        if (rest.length === 0) {
+          obsItems = chunk;
+          break;
+        }
+        await enqueueAndFlushStreamingSliceLocked(state, turn.id, chunk);
+        obsItems = rest;
+      }
+      const hadPriorDelivery = state.streamedParts.has(turn.id) || turn.status !== "active" || hasSkippedObservationsForTurn(deps.db, turn.id);
+      const miniTurn = processors.buildMiniTurn(turn.id, obsItems, {
+        role: hadPriorDelivery ? "final" : "short",
+        partIndex: hadPriorDelivery ? state.streamedParts.get(turn.id) ?? 1 : 1,
+        needsPriorTurn: hadPriorDelivery,
+        turnStopItem
+      });
+      if (!miniTurn) {
         for (const item of obsItems) {
           deleteQueueItem(deps.db, item.seq);
         }
         deleteQueueItem(deps.db, turnStopItem.seq);
         return;
       }
-      await enqueueCompletedTurnLocked(state, turnPayload);
+      if (hadPriorDelivery) {
+        enqueueSliceLocked(state, miniTurn, turnStopItem.enqueuedAtEpoch);
+      } else {
+        enqueueMergedTurnLocked(state, miniTurn);
+      }
+      while (state.batchQueue.length > config3.maxQueuedBatches) {
+        const outcome = await flushOneBatchLocked(state);
+        if (outcome === "retryLater" || outcome === "empty") {
+          break;
+        }
+      }
     } catch (error49) {
       for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
@@ -40802,6 +41059,19 @@ ${prompt}` : prompt;
       }
       if (item.kind === "obs") {
         getOrCreateBuffer(item.sessionDbId).items.push(item);
+        const observation = getObservation(deps.db, item.targetId);
+        if (observation && !compactingSessions.has(item.sessionDbId) && bufferedTurnObsExceedThreshold(item.sessionDbId, observation.turnId)) {
+          try {
+            await withSessionProcessingLock(item.sessionDbId, async (state) => {
+              await maybeStreamInProgressTurnLocked(state, observation.turnId);
+            });
+          } catch (error49) {
+            logger.error?.("streaming slice flush failed during drain", {
+              seq: item.seq,
+              error: error49
+            });
+          }
+        }
         continue;
       }
       const bufferedSeqs = [
@@ -40918,6 +41188,10 @@ ${prompt}` : prompt;
   }
   function recoverFromCrash() {
     buffers.clear();
+    for (const state of sessions.values()) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
     resetClaimedQueueItems(deps.db);
   }
   async function handleCompact(sessionDbId, transcriptPath) {
@@ -41035,6 +41309,23 @@ ${prompt}` : prompt;
       for (const sessionDbId of sessions.keys()) {
         await tryKeepaliveSession(sessionDbId, currentMs);
       }
+    },
+    // Reliable >=10s retry beat for flush units left in "retryLater" (D8).
+    // Mirrors the keepalive concurrency discipline: skip compacting sessions
+    // and do all queue work inside the session processing lock.
+    async runRetryTick() {
+      for (const sessionDbId of [...sessions.keys()]) {
+        if (compactingSessions.has(sessionDbId)) {
+          continue;
+        }
+        await withSessionProcessingLock(sessionDbId, async (state) => {
+          pruneBatchQueueLocked(state);
+          const head = state.batchQueue[0];
+          if (head && head.attempts > 0 && head.attempts < config3.maxFlushAttempts) {
+            await flushOneBatchLocked(state);
+          }
+        });
+      }
     }
   };
 }
@@ -41085,8 +41376,6 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     now: deps.now,
     nowMs: deps.nowMs,
     config: deps.config,
-    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? runtimeProcessors?.buildTurnPayload,
-    processBatchImpl: deps.processBatchImpl ?? runtimeProcessors?.processBatch,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? runtimeProcessors?.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
@@ -41227,8 +41516,6 @@ async function main(deps = {}) {
     now: deps.now,
     nowMs: deps.nowMs,
     config: config3,
-    buildTurnPayloadImpl: deps.buildTurnPayloadImpl ?? processors.buildTurnPayload,
-    processBatchImpl: deps.processBatchImpl ?? processors.processBatch,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
@@ -41285,6 +41572,7 @@ async function main(deps = {}) {
   setInterval(() => {
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
+    void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void checkForIdleWorkerShutdown(serverState, {
@@ -41313,6 +41601,7 @@ if (isDirectExecution()) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   acquireWorkerSingleton,
+  buildReminderEnvelope,
   checkForIdleWorkerShutdown,
   createWorkerCore,
   createWorkerFetchHandler,

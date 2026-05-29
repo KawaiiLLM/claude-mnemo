@@ -664,7 +664,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.12-mp2pzd6c" : "dev";
+var BUILD_ID = true ? "0.2.13-mpqommoa" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1028,7 +1028,35 @@ function renderTreeNode(name, node, indent) {
   }
   return lines;
 }
-function renderFileTree(paths) {
+function isFileLine(line, index) {
+  return index > 0 && !line.endsWith("/");
+}
+function capRenderedTree(lines, totalFiles, maxChars) {
+  const suffixBudget = `
+  ...(+${totalFiles} more files)`.length;
+  const lineBudget = Math.max(0, maxChars - suffixBudget);
+  const kept = [];
+  let keptFiles = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const candidate = kept.length === 0 ? line : `${kept.join("\n")}
+${line}`;
+    if (candidate.length > lineBudget) {
+      break;
+    }
+    kept.push(line);
+    if (isFileLine(line, index)) {
+      keptFiles += 1;
+    }
+  }
+  const omitted = totalFiles - keptFiles;
+  if (omitted <= 0) {
+    return lines.join("\n");
+  }
+  return `${kept.join("\n")}
+  ...(+${omitted} more files)`;
+}
+function renderFileTree(paths, opts) {
   const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
     (left, right) => left.localeCompare(right)
   );
@@ -1036,7 +1064,12 @@ function renderFileTree(paths) {
     return "(none)";
   }
   if (uniquePaths.length === 1) {
-    return uniquePaths[0] ?? "(none)";
+    const only = uniquePaths[0] ?? "(none)";
+    if (opts?.maxChars !== void 0 && only.length > opts.maxChars) {
+      const marker = "...";
+      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
+    }
+    return only;
   }
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
@@ -1070,7 +1103,11 @@ function renderFileTree(paths) {
   )) {
     lines.push(...renderTreeNode(childName, childNode, ""));
   }
-  return lines.join("\n");
+  const rendered = lines.join("\n");
+  if (opts?.maxChars !== void 0 && rendered.length > opts.maxChars) {
+    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
+  }
+  return rendered;
 }
 
 // src/mcp/format.ts
@@ -3400,19 +3437,33 @@ function createSessionEndHandler(dependencies) {
 }
 
 // src/worker/invalidation.ts
-var PENDING_TAGS = {
-  interrupt: "invalidated:notify-pending:interrupt",
-  rollback: "invalidated:notify-pending:rollback"
+var interruptReason = {
+  key: "interrupt",
+  pendingTag: "invalidated:notify-pending:interrupt",
+  notifiedTag: "invalidated:notified:interrupt",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: () => null,
+  flagToken: () => "was_interrupted"
 };
-var NOTIFIED_TAGS = {
-  interrupt: "invalidated:notified:interrupt",
-  rollback: "invalidated:notified:rollback"
+var rollbackReason = {
+  key: "rollback",
+  pendingTag: "invalidated:notify-pending:rollback",
+  notifiedTag: "invalidated:notified:rollback",
+  qualifies: (turn) => turn.status === "extracted" || turn.status === "skipped",
+  data: (turn, ctx) => {
+    const replacementPromptId = turn.contentPromptId ? ctx.replacementByPromptId.get(turn.contentPromptId) : void 0;
+    return {
+      replacementPromptNumber: replacementPromptId ? ctx.promptNumberByPromptId.get(replacementPromptId) ?? null : null
+    };
+  },
+  flagToken: () => "was_rolled_back",
+  parenExtra: (_turn, data) => data.replacementPromptNumber !== null ? `replaced by T${data.replacementPromptNumber}` : null
 };
-function addPendingKind(tags, kind) {
-  if (tags.includes(PENDING_TAGS[kind]) || tags.includes(NOTIFIED_TAGS[kind])) {
+function addPendingReason(tags, reason) {
+  if (tags.includes(reason.pendingTag) || tags.includes(reason.notifiedTag)) {
     return tags;
   }
-  return [...tags, PENDING_TAGS[kind]];
+  return [...tags, reason.pendingTag];
 }
 function selectLatestMainLeaf(entries) {
   const parentSet = new Set(
@@ -3520,10 +3571,10 @@ function applyInvalidation(db, sessionDbId, transcriptPath, epoch) {
     const nextWasRolledBack = turn.wasRolledBack || detectedRollback;
     let nextTags = turn.tags;
     if (detectedInterrupt && !turn.wasInterrupted) {
-      nextTags = addPendingKind(nextTags, "interrupt");
+      nextTags = addPendingReason(nextTags, interruptReason);
     }
     if (detectedRollback && !turn.wasRolledBack) {
-      nextTags = addPendingKind(nextTags, "rollback");
+      nextTags = addPendingReason(nextTags, rollbackReason);
     }
     if (nextWasInterrupted === turn.wasInterrupted && nextWasRolledBack === turn.wasRolledBack && nextTags === turn.tags) {
       continue;
