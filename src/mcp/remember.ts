@@ -280,5 +280,11 @@ export function rememberTool(
     return handleSessionRemember(db, sessionId, input);
   }
 
+  if (/^M\d+$/i.test(input.id)) {
+    return parameterError(
+      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session).",
+    );
+  }
+
   return textResult(`Unsupported id selector: ${input.id}`);
 }

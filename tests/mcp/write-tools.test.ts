@@ -126,11 +126,19 @@ describe("MCP write tools", () => {
   test("remember without an id returns a parameter error (memory creation removed)", () => {
     const result = rememberTool(db, { title: "x", content: "y" });
     expect(result.content[0]?.text).toContain("Parameter error");
+    expect(result.content[0]?.text).toContain("O<n> (observation), T<n> (turn), or S<n> (session)");
   });
 
   test("remember rejects the removed memory-only statuses", () => {
     // `superseded` / `archived` only ever applied to M-layer memories.
     const result = rememberTool(db, { id: "T1", status: "superseded" as never });
     expect(result.content[0]?.text).toContain("Parameter error");
+    expect(result.content[0]?.text).toContain("superseded");
+  });
+
+  test("remember rejects M<n> ids with a guided message (durable memory removed)", () => {
+    const result = rememberTool(db, { id: "M5", title: "x", content: "y" });
+    expect(result.content[0]?.text).toContain("Durable memory (M<n>) was removed");
+    expect(result.content[0]?.text).toContain("O<n>");
   });
 });
