@@ -106,7 +106,6 @@ Do not write through `sqlite3`. Writes still go through `remember`.
 | `sessions` | One Claude Code conversation | `id`, `content_session_id`, `project`, `title`, `content`, `insight`, `next_steps`, `last_compact_turn` |
 | `turns` | One user prompt in a session | `id`, `session_id`, `prompt_number`, `status`, `title`, `content`, `user_prompt`, `assistant_response`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count` |
 | `observations` | One tool call in a turn | `id`, `turn_id`, `tool_name`, `tool_input`, `tool_result`, `status`, `title`, `content` |
-| `memories` | Durable cross-session knowledge | `id`, `type`, `scope`, `title`, `content`, `reasoning`, `application`, `tags`, `status` |
 
 ### Useful queries
 
@@ -143,17 +142,6 @@ FROM turns t
 JOIN sessions s ON s.id = t.session_id
 WHERE (t.files_read LIKE '%src/auth.ts%' OR t.files_modified LIKE '%src/auth.ts%')
 ORDER BY t.created_at_epoch DESC
-LIMIT 20;
-```
-
-**Recent active memories by tag**
-
-```sql
-SELECT id, type, scope, title
-FROM memories
-WHERE tags LIKE '%"feedback"%'
-  AND status = 'active'
-ORDER BY COALESCE(updated_at_epoch, created_at_epoch) DESC
 LIMIT 20;
 ```
 

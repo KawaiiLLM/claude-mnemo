@@ -1,6 +1,6 @@
 # Claude-Mnemo
 
-Structured memory system for Claude Code. Captures every tool call in real time, extracts durable observations and turn summaries via a background agent, and feeds them back into future sessions — so conversations start with context, not from scratch.
+Structured memory system for Claude Code. Captures every tool call in real time, extracts observations and turn summaries via a background agent, and feeds them back into future sessions — so conversations start with context, not from scratch.
 
 ## How It Works
 
@@ -22,12 +22,9 @@ Extraction does not run inside the hook process. Hooks write to SQLite and retur
 Session  [S12]        one per conversation
   Turn     [T3]        one per user prompt (promptNumber scoped to session)
     Observation [O87]   one per tool call
-Memory   [M4]         durable cross-session knowledge
 ```
 
 Turns carry a type tag: 🔴 bugfix · 🟣 feature · 🔄 refactor · ✅ change · 🔵 discovery · ⚖️ decision.
-
-Memories are the durable layer — user feedback, project decisions, gotchas, and patterns — with `scope` either `global` or an absolute project path.
 
 ### Queue + Crash Safety
 
@@ -65,7 +62,7 @@ For contributors, `npm run build` refreshes the committed release artifacts in `
 
 Once installed, Claude-Mnemo works automatically — hooks fire on every session, the worker extracts in the background, and `SessionStart` injects context on the next launch.
 
-Two skills expose the read and write paths to the main agent:
+Three skills expose the read axes to the main agent:
 
 ### `mnemo-recall` — Reading Past Work
 
@@ -83,37 +80,16 @@ recall(id="S12/T3")                                 # turn by promptNumber
 recall(id="S12/T3..7", depth="expanded")            # turn range with content
 recall(id="S12/T3/O*")                              # observations in a turn
 recall(id="O87", depth="expanded")                  # specific observation
-recall(id="M*")                                     # all active memories
 
 replay(id="S12")                                    # transcript turn overview
 replay(id="S12/T3", depth="expanded")               # exact prompt + response + tool I/O
 replay(id="S12/T3/Tool2", depth="full")             # single tool call, untruncated
 ```
 
-- **Selectors**: `S*` / `S12` / `S5..10` (sessions), `S12/T*` / `S12/T3..7` (turns by promptNumber), `S12/T3/O*` (observation list), `O7` (single observation, global id), `M*` / `M4` / `M1..20` (memories, global id).
-- **Query prefixes**: `type:` / `file:` / `project:` / `tag:` (memory-only). Free words become an FTS phrase.
+- **Selectors**: `S*` / `S12` / `S5..10` (sessions), `S12/T*` / `S12/T3..7` (turns by promptNumber), `S12/T3/O*` (observation list), `O7` (single observation, global id).
+- **Query prefixes**: `type:` / `file:` / `project:`. Free words become an FTS phrase.
 - **Time**: `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range).
 - **Depth**: `collapsed` (default) / `expanded` / `full`. `full` on `replay` disables tool-result truncation.
-
-### `mnemo-remember` — Writing Durable Memory
-
-Auto-loaded when the user says *"remember this"*, *"save as feedback"*, or when the agent notices a non-obvious fact worth preserving. Only documents `remember` for **memory creation** — turn / observation / session records are managed automatically by the worker and are not main-agent concerns.
-
-```
-remember({
-  type: "feedback",
-  scope: "global",
-  title: "Prefer terse commit messages",
-  content: "User prefers 1-2 sentence commit bodies focused on why, not what.",
-  reasoning: "Corrected me twice when I wrote long commits.",
-  application: "Apply when drafting any git commit message.",
-  tags: ["git", "style"]
-})
-```
-
-Required: `type`, `scope`, `title`, `content`. Optional: `reasoning`, `application`, `tags`, `source` (e.g. `"T5"` to link back to the triggering turn), `status` (defaults to `active`).
-
-Common types: `feedback` / `decision` / `pattern` / `gotcha` / `lesson` / `context`. Free-form string — not an enum.
 
 ### SessionStart Context Injection
 
@@ -121,16 +97,15 @@ On every session start, `SessionStart` injects:
 
 - A header with session and observation counts plus the type legend
 - A graduated view: current session expanded, recent sessions collapsed
-- Active memories for the current project scope (plus all `global`-scoped memories)
 - Expansion hints pointing to `recall(id="Sx/Ty", depth="expanded")` for drill-down
 
 ## Project Structure
 
 ```
 src/
-├── db/            # SQLite schema, sessions, turns, observations, memories, pending_queue, FTS5
+├── db/            # SQLite schema, sessions, turns, observations, pending_queue, FTS5
 ├── hooks/         # Hook handlers (session-init, post-tool-use, stop, compact, context)
-├── mcp/           # MCP server — recall, replay, remember, format renderer, selectors
+├── mcp/           # MCP server — recall, replay, format renderer, selectors
 ├── worker/        # Long-lived Bun worker — HTTP server, queue loop, agent sessions, processors
 ├── mnemosyne/     # env isolation helpers for Mnemosyne subprocess
 ├── shared/        # Transcript parser, logger, paths, constants
@@ -139,7 +114,7 @@ src/
 plugin/            # Built artifacts installed into Claude Code
 ├── hooks/         # hooks.json (lifecycle bindings)
 ├── scripts/       # bun-runner.js, hook-command.cjs, mcp-server.cjs, worker.cjs
-├── skills/        # mnemo-recall + mnemo-remember
+├── skills/        # mnemo-recall, mnemo-replay, mnemo-timeline
 └── CLAUDE.md      # Plugin-level instructions injected into context
 
 tests/             # Mirrors src/ structure
@@ -171,9 +146,8 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 | `sessions` | One row per conversation. Fields: `title`, `content`, `insight`, `next_steps`, `project`, `last_agent_session_id`, timestamps. |
 | `turns` | One row per user prompt. Fields: `user_prompt`, `assistant_response`, `title`, `content`, `insight`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count`, `status` (`active` → `extracted` / `skipped` / `undone`). |
 | `observations` | One row per tool call. Fields: `tool_name`, `tool_input`, `tool_result`, `title`, `content`, `status` (`pending` → `extracted` / `skipped`). |
-| `memories` | Durable cross-session knowledge. Fields: `type`, `scope`, `title`, `content`, `reasoning`, `application`, `tags`, `source_turn_id`, `status`. |
 | `pending_queue` | FIFO extraction queue. Fields: `seq` (monotonic), `kind` (`obs` / `turn-stop`), `target_id`, `session_db_id`, `claimed_at_epoch`. |
-| `memory_fts` | FTS5 virtual table indexing sessions / turns / observations / memories. |
+| `memory_fts` | FTS5 virtual table indexing sessions / turns / observations. |
 
 ### Architecture Decisions
 
@@ -193,7 +167,7 @@ Worker-managed Mnemosyne query sessions leave behind full Claude Agent SDK trans
 
 | Path | Purpose |
 |-------|---------|
-| `~/.claude-mnemo/claude-mnemo.db` | Structured runtime state: sessions, turns, observations, memories, pending queue |
+| `~/.claude-mnemo/claude-mnemo.db` | Structured runtime state: sessions, turns, observations, pending queue |
 | `~/.claude/projects/<encodeProjectPath(~/.claude-mnemo)>/<agent-session-id>.jsonl` | Full Mnemosyne Claude Agent SDK transcript |
 | `~/.claude-mnemo/worker.pid` | Active worker PID while the worker is running |
 | `~/.claude-mnemo/worker.starting` | Transient singleton-acquisition marker |
@@ -204,7 +178,7 @@ On a typical macOS install, the transcript directory resolves to:
 ~/.claude/projects/-Users-<username>-.claude-mnemo/
 ```
 
-Each jsonl file is an SDK-native transcript: every pushed `<obs>` / `<turn>` / `<session>` block, every `remember()` / `recall()` / `replay()` tool call, assistant free-text responses, and SDK `queue-operation` events.
+Each jsonl file is an SDK-native transcript: every pushed `<obs>` / `<turn>` / `<session>` block, every `recall()` / `replay()` tool call, assistant free-text responses, and SDK `queue-operation` events.
 
 ### Common `jq` Queries
 
@@ -237,19 +211,6 @@ The classifier is priority-ordered:
 - initial observation prompts contain a `<session>` header plus an `<obs>` body, and should count as `obs`
 - turn-stop prompts contain a `<turn>` block plus session context, and should count as `turn`
 - compact summary pushes are standalone `<session>` blocks, and should count as `session`
-
-**What did Mnemosyne `remember()`?**
-
-```bash
-jq -r '
-  select(.type == "assistant")
-  | .message.content[]?
-  | select(.type == "tool_use" and .name == "mcp__mnemo__remember")
-  | "\(.input.id // "-")\t\(.input.title // "[status-only]")"
-' "$F"
-```
-
-`[status-only]` means Mnemosyne updated a status field without extracting new content.
 
 **Did compact actually run for this session?**
 

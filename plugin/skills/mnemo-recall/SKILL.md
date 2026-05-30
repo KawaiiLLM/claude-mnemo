@@ -5,7 +5,7 @@ description: Search and read structured memory from past sessions in this projec
 
 # Mnemo Recall
 
-`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, observation summaries, and durable memories. For exact prompts, full responses, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
+`recall` is the structured read index over past sessions. It returns paginated, truncated summaries from SQLite: session headers, turn titles, and observation summaries. For exact prompts, full responses, full tool output, or raw transcript reconstruction, switch to the `mnemo-replay` skill.
 
 **Three axes of read access**:
 - `recall` — content index: what happened, where, and what to inspect next
@@ -33,7 +33,6 @@ Also use it proactively before answering questions that may already be covered b
 Session  [S12]   one per Claude Code conversation
   Turn     [T3]   one per user prompt (promptNumber-scoped to session)
     Observation [O87]   one per tool call
-Memory   [M4]   durable cross-session knowledge
 ```
 
 Output IDs map directly to selectors:
@@ -41,7 +40,6 @@ Output IDs map directly to selectors:
 - `[S12]` → `recall(id="S12")`
 - `[S12/T3]` → `recall(id="S12/T3")`
 - `[O87]` → `recall(id="O87")`
-- `[M4]` → `recall(id="M4")`
 
 ## Progressive Workflow
 
@@ -51,9 +49,7 @@ Output IDs map directly to selectors:
 recall()                                        # recent sessions
 recall(query="auth race")                       # FTS across all layers
 recall(query="type:bugfix file:src/auth.ts")    # typed filters
-recall(query="tag:feedback")                    # memory tag filter
 recall(time="-7d")                              # last 7 days
-recall(id="M*")                                 # all active memories
 ```
 
 These return paginated, collapsed results by default. Use `page` to move through large result sets.
@@ -93,7 +89,7 @@ If the result still is not enough, or you need exact wording, the full response,
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
-| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:` / `tag:`. Tokens are ANDed. |
+| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:`. Tokens are ANDed. |
 | `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
 | `depth` | string | `collapsed` (default) or `expanded`. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
@@ -114,18 +110,16 @@ Child collections are always shown as a fixed preview with a `+N more` hint. To 
 | `S12/T*/O*` | Observations for an entire session |
 | `O87` | Single observation (global DB id) |
 | `T418` | Single turn (global DB id) |
-| `M*` / `M4` / `M1..20` | Memories |
 
-In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id instead (the same id the memory worker writes through `remember`); prefer the `S/T` form unless you already hold a DB id.
+In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` is the global DB id; prefer the `S/T` form unless you already hold a DB id.
 
 ### Query Filters
 
 | Prefix | Applies to | Notes |
 |---|---|---|
-| `type:bugfix` | turns, observations, memories | Matches stored type tags. |
+| `type:bugfix` | turns, observations | Matches stored type tags. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
 | `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
-| `tag:foo` | memories only | Post-filter on memory tags. |
 
 Free words become an FTS query over indexed text.
 
@@ -154,12 +148,6 @@ recall(query="file:src/login.ts", time="2026-04-03")
 recall(id="S8", depth="expanded")
 # → session shows raw: /Users/...jsonl
 # → switch to mnemo-replay for exact transcript bytes
-```
-
-**"What feedback has the user given about testing?"**
-```text
-recall(query="tag:feedback testing")
-recall(id="M4", depth="expanded")
 ```
 
 ## Guidance
