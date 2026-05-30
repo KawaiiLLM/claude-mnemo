@@ -2,11 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   type FormattedObservation,
-  type FormattedMemory,
   type FormattedSession,
   type FormattedTurn,
-  formatMemoryCollapsed,
-  formatMemoryExpanded,
   formatObservationCollapsed,
   formatObservationExpanded,
   formatSessionCollapsed,
@@ -345,42 +342,6 @@ describe("MCP format renderer", () => {
         "  - next: verify startup migration",
         "  - [S142][T1] Diagnose auth | 💡1 [extracted]",
         "    - [O7] Mutex added",
-      ].join("\n"),
-    );
-  });
-
-  test("formats memory collapsed and expanded views with source counts", () => {
-    const memory: FormattedMemory = {
-      id: 1,
-      type: "feedback",
-      scope: "global",
-      title: "Use real DB tests",
-      content: "Integration tests should hit the real database layer.",
-      reasoning: "Mocks hide locking and transaction behavior.",
-      application: "When validating persistence or concurrency changes.",
-      tags: ["testing", "database"],
-      createdAtEpoch: createdAtEpoch,
-      sourceCount: 1,
-      source: {
-        sessionId: 142,
-        promptNumber: 3,
-        title: "Add concurrency coverage",
-        createdAtEpoch: createdAtEpoch,
-      },
-    };
-
-    expect(formatMemoryCollapsed(memory)).toBe(
-      "- [M1] feedback/global: Use real DB tests | 2026-04-05 | 1 source",
-    );
-
-    expect(formatMemoryExpanded(memory)).toBe(
-      [
-        "- [M1] feedback/global: Use real DB tests | 2026-04-05",
-        "  - content: Integration tests should hit the real database layer.",
-        "  - reasoning: Mocks hide locking and transaction behavior.",
-        "  - application: When validating persistence or concurrency changes.",
-        "  - tags: [testing, database]",
-        "  - source: [S142/T3] Add concurrency coverage | 2026-04-05",
       ].join("\n"),
     );
   });

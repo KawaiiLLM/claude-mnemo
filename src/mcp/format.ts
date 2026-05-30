@@ -24,33 +24,11 @@ export interface FormattedObservation {
   content?: string | null;
 }
 
-export interface FormattedMemorySource {
-  sessionId: number;
-  promptNumber: number;
-  title: string | null;
-  createdAtEpoch: number;
-}
-
 export interface FormattedToolCall {
   name: string;
   keyParam?: string | null;
   input?: unknown;
   result?: string | null;
-}
-
-export interface FormattedMemory {
-  id: number;
-  type: string;
-  scope: string;
-  title: string;
-  content: string;
-  reasoning?: string | null;
-  application?: string | null;
-  tags?: string[];
-  createdAtEpoch: number;
-  updatedAtEpoch?: number | null;
-  sourceCount?: number | null;
-  source?: FormattedMemorySource | null;
 }
 
 interface ObservationFormatOptions {
@@ -126,7 +104,6 @@ type RenderNode =
   | { type: "session"; value: FormattedSession }
   | { type: "turn"; value: FormattedTurn }
   | { type: "observation"; value: FormattedObservation }
-  | { type: "memory"; value: FormattedMemory }
   | { type: "toolCall"; value: FormattedToolCall };
 
 function formatEpoch(epoch: number): string {
@@ -136,16 +113,6 @@ function formatEpoch(epoch: number): string {
   const day = String(date.getUTCDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
-}
-
-function formatSourceCount(value?: number | null): string {
-  const count = normalizeCount(value);
-
-  if (count === 0) {
-    return "";
-  }
-
-  return `${count} source${count === 1 ? "" : "s"}`;
 }
 
 function normalizeCount(value?: number | null): number {
@@ -779,85 +746,6 @@ function formatObservationLabel(
   return `${indent}- [O${observation.id}] ${observation.title}`;
 }
 
-function formatMemoryLabel(
-  memory: FormattedMemory,
-  { includeSourceCount = true }: { includeSourceCount?: boolean } = {},
-): string {
-  const parts = [
-    `- [M${memory.id}] ${memory.type}/${memory.scope}: ${memory.title}`,
-    formatEpoch(memory.updatedAtEpoch ?? memory.createdAtEpoch),
-  ];
-  const sourceCount = includeSourceCount
-    ? formatSourceCount(memory.sourceCount)
-    : "";
-
-  if (sourceCount) {
-    parts.push(sourceCount);
-  }
-
-  return parts.join(" | ");
-}
-
-function formatMemoryCollapsedWithMode(
-  memory: FormattedMemory,
-  mode: RenderMode,
-): string {
-  return formatMemoryLabel(memory);
-}
-
-function formatMemoryExpandedWithMode(
-  memory: FormattedMemory,
-  mode: RenderMode,
-  truncate?: number,
-): string {
-  const limit = resolveExplicitTruncate(truncate);
-  const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
-
-  lines.push(
-    `  - content: ${truncateText(memory.content, {
-      limit,
-      mode,
-    })}`,
-  );
-
-  if (memory.reasoning) {
-    lines.push(
-      `  - reasoning: ${truncateText(memory.reasoning, {
-        limit,
-        mode,
-      })}`,
-    );
-  }
-
-  if (memory.application) {
-    lines.push(
-      `  - application: ${truncateText(memory.application, {
-        limit,
-        mode,
-      })}`,
-    );
-  }
-
-  if (memory.tags && memory.tags.length > 0) {
-    lines.push(
-      `  - tags: [${truncateText(memory.tags.join(", "), {
-        limit,
-        mode,
-      })}]`,
-    );
-  }
-
-  if (memory.source) {
-    lines.push(
-      `  - source: [S${memory.source.sessionId}/T${memory.source.promptNumber}] ${
-        memory.source.title ?? "Untitled"
-      } | ${formatEpoch(memory.source.createdAtEpoch)}`,
-    );
-  }
-
-  return lines.join("\n");
-}
-
 function formatObservationCollapsedWithMode(
   observation: FormattedObservation,
   options: ObservationFormatOptions & { mode?: RenderMode } = {},
@@ -912,10 +800,6 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions): string
       return options.depth === "collapsed"
         ? formatObservationCollapsedWithMode(node.value, { ...options, mode })
         : formatObservationExpandedWithMode(node.value, { ...options, mode });
-    case "memory":
-      return options.depth === "collapsed"
-        ? formatMemoryCollapsedWithMode(node.value, mode)
-        : formatMemoryExpandedWithMode(node.value, mode, options.truncate);
     case "toolCall":
       return options.depth === "collapsed"
         ? formatToolCallCollapsedWithMode(node.value, { ...options, mode })
@@ -943,14 +827,6 @@ export function formatTurnExpanded(
   options: TurnFormatOptions = {},
 ): string {
   return renderNode({ type: "turn", value: turn }, { depth: "expanded", mode: "legacy", ...options });
-}
-
-export function formatMemoryCollapsed(memory: FormattedMemory): string {
-  return renderNode({ type: "memory", value: memory }, { depth: "collapsed", mode: "legacy" });
-}
-
-export function formatMemoryExpanded(memory: FormattedMemory): string {
-  return renderNode({ type: "memory", value: memory }, { depth: "expanded", mode: "legacy" });
 }
 
 export function formatObservationCollapsed(
