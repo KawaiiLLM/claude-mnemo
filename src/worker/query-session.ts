@@ -278,7 +278,7 @@ For each \`<turn>\` block:
 
 2. Optionally refresh the session summary — ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) — omitting any is rejected — editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
-Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them). Never create memories.
+Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them).
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
 
@@ -330,13 +330,13 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
-Do not put file paths, tool counts, or code-level details anywhere but \`reference\` — those belong in turn records. Do not record durable cross-project lessons here; those are the main agent's M-level memories.
+Do not put file paths, tool counts, or code-level details anywhere but \`reference\` — those belong in turn records. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh — follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message — the \`prior_*\` fields are the only state to base the refresh decision on.
 
 ## Forbidden across all messages
 
-- Never call \`remember()\` without an \`id\` field — that creates an M-level memory, which is the main agent's responsibility, not yours. Proactive memory creation from Mnemosyne is a bug.
+- Always call \`remember()\` with an \`id\` (T<n> for a turn, S<n> for a session); the no-id route is rejected.
 - Never update any record not named in the current message's block headers.`,
       env: {
         ...buildIsolatedEnv(),

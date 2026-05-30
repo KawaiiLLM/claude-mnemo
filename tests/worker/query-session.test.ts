@@ -497,7 +497,7 @@ describe("worker query session", () => {
       'remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })',
     );
     expect(prompt).toContain(
-      "Never call `remember()` without an `id` field",
+      "Always call `remember()` with an `id`",
     );
     expect(prompt).toContain(
       "Never call `recall()` from a session-summary message",

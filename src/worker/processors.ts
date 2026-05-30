@@ -438,7 +438,7 @@ Fields:
 - next_steps: 50-150 chars, what is pending / the next step (one line)
 - reference: a markdown bullet list — one "- " item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
 
-decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — those are the main agent's M-level memories.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — keep summaries scoped to this session's work.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
