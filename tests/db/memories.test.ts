@@ -62,36 +62,6 @@ describe("memory queries", () => {
     expect(listMemories(db, { status: "archived" })).toHaveLength(1);
   });
 
-  test("indexes memory content and supporting fields into FTS", () => {
-    const created = createMemory(db, {
-      type: "project",
-      scope: "claude-mnemo",
-      title: "Auth race postmortem",
-      content: "Mutex is required to serialize refresh token work.",
-      reasoning: "Parallel refreshes overwrite tokens without a shared guard.",
-      application: "When auth middleware touches refresh state.",
-      tags: ["auth", "concurrency"],
-      createdAtEpoch: 200,
-      updatedAtEpoch: 210,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
-
-    const matches = db
-      .query<{ layer: string; sourceId: number }, [string]>(
-        `
-          SELECT layer, source_id AS sourceId
-          FROM memory_fts
-          WHERE memory_fts MATCH ?
-        `,
-      )
-      .all("serialize");
-
-    expect(matches).toEqual([{ layer: "memory", sourceId: created.id }]);
-  });
-
   test("allows nullable memory fields to be cleared on update", () => {
     const created = createMemory(db, {
       type: "reference",

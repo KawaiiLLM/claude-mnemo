@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createMemory } from "../../src/db/memories";
 import {
   initializeDatabase,
   initializeSchema,
@@ -745,23 +744,7 @@ describe("initializeSchema", () => {
       completedAtEpoch: null,
     });
 
-    createMemory(db, {
-      type: "feedback",
-      scope: "global",
-      title: "Rebuild FTS gate",
-      content: "The startup gate should restore missing memory rows.",
-      reasoning: null,
-      application: null,
-      tags: ["fts"],
-      createdAtEpoch: 30,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
-
-    db.query("DELETE FROM memory_fts WHERE layer = 'memory'").run();
+    db.query("DELETE FROM memory_fts WHERE layer = 'session'").run();
 
     const rebuildSpy = spyOn(searchModule, "rebuildSearchIndex");
 
@@ -771,7 +754,7 @@ describe("initializeSchema", () => {
     expect(
       db
         .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'memory'",
+          "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'session'",
         )
         .get().count,
     ).toBe(1);

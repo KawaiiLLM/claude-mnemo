@@ -25,17 +25,8 @@ export interface ObservationFtsRecord {
   content: string | null;
 }
 
-export interface MemoryFtsRecord {
-  id: number;
-  title: string;
-  content: string;
-  reasoning: string | null;
-  application: string | null;
-  tags: string[];
-}
-
 export interface SearchMemoryOptions {
-  scope?: "sessions" | "turns" | "observations" | "memories";
+  scope?: "sessions" | "turns" | "observations";
   query?: string;
   project?: string;
   type?: string;
@@ -46,7 +37,7 @@ export interface SearchMemoryOptions {
 }
 
 export interface SearchMemoryResult {
-  layer: "session" | "turn" | "observation" | "memory";
+  layer: "session" | "turn" | "observation";
   sourceId: number;
   sessionId: number | null;
   turnId: number | null;
@@ -62,7 +53,7 @@ export interface SearchMemoryResult {
 }
 
 interface SearchRow {
-  layer: "session" | "turn" | "observation" | "memory";
+  layer: "session" | "turn" | "observation";
   sourceId: number;
   sessionId: number | null;
   turnId: number | null;
@@ -163,20 +154,6 @@ function buildProjectClause(project?: string): {
   };
 }
 
-function buildMemoryScopeClause(project?: string): {
-  clause: string;
-  params: string[];
-} {
-  if (!project) {
-    return { clause: "", params: [] };
-  }
-
-  return {
-    clause: "(m.scope = 'global' OR m.scope = ?)",
-    params: [project],
-  };
-}
-
 function combineClauses(clauses: string[]): string {
   const filtered = clauses.filter(Boolean);
 
@@ -203,7 +180,7 @@ function buildSafeFtsQuery(query?: string): string | undefined {
 
 function indexFtsRecord(
   db: Database,
-  layer: "session" | "turn" | "observation" | "memory",
+  layer: "session" | "turn" | "observation",
   sourceId: number,
   title: string | null,
   content: string | null,
@@ -279,22 +256,6 @@ export function indexObservationToFTS(
     observation.title,
     observation.content,
     "",
-  );
-}
-
-export function indexMemoryToFTS(
-  db: Database,
-  memory: MemoryFtsRecord,
-): void {
-  indexFtsRecord(
-    db,
-    "memory",
-    memory.id,
-    memory.title,
-    memory.content,
-    [memory.reasoning ?? "", memory.application ?? "", ...memory.tags]
-      .filter(Boolean)
-      .join("\n"),
   );
 }
 
@@ -384,38 +345,6 @@ export function rebuildSearchIndex(db: Database): void {
       id: observation.id,
       title: observation.title,
       content: observation.content,
-    });
-  }
-
-  const memoryRows = db
-    .query<
-      {
-        id: number;
-        title: string;
-        content: string;
-        reasoning: string | null;
-        application: string | null;
-        tags: string | null;
-      },
-      []
-    >(
-      `
-        SELECT
-          id,
-          title,
-          content,
-          reasoning,
-          application,
-          tags
-        FROM memories
-      `,
-    )
-    .all();
-
-  for (const memory of memoryRows) {
-    indexMemoryToFTS(db, {
-      ...memory,
-      tags: memory.tags ? (JSON.parse(memory.tags) as string[]) : [],
     });
   }
 }
@@ -520,41 +449,6 @@ function queryRecentObservations(
       ORDER BY o.created_at_epoch DESC
     `, options.limit),
     withLimit([...projectClause.params], options.limit),
-  );
-}
-
-function queryRecentMemories(
-  db: Database,
-  options: SearchMemoryOptions,
-): SearchMemoryResult[] {
-  const scopeClause = buildMemoryScopeClause(options.project);
-  const dateClause = buildDateClause(
-    "COALESCE(m.updated_at_epoch, m.created_at_epoch)",
-    options,
-  );
-
-  return queryRows(
-    db,
-    applyLimit(`
-      SELECT
-        'memory' AS layer,
-        m.id AS sourceId,
-        NULL AS sessionId,
-        NULL AS turnId,
-        NULL AS observationId,
-        m.source_turn_id AS sourceTurnId,
-        m.scope AS project,
-        m.title AS title,
-        m.content AS content,
-        m.type AS type,
-        NULL AS filesRead,
-        NULL AS filesModified,
-        COALESCE(m.updated_at_epoch, m.created_at_epoch) AS timestampEpoch
-      FROM memories m
-      ${combineClauses(["m.status = 'active'", scopeClause.clause, dateClause.clause])}
-      ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-    `, options.limit),
-    withLimit([...scopeClause.params, ...dateClause.params], options.limit),
   );
 }
 
@@ -722,59 +616,6 @@ function queryObservationsByScope(
   );
 }
 
-function queryMemoriesByScope(
-  db: Database,
-  options: SearchMemoryOptions,
-  query?: string,
-): SearchMemoryResult[] {
-  if (options.file) {
-    return [];
-  }
-
-  const scopeClause = buildMemoryScopeClause(options.project);
-  const dateClause = buildDateClause(
-    "COALESCE(m.updated_at_epoch, m.created_at_epoch)",
-    options,
-  );
-  const whereClauses = ["m.status = 'active'", scopeClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...scopeClause.params, ...dateClause.params];
-
-  if (query) {
-    whereClauses.push("f.memory_fts MATCH ?");
-    params.push(query);
-  }
-
-  if (options.type) {
-    whereClauses.push("m.type = ?");
-    params.push(options.type);
-  }
-
-  return queryRows(
-    db,
-    applyLimit(`
-      SELECT
-        'memory' AS layer,
-        m.id AS sourceId,
-        NULL AS sessionId,
-        NULL AS turnId,
-        NULL AS observationId,
-        m.source_turn_id AS sourceTurnId,
-        m.scope AS project,
-        m.title AS title,
-        m.content AS content,
-        m.type AS type,
-        NULL AS filesRead,
-        NULL AS filesModified,
-        COALESCE(m.updated_at_epoch, m.created_at_epoch) AS timestampEpoch
-      FROM memories m
-      ${query ? "JOIN memory_fts f ON f.layer = 'memory' AND f.source_id = m.id" : ""}
-      ${combineClauses(whereClauses)}
-      ORDER BY COALESCE(m.updated_at_epoch, m.created_at_epoch) DESC, m.id DESC
-    `, options.limit),
-    withLimit(params, options.limit),
-  );
-}
-
 export function searchMemory(
   db: Database,
   options: SearchMemoryOptions,
@@ -787,10 +628,6 @@ export function searchMemory(
     options.before !== undefined;
 
   if (!query && !hasFilters) {
-    if (options.scope === "memories") {
-      return queryRecentMemories(db, options);
-    }
-
     if (!options.scope || options.scope === "sessions") {
       return queryRecentSessions(db, options);
     }
@@ -813,10 +650,6 @@ export function searchMemory(
 
     results.push(...queryObservationsByScope(db, options, query));
 
-    if (!options.file) {
-      results.push(...queryMemoriesByScope(db, options, query));
-    }
-
     return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
   }
 
@@ -826,10 +659,6 @@ export function searchMemory(
 
   if (options.scope === "turns") {
     return queryTurnsByScope(db, options, query);
-  }
-
-  if (options.scope === "memories") {
-    return queryMemoriesByScope(db, options, query);
   }
 
   return queryObservationsByScope(db, options, query);

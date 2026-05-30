@@ -1,7 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { indexMemoryToFTS } from "./search";
-
 export type MemoryStatus = "active" | "superseded" | "archived";
 
 export interface MemoryRecord {
@@ -243,8 +241,6 @@ export function createMemory(
     throw new Error("Failed to create memory.");
   }
 
-  indexMemoryToFTS(db, created);
-
   return created;
 }
 
@@ -347,7 +343,6 @@ export function updateMemory(
       throw new Error("Failed to update memory.");
     }
 
-    indexMemoryToFTS(db, updated);
     db.exec("COMMIT");
     return updated;
   } catch (error) {
