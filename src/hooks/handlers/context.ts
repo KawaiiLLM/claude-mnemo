@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { listMemories, type MemoryRecord } from "../../db/memories";
 import {
   getRecentSessions,
   getSessionByContentId,
@@ -12,7 +11,6 @@ import { splitBulletField } from "../../mcp/format";
 import { buildContextTimelineView, renderTimeline } from "../../mcp/timeline";
 import { resolveTurnPointers } from "../../mcp/turn-pointers";
 import type {
-  FormattedMemory,
   FormattedSession,
 } from "../../mcp/format";
 import { resolveTranscriptPath } from "../../shared/paths";
@@ -255,87 +253,6 @@ function buildRecentSessionsOutput(
   return lines;
 }
 
-function buildMemoryView(memory: MemoryRecord): FormattedMemory {
-  return {
-    id: memory.id,
-    type: memory.type,
-    scope: memory.scope,
-    title: memory.title,
-    content: memory.content,
-    reasoning: memory.reasoning,
-    application: memory.application,
-    tags: memory.tags,
-    createdAtEpoch: memory.createdAtEpoch,
-    updatedAtEpoch: memory.updatedAtEpoch,
-    sourceCount: memory.sourceTurnId !== null ? 1 : 0,
-    source: null,
-  };
-}
-
-function mergeMemoryLists(...memoryLists: MemoryRecord[][]): MemoryRecord[] {
-  const seen = new Set<number>();
-  const merged: MemoryRecord[] = [];
-
-  for (const list of memoryLists) {
-    for (const memory of list) {
-      if (seen.has(memory.id)) {
-        continue;
-      }
-
-      seen.add(memory.id);
-      merged.push(memory);
-    }
-  }
-
-  return merged
-    .sort((left, right) => {
-      const leftTimestamp = left.updatedAtEpoch ?? left.createdAtEpoch;
-      const rightTimestamp = right.updatedAtEpoch ?? right.createdAtEpoch;
-
-      if (rightTimestamp !== leftTimestamp) {
-        return rightTimestamp - leftTimestamp;
-      }
-
-      return right.id - left.id;
-    })
-    .slice(0, 50);
-}
-
-function buildMemoriesOutput(
-  db: Database,
-  projectScope: string | undefined,
-): string[] {
-  const memories = mergeMemoryLists(
-    listMemories(db, {
-      scope: "global",
-      status: "active",
-      limit: 50,
-    }),
-    projectScope
-      ? listMemories(db, {
-          scope: projectScope,
-          status: "active",
-          limit: 50,
-        })
-      : [],
-  );
-
-  if (memories.length === 0) {
-    return [];
-  }
-
-  return [
-    "## Memories",
-    "",
-    ...memories.map((memory) =>
-      formatModule.renderNode(
-        { type: "memory", value: buildMemoryView(memory) },
-        { depth: "collapsed", mode: "legacy" },
-      ),
-    ),
-  ];
-}
-
 function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
@@ -373,10 +290,6 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id),
   );
-  const memories = buildMemoriesOutput(
-    db,
-    primarySessionRecord.project,
-  );
 
   const recentSessionOutputs = buildRecentSessionsOutput(
     db,
@@ -392,8 +305,6 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
   return [
     buildHeader(db, input.sessionId ? primarySessionRecord.id : undefined),
     "",
-    ...memories,
-    ...(memories.length > 0 ? [""] : []),
     ...(includeCurrentSession
       ? [
           "## Current Session",

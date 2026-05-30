@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createMemory } from "../../src/db/memories";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
@@ -177,53 +176,6 @@ describe("handleContextHook", () => {
       completedAtEpoch: null,
     });
 
-    createMemory(db, {
-      type: "feedback",
-      scope: "global",
-      title: "Use real DB tests",
-      content: "Integration tests should exercise the real database layer.",
-      reasoning: "Mocks hide transaction and locking behavior.",
-      application: "When validating persistence or concurrency changes.",
-      tags: ["testing", "database"],
-      createdAtEpoch: 250,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
-
-    createMemory(db, {
-      type: "project",
-      scope: "/Users/zhaoqixuan/Projects/claude-mnemo",
-      title: "Auth mutex policy",
-      content: "Refresh token work must be serialized with a mutex.",
-      reasoning: null,
-      application: null,
-      tags: [],
-      createdAtEpoch: 260,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
-
-    createMemory(db, {
-      type: "project",
-      scope: "other-project",
-      title: "Other project note",
-      content: "This should stay out of the current project memory block.",
-      reasoning: null,
-      application: null,
-      tags: [],
-      createdAtEpoch: 270,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
   });
 
   afterEach(() => {
@@ -298,64 +250,6 @@ describe("handleContextHook", () => {
     getRecentSessionsSpy.mockRestore();
     renderNodeSpy.mockRestore();
     singleSessionDb.close();
-  });
-
-  test("caps the combined memory block at 50 rows", async () => {
-    for (let index = 0; index < 35; index += 1) {
-      createMemory(db, {
-        type: "feedback",
-        scope: "global",
-        title: `Global memory ${index + 1}`,
-        content: `Global memory content ${index + 1}`,
-        reasoning: null,
-        application: null,
-        tags: ["global"],
-        createdAtEpoch: 1_000 - index,
-        updatedAtEpoch: 1_000 - index,
-        sourceTurnId: null,
-        status: "active",
-        supersededBy: null,
-        expiresAtEpoch: null,
-      });
-    }
-
-    for (let index = 0; index < 35; index += 1) {
-      createMemory(db, {
-        type: "feedback",
-        scope: "/Users/zhaoqixuan/Projects/claude-mnemo",
-        title: `Project memory ${index + 1}`,
-        content: `Project memory content ${index + 1}`,
-        reasoning: null,
-        application: null,
-        tags: ["project"],
-        createdAtEpoch: 900 - index,
-        updatedAtEpoch: 900 - index,
-        sourceTurnId: null,
-        status: "active",
-        supersededBy: null,
-        expiresAtEpoch: null,
-      });
-    }
-
-    const handler = createContextHandler({
-      db,
-    });
-
-    const result = await handler(
-      createInput({
-        sessionId: "session-context",
-      }),
-    );
-
-    const memoryLines = (result.hookSpecificOutput ?? "")
-      .split("\n")
-      .filter((line) => /^-\s+\[M\d+\]/.test(line.trimStart()));
-    const memoryIds = memoryLines
-      .map((line) => line.match(/\[M(\d+)\]/)?.[1])
-      .filter((value): value is string => value !== undefined);
-
-    expect(memoryLines).toHaveLength(50);
-    expect(new Set(memoryIds).size).toBe(50);
   });
 
   test("compact injects current-session timeline and keeps recent sessions collapsed", async () => {
@@ -564,19 +458,11 @@ describe("handleContextHook", () => {
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");
     expect(output).toContain("## Current Session");
-    expect(output).toContain("## Memories");
     expect(output).toContain("## Recent Sessions");
     expect(output).toContain(`[S${currentSessionId}] Anchored session`);
     expect(output).toContain(
       `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
     );
-    expect(output).toContain(
-      `[M1] feedback/global: Use real DB tests | 1970-01-01`,
-    );
-    expect(output).toContain(
-      `[M2] project//Users/zhaoqixuan/Projects/claude-mnemo: Auth mutex policy | 1970-01-01`,
-    );
-    expect(output).not.toContain("Other project note");
     // D4: the current-session block injects every summary field. With no
     // `decision`, the legacy `insight` bullets render as the fallback (bullets
     // indented 4 spaces to match recall/worker).
@@ -641,13 +527,6 @@ describe("handleContextHook", () => {
     expect(renderNodeSpy).toHaveBeenCalledWith(
       { type: "session", value: expect.objectContaining({ id: 1 }) },
       { depth: "collapsed", truncate: 120, mode: "unified" },
-    );
-    expect(renderNodeSpy).toHaveBeenCalledWith(
-      {
-        type: "memory",
-        value: expect.objectContaining({ title: "Use real DB tests" }),
-      },
-      { depth: "collapsed", mode: "legacy" },
     );
     renderNodeSpy.mockRestore();
   });
