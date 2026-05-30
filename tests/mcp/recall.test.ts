@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { createMemory } from "../../src/db/memories";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -19,8 +18,6 @@ describe("recallMemory", () => {
   let authObservationId: number;
   let bigSessionId: number;
   let floodSessionId: number;
-  let globalMemoryId: number;
-  let projectMemoryId: number;
   let observationIds: number[] = [];
 
   beforeEach(() => {
@@ -100,70 +97,6 @@ describe("recallMemory", () => {
 
     const authTurn = getTurn(db, authSession.id, 1)!;
     authObservationId = getObservationsForTurn(db, authTurn.id)[0]!.id;
-
-    globalMemoryId = createMemory(db, {
-      type: "feedback",
-      scope: "global",
-      title: "Use real DB integration tests",
-      content: "Integration tests should use the real database layer.",
-      reasoning: "Mocks hide locking and transaction behavior.",
-      application: "When validating concurrency or persistence changes.",
-      tags: ["testing", "database"],
-      createdAtEpoch: 86_645,
-      updatedAtEpoch: null,
-      sourceTurnId: authTurn.id,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    }).id;
-
-    projectMemoryId = createMemory(db, {
-      type: "project",
-      scope: "claude-mnemo",
-      title: "Auth mutex policy",
-      content: "Refresh token work must be serialized with a mutex.",
-      reasoning: "Concurrent refreshes overwrite shared auth state.",
-      application: "When auth middleware touches refresh tokens.",
-      tags: ["auth", "concurrency"],
-      createdAtEpoch: 86_646,
-      updatedAtEpoch: null,
-      sourceTurnId: authTurn.id,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    }).id;
-
-    createMemory(db, {
-      type: "project",
-      scope: "other-project",
-      title: "Other project note",
-      content: "This should stay out of scoped query results.",
-      reasoning: null,
-      application: null,
-      tags: [],
-      createdAtEpoch: 247,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "active",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
-
-    createMemory(db, {
-      type: "feedback",
-      scope: "claude-mnemo",
-      title: "Archived note",
-      content: "This should not appear in active memory recall.",
-      reasoning: null,
-      application: null,
-      tags: [],
-      createdAtEpoch: 248,
-      updatedAtEpoch: null,
-      sourceTurnId: null,
-      status: "archived",
-      supersededBy: null,
-      expiresAtEpoch: null,
-    });
 
     const bigSession = upsertSession(db, {
       contentSessionId: "session-big",
@@ -306,7 +239,7 @@ describe("recallMemory", () => {
     expect(output).not.toContain("[T17] Turn 17");
   });
 
-  test("routes simplified ids for session, turn, observation, and memory detail", () => {
+  test("routes simplified ids for session, turn, and observation detail", () => {
     const sessionOutput = recallMemory(db, {
       id: `S${authSessionId}`,
       depth: "expanded",
@@ -317,10 +250,6 @@ describe("recallMemory", () => {
     });
     const observationOutput = recallMemory(db, {
       id: `O${authObservationId}`,
-      depth: "expanded",
-    });
-    const memoryOutput = recallMemory(db, {
-      id: `M${projectMemoryId}`,
       depth: "expanded",
     });
 
@@ -338,13 +267,6 @@ describe("recallMemory", () => {
 
     expect(observationOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationOutput).toContain("desc: Guards refresh");
-
-    expect(memoryOutput).toContain(
-      `[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`,
-    );
-    expect(memoryOutput).toContain(
-      "content: Refresh token work must be serialized with a mutex.",
-    );
   });
 
   test("renders anchored and legacy turn ids in routed turn listings", () => {
@@ -433,17 +355,10 @@ describe("recallMemory", () => {
     );
   });
 
-  test("renders mixed query results with prefix filters, time, and page size", () => {
+  test("renders mixed query results with prefix filters and time", () => {
     const typeQuery = recallMemory(db, {
       query: "type:bugfix",
       depth: "expanded",
-    });
-    const projectScopedQuery = recallMemory(db, {
-      query: "project:claude-mnemo auth",
-      pageSize: 2,
-    });
-    const tagQuery = recallMemory(db, {
-      query: "tag:concurrency",
     });
     const timeScopedQuery = recallMemory(db, {
       query: "auth",
@@ -453,62 +368,10 @@ describe("recallMemory", () => {
 
     expect(typeQuery).toContain(`[S${authSessionId}] Auth race fix`);
     expect(typeQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
-    expect(typeQuery).not.toContain(`[M${projectMemoryId}]`);
-
-    expect(projectScopedQuery).toContain("Auth race fix");
-    expect(projectScopedQuery).toContain("Auth mutex policy");
-    expect(projectScopedQuery).not.toContain("Other project note");
-
-    expect(tagQuery).toContain("Auth mutex policy");
-    expect(tagQuery).not.toContain("Use real DB integration tests");
 
     const hitCount = (timeScopedQuery.match(/\n- \[/g) ?? []).length + (timeScopedQuery.startsWith("- [") ? 1 : 0);
     expect(hitCount).toBe(1);
     expect(timeScopedQuery).toContain("Auth");
-  });
-
-  test("does not cap query totals before pagination", () => {
-    for (let index = 1; index <= 5001; index += 1) {
-      createMemory(db, {
-        type: "project",
-        scope: "claude-mnemo",
-        title: `Overflow memory ${index}`,
-        content: `overflowprobe entry ${index}`,
-        reasoning: null,
-        application: null,
-        tags: [],
-        createdAtEpoch: 300_000 + index,
-        updatedAtEpoch: null,
-        sourceTurnId: null,
-        status: "active",
-        supersededBy: null,
-        expiresAtEpoch: null,
-      });
-    }
-
-    const output = recallMemory(db, {
-      query: "overflowprobe",
-      page: 101,
-      pageSize: 50,
-    });
-
-    expect(output).toContain("page 101 / 101 (total 5001)");
-    expect(output).toContain("Overflow memory 1");
-  });
-
-  test("supports memory listing through simplified ids", () => {
-    const output = recallMemory(db, {
-      id: "M*",
-    });
-
-    expect(output).toContain(
-      `[M${projectMemoryId}] project/claude-mnemo: Auth mutex policy`,
-    );
-    expect(output).toContain(
-      `[M${globalMemoryId}] feedback/global: Use real DB integration tests`,
-    );
-    expect(output).toContain("Other project note");
-    expect(output).not.toContain("Archived note");
   });
 
   test("applies page offsets to direct observation browsing", () => {
@@ -609,6 +472,10 @@ describe("recallMemory", () => {
 
     expect(byDbId).toContain("Diagnose build break");
     expect(byPromptNumber).toContain("Diagnose build break");
+  });
+
+  test("recall rejects a tag: filter (removed with durable memory)", () => {
+    expect(recallMemory(db, { query: "tag:feedback" })).toContain("Parameter error");
   });
 
   test("S/T stays prompt_number-scoped and never falls back to a DB id", () => {

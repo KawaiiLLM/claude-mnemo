@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { getMemory } from "../db/memories";
 import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import { getSession } from "../db/sessions";
@@ -15,7 +14,6 @@ import { resolveTranscriptPath } from "../shared/paths";
 import {
   DEFAULT_TRUNCATE,
   renderNode,
-  type FormattedMemory,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
@@ -43,7 +41,6 @@ interface QueryFilters {
   type?: string;
   file?: string;
   project?: string;
-  tag?: string;
 }
 
 const CHILD_PREVIEW_SIZE = 5;
@@ -54,9 +51,7 @@ type RoutedRecallId =
   | { kind: "turn-by-id"; turnId: number }
   | { kind: "session-observation-list"; sessionId: number }
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
-  | { kind: "observation"; observationId: number }
-  | { kind: "memories"; memoryIds?: number[] }
-  | { kind: "memory"; memoryId: number };
+  | { kind: "observation"; observationId: number };
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -234,27 +229,6 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
-  const memoryListMatch = /^M(\*|\d+\.\.\d+)$/i.exec(trimmed);
-  if (memoryListMatch) {
-    const memoryIds = expandNumericSelector(memoryListMatch[1]!);
-    if (memoryIds === null) {
-      return null;
-    }
-
-    return {
-      kind: "memories",
-      memoryIds,
-    };
-  }
-
-  const memoryMatch = /^M(\d+)$/i.exec(trimmed);
-  if (memoryMatch) {
-    return {
-      kind: "memory",
-      memoryId: Number(memoryMatch[1]),
-    };
-  }
-
   return null;
 }
 
@@ -291,10 +265,6 @@ function parseQueryFilters(query: string | undefined): QueryFilters {
     }
     if (token.startsWith("project:")) {
       filters.project = token.slice("project:".length);
-      continue;
-    }
-    if (token.startsWith("tag:")) {
-      filters.tag = token.slice("tag:".length);
       continue;
     }
     textTerms.push(token);
@@ -476,38 +446,6 @@ export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
       title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
       content: observation.content,
     })),
-  };
-}
-
-function buildMemoryView(
-  db: Database,
-  memory: NonNullable<ReturnType<typeof getMemory>>,
-): FormattedMemory {
-  const sourceTurn = memory.sourceTurnId !== null
-    ? getTurnById(db, memory.sourceTurnId)
-    : null;
-
-  return {
-    id: memory.id,
-    type: memory.type,
-    scope: memory.scope,
-    title: memory.title,
-    content: memory.content,
-    reasoning: memory.reasoning,
-    application: memory.application,
-    tags: memory.tags,
-    createdAtEpoch: memory.createdAtEpoch,
-    updatedAtEpoch: memory.updatedAtEpoch,
-    sourceCount: memory.sourceTurnId !== null ? 1 : 0,
-    source:
-      sourceTurn !== null
-        ? {
-            sessionId: sourceTurn.sessionId,
-            promptNumber: sourceTurn.promptNumber,
-            title: sourceTurn.title,
-            createdAtEpoch: sourceTurn.createdAtEpoch,
-          }
-        : null,
   };
 }
 
@@ -768,31 +706,6 @@ function renderObservationScope(
   return lines.join("\n");
 }
 
-function renderMemoryScope(
-  db: Database,
-  memoryIds: number[],
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-): string {
-  return memoryIds
-    .map((memoryId) => getMemory(db, memoryId))
-    .filter(
-      (memory): memory is NonNullable<ReturnType<typeof getMemory>> => memory !== null,
-    )
-    .map((memory) => buildMemoryView(db, memory))
-    .map((memory) =>
-      renderNode(
-        { type: "memory", value: memory },
-        {
-          depth: depth === "collapsed" ? "collapsed" : "expanded",
-          mode: "unified",
-          truncate,
-        },
-      ),
-    )
-    .join("\n");
-}
-
 function buildObservationView(
   observation: NonNullable<ReturnType<typeof getObservation>>,
 ): FormattedObservation {
@@ -838,28 +751,6 @@ function renderObservationDetail(
   const view = buildObservationView(observation);
   return renderNode(
     { type: "observation", value: view },
-    {
-      depth: depth === "collapsed" ? "collapsed" : "expanded",
-      mode: "unified",
-      truncate,
-    },
-  );
-}
-
-function renderMemoryDetail(
-  db: Database,
-  memoryId: number,
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-): string {
-  const memory = getMemory(db, memoryId);
-  if (!memory) {
-    return "Memory not found.";
-  }
-
-  const view = buildMemoryView(db, memory);
-  return renderNode(
-    { type: "memory", value: view },
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
@@ -926,32 +817,12 @@ function applyTurnSelector(
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
 
-function filterResultsByTag(
-  db: Database,
-  results: SearchMemoryResult[],
-  tag: string | undefined,
-): SearchMemoryResult[] {
-  if (!tag) {
-    return results;
-  }
-
-  return results.filter((result) => {
-    if (result.layer === "memory") {
-      const memory = getMemory(db, result.sourceId);
-      return memory?.tags.includes(tag) ?? false;
-    }
-
-    return false;
-  });
-}
-
 function renderGroupedSearchResults(
   db: Database,
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded",
   truncate?: number,
 ): string {
-  const memoryLines: string[] = [];
   const sessionGroups = new Map<
     number,
     {
@@ -963,24 +834,6 @@ function renderGroupedSearchResults(
   const sessionOrder: number[] = [];
 
   for (const result of results) {
-    if (result.layer === "memory") {
-      const memory = getMemory(db, result.sourceId);
-      if (memory) {
-        const view = buildMemoryView(db, memory);
-        memoryLines.push(
-          renderNode(
-            { type: "memory", value: view },
-            {
-              depth: depth === "collapsed" ? "collapsed" : "expanded",
-              mode: "unified",
-              truncate,
-            },
-          ),
-        );
-      }
-      continue;
-    }
-
     if (result.sessionId === null) {
       continue;
     }
@@ -1083,7 +936,7 @@ function renderGroupedSearchResults(
     return lines.join("\n");
   });
 
-  return [...memoryLines, ...sessionLines.filter(Boolean)].join("\n");
+  return sessionLines.filter(Boolean).join("\n");
 }
 
 function renderRoutedId(
@@ -1199,24 +1052,7 @@ function renderRoutedId(
     return renderObservationDetail(db, routed.observationId, depth, truncate);
   }
 
-  if (routed.kind === "memories") {
-    const memoryIds = routed.memoryIds && routed.memoryIds.length > 0
-      ? routed.memoryIds
-      : searchMemory(
-          db,
-          { scope: "memories", after, before },
-        ).map((result) => result.sourceId);
-    const paged = paginateItems(memoryIds, page, pageSize);
-    return joinPage(
-      formatPageHeader(page, paged.pageCount, paged.total),
-      renderMemoryScope(db, paged.items, depth, truncate),
-      paged.pageCount,
-    );
-  }
-
-  return routed.kind === "memory"
-    ? renderMemoryDetail(db, routed.memoryId, depth, truncate)
-    : "";
+  return "";
 }
 
 function renderSessionList(
@@ -1249,27 +1085,6 @@ function searchQueryResults(
   after?: number,
   before?: number,
 ): SearchMemoryResult[] {
-  if (
-    filters.tag &&
-    !filters.text &&
-    !filters.type &&
-    !filters.file &&
-    !filters.project
-  ) {
-    return [
-      ...searchMemory(db, {
-        scope: "observations",
-        after,
-        before,
-      }),
-      ...searchMemory(db, {
-        scope: "memories",
-        after,
-        before,
-      }),
-    ];
-  }
-
   return searchMemory(db, {
     query: filters.text,
     type: filters.type,
@@ -1281,6 +1096,12 @@ function searchQueryResults(
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
+  if (input.query && /(^|\s)tag:/.test(input.query)) {
+    return formatParameterError(
+      "tag: filtering was removed with durable memory; use type:/file:/project: or free-text search.",
+    );
+  }
+
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? (depth === "collapsed" ? 50 : 10);
@@ -1311,15 +1132,11 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
   if (input.query) {
     const filters = parseQueryFilters(input.query);
-    const results = filterResultsByTag(
+    const results = searchQueryResults(
       db,
-      searchQueryResults(
-        db,
-        filters,
-        timeRange.after,
-        timeRange.before,
-      ),
-      filters.tag,
+      filters,
+      timeRange.after,
+      timeRange.before,
     );
     const paged = paginateItems(results, page, pageSize);
 
