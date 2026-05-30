@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getMemory, listMemories } from "../../src/db/memories";
 import { getObservation } from "../../src/db/observations";
 import { initializeDatabase } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
@@ -112,34 +111,6 @@ describe("MCP write tools", () => {
     expect(session.nextSteps).toBe("Ship the follow-up cleanup");
   });
 
-  test("rememberTool creates and updates memories", () => {
-    const createResult = rememberTool(db, {
-      type: "feedback",
-      scope: "global",
-      title: "Prefer real DB tests",
-      content: "Use the real database for concurrency integration tests.",
-      reasoning: "Mocks hide transaction boundaries.",
-      application: "When testing lock-sensitive code paths.",
-      tags: ["testing", "database"],
-      source: `T${turnId}`,
-    });
-
-    const created = listMemories(db)[0]!;
-
-    const updateResult = rememberTool(db, {
-      id: `M${created.id}`,
-      content: "Use the real database for persistence integration tests.",
-      status: "archived",
-    });
-
-    const updated = getMemory(db, created.id)!;
-
-    expect(createResult.content[0]?.text).toContain("Created memory M");
-    expect(updateResult.content[0]?.text).toContain(`Updated memory M${created.id}`);
-    expect(updated.sourceTurnId).toBe(turnId);
-    expect(updated.status).toBe("archived");
-  });
-
   test("rememberTool keeps prompt-number lookup intact for existing turns", () => {
     rememberTool(db, {
       id: `T${turnId}`,
@@ -150,5 +121,16 @@ describe("MCP write tools", () => {
     const turnByPromptNumber = getTurn(db, sessionId, 1)!;
     expect(turnByPromptNumber.id).toBe(turnId);
     expect(turnByPromptNumber.title).toBe("Updated title");
+  });
+
+  test("remember without an id returns a parameter error (memory creation removed)", () => {
+    const result = rememberTool(db, { title: "x", content: "y" });
+    expect(result.content[0]?.text).toContain("Parameter error");
+  });
+
+  test("remember rejects the removed memory-only statuses", () => {
+    // `superseded` / `archived` only ever applied to M-layer memories.
+    const result = rememberTool(db, { id: "T1", status: "superseded" as never });
+    expect(result.content[0]?.text).toContain("Parameter error");
   });
 });

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import { getMemory, listMemories } from "../../src/db/memories";
 import { getObservation, getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { searchMemory } from "../../src/db/search";
@@ -358,36 +357,6 @@ describe("remember tool routing and validation", () => {
     expect(after.summaryUpdatedAtEpoch ?? 0).toBeGreaterThan(
       before.summaryUpdatedAtEpoch ?? 0,
     );
-  });
-
-  test("creates and updates memories via routed ids", () => {
-    const createResult = rememberTool(db, {
-      type: "feedback",
-      scope: "global",
-      title: "Prefer real DB tests",
-      content: "Use the real database for concurrency integration tests.",
-      reasoning: "Mocks hide transaction boundaries.",
-      application: "When testing lock-sensitive code paths.",
-      tags: ["testing", "database"],
-      source: `T${turnId}`,
-    });
-
-    const created = listMemories(db)[0]!;
-
-    const updateResult = rememberTool(db, {
-      id: `M${created.id}`,
-      content: "Use the real database for persistence integration tests.",
-      status: "archived",
-    });
-
-    const updated = getMemory(db, created.id)!;
-
-    expect(createResult.content[0]?.text).toContain("Created memory M");
-    expect(updateResult.content[0]?.text).toContain(`Updated memory M${created.id}`);
-    expect(updated.content).toBe(
-      "Use the real database for persistence integration tests.",
-    );
-    expect(updated.status).toBe("archived");
   });
 
   test("does not create extra observations while updating O{id}", () => {

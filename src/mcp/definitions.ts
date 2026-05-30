@@ -3,7 +3,7 @@ import { z } from "zod";
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall:
     "Search past sessions for prior work, design decisions, and user corrections. Use before re-deriving implementation details from source. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
-  remember: "Persist sessions, turns, observations, or memories through one routed write tool.",
+  remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline:
     "Render the temporal/decision shape of a past session — phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus configurable page/pageSize pagination.",
 } as const;
@@ -21,12 +21,9 @@ export const recallInputShape = {
 export const rememberInputShape = {
   id: z.string().optional(),
   type: z.string().optional(),
-  scope: z.string().optional(),
   title: z.string().optional(),
   content: z.string().optional(),
   insight: z.string().optional(),
-  reasoning: z.string().optional(),
-  application: z.string().optional(),
   tags: z.array(z.string()).optional(),
   status: z
     .enum([
@@ -35,8 +32,6 @@ export const rememberInputShape = {
       "skipped",
       "undone",
       "active",
-      "superseded",
-      "archived",
     ])
     .optional(),
   next_steps: z.string().optional(),
@@ -46,7 +41,6 @@ export const rememberInputShape = {
   done: z.string().optional(),
   current: z.string().optional(),
   reference: z.string().optional(),
-  source: z.string().optional(),
 };
 
 export const timelineInputShape = {
