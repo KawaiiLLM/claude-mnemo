@@ -160,16 +160,6 @@ function indexObservationToFTS(db, observation) {
     ""
   );
 }
-function indexMemoryToFTS(db, memory) {
-  indexFtsRecord(
-    db,
-    "memory",
-    memory.id,
-    memory.title,
-    memory.content,
-    [memory.reasoning ?? "", memory.application ?? "", ...memory.tags].filter(Boolean).join("\n")
-  );
-}
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
   const sessionRows = db.query(
@@ -220,24 +210,6 @@ function rebuildSearchIndex(db) {
       id: observation.id,
       title: observation.title,
       content: observation.content
-    });
-  }
-  const memoryRows = db.query(
-    `
-        SELECT
-          id,
-          title,
-          content,
-          reasoning,
-          application,
-          tags
-        FROM memories
-      `
-  ).all();
-  for (const memory of memoryRows) {
-    indexMemoryToFTS(db, {
-      ...memory,
-      tags: memory.tags ? JSON.parse(memory.tags) : []
     });
   }
 }
@@ -300,23 +272,6 @@ var SCHEMA_SQL = `
     created_at_epoch INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    reasoning TEXT,
-    application TEXT,
-    tags TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    superseded_by INTEGER REFERENCES memories(id),
-    expires_at_epoch INTEGER,
-    source_turn_id INTEGER REFERENCES turns(id),
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER
-  );
-
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -341,15 +296,6 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
 
-  CREATE INDEX IF NOT EXISTS idx_memories_scope
-    ON memories(scope);
-
-  CREATE INDEX IF NOT EXISTS idx_memories_type
-    ON memories(type);
-
-  CREATE INDEX IF NOT EXISTS idx_memories_status
-    ON memories(status);
-
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     layer,
     source_id,
@@ -367,6 +313,7 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+  dropLegacyMemoriesTable(db);
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -430,6 +377,10 @@ function ensureTurnPromptIdIndex(db) {
       ON turns(session_id, content_prompt_id) WHERE content_prompt_id IS NOT NULL
   `);
 }
+function dropLegacyMemoriesTable(db) {
+  db.exec("DROP TABLE IF EXISTS memories");
+  db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
   return rows.some((row) => row.name === column);
@@ -443,8 +394,7 @@ function shouldRebuildSearchIndex(db) {
   const sourceLayers = [
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
-    { table: "observations", layer: "observation" },
-    { table: "memories", layer: "memory" }
+    { table: "observations", layer: "observation" }
   ];
   const hasAnySourceRows = sourceLayers.some(
     ({ table }) => hasRow(db, `SELECT 1 FROM ${table} LIMIT 1`)
@@ -703,7 +653,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.17-mpr62tlr" : "dev";
+var BUILD_ID = true ? "0.2.18-mps9yxt7" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -959,62 +909,6 @@ function createCompactHandler(dependencies) {
   };
 }
 
-// src/db/memories.ts
-var MEMORY_SELECT = `
-  SELECT
-    id,
-    type,
-    scope,
-    title,
-    content,
-    reasoning,
-    application,
-    tags,
-    status,
-    superseded_by AS supersededBy,
-    expires_at_epoch AS expiresAtEpoch,
-    source_turn_id AS sourceTurnId,
-    created_at_epoch AS createdAtEpoch,
-    updated_at_epoch AS updatedAtEpoch
-  FROM memories
-`;
-function parseJsonArray(value) {
-  if (!value) {
-    return [];
-  }
-  return JSON.parse(value);
-}
-function mapMemoryRow(row) {
-  if (!row) {
-    return null;
-  }
-  return {
-    ...row,
-    tags: parseJsonArray(row.tags)
-  };
-}
-function listMemories(db, options = {}) {
-  const clauses = [];
-  const params = [];
-  if (options.scope) {
-    clauses.push("scope = ?");
-    params.push(options.scope);
-  }
-  if (options.type) {
-    clauses.push("type = ?");
-    params.push(options.type);
-  }
-  if (options.status) {
-    clauses.push("status = ?");
-    params.push(options.status);
-  }
-  const whereClause = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-  const boundParams = [...params, options.limit ?? 50];
-  return db.query(
-    `${MEMORY_SELECT}${whereClause} ORDER BY COALESCE(updated_at_epoch, created_at_epoch) DESC, id DESC LIMIT ?`
-  ).all(...boundParams).map((row) => mapMemoryRow(row)).filter((record) => record !== null);
-}
-
 // src/shared/file-tree.ts
 var import_node_path4 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
@@ -1160,13 +1054,6 @@ function formatEpoch(epoch) {
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
   const day = String(date.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
-}
-function formatSourceCount(value) {
-  const count = normalizeCount(value);
-  if (count === 0) {
-    return "";
-  }
-  return `${count} source${count === 1 ? "" : "s"}`;
 }
 function normalizeCount(value) {
   if (!value || value < 0) {
@@ -1605,60 +1492,6 @@ function formatTurnExpandedWithMode(turn, options = {}) {
 function formatObservationLabel(observation, { indent = "" } = {}) {
   return `${indent}- [O${observation.id}] ${observation.title}`;
 }
-function formatMemoryLabel(memory, { includeSourceCount = true } = {}) {
-  const parts = [
-    `- [M${memory.id}] ${memory.type}/${memory.scope}: ${memory.title}`,
-    formatEpoch(memory.updatedAtEpoch ?? memory.createdAtEpoch)
-  ];
-  const sourceCount = includeSourceCount ? formatSourceCount(memory.sourceCount) : "";
-  if (sourceCount) {
-    parts.push(sourceCount);
-  }
-  return parts.join(" | ");
-}
-function formatMemoryCollapsedWithMode(memory, mode) {
-  return formatMemoryLabel(memory);
-}
-function formatMemoryExpandedWithMode(memory, mode, truncate) {
-  const limit = resolveExplicitTruncate(truncate);
-  const lines = [formatMemoryLabel(memory, { includeSourceCount: false })];
-  lines.push(
-    `  - content: ${truncateText(memory.content, {
-      limit,
-      mode
-    })}`
-  );
-  if (memory.reasoning) {
-    lines.push(
-      `  - reasoning: ${truncateText(memory.reasoning, {
-        limit,
-        mode
-      })}`
-    );
-  }
-  if (memory.application) {
-    lines.push(
-      `  - application: ${truncateText(memory.application, {
-        limit,
-        mode
-      })}`
-    );
-  }
-  if (memory.tags && memory.tags.length > 0) {
-    lines.push(
-      `  - tags: [${truncateText(memory.tags.join(", "), {
-        limit,
-        mode
-      })}]`
-    );
-  }
-  if (memory.source) {
-    lines.push(
-      `  - source: [S${memory.source.sessionId}/T${memory.source.promptNumber}] ${memory.source.title ?? "Untitled"} | ${formatEpoch(memory.source.createdAtEpoch)}`
-    );
-  }
-  return lines.join("\n");
-}
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
   const limit = resolveExplicitTruncate(options.truncate);
@@ -1695,8 +1528,6 @@ function renderNode(node, options) {
       return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...options, mode }) : formatTurnExpandedWithMode(node.value, { ...options, mode });
     case "observation":
       return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...options, mode }) : formatObservationExpandedWithMode(node.value, { ...options, mode });
-    case "memory":
-      return options.depth === "collapsed" ? formatMemoryCollapsedWithMode(node.value, mode) : formatMemoryExpandedWithMode(node.value, mode, options.truncate);
     case "toolCall":
       return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...options, mode }) : formatToolCallExpandedWithMode(node.value, { ...options, mode });
   }
@@ -1730,7 +1561,7 @@ var TURN_SELECT = `
 function stringifyArray(values) {
   return JSON.stringify(values);
 }
-function parseJsonArray2(value) {
+function parseJsonArray(value) {
   if (!value) {
     return [];
   }
@@ -1744,9 +1575,9 @@ function mapTurnRow(row) {
     ...row,
     wasInterrupted: row.wasInterrupted === 1,
     wasRolledBack: row.wasRolledBack === 1,
-    tags: parseJsonArray2(row.tags),
-    filesRead: parseJsonArray2(row.filesRead),
-    filesModified: parseJsonArray2(row.filesModified)
+    tags: parseJsonArray(row.tags),
+    filesRead: parseJsonArray(row.filesRead),
+    filesModified: parseJsonArray(row.filesModified)
   };
 }
 function mergeTags(existingTags, nextTags) {
@@ -2858,70 +2689,6 @@ function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, primarySe
   }
   return lines;
 }
-function buildMemoryView(memory) {
-  return {
-    id: memory.id,
-    type: memory.type,
-    scope: memory.scope,
-    title: memory.title,
-    content: memory.content,
-    reasoning: memory.reasoning,
-    application: memory.application,
-    tags: memory.tags,
-    createdAtEpoch: memory.createdAtEpoch,
-    updatedAtEpoch: memory.updatedAtEpoch,
-    sourceCount: memory.sourceTurnId !== null ? 1 : 0,
-    source: null
-  };
-}
-function mergeMemoryLists(...memoryLists) {
-  const seen = /* @__PURE__ */ new Set();
-  const merged = [];
-  for (const list of memoryLists) {
-    for (const memory of list) {
-      if (seen.has(memory.id)) {
-        continue;
-      }
-      seen.add(memory.id);
-      merged.push(memory);
-    }
-  }
-  return merged.sort((left, right) => {
-    const leftTimestamp = left.updatedAtEpoch ?? left.createdAtEpoch;
-    const rightTimestamp = right.updatedAtEpoch ?? right.createdAtEpoch;
-    if (rightTimestamp !== leftTimestamp) {
-      return rightTimestamp - leftTimestamp;
-    }
-    return right.id - left.id;
-  }).slice(0, 50);
-}
-function buildMemoriesOutput(db, projectScope) {
-  const memories = mergeMemoryLists(
-    listMemories(db, {
-      scope: "global",
-      status: "active",
-      limit: 50
-    }),
-    projectScope ? listMemories(db, {
-      scope: projectScope,
-      status: "active",
-      limit: 50
-    }) : []
-  );
-  if (memories.length === 0) {
-    return [];
-  }
-  return [
-    "## Memories",
-    "",
-    ...memories.map(
-      (memory) => renderNode(
-        { type: "memory", value: buildMemoryView(memory) },
-        { depth: "collapsed", mode: "legacy" }
-      )
-    )
-  ];
-}
 function buildContextOutput(db, input) {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
@@ -2956,10 +2723,6 @@ function buildContextOutput(db, input) {
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id)
   );
-  const memories = buildMemoriesOutput(
-    db,
-    primarySessionRecord.project
-  );
   const recentSessionOutputs = buildRecentSessionsOutput(
     db,
     recentSessions,
@@ -2971,8 +2734,6 @@ function buildContextOutput(db, input) {
   return [
     buildHeader(db, input.sessionId ? primarySessionRecord.id : void 0),
     "",
-    ...memories,
-    ...memories.length > 0 ? [""] : [],
     ...includeCurrentSession ? [
       "## Current Session",
       "",
