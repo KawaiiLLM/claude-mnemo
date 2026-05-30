@@ -8,7 +8,7 @@ Claude-Mnemo hooks into five points of the Claude Code lifecycle:
 
 | Hook | Trigger | What it does |
 |------|---------|--------------|
-| **SessionStart** | Session begins / resumes / clears / post-compact | Injects recent session summaries, turn highlights, and active memories into context |
+| **SessionStart** | Session begins / resumes / clears / post-compact | Injects recent session summaries and the current session's turn highlights into context |
 | **UserPromptSubmit** | Every user message | Creates (or resumes) the session + a new turn row in SQLite |
 | **PostToolUse** | Every tool call | Writes a raw observation (tool_name + input + result), enqueues it for extraction, wakes the worker |
 | **Stop** | Agent finishes a turn | Backfills the assistant response + tool counts, enqueues a turn-stop job |
