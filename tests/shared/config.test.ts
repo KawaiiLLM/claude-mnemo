@@ -76,7 +76,7 @@ describe("shared config", () => {
     );
 
     const config = loadConfig(home);
-    expect(config.maxMiniTurnChars).toBe(9216);
+    expect(config.maxMiniTurnChars).toBe(10240);
     expect(config.maxFlushAttempts).toBe(1);
   });
 

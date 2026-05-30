@@ -463,7 +463,7 @@ ${sessionSummaryInstruction(sessionId)}`;
 // the file tree is the only previously-uncapped field, so it is capped here.
 
 const PROMPT_CAP = 1000;
-const RESPONSE_CAP = 2000;
+const RESPONSE_CAP = 3000;
 export const FILE_TREE_CAP = 1500;
 const PRIOR_TITLE_CAP = 100;
 const PRIOR_CONTENT_CAP = 300;

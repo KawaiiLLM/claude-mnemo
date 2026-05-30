@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.18-mps9yxt7" : "dev";
+var BUILD_ID = true ? "0.2.19-mpscg8at" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1517,7 +1517,7 @@ var DEFAULT_CONFIG = {
   maxFlushAttempts: 3,
   compactContextRatio: 0.5
 };
-var MIN_MINI_TURN_CHARS = 9216;
+var MIN_MINI_TURN_CHARS = 10240;
 var MIN_FLUSH_ATTEMPTS = 1;
 var MIN_COMPACT_CONTEXT_RATIO = 0.1;
 var MAX_COMPACT_CONTEXT_RATIO = 0.95;
@@ -2475,7 +2475,7 @@ ${renderPriorSession(prior)}
 ${sessionSummaryInstruction(sessionId)}`;
 }
 var PROMPT_CAP = 1e3;
-var RESPONSE_CAP = 2e3;
+var RESPONSE_CAP = 3e3;
 var FILE_TREE_CAP = 1500;
 var PRIOR_TITLE_CAP = 100;
 var PRIOR_CONTENT_CAP = 300;
