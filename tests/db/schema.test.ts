@@ -33,7 +33,6 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("sessions");
     expect(tableNames).toContain("turns");
     expect(tableNames).toContain("observations");
-    expect(tableNames).toContain("memories");
     expect(tableNames).toContain("pending_queue");
     expect(tableNames).toContain("memory_fts");
   });
@@ -760,6 +759,40 @@ describe("initializeSchema", () => {
     ).toBe(1);
 
     rebuildSpy.mockRestore();
+  });
+
+  test("initializeSchema drops a legacy memories table and purges its FTS layer", () => {
+    const db = createDatabase(":memory:");
+    db.exec(
+      `CREATE TABLE memories (id INTEGER PRIMARY KEY, type TEXT, scope TEXT,
+         title TEXT, content TEXT, created_at_epoch INTEGER NOT NULL);`,
+    );
+    db.exec(
+      `CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(layer, source_id, title, content, extra);`,
+    );
+    db.exec(
+      `INSERT INTO memory_fts (layer, source_id, title, content, extra)
+         VALUES ('memory', 1, 't', 'c', ''), ('turn', 9, 't', 'c', '');`,
+    );
+
+    initializeSchema(db);
+
+    const table = db
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")
+      .get();
+    expect(table).toBeNull();
+
+    const memRows = db
+      .query<{ n: number }, []>("SELECT count(*) AS n FROM memory_fts WHERE layer='memory'")
+      .get()!;
+    expect(memRows.n).toBe(0);
+
+    const turnRows = db
+      .query<{ n: number }, []>("SELECT count(*) AS n FROM memory_fts WHERE layer='turn'")
+      .get()!;
+    expect(turnRows.n).toBe(1);
+
+    db.close();
   });
 
 });

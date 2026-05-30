@@ -59,23 +59,6 @@ const SCHEMA_SQL = `
     created_at_epoch INTEGER NOT NULL
   );
 
-  CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL,
-    scope TEXT NOT NULL,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    reasoning TEXT,
-    application TEXT,
-    tags TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    superseded_by INTEGER REFERENCES memories(id),
-    expires_at_epoch INTEGER,
-    source_turn_id INTEGER REFERENCES turns(id),
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER
-  );
-
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -100,15 +83,6 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
 
-  CREATE INDEX IF NOT EXISTS idx_memories_scope
-    ON memories(scope);
-
-  CREATE INDEX IF NOT EXISTS idx_memories_type
-    ON memories(type);
-
-  CREATE INDEX IF NOT EXISTS idx_memories_status
-    ON memories(status);
-
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     layer,
     source_id,
@@ -127,6 +101,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnInvalidationColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+  dropLegacyMemoriesTable(db);
 }
 
 function ensureSessionLastAgentSessionIdColumn(db: Database): void {
@@ -208,6 +183,11 @@ function ensureTurnPromptIdIndex(db: Database): void {
   `);
 }
 
+function dropLegacyMemoriesTable(db: Database): void {
+  db.exec("DROP TABLE IF EXISTS memories");
+  db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
+
 function hasColumn(db: Database, table: string, column: string): boolean {
   const rows = db
     .query<{ name: string }, []>(`SELECT name FROM pragma_table_info('${table}')`)
@@ -233,7 +213,6 @@ function shouldRebuildSearchIndex(db: Database): boolean {
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
     { table: "observations", layer: "observation" },
-    { table: "memories", layer: "memory" },
   ] as const;
 
   const hasAnySourceRows = sourceLayers.some(({ table }) =>
