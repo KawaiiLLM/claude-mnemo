@@ -834,19 +834,17 @@ function renderGroupedSearchResults(
   const sessionOrder: number[] = [];
 
   for (const result of results) {
-    if (result.sessionId === null) {
-      continue;
-    }
-
-    let group = sessionGroups.get(result.sessionId);
+    // searchQueryResults guarantees sessionId !== null; Map key requires number
+    const sessionId = result.sessionId!;
+    let group = sessionGroups.get(sessionId);
     if (!group) {
       group = {
         sessionHit: false,
         turnIds: new Set<number>(),
         observationIdsByTurnId: new Map<number, number[]>(),
       };
-      sessionGroups.set(result.sessionId, group);
-      sessionOrder.push(result.sessionId);
+      sessionGroups.set(sessionId, group);
+      sessionOrder.push(sessionId);
     }
 
     if (result.layer === "session") {
@@ -1052,7 +1050,8 @@ function renderRoutedId(
     return renderObservationDetail(db, routed.observationId, depth, truncate);
   }
 
-  return "";
+  routed satisfies never;
+  return formatParameterError(`unrecognized id kind`);
 }
 
 function renderSessionList(
@@ -1092,7 +1091,7 @@ function searchQueryResults(
     project: filters.project,
     after,
     before,
-  });
+  }).filter((r) => r.sessionId !== null);
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {

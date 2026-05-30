@@ -522,4 +522,30 @@ describe("recallMemory", () => {
       recallMemory(db, { id: `T${turn.id}`, depth: "expanded" }),
     ).toContain("Resumed adopted turn");
   });
+
+  test("recall search totals exclude memory-layer FTS rows (null session_id)", () => {
+    // A stray memory-layer FTS row must not render or inflate the page total.
+    db.query(
+      `INSERT INTO memory_fts (layer, source_id, title, content, extra)
+         VALUES ('memory', 9999, 'mem hit', 'auth refresh memory', '')`,
+    ).run();
+    // Use pageSize:1 so the page header (which contains "total N") is always emitted.
+    const output = recallMemory(db, { query: "auth", pageSize: 1 });
+    expect(output).not.toContain("M9999");
+    expect(output).not.toContain("mem hit");
+    expect(output).not.toContain("9999");
+    // total in the page header must reflect only real session/turn/observation hits
+    const totalMatch = output.match(/total (\d+)/);
+    expect(totalMatch).not.toBeNull();
+    const total = Number(totalMatch![1]);
+    // Without the filter the total would be inflated by the memory-layer row;
+    // with the filter it must equal the number of actual session/turn/observation hits.
+    // authSession contributes at least one hit, memory-layer row contributes zero.
+    expect(total).toBeGreaterThan(0);
+    // Verify total is consistent with what renders (no extra phantom count from FTS layer)
+    const pageCountMatch = output.match(/page 1 \/ (\d+)/);
+    expect(pageCountMatch).not.toBeNull();
+    const pageCount = Number(pageCountMatch![1]);
+    expect(pageCount).toBe(total); // pageSize:1 => pageCount === total
+  });
 });
