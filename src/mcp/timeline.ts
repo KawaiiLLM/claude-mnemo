@@ -7,6 +7,8 @@ export interface TimelineInput {
   id: string;
   page?: number;
   pageSize?: number;
+  milestones?: boolean;
+  phases?: boolean;
 }
 
 export interface TimelineView {
@@ -32,6 +34,10 @@ export interface TimelineView {
 export interface RenderTimelineOptions {
   promptCap?: number;
   showEarlierHint?: boolean;
+  /** When true, the turn table renders only milestone turns (spec D2). */
+  milestones?: boolean;
+  /** When false, the phases block is omitted. Defaults to included. */
+  phases?: boolean;
 }
 
 export interface SystemTimezoneSource {
@@ -928,6 +934,7 @@ function formatShowingLine(view: TimelineView): string | null {
 function renderTurnTable(
   view: TimelineView,
   promptCap: number = PROMPT_COLUMN_CAP,
+  milestones = false,
 ): string[] {
   if (view.pageTurns.length === 0) {
     return [];
@@ -939,6 +946,14 @@ function renderTurnTable(
     brokenPromptCandidates.add(pair.second);
   }
 
+  const milestoneSet = milestones
+    ? selectMilestoneTurns(
+        view.pageTurns,
+        view.windowSignals.toolBurstThreshold,
+        view.compactBoundaries,
+      )
+    : null;
+
   const lines = [
     "",
     "T# | line | time | gap | stats | prompt → title",
@@ -947,11 +962,18 @@ function renderTurnTable(
   let prevEpoch: number | null = null;
   for (const turn of view.pageTurns) {
     const previousTurnEpoch = prevEpoch;
-    // Advance gap tracking for every turn (incl. skipped) so the gap on the
-    // next rendered row spans hidden turns and stays a true delta.
+    // Advance gap tracking for every turn BEFORE any continue below (skipped or
+    // milestone-suppressed), so the gap on the next rendered row spans the
+    // hidden turns and stays a true delta.
     prevEpoch = turn.createdAtEpoch;
 
     if (turn.status === "skipped") {
+      continue;
+    }
+
+    // Milestone mode: suppress non-milestone live turns (undone turns are never
+    // in milestoneSet, so they are suppressed here too). Gap already advanced.
+    if (milestoneSet && !milestoneSet.has(turn.promptNumber)) {
       continue;
     }
 
@@ -1194,11 +1216,12 @@ export function renderTimeline(
   options: RenderTimelineOptions = {},
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
+  const milestones = options.milestones ?? false;
 
   return [
     ...renderSessionHeader(view),
-    ...renderTurnTable(view, promptCap),
-    ...renderPhases(view, options),
+    ...renderTurnTable(view, promptCap, milestones),
+    ...(options.phases === false ? [] : renderPhases(view, options)),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
   ].join("\n");
@@ -1206,7 +1229,10 @@ export function renderTimeline(
 
 export function timelineQuery(db: Database, input: TimelineInput): string {
   try {
-    return renderTimeline(buildTimelineView(db, input));
+    return renderTimeline(buildTimelineView(db, input), {
+      milestones: input.milestones,
+      phases: input.phases,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `timeline error: ${message}`;

@@ -1477,6 +1477,50 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/phases \(window T11-T40\):/);
     expect(output).toMatch(/\n  earlier: timeline\(id="S1\/T1\.\.10"\) or recall\(id="S1"\)/);
   });
+
+  it("milestones=true renders only milestone turns", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+    const view = buildTimelineView(db, { id: "S1" });
+
+    const rowCount = (s: string) =>
+      s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
+
+    const full = renderTimeline(view);
+    const milestone = renderTimeline(view, { milestones: true });
+
+    expect(rowCount(milestone)).toBeLessThan(rowCount(full));
+    expect(milestone).toContain("T6 |");      // decision phase-lead kept
+    expect(milestone).toContain("T11 |");     // tool-burst kept
+    expect(milestone).not.toContain("T2 |");  // discovery non-lead dropped
+  });
+
+  it("phases=false omits the phases block", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+    const view = buildTimelineView(db, { id: "S1" });
+
+    expect(renderTimeline(view)).toContain("phases (");
+    expect(renderTimeline(view, { phases: false })).not.toContain("phases (");
+  });
+
+  it("milestone mode keeps gaps spanning suppressed turns", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+    const view = buildTimelineView(db, { id: "S1" });
+
+    const gapField = (line: string | undefined) => line?.split("|")[3]?.trim();
+    const find = (s: string, n: string) =>
+      s.split("\n").find((l) => l.startsWith(n));
+
+    const fullT11 = find(renderTimeline(view), "T11 |");
+    const msT11 = find(renderTimeline(view, { milestones: true }), "T11 |");
+
+    expect(gapField(msT11)).toBeDefined();
+    // T11 is a tool-burst milestone; T7-T10 are suppressed. Its gap must equal
+    // the full-mode gap (T10->T11), proving suppressed turns still advance it.
+    expect(gapField(msT11)).toBe(gapField(fullT11));
+  });
 });
 
 describe("timelineQuery", () => {
