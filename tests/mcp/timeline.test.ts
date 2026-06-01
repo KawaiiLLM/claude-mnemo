@@ -23,6 +23,7 @@ import {
   renderTimeline,
   resolveWindow,
   segmentPhases,
+  selectMilestoneTurns,
   timelineQuery,
   truncateText,
 } from "../../src/mcp/timeline";
@@ -948,6 +949,72 @@ describe("detectShapeSignals", () => {
     ]);
     expect(signals.undoneTurns).toEqual([4]);
     expect(signals.externalInputs).toEqual([]);
+  });
+});
+
+describe("selectMilestoneTurns", () => {
+  it("keeps non-discovery phase leads and drops discovery non-leads", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 2, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 3, type: "decision", toolCallCount: 1 }),
+      turn({ promptNumber: 4, type: "feature", toolCallCount: 1 }),
+      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
+    ];
+    const keep = selectMilestoneTurns(turns, 1000, []);
+    // T3 (decision lead) + T4 (feature lead) + last-3 (T3,T4,T5).
+    expect([...keep].sort((a, b) => a - b)).toEqual([3, 4, 5]);
+  });
+
+  it("includes a change phase-lead (no keyword special-casing)", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 2, type: "change", toolCallCount: 1 }),
+    ];
+    expect(selectMilestoneTurns(turns, 1000, []).has(2)).toBe(true);
+  });
+
+  it("keeps every tool-burst turn, not just the top 3", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 100 }),
+      turn({ promptNumber: 2, type: "discovery", toolCallCount: 90 }),
+      turn({ promptNumber: 3, type: "discovery", toolCallCount: 80 }),
+      turn({ promptNumber: 4, type: "discovery", toolCallCount: 70 }),
+      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 6, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 7, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 8, type: "discovery", toolCallCount: 1 }),
+    ];
+    const keep = selectMilestoneTurns(turns, 10, []);
+    expect(keep.has(1)).toBe(true);
+    expect(keep.has(2)).toBe(true);
+    expect(keep.has(3)).toBe(true);
+    expect(keep.has(4)).toBe(true);
+    expect(keep.has(5)).toBe(false);
+  });
+
+  it("keeps compact boundaries within the page, not outside", () => {
+    const turns = [
+      turn({ promptNumber: 10, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 11, type: "discovery", toolCallCount: 1 }),
+    ];
+    const keep = selectMilestoneTurns(turns, 1000, [10, 99]);
+    expect(keep.has(10)).toBe(true);
+    expect(keep.has(99)).toBe(false);
+  });
+
+  it("excludes skipped turns from selection", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        status: "skipped",
+        toolCallCount: 500,
+      }),
+      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
+    ];
+    expect(selectMilestoneTurns(turns, 10, []).has(2)).toBe(false);
   });
 });
 

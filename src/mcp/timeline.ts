@@ -666,6 +666,51 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
   };
 }
 
+/**
+ * Milestone selection (spec D2). Operates only on the rendered page:
+ * non-discovery phase leads ∪ tool-burst turns ∪ in-page compact boundaries ∪
+ * last 3 live turns. The burst threshold is the window-scoped scalar reused for
+ * calibration; membership is decided per page. No cap.
+ */
+export function selectMilestoneTurns(
+  pageTurns: TurnRecord[],
+  toolBurstThreshold: number,
+  compactBoundaries: number[],
+): Set<number> {
+  const keep = new Set<number>();
+  // Sort defensively so the last-3 anchor is correct even if a caller passes
+  // unsorted turns (production pageTurns are already sorted). segmentPhases
+  // sorts internally, and the compact/burst paths are order-independent.
+  const live = sortTurnsForAnalysis(pageTurns).filter(isTimelineLiveTurn);
+
+  for (const phase of segmentPhases(pageTurns)) {
+    if (phase.type !== null && phase.type !== "discovery") {
+      keep.add(phase.startPromptNumber);
+    }
+  }
+
+  // Re-scan page live turns against the threshold. Do NOT reuse
+  // windowSignals.toolBursts — it is .slice(0, TOOL_BURST_TOP_N)-truncated.
+  for (const turn of live) {
+    if ((turn.toolCallCount ?? 0) > toolBurstThreshold) {
+      keep.add(turn.promptNumber);
+    }
+  }
+
+  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  for (const boundary of compactBoundaries) {
+    if (pageNumbers.has(boundary)) {
+      keep.add(boundary);
+    }
+  }
+
+  for (const turn of live.slice(-3)) {
+    keep.add(turn.promptNumber);
+  }
+
+  return keep;
+}
+
 function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
