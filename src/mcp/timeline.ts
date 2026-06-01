@@ -117,7 +117,6 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 };
 
 export const PENDING_EMOJI = "⏳";
-const SKIPPED_EMOJI = "⏭";
 const MISSING_LINE_ANCHOR = "—";
 
 function paginateItems<T>(
@@ -946,13 +945,13 @@ function renderTurnTable(
   ];
 
   let prevEpoch: number | null = null;
-  const skippedTurnNumbers: number[] = [];
   for (const turn of view.pageTurns) {
     const previousTurnEpoch = prevEpoch;
+    // Advance gap tracking for every turn (incl. skipped) so the gap on the
+    // next rendered row spans hidden turns and stays a true delta.
     prevEpoch = turn.createdAtEpoch;
 
     if (turn.status === "skipped") {
-      skippedTurnNumbers.push(turn.promptNumber);
       continue;
     }
 
@@ -964,10 +963,6 @@ function renderTurnTable(
         promptCap,
       ),
     );
-  }
-
-  if (skippedTurnNumbers.length > 0) {
-    lines.push(renderSkippedSummary(skippedTurnNumbers));
   }
 
   return lines;
@@ -1053,29 +1048,6 @@ function renderTitleCell(
 
 function sanitizeTimelineField(value: string): string {
   return value.replaceAll("|", "/").replaceAll("→", "->");
-}
-
-function renderSkippedSummary(promptNumbers: number[]): string {
-  const ranges: string[] = [];
-  let index = 0;
-
-  while (index < promptNumbers.length) {
-    const start = promptNumbers[index]!;
-    let end = start;
-
-    while (
-      index + 1 < promptNumbers.length &&
-      promptNumbers[index + 1] === end + 1
-    ) {
-      end = promptNumbers[index + 1]!;
-      index += 1;
-    }
-
-    ranges.push(start === end ? `T${start}` : `T${start}-T${end}`);
-    index += 1;
-  }
-
-  return `${SKIPPED_EMOJI} ${ranges.join(", ")}`;
 }
 
 function isTimelineLiveTurn(turn: TurnRecord): boolean {

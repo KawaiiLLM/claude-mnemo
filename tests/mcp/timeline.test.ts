@@ -497,7 +497,7 @@ describe("skipped turns", () => {
     });
   });
 
-  it("renders skipped turns without the pending marker", () => {
+  it("filters skipped turns out without a marker or summary", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
 
@@ -507,13 +507,8 @@ describe("skipped turns", () => {
 
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
-    const turn19Line = output
-      .split("\n")
-      .find((line) => line.startsWith("⏭ T19"));
 
-    expect(turn19Line).toBeDefined();
-    expect(turn19Line).not.toContain("⏳");
-    expect(turn19Line).toContain("⏭");
+    expect(output).not.toContain("⏭");
     expect(output).not.toContain("T19 |");
   });
 });
@@ -1441,7 +1436,7 @@ describe("renderTimeline", () => {
     expect(line).not.toContain("left → right");
   });
 
-  it("keeps skipped turns in gap tracking while collapsing them to a trailing summary", () => {
+  it("keeps skipped turns in gap tracking without a trailing summary", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
 
@@ -1467,7 +1462,7 @@ describe("renderTimeline", () => {
 
     expect(turn21Line).toBeDefined();
     expect(turn21Line).toContain("| +50s |");
-    expect(output).toContain("⏭ T20");
+    expect(output).not.toContain("⏭");
     expect(output).not.toContain("T20 |");
   });
 
