@@ -89,4 +89,14 @@ describe("timelineInputSchema", () => {
       timelineInputSchema.parse({ id: "S42", depth: "expanded" }),
     ).toThrow();
   });
+
+  it("accepts boolean milestones/phases and rejects non-boolean", () => {
+    expect(
+      timelineInputSchema.parse({ id: "S42", milestones: true, phases: false }),
+    ).toEqual({ id: "S42", milestones: true, phases: false });
+
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", milestones: "yes" }),
+    ).toThrow();
+  });
 });

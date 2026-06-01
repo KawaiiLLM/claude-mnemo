@@ -67,6 +67,8 @@ export function createDatabaseBackedHandlers(
           id: args.id as string,
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
+          milestones: args.milestones as boolean | undefined,
+          phases: args.phases as boolean | undefined,
         }),
       ),
   };
