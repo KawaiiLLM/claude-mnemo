@@ -653,7 +653,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.19-mpscg8at" : "dev";
+var BUILD_ID = true ? "0.2.20-mpv4smod" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1741,7 +1741,6 @@ var TYPE_EMOJI_MAP = {
   compact: "\u23F8"
 };
 var PENDING_EMOJI = "\u23F3";
-var SKIPPED_EMOJI = "\u23ED";
 var MISSING_LINE_ANCHOR = "\u2014";
 function paginateItems(items, page, pageSize) {
   const total = items.length;
@@ -2140,6 +2139,30 @@ function detectShapeSignals(turns) {
     externalInputs
   };
 }
+function selectMilestoneTurns(pageTurns, toolBurstThreshold, compactBoundaries) {
+  const keep = /* @__PURE__ */ new Set();
+  const live = sortTurnsForAnalysis(pageTurns).filter(isTimelineLiveTurn);
+  for (const phase of segmentPhases(pageTurns)) {
+    if (phase.type !== null && phase.type !== "discovery") {
+      keep.add(phase.startPromptNumber);
+    }
+  }
+  for (const turn of live) {
+    if ((turn.toolCallCount ?? 0) > toolBurstThreshold) {
+      keep.add(turn.promptNumber);
+    }
+  }
+  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  for (const boundary of compactBoundaries) {
+    if (pageNumbers.has(boundary)) {
+      keep.add(boundary);
+    }
+  }
+  for (const turn of live.slice(-3)) {
+    keep.add(turn.promptNumber);
+  }
+  return keep;
+}
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
@@ -2302,7 +2325,7 @@ function formatShowingLine(view) {
   }
   return `page ${view.page} / ${view.pageCount} (total ${view.windowTurns.length})`;
 }
-function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
+function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP, milestones = false) {
   if (view.pageTurns.length === 0) {
     return [];
   }
@@ -2311,17 +2334,23 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
     brokenPromptCandidates.add(pair.first);
     brokenPromptCandidates.add(pair.second);
   }
+  const milestoneSet = milestones ? selectMilestoneTurns(
+    view.pageTurns,
+    view.windowSignals.toolBurstThreshold,
+    view.compactBoundaries
+  ) : null;
   const lines = [
     "",
     "T# | line | time | gap | stats | prompt \u2192 title"
   ];
   let prevEpoch = null;
-  const skippedTurnNumbers = [];
   for (const turn of view.pageTurns) {
     const previousTurnEpoch = prevEpoch;
     prevEpoch = turn.createdAtEpoch;
     if (turn.status === "skipped") {
-      skippedTurnNumbers.push(turn.promptNumber);
+      continue;
+    }
+    if (milestoneSet && !milestoneSet.has(turn.promptNumber)) {
       continue;
     }
     lines.push(
@@ -2332,9 +2361,6 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
         promptCap
       )
     );
-  }
-  if (skippedTurnNumbers.length > 0) {
-    lines.push(renderSkippedSummary(skippedTurnNumbers));
   }
   return lines;
 }
@@ -2394,21 +2420,6 @@ function renderTitleCell(turn, isUndone, compactMetadata) {
 }
 function sanitizeTimelineField(value) {
   return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function renderSkippedSummary(promptNumbers) {
-  const ranges = [];
-  let index = 0;
-  while (index < promptNumbers.length) {
-    const start = promptNumbers[index];
-    let end = start;
-    while (index + 1 < promptNumbers.length && promptNumbers[index + 1] === end + 1) {
-      end = promptNumbers[index + 1];
-      index += 1;
-    }
-    ranges.push(start === end ? `T${start}` : `T${start}-T${end}`);
-    index += 1;
-  }
-  return `${SKIPPED_EMOJI} ${ranges.join(", ")}`;
 }
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
@@ -2505,10 +2516,11 @@ function renderEarlierHint(view, options = {}) {
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
+  const milestones = options.milestones ?? false;
   return [
     ...renderSessionHeader(view),
-    ...renderTurnTable(view, promptCap),
-    ...renderPhases(view, options),
+    ...renderTurnTable(view, promptCap, milestones),
+    ...options.phases === false ? [] : renderPhases(view, options),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options)
   ].join("\n");
@@ -2643,7 +2655,9 @@ function buildCurrentSessionOutput(db, session, sessionRecord) {
     lines.push(
       renderTimeline(timelineView, {
         promptCap: 80,
-        showEarlierHint: true
+        showEarlierHint: true,
+        milestones: true,
+        phases: false
       })
     );
   } catch {

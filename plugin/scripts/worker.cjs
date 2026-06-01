@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.19-mpscg8at" : "dev";
+var BUILD_ID = true ? "0.2.20-mpv4smod" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -37233,7 +37233,7 @@ config2(en_default3());
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for prior work, design decisions, and user corrections. Use before re-deriving implementation details from source. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
-  timeline: "Render the temporal/decision shape of a past session \u2014 phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus configurable page/pageSize pagination."
+  timeline: "Render the temporal/decision shape of a past session \u2014 phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus page/pageSize pagination. Optional `milestones` (render only key turns) and `phases` (set false to drop the phases block) flags."
 };
 var recallInputShape = {
   id: external_exports.string().optional(),
@@ -37269,7 +37269,9 @@ var rememberInputShape = {
 var timelineInputShape = {
   id: external_exports.string().min(1),
   page: external_exports.number().int().positive().optional(),
-  pageSize: external_exports.number().int().positive().optional()
+  pageSize: external_exports.number().int().positive().optional(),
+  milestones: external_exports.boolean().optional(),
+  phases: external_exports.boolean().optional()
 };
 var recallInputSchema = external_exports.object(recallInputShape).strict();
 var rememberInputSchema = external_exports.object(rememberInputShape).strict();
@@ -38751,7 +38753,6 @@ var TYPE_EMOJI_MAP = {
   compact: "\u23F8"
 };
 var PENDING_EMOJI = "\u23F3";
-var SKIPPED_EMOJI = "\u23ED";
 var MISSING_LINE_ANCHOR = "\u2014";
 function paginateItems2(items, page, pageSize) {
   const total = items.length;
@@ -39150,6 +39151,30 @@ function detectShapeSignals(turns) {
     externalInputs
   };
 }
+function selectMilestoneTurns(pageTurns, toolBurstThreshold, compactBoundaries) {
+  const keep = /* @__PURE__ */ new Set();
+  const live = sortTurnsForAnalysis(pageTurns).filter(isTimelineLiveTurn);
+  for (const phase of segmentPhases(pageTurns)) {
+    if (phase.type !== null && phase.type !== "discovery") {
+      keep.add(phase.startPromptNumber);
+    }
+  }
+  for (const turn of live) {
+    if ((turn.toolCallCount ?? 0) > toolBurstThreshold) {
+      keep.add(turn.promptNumber);
+    }
+  }
+  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  for (const boundary of compactBoundaries) {
+    if (pageNumbers.has(boundary)) {
+      keep.add(boundary);
+    }
+  }
+  for (const turn of live.slice(-3)) {
+    keep.add(turn.promptNumber);
+  }
+  return keep;
+}
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
@@ -39283,7 +39308,7 @@ function formatShowingLine(view) {
   }
   return `page ${view.page} / ${view.pageCount} (total ${view.windowTurns.length})`;
 }
-function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
+function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP, milestones = false) {
   if (view.pageTurns.length === 0) {
     return [];
   }
@@ -39292,17 +39317,23 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
     brokenPromptCandidates.add(pair.first);
     brokenPromptCandidates.add(pair.second);
   }
+  const milestoneSet = milestones ? selectMilestoneTurns(
+    view.pageTurns,
+    view.windowSignals.toolBurstThreshold,
+    view.compactBoundaries
+  ) : null;
   const lines = [
     "",
     "T# | line | time | gap | stats | prompt \u2192 title"
   ];
   let prevEpoch = null;
-  const skippedTurnNumbers = [];
   for (const turn of view.pageTurns) {
     const previousTurnEpoch = prevEpoch;
     prevEpoch = turn.createdAtEpoch;
     if (turn.status === "skipped") {
-      skippedTurnNumbers.push(turn.promptNumber);
+      continue;
+    }
+    if (milestoneSet && !milestoneSet.has(turn.promptNumber)) {
       continue;
     }
     lines.push(
@@ -39313,9 +39344,6 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
         promptCap
       )
     );
-  }
-  if (skippedTurnNumbers.length > 0) {
-    lines.push(renderSkippedSummary(skippedTurnNumbers));
   }
   return lines;
 }
@@ -39375,21 +39403,6 @@ function renderTitleCell(turn, isUndone, compactMetadata) {
 }
 function sanitizeTimelineField(value) {
   return value.replaceAll("|", "/").replaceAll("\u2192", "->");
-}
-function renderSkippedSummary(promptNumbers) {
-  const ranges = [];
-  let index = 0;
-  while (index < promptNumbers.length) {
-    const start = promptNumbers[index];
-    let end = start;
-    while (index + 1 < promptNumbers.length && promptNumbers[index + 1] === end + 1) {
-      end = promptNumbers[index + 1];
-      index += 1;
-    }
-    ranges.push(start === end ? `T${start}` : `T${start}-T${end}`);
-    index += 1;
-  }
-  return `${SKIPPED_EMOJI} ${ranges.join(", ")}`;
 }
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
@@ -39486,17 +39499,21 @@ function renderEarlierHint(view, options = {}) {
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
+  const milestones = options.milestones ?? false;
   return [
     ...renderSessionHeader(view),
-    ...renderTurnTable(view, promptCap),
-    ...renderPhases(view, options),
+    ...renderTurnTable(view, promptCap, milestones),
+    ...options.phases === false ? [] : renderPhases(view, options),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options)
   ].join("\n");
 }
 function timelineQuery(db, input) {
   try {
-    return renderTimeline(buildTimelineView(db, input));
+    return renderTimeline(buildTimelineView(db, input), {
+      milestones: input.milestones,
+      phases: input.phases
+    });
   } catch (error49) {
     const message = error49 instanceof Error ? error49.message : String(error49);
     return `timeline error: ${message}`;
@@ -39535,7 +39552,9 @@ function createDatabaseBackedHandlers(database, _options = {}) {
       timelineQuery(database, {
         id: args.id,
         page: args.page,
-        pageSize: args.pageSize
+        pageSize: args.pageSize,
+        milestones: args.milestones,
+        phases: args.phases
       })
     )
   };

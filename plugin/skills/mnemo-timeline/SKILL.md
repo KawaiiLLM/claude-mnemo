@@ -32,6 +32,7 @@ Use timeline when:
 timeline(id="S42")
 timeline(id="S42", page=2, pageSize=50)
 timeline(id="S42/T10..100", pageSize=20)
+timeline(id="S42", milestones=true)        # key turns only; phases=false drops the phases block
 ```
 
 | Field | Required | Purpose |
@@ -39,6 +40,8 @@ timeline(id="S42/T10..100", pageSize=20)
 | `id` | yes | Session selector with optional range (see below) |
 | `page` | no | 1-indexed page number. Default `1`. |
 | `pageSize` | no | Turns per page. Default `30`. |
+| `milestones` | no | When `true`, render only key turns: non-discovery phase leads, tool bursts, compact boundary, and the last 3 live turns. No row cap. Applies within the current page — widen `pageSize` for session-wide coverage. |
+| `phases` | no | Set `false` to omit the phases block. Default `true`. |
 
 `id` selects the candidate turns; `page`/`pageSize` controls rendering. The two layers are orthogonal — `id="S42/T1..100"` with `pageSize=30` keeps all 100 turns as candidates and renders page 1 (T1-T30) by default. Phases and session metadata remain session-wide regardless of page.
 
