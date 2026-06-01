@@ -702,9 +702,11 @@ export function selectMilestoneTurns(
     }
   }
 
-  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  // Compact boundaries must also be live (D2 live-only): a skipped/undone
+  // compact turn is not a milestone candidate.
+  const liveNumbers = new Set(live.map((turn) => turn.promptNumber));
   for (const boundary of compactBoundaries) {
-    if (pageNumbers.has(boundary)) {
+    if (liveNumbers.has(boundary)) {
       keep.add(boundary);
     }
   }

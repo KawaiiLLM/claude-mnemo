@@ -1011,6 +1011,34 @@ describe("selectMilestoneTurns", () => {
     ];
     expect(selectMilestoneTurns(turns, 10, []).has(2)).toBe(false);
   });
+
+  it("excludes an undone compact-boundary turn (live-only)", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+      turn({
+        promptNumber: 2,
+        type: "compact",
+        status: "undone",
+        toolCallCount: 1,
+      }),
+      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
+    ];
+    // Boundary 2 points at an undone turn — must NOT be selected.
+    expect(selectMilestoneTurns(turns, 10, [2]).has(2)).toBe(false);
+  });
+
+  it("keeps a live compact-boundary turn even when not in the last 3", () => {
+    const turns = [
+      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 2, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 4, type: "discovery", toolCallCount: 1 }),
+      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
+    ];
+    // Live boundary at T1; last-3 = T3,T4,T5, so T1 enters only via the
+    // compact-boundary path.
+    expect(selectMilestoneTurns(turns, 10, [1]).has(1)).toBe(true);
+  });
 });
 
 describe("buildTimelineView", () => {
@@ -1543,5 +1571,19 @@ describe("timelineQuery", () => {
     expect(timelineQuery(db, { id: "S999" })).toBe(
       "timeline error: timeline: session S999 not found",
     );
+  });
+
+  it("forwards milestones and phases flags into the render", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+
+    expect(timelineQuery(db, { id: "S1" })).toContain("phases (");
+    expect(timelineQuery(db, { id: "S1", phases: false })).not.toContain("phases (");
+
+    const rowCount = (s: string) =>
+      s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
+    expect(
+      rowCount(timelineQuery(db, { id: "S1", milestones: true })),
+    ).toBeLessThan(rowCount(timelineQuery(db, { id: "S1" })));
   });
 });
