@@ -470,7 +470,8 @@ describe("handleContextHook", () => {
     expect(output).toContain("    - Primary insight bullet for the current session");
     expect(output).toContain("T#");
     expect(output).not.toContain("showing:");
-    expect(output).toContain("phases (session-wide):");
+    expect(output).not.toContain("phases (");
+    expect(output).not.toContain("⏭");
     expect(output).toContain("shape signals (window T1-T6");
     // next_steps renders under its display label "next".
     expect(output).not.toContain("next_steps:");
@@ -617,7 +618,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("## Current Session");
     expect(output).toContain("T#");
     expect(output).not.toContain("showing:");
-    expect(output).toContain("phases (window T11-T40):");
+    expect(output).not.toContain("phases (");
     expect(output).toContain("shape signals (window T11-T40):");
     expect(output).toContain('earlier: timeline(id="S3/T1..10") or recall(id="S3")');
     expect(output).not.toContain("Format:");

@@ -189,6 +189,8 @@ function buildCurrentSessionOutput(
       renderTimeline(timelineView, {
         promptCap: 80,
         showEarlierHint: true,
+        milestones: true,
+        phases: false,
       }),
     );
   } catch {
