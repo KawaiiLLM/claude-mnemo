@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildCorrectiveResend,
   classifyWorkUnitResponse,
   deriveRequiredTargetIds,
   type WorkUnitSignals,
@@ -104,5 +105,17 @@ describe("deriveRequiredTargetIds", () => {
 
   test("standalone session summary requires nothing", () => {
     expect(deriveRequiredTargetIds({ kind: "session-summary" }).size).toBe(0);
+  });
+});
+
+describe("buildCorrectiveResend", () => {
+  test("prefixes a <reminder> and preserves the original block", () => {
+    const original = `<turn id="T42">\n  prompt: do X\n</turn>`;
+    const out = buildCorrectiveResend(original);
+    expect(out.startsWith("<reminder>")).toBe(true);
+    expect(out).toContain("did not extract it");
+    expect(out).toContain("DATA");
+    expect(out).toContain("</reminder>");
+    expect(out).toContain(original); // original message resent verbatim
   });
 });
