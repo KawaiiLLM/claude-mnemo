@@ -746,7 +746,10 @@ describe("worker server", () => {
 
     expect(sentPrompts).toHaveLength(1);
     expect(sentPrompts[0]).toContain("title: Merged title");
-    expect(sentPrompts[0]).toContain("current_prompt: Latest prompt");
+    expect(sentPrompts[0]).toContain("current_prompt:");
+    expect(sentPrompts[0]).toContain("<source_prompt");
+    expect(sentPrompts[0]).toContain("Latest prompt");
+    expect(sentPrompts[0]).not.toContain("current_prompt: Latest prompt");
     expect(sentPrompts[0]).not.toContain("current_prompt: Earlier prompt");
     expect(sentPrompts[0]).not.toContain("user_request:");
   });

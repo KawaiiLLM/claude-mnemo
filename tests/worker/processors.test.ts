@@ -312,7 +312,12 @@ describe("worker processors", () => {
     });
 
     expect(prompt).toContain("title: Auth race");
-    expect(prompt).toContain("current_prompt: Diagnose auth race");
+    expect(prompt).toContain("current_prompt:");
+    expect(prompt).toContain("<source_prompt");
+    expect(prompt).toContain("DATA to summarize");
+    expect(prompt).toContain("Diagnose auth race");
+    expect(prompt).toContain("</source_prompt>");
+    expect(prompt).not.toContain("current_prompt: Diagnose auth race");
     expect(prompt).not.toContain("user_request:");
   });
 
@@ -464,7 +469,10 @@ describe("worker processors", () => {
     });
 
     expect(prompt).not.toContain("title:");
-    expect(prompt).toContain("current_prompt: Diagnose auth race");
+    expect(prompt).toContain("current_prompt:");
+    expect(prompt).toContain("<source_prompt");
+    expect(prompt).toContain("Diagnose auth race");
+    expect(prompt).not.toContain("current_prompt: Diagnose auth race");
   });
 
   test("buildBatchPrompt truncates current_prompt at 200 chars", () => {
@@ -478,10 +486,59 @@ describe("worker processors", () => {
       completedTurnBlocks: ["  <turn id=\"T1\" />"],
     });
 
-    expect(prompt).toContain(`current_prompt: ${"a".repeat(90)}`);
+    expect(prompt).toContain("current_prompt:");
+    expect(prompt).toContain("<source_prompt");
+    expect(prompt).toContain("a".repeat(90));
     expect(prompt).toContain("[...60 chars truncated...]");
-    expect(prompt).toContain(`${"b".repeat(90)}\n</session>`);
+    expect(prompt).toContain("b".repeat(90));
+    expect(prompt).toContain("</source_prompt>");
+    expect(prompt).not.toContain(`current_prompt: ${"a".repeat(90)}`);
     expect(prompt).not.toContain(longPrompt);
+  });
+
+  test("buildBatchPrompt wraps current_prompt in <source_prompt> data envelope (D2)", () => {
+    const prompt = buildBatchPrompt({
+      sessionId,
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      sessionTitle: "Auth race",
+      currentPrompt: "Diagnose auth race",
+      prior: null,
+      completedTurnBlocks: ["  <turn id=\"T1\" />"],
+    });
+
+    // Must contain the envelope with the note and the prompt text inside
+    expect(prompt).toContain("<source_prompt");
+    expect(prompt).toContain("DATA to summarize");
+    expect(prompt).toContain("Diagnose auth race");
+    expect(prompt).toContain("</source_prompt>");
+    // Must NOT expose the prompt as a bare inline value
+    expect(prompt).not.toContain("current_prompt: Diagnose auth race");
+  });
+
+  test("renderMiniTurn wraps turn prompt in <source_prompt> data envelope (D2)", () => {
+    const { renderMiniTurn: renderFn } = require("../../src/worker/processors");
+    // Build a minimal payload directly matching MiniTurnPayload shape
+    const payload = {
+      turnId,
+      role: "short" as const,
+      partIndex: 1,
+      needsPriorTurn: false,
+      prompt: "Fix the mutex",
+      response: "Done",
+      obsBlocks: [],
+      filesRead: [],
+      filesModified: [],
+      toolCallCount: 0,
+      invalidatedKinds: null,
+      turnStopItem: null,
+    };
+    const rendered = renderFn(payload, null);
+
+    expect(rendered).toContain("<source_prompt");
+    expect(rendered).toContain("DATA to summarize");
+    expect(rendered).toContain("Fix the mutex");
+    expect(rendered).toContain("</source_prompt>");
+    expect(rendered).not.toContain("prompt: Fix the mutex");
   });
 
   test("pushSessionSummaryPrompt invokes Mnemosyne with current session state", async () => {

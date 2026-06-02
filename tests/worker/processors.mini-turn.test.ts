@@ -106,7 +106,11 @@ describe("mini-turn rendering primitives", () => {
     expect(rendered).not.toContain("response:");
     expect(rendered).not.toContain("files_read:");
     expect(rendered).not.toContain("tool_call_count:");
-    expect(rendered).toContain("prompt: Run /goal migration");
+    expect(rendered).toContain("<source_prompt");
+    expect(rendered).toContain("DATA to summarize");
+    expect(rendered).toContain("Run /goal migration");
+    expect(rendered).toContain("</source_prompt>");
+    expect(rendered).not.toContain("prompt: Run /goal migration");
   });
 
   test("final slice renders slice= final= and the full tail", () => {
