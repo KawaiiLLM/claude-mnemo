@@ -8,7 +8,7 @@ Claude-Mnemo hooks into five points of the Claude Code lifecycle:
 
 | Hook | Trigger | What it does |
 |------|---------|--------------|
-| **SessionStart** | Session begins / resumes / clears / post-compact | Injects recent session summaries and the current session's turn highlights into context |
+| **SessionStart** | Session begins / resumes / clears / post-compact | Injects the current session's structured summary and milestone timeline, plus recent session summaries, into context |
 | **UserPromptSubmit** | Every user message | Creates (or resumes) the session + a new turn row in SQLite |
 | **PostToolUse** | Every tool call | Writes a raw observation (tool_name + input + result), enqueues it for extraction, wakes the worker |
 | **Stop** | Agent finishes a turn | Backfills the assistant response + tool counts, enqueues a turn-stop job |
@@ -62,13 +62,16 @@ For contributors, `npm run build` refreshes the committed release artifacts in `
 
 Once installed, Claude-Mnemo works automatically — hooks fire on every session, the worker extracts in the background, and `SessionStart` injects context on the next launch.
 
-Three skills expose the read axes to the main agent:
+Three read axes plus one write path are exposed to the main agent:
 
-### `mnemo-recall` — Reading Past Work
+- **`recall`** (MCP tool) — content axis: search past work for the *why* — design rationale, rejected alternatives, decisions, user corrections. For what the code does now, read the source first.
+- **`timeline`** (MCP tool) — temporal axis: the decision arc of a single session — phases, gaps, tool bursts, compact boundary, milestones.
+- **`mnemo-replay`** (skill) — raw axis: direct reads of the source JSONL transcript and the SQLite database, for exact bytes.
+- **`remember`** (MCP tool) — the single write path; the background worker uses it to persist every extraction.
 
-Auto-loaded when the user asks questions like *"did we already do this?"*, *"how did we fix X last time?"*, or *"show me the exact tool calls from last Thursday"*. Documents the full `recall` + `replay` API.
+### `recall` — the why-axis
 
-Quick reference:
+Source records *what* the code does; it never records *why*. `recall` is the index over past sessions where that rationale lives — reach for it before reconstructing a design story from code (which yields confident-but-wrong answers), and for prior work (*"did we already do this?"*, *"how did we fix X last time?"*).
 
 ```
 recall()                                            # recent sessions
@@ -80,24 +83,42 @@ recall(id="S12/T3")                                 # turn by promptNumber
 recall(id="S12/T3..7", depth="expanded")            # turn range with content
 recall(id="S12/T3/O*")                              # observations in a turn
 recall(id="O87", depth="expanded")                  # specific observation
-
-replay(id="S12")                                    # transcript turn overview
-replay(id="S12/T3", depth="expanded")               # exact prompt + response + tool I/O
-replay(id="S12/T3/Tool2", depth="full")             # single tool call, untruncated
 ```
 
 - **Selectors**: `S*` / `S12` / `S5..10` (sessions), `S12/T*` / `S12/T3..7` (turns by promptNumber), `S12/T3/O*` (observation list), `O7` (single observation, global id).
 - **Query prefixes**: `type:` / `file:` / `project:`. Free words become an FTS phrase.
 - **Time**: `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range).
-- **Depth**: `collapsed` (default) / `expanded` / `full`. `full` on `replay` disables tool-result truncation.
+- **Depth**: `collapsed` (default) / `expanded`.
+
+### `timeline` — the decision arc
+
+Renders a time-ordered turn table, phase segmentation, and shape signals (gaps, tool bursts, compact boundary) for one session.
+
+```
+timeline(id="S12")                                  # full session shape
+timeline(id="S12", milestones=true)                 # key turns only (phase leads, bursts, stopping point)
+timeline(id="S12", phases=false)                    # drop the phases block
+timeline(id="S12/T10..100", pageSize=20)            # ranged + paginated
+```
+
+### `mnemo-replay` — raw transcript + database
+
+A skill, not a tool. Use it only after `recall` / `timeline` has narrowed you to a session or turn, when truncated output isn't enough and you need exact bytes. The `raw:` line in expanded `recall` / `timeline` output is the JSONL-path handoff.
+
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" schema <jsonl-path>     # available fields
+bun "$CLAUDE_PLUGIN_ROOT/scripts/replay-parse.cjs" show   <jsonl-path> T12  # one turn, full text
+sqlite3 ~/.claude-mnemo/claude-mnemo.db ".schema turns"                    # read-only DB access
+```
 
 ### SessionStart Context Injection
 
 On every session start, `SessionStart` injects:
 
 - A header with session and observation counts plus the type legend
-- A graduated view: current session expanded, recent sessions collapsed
-- Expansion hints pointing to `recall(id="Sx/Ty", depth="expanded")` for drill-down
+- The current session's structured summary — `content`, `decision`, `done`, `current`, `next`, `reference`
+- A milestone timeline of the current session — key turns only, phases block off
+- Recent sessions, collapsed, with drill-down hints pointing to `recall(id="Sx/Ty", depth="expanded")`
 
 ## Project Structure
 
@@ -105,7 +126,7 @@ On every session start, `SessionStart` injects:
 src/
 ├── db/            # SQLite schema, sessions, turns, observations, pending_queue, FTS5
 ├── hooks/         # Hook handlers (session-init, post-tool-use, stop, compact, context)
-├── mcp/           # MCP server — recall, replay, format renderer, selectors
+├── mcp/           # MCP server — recall, timeline, remember tools, format renderer, selectors
 ├── worker/        # Long-lived Bun worker — HTTP server, queue loop, agent sessions, processors
 ├── mnemosyne/     # env isolation helpers for Mnemosyne subprocess
 ├── shared/        # Transcript parser, logger, paths, constants
@@ -143,7 +164,7 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 
 | Table | Purpose |
 |-------|---------|
-| `sessions` | One row per conversation. Fields: `title`, `content`, `insight`, `next_steps`, `project`, `last_agent_session_id`, timestamps. |
+| `sessions` | One row per conversation. Fields: `title`, `content`, `decision`, `done`, `current`, `next_steps`, `reference`, `insight` (legacy fallback), `project`, `last_agent_session_id`, timestamps. |
 | `turns` | One row per user prompt. Fields: `user_prompt`, `assistant_response`, `title`, `content`, `insight`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count`, `status` (`active` → `extracted` / `skipped` / `undone`). |
 | `observations` | One row per tool call. Fields: `tool_name`, `tool_input`, `tool_result`, `title`, `content`, `status` (`pending` → `extracted` / `skipped`). |
 | `pending_queue` | FIFO extraction queue. Fields: `seq` (monotonic), `kind` (`obs` / `turn-stop`), `target_id`, `session_db_id`, `claimed_at_epoch`. |
