@@ -464,7 +464,9 @@ describe("worker query session", () => {
     expect(prompt).toContain('slice="<n>"');
     expect(prompt).toContain('final="true"');
     expect(prompt).toContain("<prior_turn id=\"T<n>\">");
-    expect(prompt).toContain("ONLY case where updating the same record across multiple messages is allowed");
+    expect(prompt).toContain("only case where updating the same record across multiple messages is allowed");
+    // D3: corrective resend is the second exception to "never revisit".
+    expect(prompt).toContain("Apart from a corrective resend");
     expect(prompt).toContain("delivery_dropped");
 
     // Turn-type enum — the single most load-bearing string; if this drifts,
@@ -529,6 +531,14 @@ describe("worker query session", () => {
     expect(prompt).toContain("recall({ id: \"T<n>\", depth: \"expanded\", truncate: 2000 })");
     expect(prompt).not.toContain("replay(");
     expect(prompt).not.toContain("replay()");
+
+    // D3: corrective resend clause — agent re-extracts when reminded
+    expect(prompt).toContain("did not extract");
+    expect(prompt).toContain("re-extract");
+
+    // D1: slice rule changed — mandate remember per slice, no "leave alone"
+    expect(prompt).not.toContain("leave alone");
+    expect(prompt).toContain("EVERY slice");
 
     await session.close();
   });
