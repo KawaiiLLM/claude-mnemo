@@ -5,7 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { createObservation, getObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { getTurnById } from "../../src/db/turns";
+import { getTurnById, updateTurnById } from "../../src/db/turns";
 import {
   getPendingQueueCount,
   type PendingQueueItem,
@@ -51,6 +51,48 @@ function makeCore(
         async sendPrompt(prompt: string) {
           sentPrompts.push(prompt);
           for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+            deps?.onRemember?.(`T${match[1]}`);
+          }
+          return { session_id: "worker-query" };
+        },
+        async close() {},
+      } satisfies WorkerQuerySession;
+    }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+    isProcessAliveImpl: () => false,
+    ...overrides,
+  });
+}
+
+// Like makeCore, but the mock agent also performs the REAL remember-tool DB
+// write (turn → extracted) for every <turn id="T.."> block, exactly as a live
+// agent's remember(T, title, content) does via handleTurnRemember. This is what
+// the provisional-hold contract must override for in-flight (mid) slices.
+function makeCoreWithDbRemember(
+  db: Database,
+  sentPrompts: string[],
+  overrides: Partial<WorkerCoreDeps> = {},
+) {
+  return createWorkerCore({
+    db,
+    config: STREAM_CONFIG,
+    now: () => 123,
+    createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+      const deps = (args.length === 2 ? args[1] : args[3]) as
+        | { onRemember?: (id: string) => void }
+        | undefined;
+      return {
+        sessionId: "worker-query",
+        queryPid: 1234,
+        async sendPrompt(prompt: string) {
+          sentPrompts.push(prompt);
+          for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+            const id = Number(match[1]);
+            // Real remember side effect: title/content => extracted.
+            updateTurnById(db, id, {
+              status: "extracted",
+              title: `T${id} title`,
+              content: `T${id} content`,
+            });
             deps?.onRemember?.(`T${match[1]}`);
           }
           return { session_id: "worker-query" };
@@ -237,14 +279,18 @@ describe("mini-turn streaming orchestration", () => {
     const sentPrompts: string[] = [];
     const core = makeCore(db, sentPrompts);
 
-    // Stream a slice. The mock never calls remember(), so the turn stays
-    // active — but the delivered slice's obs are marked skipped (durable).
+    // Stream a slice. The mock never calls remember(), but the worker now holds
+    // the streamed turn `provisional` until the final completion — and the
+    // delivered slice's obs are marked skipped (durable).
     queueBigObs(14);
     await core.scanAndDrainQueue();
     expect(sentPrompts.some((p) => p.includes('slice="1"'))).toBe(true);
-    expect(getTurnById(db, turnId)?.status).toBe("active");
+    expect(getTurnById(db, turnId)?.status).toBe("provisional");
 
-    // Simulate a restart: in-memory streamedParts is lost.
+    // Simulate a restart that ALSO loses the durable provisional status (forcing
+    // the test to rely on the skipped-obs signal): reset to active + drop the
+    // in-memory streamedParts.
+    db.query("UPDATE turns SET status = 'active' WHERE id = ?").run(turnId);
     core.sessions.get(sessionId)?.streamedParts.delete(turnId);
 
     db.query(
@@ -274,5 +320,84 @@ describe("mini-turn streaming orchestration", () => {
     expect(firstSlice!).not.toContain("<prior_turn");
     expect(laterSlice).toBeDefined();
     expect(laterSlice!).toContain(`<prior_turn id="T${turnId}">`);
+  });
+
+  // Contract 1: a streamed turn is `provisional` after a mid-slice (the agent's
+  // remember-driven `extracted` is held), and only becomes `extracted` at the
+  // FINAL completion. Uses the DB-remember mock so the agent's real `extracted`
+  // write is in play and must be overridden by the provisional hold.
+  test("a mid-slice holds the turn provisional, not extracted; final completion promotes to extracted", async () => {
+    const sentPrompts: string[] = [];
+    const core = makeCoreWithDbRemember(db, sentPrompts);
+
+    // Enough big obs to force at least one streaming (mid) slice mid-turn.
+    queueBigObs(14);
+    await core.scanAndDrainQueue();
+
+    // A mid slice was delivered and the agent "remembered" it (extracted write),
+    // but the worker holds the turn provisional until the final completion.
+    expect(sentPrompts.some((p) => p.includes('slice="1"'))).toBe(true);
+    expect(getTurnById(db, turnId)?.status).toBe("provisional");
+
+    // Final completion: the turn-stop's final slice promotes to extracted.
+    queueTurnStop(900);
+    await core.scanAndDrainQueue();
+    await core.flushSession(sessionId);
+
+    expect(sentPrompts.some((p) => p.includes('final="true"'))).toBe(true);
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
+    expect(getPendingQueueCount(db)).toBe(0);
+    // No completed turn is left stuck at provisional.
+    expect(getTurnById(db, turnId)?.status).not.toBe("provisional");
+  });
+
+  // Contract 2: a short / single-shot turn (no streaming slices) is never
+  // provisional — it is classified `short` (not `final`) and finalizes directly
+  // from `active` to `extracted`.
+  test("a short turn is never provisional; it finalizes short → extracted from active", async () => {
+    const sentPrompts: string[] = [];
+    const core = makeCoreWithDbRemember(db, sentPrompts);
+
+    // Two small obs never cross the streaming threshold.
+    createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: '{"file_path":"a.ts"}',
+      toolResult: "small",
+      status: "pending",
+      createdAtEpoch: 100,
+    });
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       SELECT 'obs', id, ?, 100 FROM observations WHERE turn_id = ?`,
+    ).run(sessionId, turnId);
+    queueTurnStop(200);
+
+    await core.scanAndDrainQueue();
+    await core.flushSession(sessionId);
+
+    // Short turn: one push, no slice/final, classified short (no prior delivery).
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).not.toContain("slice=");
+    expect(sentPrompts[0]).not.toContain('final="true"');
+    // The short turn finalizes to extracted, never touching provisional.
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
+  });
+
+  // Contract 3: a worker stop mid-stream leaves the turn provisional (the resume
+  // scan re-extracts provisional turns). After a mid-slice, with no turn-stop
+  // delivered, the durable turn status is provisional — recoverable.
+  test("a mid-stream stop (no final completion) leaves the turn provisional, recoverable", async () => {
+    const sentPrompts: string[] = [];
+    const core = makeCoreWithDbRemember(db, sentPrompts);
+
+    // Stream a mid slice, then stop — never deliver the turn-stop.
+    queueBigObs(14);
+    await core.scanAndDrainQueue();
+
+    expect(sentPrompts.some((p) => p.includes('slice="1"'))).toBe(true);
+    // The interrupted-mid-stream turn is durably provisional, not extracted and
+    // not stuck active — so recoverStrandedTurns will re-extract it on resume.
+    expect(getTurnById(db, turnId)?.status).toBe("provisional");
   });
 });

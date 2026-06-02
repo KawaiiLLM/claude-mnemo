@@ -1346,6 +1346,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state.streamedParts.set(turnId, partIndex + 1);
     enqueueSliceLocked(state, miniTurn, chunk[0]?.enqueuedAtEpoch ?? now());
     await flushAllBatchesLocked(state);
+    // Hold the turn `provisional` until the FINAL completion. The mid-slice's
+    // remember has already landed by the time the await above resolves (the
+    // agent finished responding to this slice's push), so the agent may have
+    // promoted the turn active → extracted. Overwrite that with `provisional`:
+    // a streamed turn is only authoritative once processTurnStopLocked builds
+    // and flushes its FINAL mini-turn (→ extracted / skipped / failed). This is
+    // race-free: it runs under the session processing lock, strictly after the
+    // synchronous flush has fully resolved, and never touches a short turn
+    // (which never enters this function), so role detection at turn-stop still
+    // sees a never-streamed turn as `active`. An interruption mid-stream thus
+    // leaves the turn `provisional`, which the resume scan re-extracts (D6).
+    const heldTurn = getTurnById(deps.db, turnId);
+    if (heldTurn && heldTurn.status !== "undone") {
+      updateTurnById(deps.db, turnId, { status: "provisional" });
+    }
   }
 
   // Cheap synchronous pre-check (no lock): do buffered obs for this turn cross
