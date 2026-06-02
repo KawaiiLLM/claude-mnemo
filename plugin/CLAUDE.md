@@ -7,7 +7,10 @@ Three-axis memory, three structured tools + one skill:
 - `mnemo-replay` skill — raw axis: JSONL + SQLite direct access
 - `remember` MCP tool — the single write path
 
-**Priority rule**: if prior sessions exist and the question involves past implementation, changes, or decisions, query mnemo first (recall → timeline → mnemo-replay). Reading source is second-best; speculation is last.
+**Priority rule** (split by question type):
+- **What / how it works now** (current behavior, mechanism) → if the source exists, read the source first; it is ground truth.
+- **Why it was built this way** (design rationale, rejected alternatives, what feedback shaped it) → recall first (recall → timeline → mnemo-replay). Source records *what*, never *why*; re-deriving rationale from code yields a self-consistent but wrong story you cannot detect.
+- Speculation is always last.
 
 Preferred workflow:
 1. `recall()` to browse recent memory or `recall(query=...)` / `recall(time=...)` to narrow.

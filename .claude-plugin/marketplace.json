@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Structured memory system for Claude Code powered by Mnemosyne.",
-    "version": "0.2.20"
+    "version": "0.2.21"
   },
   "plugins": [
     {
       "name": "claude-mnemo",
       "description": "Structured memory for Claude Code powered by Mnemosyne",
-      "version": "0.2.20",
+      "version": "0.2.21",
       "author": {
         "name": "KawaiiLLM"
       },

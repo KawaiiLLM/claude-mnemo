@@ -1,6 +1,6 @@
 ---
 name: mnemo-recall
-description: Search and read structured memory from past sessions in this project. Use when the user asks "did we already do this?", "how did we fix X last time?", "what happened last week?", or when you need context from a previous conversation before answering.
+description: Search past sessions for the *why* behind this project's code — design rationale, rejected alternatives, decisions, and user corrections that source never records. Use when asked why something is designed the way it is, before reconstructing a rationale from code (which produces confident-but-wrong stories), or for prior work ("did we already do this?", "how did we fix X last time?"). For what the code does now, read the source first.
 ---
 
 # Mnemo Recall

@@ -653,7 +653,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.20-mpv4smod" : "dev";
+var BUILD_ID = true ? "0.2.21-mpwagks7" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2152,9 +2152,9 @@ function selectMilestoneTurns(pageTurns, toolBurstThreshold, compactBoundaries) 
       keep.add(turn.promptNumber);
     }
   }
-  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  const liveNumbers = new Set(live.map((turn) => turn.promptNumber));
   for (const boundary of compactBoundaries) {
-    if (pageNumbers.has(boundary)) {
+    if (liveNumbers.has(boundary)) {
       keep.add(boundary);
     }
   }

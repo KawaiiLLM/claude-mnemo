@@ -49,7 +49,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.20-mpv4smod" : "dev";
+var BUILD_ID = true ? "0.2.21-mpwagks7" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -37231,7 +37231,7 @@ config2(en_default3());
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Search past sessions for prior work, design decisions, and user corrections. Use before re-deriving implementation details from source. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
+  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus page/pageSize pagination. Optional `milestones` (render only key turns) and `phases` (set false to drop the phases block) flags."
 };
@@ -39164,9 +39164,9 @@ function selectMilestoneTurns(pageTurns, toolBurstThreshold, compactBoundaries) 
       keep.add(turn.promptNumber);
     }
   }
-  const pageNumbers = new Set(pageTurns.map((turn) => turn.promptNumber));
+  const liveNumbers = new Set(live.map((turn) => turn.promptNumber));
   for (const boundary of compactBoundaries) {
-    if (pageNumbers.has(boundary)) {
+    if (liveNumbers.has(boundary)) {
       keep.add(boundary);
     }
   }
