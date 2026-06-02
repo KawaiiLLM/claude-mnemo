@@ -7,12 +7,11 @@ import {
   type SessionRecord,
 } from "../../db/sessions";
 import * as formatModule from "../../mcp/format";
-import { splitBulletField } from "../../mcp/format";
-import { buildContextTimelineView, renderTimeline } from "../../mcp/timeline";
 import { resolveTurnPointers } from "../../mcp/turn-pointers";
 import type {
   FormattedSession,
 } from "../../mcp/format";
+import { renderCurrentSessionOutput } from "../../mcp/session-output";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -134,72 +133,6 @@ function buildSessionView(
   };
 }
 
-function buildCurrentSessionOutput(
-  db: Database,
-  session: FormattedSession,
-  sessionRecord: SessionRecord,
-): string {
-  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const pushField = (label: string, value: string | null | undefined): void => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  // decision/done/reference are markdown bullet lists: label line + indented
-  // bullets. Sub-bullets sit at 4 spaces to match the recall-expanded and
-  // worker prior_* renders.
-  const pushBulletLines = (items: string[]): void => {
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  const pushBulletField = (label: string, value: string | null | undefined): void => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    pushBulletLines(items);
-  };
-
-  // D4: inject the full redesigned summary. `decision` falls back to legacy
-  // `insight` bullets for old sessions; empty fields are skipped.
-  // decision/done/reference are bullet lists; current/next are single lines.
-  pushField("content", session.content);
-
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else {
-    const insightLines = session.insight ?? [];
-    if (insightLines.length > 0) {
-      lines.push("  insight:");
-      pushBulletLines(insightLines);
-    }
-  }
-
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-
-  try {
-    const timelineView = buildContextTimelineView(db, sessionRecord.id);
-    lines.push("");
-    lines.push(
-      renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true,
-        milestones: true,
-        phases: false,
-      }),
-    );
-  } catch {
-    // Keep the SessionStart hook resilient even if timeline rendering breaks.
-  }
-
-  return lines.join("\n");
-}
-
 function classifyTimeGroup(epochSeconds: number, now: Date): string {
   const target = new Date(epochSeconds * 1000);
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -311,7 +244,7 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
       ? [
           "## Current Session",
           "",
-          buildCurrentSessionOutput(db, primarySession, primarySessionRecord),
+          renderCurrentSessionOutput(db, primarySession, primarySessionRecord),
           "",
         ]
       : []),
