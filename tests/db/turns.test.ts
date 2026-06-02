@@ -9,6 +9,7 @@ import {
   getTurnById,
   getTurn,
   getTurnsForSession,
+  getStrandedTurns,
   updateTurnBackfill,
   updateTurnById,
 } from "../../src/db/turns";
@@ -390,6 +391,37 @@ describe("turn queries", () => {
 
     const updated = updateTurnById(db, turnId, { title: "Did a thing" });
     expect(updated?.status).toBe("extracted");
+  });
+
+  test("getStrandedTurns selects re-extractable failures in prompt_number order", () => {
+    const insert = db.query<{ id: number }, [number, number, string, string | null, string | null, string | null]>(
+      `INSERT INTO turns (session_id, prompt_number, status, assistant_response, title, content, created_at_epoch)
+       VALUES (?, ?, ?, ?, ?, ?, 1000)
+       RETURNING id`,
+    );
+
+    // p1 active, assistant_response='r' -> INCLUDED
+    const p1id = insert.get(sessionId, 1, "active", "r", null, null)!.id;
+    // p2 provisional, assistant_response='r' -> INCLUDED
+    const p2id = insert.get(sessionId, 2, "provisional", "r", null, null)!.id;
+    // p3 extracted, title=NULL, content=NULL, resp='r' -> INCLUDED (phantom)
+    const p3id = insert.get(sessionId, 3, "extracted", "r", null, null)!.id;
+    // p4 extracted, title='ok', content='c', resp='r' -> excluded (valid)
+    insert.get(sessionId, 4, "extracted", "r", "ok", "c");
+    // p5 skipped, resp='r' -> excluded
+    insert.get(sessionId, 5, "skipped", "r", null, null);
+    // p6 failed, resp='r' -> excluded (terminal)
+    insert.get(sessionId, 6, "failed", "r", null, null);
+    // p7 active, assistant_response=NULL -> excluded (nothing to extract)
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+       VALUES (?, 7, 'active', 1000)`,
+    ).run(sessionId);
+    // p8 extracted, title='t', content=NULL, resp='r' -> excluded (title-only is valid)
+    insert.get(sessionId, 8, "extracted", "r", "t", null);
+
+    const ids = getStrandedTurns(db, sessionId).map((t) => t.id);
+    expect(ids).toEqual([p1id, p2id, p3id]);
   });
 
 });

@@ -293,6 +293,24 @@ export function getTurnsForSession(
     .filter((turn): turn is TurnRecord => turn !== null);
 }
 
+export function getStrandedTurns(
+  db: Database,
+  sessionId: number,
+): TurnRecord[] {
+  return db
+    .query<TurnRow, [number]>(
+      `${TURN_SELECT}
+       WHERE session_id = ?
+         AND assistant_response IS NOT NULL
+         AND ( status IN ('active','provisional')
+               OR (status = 'extracted' AND title IS NULL AND content IS NULL) )
+       ORDER BY prompt_number ASC`,
+    )
+    .all(sessionId)
+    .map((row) => mapTurnRow(row))
+    .filter((turn): turn is TurnRecord => turn !== null);
+}
+
 export function getMaxPromptNumber(
   db: Database,
   sessionId: number,
