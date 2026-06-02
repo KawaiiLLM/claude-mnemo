@@ -184,6 +184,7 @@ export interface SessionState {
   // onMessage stream populates these; sendWorkUnit reads them to classify.
   unitSignals: {
     rememberedIds: Set<number>;
+    hadSessionRemember: boolean;
     hadSubstantiveText: boolean;
     hadIllegalTool: boolean;
   };
@@ -193,6 +194,7 @@ export interface SessionState {
 // cold-start render, which is exempt from derailment detection).
 function resetUnitSignals(state: SessionState): void {
   state.unitSignals.rememberedIds.clear();
+  state.unitSignals.hadSessionRemember = false;
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
 }
@@ -735,6 +737,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: new Set<number>(),
+        hadSessionRemember: false,
         hadSubstantiveText: false,
         hadIllegalTool: false,
       },
@@ -911,9 +914,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           state!.queryPid = pid;
         },
         onRemember: (id: string) => {
-          const m = /^T(\d+)$/i.exec(id);
-          if (m) {
-            state!.unitSignals.rememberedIds.add(Number(m[1]));
+          const t = /^T(\d+)$/i.exec(id);
+          if (t) {
+            state!.unitSignals.rememberedIds.add(Number(t[1]));
+            return;
+          }
+          if (/^S(\d+)$/i.test(id)) {
+            state!.unitSignals.hadSessionRemember = true;
           }
         },
       },
@@ -969,6 +976,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       classifyWorkUnitResponse({
         requiredIds,
         rememberedIds: state.unitSignals.rememberedIds,
+        hadSessionRemember: state.unitSignals.hadSessionRemember,
         hadSubstantiveText: state.unitSignals.hadSubstantiveText,
         hadIllegalTool: state.unitSignals.hadIllegalTool,
       });

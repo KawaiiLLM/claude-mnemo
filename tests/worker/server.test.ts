@@ -200,6 +200,7 @@ function primeSessionState(
     pushMessage: existing?.pushMessage ?? (async () => {}),
     unitSignals: existing?.unitSignals ?? {
       rememberedIds: new Set<number>(),
+      hadSessionRemember: false,
       hadSubstantiveText: false,
       hadIllegalTool: false,
     },

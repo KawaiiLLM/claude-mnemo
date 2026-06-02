@@ -4,6 +4,8 @@ export interface WorkUnitSignals {
   requiredIds: Set<number>;
   /** Turn ids the agent actually remembered during this unit. */
   rememberedIds: Set<number>;
+  /** The agent did remember(S…) this unit (refreshed the session summary). */
+  hadSessionRemember: boolean;
   /** A substantive (non-thinking) text block was emitted. */
   hadSubstantiveText: boolean;
   /** A non-mnemo tool was attempted (should be impossible under D0). */
@@ -15,8 +17,11 @@ export type WorkUnitVerdict = "resolved" | "strike";
 /**
  * D1: a unit is RESOLVED iff every required id was remembered. Otherwise it is a
  * strike. recall and remembers of non-required ids do not resolve a required id.
- * For an empty required set (standalone summary), prose-without-remember or an
- * illegal tool is still a strike; an empty/thinking-only response is resolved.
+ * For an empty required set (standalone summary), resolution keys on whether the
+ * agent refreshed the session via remember(S…): prose without a session remember
+ * is a strike, a session remember (with or without prose) resolves, and an
+ * empty/thinking-only no-op resolves. A stray remember(T…) does NOT resolve a
+ * summary unit. An illegal tool is always a strike.
  */
 export function classifyWorkUnitResponse(s: WorkUnitSignals): WorkUnitVerdict {
   if (s.hadIllegalTool) {
@@ -27,7 +32,10 @@ export function classifyWorkUnitResponse(s: WorkUnitSignals): WorkUnitVerdict {
       return "strike";
     }
   }
-  if (s.requiredIds.size === 0 && s.hadSubstantiveText && s.rememberedIds.size === 0) {
+  // standalone summary (required ∅): resolved if it refreshed the session
+  // (remember(S…)) or made a legit no-op (no prose). Strike only if it emitted
+  // prose but did NOT refresh the session. A stray remember(T…) does not resolve.
+  if (s.requiredIds.size === 0 && s.hadSubstantiveText && !s.hadSessionRemember) {
     return "strike";
   }
   return "resolved";

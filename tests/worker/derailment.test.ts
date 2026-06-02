@@ -9,6 +9,7 @@ import {
 const base: WorkUnitSignals = {
   requiredIds: new Set<number>(),
   rememberedIds: new Set<number>(),
+  hadSessionRemember: false,
   hadSubstantiveText: false,
   hadIllegalTool: false,
 };
@@ -79,14 +80,28 @@ describe("classifyWorkUnitResponse", () => {
     ).toBe("strike");
   });
 
-  test("standalone summary (required empty): prose with a (spurious) remember does not strike", () => {
+  test("standalone summary: prose with a stray turn remember (no session remember) strikes", () => {
     expect(
       classifyWorkUnitResponse({
         ...base,
         hadSubstantiveText: true,
         rememberedIds: new Set([99]),
       }),
+    ).toBe("strike");
+  });
+
+  test("standalone summary: remember(S…) with explanatory text is resolved", () => {
+    expect(
+      classifyWorkUnitResponse({
+        ...base,
+        hadSessionRemember: true,
+        hadSubstantiveText: true,
+      }),
     ).toBe("resolved");
+  });
+
+  test("standalone summary: empty/thinking-only (no session remember, no prose) is resolved", () => {
+    expect(classifyWorkUnitResponse({ ...base })).toBe("resolved");
   });
 });
 
