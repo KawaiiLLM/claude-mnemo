@@ -14,6 +14,7 @@ import type {
 import { renderCurrentSessionOutput } from "../../mcp/session-output";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
+import { recoverStrandedTurns } from "../../db/recover-stranded";
 
 export interface ContextHandlerDependencies {
   db: Database;
@@ -214,6 +215,14 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
 
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
+  }
+
+  if (input.source === "resume" || input.source === "compact") {
+    recoverStrandedTurns(
+      db,
+      primarySessionRecord.id,
+      Math.floor(Date.now() / 1000),
+    );
   }
 
   const sessionIds = Array.from(

@@ -10,6 +10,7 @@ import * as timelineModule from "../../src/mcp/timeline";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { resolveTranscriptPath } from "../../src/shared/paths";
+import { listPendingQueueItems } from "../../src/db/pending-queue";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -824,5 +825,55 @@ describe("handleContextHook", () => {
     expect(output).toContain("## Recent Sessions");
 
     buildTimelineSpy.mockRestore();
+  });
+
+  test("resume source with a stranded active turn enqueues turn-stop and still returns hookSpecificOutput without asyncWork", async () => {
+    // Insert a stranded turn: status='active', assistant_response set → qualifies for recovery
+    db.query(`
+      INSERT INTO turns (
+        session_id, prompt_number, status,
+        user_prompt, assistant_response,
+        title, content, insight,
+        files_read, files_modified, tool_call_count,
+        created_at_epoch, updated_at_epoch
+      ) VALUES (?, 1, 'active', 'How to fix the race?', 'Use a mutex.', NULL, NULL, NULL, '[]', '[]', 1, 301, NULL)
+    `).run(currentSessionId);
+
+    const handler = createContextHandler({ db });
+    const result = await handler(
+      createInput({ source: "resume", sessionId: "session-context" }),
+    );
+
+    // Handler must still return a context string and NO asyncWork
+    expect(result.hookSpecificOutput).toBeDefined();
+    expect(typeof result.hookSpecificOutput).toBe("string");
+    expect(result.asyncWork).toBeUndefined();
+
+    // Recovery must have enqueued a turn-stop item for this session
+    const items = listPendingQueueItems(db, currentSessionId);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.some((item) => item.kind === "turn-stop")).toBe(true);
+  });
+
+  test("startup source with a stranded active turn does NOT enqueue turn-stop", async () => {
+    // Same stranded turn seed
+    db.query(`
+      INSERT INTO turns (
+        session_id, prompt_number, status,
+        user_prompt, assistant_response,
+        title, content, insight,
+        files_read, files_modified, tool_call_count,
+        created_at_epoch, updated_at_epoch
+      ) VALUES (?, 1, 'active', 'How to fix the race?', 'Use a mutex.', NULL, NULL, NULL, '[]', '[]', 1, 301, NULL)
+    `).run(currentSessionId);
+
+    const handler = createContextHandler({ db });
+    await handler(
+      createInput({ source: "startup", sessionId: "session-context" }),
+    );
+
+    // No turn-stop must have been enqueued
+    const items = listPendingQueueItems(db, currentSessionId);
+    expect(items.filter((item) => item.kind === "turn-stop").length).toBe(0);
   });
 });
