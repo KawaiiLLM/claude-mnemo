@@ -43,7 +43,7 @@ Extend `TurnStatus` (`src/db/turns.ts:5`) from four values to six.
 | `provisional` | Extractor is processing the turn as mini-turn slices; not yet finalized | worker, at first streaming-slice delivery | **yes** |
 | `extracted` | Finalized **and** `title`/`content` are non-null | completion point (gated) | no |
 | `skipped` | Extractor deliberately decided the turn warrants no record (trivial prompt), at the turn level | completion point | no |
-| `failed` | Terminal give-up: derailment floor reached (no valid extraction after K resends + cold-start) | `applyFloor` (derailment floor) | no (terminal — never re-scanned) |
+| `failed` | Terminal give-up: derailment floor reached with no usable content (content-less `active`/`provisional` turn) | `applyFloor` (derailment floor) | no (terminal — never re-scanned) |
 | `undone` | Rolled back | `invalidation` | no |
 
 **Transitions:**
@@ -52,7 +52,7 @@ Extend `TurnStatus` (`src/db/turns.ts:5`) from four values to six.
 - extractor delivers the **first streaming slice** → `active` → `provisional` (a short / single-shot turn never enters `provisional` — see Component 3)
 - completion point, content written → `provisional`|`active` → `extracted`
 - completion point, deliberate turn-level skip → `provisional`|`active` → `skipped`
-- derailment floor → `provisional`|`active` → `failed` (terminal; the drop path stays `active` and is recovered — see Component 4)
+- derailment floor (terminal, content-keyed): an unresolved turn with partial content (`title`/`content` — including a `provisional` turn that streamed slices before derailing) → `extracted` (keeps the partial); a content-less `active`/`provisional` turn → `failed`. (The drop path stays `active` and is recovered — see Component 4.)
 - worker stops before completion → stays `provisional` (re-scanned on resume)
 - rollback → any → `undone`
 
@@ -87,7 +87,12 @@ A turn left in `provisional` because the worker stopped mid-slice never reached 
 
 ## Component 4 — `failed` for the derailment floor
 
-The derailment floor is the genuinely terminal give-up. `applyFloor` (`src/worker/server.ts:1032`) changes `active → skipped` to **`active → failed`**. A partial extraction that already has content stays `extracted` (the existing "keep partial" branch is unchanged — and now consistent with the content gate); a `session-summary` floor still abandons with no turn touched.
+The derailment floor is the genuinely terminal give-up. `applyFloor` (`src/worker/server.ts:1032`) finalizes each unresolved turn **by content** (not by status), so it terminates both never-extracted `active` turns and streamed-then-derailed `provisional` turns:
+
+- A turn with `title || content` (a partial extraction — including a `provisional` turn whose mid-slices wrote content before the final derailed) → `extracted` (terminal, keeps the partial; consistent with the content gate).
+- A content-less turn (`active`, or a `provisional` turn that produced nothing) → `failed` (terminal).
+
+A `session-summary` floor still abandons with no turn touched. Keying on content rather than `status === "active"` is essential: without it, a `provisional` turn at the floor would fall through unchanged and `getStrandedTurns` would re-enqueue it on every resume — re-derailing forever and defeating the termination guarantee below.
 
 `failed` is **terminal**: the recovery scan never re-enqueues it. This is the cross-resume termination guarantee — a turn that genuinely derails reaches the floor once and is closed, so it cannot re-derail the extractor on every resume. (`T209`/`T210`-style imperative prompts are exactly why: without a terminal state they would re-hijack the agent forever — though 0.2.22's `tools:[]` + `<source_prompt>` framing now makes re-extraction itself safe.)
 
@@ -165,7 +170,7 @@ resume session
 - **No-response exclusion:** an `active`/`provisional` turn with `assistant_response IS NULL` is **not** reset or enqueued.
 - **Content gate (`deriveTurnStatus`):** `remember` with `title` or `content` → `extracted`; `remember` with only `type`/`tags`/`insight` (no title/content) → `skipped`, **not** `extracted` (no phantom); `remember({status:"skipped"})` → `skipped`.
 - **Content gate (auto-promote):** a metadata-only `updateTurnById` (no `status`) on an `active` turn with no `title`/`content` keeps it `active`, not `extracted`.
-- **`applyFloor`:** `active` turn → `failed` (not `skipped`); partial-with-content turn stays `extracted`; `session-summary` floor touches no turn.
+- **`applyFloor` (content-keyed):** content-less `active` turn → `failed` (not `skipped`); partial-with-content turn → `extracted`; **a `provisional` turn at the floor is terminated, never left `provisional`** — with partial content → `extracted`, content-less → `failed` (regression guard for the cross-task gap); `session-summary` floor touches no turn.
 - **Drop path:** a dropped batch leaves the turn `active`/partial (**not** `failed`) with `flagDeliveryDropped`; the delivery-dropped reminder still emits `prompt="…"` + "not yet extracted"; the resume scan re-enqueues the `active` turn.
 - **`provisional` write timing:** a short / single-shot turn is **never** marked `provisional` before role detection, so `hadPriorDelivery` classifies it `short` (not `final`); a streamed turn reads `provisional` and classifies `final`.
 - **`provisional` hold + finalizer:** a mid-slice `remember(T)` leaves the turn `provisional` (not `extracted`); the completion-point finalizer resolves it to `extracted`/`skipped`/`failed`.
@@ -177,7 +182,7 @@ resume session
 
 - `src/mcp/remember.ts` — tighten `deriveTurnStatus` (`:115`): require `title || content` for `extracted`; `type`/`tags`/`insight` alone → `skipped`.
 - `src/db/turns.ts` — extend `TurnStatus` (`:5`); guard the `updateTurnById` auto-promote (`:173`) so `active → extracted` needs `title || content` (else stays `active`); add a status-scan helper (`getStrandedTurns` or equivalent); add `resetTurnExtractionFields(db, turnId)` (direct `UPDATE` nulling `title`/`content`/`insight`/`type`, setting `status='active'`, **filtering `tags` to keep only colon-namespaced internal tags**, plus the `memory_fts` delete) — `updateTurnById`'s `?? existing` merge cannot null fields.
-- `src/worker/server.ts` — `applyFloor` `skipped`→`failed` (the **only** new `failed` producer; the drop path is unchanged); set `provisional` at streaming-slice delivery (`enqueueAndFlushStreamingSliceLocked`, replacing the slice auto-promote to `extracted`) and hold it across mid-slices; add the completion-point finalizer (`provisional`/`active` → `extracted` with the gate / `skipped` / `failed`); verify the `hadPriorDelivery` proxy (`:1433`) still classifies short turns correctly.
+- `src/worker/server.ts` — `applyFloor` finalizes by content (`title||content` → `extracted`, else → `failed`), terminating both `active` and `provisional` turns (the **only** new `failed` producer; the drop path is unchanged); set `provisional` at streaming-slice delivery (`enqueueAndFlushStreamingSliceLocked`, replacing the slice auto-promote to `extracted`) and hold it across mid-slices; add the completion-point finalizer (`provisional`/`active` → `extracted` with the gate / `skipped` / `failed`); verify the `hadPriorDelivery` proxy (`:1433`) still classifies short turns correctly.
 - `src/hooks/handlers/context.ts` — invoke `recoverStrandedTurns` on `resume`/`compact` as a synchronous side effect (alongside the existing `upsertSession` side effect); context output unchanged.
 - New `recoverStrandedTurns(db, sessionDbId)` (location: a worker/recovery module or `src/db`), wired from the SessionStart handler.
 - `src/db/pending-queue.ts` — reuse `enqueueQueueItem`; add a "queue item exists for turn" check for dedup if not already present.
