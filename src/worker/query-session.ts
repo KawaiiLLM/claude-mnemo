@@ -244,6 +244,7 @@ export function createWorkerQuerySession(
       cwd: DATA_DIR,
       ...(resumeTarget ? { resume: resumeTarget } : {}),
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
+      tools: [], // D0: remove all built-in tools; only mcp__mnemo__* remain (via mcpServers)
       mcpServers,
       pathToClaudeCodeExecutable,
       abortController,

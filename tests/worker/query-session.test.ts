@@ -570,6 +570,44 @@ describe("worker query session", () => {
     await session.close();
   });
 
+  test("passes tools:[] to disable built-in tools while keeping the mnemo MCP server", () => {
+    let capturedTools: unknown = "NOT_SET";
+    let capturedMcpServers: unknown = "NOT_SET";
+    const queryImpl = mock(
+      (args: {
+        options?: {
+          tools?: unknown;
+          mcpServers?: unknown;
+        };
+      }) => {
+        capturedTools = args.options?.tools;
+        capturedMcpServers = args.options?.mcpServers;
+        // eslint-disable-next-line @typescript-eslint/require-await
+        return (async function* () {
+          return;
+        })();
+      },
+    );
+
+    createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+      },
+    );
+
+    // D0: tools:[] removes all built-in tools from the model's context
+    expect(capturedTools).toEqual([]);
+    // The mnemo MCP server must still be present (arrives via mcpServers, not tools)
+    expect((capturedMcpServers as Record<string, unknown>)?.mnemo).toBeDefined();
+  });
+
   test("compact pushes /compact and resolves on compact_boundary", async () => {
     const seenMessages: string[] = [];
     const queryImpl = mock(
