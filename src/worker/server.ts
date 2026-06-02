@@ -1027,7 +1027,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   // derailment floor. A turn's record is built incrementally: any slice the
   // agent DID remember already moved the turn active → extracted (db/turns), so
   // we never downgrade a partial. Only still-active (never-extracted) turns are
-  // finalized as skipped. A standalone session-summary refresh is abandoned
+  // finalized as failed. A standalone session-summary refresh is abandoned
   // (idempotent; the next compact retries it) with no turn touched.
   function applyFloor(
     unit: WorkUnitShape,
@@ -1043,8 +1043,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     for (const turnId of unresolved) {
       const turn = getTurnById(deps.db, turnId);
       if (turn && turn.status === "active") {
-        updateTurnById(deps.db, turnId, { status: "skipped" });
-        logger.warn?.("derailment floor: turn skipped (no extraction)", {
+        updateTurnById(deps.db, turnId, { status: "failed" });
+        logger.warn?.("derailment floor: turn failed (no extraction)", {
           turnId,
         });
       } else {

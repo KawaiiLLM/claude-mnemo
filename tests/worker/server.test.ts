@@ -2481,7 +2481,7 @@ describe("worker server", () => {
     expect(resumes.length).toBeGreaterThan(1);
   });
 
-  test("short turn floor (never extracted → still active) marks the turn skipped", async () => {
+  test("short turn floor (never extracted → still active) marks the turn failed", async () => {
     const sessionId = seedDerailSession("derail-floor-skip-active");
     const turnId = insertTurnWithStatus(sessionId, 1, "active");
     queueObs(db, sessionId, turnId, 101, "short");
@@ -2502,10 +2502,10 @@ describe("worker server", () => {
 
     await core.drainSessionCompletely(sessionId);
 
-    expect(getTurnById(db, turnId)?.status).toBe("skipped");
+    expect(getTurnById(db, turnId)?.status).toBe("failed");
   });
 
-  test("merged batch floor: a remembered turn stays extracted; an unremembered one is skipped", async () => {
+  test("merged batch floor: a remembered turn stays extracted; an unremembered one is failed", async () => {
     const sessionId = seedDerailSession("derail-floor-merged");
     // Two short (active) turns merge into one batch. The agent remembers A
     // (mirrored as the real remember() DB write: active → extracted) but never
@@ -2541,7 +2541,7 @@ describe("worker server", () => {
 
     // Per-turn granularity comes from the floor, not from splitting the message.
     expect(getTurnById(db, turnA)?.status).toBe("extracted"); // kept
-    expect(getTurnById(db, turnB)?.status).toBe("skipped"); // finalized
+    expect(getTurnById(db, turnB)?.status).toBe("failed"); // finalized
   });
 
   test("session-summary floor abandons refresh (no turn skipped), queue still drains", async () => {
