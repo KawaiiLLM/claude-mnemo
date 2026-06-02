@@ -9,6 +9,7 @@ import {
   enqueueQueueItem,
   getPendingQueueCount,
   listPendingQueueItems,
+  queueItemExistsForTurn,
   resetClaimedQueueItems,
   resetQueueItemClaim,
 } from "../../src/db/pending-queue";
@@ -127,5 +128,13 @@ describe("pending_queue helpers", () => {
 
     deleteQueueItem(db, first.seq);
     expect(getPendingQueueCount(db, 1)).toBe(1);
+  });
+
+  test("queueItemExistsForTurn detects an existing item of a kind for a target", () => {
+    enqueueQueueItem(db, { kind: "turn-stop", targetId: 42, sessionDbId: 1, enqueuedAtEpoch: 1 });
+
+    expect(queueItemExistsForTurn(db, "turn-stop", 42)).toBe(true);
+    expect(queueItemExistsForTurn(db, "turn-stop", 99)).toBe(false);
+    expect(queueItemExistsForTurn(db, "obs", 42)).toBe(false);
   });
 });

@@ -224,3 +224,16 @@ export function countQueueItemsForSession(
 ): number {
   return getPendingQueueCount(db, sessionDbId);
 }
+
+export function queueItemExistsForTurn(
+  db: Database,
+  kind: PendingQueueKind,
+  targetId: number,
+): boolean {
+  const row = db
+    .query<{ one: number }, [PendingQueueKind, number]>(
+      "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1",
+    )
+    .get(kind, targetId);
+  return row !== null;
+}
