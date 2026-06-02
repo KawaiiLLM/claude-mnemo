@@ -231,4 +231,32 @@ describe("session queries", () => {
 
     expect(getSession(db, session.id)?.lastCompactTurn).toBe(2);
   });
+
+  test("updateCompactAnchor does not advance past a provisional (not-yet-finalized) turn", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "content-10",
+      project: "claude-mnemo",
+      title: "Provisional anchor test",
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES
+        (?, 1, 'extracted', 'first', 110),
+        (?, 2, 'provisional', 'second', 120),
+        (?, 3, 'active', 'third', 130)`,
+    ).run(session.id, session.id, session.id);
+
+    updateCompactAnchor(db, session.id);
+
+    // provisional (T2) and active (T3) are both in-progress re-extraction
+    // targets; the anchor must stay on the last finalized turn (T1).
+    expect(getSession(db, session.id)?.lastCompactTurn).toBe(1);
+  });
 });
