@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.22-mpwlbhps" : "dev";
+var BUILD_ID = true ? "0.2.23-mpwuxsuw" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -808,7 +808,10 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
-  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const mergedTitle = input.title ?? existing.title;
+  const mergedContent = input.content ?? existing.content;
+  const hasSubstance = mergedTitle !== null || mergedContent !== null;
+  const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
   const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
@@ -38633,7 +38636,7 @@ function deriveTurnStatus(input) {
   if (input.status === "active") {
     return "active";
   }
-  return input.title || input.content || input.insight || input.type || (input.tags?.length ?? 0) > 0 ? "extracted" : "skipped";
+  return input.title || input.content ? "extracted" : "skipped";
 }
 function deriveObservationStatus(input) {
   if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
@@ -40719,8 +40722,8 @@ ${coldStart}
     for (const turnId of unresolved) {
       const turn = getTurnById(deps.db, turnId);
       if (turn && turn.status === "active") {
-        updateTurnById(deps.db, turnId, { status: "skipped" });
-        logger.warn?.("derailment floor: turn skipped (no extraction)", {
+        updateTurnById(deps.db, turnId, { status: "failed" });
+        logger.warn?.("derailment floor: turn failed (no extraction)", {
           turnId
         });
       } else {
@@ -40957,6 +40960,10 @@ ${coldStart}
     state.streamedParts.set(turnId, partIndex + 1);
     enqueueSliceLocked(state, miniTurn, chunk[0]?.enqueuedAtEpoch ?? now());
     await flushAllBatchesLocked(state);
+    const heldTurn = getTurnById(deps.db, turnId);
+    if (heldTurn && heldTurn.status !== "undone") {
+      updateTurnById(deps.db, turnId, { status: "provisional" });
+    }
   }
   function bufferedTurnObsExceedThreshold(sessionDbId, turnId) {
     const buffer = buffers.get(sessionDbId);

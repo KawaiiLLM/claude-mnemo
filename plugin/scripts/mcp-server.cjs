@@ -31192,7 +31192,10 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
-  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const mergedTitle = input.title ?? existing.title;
+  const mergedContent = input.content ?? existing.content;
+  const hasSubstance = mergedTitle !== null || mergedContent !== null;
+  const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
   const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
@@ -32741,7 +32744,7 @@ function deriveTurnStatus(input) {
   if (input.status === "active") {
     return "active";
   }
-  return input.title || input.content || input.insight || input.type || (input.tags?.length ?? 0) > 0 ? "extracted" : "skipped";
+  return input.title || input.content ? "extracted" : "skipped";
 }
 function deriveObservationStatus(input) {
   if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
@@ -33687,7 +33690,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.22" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.23" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

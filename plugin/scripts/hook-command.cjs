@@ -653,7 +653,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.22-mpwlbhps" : "dev";
+var BUILD_ID = true ? "0.2.23-mpwuxsuw" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1602,7 +1602,10 @@ function updateTurnById(db, turnId, input) {
   if (!existing) {
     return null;
   }
-  const nextStatus = input.status ?? (existing.status === "active" ? "extracted" : existing.status);
+  const mergedTitle = input.title ?? existing.title;
+  const mergedContent = input.content ?? existing.content;
+  const hasSubstance = mergedTitle !== null || mergedContent !== null;
+  const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
   const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
   const updated = mapTurnRow(
     db.query(
@@ -1674,9 +1677,40 @@ function updateTurnById(db, turnId, input) {
   }
   return updated;
 }
+function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+  const keptTags = existing.tags.filter((tag) => tag.includes(":"));
+  db.query(
+    `UPDATE turns
+       SET status = 'active',
+           title = NULL,
+           content = NULL,
+           insight = NULL,
+           type = NULL,
+           tags = ?,
+           updated_at_epoch = ?
+       WHERE id = ?`
+  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
+  db.query(
+    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
+  ).run(turnId);
+}
 function getTurnsForSession(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
+  ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getStrandedTurns(db, sessionId) {
+  return db.query(
+    `${TURN_SELECT}
+       WHERE session_id = ?
+         AND assistant_response IS NOT NULL
+         AND ( status IN ('active','provisional')
+               OR (status = 'extracted' AND title IS NULL AND content IS NULL) )
+       ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
 }
 function getMaxPromptNumber(db, sessionId) {
@@ -2592,6 +2626,62 @@ function renderCurrentSessionOutput(db, session, sessionRecord) {
   return lines.join("\n");
 }
 
+// src/db/pending-queue.ts
+function enqueueQueueItem(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO pending_queue (
+          kind,
+          target_id,
+          session_db_id,
+          enqueued_at_epoch
+        ) VALUES (?, ?, ?, ?)
+        RETURNING
+          seq,
+          kind,
+          target_id AS targetId,
+          session_db_id AS sessionDbId,
+          claimed_at_epoch AS claimedAtEpoch,
+          enqueued_at_epoch AS enqueuedAtEpoch
+      `
+  ).get(
+    input.kind,
+    input.targetId,
+    input.sessionDbId,
+    input.enqueuedAtEpoch
+  );
+  if (!inserted) {
+    throw new Error("Failed to enqueue pending queue item.");
+  }
+  return inserted;
+}
+function queueItemExistsForTurn(db, kind, targetId) {
+  const row = db.query(
+    "SELECT 1 AS one FROM pending_queue WHERE kind = ? AND target_id = ? LIMIT 1"
+  ).get(kind, targetId);
+  return row !== null;
+}
+
+// src/db/recover-stranded.ts
+function recoverStrandedTurns(db, sessionDbId, nowEpoch) {
+  const stranded = getStrandedTurns(db, sessionDbId);
+  let recovered = 0;
+  for (const turn of stranded) {
+    if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
+      continue;
+    }
+    resetTurnExtractionFields(db, turn.id, nowEpoch);
+    enqueueQueueItem(db, {
+      kind: "turn-stop",
+      targetId: turn.id,
+      sessionDbId,
+      enqueuedAtEpoch: nowEpoch
+    });
+    recovered += 1;
+  }
+  return recovered;
+}
+
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 function splitInsight(insight) {
@@ -2729,6 +2819,13 @@ function buildContextOutput(db, input) {
   );
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
+  }
+  if (input.source === "resume" || input.source === "compact") {
+    recoverStrandedTurns(
+      db,
+      primarySessionRecord.id,
+      Math.floor(Date.now() / 1e3)
+    );
   }
   const sessionIds = Array.from(
     /* @__PURE__ */ new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id])
@@ -3650,36 +3747,6 @@ function createSessionInitHandler(dependencies) {
       suppressOutput: true
     };
   };
-}
-
-// src/db/pending-queue.ts
-function enqueueQueueItem(db, input) {
-  const inserted = db.query(
-    `
-        INSERT INTO pending_queue (
-          kind,
-          target_id,
-          session_db_id,
-          enqueued_at_epoch
-        ) VALUES (?, ?, ?, ?)
-        RETURNING
-          seq,
-          kind,
-          target_id AS targetId,
-          session_db_id AS sessionDbId,
-          claimed_at_epoch AS claimedAtEpoch,
-          enqueued_at_epoch AS enqueuedAtEpoch
-      `
-  ).get(
-    input.kind,
-    input.targetId,
-    input.sessionDbId,
-    input.enqueuedAtEpoch
-  );
-  if (!inserted) {
-    throw new Error("Failed to enqueue pending queue item.");
-  }
-  return inserted;
 }
 
 // src/hooks/backfill.ts
