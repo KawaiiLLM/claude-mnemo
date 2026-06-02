@@ -197,6 +197,21 @@ describe("delivery-dropped reminder reason (D9)", () => {
     expect(envelope).not.toContain(`prompt="`);
   });
 
+  test("content-less failed turn dropped → NOT not-yet-extracted (terminal)", () => {
+    const turnId = seedTurn(db, sessionId, {
+      promptNumber: 11,
+      status: "failed",
+      title: null,
+      content: null,
+      userPrompt: "derailed turn",
+    });
+    flagDeliveryDropped(db, turnId, 100);
+
+    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    expect(envelope).not.toContain("not yet extracted");
+    expect(envelope).not.toContain(`prompt="`);
+  });
+
   test("delivery-dropped and rollback on the same turn merge into one line", () => {
     seedTurn(db, sessionId, {
       promptNumber: 7,

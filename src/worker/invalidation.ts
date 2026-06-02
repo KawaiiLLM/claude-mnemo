@@ -131,8 +131,10 @@ interface DeliveryDroppedData {
 }
 
 // A flush unit (slice or merged batch) failed maxFlushAttempts times and was
-// dropped; the turn's memory may be incomplete (D9). qualifies keeps `active`
-// (a never-extracted turn whose only delivery failed still warrants a notice).
+// dropped; the turn's memory may be incomplete (D9). The not-yet-extracted
+// branch covers `active`/`provisional` turns with no usable content (a delivery
+// that failed before any record landed still warrants a prompt-bearing notice);
+// deliberately-closed `skipped` and terminal `failed` turns are excluded.
 const deliveryDroppedReason: ReminderReason<DeliveryDroppedData> = {
   key: "delivery-dropped",
   pendingTag: DELIVERY_DROPPED_PENDING_TAG,
