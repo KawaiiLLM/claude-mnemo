@@ -9,7 +9,8 @@ import {
 const base: WorkUnitSignals = {
   requiredIds: new Set<number>(),
   rememberedIds: new Set<number>(),
-  hadSessionRemember: false,
+  rememberedSessionIds: new Set<number>(),
+  sessionDbId: 1,
   hadSubstantiveText: false,
   hadIllegalTool: false,
 };
@@ -90,14 +91,24 @@ describe("classifyWorkUnitResponse", () => {
     ).toBe("strike");
   });
 
-  test("standalone summary: remember(S…) with explanatory text is resolved", () => {
+  test("standalone summary: remember(S=current) with explanatory text is resolved", () => {
     expect(
       classifyWorkUnitResponse({
         ...base,
-        hadSessionRemember: true,
+        rememberedSessionIds: new Set([1]), // matches base sessionDbId: 1
         hadSubstantiveText: true,
       }),
     ).toBe("resolved");
+  });
+
+  test("standalone summary: remember of a DIFFERENT session + prose still strikes", () => {
+    expect(
+      classifyWorkUnitResponse({
+        ...base,
+        rememberedSessionIds: new Set([999]), // 999 ≠ sessionDbId 1
+        hadSubstantiveText: true,
+      }),
+    ).toBe("strike");
   });
 
   test("standalone summary: empty/thinking-only (no session remember, no prose) is resolved", () => {

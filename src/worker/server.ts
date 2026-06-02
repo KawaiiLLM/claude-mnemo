@@ -184,7 +184,7 @@ export interface SessionState {
   // onMessage stream populates these; sendWorkUnit reads them to classify.
   unitSignals: {
     rememberedIds: Set<number>;
-    hadSessionRemember: boolean;
+    rememberedSessionIds: Set<number>;
     hadSubstantiveText: boolean;
     hadIllegalTool: boolean;
   };
@@ -194,7 +194,7 @@ export interface SessionState {
 // cold-start render, which is exempt from derailment detection).
 function resetUnitSignals(state: SessionState): void {
   state.unitSignals.rememberedIds.clear();
-  state.unitSignals.hadSessionRemember = false;
+  state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
 }
@@ -737,7 +737,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: new Set<number>(),
-        hadSessionRemember: false,
+        rememberedSessionIds: new Set<number>(),
         hadSubstantiveText: false,
         hadIllegalTool: false,
       },
@@ -919,8 +919,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             state!.unitSignals.rememberedIds.add(Number(t[1]));
             return;
           }
-          if (/^S(\d+)$/i.test(id)) {
-            state!.unitSignals.hadSessionRemember = true;
+          const sMatch = /^S(\d+)$/i.exec(id);
+          if (sMatch) {
+            state!.unitSignals.rememberedSessionIds.add(Number(sMatch[1]));
           }
         },
       },
@@ -976,7 +977,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       classifyWorkUnitResponse({
         requiredIds,
         rememberedIds: state.unitSignals.rememberedIds,
-        hadSessionRemember: state.unitSignals.hadSessionRemember,
+        rememberedSessionIds: state.unitSignals.rememberedSessionIds,
+        sessionDbId: state.sessionDbId,
         hadSubstantiveText: state.unitSignals.hadSubstantiveText,
         hadIllegalTool: state.unitSignals.hadIllegalTool,
       });

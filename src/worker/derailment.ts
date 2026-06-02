@@ -4,8 +4,10 @@ export interface WorkUnitSignals {
   requiredIds: Set<number>;
   /** Turn ids the agent actually remembered during this unit. */
   rememberedIds: Set<number>;
-  /** The agent did remember(S…) this unit (refreshed the session summary). */
-  hadSessionRemember: boolean;
+  /** Session ids the agent remembered (remember(S…)) during this unit. */
+  rememberedSessionIds: Set<number>;
+  /** This unit's own session — the expected S for a standalone summary refresh. */
+  sessionDbId: number;
   /** A substantive (non-thinking) text block was emitted. */
   hadSubstantiveText: boolean;
   /** A non-mnemo tool was attempted (should be impossible under D0). */
@@ -18,10 +20,11 @@ export type WorkUnitVerdict = "resolved" | "strike";
  * D1: a unit is RESOLVED iff every required id was remembered. Otherwise it is a
  * strike. recall and remembers of non-required ids do not resolve a required id.
  * For an empty required set (standalone summary), resolution keys on whether the
- * agent refreshed the session via remember(S…): prose without a session remember
- * is a strike, a session remember (with or without prose) resolves, and an
- * empty/thinking-only no-op resolves. A stray remember(T…) does NOT resolve a
- * summary unit. An illegal tool is always a strike.
+ * agent refreshed its OWN session via remember(S=sessionDbId): prose without a
+ * remember of the current session is a strike, a remember of the current session
+ * (with or without prose) resolves, and an empty/thinking-only no-op resolves. A
+ * stray remember(S=other) or remember(T…) does NOT resolve a summary unit. An
+ * illegal tool is always a strike.
  */
 export function classifyWorkUnitResponse(s: WorkUnitSignals): WorkUnitVerdict {
   if (s.hadIllegalTool) {
@@ -32,10 +35,15 @@ export function classifyWorkUnitResponse(s: WorkUnitSignals): WorkUnitVerdict {
       return "strike";
     }
   }
-  // standalone summary (required ∅): resolved if it refreshed the session
-  // (remember(S…)) or made a legit no-op (no prose). Strike only if it emitted
-  // prose but did NOT refresh the session. A stray remember(T…) does not resolve.
-  if (s.requiredIds.size === 0 && s.hadSubstantiveText && !s.hadSessionRemember) {
+  // standalone summary (required ∅): resolved if it refreshed its OWN session
+  // (remember(S=sessionDbId)) or made a legit no-op (no prose). Strike only if it
+  // emitted prose but did NOT refresh the current session. A stray
+  // remember(S=other) or remember(T…) does not resolve.
+  if (
+    s.requiredIds.size === 0 &&
+    s.hadSubstantiveText &&
+    !s.rememberedSessionIds.has(s.sessionDbId)
+  ) {
     return "strike";
   }
   return "resolved";
