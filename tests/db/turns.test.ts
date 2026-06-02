@@ -365,4 +365,31 @@ describe("turn queries", () => {
     expect(updateTurnById(db, turn.id, { status: "failed" })?.status).toBe("failed");
   });
 
+  test("metadata-only update on an active turn with no content stays active", () => {
+    // create an ACTIVE turn (no title/content) via direct SQL, same pattern used in merge tests
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 30, 'active', 'Some prompt', 3000)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    const updated = updateTurnById(db, turnId, { toolCallCount: 3 });
+    expect(updated?.status).toBe("active");
+  });
+
+  test("auto-promote still fires when title is provided", () => {
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 31, 'active', 'Some prompt', 3100)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    const updated = updateTurnById(db, turnId, { title: "Did a thing" });
+    expect(updated?.status).toBe("extracted");
+  });
+
 });

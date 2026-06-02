@@ -176,9 +176,14 @@ export function updateTurnById(
     return null;
   }
 
+  const mergedTitle = input.title ?? existing.title;
+  const mergedContent = input.content ?? existing.content;
+  const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus =
     input.status ??
-    (existing.status === "active" ? "extracted" : existing.status);
+    (existing.status === "active" && hasSubstance
+      ? "extracted"
+      : existing.status);
   const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
 
   const updated = mapTurnRow(
