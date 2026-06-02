@@ -368,4 +368,26 @@ describe("remember tool routing and validation", () => {
 
     expect(getObservationsForTurn(db, turnId)).toHaveLength(1);
   });
+
+  test("type/tags-only turn remember yields skipped, not extracted (no phantom)", () => {
+    rememberTool(db, {
+      id: `T${turnId}`,
+      type: "bugfix",
+      tags: ["auth"],
+    });
+
+    const turn = getTurn(db, sessionId, 1)!;
+    expect(turn.status).toBe("skipped");
+  });
+
+  test("turn remember with a title yields extracted status", () => {
+    rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      type: "bugfix",
+    });
+
+    const turn = getTurn(db, sessionId, 1)!;
+    expect(turn.status).toBe("extracted");
+  });
 });

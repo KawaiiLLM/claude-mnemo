@@ -124,9 +124,7 @@ function deriveTurnStatus(input: RememberToolInput): TurnStatus {
     return "active";
   }
 
-  return input.title || input.content || input.insight || input.type || (input.tags?.length ?? 0) > 0
-    ? "extracted"
-    : "skipped";
+  return input.title || input.content ? "extracted" : "skipped";
 }
 
 function deriveObservationStatus(input: RememberToolInput): ObservationStatus {
