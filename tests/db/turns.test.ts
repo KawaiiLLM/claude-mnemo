@@ -10,6 +10,7 @@ import {
   getTurn,
   getTurnsForSession,
   getStrandedTurns,
+  resetTurnExtractionFields,
   updateTurnBackfill,
   updateTurnById,
 } from "../../src/db/turns";
@@ -391,6 +392,38 @@ describe("turn queries", () => {
 
     const updated = updateTurnById(db, turnId, { title: "Did a thing" });
     expect(updated?.status).toBe("extracted");
+  });
+
+  test("resetTurnExtractionFields clears agent output, keeps internal tags, drops FTS", () => {
+    // Insert a provisional turn with partial extraction output and an assistant_response
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, assistant_response, title, content, insight, type, created_at_epoch)
+         VALUES (?, 50, 'provisional', 'r', 'Old title', 'Old content', 'Old insight', 'feature', 5000)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    // Set tags: one freeform + one colon-namespaced internal tag
+    updateTurnById(db, turnId, { replaceTags: ["auth", "delivery:dropped:notify-pending"] });
+
+    // Seed an FTS row directly to simulate the turn having been indexed
+    db.query(
+      "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES ('turn', ?, 'Old title', 'Old content', '')",
+    ).run(turnId);
+
+    resetTurnExtractionFields(db, turnId, 1234);
+
+    const t = getTurnById(db, turnId)!;
+    expect(t.status).toBe("active");
+    expect(t.title).toBeNull();
+    expect(t.content).toBeNull();
+    expect(t.insight).toBeNull();
+    expect(t.type).toBeNull();
+    expect(t.tags).toEqual(["delivery:dropped:notify-pending"]); // freeform dropped, internal kept
+    expect(t.assistantResponse).toBe("r");                       // source kept
+    const fts = db.query("SELECT COUNT(*) AS n FROM memory_fts WHERE layer='turn' AND source_id=?").get(turnId) as { n: number };
+    expect(fts.n).toBe(0);
   });
 
   test("getStrandedTurns selects re-extractable failures in prompt_number order", () => {

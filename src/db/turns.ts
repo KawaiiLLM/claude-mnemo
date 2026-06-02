@@ -280,6 +280,33 @@ export function updateTurnById(
   return updated;
 }
 
+export function resetTurnExtractionFields(
+  db: Database,
+  turnId: number,
+  updatedAtEpoch: number,
+): void {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return;
+  }
+  // Keep colon-namespaced internal reminder tags; drop agent freeform tags.
+  const keptTags = existing.tags.filter((tag) => tag.includes(":"));
+  db.query(
+    `UPDATE turns
+       SET status = 'active',
+           title = NULL,
+           content = NULL,
+           insight = NULL,
+           type = NULL,
+           tags = ?,
+           updated_at_epoch = ?
+       WHERE id = ?`,
+  ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
+  db.query(
+    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
+  ).run(turnId);
+}
+
 export function getTurnsForSession(
   db: Database,
   sessionId: number,
