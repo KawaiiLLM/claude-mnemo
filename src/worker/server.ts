@@ -22,7 +22,7 @@ import {
   getObservation,
   hasSkippedObservationsForTurn,
 } from "../db/observations";
-import { getTurnById } from "../db/turns";
+import { getTurnById, updateTurnById } from "../db/turns";
 import {
   parseReplayTranscript,
   readLatestContextTokens,
@@ -73,6 +73,8 @@ import {
 import {
   buildCorrectiveResend,
   classifyWorkUnitResponse,
+  deriveRequiredTargetIds,
+  type WorkUnitShape,
 } from "./derailment";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
 import { buildSessionSummary } from "../mcp/recall";
@@ -121,6 +123,26 @@ type BatchEntry =
 
 function batchMiniTurns(batch: BatchEntry): MiniTurnPayload[] {
   return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
+}
+
+// The minimal {turnId}-only shape the derailment module needs for one flush
+// unit (D1 required-id derivation + D5 floor granularity). Merged → all turn
+// ids; any slice (streaming mid / final) → its single turn id.
+function batchWorkUnitShape(batch: BatchEntry): WorkUnitShape {
+  if (batch.kind === "merged") {
+    return {
+      kind: "merged",
+      miniTurns: batch.miniTurns.map((miniTurn) => ({ turnId: miniTurn.turnId })),
+    };
+  }
+  return { kind: "slice", miniTurn: { turnId: batch.miniTurn.turnId } };
+}
+
+// A flush unit is a completion point (eligible for T3 re-session + the D5
+// floor) unless it is a streaming mid slice (a later/final slice still carries
+// the turn). A merged batch is always short turns (completion points).
+function batchIsCompletionPoint(batch: BatchEntry): boolean {
+  return !(batch.kind === "slice" && batch.miniTurn.role === "streaming");
 }
 
 // Result state machine (D8) — flushOneBatchLocked never throws for control flow.
@@ -182,6 +204,9 @@ export interface WorkerCoreDeps {
   pushSessionSummaryPromptImpl?: (
     state: SessionState,
     sessionId: number,
+    // Optional sender so the standalone <session> summary can be routed through
+    // the derailment state machine (D1/T2/T3). Defaults to state.pushMessage.
+    send?: (message: string) => Promise<void>,
   ) => Promise<void>;
   closeSessionQueryImpl?: (sessionId: number) => Promise<void>;
   createWorkerQuerySessionImpl?: typeof createWorkerQuerySession;
@@ -983,6 +1008,36 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     throw new DerailmentFloorError(requiredIds);
   }
 
+  // D5 finalize-by-status. Reached only when a completion-point unit hits the
+  // derailment floor. A turn's record is built incrementally: any slice the
+  // agent DID remember already moved the turn active → extracted (db/turns), so
+  // we never downgrade a partial. Only still-active (never-extracted) turns are
+  // finalized as skipped. A standalone session-summary refresh is abandoned
+  // (idempotent; the next compact retries it) with no turn touched.
+  function applyFloor(
+    unit: WorkUnitShape,
+    unresolved: Set<number>,
+    sessionDbId: number,
+  ): void {
+    if (unit.kind === "session-summary") {
+      logger.warn?.("derailment floor: abandoning session-summary refresh", {
+        sessionDbId,
+      });
+      return;
+    }
+    for (const turnId of unresolved) {
+      const turn = getTurnById(deps.db, turnId);
+      if (turn && turn.status === "active") {
+        updateTurnById(deps.db, turnId, { status: "skipped" });
+        logger.warn?.("derailment floor: turn skipped (no extraction)", {
+          turnId,
+        });
+      } else {
+        logger.warn?.("derailment floor: keeping partial extraction", { turnId });
+      }
+    }
+  }
+
   async function closeSessionQuery(sessionDbId: number): Promise<void> {
     const state = sessions.get(sessionDbId);
     if (!state) {
@@ -1093,28 +1148,45 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const staleTurns = sessionUpdated
       ? countTurnsSinceSummary(session.id)
       : 0;
-    await state.pushMessage(
-      buildBatchPrompt({
-        sessionId: session.id,
-        project: session.project,
-        sessionTitle: session.title,
-        currentPrompt,
-        prior: sessionUpdated
-          ? {
-              title: session.title,
-              content: session.content,
-              decision: session.decision,
-              done: session.done,
-              current: session.current,
-              nextSteps: session.nextSteps,
-              reference: session.reference,
-            }
-          : null,
-        sessionUpdated,
-        staleTurns,
-        completedTurnBlocks: blocks,
-      }),
-    );
+    const message = buildBatchPrompt({
+      sessionId: session.id,
+      project: session.project,
+      sessionTitle: session.title,
+      currentPrompt,
+      prior: sessionUpdated
+        ? {
+            title: session.title,
+            content: session.content,
+            decision: session.decision,
+            done: session.done,
+            current: session.current,
+            nextSteps: session.nextSteps,
+            reference: session.reference,
+          }
+        : null,
+      sessionUpdated,
+      staleTurns,
+      completedTurnBlocks: blocks,
+    });
+    // Route through the D1/T2/T3 derailment state machine. A DerailmentFloorError
+    // (completion point exhausted resends + a fresh-session retry) is resolved
+    // by D5 finalize-by-status; any other throw (push/delivery failure) is left
+    // to flushOneBatchLocked's retry/drop handling.
+    const shape = batchWorkUnitShape(batch);
+    try {
+      await sendWorkUnit(
+        state,
+        message,
+        deriveRequiredTargetIds(shape),
+        batchIsCompletionPoint(batch),
+      );
+    } catch (e) {
+      if (e instanceof DerailmentFloorError) {
+        applyFloor(shape, e.requiredIds, state.sessionDbId);
+      } else {
+        throw e;
+      }
+    }
 
     const freshSession = getSession(deps.db, session.id);
     state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
@@ -1638,7 +1710,29 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       try {
         const state = getOrCreateSessionState(sessionDbId);
-        await pushSessionSummaryPromptImpl(state, sessionDbId);
+        // Standalone <session> summary: requiredIds = ∅, completion point. A
+        // floor here abandons the refresh (idempotent; next compact retries).
+        const summaryShape: WorkUnitShape = { kind: "session-summary" };
+        await pushSessionSummaryPromptImpl(
+          state,
+          sessionDbId,
+          async (message) => {
+            try {
+              await sendWorkUnit(
+                state,
+                message,
+                deriveRequiredTargetIds(summaryShape),
+                true,
+              );
+            } catch (e) {
+              if (e instanceof DerailmentFloorError) {
+                applyFloor(summaryShape, e.requiredIds, sessionDbId);
+              } else {
+                throw e;
+              }
+            }
+          },
+        );
       } catch (error) {
         logger.error?.("session summary push failed", {
           sessionDbId,

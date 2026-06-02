@@ -729,13 +729,18 @@ export function createWorkerProcessors(db: Database) {
     async pushSessionSummaryPrompt(
       state: SessionState,
       sessionId: number,
+      // Defaults to state.pushMessage; the worker passes a sender that routes
+      // through the derailment state machine (D1/T2/T3) so a refused refresh is
+      // escalated and (at the floor) abandoned rather than silently delivered.
+      send: (message: string) => Promise<void> = (message) =>
+        state.pushMessage(message),
     ): Promise<void> {
       const session = getSession(db, sessionId);
       if (!session) {
         return;
       }
 
-      await state.pushMessage(
+      await send(
         buildSessionSummaryPrompt(session.id, session.project, {
           title: session.title,
           content: session.content,

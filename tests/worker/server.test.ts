@@ -9,7 +9,7 @@ import {
   updateLastAgentSessionId,
   upsertSession,
 } from "../../src/db/sessions";
-import { getTurn } from "../../src/db/turns";
+import { getTurn, getTurnById, updateTurnById } from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
 import {
   checkForIdleWorkerShutdown,
@@ -67,6 +67,45 @@ function batchTurnIds(batch: {
     : batch.miniTurn
       ? [batch.miniTurn.turnId]
       : [];
+}
+
+// Callbacks the worker passes to createWorkerQuerySession. A test fake captures
+// these to drive the D1 work-unit signals (onRemember) the derailment state
+// machine classifies against.
+type FakeQueryDeps = {
+  onMessage?: (message: { session_id?: string }) => void;
+  onRemember?: (id: string) => void;
+};
+
+function fakeQueryDeps(args: unknown[]): FakeQueryDeps | undefined {
+  return (args.length === 2 ? args[1] : args[3]) as FakeQueryDeps | undefined;
+}
+
+// A "healthy agent" fake query session: records every prompt and, for each
+// <turn id="T..."> block in it, fires onRemember so the flush unit resolves on
+// the first send (no derailment). Use this for legacy flush tests that only
+// assert on what was sent — the derailment wiring would otherwise classify a
+// silent fake as a strike and resend.
+function healthyQueryImpl(
+  sentPrompts: string[],
+  agentSessionId = "worker-query",
+): typeof import("../../src/worker/query-session").createWorkerQuerySession {
+  return ((...args: unknown[]) => {
+    const deps = fakeQueryDeps(args);
+    return {
+      sessionId: agentSessionId,
+      queryPid: 1234,
+      async sendPrompt(prompt: string) {
+        sentPrompts.push(prompt);
+        deps?.onMessage?.({ session_id: agentSessionId });
+        for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+          deps?.onRemember?.(`T${match[1]}`);
+        }
+        return { session_id: agentSessionId };
+      },
+      async close() {},
+    } satisfies WorkerQuerySession;
+  }) as typeof import("../../src/worker/query-session").createWorkerQuerySession;
 }
 
 function queueObs(
@@ -159,6 +198,11 @@ function primeSessionState(
     lastActivity: overrides.lastActivity ?? 0,
     processingLock: existing?.processingLock ?? Promise.resolve(),
     pushMessage: existing?.pushMessage ?? (async () => {}),
+    unitSignals: existing?.unitSignals ?? {
+      rememberedIds: new Set<number>(),
+      hadSubstantiveText: false,
+      hadIllegalTool: false,
+    },
   });
 }
 
@@ -599,16 +643,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => 123,
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
     });
 
     await core.scanAndDrainQueue();
@@ -668,16 +703,7 @@ describe("worker server", () => {
         ...QUIET_STREAMING,
       },
       now: () => 123,
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
     });
 
     await core.scanAndDrainQueue();
@@ -731,16 +757,7 @@ describe("worker server", () => {
       now: () => 123,
       buildTurnPayloadImpl: processors.buildTurnPayload,
       processBatchImpl: processors.processBatch,
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
     });
 
     await core.scanAndDrainQueue();
@@ -775,16 +792,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => 123,
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
     });
 
     await core.scanAndDrainQueue();
@@ -833,16 +841,7 @@ describe("worker server", () => {
         cacheMode: "auto",
         ...QUIET_STREAMING,
       },
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
-          sessionId: "worker-query",
-          queryPid: 1234,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            return { session_id: "worker-query" };
-          },
-          async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
     });
 
     await core.scanAndDrainQueue();
@@ -1076,12 +1075,19 @@ describe("worker server", () => {
       closeSessionQueryImpl: async (sessionId) => {
         closed.push(sessionId);
       },
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args) as
+          | (FakeQueryDeps & { onRemember?: (id: string) => void })
+          | undefined;
+        return {
           sessionId: "worker-query",
           queryPid: 1234,
           async sendPrompt(prompt: string) {
             sentPrompts.push(prompt);
+            deps?.onMessage?.({ session_id: "worker-query" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return {
               session_id: "worker-query",
             };
@@ -1090,7 +1096,8 @@ describe("worker server", () => {
             compacted.push(compactSessionId);
           },
           async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
       isProcessAliveImpl: () => false,
     });
 
@@ -1581,18 +1588,16 @@ describe("worker server", () => {
       },
       createWorkerQuerySessionImpl: ((...args: unknown[]) => {
         createWorkerQuerySessionCalls.push(args);
-        const deps =
-          (args.length === 2 ? args[1] : args[3]) as
-            | {
-                onMessage?: (message: { session_id?: string }) => void;
-              }
-            | undefined;
+        const deps = fakeQueryDeps(args);
 
         return {
           sessionId: "fresh-agent-session",
           queryPid: 1234,
-          async sendPrompt() {
+          async sendPrompt(prompt: string) {
             deps?.onMessage?.({ session_id: "fresh-agent-session" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return {
               session_id: "fresh-agent-session",
             };
@@ -1668,12 +1673,7 @@ describe("worker server", () => {
         await state.pushMessage("<batch><turn id=\"T4\"/></batch>");
       },
       createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps =
-          (args.length === 2 ? args[1] : args[3]) as
-            | {
-                onMessage?: (message: { session_id?: string }) => void;
-              }
-            | undefined;
+        const deps = fakeQueryDeps(args);
 
         return {
           sessionId: "worker-query",
@@ -1681,6 +1681,9 @@ describe("worker server", () => {
           async sendPrompt(prompt: string) {
             sentPrompts.push(prompt);
             deps?.onMessage?.({ session_id: "worker-query" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return {
               session_id: "worker-query",
             };
@@ -1784,12 +1787,7 @@ describe("worker server", () => {
         await state.pushMessage(`<batch><turn id="T${turnId}"/></batch>`);
       },
       createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps =
-          (args.length === 2 ? args[1] : args[3]) as
-            | {
-                onMessage?: (message: { session_id?: string }) => void;
-              }
-            | undefined;
+        const deps = fakeQueryDeps(args);
 
         return {
           sessionId: "worker-query",
@@ -1797,6 +1795,9 @@ describe("worker server", () => {
           async sendPrompt(prompt: string) {
             sentPrompts.push(prompt);
             deps?.onMessage?.({ session_id: "worker-query" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return {
               session_id: "worker-query",
             };
@@ -2016,8 +2017,9 @@ describe("worker server", () => {
         cacheMode: "auto",
         ...QUIET_STREAMING,
       },
-      createWorkerQuerySessionImpl: ((_input) =>
-        ({
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args);
+        return {
           sessionId: "worker-query",
           queryPid: 1234,
           async sendPrompt(prompt: string) {
@@ -2026,10 +2028,14 @@ describe("worker server", () => {
             if (tag === "T1") {
               await firstGate;
             }
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return { session_id: "worker-query" };
           },
           async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
     const first = core.processClaimedItem({
@@ -2193,6 +2199,11 @@ describe("worker server", () => {
     rememberIds?: () => number[];
     resumes: Array<string | null | undefined>;
     sentPrompts: string[];
+    // Emit a substantive assistant text block (a strike for ∅-required units
+    // like a standalone session summary).
+    substantiveText?: boolean;
+    // Side-effect run on each send (e.g. mirror the real remember() DB write).
+    onSend?: (prompt: string) => void;
   }) {
     return ((...args: unknown[]) => {
       const input = args[0] as { resumeAgentSessionId?: string | null };
@@ -2203,6 +2214,7 @@ describe("worker server", () => {
         queryPid: 999,
         async sendPrompt(prompt: string) {
           opts.sentPrompts.push(prompt);
+          opts.onSend?.(prompt);
           // Simulate the agent emitting an assistant text block + remembers.
           const ids = opts.rememberIds?.() ?? [];
           deps?.onMessage?.({
@@ -2210,6 +2222,9 @@ describe("worker server", () => {
             session_id: "fake-agent",
             message: {
               content: [
+                ...(opts.substantiveText
+                  ? [{ type: "text", text: "Here is my answer." }]
+                  : []),
                 ...ids.map((id) => ({
                   type: "tool_use",
                   name: "mcp__mnemo__remember",
@@ -2374,5 +2389,200 @@ describe("worker server", () => {
     expect(state.unitSignals.hadIllegalTool).toBe(false);
     // agentSessionId was rewritten to the fresh agent by onMessage.
     expect(state.agentSessionId).toBe("fake-agent");
+  });
+
+  // --- Task 10: flush pipeline wiring + D5 finalize-by-status floor ---
+
+  // Insert a turn with an explicit status; the floor finalizes by db status, so
+  // tests control the pre-flush record directly. Returns the new turn id.
+  function insertTurnWithStatus(
+    sessionId: number,
+    promptNumber: number,
+    status: "active" | "extracted" | "skipped" | "undone",
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt,
+           assistant_response, created_at_epoch)
+         VALUES (?, ?, ?, 'Prompt', 'Reply', 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber, status)!.id;
+  }
+
+  // Config that keeps short turns un-merged budget-wise and never force-flushes
+  // mid-scan, so a turn-stop lands one whole batch on the queue for flushSession.
+  const FLOOR_CONFIG = {
+    mergeThresholdChars: 100_000,
+    maxQueuedBatches: 50,
+    keepaliveLeadMs: 60_000,
+    cacheMode: "auto" as const,
+    ...QUIET_STREAMING,
+  };
+
+  test("mid slice that keeps derailing is skipped without re-session; turn row left as-is", async () => {
+    const sessionId = seedDerailSession("derail-mid-slice-status");
+    const turnId = insertTurnWithStatus(sessionId, 1, "active");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers → strike every time
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    const state = await realState(core, sessionId);
+
+    // Streaming mid slice (isCompletionPoint=false): resends K, then skips —
+    // no fresh session, no DerailmentFloorError, no status change.
+    await core.sendWorkUnit(
+      state,
+      `<turn id="T${turnId}" slice="2"/>`,
+      new Set([turnId]),
+      false,
+    );
+
+    expect(resumes).toHaveLength(1); // no re-session
+    expect(getTurnById(db, turnId)?.status).toBe("active"); // row left as-is
+  });
+
+  test("final-slice/short floor keeps a partial record an earlier slice produced (no downgrade)", async () => {
+    const sessionId = seedDerailSession("derail-floor-keep-partial");
+    // An earlier slice already extracted this turn (active → extracted). Its
+    // turn-stop now flushes as a final slice that derails to the floor.
+    const turnId = insertTurnWithStatus(sessionId, 1, "extracted");
+    queueObs(db, sessionId, turnId, 101, "partial");
+    queueTurnStop(db, sessionId, turnId, 201);
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // the final slice still derails → floor
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.drainSessionCompletely(sessionId);
+
+    // The floor (real applyFloor via the wired pushMiniTurnBatch catch) must NOT
+    // downgrade the extracted partial.
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
+    // Queue still drained; the floor reached re-session (completion point).
+    expect(resumes.length).toBeGreaterThan(1);
+  });
+
+  test("short turn floor (never extracted → still active) marks the turn skipped", async () => {
+    const sessionId = seedDerailSession("derail-floor-skip-active");
+    const turnId = insertTurnWithStatus(sessionId, 1, "active");
+    queueObs(db, sessionId, turnId, 101, "short");
+    queueTurnStop(db, sessionId, turnId, 201);
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers → floor
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.drainSessionCompletely(sessionId);
+
+    expect(getTurnById(db, turnId)?.status).toBe("skipped");
+  });
+
+  test("merged batch floor: a remembered turn stays extracted; an unremembered one is skipped", async () => {
+    const sessionId = seedDerailSession("derail-floor-merged");
+    // Two short (active) turns merge into one batch. The agent remembers A
+    // (mirrored as the real remember() DB write: active → extracted) but never
+    // B, so the merged unit strikes and floors with requiredIds = {A, B}.
+    const turnA = insertTurnWithStatus(sessionId, 1, "active");
+    const turnB = insertTurnWithStatus(sessionId, 2, "active");
+    queueObs(db, sessionId, turnA, 101, "merged-a");
+    queueObs(db, sessionId, turnB, 102, "merged-b");
+    queueTurnStop(db, sessionId, turnA, 201);
+    queueTurnStop(db, sessionId, turnB, 202);
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        // Remember A only (the merged unit still strikes on missing B).
+        rememberIds: () => [turnA],
+        resumes,
+        sentPrompts,
+        // Mirror the real remember() side effect for A on every send.
+        onSend: () => {
+          if (getTurnById(db, turnA)?.status === "active") {
+            updateTurnById(db, turnA, { status: "extracted" });
+          }
+        },
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.drainSessionCompletely(sessionId);
+
+    // Per-turn granularity comes from the floor, not from splitting the message.
+    expect(getTurnById(db, turnA)?.status).toBe("extracted"); // kept
+    expect(getTurnById(db, turnB)?.status).toBe("skipped"); // finalized
+  });
+
+  test("session-summary floor abandons refresh (no turn skipped), queue still drains", async () => {
+    const sessionId = seedDerailSession("derail-floor-summary");
+    const turnId = insertTurnWithStatus(sessionId, 1, "active");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const warns: unknown[][] = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn: (...a: unknown[]) => warns.push(a), error() {} },
+      // The summary push routes through the worker's sendWorkUnit sender
+      // (∅ required ids, completion point); a strike floors → abandon.
+      pushSessionSummaryPromptImpl: async (state, _sessionId, send) => {
+        await (send ?? state.pushMessage)("<session>refresh</session>");
+      },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        // A ∅-required summary resolves on an empty response, so force a strike
+        // with substantive prose to exercise the abandon path.
+        rememberIds: () => [],
+        substantiveText: true,
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.handleCompact(sessionId, null);
+
+    // A summary floor never skips a turn.
+    expect(getTurnById(db, turnId)?.status).toBe("active");
+    expect(
+      warns.some((a) => String(a[0]).includes("abandoning session-summary")),
+    ).toBe(true);
+    // The queue still drains (no leftover items for the session).
+    expect(
+      db
+        .query<{ count: number }, [number]>(
+          "SELECT COUNT(*) AS count FROM pending_queue WHERE session_db_id = ?",
+        )
+        .get(sessionId)?.count,
+    ).toBe(0);
   });
 });

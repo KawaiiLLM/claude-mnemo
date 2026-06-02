@@ -78,19 +78,28 @@ describe("flush retry / drop (D8)", () => {
       config: RETRY_CONFIG,
       now: () => 123,
       logger: { warn: () => {}, error: () => {} },
-      createWorkerQuerySessionImpl: ((..._args: unknown[]) =>
-        ({
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        // On a successful push, remember every <turn id="T..."> so the work
+        // unit resolves (this suite exercises delivery failure, not derailment).
+        const deps = (args.length === 2 ? args[1] : args[3]) as
+          | { onRemember?: (id: string) => void }
+          | undefined;
+        return {
           sessionId: "worker-query",
           queryPid: 1234,
-          async sendPrompt(_prompt: string) {
+          async sendPrompt(prompt: string) {
             attempts.n += 1;
             if (attempts.n <= failTimes) {
               throw new Error("push failed");
             }
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
             return { session_id: "worker-query" };
           },
           async close() {},
-        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
       isProcessAliveImpl: () => false,
     });
   }

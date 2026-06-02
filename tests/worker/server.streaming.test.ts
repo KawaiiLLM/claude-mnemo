@@ -39,16 +39,25 @@ function makeCore(
     db,
     config: STREAM_CONFIG,
     now: () => 123,
-    createWorkerQuerySessionImpl: ((..._args: unknown[]) =>
-      ({
+    createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+      // Healthy agent: remember every <turn id="T..."> block so each flush unit
+      // resolves on the first send (no derailment resends/re-session).
+      const deps = (args.length === 2 ? args[1] : args[3]) as
+        | { onRemember?: (id: string) => void }
+        | undefined;
+      return {
         sessionId: "worker-query",
         queryPid: 1234,
         async sendPrompt(prompt: string) {
           sentPrompts.push(prompt);
+          for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+            deps?.onRemember?.(`T${match[1]}`);
+          }
           return { session_id: "worker-query" };
         },
         async close() {},
-      }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      } satisfies WorkerQuerySession;
+    }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     isProcessAliveImpl: () => false,
     ...overrides,
   });
