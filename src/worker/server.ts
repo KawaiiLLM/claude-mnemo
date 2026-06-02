@@ -1023,12 +1023,16 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     throw new DerailmentFloorError(requiredIds);
   }
 
-  // D5 finalize-by-status. Reached only when a completion-point unit hits the
-  // derailment floor. A turn's record is built incrementally: any slice the
-  // agent DID remember already moved the turn active → extracted (db/turns), so
-  // we never downgrade a partial. Only still-active (never-extracted) turns are
-  // finalized as failed. A standalone session-summary refresh is abandoned
-  // (idempotent; the next compact retries it) with no turn touched.
+  // D5 finalize-by-content. Reached only when a completion-point unit hits the
+  // derailment floor. A turn's record is built incrementally; finalize each
+  // unresolved turn TERMINALLY by whether it carries usable content, so a turn
+  // never lingers non-terminal (active/provisional) — otherwise getStrandedTurns
+  // re-enqueues it on every resume and it re-derails forever (no terminal bound):
+  //   - has a partial extraction (title or content set, e.g. a provisional turn
+  //     a mid-slice wrote) → finalize as `extracted` (keeps the partial);
+  //   - content-less (never extracted) → `failed`.
+  // A standalone session-summary refresh is abandoned (idempotent; the next
+  // compact retries it) with no turn touched.
   function applyFloor(
     unit: WorkUnitShape,
     unresolved: Set<number>,
@@ -1042,13 +1046,27 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
     for (const turnId of unresolved) {
       const turn = getTurnById(deps.db, turnId);
-      if (turn && turn.status === "active") {
+      if (!turn) {
+        continue;
+      }
+      // Already-extracted turns are terminal — a real remember already ran;
+      // leave them. A partial extraction (title/content set, e.g. a provisional
+      // turn a mid-slice wrote) is finalized to extracted, keeping the partial.
+      const hasContent = turn.title !== null || turn.content !== null;
+      if (turn.status === "extracted" || hasContent) {
+        if (turn.status !== "extracted") {
+          updateTurnById(deps.db, turnId, { status: "extracted" });
+        }
+        logger.warn?.(
+          "derailment floor: keeping partial extraction (finalized extracted)",
+          { turnId },
+        );
+      } else {
+        // Content-less, never extracted (active or empty provisional) → failed.
         updateTurnById(deps.db, turnId, { status: "failed" });
         logger.warn?.("derailment floor: turn failed (no extraction)", {
           turnId,
         });
-      } else {
-        logger.warn?.("derailment floor: keeping partial extraction", { turnId });
       }
     }
   }

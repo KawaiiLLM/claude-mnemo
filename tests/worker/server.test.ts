@@ -9,7 +9,12 @@ import {
   updateLastAgentSessionId,
   upsertSession,
 } from "../../src/db/sessions";
-import { getTurn, getTurnById, updateTurnById } from "../../src/db/turns";
+import {
+  getStrandedTurns,
+  getTurn,
+  getTurnById,
+  updateTurnById,
+} from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
 import {
   checkForIdleWorkerShutdown,
@@ -2542,6 +2547,83 @@ describe("worker server", () => {
     // Per-turn granularity comes from the floor, not from splitting the message.
     expect(getTurnById(db, turnA)?.status).toBe("extracted"); // kept
     expect(getTurnById(db, turnB)?.status).toBe("failed"); // finalized
+  });
+
+  // Regression: a turn that streamed ≥1 mid-slice is `provisional` (not active).
+  // If it derails at the floor it must be TERMINATED — never left provisional —
+  // or getStrandedTurns re-enqueues it forever (no terminal bound).
+  test("provisional turn with partial content at the floor is finalized extracted (terminal, not stranded)", async () => {
+    const sessionId = seedDerailSession("derail-floor-provisional-partial");
+    // A mid-slice already wrote partial content, moving the turn provisional.
+    // The turn-stop's final slice then derails to the floor.
+    const turnId = insertTurnWithStatus(sessionId, 1, "provisional");
+    updateTurnById(db, turnId, {
+      status: "provisional",
+      title: "Partial title",
+      content: "Partial content from a mid-slice",
+    });
+    expect(getTurnById(db, turnId)?.status).toBe("provisional");
+    queueObs(db, sessionId, turnId, 101, "partial");
+    queueTurnStop(db, sessionId, turnId, 201);
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // the final slice still derails → floor
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.drainSessionCompletely(sessionId);
+
+    // Terminated as extracted (keeps the partial), NOT left provisional.
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
+    // The partial content is preserved.
+    expect(getTurnById(db, turnId)?.content).toBe(
+      "Partial content from a mid-slice",
+    );
+    // And it is no longer stranded — a resume will not re-enqueue it.
+    expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
+      turnId,
+    );
+  });
+
+  test("provisional turn with no content at the floor is finalized failed (terminal, not stranded)", async () => {
+    const sessionId = seedDerailSession("derail-floor-provisional-empty");
+    // Provisional (a mid-slice streamed) but produced no usable extraction
+    // (title/content still null); the final slice derails to the floor.
+    const turnId = insertTurnWithStatus(sessionId, 1, "provisional");
+    expect(getTurnById(db, turnId)?.status).toBe("provisional");
+    expect(getTurnById(db, turnId)?.title).toBeNull();
+    expect(getTurnById(db, turnId)?.content).toBeNull();
+    queueObs(db, sessionId, turnId, 101, "empty");
+    queueTurnStop(db, sessionId, turnId, 201);
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      config: FLOOR_CONFIG,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers → floor
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.drainSessionCompletely(sessionId);
+
+    // Content-less provisional → failed (terminal), not left provisional.
+    expect(getTurnById(db, turnId)?.status).toBe("failed");
+    expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
+      turnId,
+    );
   });
 
   test("session-summary floor abandons refresh (no turn skipped), queue still drains", async () => {
