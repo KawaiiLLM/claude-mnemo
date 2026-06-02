@@ -138,10 +138,20 @@ const deliveryDroppedReason: ReminderReason<DeliveryDroppedData> = {
   pendingTag: DELIVERY_DROPPED_PENDING_TAG,
   notifiedTag: DELIVERY_DROPPED_NOTIFIED_TAG,
   qualifies: (turn) => turn.status !== "undone",
-  data: (turn) => ({
-    notExtracted: turn.status === "active",
-    prompt: turn.status === "active" ? truncatePrompt(turn.userPrompt, 200) : null,
-  }),
+  data: (turn) => {
+    // "Not yet extracted" = an in-progress turn (active/provisional) with no
+    // usable record yet. Restrict to the in-progress statuses so a deliberately
+    // closed `skipped` or terminal `failed` turn (both content-less) is NOT
+    // mislabeled "not yet extracted".
+    const notExtracted =
+      (turn.status === "active" || turn.status === "provisional") &&
+      turn.title === null &&
+      turn.content === null;
+    return {
+      notExtracted,
+      prompt: notExtracted ? truncatePrompt(turn.userPrompt, 200) : null,
+    };
+  },
   flagToken: () => "delivery_dropped",
   parenExtra: (_turn, data) => (data.notExtracted ? "not yet extracted" : null),
   bodyLead: (_turn, data) =>

@@ -148,6 +148,55 @@ describe("delivery-dropped reminder reason (D9)", () => {
     expect(getReminderItems(db, sessionId)).toEqual([]);
   });
 
+  test("content-less provisional turn dropped → shows prompt + not yet extracted", () => {
+    const turnId = seedTurn(db, sessionId, {
+      promptNumber: 8,
+      status: "provisional",
+      title: null,
+      content: null,
+      userPrompt: "Run /goal migration provisional",
+    });
+    flagDeliveryDropped(db, turnId, 100);
+
+    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    expect(envelope).toContain("not yet extracted");
+    expect(envelope).toContain(`prompt="Run /goal migration provisional"`);
+    expect(envelope).toContain(
+      "one or more parts of this turn could not be delivered; record intent if possible",
+    );
+  });
+
+  test("provisional turn WITH content dropped → shows record may be incomplete (no prompt)", () => {
+    const turnId = seedTurn(db, sessionId, {
+      promptNumber: 9,
+      status: "provisional",
+      title: "Partial Title",
+      content: null,
+      userPrompt: "Run /goal migration with title",
+    });
+    flagDeliveryDropped(db, turnId, 100);
+
+    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    expect(envelope).toContain("record may be incomplete");
+    expect(envelope).not.toContain("not yet extracted");
+    expect(envelope).not.toContain(`prompt="`);
+  });
+
+  test("content-less skipped turn dropped → NOT not-yet-extracted (deliberately closed)", () => {
+    const turnId = seedTurn(db, sessionId, {
+      promptNumber: 10,
+      status: "skipped",
+      title: null,
+      content: null,
+      userPrompt: "trivial confirmation",
+    });
+    flagDeliveryDropped(db, turnId, 100);
+
+    const envelope = buildReminderEnvelope(getReminderItems(db, sessionId));
+    expect(envelope).not.toContain("not yet extracted");
+    expect(envelope).not.toContain(`prompt="`);
+  });
+
   test("delivery-dropped and rollback on the same turn merge into one line", () => {
     seedTurn(db, sessionId, {
       promptNumber: 7,
