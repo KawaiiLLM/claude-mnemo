@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.23-mpwvidc7" : "dev";
+var BUILD_ID = true ? "0.2.23-mpww3nub" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1656,10 +1656,13 @@ var deliveryDroppedReason = {
   pendingTag: DELIVERY_DROPPED_PENDING_TAG,
   notifiedTag: DELIVERY_DROPPED_NOTIFIED_TAG,
   qualifies: (turn) => turn.status !== "undone",
-  data: (turn) => ({
-    notExtracted: turn.status === "active",
-    prompt: turn.status === "active" ? truncatePrompt(turn.userPrompt, 200) : null
-  }),
+  data: (turn) => {
+    const notExtracted = (turn.status === "active" || turn.status === "provisional") && turn.title === null && turn.content === null;
+    return {
+      notExtracted,
+      prompt: notExtracted ? truncatePrompt(turn.userPrompt, 200) : null
+    };
+  },
   flagToken: () => "delivery_dropped",
   parenExtra: (_turn, data) => data.notExtracted ? "not yet extracted" : null,
   bodyLead: (_turn, data) => data.notExtracted && data.prompt ? `prompt="${data.prompt}"` : null,
