@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { updateObservation } from "../db/observations";
 import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
-import { getTurnById, updateTurnById } from "../db/turns";
+import { getTurnById, updateTurnById, type TurnStatus } from "../db/turns";
 
 type ToolTextResult = {
   content: Array<{
@@ -19,7 +19,6 @@ type RememberStatus =
   | "active";
 
 type ObservationStatus = "pending" | "extracted" | "skipped";
-type TurnStatus = "active" | "extracted" | "skipped" | "undone";
 
 const TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"] as const;
 const OBSERVATION_REMEMBER_STATUSES = [

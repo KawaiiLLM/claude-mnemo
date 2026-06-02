@@ -345,4 +345,24 @@ describe("turn queries", () => {
     expect(getMaxPromptNumber(db, sessionId)).toBe(11);
   });
 
+  test("updateTurnById accepts the new provisional and failed statuses", () => {
+    const turn = saveTurn(db, {
+      sessionId,
+      promptNumber: 20,
+      userPrompt: "Status test prompt",
+      assistantResponse: "Status test reply",
+      title: "Status test",
+      content: "Testing new statuses",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 2000,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+
+    expect(updateTurnById(db, turn.id, { status: "provisional" })?.status).toBe("provisional");
+    expect(updateTurnById(db, turn.id, { status: "failed" })?.status).toBe("failed");
+  });
+
 });

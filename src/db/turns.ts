@@ -2,7 +2,13 @@ import type { Database } from "bun:sqlite";
 
 import { indexTurnToFTS } from "./search";
 
-export type TurnStatus = "active" | "extracted" | "skipped" | "undone";
+export type TurnStatus =
+  | "active"
+  | "provisional"
+  | "extracted"
+  | "skipped"
+  | "failed"
+  | "undone";
 
 export interface TurnRecord {
   id: number;

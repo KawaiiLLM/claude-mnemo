@@ -2399,7 +2399,7 @@ describe("worker server", () => {
   function insertTurnWithStatus(
     sessionId: number,
     promptNumber: number,
-    status: "active" | "extracted" | "skipped" | "undone",
+    status: "active" | "provisional" | "extracted" | "skipped" | "failed" | "undone",
   ): number {
     return db
       .query<{ id: number }, [number, number, string]>(
