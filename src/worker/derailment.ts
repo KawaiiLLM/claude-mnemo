@@ -32,3 +32,24 @@ export function classifyWorkUnitResponse(s: WorkUnitSignals): WorkUnitVerdict {
   }
   return "resolved";
 }
+
+/** The minimal shape this module needs from a flush unit (avoids importing server types). */
+export type WorkUnitShape =
+  | { kind: "merged"; miniTurns: ReadonlyArray<{ turnId: number }> }
+  | { kind: "slice"; miniTurn: { turnId: number } }
+  | { kind: "session-summary" };
+
+/**
+ * D1 required-id table: every turn-bearing unit must remember its turn id(s) —
+ * merged → all turn ids; any slice (mid or final) → its turn id; only a
+ * standalone session summary is ∅ (refresh optional/idempotent).
+ */
+export function deriveRequiredTargetIds(unit: WorkUnitShape): Set<number> {
+  if (unit.kind === "merged") {
+    return new Set(unit.miniTurns.map((m) => m.turnId));
+  }
+  if (unit.kind === "slice") {
+    return new Set([unit.miniTurn.turnId]);
+  }
+  return new Set();
+}

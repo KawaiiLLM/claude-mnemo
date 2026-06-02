@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   classifyWorkUnitResponse,
+  deriveRequiredTargetIds,
   type WorkUnitSignals,
 } from "../../src/worker/derailment";
 
@@ -85,5 +86,23 @@ describe("classifyWorkUnitResponse", () => {
         rememberedIds: new Set([99]),
       }),
     ).toBe("resolved");
+  });
+});
+
+describe("deriveRequiredTargetIds", () => {
+  test("merged batch requires every mini-turn's id", () => {
+    const ids = deriveRequiredTargetIds({
+      kind: "merged",
+      miniTurns: [{ turnId: 11 }, { turnId: 12 }],
+    });
+    expect([...ids].sort()).toEqual([11, 12]);
+  });
+
+  test("every slice requires its turn id (mid or final — every mini-turn remembers)", () => {
+    expect([...deriveRequiredTargetIds({ kind: "slice", miniTurn: { turnId: 5 } })]).toEqual([5]);
+  });
+
+  test("standalone session summary requires nothing", () => {
+    expect(deriveRequiredTargetIds({ kind: "session-summary" }).size).toBe(0);
   });
 });
