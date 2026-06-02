@@ -17,9 +17,11 @@ import {
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,
+  DerailmentFloorError,
   ensureWorkerPidFile,
   main,
 } from "../../src/worker/server";
+import type { SessionState } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 function createTurn(
@@ -2172,5 +2174,205 @@ describe("worker server", () => {
     } finally {
       globalThis.setInterval = originalSetInterval;
     }
+  });
+
+  // --- Task 9: sendWorkUnit derailment state machine (T2/T3) ---
+
+  // A fake query whose sendPrompt drives the wired onMessage/onRemember to
+  // simulate the agent's response, then returns a result. `rememberIds`
+  // controls which T ids the agent "remembers" on each sendPrompt (default:
+  // none → always a strike). Tracks the resumeAgentSessionId each fake was
+  // built with so the fresh-session (no-resume) path can be asserted.
+  type FakeDeps = {
+    onMessage?: (message: { type?: string; session_id?: string; message?: { content?: unknown } }) => void;
+    onRemember?: (id: string) => void;
+    onPid?: (pid: number | undefined) => void;
+  };
+
+  function makeFakeQueryFactory(opts: {
+    rememberIds?: () => number[];
+    resumes: Array<string | null | undefined>;
+    sentPrompts: string[];
+  }) {
+    return ((...args: unknown[]) => {
+      const input = args[0] as { resumeAgentSessionId?: string | null };
+      const deps = (args.length === 2 ? args[1] : args[3]) as FakeDeps | undefined;
+      opts.resumes.push(input.resumeAgentSessionId);
+      return {
+        sessionId: "fake-agent",
+        queryPid: 999,
+        async sendPrompt(prompt: string) {
+          opts.sentPrompts.push(prompt);
+          // Simulate the agent emitting an assistant text block + remembers.
+          const ids = opts.rememberIds?.() ?? [];
+          deps?.onMessage?.({
+            type: "assistant",
+            session_id: "fake-agent",
+            message: {
+              content: [
+                ...ids.map((id) => ({
+                  type: "tool_use",
+                  name: "mcp__mnemo__remember",
+                  input: { id: `T${id}` },
+                })),
+              ],
+            },
+          });
+          for (const id of ids) {
+            deps?.onRemember?.(`T${id}`);
+          }
+          return { session_id: "fake-agent" };
+        },
+        async close() {},
+      } satisfies WorkerQuerySession;
+    }) as typeof import("../../src/worker/query-session").createWorkerQuerySession;
+  }
+
+  function seedDerailSession(contentSessionId: string): number {
+    return upsertSession(db, {
+      contentSessionId,
+      project: "/tmp/project-derail",
+      title: "Derail title",
+      content: "Derail content",
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+  }
+
+  // Drive the core to create a genuine SessionState (with real pushMessage and
+  // unitSignals wiring) by flushing an empty queue, then return it.
+  async function realState(
+    core: ReturnType<typeof createWorkerCore>,
+    sessionId: number,
+  ): Promise<SessionState> {
+    await core.flushSession(sessionId);
+    return core.sessions.get(sessionId)!;
+  }
+
+  test("sendWorkUnit resolves on first attempt when required id is remembered", async () => {
+    const sessionId = seedDerailSession("derail-resolve-first");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [42],
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    const state = await realState(core, sessionId);
+    await core.sendWorkUnit(state, "<turn id=\"T42\"/>", new Set([42]), true);
+
+    // One initial push, no resends, no re-session.
+    expect(sentPrompts).toHaveLength(1);
+    expect(sentPrompts[0]).not.toContain("did not extract it");
+    expect(resumes).toHaveLength(1); // only the initial session built
+  });
+
+  test("sendWorkUnit completion point: resends up to K then re-sessions then floors", async () => {
+    const sessionId = seedDerailSession("derail-floor");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers → always a strike
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    const state = await realState(core, sessionId);
+
+    await expect(
+      core.sendWorkUnit(state, "<turn id=\"T7\"/>", new Set([7]), true),
+    ).rejects.toBeInstanceOf(DerailmentFloorError);
+
+    // 1 initial + 2 corrective resends (K) on the poisoned session.
+    const poisoned = sentPrompts.filter((p) => p.includes("<turn id=\"T7\"/>"));
+    expect(poisoned).toHaveLength(4); // initial + 2 resends + 1 fresh-session resend
+    // 2 corrective resends before the re-session, then 1 more after.
+    expect(
+      sentPrompts.filter((p) => p.includes("did not extract it")),
+    ).toHaveLength(3);
+    // A fresh session was created (initial + one reopened).
+    expect(resumes.length).toBeGreaterThanOrEqual(2);
+    // The reopened session must NOT resume the poisoned transcript.
+    expect(resumes[resumes.length - 1] ?? null).toBeNull();
+  });
+
+  test("sendWorkUnit mid slice: resends up to K then skips the slice (no re-session, no floor)", async () => {
+    const sessionId = seedDerailSession("derail-mid-slice");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    const state = await realState(core, sessionId);
+
+    // isCompletionPoint=false → after K resends, skip; no throw.
+    await core.sendWorkUnit(state, "<turn id=\"T9\" slice=\"2\"/>", new Set([9]), false);
+
+    // 1 initial + 2 corrective resends, then return.
+    expect(sentPrompts).toHaveLength(3);
+    expect(
+      sentPrompts.filter((p) => p.includes("did not extract it")),
+    ).toHaveLength(2);
+    // No fresh session was created — only the initial session built.
+    expect(resumes).toHaveLength(1);
+    expect(state.querySession).not.toBeNull(); // session was not torn down
+  });
+
+  test("sendWorkUnit cold-start uses a fresh session without resume and is exempt from detection", async () => {
+    const sessionId = seedDerailSession("derail-cold-start");
+    updateLastAgentSessionId(db, sessionId, "poisoned-agent-session");
+    const sentPrompts: string[] = [];
+    const resumes: Array<string | null | undefined> = [];
+    const core = createWorkerCore({
+      db,
+      createWorkerQuerySessionImpl: makeFakeQueryFactory({
+        rememberIds: () => [], // never remembers (irrelevant to cold-start exemption)
+        resumes,
+        sentPrompts,
+      }),
+      isProcessAliveImpl: () => false,
+    });
+
+    const state = await realState(core, sessionId);
+    // Establish the initial session (lazily built on first push); it resumes
+    // the persisted (now poisoned) transcript.
+    await state.pushMessage("warmup");
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0]).toBe("poisoned-agent-session");
+
+    await core.reopenQuerySessionFresh(state);
+
+    // A new fake was built; it must NOT resume the poisoned transcript.
+    expect(resumes).toHaveLength(2);
+    expect(resumes[1] ?? null).toBeNull();
+    // The cold-start render was pushed as CONTEXT ONLY.
+    const coldStart = sentPrompts[sentPrompts.length - 1] ?? "";
+    expect(coldStart).toContain("CONTEXT ONLY");
+    expect(coldStart).toContain(`[S${sessionId}]`);
+    // Signals are reset after the cold-start (exempt from detection).
+    expect(state.unitSignals.rememberedIds.size).toBe(0);
+    expect(state.unitSignals.hadSubstantiveText).toBe(false);
+    expect(state.unitSignals.hadIllegalTool).toBe(false);
+    // agentSessionId was rewritten to the fresh agent by onMessage.
+    expect(state.agentSessionId).toBe("fake-agent");
   });
 });

@@ -70,6 +70,12 @@ import {
   createWorkerQuerySession,
   type WorkerQuerySession,
 } from "./query-session";
+import {
+  buildCorrectiveResend,
+  classifyWorkUnitResponse,
+} from "./derailment";
+import { renderCurrentSessionOutput } from "../mcp/session-output";
+import { buildSessionSummary } from "../mcp/recall";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
@@ -120,6 +126,16 @@ function batchMiniTurns(batch: BatchEntry): MiniTurnPayload[] {
 // Result state machine (D8) — flushOneBatchLocked never throws for control flow.
 type FlushOutcome = "flushed" | "retryLater" | "dropped" | "empty";
 
+// Thrown by sendWorkUnit when a completion-point unit still fails to extract
+// after K corrective resends AND a fresh-session cold-start retry (the
+// derailment floor). The caller (Task 10) decides the drop/flag side effects.
+export class DerailmentFloorError extends Error {
+  constructor(public requiredIds: Set<number>) {
+    super("derailment floor");
+    this.name = "DerailmentFloorError";
+  }
+}
+
 export interface SessionState {
   sessionDbId: number;
   querySession: WorkerQuerySession | null;
@@ -141,6 +157,22 @@ export interface SessionState {
   processingLock: Promise<void>;
   closing?: Promise<void>;
   pushMessage: (prompt: string) => Promise<void>;
+  // Transient per-work-unit signal accumulation (one outgoing message → its
+  // result). Reset before each unit and after a cold-start (D1). The SDK
+  // onMessage stream populates these; sendWorkUnit reads them to classify.
+  unitSignals: {
+    rememberedIds: Set<number>;
+    hadSubstantiveText: boolean;
+    hadIllegalTool: boolean;
+  };
+}
+
+// Clear the transient per-work-unit signals between units (and after a
+// cold-start render, which is exempt from derailment detection).
+function resetUnitSignals(state: SessionState): void {
+  state.unitSignals.rememberedIds.clear();
+  state.unitSignals.hadSubstantiveText = false;
+  state.unitSignals.hadIllegalTool = false;
 }
 
 export interface WorkerCoreDeps {
@@ -206,6 +238,15 @@ export interface WorkerCore {
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
   runRetryTick(nowMs?: number): Promise<void>;
+  // D1/T2/T3 derailment state machine. Task 10 wires the flush callers to it;
+  // exposed here so it can be unit-tested in isolation.
+  sendWorkUnit(
+    state: SessionState,
+    message: string,
+    requiredIds: Set<number>,
+    isCompletionPoint: boolean,
+  ): Promise<void>;
+  reopenQuerySessionFresh(state: SessionState): Promise<void>;
 }
 
 function defaultNoopDrain(): Promise<void> {
@@ -667,6 +708,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       lastMessageAt: 0,
       lastActivity: nowMs(),
       processingLock: Promise.resolve(),
+      unitSignals: {
+        rememberedIds: new Set<number>(),
+        hadSubstantiveText: false,
+        hadIllegalTool: false,
+      },
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
         const mainTranscriptPath =
@@ -746,7 +792,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return state;
   }
 
-  function ensureQuerySession(state: SessionState): WorkerQuerySession {
+  // forceFresh (T3): build a brand-new query that NEVER resumes the (poisoned)
+  // agent transcript and does NOT seed state.agentSessionId from the persisted
+  // lastAgentSessionId — the caller re-cold-starts the worker on it.
+  function ensureQuerySession(
+    state: SessionState,
+    options: { forceFresh?: boolean } = {},
+  ): WorkerQuerySession {
     if (state.querySession) {
       return state.querySession;
     }
@@ -760,7 +812,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state.project = session.project;
     state.nextBatchNeedsSessionContext =
       state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
-    if (session.lastAgentSessionId) {
+    if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
     state.querySession = createWorkerQuerySessionImpl(
@@ -770,7 +822,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         contentSessionId: session.contentSessionId,
         project: session.project,
         config,
-        resumeAgentSessionId: session.lastAgentSessionId,
+        resumeAgentSessionId: options.forceFresh
+          ? null
+          : session.lastAgentSessionId,
       },
       {
         onMessage: (message) => {
@@ -800,14 +854,133 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
               }
             }
           }
+          // D1 signal accumulation: inspect assistant content blocks for this
+          // work unit. thinking blocks are ignored; substantive text and any
+          // non-mnemo tool_use are strikes.
+          if (
+            message.type === "assistant" &&
+            Array.isArray((message as { message?: { content?: unknown } }).message?.content)
+          ) {
+            const content = (
+              message as { message: { content: Array<Record<string, unknown>> } }
+            ).message.content;
+            for (const block of content) {
+              if (
+                block.type === "text" &&
+                typeof block.text === "string" &&
+                block.text.trim().length > 0
+              ) {
+                state!.unitSignals.hadSubstantiveText = true;
+              } else if (
+                block.type === "tool_use" &&
+                typeof block.name === "string" &&
+                block.name !== "mcp__mnemo__remember" &&
+                block.name !== "mcp__mnemo__recall"
+              ) {
+                state!.unitSignals.hadIllegalTool = true;
+              }
+            }
+          }
         },
         onPid: (pid) => {
           state!.queryPid = pid;
+        },
+        onRemember: (id: string) => {
+          const m = /^T(\d+)$/i.exec(id);
+          if (m) {
+            state!.unitSignals.rememberedIds.add(Number(m[1]));
+          }
         },
       },
     );
 
     return state.querySession;
+  }
+
+  function ensureQuerySessionFresh(state: SessionState): WorkerQuerySession {
+    return ensureQuerySession(state, { forceFresh: true });
+  }
+
+  // Tear down the current (poisoned) query and bring up a brand-new one that
+  // never resumes the old transcript (T3). Re-cold-start it with the shared
+  // SessionStart render so the fresh agent has the session's structured state;
+  // the cold-start response is exempt from derailment detection.
+  async function reopenQuerySessionFresh(state: SessionState): Promise<void> {
+    try {
+      await state.querySession?.close();
+    } catch {
+      /* best-effort */
+    }
+    state.querySession = null;
+    state.agentSessionId = undefined;
+    const runtime = ensureQuerySessionFresh(state);
+    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
+    const session = getSession(deps.db, state.sessionDbId);
+    if (formatted && session) {
+      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
+      resetUnitSignals(state);
+      await runtime.sendPrompt(
+        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${coldStart}\n</context>`,
+      );
+    }
+    resetUnitSignals(state); // cold-start response is exempt from detection
+  }
+
+  const MAX_REMINDERS = 2; // K
+
+  // D1/T2/T3 work-unit state machine. Sends `message`, classifies the agent's
+  // response against `requiredIds`, and on a strike escalates: up to K
+  // corrective resends (T2), then — only at a completion point — one fresh
+  // session + cold start (T3); if that still fails, throw DerailmentFloorError.
+  // A streaming mid slice (isCompletionPoint=false) is skipped after the
+  // resends with no re-session and no floor.
+  async function sendWorkUnit(
+    state: SessionState,
+    message: string,
+    requiredIds: Set<number>,
+    isCompletionPoint: boolean,
+  ): Promise<void> {
+    const evaluate = () =>
+      classifyWorkUnitResponse({
+        requiredIds,
+        rememberedIds: state.unitSignals.rememberedIds,
+        hadSubstantiveText: state.unitSignals.hadSubstantiveText,
+        hadIllegalTool: state.unitSignals.hadIllegalTool,
+      });
+
+    resetUnitSignals(state);
+    await state.pushMessage(message);
+    if (evaluate() === "resolved") {
+      return;
+    }
+
+    for (let i = 0; i < MAX_REMINDERS; i++) {
+      resetUnitSignals(state);
+      await state.pushMessage(buildCorrectiveResend(message));
+      if (evaluate() === "resolved") {
+        return;
+      }
+    }
+
+    // Streaming mid slice: skip the slice, leave the turn row as-is, continue.
+    // No re-session, no floor (a later slice / the final slice carries the turn).
+    if (!isCompletionPoint) {
+      logger.warn?.("derailment: skipping mid slice after reminders", {
+        sessionDbId: state.sessionDbId,
+        requiredIds: [...requiredIds],
+      });
+      return;
+    }
+
+    // T3 (completion points only): fresh session + cold start, reprocess once.
+    await reopenQuerySessionFresh(state);
+    resetUnitSignals(state);
+    await state.pushMessage(buildCorrectiveResend(message));
+    if (evaluate() === "resolved") {
+      return;
+    }
+
+    throw new DerailmentFloorError(requiredIds);
   }
 
   async function closeSessionQuery(sessionDbId: number): Promise<void> {
@@ -1506,6 +1679,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
+    sendWorkUnit,
+    reopenQuerySessionFresh,
     async abortStalledSessions(nowMsOverride?: number): Promise<void> {
       const currentMs = nowMsOverride ?? nowMs();
       await Promise.all(
