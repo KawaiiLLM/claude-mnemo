@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.22-mpwkw7t7" : "dev";
+var BUILD_ID = true ? "0.2.22-mpwlbhps" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40055,7 +40055,7 @@ function classifyWorkUnitResponse(s) {
       return "strike";
     }
   }
-  if (s.requiredIds.size === 0 && s.hadSubstantiveText && !s.hadSessionRemember) {
+  if (s.requiredIds.size === 0 && s.hadSubstantiveText && !s.rememberedSessionIds.has(s.sessionDbId)) {
     return "strike";
   }
   return "resolved";
@@ -40162,7 +40162,7 @@ var DerailmentFloorError = class extends Error {
 };
 function resetUnitSignals(state) {
   state.unitSignals.rememberedIds.clear();
-  state.unitSignals.hadSessionRemember = false;
+  state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
 }
@@ -40495,7 +40495,7 @@ function createWorkerCore(deps) {
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: /* @__PURE__ */ new Set(),
-        hadSessionRemember: false,
+        rememberedSessionIds: /* @__PURE__ */ new Set(),
         hadSubstantiveText: false,
         hadIllegalTool: false
       },
@@ -40638,8 +40638,9 @@ ${prompt}` : prompt;
             state.unitSignals.rememberedIds.add(Number(t[1]));
             return;
           }
-          if (/^S(\d+)$/i.test(id)) {
-            state.unitSignals.hadSessionRemember = true;
+          const sMatch = /^S(\d+)$/i.exec(id);
+          if (sMatch) {
+            state.unitSignals.rememberedSessionIds.add(Number(sMatch[1]));
           }
         }
       }
@@ -40675,7 +40676,8 @@ ${coldStart}
     const evaluate = () => classifyWorkUnitResponse({
       requiredIds,
       rememberedIds: state.unitSignals.rememberedIds,
-      hadSessionRemember: state.unitSignals.hadSessionRemember,
+      rememberedSessionIds: state.unitSignals.rememberedSessionIds,
+      sessionDbId: state.sessionDbId,
       hadSubstantiveText: state.unitSignals.hadSubstantiveText,
       hadIllegalTool: state.unitSignals.hadIllegalTool
     });
