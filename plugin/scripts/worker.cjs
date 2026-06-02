@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.22-mpwkmxy6" : "dev";
+var BUILD_ID = true ? "0.2.22-mpwkw7t7" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40055,7 +40055,7 @@ function classifyWorkUnitResponse(s) {
       return "strike";
     }
   }
-  if (s.requiredIds.size === 0 && s.hadSubstantiveText && s.rememberedIds.size === 0) {
+  if (s.requiredIds.size === 0 && s.hadSubstantiveText && !s.hadSessionRemember) {
     return "strike";
   }
   return "resolved";
@@ -40162,6 +40162,7 @@ var DerailmentFloorError = class extends Error {
 };
 function resetUnitSignals(state) {
   state.unitSignals.rememberedIds.clear();
+  state.unitSignals.hadSessionRemember = false;
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
 }
@@ -40494,6 +40495,7 @@ function createWorkerCore(deps) {
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: /* @__PURE__ */ new Set(),
+        hadSessionRemember: false,
         hadSubstantiveText: false,
         hadIllegalTool: false
       },
@@ -40631,9 +40633,13 @@ ${prompt}` : prompt;
           state.queryPid = pid;
         },
         onRemember: (id) => {
-          const m = /^T(\d+)$/i.exec(id);
-          if (m) {
-            state.unitSignals.rememberedIds.add(Number(m[1]));
+          const t = /^T(\d+)$/i.exec(id);
+          if (t) {
+            state.unitSignals.rememberedIds.add(Number(t[1]));
+            return;
+          }
+          if (/^S(\d+)$/i.test(id)) {
+            state.unitSignals.hadSessionRemember = true;
           }
         }
       }
@@ -40669,6 +40675,7 @@ ${coldStart}
     const evaluate = () => classifyWorkUnitResponse({
       requiredIds,
       rememberedIds: state.unitSignals.rememberedIds,
+      hadSessionRemember: state.unitSignals.hadSessionRemember,
       hadSubstantiveText: state.unitSignals.hadSubstantiveText,
       hadIllegalTool: state.unitSignals.hadIllegalTool
     });
