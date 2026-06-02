@@ -55,6 +55,7 @@ export interface WorkerQuerySessionDeps {
   isProcessAliveImpl?: (pid: number) => boolean;
   onMessage?: (message: SDKMessage) => void;
   onPid?: (pid: number | undefined) => void;
+  onRemember?: (id: string) => void;
 }
 
 export interface WorkerQuerySession {
@@ -200,6 +201,7 @@ export function createWorkerQuerySession(
     mnemo: createMnemoSdkServer(input.db, input.project, {
       createSdkMcpServerImpl,
       toolImpl,
+      onRemember: deps.onRemember,
     }),
   };
 

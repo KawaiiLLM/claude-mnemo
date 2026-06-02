@@ -66,6 +66,7 @@ export function createMnemoSdkServer(
   deps: {
     createSdkMcpServerImpl: typeof createSdkMcpServer;
     toolImpl: typeof tool;
+    onRemember?: (id: string) => void;
   } = {
     createSdkMcpServerImpl: createSdkMcpServer,
     toolImpl: tool,
@@ -87,7 +88,13 @@ export function createMnemoSdkServer(
         "remember",
         MNEMO_TOOL_DESCRIPTIONS.remember,
         rememberInputShape,
-        async (args) => handlers.remember(args as Record<string, unknown>),
+        async (args) => {
+          const id = (args as { id?: unknown }).id;
+          if (typeof id === "string") {
+            deps.onRemember?.(id);
+          }
+          return handlers.remember(args as Record<string, unknown>);
+        },
       ),
       deps.toolImpl(
         "recall",
