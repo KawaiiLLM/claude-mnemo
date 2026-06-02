@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.23-mpww3nub" : "dev";
+var BUILD_ID = true ? "0.2.23-mpwwdvnz" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -638,7 +638,7 @@ function updateCompactAnchor(db, sessionId) {
      SET last_compact_turn = (
        SELECT MAX(prompt_number) FROM turns
        WHERE session_id = ?
-         AND status != 'active'
+         AND status NOT IN ('active', 'provisional')
      )
      WHERE id = ?`
   ).run(sessionId, sessionId);
