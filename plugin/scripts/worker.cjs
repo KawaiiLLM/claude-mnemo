@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.23-mpwuxsuw" : "dev";
+var BUILD_ID = true ? "0.2.23-mpwvidc7" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40721,13 +40721,23 @@ ${coldStart}
     }
     for (const turnId of unresolved) {
       const turn = getTurnById(deps.db, turnId);
-      if (turn && turn.status === "active") {
+      if (!turn) {
+        continue;
+      }
+      const hasContent = turn.title !== null || turn.content !== null;
+      if (turn.status === "extracted" || hasContent) {
+        if (turn.status !== "extracted") {
+          updateTurnById(deps.db, turnId, { status: "extracted" });
+        }
+        logger.warn?.(
+          "derailment floor: keeping partial extraction (finalized extracted)",
+          { turnId }
+        );
+      } else {
         updateTurnById(deps.db, turnId, { status: "failed" });
         logger.warn?.("derailment floor: turn failed (no extraction)", {
           turnId
         });
-      } else {
-        logger.warn?.("derailment floor: keeping partial extraction", { turnId });
       }
     }
   }
