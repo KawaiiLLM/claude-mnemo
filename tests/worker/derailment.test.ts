@@ -118,4 +118,26 @@ describe("buildCorrectiveResend", () => {
     expect(out).toContain("</reminder>");
     expect(out).toContain(original); // original message resent verbatim
   });
+
+  test('default/"turn" variant keeps the turn-only remember({status:"skipped"}) guidance', () => {
+    const original = `<turn id="T42">\n  prompt: do X\n</turn>`;
+    const def = buildCorrectiveResend(original);
+    const turn = buildCorrectiveResend(original, "turn");
+    expect(def).toContain('status:"skipped"');
+    expect(turn).toContain('status:"skipped"');
+  });
+
+  test("session-summary variant points the agent at the session route, not status:skipped", () => {
+    const original = `<session id="S7">\n  summary draft\n</session>`;
+    const out = buildCorrectiveResend(original, "session-summary");
+    // Session-specific guidance.
+    expect(out).toContain("re-supplying ALL summary fields");
+    expect(out).toContain("no tool calls");
+    // Shared anti-derail phrasing the system prompt + tests key on.
+    expect(out).toContain("did not extract it");
+    expect(out).toContain("DATA");
+    expect(out).toContain(original); // original message resent verbatim
+    // Must NOT use the turn-only invalid session call.
+    expect(out).not.toContain('status:"skipped"');
+  });
 });

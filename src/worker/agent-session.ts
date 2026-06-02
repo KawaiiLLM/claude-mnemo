@@ -18,6 +18,7 @@ import {
   createDatabaseBackedHandlers,
   type MnemoToolHandlers,
 } from "../mcp/handlers";
+import { isRememberSuccess } from "../mcp/remember";
 
 interface ClaudeExecutableResolverDeps {
   existsSync: (path: string) => boolean;
@@ -90,10 +91,11 @@ export function createMnemoSdkServer(
         rememberInputShape,
         async (args) => {
           const id = (args as { id?: unknown }).id;
-          if (typeof id === "string") {
+          const result = await handlers.remember(args as Record<string, unknown>);
+          if (typeof id === "string" && isRememberSuccess(result)) {
             deps.onRemember?.(id);
           }
-          return handlers.remember(args as Record<string, unknown>);
+          return result;
         },
       ),
       deps.toolImpl(

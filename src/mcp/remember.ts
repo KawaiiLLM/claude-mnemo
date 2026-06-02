@@ -66,6 +66,16 @@ function parameterError(message: string): ToolTextResult {
   return textResult(`Parameter error: ${message}`);
 }
 
+/**
+ * A remember result is a successful write iff its text is one of the "Updated …"
+ * confirmations (handleTurnRemember/handleObservationRemember/handleSessionRemember).
+ * Failures are parameterError("Parameter error: …") or "… not found.".
+ */
+export function isRememberSuccess(result: { content: Array<{ type: string; text?: string }> }): boolean {
+  const text = result.content?.[0]?.text ?? "";
+  return text.startsWith("Updated ");
+}
+
 function parseSessionId(value: string): number | null {
   const match = /^S(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1]!, 10) : null;

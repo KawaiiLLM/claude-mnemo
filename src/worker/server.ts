@@ -973,6 +973,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         hadIllegalTool: state.unitSignals.hadIllegalTool,
       });
 
+    // Only a standalone session summary has an empty required set; its
+    // corrective resend must point the agent at the session route (re-supply
+    // all summary fields), never remember({status:"skipped"}) (turn-only).
+    const resendKind = requiredIds.size === 0 ? "session-summary" : "turn";
+
     resetUnitSignals(state);
     await state.pushMessage(message);
     if (evaluate() === "resolved") {
@@ -981,7 +986,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     for (let i = 0; i < MAX_REMINDERS; i++) {
       resetUnitSignals(state);
-      await state.pushMessage(buildCorrectiveResend(message));
+      await state.pushMessage(buildCorrectiveResend(message, resendKind));
       if (evaluate() === "resolved") {
         return;
       }
@@ -1000,7 +1005,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // T3 (completion points only): fresh session + cold start, reprocess once.
     await reopenQuerySessionFresh(state);
     resetUnitSignals(state);
-    await state.pushMessage(buildCorrectiveResend(message));
+    await state.pushMessage(buildCorrectiveResend(message, resendKind));
     if (evaluate() === "resolved") {
       return;
     }
