@@ -653,7 +653,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.21-mpwagks7" : "dev";
+var BUILD_ID = true ? "0.2.22-mpwjwhqm" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1724,6 +1724,21 @@ function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId)
   ).get(sessionId, contentPromptId, turnId) !== null;
 }
 
+// src/mcp/turn-pointers.ts
+var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
+function resolveTurnPointers(db, sessionId, text) {
+  if (!text || !text.includes("[T")) {
+    return text;
+  }
+  return text.replace(TURN_POINTER_PATTERN, (literal, idDigits) => {
+    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
+    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
+      return literal;
+    }
+    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
+  });
+}
+
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
@@ -2526,19 +2541,55 @@ function renderTimeline(view, options = {}) {
   ].join("\n");
 }
 
-// src/mcp/turn-pointers.ts
-var TURN_POINTER_PATTERN = /\[T(\d+)\]/g;
-function resolveTurnPointers(db, sessionId, text) {
-  if (!text || !text.includes("[T")) {
-    return text;
-  }
-  return text.replace(TURN_POINTER_PATTERN, (literal, idDigits) => {
-    const turn = getTurnById(db, Number.parseInt(idDigits, 10));
-    if (!turn || turn.sessionId !== sessionId || turn.status === "undone") {
-      return literal;
+// src/mcp/session-output.ts
+function renderCurrentSessionOutput(db, session, sessionRecord) {
+  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
+  const pushField = (label, value) => {
+    if (value) {
+      lines.push(`  ${label}: ${value}`);
     }
-    return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
-  });
+  };
+  const pushBulletLines = (items) => {
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    pushBulletLines(items);
+  };
+  pushField("content", session.content);
+  if (session.decision) {
+    pushBulletField("decision", session.decision);
+  } else {
+    const insightLines = session.insight ?? [];
+    if (insightLines.length > 0) {
+      lines.push("  insight:");
+      pushBulletLines(insightLines);
+    }
+  }
+  pushBulletField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushBulletField("reference", session.reference);
+  try {
+    const timelineView = buildContextTimelineView(db, sessionRecord.id);
+    lines.push("");
+    lines.push(
+      renderTimeline(timelineView, {
+        promptCap: 80,
+        showEarlierHint: true,
+        milestones: true,
+        phases: false
+      })
+    );
+  } catch {
+  }
+  return lines.join("\n");
 }
 
 // src/hooks/handlers/context.ts
@@ -2614,55 +2665,6 @@ function buildSessionView(db, session, metrics) {
     observationCount: metrics?.observationCount ?? 0,
     jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId)
   };
-}
-function buildCurrentSessionOutput(db, session, sessionRecord) {
-  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const pushField = (label, value) => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  const pushBulletLines = (items) => {
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    pushBulletLines(items);
-  };
-  pushField("content", session.content);
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else {
-    const insightLines = session.insight ?? [];
-    if (insightLines.length > 0) {
-      lines.push("  insight:");
-      pushBulletLines(insightLines);
-    }
-  }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-  try {
-    const timelineView = buildContextTimelineView(db, sessionRecord.id);
-    lines.push("");
-    lines.push(
-      renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true,
-        milestones: true,
-        phases: false
-      })
-    );
-  } catch {
-  }
-  return lines.join("\n");
 }
 function classifyTimeGroup(epochSeconds, now) {
   const target = new Date(epochSeconds * 1e3);
@@ -2751,7 +2753,7 @@ function buildContextOutput(db, input) {
     ...includeCurrentSession ? [
       "## Current Session",
       "",
-      buildCurrentSessionOutput(db, primarySession, primarySessionRecord),
+      renderCurrentSessionOutput(db, primarySession, primarySessionRecord),
       ""
     ] : [],
     "## Recent Sessions",
