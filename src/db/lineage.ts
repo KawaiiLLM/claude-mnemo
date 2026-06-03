@@ -1,5 +1,20 @@
 import type { Database } from "bun:sqlite";
 
+export function linkIntraSessionChain(db: Database, sessionDbId: number): void {
+  db.query(
+    `UPDATE turns SET parent_turn_id = (
+       SELECT p.id FROM turns p
+       WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       ORDER BY p.prompt_number DESC LIMIT 1
+     )
+     WHERE session_id = ? AND parent_turn_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM turns p
+         WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       )`,
+  ).run(sessionDbId);
+}
+
 export type Ownership = "foreign" | "child" | "unknown";
 
 export interface OwnerInfo {
