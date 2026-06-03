@@ -3,10 +3,12 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  backfillAllIntraChains,
   initializeDatabase,
   initializeSchema,
 } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
+import { getTurnById } from "../../src/db/turns";
 import * as searchModule from "../../src/db/search";
 
 describe("initializeSchema", () => {
@@ -809,6 +811,80 @@ describe("initializeSchema", () => {
     expect(sessCols).toContain("lineage_status");
     const sid = upsertSession(db, { contentSessionId: "c1", project: "p", title: null, insight: null, createdAtEpoch: 1, updatedAtEpoch: null, completedAtEpoch: null }).id;
     expect(getSession(db, sid)?.lineageStatus).toBe("unchecked");
+    db.close();
+  });
+
+  test("backfillAllIntraChains links every session's intra-session chain", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    // Seed session A
+    const sidA = db
+      .query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('sess-a', 'p', 1) RETURNING id",
+      )
+      .get()!.id;
+    const a1 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidA}, 1, 'active', 10) RETURNING id`,
+      )
+      .get()!.id;
+    const a2 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidA}, 2, 'active', 11) RETURNING id`,
+      )
+      .get()!.id;
+    const a3 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidA}, 3, 'active', 12) RETURNING id`,
+      )
+      .get()!.id;
+
+    // Seed session B
+    const sidB = db
+      .query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('sess-b', 'p', 2) RETURNING id",
+      )
+      .get()!.id;
+    const b1 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidB}, 1, 'active', 20) RETURNING id`,
+      )
+      .get()!.id;
+    const b2 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidB}, 2, 'active', 21) RETURNING id`,
+      )
+      .get()!.id;
+    const b3 = db
+      .query<{ id: number }, []>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (${sidB}, 3, 'active', 22) RETURNING id`,
+      )
+      .get()!.id;
+
+    backfillAllIntraChains(db);
+
+    // Session A: each non-first turn links to predecessor; first turn stays NULL
+    expect(getTurnById(db, a1)!.parentTurnId).toBeNull();
+    expect(getTurnById(db, a2)!.parentTurnId).toBe(a1);
+    expect(getTurnById(db, a3)!.parentTurnId).toBe(a2);
+
+    // Session B: same, no cross-session links
+    expect(getTurnById(db, b1)!.parentTurnId).toBeNull();
+    expect(getTurnById(db, b2)!.parentTurnId).toBe(b1);
+    expect(getTurnById(db, b3)!.parentTurnId).toBe(b2);
+
+    // No cross-session contamination: a-series and b-series are disjoint
+    // (already guaranteed by b2→b1, not b1→a3 etc., but explicit check)
+    expect(getTurnById(db, b2)!.parentTurnId).not.toBe(a1);
+    expect(getTurnById(db, b2)!.parentTurnId).not.toBe(a2);
+
+    // Idempotent: re-running changes nothing
+    backfillAllIntraChains(db);
+    expect(getTurnById(db, a2)!.parentTurnId).toBe(a1);
+    expect(getTurnById(db, a3)!.parentTurnId).toBe(a2);
+    expect(getTurnById(db, b2)!.parentTurnId).toBe(b1);
+
     db.close();
   });
 
