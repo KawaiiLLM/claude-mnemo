@@ -6,7 +6,7 @@ import {
   initializeDatabase,
   initializeSchema,
 } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSession, upsertSession } from "../../src/db/sessions";
 import * as searchModule from "../../src/db/search";
 
 describe("initializeSchema", () => {
@@ -63,6 +63,8 @@ describe("initializeSchema", () => {
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
+      "parent_session_id",
+      "lineage_status",
     ]);
   });
 
@@ -381,6 +383,8 @@ describe("initializeSchema", () => {
       "created_at_epoch",
       "updated_at_epoch",
       "completed_at_epoch",
+      "parent_session_id",
+      "lineage_status",
     ]);
     expect(observationColumns).toEqual([
       "id",
@@ -792,6 +796,19 @@ describe("initializeSchema", () => {
       .get()!;
     expect(turnRows.n).toBe(1);
 
+    db.close();
+  });
+
+  test("lineage columns exist with defaults", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const turnCols = db.query<{ name: string }, []>(`SELECT name FROM pragma_table_info('turns')`).all().map((r) => r.name);
+    const sessCols = db.query<{ name: string }, []>(`SELECT name FROM pragma_table_info('sessions')`).all().map((r) => r.name);
+    expect(turnCols).toContain("parent_turn_id");
+    expect(sessCols).toContain("parent_session_id");
+    expect(sessCols).toContain("lineage_status");
+    const sid = upsertSession(db, { contentSessionId: "c1", project: "p", title: null, insight: null, createdAtEpoch: 1, updatedAtEpoch: null, completedAtEpoch: null }).id;
+    expect(getSession(db, sid)?.lineageStatus).toBe("unchecked");
     db.close();
   });
 

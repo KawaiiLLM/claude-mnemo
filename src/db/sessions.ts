@@ -17,6 +17,8 @@ export interface SessionRecord {
   lastCompactTurn: number | null;
   lastAgentSessionId: string | null;
   summaryUpdatedAtEpoch: number | null;
+  parentSessionId: number | null;
+  lineageStatus: string;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
   completedAtEpoch: number | null;
@@ -57,6 +59,8 @@ const SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -109,6 +113,8 @@ export function upsertSession(
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -205,6 +211,8 @@ export function updateSessionSummaryRewrite(
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch

@@ -99,6 +99,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureForkLineageColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -152,6 +153,15 @@ function ensureTurnInvalidationColumns(db: Database): void {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
     );
   }
+}
+
+function ensureForkLineageColumns(db: Database): void {
+  if (!hasColumn(db, "turns", "parent_turn_id"))
+    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+  if (!hasColumn(db, "sessions", "parent_session_id"))
+    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
+  if (!hasColumn(db, "sessions", "lineage_status"))
+    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
 }
 
 function ensureSessionProjectIndex(db: Database): void {

@@ -29,6 +29,7 @@ export interface TurnRecord {
   filesRead: string[];
   filesModified: string[];
   toolCallCount: number | null;
+  parentTurnId: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -52,6 +53,7 @@ interface TurnRow {
   filesRead: string | null;
   filesModified: string | null;
   toolCallCount: number | null;
+  parentTurnId: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -76,6 +78,7 @@ const TURN_SELECT = `
     files_read AS filesRead,
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
+    parent_turn_id AS parentTurnId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -105,6 +108,7 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
     tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
+    parentTurnId: row.parentTurnId ?? null,
   };
 }
 
@@ -243,6 +247,7 @@ export function updateTurnById(
             files_read AS filesRead,
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
+            parent_turn_id AS parentTurnId,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `,
