@@ -692,7 +692,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.24-mpxycina" : "dev";
+var BUILD_ID = true ? "0.2.24-mpy0ky1u" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -3874,22 +3874,26 @@ function linkIntraSessionChain(db, sessionDbId) {
        )`
   ).run(sessionDbId);
 }
+var OWNERSHIP_QUERY_CHUNK = 500;
 function classifyPromptOwnership(db, childSessionId, promptIds) {
   const result = /* @__PURE__ */ new Map();
   for (const p of promptIds) result.set(p, { ownership: "unknown", owners: [] });
   if (promptIds.length === 0) return result;
-  const placeholders = promptIds.map(() => "?").join(",");
-  const rows = db.query(
-    `SELECT content_prompt_id, session_id, id AS turn_id, prompt_number
-       FROM turns
-       WHERE content_prompt_id IN (${placeholders}) AND content_prompt_id IS NOT NULL`
-  ).all(...promptIds);
-  for (const row of rows) {
-    result.get(row.content_prompt_id).owners.push({
-      sessionId: row.session_id,
-      turnId: row.turn_id,
-      promptNumber: row.prompt_number
-    });
+  for (let start = 0; start < promptIds.length; start += OWNERSHIP_QUERY_CHUNK) {
+    const chunk = promptIds.slice(start, start + OWNERSHIP_QUERY_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db.query(
+      `SELECT content_prompt_id, session_id, id AS turn_id, prompt_number
+         FROM turns
+         WHERE content_prompt_id IN (${placeholders}) AND content_prompt_id IS NOT NULL`
+    ).all(...chunk);
+    for (const row of rows) {
+      result.get(row.content_prompt_id).owners.push({
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        promptNumber: row.prompt_number
+      });
+    }
   }
   for (const [, e] of result) {
     if (e.owners.length === 0) {
@@ -3992,6 +3996,7 @@ function resolveSessionLineage(db, childSessionId, transcriptPath) {
   if (!transcriptPath) return { status: "unresolved" };
   const entries = readAllTranscriptEntries(transcriptPath);
   const ordered = collectOrderedPromptIds(entries);
+  if (ordered.length === 0) return { status: "unresolved" };
   const own = classifyPromptOwnership(
     db,
     childSessionId,
@@ -4190,14 +4195,12 @@ function createStopHandler(dependencies) {
           epoch
         );
       }
-      if (input.transcriptPath) {
-        relinkSessionLineage(
-          dependencies.db,
-          session.id,
-          input.transcriptPath,
-          epoch
-        );
-      }
+      relinkSessionLineage(
+        dependencies.db,
+        session.id,
+        input.transcriptPath ?? null,
+        epoch
+      );
       recoverStrandedAncestors(dependencies.db, session.id, epoch);
       for (const orphanTurn of orphanTurns) {
         dependencies.db.query(
