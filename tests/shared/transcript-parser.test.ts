@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 
 import {
   buildPromptIdLineMap,
+  collectOrderedPromptIds,
   countUserPromptsInTranscript,
   extractAssistantResponse,
   parseReplayTranscript,
@@ -880,6 +881,37 @@ describe("parseTranscript", () => {
     directories.push(transcript.directory);
 
     expect(countUserPromptsInTranscript(transcript.path)).toBe(3);
+  });
+
+  test("preserves logicalParentUuid and collects ordered promptIds", () => {
+    const transcript = writeTranscript([
+      {
+        type: "user",
+        promptId: "pA",
+        uuid: "u1",
+        message: { role: "user", content: "hi" },
+      },
+      {
+        type: "system",
+        subtype: "compact_boundary",
+        uuid: "b1",
+        logicalParentUuid: "u1",
+      },
+      {
+        type: "user",
+        promptId: "pB",
+        uuid: "u2",
+        message: { role: "user", content: "next" },
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const entries = readAllTranscriptEntries(transcript.path);
+    expect(entries.find((e) => e.subtype === "compact_boundary")?.logicalParentUuid).toBe("u1");
+    expect(collectOrderedPromptIds(entries)).toEqual([
+      { promptId: "pA", index: 0 },
+      { promptId: "pB", index: 2 },
+    ]);
   });
 
   test("readAllTranscriptEntries skips malformed JSONL lines and returns surrounding entries", () => {
