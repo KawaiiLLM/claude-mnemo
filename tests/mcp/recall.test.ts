@@ -549,3 +549,268 @@ describe("recallMemory", () => {
     expect(pageCount).toBe(total); // pageSize:1 => pageCount === total
   });
 });
+
+describe("fork-lineage breadcrumb in recall", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("forked session shows breadcrumb with fork turn in header (collapsed)", () => {
+    // Parent session
+    const parent = upsertSession(db, {
+      contentSessionId: "parent-session",
+      project: "test-project",
+      title: "Parent session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Insert a turn in parent at promptNumber=3
+    const parentTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?)
+         RETURNING id`,
+      )
+      .get(parent.id, 3, 1_001)!.id;
+
+    // Child (forked) session
+    const child = upsertSession(db, {
+      contentSessionId: "child-session",
+      project: "test-project",
+      title: "Child session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 2_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Set parent_session_id on child
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    // Insert child's first turn with parent_turn_id pointing to parent's T3
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, parent_turn_id, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?)`,
+    ).run(child.id, 1, parentTurnId, 2_001);
+
+    const output = recallMemory(db, { id: `S${child.id}`, depth: "collapsed" });
+
+    expect(output).toContain(`continues from S${parent.id} (forked at T3)`);
+  });
+
+  test("forked session shows breadcrumb in expanded recall header", () => {
+    const parent = upsertSession(db, {
+      contentSessionId: "parent-exp",
+      project: "test-project",
+      title: "Parent exp",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const parentTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?)
+         RETURNING id`,
+      )
+      .get(parent.id, 7, 1_001)!.id;
+
+    const child = upsertSession(db, {
+      contentSessionId: "child-exp",
+      project: "test-project",
+      title: "Child exp",
+      content: null,
+      insight: null,
+      createdAtEpoch: 2_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, parent_turn_id, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?)`,
+    ).run(child.id, 1, parentTurnId, 2_001);
+
+    const output = recallMemory(db, { id: `S${child.id}`, depth: "expanded" });
+
+    expect(output).toContain(`continues from S${parent.id} (forked at T7)`);
+  });
+
+  test("non-forked session shows no breadcrumb", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "standalone",
+      project: "test-project",
+      title: "Standalone session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const output = recallMemory(db, { id: `S${session.id}`, depth: "collapsed" });
+
+    expect(output).not.toContain("continues from");
+  });
+
+  test("null-tolerant: breadcrumb shows parent without fork turn when parent_turn_id is null", () => {
+    const parent = upsertSession(db, {
+      contentSessionId: "parent-null-tol",
+      project: "test-project",
+      title: "Parent null-tol",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const child = upsertSession(db, {
+      contentSessionId: "child-null-tol",
+      project: "test-project",
+      title: "Child null-tol",
+      content: null,
+      insight: null,
+      createdAtEpoch: 2_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    // First turn with NULL parent_turn_id
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?)`,
+    ).run(child.id, 1, 2_001);
+
+    const output = recallMemory(db, { id: `S${child.id}`, depth: "collapsed" });
+
+    expect(output).toContain(`continues from S${parent.id}`);
+    expect(output).not.toContain("forked at");
+  });
+
+  test("null-tolerant: breadcrumb shows parent-only when child has no turns", () => {
+    const parent = upsertSession(db, {
+      contentSessionId: "parent-no-turns",
+      project: "test-project",
+      title: "Parent no-turns",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const child = upsertSession(db, {
+      contentSessionId: "child-no-turns",
+      project: "test-project",
+      title: "Child no-turns",
+      content: null,
+      insight: null,
+      createdAtEpoch: 2_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    // No turns inserted for child
+
+    const output = recallMemory(db, { id: `S${child.id}`, depth: "collapsed" });
+
+    expect(output).toContain(`continues from S${parent.id}`);
+    expect(output).not.toContain("forked at");
+  });
+
+  test("non-merge: project query for child returns only child turns, not parent turns", () => {
+    const parent = upsertSession(db, {
+      contentSessionId: "parent-no-merge",
+      project: "myproject",
+      title: "Parent no-merge",
+      content: "parent content for search",
+      insight: null,
+      createdAtEpoch: 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, title, content, type, tags, files_read, files_modified, created_at_epoch)
+       VALUES (?, ?, 'extracted', 'Parent turn title', 'parent turn content', 'discovery', '[]', '[]', '[]', ?)`,
+    ).run(parent.id, 1, 1_001);
+
+    const parentTurnId = db
+      .query<{ id: number }, [number, number]>(
+        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+      )
+      .get(parent.id, 1)!.id;
+
+    const child = upsertSession(db, {
+      contentSessionId: "child-no-merge",
+      project: "myproject",
+      title: "Child no-merge",
+      content: "child content for search",
+      insight: null,
+      createdAtEpoch: 2_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, title, content, type, tags, files_read, files_modified, parent_turn_id, created_at_epoch)
+       VALUES (?, ?, 'extracted', 'Child turn title', 'child turn content', 'discovery', '[]', '[]', '[]', ?, ?)`,
+    ).run(child.id, 1, parentTurnId, 2_001);
+
+    // Re-index child session for FTS
+    const { indexSessionToFTS } = require("../../src/db/search");
+    const { getTurn: getTurnFn, getTurnsForSession: getSessionTurns } = require("../../src/db/turns");
+    const { indexTurnToFTS } = require("../../src/db/search");
+    const childTurn = getTurnFn(db, child.id, 1)!;
+    indexTurnToFTS(db, childTurn);
+
+    // Single-session query: only child's turns in body, not parent's
+    const output = recallMemory(db, { id: `S${child.id}`, depth: "expanded" });
+
+    // The breadcrumb naming the parent is OK
+    expect(output).toContain(`continues from S${parent.id}`);
+    // But parent's turn title must not appear in the result body
+    expect(output).not.toContain("Parent turn title");
+    // Child's own turn must appear
+    expect(output).toContain("Child turn title");
+  });
+});

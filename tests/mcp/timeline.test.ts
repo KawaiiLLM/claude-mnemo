@@ -1587,3 +1587,112 @@ describe("timelineQuery", () => {
     ).toBeLessThan(rowCount(timelineQuery(db, { id: "S1" })));
   });
 });
+
+describe("fork-lineage breadcrumb in timeline", () => {
+  it("renders breadcrumb and earlier pointer for a forked session", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const parent = upsertSession(db, {
+      contentSessionId: "tl-parent",
+      project: "/tmp/test",
+      title: "TL Parent",
+      insight: null,
+      createdAtEpoch: 1_700_000_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Insert a parent turn at promptNumber=5
+    const parentTurnId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?)
+         RETURNING id`,
+      )
+      .get(parent.id, 5, 1_700_000_050)!.id;
+
+    const child = upsertSession(db, {
+      contentSessionId: "tl-child",
+      project: "/tmp/test",
+      title: "TL Child",
+      insight: null,
+      createdAtEpoch: 1_700_001_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    // Insert child's first turn with parent_turn_id
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, parent_turn_id, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?)`,
+    ).run(child.id, 1, parentTurnId, 1_700_001_100);
+
+    const view = buildTimelineView(db, { id: `S${child.id}` });
+    const output = renderTimeline(view);
+
+    // Breadcrumb in header
+    expect(output).toContain(`continues from S${parent.id} (forked at T5)`);
+    // Earlier pointer to parent
+    expect(output).toContain(`earlier: recall(id="S${parent.id}")`);
+  });
+
+  it("renders breadcrumb without fork turn when parent_turn_id is null", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const parent = upsertSession(db, {
+      contentSessionId: "tl-parent-null",
+      project: "/tmp/test",
+      title: "TL Parent Null",
+      insight: null,
+      createdAtEpoch: 1_700_000_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const child = upsertSession(db, {
+      contentSessionId: "tl-child-null",
+      project: "/tmp/test",
+      title: "TL Child Null",
+      insight: null,
+      createdAtEpoch: 1_700_001_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    db.query("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(
+      parent.id,
+      child.id,
+    );
+
+    // First turn with NULL parent_turn_id
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?)`,
+    ).run(child.id, 1, 1_700_001_100);
+
+    const view = buildTimelineView(db, { id: `S${child.id}` });
+    const output = renderTimeline(view);
+
+    expect(output).toContain(`continues from S${parent.id}`);
+    expect(output).not.toContain("forked at");
+    expect(output).toContain(`earlier: recall(id="S${parent.id}")`);
+  });
+
+  it("non-forked session shows no breadcrumb and no lineage pointer in timeline", () => {
+    const db = createDatabase(":memory:");
+    seedSession(db);
+
+    const view = buildTimelineView(db, { id: "S1" });
+    const output = renderTimeline(view);
+
+    expect(output).not.toContain("continues from");
+    expect(output).not.toMatch(/earlier: recall\(id="S\d+"\)/);
+  });
+});

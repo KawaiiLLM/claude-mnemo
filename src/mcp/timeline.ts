@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { getSession, type SessionRecord } from "../db/sessions";
-import { getTurnsForSession, type TurnRecord } from "../db/turns";
+import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { resolveTranscriptPath } from "../shared/paths";
 
 export interface TimelineInput {
@@ -29,6 +29,8 @@ export interface TimelineView {
   jsonlPath: string | null;
   tz: { name: string; offsetLabel: string };
   hasEarlier: boolean;
+  /** Fork-lineage breadcrumb string, or null for root sessions. */
+  breadcrumb: string | null;
 }
 
 export interface RenderTimelineOptions {
@@ -764,6 +766,31 @@ function validateOpenEndRange(range: Extract<RangeSpec, { kind: "openEnd" }>): v
   }
 }
 
+/**
+ * Derives the fork-lineage breadcrumb for a session. Returns null for root
+ * sessions. Null-tolerant: if the fork turn cannot be resolved the
+ * parenthetical is omitted.
+ */
+function deriveTimelineBreadcrumb(
+  db: Database,
+  session: SessionRecord,
+): string | null {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+
+  return `continues from ${parentRef}`;
+}
+
 export function buildTimelineView(
   db: Database,
   input: TimelineInput,
@@ -813,6 +840,7 @@ export function buildTimelineView(
   const jsonlPath =
     resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
+  const breadcrumb = deriveTimelineBreadcrumb(db, session);
 
   return {
     session,
@@ -832,6 +860,7 @@ export function buildTimelineView(
     jsonlPath,
     tz,
     hasEarlier: false,
+    breadcrumb,
   };
 }
 
@@ -920,6 +949,10 @@ function renderSessionHeader(view: TimelineView): string[] {
   const showingLine = formatShowingLine(view);
   if (showingLine) {
     lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+
+  if (view.breadcrumb !== null) {
+    lines.push(`  ${view.breadcrumb}`);
   }
 
   return lines;
@@ -1213,6 +1246,17 @@ function renderEarlierHint(
   ];
 }
 
+function renderLineagePointer(view: TimelineView): string[] {
+  if (view.session.parentSessionId === null) {
+    return [];
+  }
+
+  return [
+    "",
+    `  earlier: recall(id="S${view.session.parentSessionId}")`,
+  ];
+}
+
 export function renderTimeline(
   view: TimelineView,
   options: RenderTimelineOptions = {},
@@ -1226,6 +1270,7 @@ export function renderTimeline(
     ...(options.phases === false ? [] : renderPhases(view, options)),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
+    ...renderLineagePointer(view),
   ].join("\n");
 }
 
