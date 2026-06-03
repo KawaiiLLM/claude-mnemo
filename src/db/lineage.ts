@@ -4,7 +4,12 @@ import {
   collectOrderedPromptIds,
   readAllTranscriptEntries,
 } from "../shared/transcript-parser";
-import { getSession } from "./sessions";
+import {
+  getSession,
+  setSessionLineageStatus,
+  setSessionParent,
+} from "./sessions";
+import { getFirstTurn, setTurnParent } from "./turns";
 
 export function linkIntraSessionChain(db: Database, sessionDbId: number): void {
   db.query(
@@ -287,6 +292,51 @@ export function resolveSessionLineage(
   }
   // Otherwise: boundary/foreign/unknown prefix that didn't resolve → unresolved.
   return { status: "unresolved" };
+}
+
+// Orchestrator run per-session at Stop (spec §4). Step A always chains the
+// intra-session turns. Step B resolves the parent and atomically writes the
+// first-turn edge + parent_session_id + lineage_status together, so a "resolved"
+// session is never left in a partial state (edge-without-parent, etc).
+// `lineage_status` is 4-state: only `resolved`/`root` are terminal; `unchecked`
+// (default) and `unresolved` retry on later calls. `nowEpoch` is accepted for
+// signature consistency with the Stop caller / future use (the setters write no
+// timestamp today, so it is intentionally not referenced here).
+export function relinkSessionLineage(
+  db: Database,
+  sessionDbId: number,
+  transcriptPath: string | null,
+  nowEpoch: number,
+): void {
+  void nowEpoch;
+  linkIntraSessionChain(db, sessionDbId); // Step A (always)
+
+  const session = getSession(db, sessionDbId);
+  if (!session) return;
+  // Terminal: never re-resolve a session whose lineage is already settled.
+  if (session.lineageStatus === "resolved" || session.lineageStatus === "root") {
+    return;
+  }
+
+  const res = resolveSessionLineage(db, sessionDbId, transcriptPath);
+
+  // Step B — atomic: edge + parent + status commit (or roll back) together.
+  db.transaction(() => {
+    if (
+      res.status === "resolved" &&
+      res.forkTurnId != null &&
+      res.parentSessionId != null
+    ) {
+      const first = getFirstTurn(db, sessionDbId);
+      if (first) setTurnParent(db, first.id, res.forkTurnId);
+      setSessionParent(db, sessionDbId, res.parentSessionId);
+      setSessionLineageStatus(db, sessionDbId, "resolved");
+    } else if (res.status === "root") {
+      setSessionLineageStatus(db, sessionDbId, "root");
+    } else {
+      setSessionLineageStatus(db, sessionDbId, "unresolved");
+    }
+  })();
 }
 
 // Longest-contiguous-prefix-overlap signal for the multi-owner tie-break.

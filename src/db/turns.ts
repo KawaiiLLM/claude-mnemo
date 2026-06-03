@@ -343,6 +343,30 @@ export function getStrandedTurns(
     .filter((turn): turn is TurnRecord => turn !== null);
 }
 
+export function getFirstTurn(
+  db: Database,
+  sessionId: number,
+): TurnRecord | null {
+  return mapTurnRow(
+    db
+      .query<TurnRow, [number]>(
+        `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`,
+      )
+      .get(sessionId) ?? null,
+  );
+}
+
+export function setTurnParent(
+  db: Database,
+  turnId: number,
+  parentTurnId: number,
+): void {
+  db.query("UPDATE turns SET parent_turn_id = ? WHERE id = ?").run(
+    parentTurnId,
+    turnId,
+  );
+}
+
 export function getMaxPromptNumber(
   db: Database,
   sessionId: number,

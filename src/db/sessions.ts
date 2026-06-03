@@ -2,6 +2,10 @@ import type { Database } from "bun:sqlite";
 
 import { indexSessionToFTS } from "./search";
 
+// The 4-state lineage resolution status. Only `resolved`/`root` are terminal;
+// `unchecked` (default) and `unresolved` are retried on later relink calls.
+export type LineageStatus = "unchecked" | "resolved" | "root" | "unresolved";
+
 export interface SessionRecord {
   id: number;
   contentSessionId: string;
@@ -305,4 +309,24 @@ export function updateLastAgentSessionId(
      SET last_agent_session_id = ?
      WHERE id = ?`,
   ).run(agentSessionId, sessionId);
+}
+
+export function setSessionParent(
+  db: Database,
+  sessionId: number,
+  parentSessionId: number,
+): void {
+  db.query(
+    `UPDATE sessions SET parent_session_id = ? WHERE id = ?`,
+  ).run(parentSessionId, sessionId);
+}
+
+export function setSessionLineageStatus(
+  db: Database,
+  sessionId: number,
+  status: LineageStatus,
+): void {
+  db.query(
+    `UPDATE sessions SET lineage_status = ? WHERE id = ?`,
+  ).run(status, sessionId);
 }
