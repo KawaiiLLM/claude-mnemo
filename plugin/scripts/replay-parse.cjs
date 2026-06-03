@@ -527,6 +527,7 @@ function mergeTranscriptEntries(first, later) {
     isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
     uuid: first.uuid ?? later.uuid,
     parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
     timestamp: first.timestamp ?? later.timestamp,
     usage: mergeUsage(first.usage, later.usage),
     durationMs: later.durationMs ?? first.durationMs,
@@ -548,6 +549,7 @@ function normalizeEntry(raw) {
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
     uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
     // Preserve "absent" as undefined rather than false. The last-wins merge keeps

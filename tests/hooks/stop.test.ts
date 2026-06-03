@@ -3,8 +3,13 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
+import {
+  getSession,
+  getSessionByContentId,
+  upsertSession,
+} from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
+import { queueItemExistsForTurn } from "../../src/db/pending-queue";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
@@ -712,6 +717,153 @@ describe("handleStopHook", () => {
         ],
       }),
     );
+
+    await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
+  });
+
+  test("runs Step A (intra-session chain) on a Stop with no transcriptPath", async () => {
+    // Two turns with NULL parent_turn_id; the later turn should be chained to
+    // its predecessor even when the Stop carries no transcript (Step A must run
+    // unconditionally, not only inside the if (transcriptPath) block).
+    const first = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, created_at_epoch
+        ) VALUES (?, 1, 'active', 'First prompt', 120)
+        RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    const second = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, created_at_epoch
+        ) VALUES (?, 2, 'active', 'Second prompt', 121)
+        RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    const readParent = (turnId: number): number | null =>
+      db
+        .query<{ parentTurnId: number | null }, [number]>(
+          `SELECT parent_turn_id AS parentTurnId FROM turns WHERE id = ?`,
+        )
+        .get(turnId)?.parentTurnId ?? null;
+
+    expect(readParent(first)).toBeNull();
+    expect(readParent(second)).toBeNull();
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    // NO transcriptPath on this input.
+    const result = await handler(createInput({ lastAssistantMessage: "done" }));
+
+    expect(result.continue).toBe(true);
+    expect(readParent(second)).toBe(first);
+    expect(readParent(first)).toBeNull();
+  });
+
+  test("relinks lineage and recovers the parent's stranded tail on Stop", async () => {
+    // Parent session owns the inherited prefix prompts pA, pB; pB is the fork
+    // turn. The parent also has a stranded tail turn (phantom-extracted).
+    const parentId = upsertSession(db, {
+      contentSessionId: "parent-stop",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      insight: null,
+      createdAtEpoch: 50,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    const seedParentTurn = db.query<
+      { id: number },
+      [number, number, string, string | null]
+    >(
+      `INSERT INTO turns (session_id, prompt_number, status, assistant_response, title, content, content_prompt_id, created_at_epoch)
+       VALUES (?, ?, 'extracted', 'r', NULL, NULL, ?, 1000)
+       RETURNING id`,
+    );
+    seedParentTurn.get(parentId, 14, "pA");
+    seedParentTurn.get(parentId, 15, "pB");
+    // Parent's stranded tail turn (no content_prompt_id needed; phantom).
+    const parentStranded = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, assistant_response, title, content, created_at_epoch)
+         VALUES (?, 16, 'extracted', 'r', NULL, NULL, 1000)
+         RETURNING id`,
+      )
+      .get(parentId)!.id;
+
+    // Child (the session-stop session) has its own first turn cC, active so the
+    // Stop hook proceeds; the transcript overlaps the parent's pA, pB prefix.
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, content_prompt_id, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'cC', 'active', 'Child prompt', 120)`,
+    ).run(sessionId);
+
+    const transcriptDirectory = await Bun.$`mktemp -d`.text();
+    const transcriptPath = `${transcriptDirectory.trim()}/session.jsonl`;
+    await Bun.write(
+      transcriptPath,
+      [
+        JSON.stringify({
+          type: "user",
+          uuid: "pA",
+          promptId: "pA",
+          message: { role: "user", content: [{ type: "text", text: "pA" }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          uuid: "pB",
+          promptId: "pB",
+          message: { role: "user", content: [{ type: "text", text: "pB" }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          uuid: "cC",
+          promptId: "cC",
+          permissionMode: "default",
+          message: { role: "user", content: [{ type: "text", text: "Child prompt" }] },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          uuid: "ca",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Child answer" }],
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    const result = await handler(
+      createInput({
+        transcriptPath,
+        lastAssistantMessage: "Child answer",
+      }),
+    );
+
+    expect(result.continue).toBe(true);
+
+    const child = getSession(db, sessionId)!;
+    expect(child.parentSessionId).toBe(parentId);
+    expect(child.lineageStatus).toBe("resolved");
+
+    // The parent's stranded tail turn is re-enqueued for recovery.
+    expect(queueItemExistsForTurn(db, "turn-stop", parentStranded)).toBe(true);
 
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });

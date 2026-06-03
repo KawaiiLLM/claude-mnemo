@@ -7330,6 +7330,7 @@ var init_database = __esm({
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
+  backfillAllIntraChains: () => backfillAllIntraChains,
   initializeDatabase: () => initializeDatabase,
   initializeSchema: () => initializeSchema
 });
@@ -7340,6 +7341,7 @@ function initializeSchema(db) {
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureForkLineageColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -7380,6 +7382,30 @@ function ensureTurnInvalidationColumns(db) {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureForkLineageColumns(db) {
+  if (!hasColumn(db, "turns", "parent_turn_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+    backfillAllIntraChains(db);
+  }
+  if (!hasColumn(db, "sessions", "parent_session_id"))
+    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
+  if (!hasColumn(db, "sessions", "lineage_status"))
+    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+}
+function backfillAllIntraChains(db) {
+  db.query(
+    `UPDATE turns SET parent_turn_id = (
+       SELECT p.id FROM turns p
+       WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       ORDER BY p.prompt_number DESC LIMIT 1
+     )
+     WHERE parent_turn_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM turns p
+         WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       )`
+  ).run();
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -31055,6 +31081,8 @@ var SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -31090,6 +31118,8 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -31137,6 +31167,7 @@ var TURN_SELECT = `
     files_read AS filesRead,
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
+    parent_turn_id AS parentTurnId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -31160,7 +31191,8 @@ function mapTurnRow(row) {
     wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray2(row.tags),
     filesRead: parseJsonArray2(row.filesRead),
-    filesModified: parseJsonArray2(row.filesModified)
+    filesModified: parseJsonArray2(row.filesModified),
+    parentTurnId: row.parentTurnId ?? null
   };
 }
 function mergeTags(existingTags, nextTags) {
@@ -31235,6 +31267,7 @@ function updateTurnById(db, turnId, input) {
             files_read AS filesRead,
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
+            parent_turn_id AS parentTurnId,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -31271,6 +31304,13 @@ function getTurnsForSession(db, sessionId) {
   return db.query(
     `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getFirstTurn(db, sessionId) {
+  return mapTurnRow(
+    db.query(
+      `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
+    ).get(sessionId) ?? null
+  );
 }
 
 // src/mcp/recall.ts
@@ -32203,8 +32243,23 @@ function joinPage(header, body, pageCount) {
   return body ? `${header}
 ${body}` : header;
 }
+function deriveBreadcrumb(db, session) {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+  return `continues from ${parentRef}`;
+}
 function renderSession(db, session, depth, truncate, turnSelector) {
   const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+  const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
@@ -32215,6 +32270,9 @@ function renderSession(db, session, depth, truncate, turnSelector) {
       }
     )
   ];
+  if (breadcrumb !== null) {
+    lines.push(`  ${breadcrumb}`);
+  }
   if (depth === "collapsed") {
     return lines.join("\n");
   }
@@ -33333,6 +33391,20 @@ function validateOpenEndRange(range) {
     );
   }
 }
+function deriveTimelineBreadcrumb(db, session) {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+  return `continues from ${parentRef}`;
+}
 function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
@@ -33366,6 +33438,7 @@ function buildTimelineView(db, input, preloadedTurns) {
   }
   const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
+  const breadcrumb = deriveTimelineBreadcrumb(db, session);
   return {
     session,
     totalTurns,
@@ -33383,7 +33456,8 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: false
+    hasEarlier: false,
+    breadcrumb
   };
 }
 function renderSessionHeader(view) {
@@ -33425,6 +33499,9 @@ function renderSessionHeader(view) {
   const showingLine = formatShowingLine(view);
   if (showingLine) {
     lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+  if (view.breadcrumb !== null) {
+    lines.push(`  ${view.breadcrumb}`);
   }
   return lines;
 }
@@ -33623,6 +33700,15 @@ function renderEarlierHint(view, options = {}) {
     `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
   ];
 }
+function renderLineagePointer(view) {
+  if (view.session.parentSessionId === null) {
+    return [];
+  }
+  return [
+    "",
+    `  earlier: recall(id="S${view.session.parentSessionId}")`
+  ];
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const milestones = options.milestones ?? false;
@@ -33631,7 +33717,8 @@ function renderTimeline(view, options = {}) {
     ...renderTurnTable(view, promptCap, milestones),
     ...options.phases === false ? [] : renderPhases(view, options),
     ...renderShapeSignals(view),
-    ...renderEarlierHint(view, options)
+    ...renderEarlierHint(view, options),
+    ...renderLineagePointer(view)
   ].join("\n");
 }
 function timelineQuery(db, input) {
@@ -33690,7 +33777,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.23" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.24" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

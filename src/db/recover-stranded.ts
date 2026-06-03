@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { enqueueQueueItem, queueItemExistsForTurn } from "./pending-queue";
+import { getSession } from "./sessions";
 import { getStrandedTurns, resetTurnExtractionFields } from "./turns";
 
 /**
@@ -29,6 +30,33 @@ export function recoverStrandedTurns(
       enqueuedAtEpoch: nowEpoch,
     });
     recovered += 1;
+  }
+  return recovered;
+}
+
+/**
+ * Walk a session's parent chain and recover each ancestor's stranded tail. A
+ * forked child reopening its lineage re-enqueues turn-stop work for any
+ * stranded turns left behind in its ancestors (the child's own turns are
+ * recovered separately). Cycle-guarded (a `visited` set) and depth-capped so a
+ * corrupt `parent_session_id` self/loop never spins. Returns the total number
+ * of ancestor turns re-enqueued.
+ */
+export function recoverStrandedAncestors(
+  db: Database,
+  childSessionId: number,
+  nowEpoch: number,
+  maxDepth = 16,
+): number {
+  let recovered = 0;
+  const visited = new Set<number>([childSessionId]);
+  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
+  let depth = 0;
+  while (current != null && depth < maxDepth && !visited.has(current)) {
+    visited.add(current);
+    recovered += recoverStrandedTurns(db, current, nowEpoch);
+    current = getSession(db, current)?.parentSessionId ?? null;
+    depth += 1;
   }
   return recovered;
 }

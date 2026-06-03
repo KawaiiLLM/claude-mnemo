@@ -311,6 +311,7 @@ function initializeSchema(db) {
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureForkLineageColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -351,6 +352,30 @@ function ensureTurnInvalidationColumns(db) {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureForkLineageColumns(db) {
+  if (!hasColumn(db, "turns", "parent_turn_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+    backfillAllIntraChains(db);
+  }
+  if (!hasColumn(db, "sessions", "parent_session_id"))
+    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
+  if (!hasColumn(db, "sessions", "lineage_status"))
+    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+}
+function backfillAllIntraChains(db) {
+  db.query(
+    `UPDATE turns SET parent_turn_id = (
+       SELECT p.id FROM turns p
+       WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       ORDER BY p.prompt_number DESC LIMIT 1
+     )
+     WHERE parent_turn_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM turns p
+         WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       )`
+  ).run();
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -557,6 +582,8 @@ var SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    parent_session_id AS parentSessionId,
+    lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch,
     completed_at_epoch AS completedAtEpoch
@@ -603,6 +630,8 @@ function upsertSession(db, input) {
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        parent_session_id AS parentSessionId,
+        lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
         updated_at_epoch AS updatedAtEpoch,
         completed_at_epoch AS completedAtEpoch
@@ -646,6 +675,16 @@ function getRecentSessions(db, options = {}) {
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
 }
+function setSessionParent(db, sessionId, parentSessionId) {
+  db.query(
+    `UPDATE sessions SET parent_session_id = ? WHERE id = ?`
+  ).run(parentSessionId, sessionId);
+}
+function setSessionLineageStatus(db, sessionId, status) {
+  db.query(
+    `UPDATE sessions SET lineage_status = ? WHERE id = ?`
+  ).run(status, sessionId);
+}
 
 // src/worker/client.ts
 var import_node_child_process = require("node:child_process");
@@ -653,7 +692,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.23-mpwwdvnz" : "dev";
+var BUILD_ID = true ? "0.2.24-mpy0ky1u" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1554,6 +1593,7 @@ var TURN_SELECT = `
     files_read AS filesRead,
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
+    parent_turn_id AS parentTurnId,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -1577,7 +1617,8 @@ function mapTurnRow(row) {
     wasRolledBack: row.wasRolledBack === 1,
     tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
-    filesModified: parseJsonArray(row.filesModified)
+    filesModified: parseJsonArray(row.filesModified),
+    parentTurnId: row.parentTurnId ?? null
   };
 }
 function mergeTags(existingTags, nextTags) {
@@ -1645,6 +1686,7 @@ function updateTurnById(db, turnId, input) {
             files_read AS filesRead,
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
+            parent_turn_id AS parentTurnId,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -1712,6 +1754,19 @@ function getStrandedTurns(db, sessionId) {
                OR (status = 'extracted' AND title IS NULL AND content IS NULL) )
        ORDER BY prompt_number ASC`
   ).all(sessionId).map((row) => mapTurnRow(row)).filter((turn) => turn !== null);
+}
+function getFirstTurn(db, sessionId) {
+  return mapTurnRow(
+    db.query(
+      `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
+    ).get(sessionId) ?? null
+  );
+}
+function setTurnParent(db, turnId, parentTurnId) {
+  db.query("UPDATE turns SET parent_turn_id = ? WHERE id = ?").run(
+    parentTurnId,
+    turnId
+  );
 }
 function getMaxPromptNumber(db, sessionId) {
   const row = db.query(
@@ -2244,6 +2299,20 @@ function validateOpenEndRange(range) {
     );
   }
 }
+function deriveTimelineBreadcrumb(db, session) {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+  const parentRef = `S${session.parentSessionId}`;
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+  return `continues from ${parentRef}`;
+}
 function buildTimelineView(db, input, preloadedTurns) {
   const parsed = parseTimelineId(input.id);
   const session = getSession(db, parsed.sessionId);
@@ -2277,6 +2346,7 @@ function buildTimelineView(db, input, preloadedTurns) {
   }
   const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
+  const breadcrumb = deriveTimelineBreadcrumb(db, session);
   return {
     session,
     totalTurns,
@@ -2294,7 +2364,8 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: false
+    hasEarlier: false,
+    breadcrumb
   };
 }
 function buildContextTimelineView(db, sessionId) {
@@ -2365,6 +2436,9 @@ function renderSessionHeader(view) {
   const showingLine = formatShowingLine(view);
   if (showingLine) {
     lines.splice(3, 0, `  showing: ${showingLine}`);
+  }
+  if (view.breadcrumb !== null) {
+    lines.push(`  ${view.breadcrumb}`);
   }
   return lines;
 }
@@ -2563,6 +2637,15 @@ function renderEarlierHint(view, options = {}) {
     `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
   ];
 }
+function renderLineagePointer(view) {
+  if (view.session.parentSessionId === null) {
+    return [];
+  }
+  return [
+    "",
+    `  earlier: recall(id="S${view.session.parentSessionId}")`
+  ];
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const milestones = options.milestones ?? false;
@@ -2571,7 +2654,8 @@ function renderTimeline(view, options = {}) {
     ...renderTurnTable(view, promptCap, milestones),
     ...options.phases === false ? [] : renderPhases(view, options),
     ...renderShapeSignals(view),
-    ...renderEarlierHint(view, options)
+    ...renderEarlierHint(view, options),
+    ...renderLineagePointer(view)
   ].join("\n");
 }
 
@@ -2678,6 +2762,19 @@ function recoverStrandedTurns(db, sessionDbId, nowEpoch) {
       enqueuedAtEpoch: nowEpoch
     });
     recovered += 1;
+  }
+  return recovered;
+}
+function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
+  let recovered = 0;
+  const visited = /* @__PURE__ */ new Set([childSessionId]);
+  let current = getSession(db, childSessionId)?.parentSessionId ?? null;
+  let depth = 0;
+  while (current != null && depth < maxDepth && !visited.has(current)) {
+    visited.add(current);
+    recovered += recoverStrandedTurns(db, current, nowEpoch);
+    current = getSession(db, current)?.parentSessionId ?? null;
+    depth += 1;
   }
   return recovered;
 }
@@ -3034,6 +3131,7 @@ function mergeTranscriptEntries(first, later) {
     isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
     uuid: first.uuid ?? later.uuid,
     parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
     timestamp: first.timestamp ?? later.timestamp,
     usage: mergeUsage(first.usage, later.usage),
     durationMs: later.durationMs ?? first.durationMs,
@@ -3055,6 +3153,7 @@ function normalizeEntry(raw) {
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
     uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
     permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
     // Preserve "absent" as undefined rather than false. The last-wins merge keeps
@@ -3075,6 +3174,17 @@ function normalizeEntry(raw) {
       pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
     } : void 0
   };
+}
+function collectOrderedPromptIds(entries) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
 }
 function startsNewTurn(entry, currentPromptId) {
   if (!isCountedUserPrompt(entry)) {
@@ -3749,6 +3859,223 @@ function createSessionInitHandler(dependencies) {
   };
 }
 
+// src/db/lineage.ts
+function linkIntraSessionChain(db, sessionDbId) {
+  db.query(
+    `UPDATE turns SET parent_turn_id = (
+       SELECT p.id FROM turns p
+       WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       ORDER BY p.prompt_number DESC LIMIT 1
+     )
+     WHERE session_id = ? AND parent_turn_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM turns p
+         WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       )`
+  ).run(sessionDbId);
+}
+var OWNERSHIP_QUERY_CHUNK = 500;
+function classifyPromptOwnership(db, childSessionId, promptIds) {
+  const result = /* @__PURE__ */ new Map();
+  for (const p of promptIds) result.set(p, { ownership: "unknown", owners: [] });
+  if (promptIds.length === 0) return result;
+  for (let start = 0; start < promptIds.length; start += OWNERSHIP_QUERY_CHUNK) {
+    const chunk = promptIds.slice(start, start + OWNERSHIP_QUERY_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db.query(
+      `SELECT content_prompt_id, session_id, id AS turn_id, prompt_number
+         FROM turns
+         WHERE content_prompt_id IN (${placeholders}) AND content_prompt_id IS NOT NULL`
+    ).all(...chunk);
+    for (const row of rows) {
+      result.get(row.content_prompt_id).owners.push({
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        promptNumber: row.prompt_number
+      });
+    }
+  }
+  for (const [, e] of result) {
+    if (e.owners.length === 0) {
+      e.ownership = "unknown";
+    } else if (e.owners.some((o) => o.sessionId !== childSessionId)) {
+      e.ownership = "foreign";
+    } else {
+      e.ownership = "child";
+    }
+  }
+  return result;
+}
+function isContiguousRun(prefixOwnerships) {
+  const first = prefixOwnerships.indexOf("foreign");
+  if (first === -1) return false;
+  let last = first;
+  for (let i = first; i < prefixOwnerships.length; i += 1) {
+    if (prefixOwnerships[i] === "foreign") last = i;
+  }
+  for (let i = first; i <= last; i += 1) {
+    if (prefixOwnerships[i] !== "foreign") return false;
+  }
+  return true;
+}
+function pickForeignOwner(owners, overlapBySession, childCreated, db) {
+  if (owners.length === 0) return null;
+  if (owners.length === 1) return owners[0];
+  const overlapMap = /* @__PURE__ */ new Map();
+  for (const { sessionId, overlap } of overlapBySession) {
+    overlapMap.set(sessionId, Math.max(overlapMap.get(sessionId) ?? 0, overlap));
+  }
+  let bestOverlap = -1;
+  let overlapWinners = [];
+  for (const owner of owners) {
+    const ov = overlapMap.get(owner.sessionId) ?? 0;
+    if (ov > bestOverlap) {
+      bestOverlap = ov;
+      overlapWinners = [owner];
+    } else if (ov === bestOverlap) {
+      overlapWinners.push(owner);
+    }
+  }
+  if (bestOverlap > 0 && overlapWinners.length === 1) {
+    return overlapWinners[0];
+  }
+  const contenders = bestOverlap > 0 ? overlapWinners : owners;
+  if (db) {
+    let best = null;
+    let bestCreated = -1;
+    let tied = false;
+    for (const owner of contenders) {
+      const session = getSession(db, owner.sessionId);
+      const created = session?.createdAtEpoch;
+      if (created === void 0 || created > childCreated) continue;
+      if (created > bestCreated) {
+        bestCreated = created;
+        best = owner;
+        tied = false;
+      } else if (created === bestCreated) {
+        tied = true;
+      }
+    }
+    if (best && !tied) return best;
+  }
+  return null;
+}
+function resolveViaLogicalParent(db, transcriptPath, childSessionId, ownership) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  const byUuid = /* @__PURE__ */ new Map();
+  for (const e of entries) {
+    if (e.uuid && !byUuid.has(e.uuid)) byUuid.set(e.uuid, e);
+  }
+  for (const boundary of entries) {
+    if (boundary.subtype !== "compact_boundary") continue;
+    const targetUuid = boundary.logicalParentUuid;
+    if (!targetUuid) continue;
+    const target = byUuid.get(targetUuid);
+    if (!target) continue;
+    if (target.subtype === "compact_boundary") continue;
+    const promptId = target.promptId;
+    if (!promptId) continue;
+    const own = ownership.get(promptId) ?? classifyPromptOwnership(db, childSessionId, [promptId]).get(promptId);
+    if (!own || own.ownership !== "foreign") continue;
+    const owner = pickForeignOwner(
+      own.owners.filter((o) => o.sessionId !== childSessionId),
+      [],
+      getSession(db, childSessionId)?.createdAtEpoch ?? Number.MAX_SAFE_INTEGER,
+      db
+    );
+    if (!owner) continue;
+    return {
+      status: "resolved",
+      parentSessionId: owner.sessionId,
+      forkTurnId: owner.turnId
+    };
+  }
+  return null;
+}
+function resolveSessionLineage(db, childSessionId, transcriptPath) {
+  if (!transcriptPath) return { status: "unresolved" };
+  const entries = readAllTranscriptEntries(transcriptPath);
+  const ordered = collectOrderedPromptIds(entries);
+  if (ordered.length === 0) return { status: "unresolved" };
+  const own = classifyPromptOwnership(
+    db,
+    childSessionId,
+    ordered.map((o) => o.promptId)
+  );
+  const hasBoundary = entries.some((e) => e.subtype === "compact_boundary");
+  const ownershipOf = (promptId) => own.get(promptId)?.ownership ?? "unknown";
+  let boundaryIndex = ordered.findIndex((o) => ownershipOf(o.promptId) === "child");
+  if (boundaryIndex === -1) boundaryIndex = ordered.length;
+  const prefix = ordered.slice(0, boundaryIndex);
+  const prefixOwnerships = prefix.map((o) => ownershipOf(o.promptId));
+  const foreignInPrefix = prefix.filter((o) => ownershipOf(o.promptId) === "foreign");
+  const unknownInPrefix = prefix.filter((o) => ownershipOf(o.promptId) === "unknown");
+  if (foreignInPrefix.length > 0 && isContiguousRun(prefixOwnerships)) {
+    const latestForeign = foreignInPrefix[foreignInPrefix.length - 1];
+    const entry = own.get(latestForeign.promptId);
+    const foreignOwners = entry.owners.filter((o) => o.sessionId !== childSessionId);
+    const overlapBySession = computePrefixOverlap(prefix, foreignOwners, own, childSessionId);
+    const childCreated = getSession(db, childSessionId)?.createdAtEpoch ?? Number.MAX_SAFE_INTEGER;
+    const owner = pickForeignOwner(foreignOwners, overlapBySession, childCreated, db);
+    if (owner) {
+      return {
+        status: "resolved",
+        parentSessionId: owner.sessionId,
+        forkTurnId: owner.turnId
+      };
+    }
+    return { status: "unresolved" };
+  }
+  const viaLogical = resolveViaLogicalParent(db, transcriptPath, childSessionId, own);
+  if (viaLogical) return viaLogical;
+  if (!hasBoundary && foreignInPrefix.length === 0 && unknownInPrefix.length === 0) {
+    return { status: "root" };
+  }
+  if (hasBoundary && foreignInPrefix.length === 0 && unknownInPrefix.length === 0) {
+    return { status: "root" };
+  }
+  return { status: "unresolved" };
+}
+function relinkSessionLineage(db, sessionDbId, transcriptPath, nowEpoch) {
+  void nowEpoch;
+  linkIntraSessionChain(db, sessionDbId);
+  const session = getSession(db, sessionDbId);
+  if (!session) return;
+  if (session.lineageStatus === "resolved" || session.lineageStatus === "root") {
+    return;
+  }
+  const res = resolveSessionLineage(db, sessionDbId, transcriptPath);
+  db.transaction(() => {
+    if (res.status === "resolved" && res.forkTurnId != null && res.parentSessionId != null) {
+      const first = getFirstTurn(db, sessionDbId);
+      if (first) setTurnParent(db, first.id, res.forkTurnId);
+      setSessionParent(db, sessionDbId, res.parentSessionId);
+      setSessionLineageStatus(db, sessionDbId, "resolved");
+    } else if (res.status === "root") {
+      setSessionLineageStatus(db, sessionDbId, "root");
+    } else {
+      setSessionLineageStatus(db, sessionDbId, "unresolved");
+    }
+  })();
+}
+function computePrefixOverlap(prefix, foreignOwners, ownership, childSessionId) {
+  const candidateSessions = new Set(foreignOwners.map((o) => o.sessionId));
+  const out = [];
+  for (const sessionId of candidateSessions) {
+    let overlap = 0;
+    for (let i = prefix.length - 1; i >= 0; i -= 1) {
+      const own = ownership.get(prefix[i].promptId);
+      const ownedByCandidate = own?.owners.some(
+        (o) => o.sessionId === sessionId && sessionId !== childSessionId
+      ) ?? false;
+      if (ownedByCandidate) overlap += 1;
+      else break;
+    }
+    out.push({ sessionId, overlap });
+  }
+  return out;
+}
+
 // src/hooks/backfill.ts
 function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurns) {
   if (pendingTurns.length === 0) {
@@ -3868,6 +4195,13 @@ function createStopHandler(dependencies) {
           epoch
         );
       }
+      relinkSessionLineage(
+        dependencies.db,
+        session.id,
+        input.transcriptPath ?? null,
+        epoch
+      );
+      recoverStrandedAncestors(dependencies.db, session.id, epoch);
       for (const orphanTurn of orphanTurns) {
         dependencies.db.query(
           `

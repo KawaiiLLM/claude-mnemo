@@ -26,6 +26,7 @@ interface TranscriptEntry {
   isApiErrorMessage?: boolean;
   uuid?: string;
   parentUuid?: string;
+  logicalParentUuid?: string;
   timestamp?: string;
   usage?: TranscriptUsage;
   durationMs?: number;
@@ -80,6 +81,7 @@ interface RawTranscriptEntry {
   isApiErrorMessage?: unknown;
   uuid?: unknown;
   parentUuid?: unknown;
+  logicalParentUuid?: unknown;
   timestamp?: unknown;
   durationMs?: unknown;
   messageCount?: unknown;
@@ -370,6 +372,7 @@ function mergeTranscriptEntries(
     isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
     uuid: first.uuid ?? later.uuid,
     parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
     timestamp: first.timestamp ?? later.timestamp,
     usage: mergeUsage(first.usage, later.usage),
     durationMs: later.durationMs ?? first.durationMs,
@@ -408,6 +411,7 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
     promptId: typeof raw.promptId === "string" ? raw.promptId : undefined,
     uuid: typeof raw.uuid === "string" ? raw.uuid : undefined,
     parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : undefined,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : undefined,
     timestamp: typeof raw.timestamp === "string" ? raw.timestamp : undefined,
     permissionMode:
       typeof raw.permissionMode === "string" ? raw.permissionMode : undefined,
@@ -470,6 +474,20 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
           }
         : undefined,
   };
+}
+
+export function collectOrderedPromptIds(
+  entries: TranscriptEntryWithLineNumber[],
+): Array<{ promptId: string; index: number }> {
+  const out: Array<{ promptId: string; index: number }> = [];
+  const seen = new Set<string>();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
 }
 
 export function buildPromptIdLineMap(transcriptPath: string): Map<string, number> {

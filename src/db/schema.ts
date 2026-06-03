@@ -99,6 +99,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureForkLineageColumns(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -152,6 +153,32 @@ function ensureTurnInvalidationColumns(db: Database): void {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
     );
   }
+}
+
+function ensureForkLineageColumns(db: Database): void {
+  if (!hasColumn(db, "turns", "parent_turn_id")) {
+    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+    backfillAllIntraChains(db); // one-time bulk Step A on migration
+  }
+  if (!hasColumn(db, "sessions", "parent_session_id"))
+    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
+  if (!hasColumn(db, "sessions", "lineage_status"))
+    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+}
+
+export function backfillAllIntraChains(db: Database): void {
+  db.query(
+    `UPDATE turns SET parent_turn_id = (
+       SELECT p.id FROM turns p
+       WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       ORDER BY p.prompt_number DESC LIMIT 1
+     )
+     WHERE parent_turn_id IS NULL
+       AND EXISTS (
+         SELECT 1 FROM turns p
+         WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
+       )`,
+  ).run();
 }
 
 function ensureSessionProjectIndex(db: Database): void {

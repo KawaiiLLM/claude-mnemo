@@ -4,6 +4,7 @@ import { getObservation, getObservationsForTurn } from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import { getSession } from "../db/sessions";
 import {
+  getFirstTurn,
   getTurn,
   getTurnById,
   getTurnsForSession,
@@ -484,6 +485,34 @@ function joinPage(header: string, body: string, pageCount: number): string {
   return body ? `${header}\n${body}` : header;
 }
 
+/**
+ * Derives a fork-lineage breadcrumb string for a session with parentSessionId.
+ * Returns null for root sessions. Null-tolerant: if the fork turn number cannot
+ * be resolved the parenthetical is omitted (just "continues from S<id>").
+ */
+function deriveBreadcrumb(
+  db: Database,
+  session: NonNullable<ReturnType<typeof getSession>>,
+): string | null {
+  if (session.parentSessionId === null) {
+    return null;
+  }
+
+  const parentRef = `S${session.parentSessionId}`;
+
+  // Attempt to derive the fork turn: first turn of child → its parentTurnId →
+  // look up that turn's promptNumber in the parent session.
+  const firstTurn = getFirstTurn(db, session.id);
+  if (firstTurn !== null && firstTurn.parentTurnId !== null) {
+    const forkTurn = getTurnById(db, firstTurn.parentTurnId);
+    if (forkTurn !== null) {
+      return `continues from ${parentRef} (forked at T${forkTurn.promptNumber})`;
+    }
+  }
+
+  return `continues from ${parentRef}`;
+}
+
 function renderSession(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
@@ -494,6 +523,7 @@ function renderSession(
   const view = depth === "expanded"
     ? buildSessionView(db, session)
     : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+  const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
       { type: "session", value: view },
@@ -504,6 +534,10 @@ function renderSession(
       },
     ),
   ];
+
+  if (breadcrumb !== null) {
+    lines.push(`  ${breadcrumb}`);
+  }
 
   if (depth === "collapsed") {
     return lines.join("\n");

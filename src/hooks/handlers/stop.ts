@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
+import { relinkSessionLineage } from "../../db/lineage";
+import { recoverStrandedAncestors } from "../../db/recover-stranded";
 import { getTurnsForSession } from "../../db/turns";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
@@ -136,6 +138,21 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           epoch,
         );
       }
+
+      // Relink this session's lineage (resolves parent_session_id) BEFORE the
+      // ancestor climb, then re-enqueue any stranded ancestor tails so a forked
+      // child's reopening recovers its parent's stranded work (spec §4/§5).
+      // Runs on EVERY Stop (even without a transcript): relinkSessionLineage's
+      // Step A maintains the intra-session parent_turn_id chain unconditionally,
+      // while Step B harmlessly leaves the session "unresolved" (retryable) when
+      // there is no transcript to resolve a parent from.
+      relinkSessionLineage(
+        dependencies.db,
+        session.id,
+        input.transcriptPath ?? null,
+        epoch,
+      );
+      recoverStrandedAncestors(dependencies.db, session.id, epoch);
 
       for (const orphanTurn of orphanTurns) {
         dependencies.db
