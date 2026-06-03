@@ -128,6 +128,40 @@ test("classifies foreign / child / unknown by content_prompt_id ownership", () =
   ]);
 });
 
+test("classifyPromptOwnership chunks a large promptId list and merges correctly", () => {
+  const db = createDatabase(":memory:");
+  initializeSchema(db);
+
+  const parent = makeSession(db, "parent", 1);
+  const child = makeSession(db, "child", 2);
+
+  // Two real, classifiable prompts surrounded by many unknown ids — well over
+  // the chunk size so the IN(...) lookup must span multiple batches.
+  const foreignTurn = seedTurn(db, parent, 1, "pForeign");
+  const childTurn = seedTurn(db, child, 1, "cOwned");
+
+  const promptIds: string[] = [];
+  for (let i = 0; i < 1200; i += 1) promptIds.push(`u${i}`);
+  // Place the seeded ids in different chunks (start and well past 500).
+  promptIds[3] = "pForeign";
+  promptIds[700] = "cOwned";
+
+  const map = classifyPromptOwnership(db, child, promptIds);
+
+  expect(map.size).toBe(1200);
+  expect(map.get("pForeign")?.ownership).toBe("foreign");
+  expect(map.get("pForeign")?.owners).toEqual([
+    { sessionId: parent, turnId: foreignTurn, promptNumber: 1 },
+  ]);
+  expect(map.get("cOwned")?.ownership).toBe("child");
+  expect(map.get("cOwned")?.owners).toEqual([
+    { sessionId: child, turnId: childTurn, promptNumber: 1 },
+  ]);
+  // Every other id stays unknown (Map pre-populated, no row matched).
+  expect(map.get("u0")?.ownership).toBe("unknown");
+  expect(map.get("u1199")?.ownership).toBe("unknown");
+});
+
 // ---------------------------------------------------------------------------
 // isContiguousRun (helper)
 // ---------------------------------------------------------------------------
@@ -191,6 +225,40 @@ test("unresolved when no transcript path", () => {
   expect(resolveSessionLineage(db, child, null)).toEqual({
     status: "unresolved",
   });
+});
+
+test("unresolved (NOT root) when transcript file is missing", () => {
+  const db = createDatabase(":memory:");
+  initializeSchema(db);
+  const child = makeSession(db, "child", 2);
+  const missing = join(tmpdir(), "claude-mnemo-missing-transcript-xyz.jsonl");
+  // A missing transcript yields no ordered prompts → must be retryable, not a
+  // terminal root (positive child-owned evidence is required for root).
+  expect(resolveSessionLineage(db, child, missing).status).toBe("unresolved");
+});
+
+test("unresolved (NOT root) when transcript file is empty", () => {
+  const db = createDatabase(":memory:");
+  initializeSchema(db);
+  const child = makeSession(db, "child", 2);
+  const empty = writeTranscript([]);
+  expect(resolveSessionLineage(db, child, empty).status).toBe("unresolved");
+});
+
+test("retry: empty transcript → unresolved, then valid clean-start → root (not frozen)", () => {
+  const db = createDatabase(":memory:");
+  initializeSchema(db);
+  const child = makeSession(db, "child", 2);
+
+  // First Stop: transient empty transcript → unresolved (NOT a terminal root).
+  const empty = writeTranscript([]);
+  expect(resolveSessionLineage(db, child, empty).status).toBe("unresolved");
+
+  // Later Stop: a valid clean-start transcript with the child's own prompt →
+  // resolves to root, proving the empty case did not freeze the fork.
+  seedTurn(db, child, 1, "c1");
+  const valid = writeTranscript([promptEntry("c1")]);
+  expect(resolveSessionLineage(db, child, valid).status).toBe("root");
 });
 
 test("resolved: prefix has 2 foreign promptIds then a child-owned one", () => {

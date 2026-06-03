@@ -721,6 +721,52 @@ describe("handleStopHook", () => {
     await Bun.$`rm -rf ${transcriptDirectory.trim()}`;
   });
 
+  test("runs Step A (intra-session chain) on a Stop with no transcriptPath", async () => {
+    // Two turns with NULL parent_turn_id; the later turn should be chained to
+    // its predecessor even when the Stop carries no transcript (Step A must run
+    // unconditionally, not only inside the if (transcriptPath) block).
+    const first = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, created_at_epoch
+        ) VALUES (?, 1, 'active', 'First prompt', 120)
+        RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    const second = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, created_at_epoch
+        ) VALUES (?, 2, 'active', 'Second prompt', 121)
+        RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    const readParent = (turnId: number): number | null =>
+      db
+        .query<{ parentTurnId: number | null }, [number]>(
+          `SELECT parent_turn_id AS parentTurnId FROM turns WHERE id = ?`,
+        )
+        .get(turnId)?.parentTurnId ?? null;
+
+    expect(readParent(first)).toBeNull();
+    expect(readParent(second)).toBeNull();
+
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl },
+    });
+
+    // NO transcriptPath on this input.
+    const result = await handler(createInput({ lastAssistantMessage: "done" }));
+
+    expect(result.continue).toBe(true);
+    expect(readParent(second)).toBe(first);
+    expect(readParent(first)).toBeNull();
+  });
+
   test("relinks lineage and recovers the parent's stranded tail on Stop", async () => {
     // Parent session owns the inherited prefix prompts pA, pB; pB is the fork
     // turn. The parent also has a stranded tail turn (phantom-extracted).

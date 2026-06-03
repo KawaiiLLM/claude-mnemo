@@ -39,6 +39,11 @@ export interface PromptOwnership {
   owners: OwnerInfo[];
 }
 
+// Batch size for the ownership IN(...) lookup. A --fork-session child copies
+// long parent history, so the distinct-promptId count can grow large; chunking
+// keeps each query under SQLite's bind-variable limit and bounds Stop-time cost.
+const OWNERSHIP_QUERY_CHUNK = 500;
+
 export function classifyPromptOwnership(
   db: Database,
   childSessionId: number,
@@ -48,26 +53,33 @@ export function classifyPromptOwnership(
   for (const p of promptIds) result.set(p, { ownership: "unknown", owners: [] });
   if (promptIds.length === 0) return result;
 
-  const placeholders = promptIds.map(() => "?").join(",");
-  const rows = db
-    .query<
-      { content_prompt_id: string; session_id: number; turn_id: number; prompt_number: number },
-      string[]
-    >(
-      `SELECT content_prompt_id, session_id, id AS turn_id, prompt_number
-       FROM turns
-       WHERE content_prompt_id IN (${placeholders}) AND content_prompt_id IS NOT NULL`,
-    )
-    .all(...promptIds);
+  // Run the lookup in batches and merge owners into the result Map; the Map is
+  // already pre-populated with every input promptId as "unknown", so any id
+  // with no matching row stays "unknown".
+  for (let start = 0; start < promptIds.length; start += OWNERSHIP_QUERY_CHUNK) {
+    const chunk = promptIds.slice(start, start + OWNERSHIP_QUERY_CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = db
+      .query<
+        { content_prompt_id: string; session_id: number; turn_id: number; prompt_number: number },
+        string[]
+      >(
+        `SELECT content_prompt_id, session_id, id AS turn_id, prompt_number
+         FROM turns
+         WHERE content_prompt_id IN (${placeholders}) AND content_prompt_id IS NOT NULL`,
+      )
+      .all(...chunk);
 
-  for (const row of rows) {
-    result.get(row.content_prompt_id)!.owners.push({
-      sessionId: row.session_id,
-      turnId: row.turn_id,
-      promptNumber: row.prompt_number,
-    });
+    for (const row of rows) {
+      result.get(row.content_prompt_id)!.owners.push({
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        promptNumber: row.prompt_number,
+      });
+    }
   }
 
+  // Classify AFTER all chunks are merged so multi-owner detection sees every row.
   for (const [, e] of result) {
     if (e.owners.length === 0) {
       e.ownership = "unknown";
@@ -226,6 +238,11 @@ export function resolveSessionLineage(
   // 2. Scan the child transcript + classify each promptId by ownership.
   const entries = readAllTranscriptEntries(transcriptPath);
   const ordered = collectOrderedPromptIds(entries);
+  // No ordered prompts (missing/empty/unreadable transcript) → unresolved, not
+  // a terminal root. `root` requires positive transcript evidence (the
+  // session's own child-owned prompt); without it, stay retryable on the next
+  // Stop so a transient empty transcript can't permanently freeze a fork.
+  if (ordered.length === 0) return { status: "unresolved" };
   const own = classifyPromptOwnership(
     db,
     childSessionId,
