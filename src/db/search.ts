@@ -17,6 +17,8 @@ export interface TurnFtsRecord {
   title: string | null;
   content: string | null;
   insight: string | null;
+  userPrompt: string | null;
+  assistantResponse: string | null;
 }
 
 export interface ObservationFtsRecord {
@@ -50,6 +52,7 @@ export interface SearchMemoryResult {
   filesRead: string[];
   filesModified: string[];
   timestampEpoch: number;
+  relevance: number | null;
 }
 
 interface SearchRow {
@@ -66,6 +69,7 @@ interface SearchRow {
   filesRead: string | null;
   filesModified: string | null;
   timestampEpoch: number;
+  relevance: number | null;
 }
 
 function parseJsonArray(value: string | null): string[] {
@@ -166,8 +170,8 @@ function buildSafeFtsQuery(query?: string): string | undefined {
     .split(/\s+/)
     .filter(Boolean)
     .map((term) => {
-      const sanitized = term.replace(/["\*]/g, "");
-      return sanitized ? `"${sanitized.replace(/"/g, '""')}"*` : null;
+      const sanitized = term.replace(/["*]/g, "");
+      return sanitized ? `"${sanitized.replace(/"/g, '""')}"` : null;
     })
     .filter(Boolean);
 
@@ -175,7 +179,7 @@ function buildSafeFtsQuery(query?: string): string | undefined {
     return undefined;
   }
 
-  return terms.join(" AND ");
+  return terms.join(" OR ");
 }
 
 function indexFtsRecord(
@@ -185,6 +189,8 @@ function indexFtsRecord(
   title: string | null,
   content: string | null,
   extra: string,
+  prompt: string | null,
+  response: string | null,
 ): void {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
     layer,
@@ -192,8 +198,8 @@ function indexFtsRecord(
   );
 
   db.query(
-    "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES (?, ?, ?, ?, ?)",
-  ).run(layer, sourceId, title, content, extra);
+    "INSERT INTO memory_fts (layer, source_id, title, content, extra, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(layer, sourceId, title, content, extra, prompt ?? "", response ?? "");
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
@@ -231,6 +237,8 @@ export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void
     session.title,
     session.content,
     extra,
+    null,
+    null,
   );
 }
 
@@ -242,6 +250,8 @@ export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
     turn.title,
     turn.content,
     turn.insight ?? "",
+    turn.userPrompt,
+    turn.assistantResponse,
   );
 }
 
@@ -256,6 +266,8 @@ export function indexObservationToFTS(
     observation.title,
     observation.content,
     "",
+    null,
+    null,
   );
 }
 
@@ -299,7 +311,14 @@ export function rebuildSearchIndex(db: Database): void {
 
   const turnRows = db
     .query<
-      { id: number; title: string | null; content: string | null; insight: string | null },
+      {
+        id: number;
+        title: string | null;
+        content: string | null;
+        insight: string | null;
+        userPrompt: string | null;
+        assistantResponse: string | null;
+      },
       []
     >(
       `
@@ -307,7 +326,9 @@ export function rebuildSearchIndex(db: Database): void {
           id,
           title,
           content,
-          insight
+          insight,
+          user_prompt AS userPrompt,
+          assistant_response AS assistantResponse
         FROM turns
         WHERE status = 'extracted'
       `,
@@ -383,7 +404,8 @@ function queryRecentSessions(db: Database, options: SearchMemoryOptions): Search
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.created_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM sessions s
       ${combineClauses([projectClause.clause])}
       ORDER BY s.created_at_epoch DESC
@@ -410,7 +432,8 @@ function queryRecentTurns(db: Database, options: SearchMemoryOptions): SearchMem
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
-        t.created_at_epoch AS timestampEpoch
+        t.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM turns t
       JOIN sessions s ON s.id = t.session_id
       ${combineClauses([projectClause.clause])}
@@ -441,7 +464,8 @@ function queryRecentObservations(
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        o.created_at_epoch AS timestampEpoch
+        o.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
@@ -459,13 +483,64 @@ function querySessionsByScope(
 ): SearchMemoryResult[] {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
-  const whereClauses = [projectClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
 
   if (query) {
-    whereClauses.push("f.memory_fts MATCH ?");
-    params.push(query);
+    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params];
+
+    if (options.type) {
+      whereClauses.push(
+        `EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND t.type = ?
+        )`,
+      );
+      params.push(options.type);
+    }
+
+    if (options.file) {
+      whereClauses.push(
+        `EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+        )`,
+      );
+      params.push(`%${options.file}%`, `%${options.file}%`);
+    }
+
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'session' AS layer,
+          s.id AS sourceId,
+          s.id AS sessionId,
+          NULL AS turnId,
+          NULL AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          s.title AS title,
+          s.content AS content,
+          NULL AS type,
+          NULL AS filesRead,
+          NULL AS filesModified,
+          s.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN sessions s ON s.id = memory_fts.source_id
+        ${combineClauses(whereClauses)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params, options.limit),
+    );
   }
+
+  const whereClauses = [projectClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
 
   if (options.type) {
     whereClauses.push(
@@ -507,9 +582,9 @@ function querySessionsByScope(
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        s.created_at_epoch AS timestampEpoch
+        s.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM sessions s
-      ${query ? "JOIN memory_fts f ON f.layer = 'session' AND f.source_id = s.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY s.created_at_epoch DESC
     `, options.limit),
@@ -525,13 +600,46 @@ function queryTurnsByScope(
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
-  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params, ...fileClause.params];
 
   if (query) {
-    whereClauses.push("f.memory_fts MATCH ?");
-    params.push(query);
+    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause, fileClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params, ...fileClause.params];
+
+    if (options.type) {
+      whereClauses.push("t.type = ?");
+      params.push(options.type);
+    }
+
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'turn' AS layer,
+          t.id AS sourceId,
+          t.session_id AS sessionId,
+          t.id AS turnId,
+          NULL AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          t.title AS title,
+          t.content AS content,
+          NULL AS type,
+          t.files_read AS filesRead,
+          t.files_modified AS filesModified,
+          t.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN turns t ON t.id = memory_fts.source_id
+        JOIN sessions s ON s.id = t.session_id
+        ${combineClauses(whereClauses)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params, options.limit),
+    );
   }
+
+  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params, ...fileClause.params];
 
   if (options.type) {
     whereClauses.push("t.type = ?");
@@ -554,10 +662,10 @@ function queryTurnsByScope(
         NULL AS type,
         t.files_read AS filesRead,
         t.files_modified AS filesModified,
-        t.created_at_epoch AS timestampEpoch
+        t.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM turns t
       JOIN sessions s ON s.id = t.session_id
-      ${query ? "JOIN memory_fts f ON f.layer = 'turn' AND f.source_id = t.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY t.created_at_epoch DESC
     `, options.limit),
@@ -574,19 +682,48 @@ function queryObservationsByScope(
     return [];
   }
 
-  const projectClause = buildProjectClause(options.project);
-  const dateClause = buildDateClause("o.created_at_epoch", options);
-  const whereClauses = ["o.status = 'extracted'", projectClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
-
-  if (query) {
-    whereClauses.push("f.memory_fts MATCH ?");
-    params.push(query);
-  }
-
   if (options.type) {
     return [];
   }
+
+  const projectClause = buildProjectClause(options.project);
+  const dateClause = buildDateClause("o.created_at_epoch", options);
+
+  if (query) {
+    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, dateClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params];
+
+    return queryRows(
+      db,
+      applyLimit(`
+        SELECT
+          'observation' AS layer,
+          o.id AS sourceId,
+          t.session_id AS sessionId,
+          t.id AS turnId,
+          o.id AS observationId,
+          NULL AS sourceTurnId,
+          s.project AS project,
+          o.title AS title,
+          o.content AS content,
+          NULL AS type,
+          NULL AS filesRead,
+          NULL AS filesModified,
+          o.created_at_epoch AS timestampEpoch,
+          bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0) AS relevance
+        FROM memory_fts
+        JOIN observations o ON o.id = memory_fts.source_id
+        JOIN turns t ON t.id = o.turn_id
+        JOIN sessions s ON s.id = t.session_id
+        ${combineClauses(whereClauses)}
+        ORDER BY relevance ASC
+      `, options.limit),
+      withLimit(params, options.limit),
+    );
+  }
+
+  const whereClauses = ["o.status = 'extracted'", projectClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
 
   return queryRows(
     db,
@@ -604,11 +741,11 @@ function queryObservationsByScope(
         NULL AS type,
         NULL AS filesRead,
         NULL AS filesModified,
-        o.created_at_epoch AS timestampEpoch
+        o.created_at_epoch AS timestampEpoch,
+        NULL AS relevance
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
-      ${query ? "JOIN memory_fts f ON f.layer = 'observation' AND f.source_id = o.id" : ""}
       ${combineClauses(whereClauses)}
       ORDER BY o.created_at_epoch DESC
     `, options.limit),
@@ -649,6 +786,17 @@ export function searchMemory(
     results.push(...queryTurnsByScope(db, options, query));
 
     results.push(...queryObservationsByScope(db, options, query));
+
+    if (query) {
+      return results.sort((left, right) => {
+        const leftRank = left.relevance ?? Number.POSITIVE_INFINITY;
+        const rightRank = right.relevance ?? Number.POSITIVE_INFINITY;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        return right.timestampEpoch - left.timestampEpoch;
+      });
+    }
 
     return results.sort((left, right) => right.timestampEpoch - left.timestampEpoch);
   }

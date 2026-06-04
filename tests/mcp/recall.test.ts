@@ -523,6 +523,42 @@ describe("recallMemory", () => {
     ).toContain("Resumed adopted turn");
   });
 
+  test("surfaces a Chinese prompt-only match though the collapsed snippet stays English", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-prompt-only",
+      project: "claude-mnemo",
+      title: "Browser plugin login",
+      content: "English summary",
+      insight: null,
+      createdAtEpoch: 900_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "怎么用 浏览器插件 同步 cookie",
+      assistantResponse: "Use CookieCloud.",
+      title: "Cookie sync setup",
+      content: "English turn summary",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 900_010,
+      updatedAtEpoch: 900_020,
+      observations: [],
+    });
+
+    const output = recallMemory(db, { query: "浏览器插件" });
+
+    // Findability is met: the turn's session surfaces.
+    expect(output).toContain(`[S${session.id}`);
+    expect(output).toContain("Cookie sync setup");
+    // Accepted limitation: the visible snippet is the English summary, not the
+    // matched Chinese prompt fragment (snippet() preview deferred).
+    expect(output).not.toContain("浏览器插件");
+  });
+
   test("recall search totals exclude memory-layer FTS rows (null session_id)", () => {
     // A stray memory-layer FTS row must not render or inflate the page total.
     db.query(

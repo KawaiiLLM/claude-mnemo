@@ -107,14 +107,14 @@ function createDatabase(path2) {
 }
 
 // src/db/search.ts
-function indexFtsRecord(db, layer, sourceId, title, content, extra) {
+function indexFtsRecord(db, layer, sourceId, title, content, extra, prompt, response) {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
     layer,
     sourceId
   );
   db.query(
-    "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES (?, ?, ?, ?, ?)"
-  ).run(layer, sourceId, title, content, extra);
+    "INSERT INTO memory_fts (layer, source_id, title, content, extra, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(layer, sourceId, title, content, extra, prompt ?? "", response ?? "");
 }
 function indexSessionToFTS(db, session) {
   const hasNewFields = [
@@ -137,7 +137,9 @@ function indexSessionToFTS(db, session) {
     session.id,
     session.title,
     session.content,
-    extra
+    extra,
+    null,
+    null
   );
 }
 function indexTurnToFTS(db, turn) {
@@ -147,7 +149,9 @@ function indexTurnToFTS(db, turn) {
     turn.id,
     turn.title,
     turn.content,
-    turn.insight ?? ""
+    turn.insight ?? "",
+    turn.userPrompt,
+    turn.assistantResponse
   );
 }
 function indexObservationToFTS(db, observation) {
@@ -157,7 +161,9 @@ function indexObservationToFTS(db, observation) {
     observation.id,
     observation.title,
     observation.content,
-    ""
+    "",
+    null,
+    null
   );
 }
 function rebuildSearchIndex(db) {
@@ -186,7 +192,9 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          insight
+          insight,
+          user_prompt AS userPrompt,
+          assistant_response AS assistantResponse
         FROM turns
         WHERE status = 'extracted'
       `
@@ -215,6 +223,18 @@ function rebuildSearchIndex(db) {
 }
 
 // src/db/schema.ts
+var MEMORY_FTS_DDL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    layer UNINDEXED,
+    source_id UNINDEXED,
+    title,
+    content,
+    extra,
+    prompt,
+    response,
+    tokenize = 'trigram'
+  );
+`;
 var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,13 +316,7 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
 
-  CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    layer,
-    source_id,
-    title,
-    content,
-    extra
-  );
+  ${MEMORY_FTS_DDL}
 `;
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
@@ -312,6 +326,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureForkLineageColumns(db);
+  ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -376,6 +391,27 @@ function backfillAllIntraChains(db) {
          WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
        )`
   ).run();
+}
+var EXPECTED_FTS_COLUMNS = [
+  "layer",
+  "source_id",
+  "title",
+  "content",
+  "extra",
+  "prompt",
+  "response"
+];
+function ensureSearchIndexSchema(db) {
+  const row = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'"
+  ).get();
+  const isCurrent = row !== null && row.sql.includes("trigram") && EXPECTED_FTS_COLUMNS.every((column) => hasColumn(db, "memory_fts", column));
+  if (isCurrent) {
+    return;
+  }
+  db.exec("DROP TABLE IF EXISTS memory_fts");
+  db.exec(MEMORY_FTS_DDL);
+  rebuildSearchIndex(db);
 }
 function ensureSessionProjectIndex(db) {
   if (hasColumn(db, "sessions", "created_at_epoch")) {
@@ -692,7 +728,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.24-mpy0ky1u" : "dev";
+var BUILD_ID = true ? "0.2.25-mpz6de20" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;

@@ -204,6 +204,119 @@ describe("observation queries and search", () => {
     expect(results[0]?.observationId).not.toBe(pendingObservation.id);
   });
 
+  test("finds a turn by a Chinese substring of its user prompt via trigram", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-cjk",
+      project: "claude-mnemo",
+      title: "Cookie auth investigation",
+      content: "English summary only",
+      insight: null,
+      createdAtEpoch: 600,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "哔哩哔哩 浏览器插件 登录测试",
+      assistantResponse: "Investigated CookieCloud auth.",
+      title: "Cookie auth",
+      content: "English turn summary",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 610,
+      updatedAtEpoch: 620,
+      observations: [],
+    });
+
+    expect(searchMemory(db, { query: "哔哩哔哩" }).some((r) => r.layer === "turn")).toBe(true);
+    expect(searchMemory(db, { query: "浏览器" }).some((r) => r.layer === "turn")).toBe(true);
+    expect(searchMemory(db, { query: "登录" })).toHaveLength(0);
+  });
+
+  test("appending a non-co-occurring term does not drop results (OR semantics)", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-or",
+      project: "claude-mnemo",
+      title: "Race archive",
+      content: "Session about the auth race",
+      insight: null,
+      createdAtEpoch: 700,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "race details",
+      assistantResponse: "reproduced",
+      title: "Race diagnosis",
+      content: "the race reproduction",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 710,
+      updatedAtEpoch: 720,
+      observations: [],
+    });
+
+    const single = searchMemory(db, { query: "race" });
+    const widened = searchMemory(db, { query: "race zzzznotpresent" });
+
+    expect(single.length).toBeGreaterThan(0);
+    expect(widened.length).toBeGreaterThanOrEqual(single.length);
+  });
+
+  test("≤2-char Latin tokens are an accepted regression; 3+ char still matches", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-short-latin",
+      project: "claude-mnemo",
+      title: "UI API DB layer",
+      content: "covers UI, the API surface, and the DB",
+      insight: null,
+      createdAtEpoch: 630,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    void session;
+
+    expect(searchMemory(db, { query: "UI" })).toHaveLength(0);
+    expect(searchMemory(db, { query: "DB" })).toHaveLength(0);
+    expect(searchMemory(db, { query: "API" }).some((r) => r.layer === "session")).toBe(true);
+  });
+
+  test("ranks a title match above a body-only match (bm25)", () => {
+    upsertSession(db, {
+      contentSessionId: "session-rank-title",
+      project: "claude-mnemo",
+      title: "widget overview",
+      content: "unrelated body",
+      insight: null,
+      createdAtEpoch: 800,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    upsertSession(db, {
+      contentSessionId: "session-rank-body",
+      project: "claude-mnemo",
+      title: "unrelated title",
+      content: "a passing mention of widget here",
+      insight: null,
+      createdAtEpoch: 810,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const results = searchMemory(db, { query: "widget", scope: "sessions" });
+    const titles = results.map((r) => r.title);
+
+    expect(titles.indexOf("widget overview")).toBeLessThan(
+      titles.indexOf("unrelated title"),
+    );
+  });
+
   test("returns recent sessions when no query is provided", () => {
     upsertSession(db, {
       contentSessionId: "session-recent-1",
