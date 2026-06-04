@@ -33,6 +33,7 @@ export interface SearchMemoryOptions {
   project?: string;
   type?: string;
   file?: string;
+  sessionId?: number;
   after?: number;
   before?: number;
   limit?: number;
@@ -155,6 +156,20 @@ function buildProjectClause(project?: string): {
   return {
     clause: "s.project = ?",
     params: [project],
+  };
+}
+
+function buildSessionClause(
+  column: string,
+  sessionId?: number,
+): { clause: string; params: number[] } {
+  if (sessionId === undefined) {
+    return { clause: "", params: [] };
+  }
+
+  return {
+    clause: `${column} = ?`,
+    params: [sessionId],
   };
 }
 
@@ -483,10 +498,11 @@ function querySessionsByScope(
 ): SearchMemoryResult[] {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
+  const sessionClause = buildSessionClause("s.id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params];
+    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
     if (options.type) {
       whereClauses.push(
@@ -539,8 +555,8 @@ function querySessionsByScope(
     );
   }
 
-  const whereClauses = [projectClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
   if (options.type) {
     whereClauses.push(
@@ -600,10 +616,11 @@ function queryTurnsByScope(
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause, fileClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params, ...fileClause.params];
+    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
 
     if (options.type) {
       whereClauses.push("t.type = ?");
@@ -638,8 +655,8 @@ function queryTurnsByScope(
     );
   }
 
-  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
 
   if (options.type) {
     whereClauses.push("t.type = ?");
@@ -688,10 +705,11 @@ function queryObservationsByScope(
 
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("o.created_at_epoch", options);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, dateClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...dateClause.params];
+    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
     return queryRows(
       db,
@@ -722,8 +740,8 @@ function queryObservationsByScope(
     );
   }
 
-  const whereClauses = ["o.status = 'extracted'", projectClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...dateClause.params];
+  const whereClauses = ["o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
   return queryRows(
     db,
@@ -761,6 +779,7 @@ export function searchMemory(
   const hasFilters =
     Boolean(options.type) ||
     Boolean(options.file) ||
+    options.sessionId !== undefined ||
     options.after !== undefined ||
     options.before !== undefined;
 

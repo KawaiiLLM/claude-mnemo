@@ -42,6 +42,7 @@ interface QueryFilters {
   type?: string;
   file?: string;
   project?: string;
+  session?: number;
 }
 
 const CHILD_PREVIEW_SIZE = 5;
@@ -266,6 +267,16 @@ function parseQueryFilters(query: string | undefined): QueryFilters {
     }
     if (token.startsWith("project:")) {
       filters.project = token.slice("project:".length);
+      continue;
+    }
+    if (token.startsWith("session:")) {
+      // Accept both the `S<id>` form users see in output and a bare `<id>`.
+      const raw = token.slice("session:".length).replace(/^[Ss]/, "");
+      const sessionId = Number(raw);
+      if (Number.isInteger(sessionId) && sessionId > 0) {
+        filters.session = sessionId;
+      }
+      // Malformed session: tokens are dropped, never searched as free text.
       continue;
     }
     textTerms.push(token);
@@ -1123,6 +1134,7 @@ function searchQueryResults(
     type: filters.type,
     file: filters.file,
     project: filters.project,
+    sessionId: filters.session,
     after,
     before,
   }).filter((r) => r.sessionId !== null);
@@ -1137,7 +1149,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
-  const pageSize = input.pageSize ?? (depth === "collapsed" ? 50 : 10);
+  const pageSize = input.pageSize ?? 10;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const timeRange = resolveTimeRange(input.time);
 

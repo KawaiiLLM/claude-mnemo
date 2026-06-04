@@ -49,6 +49,7 @@ Output IDs map directly to selectors:
 recall()                                        # recent sessions
 recall(query="auth race")                       # FTS across all layers
 recall(query="type:bugfix file:src/auth.ts")    # typed filters
+recall(query="cookie session:S12")              # full-text search within one session
 recall(time="-7d")                              # last 7 days
 ```
 
@@ -89,11 +90,11 @@ If the result still is not enough, or you need exact wording, the full response,
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
-| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:`. Tokens are ANDed. |
+| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:` / `session:`. Free-text terms are OR'd and ranked by relevance (bm25); the typed filters are AND'd with the text and each other. |
 | `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
 | `depth` | string | `collapsed` (default) or `expanded`. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
-| `pageSize` | number | Item count for the target level page. |
+| `pageSize` | number | Item count for the target level page. Default `10`. |
 | `truncate` | number | Character cap per rendered field. Default `200`, max `2000`. |
 
 Omit both `id` and `query` to get recent sessions.
@@ -120,8 +121,9 @@ In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` 
 | `type:bugfix` | turns, observations | Matches stored type tags. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
 | `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
+| `session:S12` | sessions, turns, observations | Restrict a full-text search to one session. Accepts `S12` or bare `12`; a malformed id is ignored. |
 
-Free words become an FTS query over indexed text.
+Free words become an FTS query (terms OR'd, bm25-ranked) over indexed text. Use `session:` to scope that search to a single session — the one thing the `id` selector cannot combine with free text.
 
 ## Depth Guidance
 
