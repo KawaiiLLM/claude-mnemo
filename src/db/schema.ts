@@ -189,6 +189,16 @@ export function backfillAllIntraChains(db: Database): void {
   ).run();
 }
 
+const EXPECTED_FTS_COLUMNS = [
+  "layer",
+  "source_id",
+  "title",
+  "content",
+  "extra",
+  "prompt",
+  "response",
+] as const;
+
 function ensureSearchIndexSchema(db: Database): void {
   const row = db
     .query<{ sql: string }, []>(
@@ -196,8 +206,13 @@ function ensureSearchIndexSchema(db: Database): void {
     )
     .get();
 
-  // Fresh DBs already got the new DDL from SCHEMA_SQL → both markers present → no-op.
-  if (row && row.sql.includes("trigram") && row.sql.includes("prompt")) {
+  // Fresh DBs already got the new DDL from SCHEMA_SQL → trigram + all expected columns present → no-op.
+  const isCurrent =
+    row !== null &&
+    row.sql.includes("trigram") &&
+    EXPECTED_FTS_COLUMNS.every((column) => hasColumn(db, "memory_fts", column));
+
+  if (isCurrent) {
     return;
   }
 

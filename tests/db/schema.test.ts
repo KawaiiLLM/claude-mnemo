@@ -875,6 +875,41 @@ describe("initializeSchema", () => {
     db.close();
   });
 
+  test("recreates an FTS table that has trigram+prompt but is missing the response column", () => {
+    const db = createDatabase(":memory:");
+    // Partial/intermediate schema: trigram + prompt, but NO response column.
+    db.exec(`
+      CREATE VIRTUAL TABLE memory_fts USING fts5(
+        layer UNINDEXED, source_id UNINDEXED, title, content, extra, prompt,
+        tokenize = 'trigram'
+      );
+    `);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(memory_fts)")
+      .all()
+      .map((r) => r.name);
+    expect(columns).toContain("response");
+
+    // A subsequent index write must not throw "no column named response".
+    expect(() =>
+      upsertSession(db, {
+        contentSessionId: "partial-schema",
+        project: "claude-mnemo",
+        title: "x",
+        content: "y",
+        insight: null,
+        createdAtEpoch: 1,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      }),
+    ).not.toThrow();
+
+    db.close();
+  });
+
   test("backfillAllIntraChains links every session's intra-session chain", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);

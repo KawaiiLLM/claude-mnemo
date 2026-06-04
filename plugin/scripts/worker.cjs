@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.25-mpz431e8" : "dev";
+var BUILD_ID = true ? "0.2.25-mpz6de20" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1572,11 +1572,21 @@ function backfillAllIntraChains(db) {
        )`
   ).run();
 }
+var EXPECTED_FTS_COLUMNS = [
+  "layer",
+  "source_id",
+  "title",
+  "content",
+  "extra",
+  "prompt",
+  "response"
+];
 function ensureSearchIndexSchema(db) {
   const row = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'"
   ).get();
-  if (row && row.sql.includes("trigram") && row.sql.includes("prompt")) {
+  const isCurrent = row !== null && row.sql.includes("trigram") && EXPECTED_FTS_COLUMNS.every((column) => hasColumn(db, "memory_fts", column));
+  if (isCurrent) {
     return;
   }
   db.exec("DROP TABLE IF EXISTS memory_fts");

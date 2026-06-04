@@ -7537,7 +7537,8 @@ function ensureSearchIndexSchema(db) {
   const row = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'"
   ).get();
-  if (row && row.sql.includes("trigram") && row.sql.includes("prompt")) {
+  const isCurrent = row !== null && row.sql.includes("trigram") && EXPECTED_FTS_COLUMNS.every((column) => hasColumn(db, "memory_fts", column));
+  if (isCurrent) {
     return;
   }
   db.exec("DROP TABLE IF EXISTS memory_fts");
@@ -7652,7 +7653,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, SCHEMA_SQL;
+var MEMORY_FTS_DDL, SCHEMA_SQL, EXPECTED_FTS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -7752,6 +7753,15 @@ var init_schema = __esm({
 
   ${MEMORY_FTS_DDL}
 `;
+    EXPECTED_FTS_COLUMNS = [
+      "layer",
+      "source_id",
+      "title",
+      "content",
+      "extra",
+      "prompt",
+      "response"
+    ];
   }
 });
 
