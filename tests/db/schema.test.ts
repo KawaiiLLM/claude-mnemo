@@ -853,6 +853,13 @@ describe("initializeSchema", () => {
       .all()
       .map((row) => row.name);
     expect(sessionColumns).toContain("decision");
+
+    const ftsCount = db
+      .query<{ n: number }, []>(
+        "SELECT count(*) AS n FROM memory_fts WHERE layer = 'session'",
+      )
+      .get()!;
+    expect(ftsCount.n).toBe(1);
   });
 
   test("lineage columns exist with defaults", () => {

@@ -187,8 +187,8 @@ function indexFtsRecord(
   title: string | null,
   content: string | null,
   extra: string,
-  prompt: string,
-  response: string,
+  prompt: string | null,
+  response: string | null,
 ): void {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
     layer,
@@ -197,7 +197,7 @@ function indexFtsRecord(
 
   db.query(
     "INSERT INTO memory_fts (layer, source_id, title, content, extra, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(layer, sourceId, title, content, extra, prompt, response);
+  ).run(layer, sourceId, title, content, extra, prompt ?? "", response ?? "");
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
@@ -235,8 +235,8 @@ export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void
     session.title,
     session.content,
     extra,
-    "",
-    "",
+    null,
+    null,
   );
 }
 
@@ -248,8 +248,8 @@ export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
     turn.title,
     turn.content,
     turn.insight ?? "",
-    turn.userPrompt ?? "",
-    turn.assistantResponse ?? "",
+    turn.userPrompt,
+    turn.assistantResponse,
   );
 }
 
@@ -264,8 +264,8 @@ export function indexObservationToFTS(
     observation.title,
     observation.content,
     "",
-    "",
-    "",
+    null,
+    null,
   );
 }
 
