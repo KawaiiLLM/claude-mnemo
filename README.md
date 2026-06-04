@@ -77,6 +77,7 @@ Source records *what* the code does; it never records *why*. `recall` is the ind
 recall()                                            # recent sessions
 recall(query="auth race")                           # FTS across all layers
 recall(query="type:bugfix file:src/auth.ts")        # typed filters
+recall(query="cookie session:S12")                  # full-text search within one session
 recall(time="-7d")                                  # relative time window
 recall(id="S12")                                    # session summary
 recall(id="S12/T3")                                 # turn by promptNumber
@@ -86,7 +87,7 @@ recall(id="O87", depth="expanded")                  # specific observation
 ```
 
 - **Selectors**: `S*` / `S12` / `S5..10` (sessions), `S12/T*` / `S12/T3..7` (turns by promptNumber), `S12/T3/O*` (observation list), `O7` (single observation, global id).
-- **Query prefixes**: `type:` / `file:` / `project:`. Free words become an FTS phrase.
+- **Query prefixes**: `type:` / `file:` / `project:` / `session:` (`S12` or bare `12`). Free-text terms are OR'd and bm25-ranked; prefixes are AND'd with the text.
 - **Time**: `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range).
 - **Depth**: `collapsed` (default) / `expanded`.
 
@@ -168,7 +169,7 @@ SQLite at `~/.claude-mnemo/claude-mnemo.db` (WAL mode, 3s busy timeout):
 | `turns` | One row per user prompt. Fields: `user_prompt`, `assistant_response`, `title`, `content`, `insight`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count`, `status` (`active` → `extracted` / `skipped` / `undone`). |
 | `observations` | One row per tool call. Fields: `tool_name`, `tool_input`, `tool_result`, `title`, `content`, `status` (`pending` → `extracted` / `skipped`). |
 | `pending_queue` | FIFO extraction queue. Fields: `seq` (monotonic), `kind` (`obs` / `turn-stop`), `target_id`, `session_db_id`, `claimed_at_epoch`. |
-| `memory_fts` | FTS5 virtual table indexing sessions / turns / observations. |
+| `memory_fts` | FTS5 (trigram) virtual table indexing sessions / turns / observations — including each turn's raw `user_prompt` / `assistant_response` — with bm25 relevance ranking. |
 
 ### Architecture Decisions
 

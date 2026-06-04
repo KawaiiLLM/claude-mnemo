@@ -584,6 +584,38 @@ describe("recallMemory", () => {
     const pageCount = Number(pageCountMatch![1]);
     expect(pageCount).toBe(total); // pageSize:1 => pageCount === total
   });
+
+  test("session: filter scopes a full-text search to one session", () => {
+    // 'auth' matches BOTH the baseline session and the auth-race session.
+    const unscoped = recallMemory(db, { query: "auth", pageSize: 50 });
+    expect(unscoped).toContain(`[S${baselineSessionId}] Auth baseline`);
+    expect(unscoped).toContain(`[S${authSessionId}] Auth race fix`);
+
+    // session:S<id> narrows the same query to a single session.
+    const scoped = recallMemory(db, {
+      query: `auth session:S${authSessionId}`,
+      pageSize: 50,
+    });
+    expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+  });
+
+  test("session: filter accepts a bare numeric id without the S prefix", () => {
+    const scoped = recallMemory(db, {
+      query: `auth session:${authSessionId}`,
+      pageSize: 50,
+    });
+    expect(scoped).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(scoped).not.toContain(`[S${baselineSessionId}] Auth baseline`);
+  });
+
+  test("session: filter drops a malformed id instead of searching it as text", () => {
+    // A non-numeric session: token must be ignored, not applied as a filter and
+    // not OR'd into the FTS query — so the search behaves like a plain `auth`.
+    const output = recallMemory(db, { query: "auth session:abc", pageSize: 50 });
+    expect(output).toContain(`[S${authSessionId}] Auth race fix`);
+    expect(output).toContain(`[S${baselineSessionId}] Auth baseline`);
+  });
 });
 
 describe("fork-lineage breadcrumb in recall", () => {
