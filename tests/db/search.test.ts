@@ -287,6 +287,36 @@ describe("observation queries and search", () => {
     expect(searchMemory(db, { query: "API" }).some((r) => r.layer === "session")).toBe(true);
   });
 
+  test("ranks a title match above a body-only match (bm25)", () => {
+    upsertSession(db, {
+      contentSessionId: "session-rank-title",
+      project: "claude-mnemo",
+      title: "widget overview",
+      content: "unrelated body",
+      insight: null,
+      createdAtEpoch: 800,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    upsertSession(db, {
+      contentSessionId: "session-rank-body",
+      project: "claude-mnemo",
+      title: "unrelated title",
+      content: "a passing mention of widget here",
+      insight: null,
+      createdAtEpoch: 810,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const results = searchMemory(db, { query: "widget", scope: "sessions" });
+    const titles = results.map((r) => r.title);
+
+    expect(titles.indexOf("widget overview")).toBeLessThan(
+      titles.indexOf("unrelated title"),
+    );
+  });
+
   test("returns recent sessions when no query is provided", () => {
     upsertSession(db, {
       contentSessionId: "session-recent-1",
