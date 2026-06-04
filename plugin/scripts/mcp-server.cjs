@@ -6864,6 +6864,15 @@ function buildProjectClause(project) {
     params: [project]
   };
 }
+function buildSessionClause(column, sessionId) {
+  if (sessionId === void 0) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `${column} = ?`,
+    params: [sessionId]
+  };
+}
 function combineClauses(clauses) {
   const filtered = clauses.filter(Boolean);
   return filtered.length > 0 ? ` WHERE ${filtered.join(" AND ")}` : "";
@@ -7089,9 +7098,10 @@ function queryRecentObservations(db, options) {
 function querySessionsByScope(db, options, query) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
+  const sessionClause = buildSessionClause("s.id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause];
-    const params2 = [query, ...projectClause.params, ...dateClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
     if (options.type) {
       whereClauses2.push(
         `EXISTS (
@@ -7140,8 +7150,8 @@ function querySessionsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = [projectClause.clause, dateClause.clause];
-  const params = [...projectClause.params, ...dateClause.params];
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
   if (options.type) {
     whereClauses.push(
       `EXISTS (
@@ -7193,9 +7203,10 @@ function queryTurnsByScope(db, options, query) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, dateClause.clause, fileClause.clause];
-    const params2 = [query, ...projectClause.params, ...dateClause.params, ...fileClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
     if (options.type) {
       whereClauses2.push("t.type = ?");
       params2.push(options.type);
@@ -7227,8 +7238,8 @@ function queryTurnsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["1 = 1", projectClause.clause, dateClause.clause, fileClause.clause];
-  const params = [...projectClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
   if (options.type) {
     whereClauses.push("t.type = ?");
     params.push(options.type);
@@ -7268,9 +7279,10 @@ function queryObservationsByScope(db, options, query) {
   }
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("o.created_at_epoch", options);
+  const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, dateClause.clause];
-    const params2 = [query, ...projectClause.params, ...dateClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
     return queryRows(
       db,
       applyLimit(`
@@ -7299,8 +7311,8 @@ function queryObservationsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["o.status = 'extracted'", projectClause.clause, dateClause.clause];
-  const params = [...projectClause.params, ...dateClause.params];
+  const whereClauses = ["o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
   return queryRows(
     db,
     applyLimit(`
@@ -7330,7 +7342,7 @@ function queryObservationsByScope(db, options, query) {
 }
 function searchMemory(db, options) {
   const query = buildSafeFtsQuery(options.query);
-  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.after !== void 0 || options.before !== void 0;
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
   if (!query && !hasFilters) {
     if (!options.scope || options.scope === "sessions") {
       return queryRecentSessions(db, options);
@@ -32294,6 +32306,14 @@ function parseQueryFilters(query) {
       filters.project = token.slice("project:".length);
       continue;
     }
+    if (token.startsWith("session:")) {
+      const raw = token.slice("session:".length).replace(/^[Ss]/, "");
+      const sessionId = Number(raw);
+      if (Number.isInteger(sessionId) && sessionId > 0) {
+        filters.session = sessionId;
+      }
+      continue;
+    }
     textTerms.push(token);
   }
   if (textTerms.length > 0) {
@@ -32836,6 +32856,7 @@ function searchQueryResults(db, filters, after, before) {
     type: filters.type,
     file: filters.file,
     project: filters.project,
+    sessionId: filters.session,
     after,
     before
   }).filter((r) => r.sessionId !== null);
@@ -32848,7 +32869,7 @@ function recallMemory(db, input) {
   }
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
-  const pageSize = input.pageSize ?? (depth === "collapsed" ? 50 : 10);
+  const pageSize = input.pageSize ?? 10;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
@@ -33930,7 +33951,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.25" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.26" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
