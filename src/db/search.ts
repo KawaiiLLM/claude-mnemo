@@ -168,8 +168,8 @@ function buildSafeFtsQuery(query?: string): string | undefined {
     .split(/\s+/)
     .filter(Boolean)
     .map((term) => {
-      const sanitized = term.replace(/["\*]/g, "");
-      return sanitized ? `"${sanitized.replace(/"/g, '""')}"*` : null;
+      const sanitized = term.replace(/["*]/g, "");
+      return sanitized ? `"${sanitized.replace(/"/g, '""')}"` : null;
     })
     .filter(Boolean);
 
@@ -177,7 +177,7 @@ function buildSafeFtsQuery(query?: string): string | undefined {
     return undefined;
   }
 
-  return terms.join(" AND ");
+  return terms.join(" OR ");
 }
 
 function indexFtsRecord(

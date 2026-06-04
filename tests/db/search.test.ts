@@ -236,6 +236,39 @@ describe("observation queries and search", () => {
     expect(searchMemory(db, { query: "登录" })).toHaveLength(0);
   });
 
+  test("appending a non-co-occurring term does not drop results (OR semantics)", () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-or",
+      project: "claude-mnemo",
+      title: "Race archive",
+      content: "Session about the auth race",
+      insight: null,
+      createdAtEpoch: 700,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "race details",
+      assistantResponse: "reproduced",
+      title: "Race diagnosis",
+      content: "the race reproduction",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 710,
+      updatedAtEpoch: 720,
+      observations: [],
+    });
+
+    const single = searchMemory(db, { query: "race" });
+    const widened = searchMemory(db, { query: "race zzzznotpresent" });
+
+    expect(single.length).toBeGreaterThan(0);
+    expect(widened.length).toBeGreaterThanOrEqual(single.length);
+  });
+
   test("≤2-char Latin tokens are an accepted regression; 3+ char still matches", () => {
     const session = upsertSession(db, {
       contentSessionId: "session-short-latin",
