@@ -2,6 +2,19 @@ import type { Database } from "bun:sqlite";
 
 import { rebuildSearchIndex } from "./search";
 
+const MEMORY_FTS_DDL = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    layer UNINDEXED,
+    source_id UNINDEXED,
+    title,
+    content,
+    extra,
+    prompt,
+    response,
+    tokenize = 'trigram'
+  );
+`;
+
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,13 +96,7 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
 
-  CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-    layer,
-    source_id,
-    title,
-    content,
-    extra
-  );
+  ${MEMORY_FTS_DDL}
 `;
 
 export function initializeSchema(db: Database): void {
@@ -100,6 +107,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureForkLineageColumns(db);
+  ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
@@ -179,6 +187,23 @@ export function backfillAllIntraChains(db: Database): void {
          WHERE p.session_id = turns.session_id AND p.prompt_number < turns.prompt_number
        )`,
   ).run();
+}
+
+function ensureSearchIndexSchema(db: Database): void {
+  const row = db
+    .query<{ sql: string }, []>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'",
+    )
+    .get();
+
+  // Fresh DBs already got the new DDL from SCHEMA_SQL → both markers present → no-op.
+  if (row && row.sql.includes("trigram") && row.sql.includes("prompt")) {
+    return;
+  }
+
+  db.exec("DROP TABLE IF EXISTS memory_fts");
+  db.exec(MEMORY_FTS_DDL);
+  rebuildSearchIndex(db);
 }
 
 function ensureSessionProjectIndex(db: Database): void {

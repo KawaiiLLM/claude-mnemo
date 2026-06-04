@@ -17,6 +17,8 @@ export interface TurnFtsRecord {
   title: string | null;
   content: string | null;
   insight: string | null;
+  userPrompt: string | null;
+  assistantResponse: string | null;
 }
 
 export interface ObservationFtsRecord {
@@ -185,6 +187,8 @@ function indexFtsRecord(
   title: string | null,
   content: string | null,
   extra: string,
+  prompt: string,
+  response: string,
 ): void {
   db.query("DELETE FROM memory_fts WHERE layer = ? AND source_id = ?").run(
     layer,
@@ -192,8 +196,8 @@ function indexFtsRecord(
   );
 
   db.query(
-    "INSERT INTO memory_fts (layer, source_id, title, content, extra) VALUES (?, ?, ?, ?, ?)",
-  ).run(layer, sourceId, title, content, extra);
+    "INSERT INTO memory_fts (layer, source_id, title, content, extra, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(layer, sourceId, title, content, extra, prompt, response);
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
@@ -231,6 +235,8 @@ export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void
     session.title,
     session.content,
     extra,
+    "",
+    "",
   );
 }
 
@@ -242,6 +248,8 @@ export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
     turn.title,
     turn.content,
     turn.insight ?? "",
+    turn.userPrompt ?? "",
+    turn.assistantResponse ?? "",
   );
 }
 
@@ -255,6 +263,8 @@ export function indexObservationToFTS(
     observation.id,
     observation.title,
     observation.content,
+    "",
+    "",
     "",
   );
 }
@@ -299,7 +309,14 @@ export function rebuildSearchIndex(db: Database): void {
 
   const turnRows = db
     .query<
-      { id: number; title: string | null; content: string | null; insight: string | null },
+      {
+        id: number;
+        title: string | null;
+        content: string | null;
+        insight: string | null;
+        userPrompt: string | null;
+        assistantResponse: string | null;
+      },
       []
     >(
       `
@@ -307,7 +324,9 @@ export function rebuildSearchIndex(db: Database): void {
           id,
           title,
           content,
-          insight
+          insight,
+          user_prompt AS userPrompt,
+          assistant_response AS assistantResponse
         FROM turns
         WHERE status = 'extracted'
       `,

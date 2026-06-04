@@ -767,18 +767,18 @@ describe("initializeSchema", () => {
     rebuildSpy.mockRestore();
   });
 
-  test("initializeSchema drops a legacy memories table and purges its FTS layer", () => {
+  test("initializeSchema drops a legacy memories table and recreates the FTS as trigram", () => {
     const db = createDatabase(":memory:");
     db.exec(
       `CREATE TABLE memories (id INTEGER PRIMARY KEY, type TEXT, scope TEXT,
          title TEXT, content TEXT, created_at_epoch INTEGER NOT NULL);`,
     );
     db.exec(
-      `CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(layer, source_id, title, content, extra);`,
+      `CREATE VIRTUAL TABLE memory_fts USING fts5(layer, source_id, title, content, extra);`,
     );
     db.exec(
       `INSERT INTO memory_fts (layer, source_id, title, content, extra)
-         VALUES ('memory', 1, 't', 'c', ''), ('turn', 9, 't', 'c', '');`,
+         VALUES ('memory', 1, 't', 'c', '');`,
     );
 
     initializeSchema(db);
@@ -788,17 +788,71 @@ describe("initializeSchema", () => {
       .get();
     expect(table).toBeNull();
 
+    const ddl = db
+      .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = 'memory_fts'")
+      .get()!.sql;
+    expect(ddl).toContain("trigram");
+
     const memRows = db
       .query<{ n: number }, []>("SELECT count(*) AS n FROM memory_fts WHERE layer='memory'")
       .get()!;
     expect(memRows.n).toBe(0);
 
-    const turnRows = db
-      .query<{ n: number }, []>("SELECT count(*) AS n FROM memory_fts WHERE layer='turn'")
-      .get()!;
-    expect(turnRows.n).toBe(1);
-
     db.close();
+  });
+
+  test("memory_fts uses the trigram tokenizer with prompt/response columns", () => {
+    initializeSchema(db);
+
+    const ddl = db
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_master WHERE name = 'memory_fts'",
+      )
+      .get()!.sql;
+    expect(ddl).toContain("trigram");
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(memory_fts)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("prompt");
+    expect(columns).toContain("response");
+  });
+
+  test("migrates an old 5-col FTS on a pre-summary-field DB without no-such-column", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        next_steps TEXT,
+        last_compact_turn INTEGER,
+        last_agent_session_id TEXT,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        completed_at_epoch INTEGER
+      );
+      CREATE VIRTUAL TABLE memory_fts USING fts5(layer, source_id, title, content, extra);
+    `);
+    db.query(
+      "INSERT INTO sessions (content_session_id, project, title, created_at_epoch) VALUES (?, ?, ?, ?)",
+    ).run("legacy-session", "claude-mnemo", "Legacy", 1);
+
+    expect(() => initializeSchema(db)).not.toThrow();
+
+    const ddl = db
+      .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = 'memory_fts'")
+      .get()!.sql;
+    expect(ddl).toContain("trigram");
+
+    const sessionColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
+      .all()
+      .map((row) => row.name);
+    expect(sessionColumns).toContain("decision");
   });
 
   test("lineage columns exist with defaults", () => {
