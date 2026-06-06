@@ -7421,7 +7421,10 @@ var init_paths = __esm({
 // src/db/database.ts
 var database_exports = {};
 __export(database_exports, {
-  createDatabase: () => createDatabase
+  createDatabase: () => createDatabase,
+  isSqliteBusy: () => isSqliteBusy,
+  runHookWriteTransaction: () => runHookWriteTransaction,
+  runWriteTransaction: () => runWriteTransaction
 });
 function resolveDatabasePath2(path2) {
   if (!path2 || path2.trim() === "") {
@@ -7438,22 +7441,100 @@ function ensureParentDirectory(databasePath) {
     (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
-function configureDatabase(db) {
+function normalizeNonNegativeMilliseconds(value, name) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`);
+  }
+  return Math.floor(value);
+}
+function syncSleep(ms) {
+  if (ms <= 0) {
+    return;
+  }
+  const wakeSignal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(wakeSignal, 0, 0, ms);
+}
+function genericWriteBackoffMs(attempt) {
+  return Math.min(25, 5 * (attempt + 1));
+}
+function hookWriteBackoffMs(attempt) {
+  return Math.min(100, 25 * 2 ** attempt);
+}
+function configureDatabase(db, options) {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA synchronous = NORMAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA mmap_size = 268435456;");
   db.exec("PRAGMA cache_size = 10000;");
-  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs};`);
 }
-function createDatabase(path2) {
+function createDatabase(path2, options = {}) {
   const databasePath = resolveDatabasePath2(path2);
+  const busyTimeoutMs = normalizeNonNegativeMilliseconds(
+    options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS,
+    "busyTimeoutMs"
+  );
   ensureParentDirectory(databasePath);
   const db = new import_bun_sqlite.Database(databasePath);
-  configureDatabase(db);
+  configureDatabase(db, { busyTimeoutMs });
   return db;
 }
-var import_node_fs, import_node_path3, import_bun_sqlite;
+function isSqliteBusy(err) {
+  const code = typeof err === "object" && err !== null && "code" in err ? String(err.code) : "";
+  if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT") {
+    return true;
+  }
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return /\bSQLITE_BUSY(?:_SNAPSHOT)?\b/.test(message) || /\bdatabase is locked\b/i.test(message) || /\bdatabase table is locked\b/i.test(message);
+}
+function runWriteTransaction(db, fn, attempts = 3) {
+  const txn = db.transaction(fn);
+  const maxAttempts = Math.max(1, Math.floor(attempts));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (attempt >= maxAttempts - 1 || !isSqliteBusy(err)) {
+        throw err;
+      }
+      syncSleep(genericWriteBackoffMs(attempt));
+    }
+  }
+}
+function runHookWriteTransaction(db, fn, options = {}) {
+  const txn = db.transaction(fn);
+  const budgetMs = normalizeNonNegativeMilliseconds(
+    options.budgetMs ?? DEFAULT_HOOK_TRANSACTION_BUDGET_MS,
+    "budgetMs"
+  );
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? syncSleep;
+  const backoffMs = options.backoffMs ?? ((attempt) => hookWriteBackoffMs(attempt));
+  const start = now();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (!isSqliteBusy(err)) {
+        throw err;
+      }
+      const elapsedMs = Math.max(0, now() - start);
+      if (elapsedMs >= budgetMs) {
+        throw err;
+      }
+      const delayMs = normalizeNonNegativeMilliseconds(
+        backoffMs(attempt, elapsedMs),
+        "backoffMs"
+      );
+      const remainingMs = budgetMs - elapsedMs;
+      if (delayMs >= remainingMs) {
+        throw err;
+      }
+      sleep(delayMs);
+    }
+  }
+}
+var import_node_fs, import_node_path3, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
@@ -7461,6 +7542,8 @@ var init_database = __esm({
     import_node_path3 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
+    DEFAULT_BUSY_TIMEOUT_MS = 5e3;
+    DEFAULT_HOOK_TRANSACTION_BUDGET_MS = 2500;
   }
 });
 
@@ -33951,7 +34034,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.26" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.27" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

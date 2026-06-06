@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import {
   collectOrderedPromptIds,
   readAllTranscriptEntries,
+  type TranscriptEntryWithLineNumber,
 } from "../shared/transcript-parser";
 import {
   getSession,
@@ -186,13 +187,12 @@ export function pickForeignOwner(
 // follow a compact_boundary's logicalParentUuid one hop to the inherited entry
 // with that uuid, take its promptId, and resolve if it is foreign-owned. Give
 // up if the hop lands on another boundary or a non-foreign entry.
-export function resolveViaLogicalParent(
+export function resolveViaLogicalParentFromEntries(
   db: Database,
-  transcriptPath: string,
+  entries: TranscriptEntryWithLineNumber[],
   childSessionId: number,
   ownership: Map<string, PromptOwnership>,
 ): LineageResolution | null {
-  const entries = readAllTranscriptEntries(transcriptPath);
   const byUuid = new Map<string, (typeof entries)[number]>();
   for (const e of entries) {
     if (e.uuid && !byUuid.has(e.uuid)) byUuid.set(e.uuid, e);
@@ -227,16 +227,25 @@ export function resolveViaLogicalParent(
   return null;
 }
 
-export function resolveSessionLineage(
+export function resolveViaLogicalParent(
+  db: Database,
+  transcriptPath: string,
+  childSessionId: number,
+  ownership: Map<string, PromptOwnership>,
+): LineageResolution | null {
+  return resolveViaLogicalParentFromEntries(
+    db,
+    readAllTranscriptEntries(transcriptPath),
+    childSessionId,
+    ownership,
+  );
+}
+
+export function resolveSessionLineageFromEntries(
   db: Database,
   childSessionId: number,
-  transcriptPath: string | null,
+  entries: TranscriptEntryWithLineNumber[],
 ): LineageResolution {
-  // 1. No transcript → unresolved (retryable; Step A still runs elsewhere).
-  if (!transcriptPath) return { status: "unresolved" };
-
-  // 2. Scan the child transcript + classify each promptId by ownership.
-  const entries = readAllTranscriptEntries(transcriptPath);
   const ordered = collectOrderedPromptIds(entries);
   // No ordered prompts (missing/empty/unreadable transcript) → unresolved, not
   // a terminal root. `root` requires positive transcript evidence (the
@@ -290,7 +299,7 @@ export function resolveSessionLineage(
   }
 
   // 6. logicalParentUuid fallback — no direct foreign match in the prefix.
-  const viaLogical = resolveViaLogicalParent(db, transcriptPath, childSessionId, own);
+  const viaLogical = resolveViaLogicalParentFromEntries(db, entries, childSessionId, own);
   if (viaLogical) return viaLogical;
 
   // 7. root vs unresolved.
@@ -311,6 +320,22 @@ export function resolveSessionLineage(
   return { status: "unresolved" };
 }
 
+export function resolveSessionLineage(
+  db: Database,
+  childSessionId: number,
+  transcriptPath: string | null,
+): LineageResolution {
+  // 1. No transcript → unresolved (retryable; Step A still runs elsewhere).
+  if (!transcriptPath) return { status: "unresolved" };
+
+  // 2. Scan the child transcript + classify each promptId by ownership.
+  return resolveSessionLineageFromEntries(
+    db,
+    childSessionId,
+    readAllTranscriptEntries(transcriptPath),
+  );
+}
+
 // Orchestrator run per-session at Stop (spec §4). Step A always chains the
 // intra-session turns. Step B resolves the parent and atomically writes the
 // first-turn edge + parent_session_id + lineage_status together, so a "resolved"
@@ -325,6 +350,20 @@ export function relinkSessionLineage(
   transcriptPath: string | null,
   nowEpoch: number,
 ): void {
+  relinkSessionLineageFromEntries(
+    db,
+    sessionDbId,
+    transcriptPath ? readAllTranscriptEntries(transcriptPath) : null,
+    nowEpoch,
+  );
+}
+
+export function relinkSessionLineageFromEntries(
+  db: Database,
+  sessionDbId: number,
+  entries: TranscriptEntryWithLineNumber[] | null,
+  nowEpoch: number,
+): void {
   void nowEpoch;
   linkIntraSessionChain(db, sessionDbId); // Step A (always)
 
@@ -335,7 +374,9 @@ export function relinkSessionLineage(
     return;
   }
 
-  const res = resolveSessionLineage(db, sessionDbId, transcriptPath);
+  const res = entries === null
+    ? { status: "unresolved" as const }
+    : resolveSessionLineageFromEntries(db, sessionDbId, entries);
 
   // Step B — atomic: edge + parent + status commit (or roll back) together.
   db.transaction(() => {

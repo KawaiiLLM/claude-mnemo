@@ -142,6 +142,79 @@ describe("handleStopHook", () => {
     expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/wake");
   });
 
+  test("runs foreground writes through the bounded hook transaction runner", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Pending work', 120)`,
+    ).run(sessionId);
+    const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
+      expect(runnerDb).toBe(db);
+      return fn();
+    });
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    await handler(createInput({ lastAssistantMessage: "Done" }));
+
+    expect(transactionRunner).toHaveBeenCalledTimes(1);
+  });
+
+  test("decides orphan recovery and current turn enqueue inside the hook transaction runner", async () => {
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Orphan work', 120)`,
+    ).run(sessionId);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 2, 'active', 'Current work', 121)`,
+    ).run(sessionId);
+
+    const orphanTurn = getTurn(db, sessionId, 1)!;
+    const currentTurn = getTurn(db, sessionId, 2)!;
+    let rowsObservedInsideTransaction: ReturnType<typeof getPendingQueueRows> = [];
+    const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
+      expect(runnerDb).toBe(db);
+      expect(getPendingQueueRows(db)).toEqual([]);
+
+      const result = fn();
+
+      rowsObservedInsideTransaction = getPendingQueueRows(db);
+      expect(rowsObservedInsideTransaction).toEqual([
+        {
+          seq: 1,
+          kind: "turn-stop",
+          targetId: orphanTurn.id,
+          sessionDbId: sessionId,
+        },
+        {
+          seq: 2,
+          kind: "turn-stop",
+          targetId: currentTurn.id,
+          sessionDbId: sessionId,
+        },
+      ]);
+      expect(getTurn(db, sessionId, 2)?.assistantResponse).toBe("Current answer");
+
+      return result;
+    });
+    const handler = createStopHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    await handler(createInput({ lastAssistantMessage: "Current answer" }));
+
+    expect(transactionRunner).toHaveBeenCalledTimes(1);
+    expect(getPendingQueueRows(db)).toEqual(rowsObservedInsideTransaction);
+  });
+
   test("does not enqueue the same turn-stop task twice for the current turn", async () => {
     db.query(
       `INSERT INTO turns (

@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.26-mpz9bjyj" : "dev";
+var BUILD_ID = true ? "0.2.27-mq2edlfh" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -85,6 +85,7 @@ function resolveTranscriptPath(projectPath, sessionId) {
 }
 
 // src/db/database.ts
+var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
 function resolveDatabasePath2(path2) {
   if (!path2 || path2.trim() === "") {
     return resolveDatabasePath();
@@ -100,20 +101,62 @@ function ensureParentDirectory(databasePath) {
     (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
-function configureDatabase(db) {
+function normalizeNonNegativeMilliseconds(value, name) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`);
+  }
+  return Math.floor(value);
+}
+function syncSleep(ms) {
+  if (ms <= 0) {
+    return;
+  }
+  const wakeSignal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(wakeSignal, 0, 0, ms);
+}
+function genericWriteBackoffMs(attempt) {
+  return Math.min(25, 5 * (attempt + 1));
+}
+function configureDatabase(db, options) {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA synchronous = NORMAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA mmap_size = 268435456;");
   db.exec("PRAGMA cache_size = 10000;");
-  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs};`);
 }
-function createDatabase(path2) {
+function createDatabase(path2, options = {}) {
   const databasePath = resolveDatabasePath2(path2);
+  const busyTimeoutMs = normalizeNonNegativeMilliseconds(
+    options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS,
+    "busyTimeoutMs"
+  );
   ensureParentDirectory(databasePath);
   const db = new import_bun_sqlite.Database(databasePath);
-  configureDatabase(db);
+  configureDatabase(db, { busyTimeoutMs });
   return db;
+}
+function isSqliteBusy(err) {
+  const code = typeof err === "object" && err !== null && "code" in err ? String(err.code) : "";
+  if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT") {
+    return true;
+  }
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return /\bSQLITE_BUSY(?:_SNAPSHOT)?\b/.test(message) || /\bdatabase is locked\b/i.test(message) || /\bdatabase table is locked\b/i.test(message);
+}
+function runWriteTransaction(db, fn, attempts = 3) {
+  const txn = db.transaction(fn);
+  const maxAttempts = Math.max(1, Math.floor(attempts));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (attempt >= maxAttempts - 1 || !isSqliteBusy(err)) {
+        throw err;
+      }
+      syncSleep(genericWriteBackoffMs(attempt));
+    }
+  }
 }
 
 // src/db/search.ts
@@ -1340,50 +1383,47 @@ var PENDING_QUEUE_SELECT = `
   FROM pending_queue
 `;
 function claimNextQueueItem(db, claimedAtEpoch, options = {}) {
-  const claimTransaction = db.transaction(
-    (epoch, opts) => {
-      const clauses = ["claimed_at_epoch IS NULL"];
-      const params = [];
-      if (opts.sessionFilter !== void 0) {
-        clauses.push("session_db_id = ?");
-        params.push(opts.sessionFilter);
-      }
-      if (opts.excludeSessions && opts.excludeSessions.size > 0) {
-        const placeholders = Array.from(opts.excludeSessions).map(() => "?").join(", ");
-        clauses.push(`session_db_id NOT IN (${placeholders})`);
-        params.push(...opts.excludeSessions);
-      }
-      if (opts.skippedSeqs && opts.skippedSeqs.size > 0) {
-        const placeholders = Array.from(opts.skippedSeqs).map(() => "?").join(", ");
-        clauses.push(`seq NOT IN (${placeholders})`);
-        params.push(...opts.skippedSeqs);
-      }
-      const row = db.query(
-        `${PENDING_QUEUE_SELECT}
-           WHERE ${clauses.join(" AND ")}
-           ORDER BY seq ASC
-           LIMIT 1`
-      ).get(...params);
-      if (!row) {
-        return null;
-      }
-      const result = db.query(
-        `
-            UPDATE pending_queue
-            SET claimed_at_epoch = ?
-            WHERE seq = ? AND claimed_at_epoch IS NULL
-          `
-      ).run(epoch, row.seq);
-      if (result.changes !== 1) {
-        throw new Error(`unexpected claim race on pending_queue seq=${row.seq}`);
-      }
-      return {
-        ...row,
-        claimedAtEpoch: epoch
-      };
+  return runWriteTransaction(db, () => {
+    const clauses = ["claimed_at_epoch IS NULL"];
+    const params = [];
+    if (options.sessionFilter !== void 0) {
+      clauses.push("session_db_id = ?");
+      params.push(options.sessionFilter);
     }
-  );
-  return claimTransaction(claimedAtEpoch, options);
+    if (options.excludeSessions && options.excludeSessions.size > 0) {
+      const placeholders = Array.from(options.excludeSessions).map(() => "?").join(", ");
+      clauses.push(`session_db_id NOT IN (${placeholders})`);
+      params.push(...options.excludeSessions);
+    }
+    if (options.skippedSeqs && options.skippedSeqs.size > 0) {
+      const placeholders = Array.from(options.skippedSeqs).map(() => "?").join(", ");
+      clauses.push(`seq NOT IN (${placeholders})`);
+      params.push(...options.skippedSeqs);
+    }
+    const row = db.query(
+      `${PENDING_QUEUE_SELECT}
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY seq ASC
+         LIMIT 1`
+    ).get(...params);
+    if (!row) {
+      return null;
+    }
+    const result = db.query(
+      `
+          UPDATE pending_queue
+          SET claimed_at_epoch = ?
+          WHERE seq = ? AND claimed_at_epoch IS NULL
+        `
+    ).run(claimedAtEpoch, row.seq);
+    if (result.changes !== 1) {
+      throw new Error(`unexpected claim race on pending_queue seq=${row.seq}`);
+    }
+    return {
+      ...row,
+      claimedAtEpoch
+    };
+  });
 }
 var claimNextItem = claimNextQueueItem;
 function resetQueueItemClaim(db, seq) {
@@ -1930,8 +1970,7 @@ function selectLatestMainLeaf(entries) {
     return latest;
   });
 }
-function detectRollbackTopology(transcriptPath) {
-  const entries = readAllTranscriptEntries(transcriptPath);
+function detectRollbackTopologyFromEntries(entries) {
   if (entries.length === 0) {
     return {
       rolledBackPromptIds: /* @__PURE__ */ new Set(),
@@ -1999,6 +2038,11 @@ function detectRollbackTopology(transcriptPath) {
     rolledBackPromptIds,
     replacementByPromptId
   };
+}
+function detectRollbackTopology(transcriptPath) {
+  return detectRollbackTopologyFromEntries(
+    readAllTranscriptEntries(transcriptPath)
+  );
 }
 function flagDeliveryDropped(db, turnId, updatedAtEpoch) {
   const turn = getTurnById(db, turnId);
@@ -2154,8 +2198,7 @@ function deleteObservationsForTurns(db, turnIds) {
     `
   ).run(...turnIds);
 }
-function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
-  const parsedTurns = parseReplayTranscript(transcriptPath);
+function resolveSubagentTurnsFromParsedTurns(db, sessionDbId, parsedTurns) {
   const newestSubagentChain = [];
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
     const parsedTurn = parsedTurns[index];
@@ -2183,27 +2226,50 @@ function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
   }
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
-function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
-  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
+function cleanSubagentTurns(db, sessionDbId, matchedTurns, updatedAtEpoch) {
   if (matchedTurns.length === 0) {
     return [];
   }
   const turnIds = matchedTurns.map((turn) => turn.id);
   const observationIds = selectObservationIdsForTurns(db, turnIds);
-  db.transaction(() => {
-    deleteTurnStopQueueItems(db, sessionDbId, turnIds);
-    deleteObservationQueueItems(db, sessionDbId, observationIds);
-    deleteObservationFtsRows(db, observationIds);
-    deleteObservationsForTurns(db, turnIds);
-    for (const turn of matchedTurns) {
-      updateTurnById(db, turn.id, {
-        status: "undone",
-        replaceTags: addSubagentPendingTag(turn.tags),
-        updatedAtEpoch
-      });
-    }
-  })();
+  deleteTurnStopQueueItems(db, sessionDbId, turnIds);
+  deleteObservationQueueItems(db, sessionDbId, observationIds);
+  deleteObservationFtsRows(db, observationIds);
+  deleteObservationsForTurns(db, turnIds);
+  for (const turn of matchedTurns) {
+    updateTurnById(db, turn.id, {
+      status: "undone",
+      replaceTags: addSubagentPendingTag(turn.tags),
+      updatedAtEpoch
+    });
+  }
   return matchedTurns.map((turn) => turn.promptNumber);
+}
+function detectAndCleanSubagentTurnsFromParsed(db, sessionDbId, parsedTurns, updatedAtEpoch) {
+  return cleanSubagentTurns(
+    db,
+    sessionDbId,
+    resolveSubagentTurnsFromParsedTurns(
+      db,
+      sessionDbId,
+      parsedTurns
+    ),
+    updatedAtEpoch
+  );
+}
+function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtEpoch, options = {}) {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  const parsedTurns = parseReplayTranscript(transcriptPath, entries);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  return writeTransaction(
+    db,
+    () => detectAndCleanSubagentTurnsFromParsed(
+      db,
+      sessionDbId,
+      parsedTurns,
+      updatedAtEpoch
+    )
+  );
 }
 function getPendingSubagentTurns(db, sessionDbId) {
   return getTurnsForSession(db, sessionDbId).filter(

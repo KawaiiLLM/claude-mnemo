@@ -1,15 +1,24 @@
 import type { Database } from "bun:sqlite";
 
+import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { getMaxPromptNumber } from "../../db/turns";
-import { countUserPromptsInTranscript } from "../../shared/transcript-parser";
-import { applyInvalidation } from "../../worker/invalidation";
-import { detectAndCleanSubagentTurns } from "../../worker/subagent-filter";
+import {
+  countUserPromptsInEntries,
+  parseReplayTranscript,
+  readAllTranscriptEntries,
+} from "../../shared/transcript-parser";
+import {
+  applyInvalidationSets,
+  computeInvalidationSets,
+} from "../../worker/invalidation";
+import { detectAndCleanSubagentTurnsFromParsed } from "../../worker/subagent-filter";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionInitDependencies {
   db: Database;
   now?: () => number;
+  runHookWriteTransaction?: typeof runHookWriteTransaction;
 }
 
 function createPendingTurn(
@@ -34,6 +43,7 @@ export function createSessionInitHandler(
   dependencies: SessionInitDependencies,
 ) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
 
   return async function handleSessionInitHook(
     input: NormalizedHookInput,
@@ -46,47 +56,65 @@ export function createSessionInitHandler(
     }
 
     const epoch = now();
-    const existingSession = getSessionByContentId(dependencies.db, input.sessionId);
-    const session = upsertSession(dependencies.db, {
-      contentSessionId: input.sessionId,
-      project: input.cwd,
-      title: existingSession?.title ?? null,
-      content: existingSession?.content ?? null,
-      insight: existingSession?.insight ?? null,
-      createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
-      updatedAtEpoch: epoch,
-      completedAtEpoch: existingSession?.completedAtEpoch ?? null,
+    const contentSessionId = input.sessionId;
+    const project = input.cwd;
+    const prompt = input.prompt;
+    const existingSession = getSessionByContentId(dependencies.db, contentSessionId);
+    const transcriptEntries = input.transcriptPath
+      ? readAllTranscriptEntries(input.transcriptPath)
+      : null;
+    const invalidationSets = transcriptEntries
+      ? computeInvalidationSets(transcriptEntries)
+      : null;
+    const parsedTurns = transcriptEntries
+      ? parseReplayTranscript(input.transcriptPath ?? "", transcriptEntries)
+      : null;
+    const transcriptPromptCount = transcriptEntries
+      ? countUserPromptsInEntries(transcriptEntries)
+      : null;
+
+    writeTransaction(dependencies.db, () => {
+      const session = upsertSession(dependencies.db, {
+        contentSessionId,
+        project,
+        title: existingSession?.title ?? null,
+        content: existingSession?.content ?? null,
+        insight: existingSession?.insight ?? null,
+        createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
+        updatedAtEpoch: epoch,
+        completedAtEpoch: existingSession?.completedAtEpoch ?? null,
+      });
+
+      if (transcriptEntries && invalidationSets && parsedTurns) {
+        applyInvalidationSets(
+          dependencies.db,
+          session.id,
+          invalidationSets,
+          epoch,
+        );
+        detectAndCleanSubagentTurnsFromParsed(
+          dependencies.db,
+          session.id,
+          parsedTurns,
+          epoch,
+        );
+      }
+
+      const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
+      const promptNumber = dbMaxPromptNumber !== null
+        ? dbMaxPromptNumber + 1
+        : transcriptPromptCount !== null
+          ? transcriptPromptCount + 1
+          : 1;
+
+      createPendingTurn(
+        dependencies.db,
+        session.id,
+        promptNumber,
+        prompt,
+        epoch,
+      );
     });
-
-    if (input.transcriptPath) {
-      applyInvalidation(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch,
-      );
-      detectAndCleanSubagentTurns(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch,
-      );
-    }
-
-    const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
-    const promptNumber = dbMaxPromptNumber !== null
-      ? dbMaxPromptNumber + 1
-      : input.transcriptPath
-        ? countUserPromptsInTranscript(input.transcriptPath) + 1
-        : 1;
-
-    createPendingTurn(
-      dependencies.db,
-      session.id,
-      promptNumber,
-      input.prompt,
-      epoch,
-    );
 
     return {
       continue: true,

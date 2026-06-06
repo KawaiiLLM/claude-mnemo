@@ -15,7 +15,7 @@ interface TranscriptUsage {
   cacheCreationTokens?: number;
 }
 
-interface TranscriptEntry {
+export interface TranscriptEntry {
   type?: string;
   subtype?: string;
   role?: string;
@@ -258,8 +258,16 @@ function collectInterruptedPromptIds(
   return interruptedPromptIds;
 }
 
+export function detectInterruptedPromptIdsInEntries(
+  entries: TranscriptEntry[],
+): Set<string> {
+  return collectInterruptedPromptIds(entries);
+}
+
 export function detectInterruptedPromptIds(transcriptPath: string): Set<string> {
-  return collectInterruptedPromptIds(readAllTranscriptEntries(transcriptPath));
+  return detectInterruptedPromptIdsInEntries(
+    readAllTranscriptEntries(transcriptPath),
+  );
 }
 
 export function readAllTranscriptEntries(
@@ -639,11 +647,11 @@ export function parseReplayTranscript(
   }));
 }
 
-export function countUserPromptsInTranscript(transcriptPath: string): number {
+export function countUserPromptsInEntries(entries: TranscriptEntry[]): number {
   const seenPromptIds = new Set<string>();
   let count = 0;
 
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of entries) {
     if (!isCountedUserPrompt(entry)) {
       continue;
     }
@@ -664,6 +672,10 @@ export function countUserPromptsInTranscript(transcriptPath: string): number {
   }
 
   return count;
+}
+
+export function countUserPromptsInTranscript(transcriptPath: string): number {
+  return countUserPromptsInEntries(readAllTranscriptEntries(transcriptPath));
 }
 
 export function extractAssistantResponse(

@@ -75,6 +75,8 @@ function resolveTranscriptPath(projectPath, sessionId) {
 }
 
 // src/db/database.ts
+var DEFAULT_BUSY_TIMEOUT_MS = 5e3;
+var DEFAULT_HOOK_TRANSACTION_BUDGET_MS = 2500;
 function resolveDatabasePath2(path2) {
   if (!path2 || path2.trim() === "") {
     return resolveDatabasePath();
@@ -90,20 +92,81 @@ function ensureParentDirectory(databasePath) {
     (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
 }
-function configureDatabase(db) {
+function normalizeNonNegativeMilliseconds(value, name) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative finite number`);
+  }
+  return Math.floor(value);
+}
+function syncSleep(ms) {
+  if (ms <= 0) {
+    return;
+  }
+  const wakeSignal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(wakeSignal, 0, 0, ms);
+}
+function hookWriteBackoffMs(attempt) {
+  return Math.min(100, 25 * 2 ** attempt);
+}
+function configureDatabase(db, options) {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA synchronous = NORMAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA mmap_size = 268435456;");
   db.exec("PRAGMA cache_size = 10000;");
-  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs};`);
 }
-function createDatabase(path2) {
+function createDatabase(path2, options = {}) {
   const databasePath = resolveDatabasePath2(path2);
+  const busyTimeoutMs = normalizeNonNegativeMilliseconds(
+    options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS,
+    "busyTimeoutMs"
+  );
   ensureParentDirectory(databasePath);
   const db = new import_bun_sqlite.Database(databasePath);
-  configureDatabase(db);
+  configureDatabase(db, { busyTimeoutMs });
   return db;
+}
+function isSqliteBusy(err) {
+  const code = typeof err === "object" && err !== null && "code" in err ? String(err.code) : "";
+  if (code === "SQLITE_BUSY" || code === "SQLITE_BUSY_SNAPSHOT") {
+    return true;
+  }
+  const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  return /\bSQLITE_BUSY(?:_SNAPSHOT)?\b/.test(message) || /\bdatabase is locked\b/i.test(message) || /\bdatabase table is locked\b/i.test(message);
+}
+function runHookWriteTransaction(db, fn, options = {}) {
+  const txn = db.transaction(fn);
+  const budgetMs = normalizeNonNegativeMilliseconds(
+    options.budgetMs ?? DEFAULT_HOOK_TRANSACTION_BUDGET_MS,
+    "budgetMs"
+  );
+  const now = options.now ?? Date.now;
+  const sleep2 = options.sleep ?? syncSleep;
+  const backoffMs = options.backoffMs ?? ((attempt) => hookWriteBackoffMs(attempt));
+  const start = now();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (!isSqliteBusy(err)) {
+        throw err;
+      }
+      const elapsedMs = Math.max(0, now() - start);
+      if (elapsedMs >= budgetMs) {
+        throw err;
+      }
+      const delayMs = normalizeNonNegativeMilliseconds(
+        backoffMs(attempt, elapsedMs),
+        "backoffMs"
+      );
+      const remainingMs = budgetMs - elapsedMs;
+      if (delayMs >= remainingMs) {
+        throw err;
+      }
+      sleep2(delayMs);
+    }
+  }
 }
 
 // src/db/search.ts
@@ -728,7 +791,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.26-mpz9bjyj" : "dev";
+var BUILD_ID = true ? "0.2.27-mq2edlfh" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -3083,8 +3146,8 @@ function collectInterruptedPromptIds(entries) {
   }
   return interruptedPromptIds;
 }
-function detectInterruptedPromptIds(transcriptPath) {
-  return collectInterruptedPromptIds(readAllTranscriptEntries(transcriptPath));
+function detectInterruptedPromptIdsInEntries(entries) {
+  return collectInterruptedPromptIds(entries);
 }
 function readAllTranscriptEntries(transcriptPath) {
   if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
@@ -3290,10 +3353,10 @@ ${assistantText}` : assistantText;
     assistantText: normalizeAssistantText(turn.assistantText)
   }));
 }
-function countUserPromptsInTranscript(transcriptPath) {
+function countUserPromptsInEntries(entries) {
   const seenPromptIds = /* @__PURE__ */ new Set();
   let count = 0;
-  for (const entry of readAllTranscriptEntries(transcriptPath)) {
+  for (const entry of entries) {
     if (!isCountedUserPrompt(entry)) {
       continue;
     }
@@ -3473,6 +3536,7 @@ function getLatestTurnId(db, sessionDbId) {
 }
 function createPostToolUseHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handlePostToolUseHook(input) {
     if (!input.sessionId || !input.toolName) {
       return { continue: true };
@@ -3489,7 +3553,7 @@ function createPostToolUseHandler(dependencies) {
     const toolName = input.toolName;
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
-    dependencies.db.transaction(() => {
+    writeTransaction(dependencies.db, () => {
       const inserted = dependencies.db.query(
         `
             INSERT INTO observations (
@@ -3521,7 +3585,7 @@ function createPostToolUseHandler(dependencies) {
             ) VALUES ('obs', ?, ?, ?)
           `
       ).run(inserted.id, session.id, createdAtEpoch);
-    })();
+    });
     return {
       continue: true,
       asyncWork: async () => {
@@ -3608,8 +3672,7 @@ function selectLatestMainLeaf(entries) {
     return latest;
   });
 }
-function detectRollbackTopology(transcriptPath) {
-  const entries = readAllTranscriptEntries(transcriptPath);
+function detectRollbackTopologyFromEntries(entries) {
   if (entries.length === 0) {
     return {
       rolledBackPromptIds: /* @__PURE__ */ new Set(),
@@ -3678,9 +3741,16 @@ function detectRollbackTopology(transcriptPath) {
     replacementByPromptId
   };
 }
-function applyInvalidation(db, sessionDbId, transcriptPath, epoch) {
-  const interruptedPromptIds = detectInterruptedPromptIds(transcriptPath);
-  const { rolledBackPromptIds } = detectRollbackTopology(transcriptPath);
+function computeInvalidationSets(entries) {
+  const rollbackDetection = detectRollbackTopologyFromEntries(entries);
+  return {
+    interruptedPromptIds: detectInterruptedPromptIdsInEntries(entries),
+    rolledBackPromptIds: rollbackDetection.rolledBackPromptIds,
+    replacementByPromptId: rollbackDetection.replacementByPromptId
+  };
+}
+function applyInvalidationSets(db, sessionDbId, invalidationSets, epoch) {
+  const { interruptedPromptIds, rolledBackPromptIds } = invalidationSets;
   const turns = getTurnsForSession(db, sessionDbId);
   for (const turn of turns) {
     if (!turn.contentPromptId) {
@@ -3780,8 +3850,7 @@ function deleteObservationsForTurns(db, turnIds) {
     `
   ).run(...turnIds);
 }
-function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
-  const parsedTurns = parseReplayTranscript(transcriptPath);
+function resolveSubagentTurnsFromParsedTurns(db, sessionDbId, parsedTurns) {
   const newestSubagentChain = [];
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
     const parsedTurn = parsedTurns[index];
@@ -3809,27 +3878,36 @@ function resolveSubagentTurns(db, sessionDbId, transcriptPath) {
   }
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
-function detectAndCleanSubagentTurns(db, sessionDbId, transcriptPath, updatedAtEpoch) {
-  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
+function cleanSubagentTurns(db, sessionDbId, matchedTurns, updatedAtEpoch) {
   if (matchedTurns.length === 0) {
     return [];
   }
   const turnIds = matchedTurns.map((turn) => turn.id);
   const observationIds = selectObservationIdsForTurns(db, turnIds);
-  db.transaction(() => {
-    deleteTurnStopQueueItems(db, sessionDbId, turnIds);
-    deleteObservationQueueItems(db, sessionDbId, observationIds);
-    deleteObservationFtsRows(db, observationIds);
-    deleteObservationsForTurns(db, turnIds);
-    for (const turn of matchedTurns) {
-      updateTurnById(db, turn.id, {
-        status: "undone",
-        replaceTags: addSubagentPendingTag(turn.tags),
-        updatedAtEpoch
-      });
-    }
-  })();
+  deleteTurnStopQueueItems(db, sessionDbId, turnIds);
+  deleteObservationQueueItems(db, sessionDbId, observationIds);
+  deleteObservationFtsRows(db, observationIds);
+  deleteObservationsForTurns(db, turnIds);
+  for (const turn of matchedTurns) {
+    updateTurnById(db, turn.id, {
+      status: "undone",
+      replaceTags: addSubagentPendingTag(turn.tags),
+      updatedAtEpoch
+    });
+  }
   return matchedTurns.map((turn) => turn.promptNumber);
+}
+function detectAndCleanSubagentTurnsFromParsed(db, sessionDbId, parsedTurns, updatedAtEpoch) {
+  return cleanSubagentTurns(
+    db,
+    sessionDbId,
+    resolveSubagentTurnsFromParsedTurns(
+      db,
+      sessionDbId,
+      parsedTurns
+    ),
+    updatedAtEpoch
+  );
 }
 
 // src/hooks/handlers/session-init.ts
@@ -3846,6 +3924,7 @@ function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch) 
 }
 function createSessionInitHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handleSessionInitHook(input) {
     if (!input.sessionId || !input.cwd || !input.prompt) {
       return {
@@ -3854,40 +3933,49 @@ function createSessionInitHandler(dependencies) {
       };
     }
     const epoch = now();
-    const existingSession = getSessionByContentId(dependencies.db, input.sessionId);
-    const session = upsertSession(dependencies.db, {
-      contentSessionId: input.sessionId,
-      project: input.cwd,
-      title: existingSession?.title ?? null,
-      content: existingSession?.content ?? null,
-      insight: existingSession?.insight ?? null,
-      createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
-      updatedAtEpoch: epoch,
-      completedAtEpoch: existingSession?.completedAtEpoch ?? null
+    const contentSessionId = input.sessionId;
+    const project = input.cwd;
+    const prompt = input.prompt;
+    const existingSession = getSessionByContentId(dependencies.db, contentSessionId);
+    const transcriptEntries = input.transcriptPath ? readAllTranscriptEntries(input.transcriptPath) : null;
+    const invalidationSets = transcriptEntries ? computeInvalidationSets(transcriptEntries) : null;
+    const parsedTurns = transcriptEntries ? parseReplayTranscript(input.transcriptPath ?? "", transcriptEntries) : null;
+    const transcriptPromptCount = transcriptEntries ? countUserPromptsInEntries(transcriptEntries) : null;
+    writeTransaction(dependencies.db, () => {
+      const session = upsertSession(dependencies.db, {
+        contentSessionId,
+        project,
+        title: existingSession?.title ?? null,
+        content: existingSession?.content ?? null,
+        insight: existingSession?.insight ?? null,
+        createdAtEpoch: existingSession?.createdAtEpoch ?? epoch,
+        updatedAtEpoch: epoch,
+        completedAtEpoch: existingSession?.completedAtEpoch ?? null
+      });
+      if (transcriptEntries && invalidationSets && parsedTurns) {
+        applyInvalidationSets(
+          dependencies.db,
+          session.id,
+          invalidationSets,
+          epoch
+        );
+        detectAndCleanSubagentTurnsFromParsed(
+          dependencies.db,
+          session.id,
+          parsedTurns,
+          epoch
+        );
+      }
+      const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
+      const promptNumber = dbMaxPromptNumber !== null ? dbMaxPromptNumber + 1 : transcriptPromptCount !== null ? transcriptPromptCount + 1 : 1;
+      createPendingTurn(
+        dependencies.db,
+        session.id,
+        promptNumber,
+        prompt,
+        epoch
+      );
     });
-    if (input.transcriptPath) {
-      applyInvalidation(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch
-      );
-      detectAndCleanSubagentTurns(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch
-      );
-    }
-    const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
-    const promptNumber = dbMaxPromptNumber !== null ? dbMaxPromptNumber + 1 : input.transcriptPath ? countUserPromptsInTranscript(input.transcriptPath) + 1 : 1;
-    createPendingTurn(
-      dependencies.db,
-      session.id,
-      promptNumber,
-      input.prompt,
-      epoch
-    );
     return {
       continue: true,
       suppressOutput: true
@@ -3996,8 +4084,7 @@ function pickForeignOwner(owners, overlapBySession, childCreated, db) {
   }
   return null;
 }
-function resolveViaLogicalParent(db, transcriptPath, childSessionId, ownership) {
-  const entries = readAllTranscriptEntries(transcriptPath);
+function resolveViaLogicalParentFromEntries(db, entries, childSessionId, ownership) {
   const byUuid = /* @__PURE__ */ new Map();
   for (const e of entries) {
     if (e.uuid && !byUuid.has(e.uuid)) byUuid.set(e.uuid, e);
@@ -4028,9 +4115,7 @@ function resolveViaLogicalParent(db, transcriptPath, childSessionId, ownership) 
   }
   return null;
 }
-function resolveSessionLineage(db, childSessionId, transcriptPath) {
-  if (!transcriptPath) return { status: "unresolved" };
-  const entries = readAllTranscriptEntries(transcriptPath);
+function resolveSessionLineageFromEntries(db, childSessionId, entries) {
   const ordered = collectOrderedPromptIds(entries);
   if (ordered.length === 0) return { status: "unresolved" };
   const own = classifyPromptOwnership(
@@ -4062,7 +4147,7 @@ function resolveSessionLineage(db, childSessionId, transcriptPath) {
     }
     return { status: "unresolved" };
   }
-  const viaLogical = resolveViaLogicalParent(db, transcriptPath, childSessionId, own);
+  const viaLogical = resolveViaLogicalParentFromEntries(db, entries, childSessionId, own);
   if (viaLogical) return viaLogical;
   if (!hasBoundary && foreignInPrefix.length === 0 && unknownInPrefix.length === 0) {
     return { status: "root" };
@@ -4072,7 +4157,7 @@ function resolveSessionLineage(db, childSessionId, transcriptPath) {
   }
   return { status: "unresolved" };
 }
-function relinkSessionLineage(db, sessionDbId, transcriptPath, nowEpoch) {
+function relinkSessionLineageFromEntries(db, sessionDbId, entries, nowEpoch) {
   void nowEpoch;
   linkIntraSessionChain(db, sessionDbId);
   const session = getSession(db, sessionDbId);
@@ -4080,7 +4165,7 @@ function relinkSessionLineage(db, sessionDbId, transcriptPath, nowEpoch) {
   if (session.lineageStatus === "resolved" || session.lineageStatus === "root") {
     return;
   }
-  const res = resolveSessionLineage(db, sessionDbId, transcriptPath);
+  const res = entries === null ? { status: "unresolved" } : resolveSessionLineageFromEntries(db, sessionDbId, entries);
   db.transaction(() => {
     if (res.status === "resolved" && res.forkTurnId != null && res.parentSessionId != null) {
       const first = getFirstTurn(db, sessionDbId);
@@ -4191,6 +4276,7 @@ function hasTurnStopTask(db, turnId) {
 }
 function createStopHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handleStopHook(input) {
     if (input.stopHookActive || !input.sessionId) {
       return {
@@ -4214,27 +4300,31 @@ function createStopHandler(dependencies) {
     }
     const epoch = now();
     const assistantResponse = input.lastAssistantMessage !== void 0 ? stripPrivateTags(input.lastAssistantMessage) : null;
-    const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
-    dependencies.db.transaction(() => {
-      if (input.transcriptPath) {
+    const transcriptEntries = input.transcriptPath ? readAllTranscriptEntries(input.transcriptPath) : null;
+    const parsedTurns = transcriptEntries ? parseReplayTranscript(input.transcriptPath ?? "", transcriptEntries) : null;
+    const invalidationSets = transcriptEntries ? computeInvalidationSets(transcriptEntries) : null;
+    writeTransaction(dependencies.db, () => {
+      const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
+      if (transcriptEntries && parsedTurns && invalidationSets) {
         const allTurns = getTurnsForSession(dependencies.db, session.id);
         backfillFromTranscript(
           dependencies.db,
           allTurns,
-          input.transcriptPath,
-          assistantResponse ?? void 0
+          void 0,
+          assistantResponse ?? void 0,
+          parsedTurns
         );
-        applyInvalidation(
+        applyInvalidationSets(
           dependencies.db,
           session.id,
-          input.transcriptPath,
+          invalidationSets,
           epoch
         );
       }
-      relinkSessionLineage(
+      relinkSessionLineageFromEntries(
         dependencies.db,
         session.id,
-        input.transcriptPath ?? null,
+        transcriptEntries,
         epoch
       );
       recoverStrandedAncestors(dependencies.db, session.id, epoch);
@@ -4269,26 +4359,26 @@ function createStopHandler(dependencies) {
           enqueuedAtEpoch: epoch
         });
       }
-    })();
-    upsertSession(dependencies.db, {
-      contentSessionId: session.contentSessionId,
-      project: session.project,
-      title: session.title,
-      content: session.content,
-      insight: session.insight,
-      nextSteps: session.nextSteps,
-      createdAtEpoch: session.createdAtEpoch,
-      updatedAtEpoch: epoch,
-      completedAtEpoch: epoch
+      upsertSession(dependencies.db, {
+        contentSessionId: session.contentSessionId,
+        project: session.project,
+        title: session.title,
+        content: session.content,
+        insight: session.insight,
+        nextSteps: session.nextSteps,
+        createdAtEpoch: session.createdAtEpoch,
+        updatedAtEpoch: epoch,
+        completedAtEpoch: epoch
+      });
+      if (parsedTurns) {
+        detectAndCleanSubagentTurnsFromParsed(
+          dependencies.db,
+          session.id,
+          parsedTurns,
+          epoch
+        );
+      }
     });
-    if (input.transcriptPath) {
-      detectAndCleanSubagentTurns(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch
-      );
-    }
     return {
       continue: true,
       exitCode: HOOK_SUCCESS_EXIT_CODE,
@@ -4304,11 +4394,12 @@ function createStopHandler(dependencies) {
 
 // src/hooks/hook-command.ts
 var defaultHandlers;
+var HOOK_DB_BUSY_TIMEOUT_MS = 800;
 function getDefaultHandlers() {
   if (defaultHandlers) {
     return defaultHandlers;
   }
-  const db = createDatabase();
+  const db = createDatabase(void 0, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
   defaultHandlers = {
     SessionStart: createContextHandler({ db }),

@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import {
   detectRolledBackPromptIds,
   detectRollbackTopology,
+  detectRollbackTopologyFromEntries,
 } from "../../src/worker/invalidation";
+import { readAllTranscriptEntries } from "../../src/shared/transcript-parser";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
   const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-rollback-"));
@@ -147,6 +149,11 @@ describe("detectRollbackTopology", () => {
     directories.push(transcript.directory);
 
     const result = detectRollbackTopology(transcript.path);
+    expect(
+      detectRollbackTopologyFromEntries(
+        readAllTranscriptEntries(transcript.path),
+      ),
+    ).toEqual(result);
     expect(result.rolledBackPromptIds).toEqual(new Set(["p2"]));
     expect(result.replacementByPromptId.get("p2")).toBe("p3");
   });

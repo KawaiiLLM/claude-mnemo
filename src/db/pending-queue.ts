@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { runWriteTransaction } from "./database";
+
 export type PendingQueueKind = "obs" | "turn-stop";
 
 export interface PendingQueueItem {
@@ -88,70 +90,63 @@ export function claimNextQueueItem(
   claimedAtEpoch: number,
   options: ClaimNextQueueItemOptions = {},
 ): PendingQueueItem | null {
-  const claimTransaction = db.transaction(
-    (
-      epoch: number,
-      opts: ClaimNextQueueItemOptions,
-    ): PendingQueueItem | null => {
-      const clauses = ["claimed_at_epoch IS NULL"];
-      const params: Array<number> = [];
+  return runWriteTransaction(db, () => {
+    const clauses = ["claimed_at_epoch IS NULL"];
+    const params: Array<number> = [];
 
-      if (opts.sessionFilter !== undefined) {
-        clauses.push("session_db_id = ?");
-        params.push(opts.sessionFilter);
-      }
+    if (options.sessionFilter !== undefined) {
+      clauses.push("session_db_id = ?");
+      params.push(options.sessionFilter);
+    }
 
-      if (opts.excludeSessions && opts.excludeSessions.size > 0) {
-        const placeholders = Array.from(opts.excludeSessions)
-          .map(() => "?")
-          .join(", ");
-        clauses.push(`session_db_id NOT IN (${placeholders})`);
-        params.push(...opts.excludeSessions);
-      }
+    if (options.excludeSessions && options.excludeSessions.size > 0) {
+      const placeholders = Array.from(options.excludeSessions)
+        .map(() => "?")
+        .join(", ");
+      clauses.push(`session_db_id NOT IN (${placeholders})`);
+      params.push(...options.excludeSessions);
+    }
 
-      if (opts.skippedSeqs && opts.skippedSeqs.size > 0) {
-        const placeholders = Array.from(opts.skippedSeqs)
-          .map(() => "?")
-          .join(", ");
-        clauses.push(`seq NOT IN (${placeholders})`);
-        params.push(...opts.skippedSeqs);
-      }
+    if (options.skippedSeqs && options.skippedSeqs.size > 0) {
+      const placeholders = Array.from(options.skippedSeqs)
+        .map(() => "?")
+        .join(", ");
+      clauses.push(`seq NOT IN (${placeholders})`);
+      params.push(...options.skippedSeqs);
+    }
 
-      const row = db
-        .query<PendingQueueRow, Array<number>>(
-          `${PENDING_QUEUE_SELECT}
-           WHERE ${clauses.join(" AND ")}
-           ORDER BY seq ASC
-           LIMIT 1`,
-        )
-        .get(...params);
+    const row = db
+      .query<PendingQueueRow, Array<number>>(
+        `${PENDING_QUEUE_SELECT}
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY seq ASC
+         LIMIT 1`,
+      )
+      .get(...params);
 
-      if (!row) {
-        return null;
-      }
+    if (!row) {
+      return null;
+    }
 
-      const result = db
-        .query<unknown, [number, number]>(
-          `
-            UPDATE pending_queue
-            SET claimed_at_epoch = ?
-            WHERE seq = ? AND claimed_at_epoch IS NULL
-          `,
-        )
-        .run(epoch, row.seq);
+    const result = db
+      .query<unknown, [number, number]>(
+        `
+          UPDATE pending_queue
+          SET claimed_at_epoch = ?
+          WHERE seq = ? AND claimed_at_epoch IS NULL
+        `,
+      )
+      .run(claimedAtEpoch, row.seq);
 
-      if (result.changes !== 1) {
-        throw new Error(`unexpected claim race on pending_queue seq=${row.seq}`);
-      }
+    if (result.changes !== 1) {
+      throw new Error(`unexpected claim race on pending_queue seq=${row.seq}`);
+    }
 
-      return {
-        ...row,
-        claimedAtEpoch: epoch,
-      };
-    },
-  );
-
-  return claimTransaction(claimedAtEpoch, options);
+    return {
+      ...row,
+      claimedAtEpoch,
+    };
+  });
 }
 
 export const claimNextItem = claimNextQueueItem;

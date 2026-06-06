@@ -1,14 +1,22 @@
 import type { Database } from "bun:sqlite";
 
+import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
-import { relinkSessionLineage } from "../../db/lineage";
+import { relinkSessionLineageFromEntries } from "../../db/lineage";
 import { recoverStrandedAncestors } from "../../db/recover-stranded";
 import { getTurnsForSession } from "../../db/turns";
+import {
+  parseReplayTranscript,
+  readAllTranscriptEntries,
+} from "../../shared/transcript-parser";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
-import { applyInvalidation } from "../../worker/invalidation";
-import { detectAndCleanSubagentTurns } from "../../worker/subagent-filter";
+import {
+  applyInvalidationSets,
+  computeInvalidationSets,
+} from "../../worker/invalidation";
+import { detectAndCleanSubagentTurnsFromParsed } from "../../worker/subagent-filter";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import { backfillFromTranscript } from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -18,6 +26,7 @@ export interface StopHandlerDependencies {
   now?: () => number;
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
+  runHookWriteTransaction?: typeof runHookWriteTransaction;
 }
 
 function getLatestTurn(
@@ -88,6 +97,7 @@ function hasTurnStopTask(db: Database, turnId: number): boolean {
 
 export function createStopHandler(dependencies: StopHandlerDependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
 
   return async function handleStopHook(
     input: NormalizedHookInput,
@@ -120,21 +130,32 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       input.lastAssistantMessage !== undefined
         ? stripPrivateTags(input.lastAssistantMessage)
         : null;
-    const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
+    const transcriptEntries = input.transcriptPath
+      ? readAllTranscriptEntries(input.transcriptPath)
+      : null;
+    const parsedTurns = transcriptEntries
+      ? parseReplayTranscript(input.transcriptPath ?? "", transcriptEntries)
+      : null;
+    const invalidationSets = transcriptEntries
+      ? computeInvalidationSets(transcriptEntries)
+      : null;
 
-    dependencies.db.transaction(() => {
-      if (input.transcriptPath) {
+    writeTransaction(dependencies.db, () => {
+      const orphanTurns = getOrphanTurns(dependencies.db, session.id, turn.id);
+
+      if (transcriptEntries && parsedTurns && invalidationSets) {
         const allTurns = getTurnsForSession(dependencies.db, session.id);
         backfillFromTranscript(
           dependencies.db,
           allTurns,
-          input.transcriptPath,
+          undefined,
           assistantResponse ?? undefined,
+          parsedTurns,
         );
-        applyInvalidation(
+        applyInvalidationSets(
           dependencies.db,
           session.id,
-          input.transcriptPath,
+          invalidationSets,
           epoch,
         );
       }
@@ -146,10 +167,10 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       // Step A maintains the intra-session parent_turn_id chain unconditionally,
       // while Step B harmlessly leaves the session "unresolved" (retryable) when
       // there is no transcript to resolve a parent from.
-      relinkSessionLineage(
+      relinkSessionLineageFromEntries(
         dependencies.db,
         session.id,
-        input.transcriptPath ?? null,
+        transcriptEntries,
         epoch,
       );
       recoverStrandedAncestors(dependencies.db, session.id, epoch);
@@ -192,28 +213,28 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           enqueuedAtEpoch: epoch,
         });
       }
-    })();
 
-    upsertSession(dependencies.db, {
-      contentSessionId: session.contentSessionId,
-      project: session.project,
-      title: session.title,
-      content: session.content,
-      insight: session.insight,
-      nextSteps: session.nextSteps,
-      createdAtEpoch: session.createdAtEpoch,
-      updatedAtEpoch: epoch,
-      completedAtEpoch: epoch,
+      upsertSession(dependencies.db, {
+        contentSessionId: session.contentSessionId,
+        project: session.project,
+        title: session.title,
+        content: session.content,
+        insight: session.insight,
+        nextSteps: session.nextSteps,
+        createdAtEpoch: session.createdAtEpoch,
+        updatedAtEpoch: epoch,
+        completedAtEpoch: epoch,
+      });
+
+      if (parsedTurns) {
+        detectAndCleanSubagentTurnsFromParsed(
+          dependencies.db,
+          session.id,
+          parsedTurns,
+          epoch,
+        );
+      }
     });
-
-    if (input.transcriptPath) {
-      detectAndCleanSubagentTurns(
-        dependencies.db,
-        session.id,
-        input.transcriptPath,
-        epoch,
-      );
-    }
 
     return {
       continue: true,

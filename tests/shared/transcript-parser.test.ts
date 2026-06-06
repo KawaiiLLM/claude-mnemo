@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import {
   buildPromptIdLineMap,
   collectOrderedPromptIds,
+  countUserPromptsInEntries,
   countUserPromptsInTranscript,
   extractAssistantResponse,
   parseReplayTranscript,
@@ -336,6 +337,46 @@ describe("parseTranscript", () => {
     expect(countUserPromptsInTranscript(transcript.path)).toBe(2);
     expect(turns).toHaveLength(2);
     expect(turns[0]?.isSidechain).toBe(true);
+  });
+
+  test("countUserPromptsInEntries matches the path wrapper on preloaded entries", () => {
+    const transcript = writeTranscript([
+      {
+        role: "user",
+        promptId: "p1",
+        permissionMode: "default",
+        content: [{ type: "text", text: "First prompt" }],
+      },
+      {
+        role: "user",
+        promptId: "p1",
+        content: [{ type: "tool_result", content: "Read result" }],
+      },
+      {
+        role: "user",
+        isSidechain: true,
+        promptId: "p2",
+        permissionMode: "default",
+        content: [{ type: "text", text: "Sidechain prompt" }],
+      },
+      {
+        role: "user",
+        promptId: "cmd-1",
+        content: [{ type: "text", text: "<command-name>/help</command-name>" }],
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Prompt without id" }],
+      },
+    ]);
+    directories.push(transcript.directory);
+
+    const entries = readAllTranscriptEntries(transcript.path);
+
+    expect(countUserPromptsInEntries(entries)).toBe(3);
+    expect(countUserPromptsInEntries(entries)).toBe(
+      countUserPromptsInTranscript(transcript.path),
+    );
   });
 
   test("countUserPromptsInTranscript returns 0 for missing or empty files", () => {

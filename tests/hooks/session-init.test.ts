@@ -79,6 +79,70 @@ describe("handleSessionInitHook", () => {
     expect(turn?.userPrompt).toBe("Diagnose the auth race");
   });
 
+  test("runs session creation and prompt-number selection through the bounded hook transaction runner", async () => {
+    const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
+      expect(runnerDb).toBe(db);
+      return fn();
+    });
+    const handler = createSessionInitHandler({
+      db,
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    await handler(
+      createInput({
+        prompt: "Diagnose the auth race",
+      }),
+    );
+
+    const session = getSessionByContentId(db, "session-1")!;
+    expect(getTurn(db, session.id, 1)?.userPrompt).toBe("Diagnose the auth race");
+    expect(transactionRunner).toHaveBeenCalledTimes(1);
+  });
+
+  test("chooses the next prompt number inside the hook transaction runner", async () => {
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1000,
+      updatedAtEpoch: 1000,
+      completedAtEpoch: null,
+    });
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Existing prompt', 1000)`,
+    ).run(session.id);
+
+    const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
+      expect(runnerDb).toBe(db);
+      db.query(
+        `INSERT INTO turns (
+          session_id, prompt_number, status, user_prompt, created_at_epoch
+        ) VALUES (?, 2, 'active', 'Concurrent prompt', 1001)`,
+      ).run(session.id);
+
+      const result = fn();
+
+      expect(getTurn(db, session.id, 2)?.userPrompt).toBe("Concurrent prompt");
+      expect(getTurn(db, session.id, 3)?.userPrompt).toBe("Prompt after lock");
+      return result;
+    });
+    const handler = createSessionInitHandler({
+      db,
+      now: () => 1002,
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    await handler(createInput({ prompt: "Prompt after lock" }));
+
+    expect(transactionRunner).toHaveBeenCalledTimes(1);
+    expect(getTurn(db, session.id, 3)?.status).toBe("active");
+  });
+
   test("second prompt only inserts another active turn", async () => {
     const transcript = writeTranscript([
       { role: "user", content: [{ type: "text", text: "Diagnose the auth race" }] },

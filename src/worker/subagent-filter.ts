@@ -1,10 +1,19 @@
 import type { Database } from "bun:sqlite";
 
+import { runWriteTransaction } from "../db/database";
 import { updateTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
-import { parseReplayTranscript } from "../shared/transcript-parser";
+import {
+  parseReplayTranscript,
+  readAllTranscriptEntries,
+  type ParsedReplayTurn,
+} from "../shared/transcript-parser";
 
 const SUBAGENT_PENDING_TAG = "subagent:pending";
 const SUBAGENT_NOTIFIED_TAG = "subagent:notified";
+
+interface DetectAndCleanSubagentTurnsOptions {
+  runWriteTransaction?: typeof runWriteTransaction;
+}
 
 function addSubagentPendingTag(tags: string[]): string[] {
   if (tags.includes(SUBAGENT_PENDING_TAG) || tags.includes(SUBAGENT_NOTIFIED_TAG)) {
@@ -106,12 +115,11 @@ function deleteObservationsForTurns(db: Database, turnIds: number[]): void {
   ).run(...turnIds);
 }
 
-function resolveSubagentTurns(
+function resolveSubagentTurnsFromParsedTurns(
   db: Database,
   sessionDbId: number,
-  transcriptPath: string,
+  parsedTurns: ParsedReplayTurn[],
 ): TurnRecord[] {
-  const parsedTurns = parseReplayTranscript(transcriptPath);
   const newestSubagentChain: typeof parsedTurns = [];
 
   for (let index = parsedTurns.length - 1; index >= 0; index -= 1) {
@@ -150,13 +158,12 @@ function resolveSubagentTurns(
   return [...matched.values()].sort((left, right) => left.promptNumber - right.promptNumber);
 }
 
-export function detectAndCleanSubagentTurns(
+function cleanSubagentTurns(
   db: Database,
   sessionDbId: number,
-  transcriptPath: string,
+  matchedTurns: TurnRecord[],
   updatedAtEpoch: number,
 ): number[] {
-  const matchedTurns = resolveSubagentTurns(db, sessionDbId, transcriptPath);
   if (matchedTurns.length === 0) {
     return [];
   }
@@ -164,22 +171,59 @@ export function detectAndCleanSubagentTurns(
   const turnIds = matchedTurns.map((turn) => turn.id);
   const observationIds = selectObservationIdsForTurns(db, turnIds);
 
-  db.transaction(() => {
-    deleteTurnStopQueueItems(db, sessionDbId, turnIds);
-    deleteObservationQueueItems(db, sessionDbId, observationIds);
-    deleteObservationFtsRows(db, observationIds);
-    deleteObservationsForTurns(db, turnIds);
+  deleteTurnStopQueueItems(db, sessionDbId, turnIds);
+  deleteObservationQueueItems(db, sessionDbId, observationIds);
+  deleteObservationFtsRows(db, observationIds);
+  deleteObservationsForTurns(db, turnIds);
 
-    for (const turn of matchedTurns) {
-      updateTurnById(db, turn.id, {
-        status: "undone",
-        replaceTags: addSubagentPendingTag(turn.tags),
-        updatedAtEpoch,
-      });
-    }
-  })();
+  for (const turn of matchedTurns) {
+    updateTurnById(db, turn.id, {
+      status: "undone",
+      replaceTags: addSubagentPendingTag(turn.tags),
+      updatedAtEpoch,
+    });
+  }
 
   return matchedTurns.map((turn) => turn.promptNumber);
+}
+
+export function detectAndCleanSubagentTurnsFromParsed(
+  db: Database,
+  sessionDbId: number,
+  parsedTurns: ParsedReplayTurn[],
+  updatedAtEpoch: number,
+): number[] {
+  return cleanSubagentTurns(
+    db,
+    sessionDbId,
+    resolveSubagentTurnsFromParsedTurns(
+      db,
+      sessionDbId,
+      parsedTurns,
+    ),
+    updatedAtEpoch,
+  );
+}
+
+export function detectAndCleanSubagentTurns(
+  db: Database,
+  sessionDbId: number,
+  transcriptPath: string,
+  updatedAtEpoch: number,
+  options: DetectAndCleanSubagentTurnsOptions = {},
+): number[] {
+  const entries = readAllTranscriptEntries(transcriptPath);
+  const parsedTurns = parseReplayTranscript(transcriptPath, entries);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+
+  return writeTransaction(db, () =>
+    detectAndCleanSubagentTurnsFromParsed(
+      db,
+      sessionDbId,
+      parsedTurns,
+      updatedAtEpoch,
+    ),
+  );
 }
 
 export function getPendingSubagentTurns(

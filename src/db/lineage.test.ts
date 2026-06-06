@@ -13,9 +13,11 @@ import {
   isContiguousRun,
   pickForeignOwner,
   resolveSessionLineage,
+  resolveSessionLineageFromEntries,
   resolveViaLogicalParent,
 } from "./lineage";
 import type { OwnerInfo } from "./lineage";
+import { readAllTranscriptEntries } from "../shared/transcript-parser";
 
 const directories: string[] = [];
 
@@ -284,6 +286,34 @@ test("resolved: prefix has 2 foreign promptIds then a child-owned one", () => {
   expect(res.status).toBe("resolved");
   expect(res.parentSessionId).toBe(parent);
   expect(res.forkTurnId).toBe(forkTurn);
+});
+
+test("resolveSessionLineageFromEntries matches the path wrapper without re-reading", () => {
+  const db = createDatabase(":memory:");
+  initializeSchema(db);
+
+  const parent = makeSession(db, "parent", 1);
+  const child = makeSession(db, "child", 2);
+
+  seedTurn(db, parent, 14, "pA");
+  const forkTurn = seedTurn(db, parent, 15, "pB");
+  seedTurn(db, child, 1, "cC");
+
+  const path = writeTranscript([
+    promptEntry("pA"),
+    promptEntry("pB"),
+    promptEntry("cC"),
+  ]);
+  const entries = readAllTranscriptEntries(path);
+
+  expect(resolveSessionLineageFromEntries(db, child, entries)).toEqual(
+    resolveSessionLineage(db, child, path),
+  );
+  expect(resolveSessionLineageFromEntries(db, child, entries)).toEqual({
+    status: "resolved",
+    parentSessionId: parent,
+    forkTurnId: forkTurn,
+  });
 });
 
 test("position picks immediate parent over grandparent (latest foreign index)", () => {

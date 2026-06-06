@@ -147,6 +147,22 @@ describe("handlePostToolUseHook", () => {
     expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/wake");
   });
 
+  test("runs foreground writes through the bounded hook transaction runner", async () => {
+    const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
+      expect(runnerDb).toBe(db);
+      return fn();
+    });
+    const handler = createPostToolUseHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    await handler(createInput());
+
+    expect(transactionRunner).toHaveBeenCalledTimes(1);
+  });
+
   test("continues without writing when session or turn context is missing", async () => {
     const fetchImpl = mock(async () => new Response(null, { status: 200 }));
     const handler = createPostToolUseHandler({

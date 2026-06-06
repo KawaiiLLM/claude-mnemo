@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId } from "../../db/sessions";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
@@ -10,6 +11,7 @@ export interface PostToolUseHandlerDependencies {
   now?: () => number;
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
+  runHookWriteTransaction?: typeof runHookWriteTransaction;
 }
 
 function stringifyToolPayload(value: unknown): string | null {
@@ -36,6 +38,7 @@ export function createPostToolUseHandler(
   dependencies: PostToolUseHandlerDependencies,
 ) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
 
   return async function handlePostToolUseHook(
     input: NormalizedHookInput,
@@ -59,7 +62,7 @@ export function createPostToolUseHandler(
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
 
-    dependencies.db.transaction(() => {
+    writeTransaction(dependencies.db, () => {
       const inserted = dependencies.db
         .query<
           { id: number },
@@ -106,7 +109,7 @@ export function createPostToolUseHandler(
           `,
         )
         .run(inserted.id, session.id, createdAtEpoch);
-    })();
+    });
 
     return {
       continue: true,

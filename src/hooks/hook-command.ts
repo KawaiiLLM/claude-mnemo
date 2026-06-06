@@ -27,13 +27,14 @@ export interface HookCommandDependencies {
 }
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
+const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
 function getDefaultHandlers(): Record<string, HookHandler> {
   if (defaultHandlers) {
     return defaultHandlers;
   }
 
-  const db = createDatabase();
+  const db = createDatabase(undefined, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
 
   defaultHandlers = {

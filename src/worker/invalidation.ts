@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { getTurnById, getTurnsForSession, updateTurnById } from "../db/turns";
 import type { TurnRecord } from "../db/turns";
 import {
-  detectInterruptedPromptIds,
+  detectInterruptedPromptIdsInEntries,
   isChainParticipant,
   readAllTranscriptEntries,
   type TranscriptEntryWithLineNumber,
@@ -72,9 +72,13 @@ export interface ReminderItem {
   reasons: ReminderReasonHit[];
 }
 
-interface RollbackDetection {
+export interface RollbackDetection {
   rolledBackPromptIds: Set<string>;
   replacementByPromptId: Map<string, string>;
+}
+
+export interface InvalidationSets extends RollbackDetection {
+  interruptedPromptIds: Set<string>;
 }
 
 const REMINDER_LIMIT = 10;
@@ -242,10 +246,9 @@ function selectLatestMainLeaf(
   });
 }
 
-export function detectRollbackTopology(
-  transcriptPath: string,
+export function detectRollbackTopologyFromEntries(
+  entries: TranscriptEntryWithLineNumber[],
 ): RollbackDetection {
-  const entries = readAllTranscriptEntries(transcriptPath);
   if (entries.length === 0) {
     return {
       rolledBackPromptIds: new Set(),
@@ -330,18 +333,36 @@ export function detectRollbackTopology(
   };
 }
 
+export function detectRollbackTopology(
+  transcriptPath: string,
+): RollbackDetection {
+  return detectRollbackTopologyFromEntries(
+    readAllTranscriptEntries(transcriptPath),
+  );
+}
+
 export function detectRolledBackPromptIds(transcriptPath: string): Set<string> {
   return detectRollbackTopology(transcriptPath).rolledBackPromptIds;
 }
 
-export function applyInvalidation(
+export function computeInvalidationSets(
+  entries: TranscriptEntryWithLineNumber[],
+): InvalidationSets {
+  const rollbackDetection = detectRollbackTopologyFromEntries(entries);
+  return {
+    interruptedPromptIds: detectInterruptedPromptIdsInEntries(entries),
+    rolledBackPromptIds: rollbackDetection.rolledBackPromptIds,
+    replacementByPromptId: rollbackDetection.replacementByPromptId,
+  };
+}
+
+export function applyInvalidationSets(
   db: Database,
   sessionDbId: number,
-  transcriptPath: string,
+  invalidationSets: InvalidationSets,
   epoch: number,
 ): void {
-  const interruptedPromptIds = detectInterruptedPromptIds(transcriptPath);
-  const { rolledBackPromptIds } = detectRollbackTopology(transcriptPath);
+  const { interruptedPromptIds, rolledBackPromptIds } = invalidationSets;
   const turns = getTurnsForSession(db, sessionDbId);
 
   for (const turn of turns) {
@@ -378,6 +399,20 @@ export function applyInvalidation(
       updatedAtEpoch: epoch,
     });
   }
+}
+
+export function applyInvalidation(
+  db: Database,
+  sessionDbId: number,
+  transcriptPath: string,
+  epoch: number,
+): void {
+  applyInvalidationSets(
+    db,
+    sessionDbId,
+    computeInvalidationSets(readAllTranscriptEntries(transcriptPath)),
+    epoch,
+  );
 }
 
 // Mark a turn whose flush unit was dropped (D8). Passes `status: turn.status`
