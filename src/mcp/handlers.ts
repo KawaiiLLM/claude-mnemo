@@ -19,6 +19,15 @@ export interface MnemoToolHandlers {
   timeline: ToolHandler;
 }
 
+export type TimelineToolView = "turns" | "milestones" | "phases";
+
+export interface TimelineQueryInput {
+  id: string;
+  page?: number;
+  pageSize?: number;
+  view?: TimelineToolView;
+}
+
 export interface CreateDatabaseBackedHandlersOptions {
   defaultProject?: string;
 }
@@ -36,6 +45,24 @@ export function textResult(text: string): ToolResult {
 
 export function createStubHandler(toolName: string): ToolHandler {
   return async () => textResult(`${toolName} not implemented`);
+}
+
+export function toTimelineQueryInput(args: Record<string, unknown>): TimelineQueryInput {
+  const input: TimelineQueryInput = {
+    id: args.id as string,
+  };
+
+  if (args.page !== undefined) {
+    input.page = args.page as number;
+  }
+  if (args.pageSize !== undefined) {
+    input.pageSize = args.pageSize as number;
+  }
+  if (args.view !== undefined) {
+    input.view = args.view as TimelineToolView;
+  }
+
+  return input;
 }
 
 export function createDatabaseBackedHandlers(
@@ -63,13 +90,7 @@ export function createDatabaseBackedHandlers(
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
     timeline: (args) =>
       textResult(
-        timelineQuery(database, {
-          id: args.id as string,
-          page: args.page as number | undefined,
-          pageSize: args.pageSize as number | undefined,
-          milestones: args.milestones as boolean | undefined,
-          phases: args.phases as boolean | undefined,
-        }),
+        timelineQuery(database, toTimelineQueryInput(args)),
       ),
   };
 }

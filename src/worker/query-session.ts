@@ -277,6 +277,7 @@ For each \`<turn>\` block:
    - insight: optional, 1-3 bullet lines (≤50 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - tags: 0-5 lowercase-hyphenated keywords
+   - tag style: use short stable conventional values, reuse existing concept stems, and include a reversal/supersede-style tag when the turn overturns an earlier decision.
    - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
 
 2. Optionally refresh the session summary — ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) — omitting any is rejected — editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.

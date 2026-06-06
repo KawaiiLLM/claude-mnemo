@@ -11,13 +11,17 @@ import { resolveTurnPointers } from "../../mcp/turn-pointers";
 import type {
   FormattedSession,
 } from "../../mcp/format";
-import { renderCurrentSessionOutput } from "../../mcp/session-output";
+import {
+  renderCurrentSessionOutput,
+  type CurrentSessionTimelineRenderer,
+} from "../../mcp/session-output";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
 
 export interface ContextHandlerDependencies {
   db: Database;
+  timelineRenderer?: CurrentSessionTimelineRenderer;
 }
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
@@ -189,7 +193,11 @@ function buildRecentSessionsOutput(
   return lines;
 }
 
-function buildContextOutput(db: Database, input: NormalizedHookInput): string {
+function buildContextOutput(
+  db: Database,
+  input: NormalizedHookInput,
+  timelineRenderer?: CurrentSessionTimelineRenderer,
+): string {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
       contentSessionId: input.sessionId,
@@ -253,7 +261,12 @@ function buildContextOutput(db: Database, input: NormalizedHookInput): string {
       ? [
           "## Current Session",
           "",
-          renderCurrentSessionOutput(db, primarySession, primarySessionRecord),
+          renderCurrentSessionOutput(
+            db,
+            primarySession,
+            primarySessionRecord,
+            timelineRenderer,
+          ),
           "",
         ]
       : []),
@@ -269,7 +282,11 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
   ): Promise<HookResult> {
     return {
       continue: true,
-      hookSpecificOutput: buildContextOutput(dependencies.db, input),
+      hookSpecificOutput: buildContextOutput(
+        dependencies.db,
+        input,
+        dependencies.timelineRenderer,
+      ),
     };
   };
 }

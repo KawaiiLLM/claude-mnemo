@@ -5,12 +5,12 @@ description: Render the temporal/decision shape of a past session - phases, gaps
 
 # Mnemo Timeline
 
-Timeline is the temporal axis of the three-axis read model. It answers "how did this session unfold" by rendering a time-ordered turn table, session-wide phase segmentation, and window-scoped shape signals.
+Timeline is the temporal axis of the three-axis read model. It answers "how did this session unfold" by rendering one per-session view: a turn table, milestone digest, or phase overview, plus window-scoped shape signals.
 
 Three axes of read access:
 
 - `recall` - content axis: structured semantic index
-- `timeline` - temporal axis: decision arc, phases, gaps, bursts
+- `timeline` - temporal axis: decision arc, turns, milestones, phases, gaps, bursts
 - `mnemo-replay` - raw axis: direct JSONL + SQLite access
 
 `remember` is the single write path. Use `timeline` for shape, `recall` for content, and `mnemo-replay` only for exact bytes.
@@ -32,18 +32,24 @@ Use timeline when:
 timeline(id="S42")
 timeline(id="S42", page=2, pageSize=50)
 timeline(id="S42/T10..100", pageSize=20)
-timeline(id="S42", milestones=true)        # key turns only; phases=false drops the phases block
+timeline(id="S42", view="milestones")      # key chronological digest
+timeline(id="S42", view="phases")          # standalone phase overview
 ```
 
 | Field | Required | Purpose |
 |---|---|---|
 | `id` | yes | Session selector with optional range (see below) |
+| `view` | no | `turns` (default), `milestones`, or `phases` |
 | `page` | no | 1-indexed page number. Default `1`. |
-| `pageSize` | no | Turns per page. Default `30`. |
-| `milestones` | no | When `true`, render only key turns: non-discovery phase leads, tool bursts, compact boundary, and the last 3 live turns. No row cap. Applies within the current page — widen `pageSize` for session-wide coverage. |
-| `phases` | no | Set `false` to omit the phases block. Default `true`. |
+| `pageSize` | no | Items per page for the selected view. Default `30`. |
 
-`id` selects the candidate turns; `page`/`pageSize` controls rendering. The two layers are orthogonal — `id="S42/T1..100"` with `pageSize=30` keeps all 100 turns as candidates and renders page 1 (T1-T30) by default. Phases and session metadata remain session-wide regardless of page.
+`id` selects the candidate turns; `view` selects the body; `page`/`pageSize` controls rendering for that body. The layers are orthogonal — `id="S42/T1..100"` with `pageSize=30` keeps all 100 turns as candidates and renders page 1 of the default `turns` view.
+
+Views:
+
+- `turns` - full time-ordered turn table.
+- `milestones` - key chronological digest for skimming the session arc.
+- `phases` - standalone phase overview.
 
 ### Range syntax
 
@@ -83,6 +89,8 @@ Markers:
 - `⨯` prefix on `T#` for undone turns
 - `※` in the gap column for broken-prompt candidates
 - `[ext:<name>]` prefix in the prompt column for external-source turns
+- `↩️` on a decision that reverses or supersedes an earlier decision
+- `🚫` on an invalidated or rolled-back turn
 
 ### Phases
 

@@ -5,10 +5,37 @@ import { splitBulletField } from "./format";
 import type { FormattedSession } from "./format";
 import { buildContextTimelineView, renderTimeline } from "./timeline";
 
+type ContextTimelineViewMode = "turns" | "milestones" | "phases";
+type ContextTimelineView = ReturnType<typeof buildContextTimelineView>;
+
+export interface CurrentSessionTimelineRenderer {
+  buildContextTimelineView: (
+    db: Database,
+    sessionId: number,
+    view?: ContextTimelineViewMode,
+  ) => ContextTimelineView;
+  renderTimeline: (
+    view: ContextTimelineView,
+    options: { promptCap?: number; showEarlierHint?: boolean },
+  ) => string;
+}
+
+const buildContextTimelineViewWithMode = buildContextTimelineView as (
+  db: Database,
+  sessionId: number,
+  view?: ContextTimelineViewMode,
+) => ContextTimelineView;
+
+const defaultTimelineRenderer: CurrentSessionTimelineRenderer = {
+  buildContextTimelineView: buildContextTimelineViewWithMode,
+  renderTimeline,
+};
+
 export function renderCurrentSessionOutput(
   db: Database,
   session: FormattedSession,
   sessionRecord: SessionRecord,
+  timelineRenderer: CurrentSessionTimelineRenderer = defaultTimelineRenderer,
 ): string {
   const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
   const pushField = (label: string, value: string | null | undefined): void => {
@@ -54,14 +81,16 @@ export function renderCurrentSessionOutput(
   pushBulletField("reference", session.reference);
 
   try {
-    const timelineView = buildContextTimelineView(db, sessionRecord.id);
+    const timelineView = timelineRenderer.buildContextTimelineView(
+      db,
+      sessionRecord.id,
+      "milestones",
+    );
     lines.push("");
     lines.push(
-      renderTimeline(timelineView, {
+      timelineRenderer.renderTimeline(timelineView, {
         promptCap: 80,
         showEarlierHint: true,
-        milestones: true,
-        phases: false,
       }),
     );
   } catch {

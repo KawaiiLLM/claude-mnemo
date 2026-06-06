@@ -65,7 +65,7 @@ Once installed, Claude-Mnemo works automatically — hooks fire on every session
 Three read axes plus one write path are exposed to the main agent:
 
 - **`recall`** (MCP tool) — content axis: search past work for the *why* — design rationale, rejected alternatives, decisions, user corrections. For what the code does now, read the source first.
-- **`timeline`** (MCP tool) — temporal axis: the decision arc of a single session — phases, gaps, tool bursts, compact boundary, milestones.
+- **`timeline`** (MCP tool) — temporal axis: the decision arc of a single session — turns, milestone digest, phase overview, gaps, tool bursts, and compact boundary.
 - **`mnemo-replay`** (skill) — raw axis: direct reads of the source JSONL transcript and the SQLite database, for exact bytes.
 - **`remember`** (MCP tool) — the single write path; the background worker uses it to persist every extraction.
 
@@ -93,14 +93,17 @@ recall(id="O87", depth="expanded")                  # specific observation
 
 ### `timeline` — the decision arc
 
-Renders a time-ordered turn table, phase segmentation, and shape signals (gaps, tool bursts, compact boundary) for one session.
+Renders one temporal view for one session. `view="turns"` is the default turn table, `view="milestones"` is a key chronological digest, and `view="phases"` is the phase overview. All views keep shape signals such as gaps, tool bursts, broken-prompt candidates, and compact boundaries.
 
 ```
-timeline(id="S12")                                  # full session shape
-timeline(id="S12", milestones=true)                 # key turns only (phase leads, bursts, stopping point)
-timeline(id="S12", phases=false)                    # drop the phases block
+timeline(id="S12")                                  # view="turns": full turn table
+timeline(id="S12", view="milestones")               # key chronological digest
+timeline(id="S12", view="phases")                   # phase overview
 timeline(id="S12/T10..100", pageSize=20)            # ranged + paginated
 ```
+
+- **Views**: `turns` (default), `milestones`, `phases`.
+- **Markers**: `↩️` marks a decision reversal; `🚫` marks an invalidated or rolled-back turn.
 
 ### `mnemo-replay` — raw transcript + database
 
@@ -118,7 +121,7 @@ On every session start, `SessionStart` injects:
 
 - A header with session and observation counts plus the type legend
 - The current session's structured summary — `content`, `decision`, `done`, `current`, `next`, `reference`
-- A milestone timeline of the current session — key turns only, phases block off
+- A milestone timeline of the current session — `timeline(..., view="milestones")`
 - Recent sessions, collapsed, with drill-down hints pointing to `recall(id="Sx/Ty", depth="expanded")`
 
 ## Project Structure

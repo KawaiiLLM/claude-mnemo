@@ -3,7 +3,7 @@ Claude-Mnemo is installed in this environment.
 
 Three-axis memory, three structured tools + one skill:
 - `recall` MCP tool — content axis: high-entropy semantic index
-- `timeline` MCP tool — temporal axis: decision arc, phases, gaps, bursts
+- `timeline` MCP tool — temporal axis: decision arc, turns, milestones, phases, gaps, bursts
 - `mnemo-replay` skill — raw axis: JSONL + SQLite direct access
 - `remember` MCP tool — the single write path
 
@@ -14,7 +14,7 @@ Three-axis memory, three structured tools + one skill:
 
 Preferred workflow:
 1. `recall()` to browse recent memory or `recall(query=...)` / `recall(time=...)` to narrow.
-2. `timeline(id="S<n>")` to see the session's shape - decision arc, gaps, phases.
+2. `timeline(id="S<n>")` to see the turn table, or `timeline(id="S<n>", view="milestones"|"phases")` for the digest or phase overview.
 3. `recall(id="S<n>/T<m>", depth="expanded")` to zoom into a specific turn's content.
 4. Use the `mnemo-replay` skill only when exact wording or full tool output matters - the `raw:` line in an expanded recall or timeline result is your hand-off.
 </claude-mnemo-context>

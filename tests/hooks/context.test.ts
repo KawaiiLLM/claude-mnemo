@@ -6,7 +6,6 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 import * as formatModule from "../../src/mcp/format";
-import * as timelineModule from "../../src/mcp/timeline";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { resolveTranscriptPath } from "../../src/shared/paths";
@@ -802,13 +801,17 @@ describe("handleContextHook", () => {
       createdAtEpoch: 302,
     });
 
-    const buildTimelineSpy = spyOn(timelineModule, "buildContextTimelineView").mockImplementation(
-      () => {
-        throw new Error("timeline exploded");
+    const handler = createContextHandler({
+      db,
+      timelineRenderer: {
+        buildContextTimelineView: () => {
+          throw new Error("timeline exploded");
+        },
+        renderTimeline: () => {
+          throw new Error("render should not run after build failure");
+        },
       },
-    );
-
-    const handler = createContextHandler({ db });
+    });
     const result = await handler(
       createInput({
         source: "compact",
@@ -823,8 +826,6 @@ describe("handleContextHook", () => {
     expect(output).not.toContain("T#");
     expect(output).not.toContain("showing:");
     expect(output).toContain("## Recent Sessions");
-
-    buildTimelineSpy.mockRestore();
   });
 
   test("resume source with a stranded active turn enqueues turn-stop and still returns hookSpecificOutput without asyncWork", async () => {

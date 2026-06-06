@@ -7,11 +7,13 @@ export interface TimelineInput {
   id: string;
   page?: number;
   pageSize?: number;
-  milestones?: boolean;
-  phases?: boolean;
+  view?: TimelineViewKind;
 }
 
+export type TimelineViewKind = "turns" | "milestones" | "phases";
+
 export interface TimelineView {
+  view: TimelineViewKind;
   session: SessionRecord;
   totalTurns: number;
   firstPromptNumber: number;
@@ -22,6 +24,11 @@ export interface TimelineView {
   window: ResolvedWindow;
   windowTurns: TurnRecord[];
   pageTurns: TurnRecord[];
+  pagedMilestones: KeptMilestone[];
+  pagedPhases: Phase[];
+  milestoneOverflowByDay: OverflowHint[];
+  viewItemTotal: number;
+  pageAnchorEpoch: number | null;
   page: number;
   pageSize: number;
   pageCount: number;
@@ -36,10 +43,6 @@ export interface TimelineView {
 export interface RenderTimelineOptions {
   promptCap?: number;
   showEarlierHint?: boolean;
-  /** When true, the turn table renders only milestone turns (spec D2). */
-  milestones?: boolean;
-  /** When false, the phases block is omitted. Defaults to included. */
-  phases?: boolean;
 }
 
 export interface SystemTimezoneSource {
@@ -57,6 +60,7 @@ export const TITLE_COLUMN_CAP = 40;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
+export const MILESTONE_TIER2_PER_DAY = 4;
 
 export type RangeSpec =
   | { kind: "none" }
@@ -82,6 +86,8 @@ export interface Phase {
   emoji: string;
   startPromptNumber: number;
   endPromptNumber: number;
+  startEpoch: number;
+  endEpoch: number;
   turnCount: number;
   totalToolCalls: number;
   totalFilesRead: number;
@@ -114,6 +120,27 @@ export interface ShapeSignals {
   externalInputs: Array<{ promptNumber: number; source: string }>;
 }
 
+export interface KeptMilestone {
+  turn: TurnRecord;
+  tier: 1 | 2;
+  invalidated: boolean;
+  reversal: boolean;
+}
+
+export interface OverflowHint {
+  date: string;
+  count: number;
+  firstPrompt: number;
+  lastPrompt: number;
+  lastKeptPrompt: number;
+  kind: string;
+}
+
+export interface MilestoneSelection {
+  kept: KeptMilestone[];
+  overflowByDay: OverflowHint[];
+}
+
 export const TYPE_EMOJI_MAP: Record<string, string> = {
   bugfix: "🔴",
   feature: "🟣",
@@ -127,11 +154,13 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 export const PENDING_EMOJI = "⏳";
 const MISSING_LINE_ANCHOR = "—";
 
+type PaginatedItems<T> = { items: T[]; total: number; pageCount: number };
+
 function paginateItems<T>(
   items: T[],
   page: number,
   pageSize: number,
-): { items: T[]; total: number; pageCount: number } {
+): PaginatedItems<T> {
   const total = items.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const offset = (page - 1) * pageSize;
@@ -140,6 +169,14 @@ function paginateItems<T>(
     items: items.slice(offset, offset + pageSize),
     total,
     pageCount,
+  };
+}
+
+function emptyPaginatedItems<T>(total: number, pageSize: number): PaginatedItems<T> {
+  return {
+    items: [],
+    total,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
   };
 }
 
@@ -356,6 +393,30 @@ export function formatLocalDate(epochSeconds: number): string {
   }).format(new Date(epochSeconds * 1000));
 }
 
+function formatLocalWeekday(epochSeconds: number): string {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+  }).format(new Date(epochSeconds * 1000));
+}
+
+function formatLocalDateWithWeekday(epochSeconds: number): string {
+  return `${formatLocalDate(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
+}
+
+function formatLocalMonthDay(epochSeconds: number): string {
+  const [year, month, day] = formatLocalDate(epochSeconds).split("-");
+  void year;
+  return `${month}-${day}`;
+}
+
+function formatLocalMonthDayWithWeekday(epochSeconds: number): string {
+  return `${formatLocalMonthDay(epochSeconds)} ${formatLocalWeekday(epochSeconds)}`;
+}
+
+function sameLocalDate(leftEpoch: number, rightEpoch: number): boolean {
+  return formatLocalDate(leftEpoch) === formatLocalDate(rightEpoch);
+}
+
 export function getSystemTimezone(
   referenceEpochSeconds = Math.floor(Date.now() / 1000),
   source: SystemTimezoneSource = {},
@@ -388,6 +449,46 @@ export function extractSourceTags(tags: string[]): string[] {
   return tags
     .filter((tag) => tag.startsWith("source:"))
     .map((tag) => tag.slice("source:".length));
+}
+
+export function extractReversalFlag(turn: TurnRecord): boolean {
+  if (turn.type !== "decision") {
+    return false;
+  }
+
+  const reversalTags = new Set([
+    "reversal",
+    "reversed",
+    "superseded",
+    "supersede",
+    "reframed",
+    "reframe",
+    "design-pivot",
+    "pivot",
+  ]);
+
+  return turn.tags.some((tag) => reversalTags.has(tag));
+}
+
+function isInvalidatedTurn(turn: TurnRecord): boolean {
+  return (
+    turn.status === "undone" ||
+    turn.wasRolledBack ||
+    turn.wasInterrupted ||
+    turn.tags.some((tag) => tag.startsWith("invalidated:"))
+  );
+}
+
+export function milestoneCandidateTurn(turn: TurnRecord): boolean {
+  if (turn.status === "skipped") {
+    return false;
+  }
+
+  if (isInvalidatedTurn(turn)) {
+    return turn.type === "decision";
+  }
+
+  return true;
 }
 
 function getCompactMetadata(tags: string[]): {
@@ -461,6 +562,8 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
         emoji,
         startPromptNumber: turn.promptNumber,
         endPromptNumber: turn.promptNumber,
+        startEpoch: turn.createdAtEpoch,
+        endEpoch: turn.createdAtEpoch,
         turnCount: 0,
         totalToolCalls: 0,
         totalFilesRead: 0,
@@ -473,6 +576,7 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
     }
 
     current.endPromptNumber = turn.promptNumber;
+    current.endEpoch = turn.createdAtEpoch;
     current.turnCount += 1;
     current.totalToolCalls += turn.toolCallCount ?? 0;
     current.totalFilesRead += turn.filesRead.length;
@@ -673,51 +777,137 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
   };
 }
 
-/**
- * Milestone selection (spec D2). Operates only on the rendered page:
- * non-discovery phase leads ∪ tool-burst turns ∪ in-page compact boundaries ∪
- * last 3 live turns. The burst threshold is the window-scoped scalar reused for
- * calibration; membership is decided per page. No cap.
- */
-export function selectMilestoneTurns(
-  pageTurns: TurnRecord[],
-  toolBurstThreshold: number,
-  compactBoundaries: number[],
-): Set<number> {
-  const keep = new Set<number>();
-  // Sort defensively so the last-3 anchor is correct even if a caller passes
-  // unsorted turns (production pageTurns are already sorted). segmentPhases
-  // sorts internally, and the compact/burst paths are order-independent.
-  const live = sortTurnsForAnalysis(pageTurns).filter(isTimelineLiveTurn);
+export function selectMilestoneTurns(view: {
+  session?: SessionRecord;
+  windowTurns: TurnRecord[];
+  windowSignals: ShapeSignals;
+  compactBoundaries: number[];
+}): MilestoneSelection {
+  const sorted = sortTurnsForAnalysis(view.windowTurns);
+  const candidates = sorted.filter(milestoneCandidateTurn);
+  const keptByPrompt = new Map<number, KeptMilestone>();
+  const tier2Candidates: TurnRecord[] = [];
 
-  for (const phase of segmentPhases(pageTurns)) {
-    if (phase.type !== null && phase.type !== "discovery") {
-      keep.add(phase.startPromptNumber);
+  const phaseLeads = new Set(segmentPhases(view.windowTurns).map((phase) => phase.startPromptNumber));
+  const firstCandidate = candidates[0]?.promptNumber ?? null;
+  const lastCandidate = candidates[candidates.length - 1]?.promptNumber ?? null;
+  const candidateByPrompt = new Map(candidates.map((turn, index) => [turn.promptNumber, { turn, index }]));
+
+  const addKept = (turn: TurnRecord, tier: 1 | 2): void => {
+    const existing = keptByPrompt.get(turn.promptNumber);
+    if (existing && existing.tier <= tier) {
+      return;
+    }
+
+    keptByPrompt.set(turn.promptNumber, {
+      turn,
+      tier,
+      invalidated: isInvalidatedTurn(turn),
+      reversal: extractReversalFlag(turn),
+    });
+  };
+
+  for (const turn of candidates) {
+    const isEndpoint =
+      turn.promptNumber === firstCandidate || turn.promptNumber === lastCandidate;
+    const isDeliverable =
+      (turn.type === "change" || turn.type === "feature" || turn.type === "refactor") &&
+      turn.filesModified.length > 0;
+
+    if (
+      isEndpoint ||
+      turn.type === "decision" ||
+      isDeliverable ||
+      turn.type === "compact"
+    ) {
+      addKept(turn, 1);
+      continue;
+    }
+
+    if (turn.type === "bugfix") {
+      const current = candidateByPrompt.get(turn.promptNumber);
+      const next = current ? candidates[current.index + 1] : undefined;
+      if (next?.type !== "bugfix") {
+        tier2Candidates.push(turn);
+      }
+      continue;
+    }
+
+    if (turn.type === "discovery" && phaseLeads.has(turn.promptNumber)) {
+      const current = candidateByPrompt.get(turn.promptNumber);
+      const next = current ? candidates[current.index + 1] : undefined;
+      const feedsLiveDecision =
+        next?.type === "decision" && !isInvalidatedTurn(next);
+      const isBurst = (turn.toolCallCount ?? 0) > view.windowSignals.toolBurstThreshold;
+      if (feedsLiveDecision || isBurst) {
+        tier2Candidates.push(turn);
+      }
     }
   }
 
-  // Re-scan page live turns against the threshold. Do NOT reuse
-  // windowSignals.toolBursts — it is .slice(0, TOOL_BURST_TOP_N)-truncated.
-  for (const turn of live) {
-    if ((turn.toolCallCount ?? 0) > toolBurstThreshold) {
-      keep.add(turn.promptNumber);
+  const tier2ByDay = new Map<string, TurnRecord[]>();
+  for (const turn of tier2Candidates) {
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = tier2ByDay.get(day) ?? [];
+    bucket.push(turn);
+    tier2ByDay.set(day, bucket);
+  }
+
+  const overflowByDay: OverflowHint[] = [];
+  for (const [date, turns] of tier2ByDay) {
+    const ranked = [...turns].sort((left, right) => {
+      const leftRank = left.type === "bugfix" ? 0 : 1;
+      const rightRank = right.type === "bugfix" ? 0 : 1;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+
+      const toolDiff = (right.toolCallCount ?? 0) - (left.toolCallCount ?? 0);
+      if (toolDiff !== 0) return toolDiff;
+
+      return left.promptNumber - right.promptNumber;
+    });
+
+    for (const turn of ranked.slice(0, MILESTONE_TIER2_PER_DAY)) {
+      addKept(turn, 2);
+    }
+
+    const overflow = ranked.slice(MILESTONE_TIER2_PER_DAY);
+    if (overflow.length > 0) {
+      const byPrompt = [...overflow].sort((left, right) => left.promptNumber - right.promptNumber);
+      const hasBugfix = overflow.some((turn) => turn.type === "bugfix");
+      const hasDiscovery = overflow.some((turn) => turn.type === "discovery");
+      overflowByDay.push({
+        date,
+        count: overflow.length,
+        firstPrompt: byPrompt[0]!.promptNumber,
+        lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
+        lastKeptPrompt: 0,
+        kind: hasBugfix && hasDiscovery ? "fixes/notes" : hasBugfix ? "fixes" : "notes",
+      });
     }
   }
 
-  // Compact boundaries must also be live (D2 live-only): a skipped/undone
-  // compact turn is not a milestone candidate.
-  const liveNumbers = new Set(live.map((turn) => turn.promptNumber));
-  for (const boundary of compactBoundaries) {
-    if (liveNumbers.has(boundary)) {
-      keep.add(boundary);
-    }
+  const kept = [...keptByPrompt.values()].sort(
+    (left, right) => left.turn.promptNumber - right.turn.promptNumber,
+  );
+  const lastKeptPromptByDay = new Map<string, number>();
+  for (const milestone of kept) {
+    lastKeptPromptByDay.set(
+      formatLocalDate(milestone.turn.createdAtEpoch),
+      milestone.turn.promptNumber,
+    );
   }
 
-  for (const turn of live.slice(-3)) {
-    keep.add(turn.promptNumber);
-  }
-
-  return keep;
+  return {
+    kept,
+    overflowByDay: overflowByDay
+      .map((overflow) => ({
+        ...overflow,
+        lastKeptPrompt: lastKeptPromptByDay.get(overflow.date) ?? 0,
+      }))
+      .sort((left, right) =>
+        left.date === right.date ? left.firstPrompt - right.firstPrompt : left.date.localeCompare(right.date),
+      ),
+  };
 }
 
 function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
@@ -797,6 +987,7 @@ export function buildTimelineView(
   preloadedTurns?: TurnRecord[],
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
+  const viewKind = input.view ?? "turns";
   const session = getSession(db, parsed.sessionId);
 
   if (!session) {
@@ -821,7 +1012,6 @@ export function buildTimelineView(
   );
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
-  const pagedTurns = paginateItems(windowTurns, page, pageSize);
   const typesDistribution = computeTypesDistribution(allTurns);
   const windowSignals = detectShapeSignals(windowTurns);
   const compactBoundaries = [
@@ -841,8 +1031,47 @@ export function buildTimelineView(
     resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
+  const milestoneSelection = selectMilestoneTurns({
+    session,
+    windowTurns,
+    windowSignals,
+    compactBoundaries,
+  });
+  const phases = segmentPhases(windowTurns);
+  const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
+  const pagedTurns =
+    viewKind === "turns"
+      ? paginateItems(nonSkippedTurns, page, pageSize)
+      : emptyPaginatedItems<TurnRecord>(nonSkippedTurns.length, pageSize);
+  const pagedMilestones =
+    viewKind === "milestones"
+      ? paginateItems(milestoneSelection.kept, page, pageSize)
+      : emptyPaginatedItems<KeptMilestone>(milestoneSelection.kept.length, pageSize);
+  const pagedPhases =
+    viewKind === "phases"
+      ? paginateItems(phases, page, pageSize)
+      : emptyPaginatedItems<Phase>(phases.length, pageSize);
+  const viewItemTotal =
+    viewKind === "turns"
+      ? pagedTurns.total
+      : viewKind === "milestones"
+        ? pagedMilestones.total
+        : pagedPhases.total;
+  const pageCount =
+    viewKind === "turns"
+      ? pagedTurns.pageCount
+      : viewKind === "milestones"
+        ? pagedMilestones.pageCount
+        : pagedPhases.pageCount;
+  const pageAnchorEpoch =
+    viewKind === "turns"
+      ? (pagedTurns.items[0]?.createdAtEpoch ?? null)
+      : viewKind === "milestones"
+        ? (pagedMilestones.items[0]?.turn.createdAtEpoch ?? null)
+        : (pagedPhases.items[0]?.startEpoch ?? null);
 
   return {
+    view: viewKind,
     session,
     totalTurns,
     firstPromptNumber: bounds.first,
@@ -853,9 +1082,14 @@ export function buildTimelineView(
     window,
     windowTurns,
     pageTurns: pagedTurns.items,
+    pagedMilestones: pagedMilestones.items,
+    pagedPhases: pagedPhases.items,
+    milestoneOverflowByDay: milestoneSelection.overflowByDay,
+    viewItemTotal,
+    pageAnchorEpoch,
     page,
     pageSize,
-    pageCount: pagedTurns.pageCount,
+    pageCount,
     windowSignals,
     jsonlPath,
     tz,
@@ -867,6 +1101,7 @@ export function buildTimelineView(
 export function buildContextTimelineView(
   db: Database,
   sessionId: number,
+  view: TimelineViewKind = "turns",
 ): TimelineView {
   const session = getSession(db, sessionId);
   if (!session) {
@@ -890,13 +1125,14 @@ export function buildContextTimelineView(
   const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
   const firstPromptNumber = windowTurns[0]!.promptNumber;
   const lastPromptNumber = windowTurns[windowTurns.length - 1]!.promptNumber;
-  const view = buildTimelineView(db, {
+  const timelineView = buildTimelineView(db, {
     id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
     pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
+    view,
   }, sortedTurns);
 
   return {
-    ...view,
+    ...timelineView,
     hasEarlier: firstPromptNumber !== sortedTurns[0]!.promptNumber,
   };
 }
@@ -937,9 +1173,15 @@ function renderSessionHeader(view: TimelineView): string[] {
   if (view.typesDistribution.pending > 0) {
     typesParts.push(`⏳${view.typesDistribution.pending}`);
   }
+  const startDate = formatLocalDate(sessionStart);
+  const endDate = formatLocalDate(sessionEnd);
+  const endLabel =
+    startDate === endDate
+      ? formatLocalTime(sessionEnd)
+      : `${endDate} ${formatLocalTime(sessionEnd)}`;
 
   const lines = [
-    `- [S${view.session.id}] ${formatLocalDate(sessionStart)} ${formatLocalTime(sessionStart)} → ${formatLocalTime(sessionEnd)} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
+    `- [S${view.session.id}] ${startDate} ${formatLocalTime(sessionStart)} → ${endLabel} (${formatDuration((sessionEnd - sessionStart) * 1000)}${compactSuffix})`,
     `  ${view.session.project} | ${view.totalTurns} turns | ${view.totalToolCalls} tool_calls`,
     `  types: ${typesParts.join(" ")} (session-wide)`,
     `  tz: ${view.tz.name} (${view.tz.offsetLabel})`,
@@ -959,19 +1201,47 @@ function renderSessionHeader(view: TimelineView): string[] {
 }
 
 function formatShowingLine(view: TimelineView): string | null {
-  if (view.totalTurns === 0 || view.windowTurns.length <= view.pageSize) {
+  if (view.viewItemTotal === 0 || view.viewItemTotal <= view.pageSize) {
     return null;
   }
 
-  return `page ${view.page} / ${view.pageCount} (total ${view.windowTurns.length})`;
+  const anchor = view.pageAnchorEpoch === null
+    ? ""
+    : ` · ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
+  return `${view.view} · page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
 
 function renderTurnTable(
   view: TimelineView,
   promptCap: number = PROMPT_COLUMN_CAP,
-  milestones = false,
 ): string[] {
-  if (view.pageTurns.length === 0) {
+  const renderedTurns = view.pageTurns.map((turn) => ({
+    turn,
+    marker: null as string | null,
+  }));
+
+  return renderTurnRows(view, renderedTurns, promptCap);
+}
+
+function renderMilestoneDigest(
+  view: TimelineView,
+  promptCap: number = PROMPT_COLUMN_CAP,
+): string[] {
+  const renderedTurns = view.pagedMilestones.map((milestone) => ({
+    turn: milestone.turn,
+    marker: milestone.invalidated ? "🚫" : milestone.reversal ? "↩️" : null,
+  }));
+
+  return renderTurnRows(view, renderedTurns, promptCap, view.milestoneOverflowByDay);
+}
+
+function renderTurnRows(
+  view: TimelineView,
+  renderedTurns: Array<{ turn: TurnRecord; marker: string | null }>,
+  promptCap: number,
+  overflowByDay: OverflowHint[] = [],
+): string[] {
+  if (renderedTurns.length === 0) {
     return [];
   }
 
@@ -981,48 +1251,63 @@ function renderTurnTable(
     brokenPromptCandidates.add(pair.second);
   }
 
-  const milestoneSet = milestones
-    ? selectMilestoneTurns(
-        view.pageTurns,
-        view.windowSignals.toolBurstThreshold,
-        view.compactBoundaries,
-      )
-    : null;
+  const previousEpochByPrompt = computePreviousEpochByPrompt(view.windowTurns);
 
   const lines = [
     "",
     "T# | line | time | gap | stats | prompt → title",
   ];
 
-  let prevEpoch: number | null = null;
-  for (const turn of view.pageTurns) {
-    const previousTurnEpoch = prevEpoch;
-    // Advance gap tracking for every turn BEFORE any continue below (skipped or
-    // milestone-suppressed), so the gap on the next rendered row spans the
-    // hidden turns and stays a true delta.
-    prevEpoch = turn.createdAtEpoch;
+  let previousRenderedEpoch: number | null = null;
+  for (let index = 0; index < renderedTurns.length; index += 1) {
+    const { turn, marker } = renderedTurns[index]!;
 
-    if (turn.status === "skipped") {
-      continue;
-    }
-
-    // Milestone mode: suppress non-milestone live turns (undone turns are never
-    // in milestoneSet, so they are suppressed here too). Gap already advanced.
-    if (milestoneSet && !milestoneSet.has(turn.promptNumber)) {
-      continue;
+    if (
+      previousRenderedEpoch !== null &&
+      !sameLocalDate(previousRenderedEpoch, turn.createdAtEpoch)
+    ) {
+      lines.push(renderDayDivider(turn.createdAtEpoch, previousRenderedEpoch));
     }
 
     lines.push(
       renderTurnRow(
         turn,
-        previousTurnEpoch,
+        previousEpochByPrompt.get(turn.promptNumber) ?? null,
         brokenPromptCandidates.has(turn.promptNumber),
         promptCap,
+        marker,
       ),
     );
+    previousRenderedEpoch = turn.createdAtEpoch;
+
+    for (const overflow of overflowByDay) {
+      if (overflow.lastKeptPrompt === turn.promptNumber) {
+        lines.push(renderOverflowHint(view.session.id, overflow));
+      }
+    }
   }
 
   return lines;
+}
+
+function computePreviousEpochByPrompt(turns: TurnRecord[]): Map<number, number | null> {
+  const out = new Map<number, number | null>();
+  let previous: number | null = null;
+
+  for (const turn of sortTurnsForAnalysis(turns)) {
+    out.set(turn.promptNumber, previous);
+    previous = turn.createdAtEpoch;
+  }
+
+  return out;
+}
+
+function renderDayDivider(currentEpoch: number, previousRenderedEpoch: number): string {
+  return `── ${formatLocalDateWithWeekday(currentEpoch)} · ${formatGap(currentEpoch, previousRenderedEpoch)} idle ──`;
+}
+
+function renderOverflowHint(sessionId: number, overflow: OverflowHint): string {
+  return `   … +${overflow.count} more ${overflow.kind} this day → timeline(id="S${sessionId}", view="turns") @ T${overflow.firstPrompt}–T${overflow.lastPrompt}`;
 }
 
 function renderTurnRow(
@@ -1030,6 +1315,7 @@ function renderTurnRow(
   prevEpoch: number | null,
   isBrokenPromptCandidate: boolean,
   promptCap: number,
+  marker: string | null = null,
 ): string {
   const isUndone = turn.status === "undone";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
@@ -1047,7 +1333,7 @@ function renderTurnRow(
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "⨯ " : "";
   const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata),
+    renderTitleCell(turn, isUndone, compactMetadata, marker),
   );
 
   return [
@@ -1081,26 +1367,29 @@ function renderTitleCell(
   turn: TurnRecord,
   isUndone: boolean,
   compactMetadata: { preTokens: number; trigger: string } | null,
+  marker: string | null = null,
 ): string {
+  const markerPrefix = marker ? `${marker} ` : "";
+
   if (turn.type === "compact") {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
     const trigger = compactMetadata?.trigger ?? "manual";
-    return `${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
 
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
       const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
-      return `~~${body}~~`;
+      return `${markerPrefix}~~${body}~~`;
     }
-    return "⨯";
+    return `${markerPrefix}⨯`.trim();
   }
 
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
   }
 
-  return "⏳";
+  return `${markerPrefix}⏳`.trim();
 }
 
 function sanitizeTimelineField(value: string): string {
@@ -1113,23 +1402,31 @@ function isTimelineLiveTurn(turn: TurnRecord): boolean {
 
 function renderPhases(
   view: TimelineView,
-  options: RenderTimelineOptions = {},
 ): string[] {
-  const windowIsFullSession =
-    view.window.startPromptNumber === view.firstPromptNumber &&
-    view.window.endPromptNumber === view.lastPromptNumber;
-  const phases = segmentPhases(view.windowTurns);
-
-  if (phases.length === 0) {
+  if (view.pagedPhases.length === 0) {
     return [];
   }
 
-  const label = windowIsFullSession
-    ? "  phases (session-wide):"
-    : `  phases (window T${view.window.startPromptNumber}-T${view.window.endPromptNumber}):`;
-  const lines = ["", label];
+  const turnByPrompt = new Map(
+    view.windowTurns.map((turn) => [turn.promptNumber, turn] as const),
+  );
+  const lines = [
+    "",
+    "  phases:",
+    "  # | date | type | turns | span | work | lead title",
+  ];
 
-  for (const [index, phase] of phases.entries()) {
+  let previousPhaseEpoch: number | null = null;
+  const startIndex = (view.page - 1) * view.pageSize;
+
+  for (const [index, phase] of view.pagedPhases.entries()) {
+    if (
+      previousPhaseEpoch !== null &&
+      !sameLocalDate(previousPhaseEpoch, phase.startEpoch)
+    ) {
+      lines.push(`  ${renderDayDivider(phase.startEpoch, previousPhaseEpoch)}`);
+    }
+
     const range =
       phase.startPromptNumber === phase.endPromptNumber
         ? `T${phase.startPromptNumber}`
@@ -1153,10 +1450,26 @@ function renderPhases(
       phase.externalInputs.length > 0
         ? `  [ext:${phase.externalInputs.join(",")}]`
         : "";
+    const dateLabel = sameLocalDate(phase.startEpoch, phase.endEpoch)
+      ? formatLocalMonthDayWithWeekday(phase.startEpoch)
+      : `${formatLocalMonthDay(phase.startEpoch)}→${formatLocalMonthDay(phase.endEpoch)}`;
+    const leadTurn = turnByPrompt.get(phase.startPromptNumber);
+    const leadTextCandidate =
+      leadTurn?.title ??
+      cleanPromptForLabel(leadTurn?.userPrompt ?? null);
+    const leadText =
+      leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
+    const leadTitle = sanitizeTimelineField(
+      truncateText(
+        leadText,
+        TITLE_COLUMN_CAP,
+      ),
+    );
 
     lines.push(
-      `    ${String(index + 1)}. ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} ${range.padEnd(8)} ${durationLabel.padEnd(7)} ${countsLabel.padEnd(7)} ${stats.join(" ").padEnd(14)}${extSuffix}`.trimEnd(),
+      `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
     );
+    previousPhaseEpoch = phase.endEpoch;
   }
 
   return lines;
@@ -1262,12 +1575,16 @@ export function renderTimeline(
   options: RenderTimelineOptions = {},
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
-  const milestones = options.milestones ?? false;
+  const body =
+    view.view === "phases"
+      ? renderPhases(view)
+      : view.view === "milestones"
+        ? renderMilestoneDigest(view, promptCap)
+        : renderTurnTable(view, promptCap);
 
   return [
     ...renderSessionHeader(view),
-    ...renderTurnTable(view, promptCap, milestones),
-    ...(options.phases === false ? [] : renderPhases(view, options)),
+    ...body,
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view),
@@ -1276,10 +1593,7 @@ export function renderTimeline(
 
 export function timelineQuery(db: Database, input: TimelineInput): string {
   try {
-    return renderTimeline(buildTimelineView(db, input), {
-      milestones: input.milestones,
-      phases: input.phases,
-    });
+    return renderTimeline(buildTimelineView(db, input));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return `timeline error: ${message}`;

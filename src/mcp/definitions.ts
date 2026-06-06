@@ -5,7 +5,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
     "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline:
-    "Render the temporal/decision shape of a past session — phases, gaps, tool bursts, compact boundary, broken-prompt candidates. Single-session view with range selectors plus page/pageSize pagination. Optional `milestones` (render only key turns) and `phases` (set false to drop the phases block) flags.",
+    "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
 } as const;
 
 export const recallInputShape = {
@@ -47,8 +47,7 @@ export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
   pageSize: z.number().int().positive().optional(),
-  milestones: z.boolean().optional(),
-  phases: z.boolean().optional(),
+  view: z.enum(["turns", "milestones", "phases"]).optional(),
 };
 
 export const recallInputSchema = z.object(recallInputShape).strict();

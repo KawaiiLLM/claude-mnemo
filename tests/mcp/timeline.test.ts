@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { upsertSession, type UpsertSessionInput } from "../../src/db/sessions";
 import type { TurnRecord } from "../../src/db/turns";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import {
@@ -13,12 +13,14 @@ import {
   computeTypesDistribution,
   detectBrokenPromptPairs,
   detectShapeSignals,
+  extractReversalFlag,
   formatDuration,
   formatGap,
   formatLocalDate,
   formatLocalTime,
   getSystemTimezone,
   extractSourceTags,
+  milestoneCandidateTurn,
   parseTimelineId,
   renderTimeline,
   resolveWindow,
@@ -26,6 +28,8 @@ import {
   selectMilestoneTurns,
   timelineQuery,
   truncateText,
+  type MilestoneSelection,
+  type TimelineView,
 } from "../../src/mcp/timeline";
 
 function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
@@ -35,6 +39,8 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     promptNumber: 1,
     contentPromptId: null,
     transcriptLineStart: null,
+    wasInterrupted: false,
+    wasRolledBack: false,
     status: "extracted",
     userPrompt: null,
     assistantResponse: null,
@@ -46,6 +52,7 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     filesRead: [],
     filesModified: [],
     toolCallCount: 0,
+    parentTurnId: null,
     createdAtEpoch: 1000,
     updatedAtEpoch: null,
     ...overrides,
@@ -177,6 +184,102 @@ function seedLongSession(db: Database, count: number) {
   }
 
   return session;
+}
+
+function seedTimelineSession(
+  db: Database,
+  rows: TurnRecord[],
+  overrides: Partial<UpsertSessionInput> = {},
+) {
+  initializeSchema(db);
+
+  const firstEpoch =
+    rows.length > 0
+      ? Math.min(...rows.map((row) => row.createdAtEpoch))
+      : 1_779_781_860;
+  const lastEpoch =
+    rows.length > 0
+      ? Math.max(...rows.map((row) => row.createdAtEpoch))
+      : firstEpoch;
+
+  const session = upsertSession(db, {
+    contentSessionId: "custom-timeline-fixture",
+    project: "/tmp/claude-mnemo-test",
+    title: "custom timeline fixture",
+    insight: null,
+    createdAtEpoch: firstEpoch,
+    updatedAtEpoch: lastEpoch,
+    completedAtEpoch: null,
+    ...overrides,
+  });
+
+  const insertTurn = db.query(
+    `INSERT INTO turns (
+      session_id,
+      prompt_number,
+      content_prompt_id,
+      transcript_line_start,
+      was_interrupted,
+      was_rolled_back,
+      status,
+      user_prompt,
+      assistant_response,
+      title,
+      content,
+      insight,
+      type,
+      tags,
+      files_read,
+      files_modified,
+      tool_call_count,
+      parent_turn_id,
+      created_at_epoch,
+      updated_at_epoch
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  for (const row of rows) {
+    insertTurn.run(
+      session.id,
+      row.promptNumber,
+      row.contentPromptId,
+      row.transcriptLineStart,
+      row.wasInterrupted ? 1 : 0,
+      row.wasRolledBack ? 1 : 0,
+      row.status,
+      row.userPrompt,
+      row.assistantResponse,
+      row.title,
+      row.content,
+      row.insight,
+      row.type,
+      JSON.stringify(row.tags),
+      JSON.stringify(row.filesRead),
+      JSON.stringify(row.filesModified),
+      row.toolCallCount,
+      row.parentTurnId,
+      row.createdAtEpoch,
+      row.updatedAtEpoch,
+    );
+  }
+
+  return session;
+}
+
+function selectionFor(turns: TurnRecord[]): MilestoneSelection {
+  const selectionView = {
+    windowTurns: turns,
+    windowSignals: detectShapeSignals(turns),
+    compactBoundaries: turns
+      .filter((row) => row.type === "compact")
+      .map((row) => row.promptNumber),
+  } as unknown as TimelineView;
+
+  return selectMilestoneTurns(selectionView) as unknown as MilestoneSelection;
+}
+
+function keptPromptNumbers(selection: MilestoneSelection): number[] {
+  return selection.kept.map((item) => item.turn.promptNumber);
 }
 
 describe("parseTimelineId", () => {
@@ -551,6 +654,27 @@ describe("segmentPhases", () => {
       type: "discovery",
       startPromptNumber: 5,
       endPromptNumber: 5,
+    });
+  });
+
+  it("records startEpoch and endEpoch for each phase", () => {
+    const phases = segmentPhases([
+      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1_000 }),
+      turn({ promptNumber: 2, type: "discovery", createdAtEpoch: 1_100 }),
+      turn({ promptNumber: 3, type: "decision", createdAtEpoch: 1_300 }),
+    ]);
+
+    expect(phases[0]).toMatchObject({
+      startPromptNumber: 1,
+      endPromptNumber: 2,
+      startEpoch: 1_000,
+      endEpoch: 1_100,
+    });
+    expect(phases[1]).toMatchObject({
+      startPromptNumber: 3,
+      endPromptNumber: 3,
+      startEpoch: 1_300,
+      endEpoch: 1_300,
     });
   });
 
@@ -947,97 +1071,288 @@ describe("detectShapeSignals", () => {
   });
 });
 
+describe("milestoneCandidateTurn", () => {
+  it("keeps live rows and invalidated decisions, but rejects skipped and invalidated non-decisions", () => {
+    expect(milestoneCandidateTurn(turn({ type: "discovery" }))).toBe(true);
+    expect(
+      milestoneCandidateTurn(
+        turn({ type: "decision", status: "skipped" }),
+      ),
+    ).toBe(false);
+    expect(
+      milestoneCandidateTurn(
+        turn({ type: "decision", status: "undone" }),
+      ),
+    ).toBe(true);
+    expect(
+      milestoneCandidateTurn(
+        turn({ type: "decision", wasRolledBack: true }),
+      ),
+    ).toBe(true);
+    expect(
+      milestoneCandidateTurn(
+        turn({ type: "feature", status: "undone" }),
+      ),
+    ).toBe(false);
+    expect(
+      milestoneCandidateTurn(
+        turn({ type: "discovery", tags: ["invalidated:notify-pending:rollback"] }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("extractReversalFlag", () => {
+  it("marks seeded reversal tags only on decision turns", () => {
+    expect(
+      extractReversalFlag(turn({ type: "decision", tags: ["reversal"] })),
+    ).toBe(true);
+    expect(
+      extractReversalFlag(turn({ type: "decision", tags: ["design-pivot"] })),
+    ).toBe(true);
+    expect(
+      extractReversalFlag(turn({ type: "feature", tags: ["reversal"] })),
+    ).toBe(false);
+    expect(
+      extractReversalFlag(turn({ type: "decision", tags: ["rollback"] })),
+    ).toBe(false);
+    expect(
+      extractReversalFlag(turn({ type: "discovery", tags: ["reverse-kl"] })),
+    ).toBe(false);
+  });
+});
+
 describe("selectMilestoneTurns", () => {
-  it("keeps non-discovery phase leads and drops discovery non-leads", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 2, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 3, type: "decision", toolCallCount: 1 }),
-      turn({ promptNumber: 4, type: "feature", toolCallCount: 1 }),
-      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
-    ];
-    const keep = selectMilestoneTurns(turns, 1000, []);
-    // T3 (decision lead) + T4 (feature lead) + last-3 (T3,T4,T5).
-    expect([...keep].sort((a, b) => a - b)).toEqual([3, 4, 5]);
+  it("keeps all Tier 1 decisions from a dense day without applying the Tier 2 cap", () => {
+    const rows = Array.from({ length: 8 }, (_, index) =>
+      turn({
+        promptNumber: index + 1,
+        type: "decision",
+        title: `decision ${index + 1}`,
+        createdAtEpoch: 1_779_782_400 + index * 60,
+      }),
+    );
+
+    const selection = selectionFor(rows);
+
+    expect(keptPromptNumbers(selection)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(selection.kept.every((item) => item.tier === 1)).toBe(true);
+    expect(selection.overflowByDay).toEqual([]);
   });
 
-  it("includes a change phase-lead (no keyword special-casing)", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 2, type: "change", toolCallCount: 1 }),
+  it("caps same-day Tier 2 fixes by score and preserves overflow metadata", () => {
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "open the day",
+        createdAtEpoch: 1_779_782_400,
+      }),
+      ...Array.from({ length: 10 }, (_, index) => {
+        const promptNumber = 2 + index * 2;
+        return [
+          turn({
+            promptNumber,
+            type: "bugfix",
+            title: `fix ${promptNumber}`,
+            toolCallCount: promptNumber,
+            createdAtEpoch: 1_779_782_400 + promptNumber * 60,
+          }),
+          turn({
+            promptNumber: promptNumber + 1,
+            type: null,
+            title: `note ${promptNumber + 1}`,
+            toolCallCount: 1,
+            createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
+          }),
+        ];
+      }).flat(),
+      turn({
+        promptNumber: 23,
+        type: "decision",
+        title: "close the day",
+        createdAtEpoch: 1_779_782_400 + 23 * 60,
+      }),
     ];
-    expect(selectMilestoneTurns(turns, 1000, []).has(2)).toBe(true);
+
+    const selection = selectionFor(rows);
+    const keptFixes = selection.kept
+      .filter((item) => item.turn.type === "bugfix")
+      .map((item) => item.turn.promptNumber);
+
+    expect(keptFixes).toEqual([14, 16, 18, 20]);
+    expect(selection.overflowByDay).toEqual([
+      {
+        date: "2026-05-26",
+        count: 6,
+        firstPrompt: 2,
+        lastPrompt: 12,
+        lastKeptPrompt: 23,
+        kind: "fixes",
+      },
+    ]);
   });
 
-  it("keeps every tool-burst turn, not just the top 3", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 100 }),
-      turn({ promptNumber: 2, type: "discovery", toolCallCount: 90 }),
-      turn({ promptNumber: 3, type: "discovery", toolCallCount: 80 }),
-      turn({ promptNumber: 4, type: "discovery", toolCallCount: 70 }),
-      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 6, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 7, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 8, type: "discovery", toolCallCount: 1 }),
+  it("selects capped Tier 2 milestones by score but renders kept rows in prompt order", () => {
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "start",
+        createdAtEpoch: 1_779_782_400,
+      }),
+      ...[2, 4, 6, 8, 10, 12].flatMap((promptNumber) => [
+        turn({
+          promptNumber,
+          type: "bugfix",
+          title: `fix ${promptNumber}`,
+          toolCallCount:
+            promptNumber === 10
+              ? 100
+              : promptNumber === 12
+                ? 90
+                : promptNumber === 4
+                  ? 80
+                  : promptNumber === 2
+                    ? 70
+                    : 1,
+          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
+        }),
+        turn({
+          promptNumber: promptNumber + 1,
+          type: null,
+          title: `separator ${promptNumber + 1}`,
+          toolCallCount: 1,
+          createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
+        }),
+      ]),
+      turn({
+        promptNumber: 15,
+        type: "decision",
+        title: "end",
+        createdAtEpoch: 1_779_782_400 + 15 * 60,
+      }),
     ];
-    const keep = selectMilestoneTurns(turns, 10, []);
-    expect(keep.has(1)).toBe(true);
-    expect(keep.has(2)).toBe(true);
-    expect(keep.has(3)).toBe(true);
-    expect(keep.has(4)).toBe(true);
-    expect(keep.has(5)).toBe(false);
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, rows);
+
+    const selection = selectionFor(rows);
+    expect(keptPromptNumbers(selection)).toContain(10);
+    expect(keptPromptNumbers(selection)).not.toContain(6);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+    );
+    const rowOrder = output
+      .split("\n")
+      .filter((line) => /^T\d+ \|/.test(line))
+      .map((line) => Number(line.match(/^T(\d+)/)?.[1]));
+
+    expect(rowOrder).toEqual([1, 2, 4, 10, 12, 15]);
   });
 
-  it("keeps compact boundaries within the page, not outside", () => {
-    const turns = [
-      turn({ promptNumber: 10, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 11, type: "discovery", toolCallCount: 1 }),
+  it("renders same-day overflow hint only on the page with that day's last kept milestone", () => {
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "open",
+        createdAtEpoch: 1_779_782_400,
+      }),
+      ...[2, 4, 6, 8, 10, 12].flatMap((promptNumber) => [
+        turn({
+          promptNumber,
+          type: "bugfix",
+          title: `fix ${promptNumber}`,
+          toolCallCount: 120 - promptNumber,
+          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
+        }),
+        turn({
+          promptNumber: promptNumber + 1,
+          type: null,
+          title: `separator ${promptNumber + 1}`,
+          toolCallCount: 1,
+          createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
+        }),
+      ]),
+      ...[14, 15, 16, 17, 18].map((promptNumber) =>
+        turn({
+          promptNumber,
+          type: "decision",
+          title: `decision ${promptNumber}`,
+          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
+        }),
+      ),
     ];
-    const keep = selectMilestoneTurns(turns, 1000, [10, 99]);
-    expect(keep.has(10)).toBe(true);
-    expect(keep.has(99)).toBe(false);
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, rows);
+
+    const page1 = renderTimeline(
+      buildTimelineView(db, {
+        id: "S1",
+        view: "milestones",
+        page: 1,
+        pageSize: 5,
+      }),
+    );
+    const page2 = renderTimeline(
+      buildTimelineView(db, {
+        id: "S1",
+        view: "milestones",
+        page: 2,
+        pageSize: 5,
+      }),
+    );
+
+    expect(page1).not.toContain("… +2 more fixes this day");
+    expect(page2.match(/… \+2 more fixes this day/g)).toHaveLength(1);
   });
 
-  it("excludes skipped turns from selection", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
+  it("renders invalidated decisions with 🚫 taking precedence over reversal ↩️", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "live decision",
+        createdAtEpoch: 1_779_782_400,
+      }),
       turn({
         promptNumber: 2,
         type: "decision",
-        status: "skipped",
-        toolCallCount: 500,
+        title: "rolled back reversal",
+        wasRolledBack: true,
+        tags: ["reversal"],
+        createdAtEpoch: 1_779_782_460,
       }),
-      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
-    ];
-    expect(selectMilestoneTurns(turns, 10, []).has(2)).toBe(false);
+    ]);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+    );
+    const invalidatedLine = output
+      .split("\n")
+      .find((line) => line.includes("T2"));
+
+    expect(invalidatedLine).toBeDefined();
+    expect(invalidatedLine).toContain("🚫");
+    expect(invalidatedLine).not.toContain("↩️");
   });
 
-  it("excludes an undone compact-boundary turn (live-only)", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
-      turn({
-        promptNumber: 2,
-        type: "compact",
-        status: "undone",
-        toolCallCount: 1,
-      }),
-      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
-    ];
-    // Boundary 2 points at an undone turn — must NOT be selected.
-    expect(selectMilestoneTurns(turns, 10, [2]).has(2)).toBe(false);
-  });
+  it("does not promote session compact-boundary fallback rows into milestones", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
 
-  it("keeps a live compact-boundary turn even when not in the last 3", () => {
-    const turns = [
-      turn({ promptNumber: 1, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 2, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 3, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 4, type: "discovery", toolCallCount: 1 }),
-      turn({ promptNumber: 5, type: "discovery", toolCallCount: 1 }),
-    ];
-    // Live boundary at T1; last-3 = T3,T4,T5, so T1 enters only via the
-    // compact-boundary path.
-    expect(selectMilestoneTurns(turns, 10, [1]).has(1)).toBe(true);
+    db.query("UPDATE sessions SET last_compact_turn = 15 WHERE id = ?").run(
+      session.id,
+    );
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+
+    expect(view.compactBoundaries).toEqual([15]);
+    expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).not.toContain(
+      15,
+    );
   });
 });
 
@@ -1093,6 +1408,95 @@ describe("buildTimelineView", () => {
       undoneTurns: [],
       externalInputs: [],
     });
+  });
+
+  it("paginates the turns view over non-skipped rows and anchors to the first visible page row", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "decision", createdAtEpoch: 1_779_782_400 }),
+      turn({ promptNumber: 2, type: "decision", createdAtEpoch: 1_779_782_460 }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        status: "skipped",
+        createdAtEpoch: 1_779_782_520,
+      }),
+      turn({ promptNumber: 4, type: "decision", createdAtEpoch: 1_779_782_580 }),
+      turn({ promptNumber: 5, type: "decision", createdAtEpoch: 1_779_782_640 }),
+    ]);
+
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "turns",
+      page: 2,
+      pageSize: 2,
+    });
+
+    expect(view.view).toBe("turns");
+    expect(view.viewItemTotal).toBe(4);
+    expect(view.pageCount).toBe(2);
+    expect(view.pageAnchorEpoch).toBe(1_779_782_580);
+    expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([4, 5]);
+  });
+
+  it("paginates the milestones view over kept milestones, not raw turns", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(
+      db,
+      Array.from({ length: 10 }, (_, index) =>
+        turn({
+          promptNumber: index + 1,
+          type: "decision",
+          title: `decision ${index + 1}`,
+          createdAtEpoch: 1_779_782_400 + index * 60,
+        }),
+      ),
+    );
+
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "milestones",
+      page: 2,
+      pageSize: 3,
+    });
+
+    expect(view.view).toBe("milestones");
+    expect(view.viewItemTotal).toBe(10);
+    expect(view.pageCount).toBe(4);
+    expect(view.pageAnchorEpoch).toBe(1_779_782_400 + 3 * 60);
+    expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).toEqual([
+      4,
+      5,
+      6,
+    ]);
+  });
+
+  it("paginates the phases view over phases and anchors to the first phase start", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "discovery", createdAtEpoch: 1_779_782_400 }),
+      turn({ promptNumber: 2, type: "discovery", createdAtEpoch: 1_779_782_460 }),
+      turn({ promptNumber: 3, type: "decision", createdAtEpoch: 1_779_782_520 }),
+      turn({ promptNumber: 4, type: "feature", createdAtEpoch: 1_779_782_580 }),
+      turn({ promptNumber: 5, type: "feature", createdAtEpoch: 1_779_782_640 }),
+      turn({ promptNumber: 6, type: "bugfix", createdAtEpoch: 1_779_782_700 }),
+    ]);
+
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "phases",
+      page: 2,
+      pageSize: 2,
+    });
+
+    expect(view.view).toBe("phases");
+    expect(view.viewItemTotal).toBe(4);
+    expect(view.pageCount).toBe(2);
+    expect(view.pageAnchorEpoch).toBe(1_779_782_580);
+    expect(view.pagedPhases.map((phase) => phase.startPromptNumber)).toEqual([
+      4,
+      6,
+    ]);
   });
 
   it("rejects unknown session ids", () => {
@@ -1199,6 +1603,7 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/\| \d+ turns \| \d+ tool_calls/);
     expect(output).toMatch(/types: .+\(session-wide\)/);
     expect(output).not.toMatch(/showing:/);
+    expect(output).not.toMatch(/\n\s+phases[:(]/);
     expect(output).toMatch(/tz: .+/);
     expect(output).toMatch(/raw: .+\.jsonl/);
   });
@@ -1222,7 +1627,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1", pageSize: 30 });
     const output = renderTimeline(view);
 
-    expect(output).toContain("showing: page 1 / 2 (total 45)");
+    expect(output).toMatch(/showing: turns .*page 1\s*\/\s*2.*45.*\d{4}-\d{2}-\d{2}/);
   });
 
   it("shows the second page of a paginated timeline", () => {
@@ -1232,7 +1637,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1", page: 2, pageSize: 30 });
     const output = renderTimeline(view);
 
-    expect(output).toContain("showing: page 2 / 2 (total 45)");
+    expect(output).toMatch(/showing: turns .*page 2\s*\/\s*2.*45.*\d{4}-\d{2}-\d{2}/);
     expect(output).toContain("T31");
     expect(output).toContain("T45");
     expect(output).not.toContain("T30");
@@ -1252,7 +1657,7 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view);
 
     expect(view.lastPromptNumber).toBe(180);
-    expect(output).toContain("showing: page 2 / 2 (total 45)");
+    expect(output).toMatch(/showing: turns .*page 2\s*\/\s*2.*45.*\d{4}-\d{2}-\d{2}/);
   });
 
   it("keeps shape signals scoped to the full selected range instead of the current page", () => {
@@ -1262,7 +1667,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T20..50", page: 2, pageSize: 10 });
     const output = renderTimeline(view);
 
-    expect(output).toContain("showing: page 2 / 4 (total 31)");
+    expect(output).toMatch(/showing: turns .*page 2\s*\/\s*4.*31.*\d{4}-\d{2}-\d{2}/);
     expect(output).toMatch(/shape signals \(window T20-T50\):/);
     expect(output).toContain("T30");
     expect(output).toContain("T39");
@@ -1365,26 +1770,30 @@ describe("renderTimeline", () => {
     expect(compactLine).not.toContain("ignored raw summary wrapper");
   });
 
-  it("renders phases scoped to window for range queries", () => {
+  it("renders phases scoped to window only in the phases view", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
 
-    const view = buildTimelineView(db, { id: "S1/T10..15" });
+    const view = buildTimelineView(db, { id: "S1/T10..15", view: "phases" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/phases \(window T10-T15\)/);
+    expect(output).toContain("phases:");
+    expect(output).toMatch(/shape signals \(window T10-T15\):/);
+    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
   });
 
-  it("renders phases labeled session-wide for full session", () => {
+  it("renders phases labeled session-wide only in the phases view", () => {
     const db = createDatabase(":memory:");
 
     seedSession(db);
 
-    const view = buildTimelineView(db, { id: "S1" });
+    const view = buildTimelineView(db, { id: "S1", view: "phases" });
     const output = renderTimeline(view);
 
-    expect(output).toMatch(/phases \(session-wide\)/);
+    expect(output).toContain("phases:");
+    expect(output).toMatch(/shape signals \(window T1-T21 = full session\):/);
+    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
   });
 
   it("renders shape signals as a window-scoped block", () => {
@@ -1398,6 +1807,167 @@ describe("renderTimeline", () => {
     expect(output).toMatch(/shape signals \(window T5-T10\):/);
     expect(output).toMatch(/fastest gap:/);
     expect(output).toMatch(/tool bursts:/);
+  });
+
+  it("dispatches default, turns, milestones, and phases views to separate bodies", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "discovery", title: "start", createdAtEpoch: 1_779_782_400 }),
+      turn({ promptNumber: 2, type: "discovery", title: "routine note", createdAtEpoch: 1_779_782_460 }),
+      turn({ promptNumber: 3, type: "decision", title: "choose path", createdAtEpoch: 1_779_782_520 }),
+      turn({ promptNumber: 4, type: "discovery", title: "routine follow-up", createdAtEpoch: 1_779_782_580 }),
+      turn({ promptNumber: 5, type: "discovery", title: "current state", createdAtEpoch: 1_779_782_640 }),
+    ]);
+
+    const promptNumbers = (output: string) =>
+      output
+        .split("\n")
+        .filter((line) => /^T\d+ \|/.test(line))
+        .map((line) => Number(line.match(/^T(\d+)/)?.[1]));
+
+    const defaultOutput = renderTimeline(buildTimelineView(db, { id: "S1" }));
+    const turnsOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns" }),
+    );
+    const milestoneOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+    );
+    const phasesOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "phases" }),
+    );
+
+    expect(defaultOutput).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(defaultOutput).toContain("shape signals");
+    expect(defaultOutput).not.toMatch(/\n\s+phases[:(]/);
+    expect(turnsOutput).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(turnsOutput).toContain("shape signals");
+    expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
+    expect(promptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
+    expect(milestoneOutput).toContain("shape signals");
+    expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
+    expect(phasesOutput).toContain("phases:");
+    expect(phasesOutput).toContain("shape signals");
+    expect(phasesOutput).not.toContain("T# | line | time | gap | stats | prompt → title");
+  });
+
+  it("renders cross-day header dates and day dividers for turns and milestones", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(
+      db,
+      [
+        turn({
+          promptNumber: 1,
+          type: "decision",
+          title: "first day",
+          createdAtEpoch: 1_779_781_860,
+        }),
+        turn({
+          promptNumber: 2,
+          type: "decision",
+          title: "next day",
+          createdAtEpoch: 1_779_843_600,
+        }),
+        turn({
+          promptNumber: 3,
+          type: "decision",
+          title: "after idle day",
+          createdAtEpoch: 1_780_016_400,
+        }),
+      ],
+      {
+        createdAtEpoch: 1_779_781_860,
+        updatedAtEpoch: 1_780_739_280,
+      },
+    );
+
+    const turnsOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns" }),
+    );
+    const milestoneOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+    );
+
+    expect(turnsOutput).toContain(
+      `${formatLocalDate(1_779_781_860)} ${formatLocalTime(1_779_781_860)} → ${formatLocalDate(1_780_739_280)} ${formatLocalTime(1_780_739_280)}`,
+    );
+    expect(turnsOutput).toContain("2026-05-27 Wed");
+    expect(turnsOutput).toContain("2026-05-29 Fri");
+    expect(turnsOutput).not.toContain("2026-05-28");
+    expect(milestoneOutput).toContain("2026-05-27 Wed");
+    expect(milestoneOutput).toContain("2026-05-29 Fri");
+  });
+
+  it("adds the view label and page anchor date to showing only on multipage views", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "decision", createdAtEpoch: 1_779_781_860 }),
+      turn({ promptNumber: 2, type: "decision", createdAtEpoch: 1_779_843_600 }),
+      turn({ promptNumber: 3, type: "decision", createdAtEpoch: 1_780_016_400 }),
+    ]);
+
+    const multipageOutput = renderTimeline(
+      buildTimelineView(db, {
+        id: "S1",
+        view: "turns",
+        page: 2,
+        pageSize: 1,
+      }),
+    );
+    const singlePageOutput = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "turns", pageSize: 10 }),
+    );
+
+    expect(multipageOutput).toMatch(
+      /showing: turns .*page 2\s*\/\s*3.*3.*2026-05-27 Wed/,
+    );
+    expect(singlePageOutput).not.toContain("showing:");
+  });
+
+  it("renders phase dates, cross-day phase spans, and lead titles in the phases view", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        title: "same day research",
+        createdAtEpoch: 1_779_782_400,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        title: "same day follow-up",
+        createdAtEpoch: 1_779_783_000,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "feature",
+        title: "cross-day feature",
+        createdAtEpoch: 1_780_178_400,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "feature",
+        title: "feature after midnight",
+        createdAtEpoch: 1_780_187_400,
+      }),
+      turn({
+        promptNumber: 5,
+        type: "decision",
+        title: "next day decision",
+        createdAtEpoch: 1_780_233_900,
+      }),
+    ]);
+
+    const output = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "phases" }),
+    );
+
+    expect(output).toContain("05-26 Tue");
+    expect(output).toContain("same day research");
+    expect(output).toContain("05-30→05-31");
+    expect(output).toContain("cross-day feature");
+    expect(output).toContain("next day decision");
+    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
   });
 
   it("renderTimeline respects promptCap option", () => {
@@ -1488,6 +2058,8 @@ describe("renderTimeline", () => {
       .split("\n")
       .find((line) => line.startsWith("T21 |"));
 
+    expect(view.viewItemTotal).toBe(2);
+    expect(view.pageTurns.map((row) => row.promptNumber)).toEqual([19, 21]);
     expect(turn21Line).toBeDefined();
     expect(turn21Line).toContain("| +50s |");
     expect(output).not.toContain("⏭");
@@ -1502,52 +2074,50 @@ describe("renderTimeline", () => {
     const output = renderTimeline(view, { showEarlierHint: true });
 
     expect(output).toContain('earlier: timeline(id="S1/T1..10") or recall(id="S1")');
-    expect(output).toMatch(/phases \(window T11-T40\):/);
+    expect(output).not.toMatch(/\n\s+phases[:(]/);
     expect(output).toMatch(/\n  earlier: timeline\(id="S1\/T1\.\.10"\) or recall\(id="S1"\)/);
   });
 
-  it("milestones=true renders only milestone turns", () => {
+  it("view=milestones renders the milestone digest without phases or the full table", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
-    const view = buildTimelineView(db, { id: "S1" });
 
     const rowCount = (s: string) =>
       s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
 
-    const full = renderTimeline(view);
-    const milestone = renderTimeline(view, { milestones: true });
+    const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
+    const milestone = renderTimeline(
+      buildTimelineView(db, { id: "S1", view: "milestones" }),
+    );
 
     expect(rowCount(milestone)).toBeLessThan(rowCount(full));
-    expect(milestone).toContain("T6 |");      // decision phase-lead kept
-    expect(milestone).toContain("T11 |");     // tool-burst kept
-    expect(milestone).not.toContain("T2 |");  // discovery non-lead dropped
+    expect(milestone).toContain("T6 |");
+    expect(milestone).not.toContain("T11 |");
+    expect(milestone).not.toContain("T2 |");
+    expect(milestone).not.toMatch(/\n\s+phases[:(]/);
   });
 
-  it("phases=false omits the phases block", () => {
+  it("view=milestones keeps gaps spanning suppressed turns", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
-    const view = buildTimelineView(db, { id: "S1" });
-
-    expect(renderTimeline(view)).toContain("phases (");
-    expect(renderTimeline(view, { phases: false })).not.toContain("phases (");
-  });
-
-  it("milestone mode keeps gaps spanning suppressed turns", () => {
-    const db = createDatabase(":memory:");
-    seedSession(db);
-    const view = buildTimelineView(db, { id: "S1" });
 
     const gapField = (line: string | undefined) => line?.split("|")[3]?.trim();
     const find = (s: string, n: string) =>
       s.split("\n").find((l) => l.startsWith(n));
 
-    const fullT11 = find(renderTimeline(view), "T11 |");
-    const msT11 = find(renderTimeline(view, { milestones: true }), "T11 |");
+    const fullT6 = find(
+      renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" })),
+      "T6 |",
+    );
+    const msT6 = find(
+      renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" })),
+      "T6 |",
+    );
 
-    expect(gapField(msT11)).toBeDefined();
-    // T11 is a tool-burst milestone; T7-T10 are suppressed. Its gap must equal
-    // the full-mode gap (T10->T11), proving suppressed turns still advance it.
-    expect(gapField(msT11)).toBe(gapField(fullT11));
+    expect(gapField(msT6)).toBeDefined();
+    // T6 is a decision milestone; T2-T5 are suppressed. Its gap must equal the
+    // full-mode gap (T5->T6), proving suppressed turns still advance it.
+    expect(gapField(msT6)).toBe(gapField(fullT6));
   });
 });
 
@@ -1573,17 +2143,17 @@ describe("timelineQuery", () => {
     );
   });
 
-  it("forwards milestones and phases flags into the render", () => {
+  it("forwards the view enum into the rendered timeline", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
 
-    expect(timelineQuery(db, { id: "S1" })).toContain("phases (");
-    expect(timelineQuery(db, { id: "S1", phases: false })).not.toContain("phases (");
+    expect(timelineQuery(db, { id: "S1" })).not.toMatch(/\n\s+phases[:(]/);
+    expect(timelineQuery(db, { id: "S1", view: "phases" })).toContain("phases:");
 
     const rowCount = (s: string) =>
       s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
     expect(
-      rowCount(timelineQuery(db, { id: "S1", milestones: true })),
+      rowCount(timelineQuery(db, { id: "S1", view: "milestones" })),
     ).toBeLessThan(rowCount(timelineQuery(db, { id: "S1" })));
   });
 });

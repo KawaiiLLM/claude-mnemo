@@ -53,7 +53,10 @@ describe("tool surface", () => {
       "timeline",
     ]);
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain("page/pageSize");
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).toContain("view");
     expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("hard cap");
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("Optional `milestones`");
+    expect(MNEMO_TOOL_DESCRIPTIONS.timeline).not.toContain("set false");
     expect(rememberInputSchema.parse({ id: "S1", title: "ok" })).toEqual({
       id: "S1",
       title: "ok",
@@ -90,13 +93,28 @@ describe("timelineInputSchema", () => {
     ).toThrow();
   });
 
-  it("accepts boolean milestones/phases and rejects non-boolean", () => {
-    expect(
-      timelineInputSchema.parse({ id: "S42", milestones: true, phases: false }),
-    ).toEqual({ id: "S42", milestones: true, phases: false });
+  it("accepts view enum and rejects removed boolean flags", () => {
+    expect(timelineInputSchema.parse({ id: "S42", view: "turns" })).toEqual({
+      id: "S42",
+      view: "turns",
+    });
+    expect(timelineInputSchema.parse({ id: "S42", view: "milestones" })).toEqual({
+      id: "S42",
+      view: "milestones",
+    });
+    expect(timelineInputSchema.parse({ id: "S42", view: "phases" })).toEqual({
+      id: "S42",
+      view: "phases",
+    });
 
     expect(() =>
-      timelineInputSchema.parse({ id: "S42", milestones: "yes" }),
+      timelineInputSchema.parse({ id: "S42", view: "summary" }),
+    ).toThrow();
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", milestones: true }),
+    ).toThrow();
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", phases: false }),
     ).toThrow();
   });
 });

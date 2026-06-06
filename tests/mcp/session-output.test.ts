@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -152,16 +152,7 @@ describe("renderCurrentSessionOutput", () => {
     expect(output).not.toContain("next_steps:");
   });
 
-  test("does NOT render phases block (milestones:true, phases:false)", () => {
-    // Insert a turn so timeline rendering actually fires.
-    db.query(`
-      INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response,
-        title, content, insight, files_read, files_modified, tool_call_count, created_at_epoch,
-        updated_at_epoch)
-      VALUES (?, 1, 'extracted', 'Test prompt', 'Test response', 'T1', 'Turn content', NULL,
-        '[]', '[]', 1, 1001, NULL)
-    `).run(sessionRecord.id);
-
+  test("builds a milestone context timeline and leaves view out of render options", () => {
     const session: FormattedSession = {
       id: sessionRecord.id,
       title: sessionRecord.title,
@@ -177,12 +168,32 @@ describe("renderCurrentSessionOutput", () => {
       turnCount: 1,
       observationCount: 0,
     };
+    const timelineView = { sessionId: sessionRecord.id };
+    const buildContextTimelineView = mock(
+      (_db: Database, _sessionId: number, _view: "milestones") => timelineView as never,
+    );
+    const renderTimeline = mock(
+      (_view: never, _options: { promptCap?: number; showEarlierHint?: boolean }) =>
+        "rendered milestone timeline",
+    );
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionOutput(db, session, sessionRecord, {
+      buildContextTimelineView,
+      renderTimeline,
+    });
 
-    expect(output).not.toContain("phases (");
-    // Timeline header should be present
-    expect(output).toContain("T#");
+    expect(buildContextTimelineView).toHaveBeenCalledWith(
+      db,
+      sessionRecord.id,
+      "milestones",
+    );
+    expect(renderTimeline).toHaveBeenCalledWith(timelineView, {
+      promptCap: 80,
+      showEarlierHint: true,
+    });
+    expect(renderTimeline.mock.calls[0]?.[1]).not.toHaveProperty("milestones");
+    expect(renderTimeline.mock.calls[0]?.[1]).not.toHaveProperty("phases");
+    expect(output).toContain("rendered milestone timeline");
   });
 
   test("renders untitled session when title is null", () => {
