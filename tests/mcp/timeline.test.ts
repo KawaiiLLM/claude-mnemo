@@ -1389,6 +1389,11 @@ describe("buildTimelineView", () => {
 
   it("paginates the milestones view over kept milestones, not raw turns", () => {
     const db = createDatabase(":memory:");
+    // 10 consecutive decisions on one day. Under the narrative-digest model this
+    // is a single decision run: T1/T10 are window endpoints (always-keep), and the
+    // interior run folds to its first+last foldable (T2, T9). So the kept set is
+    // {1, 2, 9, 10} — 4 milestones over 10 raw turns, which is exactly the point of
+    // paginating over kept milestones rather than raw turns.
     seedTimelineSession(
       db,
       Array.from({ length: 10 }, (_, index) =>
@@ -1409,13 +1414,11 @@ describe("buildTimelineView", () => {
     });
 
     expect(view.view).toBe("milestones");
-    expect(view.viewItemTotal).toBe(10);
-    expect(view.pageCount).toBe(4);
-    expect(view.pageAnchorEpoch).toBe(1_779_782_400 + 3 * 60);
+    expect(view.viewItemTotal).toBe(4);
+    expect(view.pageCount).toBe(2);
+    expect(view.pageAnchorEpoch).toBe(1_779_782_400 + 9 * 60);
     expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).toEqual([
-      4,
-      5,
-      6,
+      10,
     ]);
   });
 
