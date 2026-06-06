@@ -56,6 +56,8 @@ Source DB `~/.claude-mnemo/claude-mnemo.db`, as-of 2026-06-06. Two scopes, kept 
 - No new DB columns (all signals already exist: `type`, `status`, `was_rolled_back`, `was_interrupted`, `files_modified`, `tags`).
 - **No change to `isInvalidatedTurn` / `extractReversalFlag`** — they keep their current meaning for the `turns`/`phases` strike-through. Markers here come from a new milestone-local function (D5).
 
+> **Implementation correction (2026-06-07, 0.2.29):** This non-goal — and every other mention below of `isInvalidatedTurn` / `extractReversalFlag` "driving the `turns`/`phases` strike-through" — rested on a false premise. During the Task 7 cleanup a repo-wide trace showed both helpers (and the old `milestoneCandidateTurn`) had **no production caller**: the `turns`/`phases` strike-through is driven directly by `turn.status === "undone"` in `renderTurnRows`, not by these functions. They were leftovers of the pre-rewrite selection path, kept alive only by their own tests. All three were therefore **removed** as dead code (commit `547920d`); the strike-through behavior is unchanged and still covered by its own test. `REVERSAL_KEYWORD_TAGS` is now the sole definition of the reversal-keyword set (it fed `milestoneMarker`'s gated `enableReversalKeyword` path, not `extractReversalFlag`).
+
 ## Decisions
 
 ### D1 — Candidacy + significance score
