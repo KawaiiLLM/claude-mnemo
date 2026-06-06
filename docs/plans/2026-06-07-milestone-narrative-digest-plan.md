@@ -963,8 +963,28 @@ Expected: PASS. If the ratio falls outside [0.12, 0.20], do NOT widen the bounds
 - [ ] **Step 3: Remove dead constant + verify `milestoneCandidateTurn`**
 
 Run: `grep -rn "MILESTONE_TIER2_PER_DAY\|milestoneCandidateTurn" src/ tests/`
-- Remove the `export const MILESTONE_TIER2_PER_DAY = 4;` line (`src/mcp/timeline.ts:63`) if `grep` shows no remaining references.
-- If `milestoneCandidateTurn` has no remaining references, delete it (`src/mcp/timeline.ts:482-492`) and its import in the test file; otherwise leave it.
+- Remove the `export const MILESTONE_TIER2_PER_DAY = 4;` line if `grep` shows no remaining references.
+- If `milestoneCandidateTurn` has no remaining references, delete it and its import in the test file; otherwise leave it.
+
+- [ ] **Step 3b: Remove dead overflow plumbing left by the Task 6 refactor**
+
+After Task 6, milestones render via their own `renderMilestoneDigest` (reading `group.overflow`), so the OLD turn-table-shared overflow path is orphaned. Remove it **one item at a time, re-running `bun test` + `bun run typecheck` after each removal** (do not batch — if a removal turns something red, you've found a live reader and must stop and report):
+
+1. **`renderOverflowHint`** + the `overflowByDay` parameter of `renderTurnRows`. Verify first: `grep -n "renderOverflowHint\|overflowByDay" src/mcp/timeline.ts`. `renderTurnRows`' only caller is `renderTurnTable`, which never passes `overflowByDay` (it defaults to `[]`), so the `for (const overflow of overflowByDay)` loop never iterates. Delete `renderOverflowHint`, drop the `overflowByDay` param from `renderTurnRows`, and remove the dead loop. The turn-table output must be byte-identical (it already never emitted overflow lines) — confirm the turn-table render tests still pass.
+2. **`milestoneOverflowByDay`** view field. Verify first: `grep -rn "milestoneOverflowByDay" src/ tests/`. It is written in `buildTimelineView` but no longer read (the digest path uses `buildMilestoneDayGroups(... milestoneSelection.overflowByDay)` directly). If grep shows only the interface declaration + the single write site (no readers, no test assertions), remove the field from the `TimelineView` interface and delete its assignment in the returned object. If any test reads it, leave it and report.
+
+- [ ] **Step 3c: De-duplicate the type→emoji mapping**
+
+The emoji fallback `TYPE_EMOJI_MAP[type ?? ""] ?? (type === null ? PENDING_EMOJI : "•")` now appears in both `renderTurnRows` and the new `renderMilestoneDigest` — two formulations of one rule. Extract a single helper near `TYPE_EMOJI_MAP`:
+
+```ts
+function typeEmoji(type: string | null): string {
+  if (type === null) return PENDING_EMOJI;
+  return TYPE_EMOJI_MAP[type] ?? "•";
+}
+```
+
+Replace both call sites with `typeEmoji(turn.type)` / `typeEmoji(milestone.turn.type)`. Confirm the rendered output is unchanged (the existing render tests pin the emojis). Also rename the local `cont` in `renderMilestoneDigest` to `contSuffix` (it holds the `" (cont.)"` suffix string, not a boolean). These are pure refactors — no test should change.
 
 - [ ] **Step 4: Full suite + typecheck**
 
@@ -982,7 +1002,7 @@ Then: `git diff --stat plugin/scripts/*.cjs` — expect changes beyond the `BUIL
 
 ```bash
 git add src/mcp/timeline.ts tests/mcp/timeline.test.ts plugin/scripts/*.cjs
-git commit -m "test(timeline): frozen-fixture retention guard; drop dead Tier constant; rebuild"
+git commit -m "test(timeline): frozen-fixture retention guard; remove dead milestone plumbing; rebuild"
 ```
 
 ---
