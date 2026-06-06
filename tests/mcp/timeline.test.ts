@@ -20,8 +20,10 @@ import {
   formatLocalTime,
   getSystemTimezone,
   extractSourceTags,
+  milestoneBaseScore,
   milestoneCandidateTurn,
   milestoneMarker,
+  milestoneSignificance,
   parseTimelineId,
   renderTimeline,
   resolveWindow,
@@ -1100,6 +1102,30 @@ describe("milestoneCandidateTurn", () => {
         turn({ type: "discovery", tags: ["invalidated:notify-pending:rollback"] }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("milestoneBaseScore / milestoneSignificance", () => {
+  const noEndpoints = new Set<number>();
+
+  it("scores by type, requiring files for deliverables", () => {
+    expect(milestoneBaseScore(turn({ type: "decision" }))).toBe(4);
+    expect(milestoneBaseScore(turn({ type: "feature", filesModified: ["a.ts"] }))).toBe(3);
+    expect(milestoneBaseScore(turn({ type: "feature", filesModified: [] }))).toBe(0);
+    expect(milestoneBaseScore(turn({ type: "change", filesModified: [] }))).toBe(0);
+    expect(milestoneBaseScore(turn({ type: "bugfix" }))).toBe(2);
+    expect(milestoneBaseScore(turn({ type: "discovery" }))).toBe(0);
+  });
+
+  it("gives always-keep turns +infinity", () => {
+    expect(milestoneSignificance(turn({ type: "compact" }), noEndpoints, 10)).toBe(Number.POSITIVE_INFINITY);
+    expect(milestoneSignificance(turn({ type: "change", tags: ["merged"], filesModified: [] }), noEndpoints, 10)).toBe(Number.POSITIVE_INFINITY);
+    expect(milestoneSignificance(turn({ promptNumber: 5 }), new Set([5]), 10)).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("re-admits a bursting discovery as a 0.5 singleton, else 0", () => {
+    expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 50 }), noEndpoints, 10)).toBe(0.5);
+    expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 2 }), noEndpoints, 10)).toBe(0);
   });
 });
 

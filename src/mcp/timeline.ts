@@ -545,6 +545,51 @@ export function milestoneCandidateTurn(turn: TurnRecord): boolean {
   return true;
 }
 
+const MILESTONE_BASE_SCORE: Record<string, number> = {
+  decision: 4,
+  feature: 3,
+  refactor: 3,
+  bugfix: 2,
+  change: 1,
+};
+
+export function milestoneBaseScore(turn: TurnRecord): number {
+  const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
+  if (
+    (turn.type === "feature" || turn.type === "refactor" || turn.type === "change") &&
+    turn.filesModified.length === 0
+  ) {
+    return 0;
+  }
+  return score;
+}
+
+export function isMilestoneAlwaysKeep(turn: TurnRecord, endpoints: Set<number>): boolean {
+  return (
+    milestoneMarker(turn) !== null ||
+    turn.type === "compact" ||
+    endpoints.has(turn.promptNumber)
+  );
+}
+
+export function isReadmittedDiscovery(turn: TurnRecord, toolBurstThreshold: number): boolean {
+  return turn.type === "discovery" && (turn.toolCallCount ?? 0) > toolBurstThreshold;
+}
+
+export function milestoneSignificance(
+  turn: TurnRecord,
+  endpoints: Set<number>,
+  toolBurstThreshold: number,
+): number {
+  if (isMilestoneAlwaysKeep(turn, endpoints)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (isReadmittedDiscovery(turn, toolBurstThreshold)) {
+    return 0.5;
+  }
+  return milestoneBaseScore(turn);
+}
+
 function getCompactMetadata(tags: string[]): {
   preTokens: number;
   trigger: string;
