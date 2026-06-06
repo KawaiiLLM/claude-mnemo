@@ -33179,7 +33179,7 @@ function rememberTool(db, input) {
 init_paths();
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
-var TITLE_COLUMN_CAP = 40;
+var TITLE_COLUMN_CAP = 80;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;

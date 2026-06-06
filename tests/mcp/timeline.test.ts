@@ -1771,6 +1771,28 @@ describe("renderTimeline", () => {
     expect(turn1Line).toContain("🔵 title for T1");
   });
 
+  it("renders titles longer than the legacy 37-char cap without truncation", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+    // 58 chars: beyond the legacy 37-char effective cap, within the raised ~77.
+    const longTitle = "Hardened spec across delivery paths and notify gates ahead";
+    expect(longTitle.length).toBeGreaterThan(37);
+    expect(longTitle.length).toBeLessThanOrEqual(77);
+    db.query(
+      "UPDATE turns SET title = ? WHERE session_id = ? AND prompt_number = 1",
+    ).run(longTitle, session.id);
+
+    const view = buildTimelineView(db, { id: "S1/T1..1" });
+    const output = renderTimeline(view);
+    const turn1Line = output
+      .split("\n")
+      .find((line) => line.startsWith("T1 |"));
+
+    expect(turn1Line).toBeDefined();
+    expect(turn1Line).toContain(longTitle);
+    expect(turn1Line).not.toContain("…");
+  });
+
   it("undone turns render a marker and strikethrough title", () => {
     const db = createDatabase(":memory:");
     const session = seedSession(db);
