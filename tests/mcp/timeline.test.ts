@@ -1877,11 +1877,19 @@ describe("renderTimeline", () => {
       turn({ promptNumber: 5, type: "discovery", title: "current state", createdAtEpoch: 1_779_782_640 }),
     ]);
 
-    const promptNumbers = (output: string) =>
+    const turnPromptNumbers = (output: string) =>
       output
         .split("\n")
         .filter((line) => /^T\d+ \|/.test(line))
         .map((line) => Number(line.match(/^T(\d+)/)?.[1]));
+    // Milestone rows are day-grouped, title-only, front-gutter lines:
+    //   "   <glyph> T<n> <emoji> <title>" (no turn-table "|" columns).
+    const milestonePromptNumbers = (output: string) =>
+      output
+        .split("\n")
+        .map((line) => line.match(/^\s+(?:\S+ )?T(\d+) /)?.[1])
+        .filter((n): n is string => n !== undefined)
+        .map(Number);
 
     const defaultOutput = renderTimeline(buildTimelineView(db, { id: "S1" }));
     const turnsOutput = renderTimeline(
@@ -1900,7 +1908,9 @@ describe("renderTimeline", () => {
     expect(turnsOutput).toContain("T# | line | time | gap | stats | prompt → title");
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
-    expect(promptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
+    expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
+    expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
+    expect(milestoneOutput).not.toContain("T# | line | time | gap | stats | prompt → title");
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(phasesOutput).toContain("phases:");
@@ -2140,42 +2150,46 @@ describe("renderTimeline", () => {
     const db = createDatabase(":memory:");
     seedSession(db);
 
-    const rowCount = (s: string) =>
+    const turnRowCount = (s: string) =>
       s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
+    // Milestone rows are day-grouped front-gutter lines, not turn-table "|" rows.
+    const milestoneRowCount = (s: string) =>
+      s.split("\n").filter((l) => /^\s+(?:\S+ )?T\d+ /.test(l)).length;
 
     const full = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
     const milestone = renderTimeline(
       buildTimelineView(db, { id: "S1", view: "milestones" }),
     );
 
-    expect(rowCount(milestone)).toBeLessThan(rowCount(full));
-    expect(milestone).toContain("T6 |");
-    expect(milestone).not.toContain("T11 |");
-    expect(milestone).not.toContain("T2 |");
+    expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
+    expect(milestone).not.toContain("T# | line | time | gap | stats | prompt → title");
+    // T6 is kept (front-gutter milestone row); T2 is suppressed; T11 is folded
+    // into the day's overflow rather than rendered as its own row.
+    expect(milestone).toMatch(/^\s+(?:\S+ )?T6 /m);
+    expect(milestone).not.toMatch(/^\s+(?:\S+ )?T11 /m);
+    expect(milestone).not.toMatch(/^\s+(?:\S+ )?T2 /m);
     expect(milestone).not.toMatch(/\n\s+phases[:(]/);
   });
 
-  it("view=milestones keeps gaps spanning suppressed turns", () => {
+});
+
+describe("renderMilestoneDigest layout", () => {
+  it("renders day-grouped title-only rows with front-gutter markers, no prompt/stats columns", () => {
     const db = createDatabase(":memory:");
-    seedSession(db);
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "kick off the design", userPrompt: "PROMPTTEXT", createdAtEpoch: base }),
+      turn({ promptNumber: 2, type: "decision", title: "pivot the approach", wasRolledBack: true, createdAtEpoch: base + 60 }),
+      turn({ promptNumber: 3, type: "feature", title: "shipped it", tags: ["merged"], filesModified: ["a.ts"], createdAtEpoch: base + 120 }),
+    ];
+    seedTimelineSession(db, rows);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    const gapField = (line: string | undefined) => line?.split("|")[3]?.trim();
-    const find = (s: string, n: string) =>
-      s.split("\n").find((l) => l.startsWith(n));
-
-    const fullT6 = find(
-      renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" })),
-      "T6 |",
-    );
-    const msT6 = find(
-      renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" })),
-      "T6 |",
-    );
-
-    expect(gapField(msT6)).toBeDefined();
-    // T6 is a decision milestone; T2-T5 are suppressed. Its gap must equal the
-    // full-mode gap (T5->T6), proving suppressed turns still advance it.
-    expect(gapField(msT6)).toBe(gapField(fullT6));
+    expect(out).not.toContain("PROMPTTEXT"); // no user prompt
+    expect(out).not.toContain("T# | line | time | gap"); // not the turn table
+    expect(out).toContain("↩️ T2"); // reversed marker in front gutter
+    expect(out).toContain("🏁 T3"); // outcome marker in front gutter
+    expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · \d+ kept/); // day header (full date, matches day-divider style)
   });
 });
 
@@ -2208,11 +2222,10 @@ describe("timelineQuery", () => {
     expect(timelineQuery(db, { id: "S1" })).not.toMatch(/\n\s+phases[:(]/);
     expect(timelineQuery(db, { id: "S1", view: "phases" })).toContain("phases:");
 
-    const rowCount = (s: string) =>
-      s.split("\n").filter((l) => /^T\d+ \|/.test(l)).length;
-    expect(
-      rowCount(timelineQuery(db, { id: "S1", view: "milestones" })),
-    ).toBeLessThan(rowCount(timelineQuery(db, { id: "S1" })));
+    // The milestone view dispatches to the day-grouped digest, not the turn table.
+    const milestoneOut = timelineQuery(db, { id: "S1", view: "milestones" });
+    expect(milestoneOut).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(milestoneOut).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
   });
 });
 

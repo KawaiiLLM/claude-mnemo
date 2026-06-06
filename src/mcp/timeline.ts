@@ -1408,23 +1408,39 @@ function renderTurnTable(
   return renderTurnRows(view, renderedTurns, promptCap);
 }
 
-function renderMilestoneDigest(
-  view: TimelineView,
-  promptCap: number = PROMPT_COLUMN_CAP,
-): string[] {
-  const renderedTurns = view.pagedMilestones.map((milestone) => ({
-    turn: milestone.turn,
-    marker:
-      milestone.marker === "invalidated"
-        ? "🚫"
-        : milestone.marker === "reversed"
-          ? "↩️"
-          : milestone.marker === "outcome"
-            ? "🏁"
-            : null,
-  }));
+const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
+  invalidated: "🚫",
+  reversed: "↩️",
+  outcome: "🏁",
+};
 
-  return renderTurnRows(view, renderedTurns, promptCap, view.milestoneOverflowByDay);
+function renderMilestoneDigest(view: TimelineView): string[] {
+  if (view.milestoneDayGroups.length === 0) {
+    return [];
+  }
+
+  const lines: string[] = [""];
+  for (const group of view.milestoneDayGroups) {
+    const cont = group.continued ? " (cont.)" : "";
+    lines.push(
+      `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${cont} ──`,
+    );
+    for (const milestone of group.rows) {
+      const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
+      const emoji = TYPE_EMOJI_MAP[milestone.turn.type ?? ""] ?? (milestone.turn.type === null ? PENDING_EMOJI : "•");
+      const title = sanitizeTimelineField(
+        truncateText(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP),
+      );
+      lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji} ${title}`);
+    }
+    if (group.overflow !== null) {
+      lines.push(
+        `        … +${group.overflow.count} more → timeline(id="S${view.session.id}", view="turns") @ T${group.overflow.firstPrompt}–T${group.overflow.lastPrompt}`,
+      );
+    }
+  }
+
+  return lines;
 }
 
 function renderTurnRows(
@@ -1771,7 +1787,7 @@ export function renderTimeline(
     view.view === "phases"
       ? renderPhases(view)
       : view.view === "milestones"
-        ? renderMilestoneDigest(view, promptCap)
+        ? renderMilestoneDigest(view)
         : renderTurnTable(view, promptCap);
 
   return [

@@ -468,7 +468,9 @@ describe("handleContextHook", () => {
     // indented 4 spaces to match recall/worker).
     expect(output).toContain("  insight:");
     expect(output).toContain("    - Primary insight bullet for the current session");
-    expect(output).toContain("T#");
+    // The current-session block renders the day-grouped milestone digest
+    // (session-output.ts injects the "milestones" view), not the turn table.
+    expect(output).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
     expect(output).not.toContain("showing:");
     expect(output).not.toContain("phases (");
     expect(output).not.toContain("⏭");
@@ -616,7 +618,9 @@ describe("handleContextHook", () => {
     const output = result.hookSpecificOutput ?? "";
     expect(output).toContain(`claude-mnemo: 5 sessions, 0 observations | current: S${currentSessionId}`);
     expect(output).toContain("## Current Session");
-    expect(output).toContain("T#");
+    // The current-session block renders the day-grouped milestone digest
+    // (session-output.ts injects the "milestones" view), not the turn table.
+    expect(output).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
     expect(output).not.toContain("showing:");
     expect(output).not.toContain("phases (");
     expect(output).toContain("shape signals (window T11-T40):");
