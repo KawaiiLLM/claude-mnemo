@@ -1251,6 +1251,57 @@ describe("selectMilestoneTurns", () => {
     expect(rowOrder).toEqual([1, 2, 4, 10, 12, 15]);
   });
 
+  it("excludes a phase-lead discovery feeding an invalidated decision unless it bursts on its own", () => {
+    const base = 1_779_782_400;
+    const rowsFor = (discoveryTools: number): TurnRecord[] => [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "start",
+        toolCallCount: 2,
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        title: "analysis feeding a dead branch",
+        toolCallCount: discoveryTools,
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        title: "rolled-back decision",
+        wasRolledBack: true,
+        toolCallCount: 2,
+        createdAtEpoch: base + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "decision",
+        title: "end",
+        toolCallCount: 2,
+        createdAtEpoch: base + 180,
+      }),
+    ];
+
+    // Low-tool phase-lead discovery: adjacency to an *invalidated* decision must
+    // not pull it in (the dead branch does not resurrect its upstream analysis).
+    const lowTool = selectionFor(rowsFor(2));
+    expect(keptPromptNumbers(lowTool)).toEqual([1, 3, 4]);
+    expect(
+      lowTool.kept.find((item) => item.turn.promptNumber === 3)?.invalidated,
+    ).toBe(true);
+
+    // The same discovery, now exceeding the burst threshold, is kept on its own
+    // merit (Tier 2) — independent of the adjacency path.
+    const burst = selectionFor(rowsFor(100));
+    expect(keptPromptNumbers(burst)).toContain(2);
+    expect(
+      burst.kept.find((item) => item.turn.promptNumber === 2)?.tier,
+    ).toBe(2);
+  });
+
   it("renders same-day overflow hint only on the page with that day's last kept milestone", () => {
     const rows = [
       turn({
