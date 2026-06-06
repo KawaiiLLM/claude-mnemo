@@ -25,6 +25,7 @@ export interface TimelineView {
   windowTurns: TurnRecord[];
   pageTurns: TurnRecord[];
   pagedMilestones: KeptMilestone[];
+  milestoneDayGroups: MilestoneDayGroup[];
   pagedPhases: Phase[];
   milestoneOverflowByDay: OverflowHint[];
   viewItemTotal: number;
@@ -167,6 +168,18 @@ export interface OverflowHint {
 export interface MilestoneSelection {
   kept: KeptMilestone[];
   overflowByDay: OverflowHint[];
+}
+
+export interface MilestoneDayGroup {
+  date: string;
+  label: number; // local-date epoch anchor for formatting (createdAtEpoch of first row)
+  promptLo: number; // full-day range, not page-local
+  promptHi: number;
+  keptCount: number; // full-day kept count, not page-local
+  rows: KeptMilestone[]; // this page's slice
+  continued: boolean; // true when this is not the day's first slice
+  isFinalSliceForDay: boolean;
+  overflow: OverflowHint | null; // attached only on the final slice
 }
 
 export const TYPE_EMOJI_MAP: Record<string, string> = {
@@ -1144,6 +1157,14 @@ export function buildTimelineView(
     viewKind === "milestones"
       ? paginateItems(milestoneSelection.kept, page, pageSize)
       : emptyPaginatedItems<KeptMilestone>(milestoneSelection.kept.length, pageSize);
+  const milestoneDayGroups =
+    viewKind === "milestones"
+      ? buildMilestoneDayGroups(
+          pagedMilestones.items,
+          milestoneSelection.kept,
+          milestoneSelection.overflowByDay,
+        )
+      : [];
   const pagedPhases =
     viewKind === "phases"
       ? paginateItems(phases, page, pageSize)
@@ -1180,6 +1201,7 @@ export function buildTimelineView(
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
+    milestoneDayGroups,
     pagedPhases: pagedPhases.items,
     milestoneOverflowByDay: milestoneSelection.overflowByDay,
     viewItemTotal,
@@ -1232,6 +1254,68 @@ export function buildContextTimelineView(
     ...timelineView,
     hasEarlier: firstPromptNumber !== sortedTurns[0]!.promptNumber,
   };
+}
+
+function buildMilestoneDayGroups(
+  pagedMilestones: KeptMilestone[],
+  allMilestones: KeptMilestone[],
+  overflowByDay: OverflowHint[],
+): MilestoneDayGroup[] {
+  if (pagedMilestones.length === 0) return [];
+
+  const dayKey = (m: KeptMilestone) => formatLocalDate(m.turn.createdAtEpoch);
+
+  // Full-day stats from the complete kept set.
+  const fullByDay = new Map<string, KeptMilestone[]>();
+  for (const m of allMilestones) {
+    const key = dayKey(m);
+    const bucket = fullByDay.get(key) ?? [];
+    bucket.push(m);
+    fullByDay.set(key, bucket);
+  }
+  const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
+
+  const groups: MilestoneDayGroup[] = [];
+  for (const m of pagedMilestones) {
+    const key = dayKey(m);
+    let group = groups.length > 0 && groups[groups.length - 1]!.date === key
+      ? groups[groups.length - 1]!
+      : null;
+    if (group === null) {
+      const full = fullByDay.get(key) ?? [];
+      const fullPrompts = full.map((x) => x.turn.promptNumber);
+      group = {
+        date: key,
+        label: m.turn.createdAtEpoch,
+        promptLo: Math.min(...fullPrompts),
+        promptHi: Math.max(...fullPrompts),
+        keptCount: full.length,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null,
+      };
+      groups.push(group);
+    }
+    group.rows.push(m);
+  }
+
+  // continued = this page-slice does not start at the day's overall-first kept milestone;
+  // isFinalSliceForDay = this slice ends at the day's overall-last kept milestone.
+  for (const group of groups) {
+    const full = fullByDay.get(group.date) ?? [];
+    const dayFirstPrompt = full[0]?.turn.promptNumber ?? -1;
+    const dayLastPrompt = full[full.length - 1]?.turn.promptNumber ?? -1;
+    const firstRowPrompt = group.rows[0]?.turn.promptNumber ?? -1;
+    const lastRowPrompt = group.rows[group.rows.length - 1]?.turn.promptNumber ?? -1;
+    group.continued = firstRowPrompt !== dayFirstPrompt;
+    group.isFinalSliceForDay = lastRowPrompt === dayLastPrompt;
+    if (group.isFinalSliceForDay) {
+      group.overflow = overflowFor.get(group.date) ?? null;
+    }
+  }
+
+  return groups;
 }
 
 function renderSessionHeader(view: TimelineView): string[] {

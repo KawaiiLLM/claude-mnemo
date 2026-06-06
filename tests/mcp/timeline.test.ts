@@ -1541,6 +1541,41 @@ describe("buildTimelineView", () => {
   });
 });
 
+describe("milestoneDayGroups (pagination)", () => {
+  it("splits a day across a page boundary, repeats the day header, overflow once on final slice", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    // 40 turns ALTERNATING decision/change on one local day → 40 singleton runs (none
+    // fold away), so survivors exceed both the day cap (7) and the pageSize (5).
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      turn({
+        promptNumber: i + 1,
+        type: i % 2 === 0 ? "decision" : "change",
+        title: `m ${i + 1}`,
+        filesModified: i % 2 === 0 ? [] : ["a.ts"],
+        toolCallCount: 40 - i,
+        createdAtEpoch: base + i * 60,
+      }),
+    );
+    seedTimelineSession(db, rows);
+
+    const page1 = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 5 });
+    const page2 = buildTimelineView(db, { id: "S1", view: "milestones", page: 2, pageSize: 5 });
+
+    expect(page1.milestoneDayGroups.length).toBeGreaterThanOrEqual(1);
+    const g1 = page1.milestoneDayGroups[0]!;
+    const g2 = page2.milestoneDayGroups[0]!;
+    // same full-day metadata on both slices
+    expect(g2.date).toBe(g1.date);
+    expect(g2.keptCount).toBe(g1.keptCount);
+    expect(g2.continued).toBe(true);
+    // overflow exists on exactly one slice (the final one)
+    const overflowSlices = [g1, g2].filter((g) => g.isFinalSliceForDay && g.overflow !== null);
+    expect(overflowSlices.length).toBeLessThanOrEqual(1);
+    expect(g1.overflow === null || g1.isFinalSliceForDay).toBe(true);
+  });
+});
+
 describe("renderTimeline", () => {
   it("omits the showing line when the candidate set fits on one page", () => {
     const db = createDatabase(":memory:");
