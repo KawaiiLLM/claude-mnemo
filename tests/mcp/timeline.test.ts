@@ -1174,6 +1174,19 @@ describe("foldMilestoneRuns", () => {
     // T3 is always-keep (outcome); fold keeps the last *foldable* = T2.
     expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([2]);
   });
+
+  it("keeps nothing for an empty sequence", () => {
+    expect([...foldMilestoneRuns([], noEndpoints)]).toEqual([]);
+  });
+
+  it("keeps nothing when every run member scores zero", () => {
+    // A fold-type run (feature) whose members all score 0 (no files modified)
+    // exercises the foldable.length === 0 branch — nothing is kept.
+    const rows = Array.from({ length: 5 }, (_, i) =>
+      turn({ promptNumber: i + 1, type: "feature", filesModified: [] }),
+    );
+    expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([]);
+  });
 });
 
 describe("extractReversalFlag", () => {
