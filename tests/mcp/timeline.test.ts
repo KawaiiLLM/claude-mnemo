@@ -1238,287 +1238,68 @@ describe("milestoneMarker", () => {
   });
 });
 
-describe("selectMilestoneTurns", () => {
-  it("keeps all Tier 1 decisions from a dense day without applying the Tier 2 cap", () => {
-    const rows = Array.from({ length: 8 }, (_, index) =>
-      turn({
-        promptNumber: index + 1,
-        type: "decision",
-        title: `decision ${index + 1}`,
-        createdAtEpoch: 1_779_782_400 + index * 60,
-      }),
-    );
+describe("selectMilestoneTurns (narrative digest)", () => {
+  const select = (rows: TurnRecord[]): MilestoneSelection =>
+    selectMilestoneTurns({
+      windowTurns: rows,
+      windowSignals: detectShapeSignals(rows),
+      compactBoundaries: [],
+    });
+  const kept = (s: MilestoneSelection) => s.kept.map((k) => k.turn.promptNumber).sort((a, b) => a - b);
 
-    const selection = selectionFor(rows);
-
-    expect(keptPromptNumbers(selection)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(selection.kept.every((item) => item.tier === 1)).toBe(true);
-    expect(selection.overflowByDay).toEqual([]);
-  });
-
-  it("caps same-day Tier 2 fixes by score and preserves overflow metadata", () => {
-    const rows = [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "open the day",
-        createdAtEpoch: 1_779_782_400,
-      }),
-      ...Array.from({ length: 10 }, (_, index) => {
-        const promptNumber = 2 + index * 2;
-        return [
-          turn({
-            promptNumber,
-            type: "bugfix",
-            title: `fix ${promptNumber}`,
-            toolCallCount: promptNumber,
-            createdAtEpoch: 1_779_782_400 + promptNumber * 60,
-          }),
-          turn({
-            promptNumber: promptNumber + 1,
-            type: null,
-            title: `note ${promptNumber + 1}`,
-            toolCallCount: 1,
-            createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
-          }),
-        ];
-      }).flat(),
-      turn({
-        promptNumber: 23,
-        type: "decision",
-        title: "close the day",
-        createdAtEpoch: 1_779_782_400 + 23 * 60,
-      }),
-    ];
-
-    const selection = selectionFor(rows);
-    const keptFixes = selection.kept
-      .filter((item) => item.turn.type === "bugfix")
-      .map((item) => item.turn.promptNumber);
-
-    expect(keptFixes).toEqual([14, 16, 18, 20]);
-    expect(selection.overflowByDay).toEqual([
-      {
-        date: "2026-05-26",
-        count: 6,
-        firstPrompt: 2,
-        lastPrompt: 12,
-        lastKeptPrompt: 23,
-        kind: "fixes",
-      },
-    ]);
-  });
-
-  it("selects capped Tier 2 milestones by score but renders kept rows in prompt order", () => {
-    const rows = [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "start",
-        createdAtEpoch: 1_779_782_400,
-      }),
-      ...[2, 4, 6, 8, 10, 12].flatMap((promptNumber) => [
-        turn({
-          promptNumber,
-          type: "bugfix",
-          title: `fix ${promptNumber}`,
-          toolCallCount:
-            promptNumber === 10
-              ? 100
-              : promptNumber === 12
-                ? 90
-                : promptNumber === 4
-                  ? 80
-                  : promptNumber === 2
-                    ? 70
-                    : 1,
-          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
-        }),
-        turn({
-          promptNumber: promptNumber + 1,
-          type: null,
-          title: `separator ${promptNumber + 1}`,
-          toolCallCount: 1,
-          createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
-        }),
-      ]),
-      turn({
-        promptNumber: 15,
-        type: "decision",
-        title: "end",
-        createdAtEpoch: 1_779_782_400 + 15 * 60,
-      }),
-    ];
-    const db = createDatabase(":memory:");
-    seedTimelineSession(db, rows);
-
-    const selection = selectionFor(rows);
-    expect(keptPromptNumbers(selection)).toContain(10);
-    expect(keptPromptNumbers(selection)).not.toContain(6);
-
-    const output = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones" }),
-    );
-    const rowOrder = output
-      .split("\n")
-      .filter((line) => /^T\d+ \|/.test(line))
-      .map((line) => Number(line.match(/^T(\d+)/)?.[1]));
-
-    expect(rowOrder).toEqual([1, 2, 4, 10, 12, 15]);
-  });
-
-  it("excludes a phase-lead discovery feeding an invalidated decision unless it bursts on its own", () => {
+  it("folds a long decision run to its first+last (run interior dropped)", () => {
     const base = 1_779_782_400;
-    const rowsFor = (discoveryTools: number): TurnRecord[] => [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "start",
-        toolCallCount: 2,
-        createdAtEpoch: base,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        title: "analysis feeding a dead branch",
-        toolCallCount: discoveryTools,
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "decision",
-        title: "rolled-back decision",
-        wasRolledBack: true,
-        toolCallCount: 2,
-        createdAtEpoch: base + 120,
-      }),
-      turn({
-        promptNumber: 4,
-        type: "decision",
-        title: "end",
-        toolCallCount: 2,
-        createdAtEpoch: base + 180,
-      }),
-    ];
-
-    // Low-tool phase-lead discovery: adjacency to an *invalidated* decision must
-    // not pull it in (the dead branch does not resurrect its upstream analysis).
-    const lowTool = selectionFor(rowsFor(2));
-    expect(keptPromptNumbers(lowTool)).toEqual([1, 3, 4]);
-    expect(
-      lowTool.kept.find((item) => item.turn.promptNumber === 3)?.invalidated,
-    ).toBe(true);
-
-    // The same discovery, now exceeding the burst threshold, is kept on its own
-    // merit (Tier 2) — independent of the adjacency path.
-    const burst = selectionFor(rowsFor(100));
-    expect(keptPromptNumbers(burst)).toContain(2);
-    expect(
-      burst.kept.find((item) => item.turn.promptNumber === 2)?.tier,
-    ).toBe(2);
-  });
-
-  it("renders same-day overflow hint only on the page with that day's last kept milestone", () => {
+    // Bracket the 6-decision run (T2–T7) with a leading discovery + trailing feature
+    // so the run's first/last are NOT the window endpoints.
     const rows = [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "open",
-        createdAtEpoch: 1_779_782_400,
-      }),
-      ...[2, 4, 6, 8, 10, 12].flatMap((promptNumber) => [
-        turn({
-          promptNumber,
-          type: "bugfix",
-          title: `fix ${promptNumber}`,
-          toolCallCount: 120 - promptNumber,
-          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
-        }),
-        turn({
-          promptNumber: promptNumber + 1,
-          type: null,
-          title: `separator ${promptNumber + 1}`,
-          toolCallCount: 1,
-          createdAtEpoch: 1_779_782_400 + (promptNumber + 1) * 60,
-        }),
-      ]),
-      ...[14, 15, 16, 17, 18].map((promptNumber) =>
-        turn({
-          promptNumber,
-          type: "decision",
-          title: `decision ${promptNumber}`,
-          createdAtEpoch: 1_779_782_400 + promptNumber * 60,
-        }),
+      turn({ promptNumber: 1, type: "discovery", title: "intro", toolCallCount: 1, createdAtEpoch: base }),
+      ...Array.from({ length: 6 }, (_, i) =>
+        turn({ promptNumber: i + 2, type: "decision", title: `d${i + 2}`, createdAtEpoch: base + (i + 1) * 60 }),
       ),
+      turn({ promptNumber: 8, type: "feature", title: "done", filesModified: ["a.ts"], createdAtEpoch: base + 7 * 60 }),
     ];
-    const db = createDatabase(":memory:");
-    seedTimelineSession(db, rows);
-
-    const page1 = renderTimeline(
-      buildTimelineView(db, {
-        id: "S1",
-        view: "milestones",
-        page: 1,
-        pageSize: 5,
-      }),
-    );
-    const page2 = renderTimeline(
-      buildTimelineView(db, {
-        id: "S1",
-        view: "milestones",
-        page: 2,
-        pageSize: 5,
-      }),
-    );
-
-    expect(page1).not.toContain("… +2 more fixes this day");
-    expect(page2.match(/… \+2 more fixes this day/g)).toHaveLength(1);
+    const k = kept(select(rows));
+    expect(k).toContain(2); // run-first foldable
+    expect(k).toContain(7); // run-last foldable
+    expect(k).not.toContain(4); // interior folded away
+    expect(k).not.toContain(5);
   });
 
-  it("renders invalidated decisions with 🚫 taking precedence over reversal ↩️", () => {
-    const db = createDatabase(":memory:");
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "live decision",
-        createdAtEpoch: 1_779_782_400,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "decision",
-        title: "rolled back reversal",
-        wasRolledBack: true,
-        tags: ["reversal"],
-        createdAtEpoch: 1_779_782_460,
-      }),
-    ]);
-
-    const output = renderTimeline(
-      buildTimelineView(db, { id: "S1", view: "milestones" }),
-    );
-    const invalidatedLine = output
-      .split("\n")
-      .find((line) => line.includes("T2"));
-
-    expect(invalidatedLine).toBeDefined();
-    expect(invalidatedLine).toContain("🚫");
-    expect(invalidatedLine).not.toContain("↩️");
+  it("marks rolled-back as reversed and outcome-tagged as outcome, force-keeping both", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({ promptNumber: 2, type: "decision", title: "pivot", wasRolledBack: true, createdAtEpoch: base + 60 }),
+      turn({ promptNumber: 3, type: "discovery", title: "ship", tags: ["merged"], createdAtEpoch: base + 120 }),
+      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+    const result = select(rows);
+    expect(kept(result)).toContain(2);
+    expect(kept(result)).toContain(3); // outcome on a discovery is still force-kept
+    expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
+    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("outcome");
   });
 
-  it("does not promote session compact-boundary fallback rows into milestones", () => {
-    const db = createDatabase(":memory:");
-    const session = seedSession(db);
-
-    db.query("UPDATE sessions SET last_compact_turn = 15 WHERE id = ?").run(
-      session.id,
+  it("caps a heavy day and emits one overflow hint on the last kept prompt", () => {
+    const base = 1_779_782_400;
+    // 30 turns ALTERNATING decision/change on one day -> 30 singleton runs, so folding
+    // keeps each one (no consecutive same-type collapse). 30 survivors > cap -> overflow.
+    const rows = Array.from({ length: 30 }, (_, i) =>
+      turn({
+        promptNumber: i + 1,
+        type: i % 2 === 0 ? "decision" : "change",
+        title: `m${i + 1}`,
+        filesModified: i % 2 === 0 ? [] : ["a.ts"],
+        toolCallCount: 30 - i,
+        createdAtEpoch: base + i * 60,
+      }),
     );
-
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-
-    expect(view.compactBoundaries).toEqual([15]);
-    expect(view.pagedMilestones.map((item) => item.turn.promptNumber)).not.toContain(
-      15,
+    const result = select(rows);
+    // cap = min(4 + floor(30/8), 7) = 7 kept -> 23 dropped, exactly one overflow entry.
+    expect(result.overflowByDay).toHaveLength(1);
+    expect(result.overflowByDay[0]!.count).toBe(rows.length - result.kept.length);
+    expect(result.overflowByDay[0]!.lastKeptPrompt).toBe(
+      Math.max(...result.kept.map((k) => k.turn.promptNumber)),
     );
   });
 });

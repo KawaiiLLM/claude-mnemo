@@ -152,9 +152,8 @@ export interface ShapeSignals {
 
 export interface KeptMilestone {
   turn: TurnRecord;
-  tier: 1 | 2;
-  invalidated: boolean;
-  reversal: boolean;
+  score: number;
+  marker: MilestoneMarker;
 }
 
 export interface OverflowHint {
@@ -163,7 +162,6 @@ export interface OverflowHint {
   firstPrompt: number;
   lastPrompt: number;
   lastKeptPrompt: number;
-  kind: string;
 }
 
 export interface MilestoneSelection {
@@ -920,131 +918,93 @@ export function selectMilestoneTurns(view: {
   windowSignals: ShapeSignals;
   compactBoundaries: number[];
 }): MilestoneSelection {
-  const sorted = sortTurnsForAnalysis(view.windowTurns);
-  const candidates = sorted.filter(milestoneCandidateTurn);
-  const keptByPrompt = new Map<number, KeptMilestone>();
-  const tier2Candidates: TurnRecord[] = [];
+  const seq = sortTurnsForAnalysis(view.windowTurns).filter(
+    (turn) => turn.status !== "skipped",
+  );
+  if (seq.length === 0) {
+    return { kept: [], overflowByDay: [] };
+  }
 
-  const phaseLeads = new Set(segmentPhases(view.windowTurns).map((phase) => phase.startPromptNumber));
-  const firstCandidate = candidates[0]?.promptNumber ?? null;
-  const lastCandidate = candidates[candidates.length - 1]?.promptNumber ?? null;
-  const candidateByPrompt = new Map(candidates.map((turn, index) => [turn.promptNumber, { turn, index }]));
+  const threshold = view.windowSignals.toolBurstThreshold;
 
-  const addKept = (turn: TurnRecord, tier: 1 | 2): void => {
-    const existing = keptByPrompt.get(turn.promptNumber);
-    if (existing && existing.tier <= tier) {
-      return;
-    }
+  // D4 endpoints: window first live + window last *titled* live.
+  const endpoints = new Set<number>();
+  endpoints.add(seq[0]!.promptNumber);
+  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
+  endpoints.add((lastTitled ?? seq[seq.length - 1]!).promptNumber);
 
-    keptByPrompt.set(turn.promptNumber, {
-      turn,
-      tier,
-      invalidated: isInvalidatedTurn(turn),
-      reversal: extractReversalFlag(turn),
-    });
-  };
-
-  for (const turn of candidates) {
-    const isEndpoint =
-      turn.promptNumber === firstCandidate || turn.promptNumber === lastCandidate;
-    const isDeliverable =
-      (turn.type === "change" || turn.type === "feature" || turn.type === "refactor") &&
-      turn.filesModified.length > 0;
-
+  // D2 fold + D1 always-keep / re-admitted discovery, unioned.
+  const keptPrompts = foldMilestoneRuns(seq, endpoints);
+  for (const turn of seq) {
     if (
-      isEndpoint ||
-      turn.type === "decision" ||
-      isDeliverable ||
-      turn.type === "compact"
+      isMilestoneAlwaysKeep(turn, endpoints) ||
+      isReadmittedDiscovery(turn, threshold)
     ) {
-      addKept(turn, 1);
-      continue;
-    }
-
-    if (turn.type === "bugfix") {
-      const current = candidateByPrompt.get(turn.promptNumber);
-      const next = current ? candidates[current.index + 1] : undefined;
-      if (next?.type !== "bugfix") {
-        tier2Candidates.push(turn);
-      }
-      continue;
-    }
-
-    if (turn.type === "discovery" && phaseLeads.has(turn.promptNumber)) {
-      const current = candidateByPrompt.get(turn.promptNumber);
-      const next = current ? candidates[current.index + 1] : undefined;
-      const feedsLiveDecision =
-        next?.type === "decision" && !isInvalidatedTurn(next);
-      const isBurst = (turn.toolCallCount ?? 0) > view.windowSignals.toolBurstThreshold;
-      if (feedsLiveDecision || isBurst) {
-        tier2Candidates.push(turn);
-      }
+      keptPrompts.add(turn.promptNumber);
     }
   }
 
-  const tier2ByDay = new Map<string, TurnRecord[]>();
-  for (const turn of tier2Candidates) {
+  const survivors = seq.filter((turn) => keptPrompts.has(turn.promptNumber));
+
+  // D3 per-day adaptive budget.
+  const byDay = new Map<string, TurnRecord[]>();
+  for (const turn of survivors) {
     const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = tier2ByDay.get(day) ?? [];
+    const bucket = byDay.get(day) ?? [];
     bucket.push(turn);
-    tier2ByDay.set(day, bucket);
+    byDay.set(day, bucket);
   }
 
+  const finalPrompts = new Set<number>();
   const overflowByDay: OverflowHint[] = [];
-  for (const [date, turns] of tier2ByDay) {
-    const ranked = [...turns].sort((left, right) => {
-      const leftRank = left.type === "bugfix" ? 0 : 1;
-      const rightRank = right.type === "bugfix" ? 0 : 1;
-      if (leftRank !== rightRank) return leftRank - rightRank;
 
-      const toolDiff = (right.toolCallCount ?? 0) - (left.toolCallCount ?? 0);
-      if (toolDiff !== 0) return toolDiff;
-
-      return left.promptNumber - right.promptNumber;
+  for (const [date, dayTurns] of byDay) {
+    const cap = Math.min(
+      MILESTONE_DAY_BUDGET_BASE + Math.floor(dayTurns.length / MILESTONE_DAY_BUDGET_DIVISOR),
+      MILESTONE_DAY_BUDGET_MAX,
+    );
+    const ranked = [...dayTurns].sort((a, b) => {
+      const sa = milestoneSignificance(a, endpoints, threshold);
+      const sb = milestoneSignificance(b, endpoints, threshold);
+      if (sa !== sb) return sb - sa;
+      const ta = a.toolCallCount ?? 0;
+      const tb = b.toolCallCount ?? 0;
+      if (ta !== tb) return tb - ta;
+      return a.promptNumber - b.promptNumber;
     });
 
-    for (const turn of ranked.slice(0, MILESTONE_TIER2_PER_DAY)) {
-      addKept(turn, 2);
+    const top = ranked.slice(0, cap);
+    for (const turn of top) finalPrompts.add(turn.promptNumber);
+    // Always-keep beyond the cap are force-kept (the spine is never dropped).
+    for (const turn of ranked.slice(cap)) {
+      if (isMilestoneAlwaysKeep(turn, endpoints)) finalPrompts.add(turn.promptNumber);
     }
 
-    const overflow = ranked.slice(MILESTONE_TIER2_PER_DAY);
-    if (overflow.length > 0) {
-      const byPrompt = [...overflow].sort((left, right) => left.promptNumber - right.promptNumber);
-      const hasBugfix = overflow.some((turn) => turn.type === "bugfix");
-      const hasDiscovery = overflow.some((turn) => turn.type === "discovery");
+    const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
+    if (dropped.length > 0) {
+      const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
+      const keptThatDay = dayTurns
+        .filter((turn) => finalPrompts.has(turn.promptNumber))
+        .map((turn) => turn.promptNumber);
       overflowByDay.push({
         date,
-        count: overflow.length,
+        count: dropped.length,
         firstPrompt: byPrompt[0]!.promptNumber,
         lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
-        lastKeptPrompt: 0,
-        kind: hasBugfix && hasDiscovery ? "fixes/notes" : hasBugfix ? "fixes" : "notes",
+        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0,
       });
     }
   }
 
-  const kept = [...keptByPrompt.values()].sort(
-    (left, right) => left.turn.promptNumber - right.turn.promptNumber,
-  );
-  const lastKeptPromptByDay = new Map<string, number>();
-  for (const milestone of kept) {
-    lastKeptPromptByDay.set(
-      formatLocalDate(milestone.turn.createdAtEpoch),
-      milestone.turn.promptNumber,
-    );
-  }
+  const kept: KeptMilestone[] = seq
+    .filter((turn) => finalPrompts.has(turn.promptNumber))
+    .map((turn) => ({
+      turn,
+      score: milestoneSignificance(turn, endpoints, threshold),
+      marker: milestoneMarker(turn),
+    }));
 
-  return {
-    kept,
-    overflowByDay: overflowByDay
-      .map((overflow) => ({
-        ...overflow,
-        lastKeptPrompt: lastKeptPromptByDay.get(overflow.date) ?? 0,
-      }))
-      .sort((left, right) =>
-        left.date === right.date ? left.firstPrompt - right.firstPrompt : left.date.localeCompare(right.date),
-      ),
-  };
+  return { kept, overflowByDay };
 }
 
 function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
@@ -1366,7 +1326,14 @@ function renderMilestoneDigest(
 ): string[] {
   const renderedTurns = view.pagedMilestones.map((milestone) => ({
     turn: milestone.turn,
-    marker: milestone.invalidated ? "🚫" : milestone.reversal ? "↩️" : null,
+    marker:
+      milestone.marker === "invalidated"
+        ? "🚫"
+        : milestone.marker === "reversed"
+          ? "↩️"
+          : milestone.marker === "outcome"
+            ? "🏁"
+            : null,
   }));
 
   return renderTurnRows(view, renderedTurns, promptCap, view.milestoneOverflowByDay);
@@ -1444,7 +1411,7 @@ function renderDayDivider(currentEpoch: number, previousRenderedEpoch: number): 
 }
 
 function renderOverflowHint(sessionId: number, overflow: OverflowHint): string {
-  return `   … +${overflow.count} more ${overflow.kind} this day → timeline(id="S${sessionId}", view="turns") @ T${overflow.firstPrompt}–T${overflow.lastPrompt}`;
+  return `   … +${overflow.count} more this day → timeline(id="S${sessionId}", view="turns") @ T${overflow.firstPrompt}–T${overflow.lastPrompt}`;
 }
 
 function renderTurnRow(
