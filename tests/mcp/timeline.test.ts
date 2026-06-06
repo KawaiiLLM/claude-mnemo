@@ -14,6 +14,7 @@ import {
   detectBrokenPromptPairs,
   detectShapeSignals,
   extractReversalFlag,
+  foldMilestoneRuns,
   formatDuration,
   formatGap,
   formatLocalDate,
@@ -1126,6 +1127,52 @@ describe("milestoneBaseScore / milestoneSignificance", () => {
   it("re-admits a bursting discovery as a 0.5 singleton, else 0", () => {
     expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 50 }), noEndpoints, 10)).toBe(0.5);
     expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 2 }), noEndpoints, 10)).toBe(0);
+  });
+});
+
+describe("foldMilestoneRuns", () => {
+  const noEndpoints = new Set<number>();
+  const decisions = (count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      turn({ promptNumber: i + 1, type: "decision", title: `d${i + 1}` }),
+    );
+
+  it("keeps only the last of a short decision run", () => {
+    const kept = foldMilestoneRuns(decisions(3), noEndpoints);
+    expect([...kept].sort((a, b) => a - b)).toEqual([3]);
+  });
+
+  it("keeps first + last of a >=4 decision run", () => {
+    const kept = foldMilestoneRuns(decisions(5), noEndpoints);
+    expect([...kept].sort((a, b) => a - b)).toEqual([1, 5]);
+  });
+
+  it("keeps bugfix runs at last-only regardless of length", () => {
+    const bugs = Array.from({ length: 5 }, (_, i) =>
+      turn({ promptNumber: i + 1, type: "bugfix", title: `b${i + 1}` }),
+    );
+    expect([...foldMilestoneRuns(bugs, noEndpoints)]).toEqual([5]);
+  });
+
+  it("a non-candidate type between two decision groups splits the runs", () => {
+    const rows = [
+      turn({ promptNumber: 1, type: "decision" }),
+      turn({ promptNumber: 2, type: "decision" }),
+      turn({ promptNumber: 3, type: "discovery" }),
+      turn({ promptNumber: 4, type: "decision" }),
+      turn({ promptNumber: 5, type: "decision" }),
+    ];
+    expect([...foldMilestoneRuns(rows, noEndpoints)].sort((a, b) => a - b)).toEqual([2, 5]);
+  });
+
+  it("excludes always-keep members from the fold so the converged member survives", () => {
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "open" }),
+      turn({ promptNumber: 2, type: "decision", title: "converged" }),
+      turn({ promptNumber: 3, type: "decision", title: "shipped", tags: ["merged"] }),
+    ];
+    // T3 is always-keep (outcome); fold keeps the last *foldable* = T2.
+    expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([2]);
   });
 });
 

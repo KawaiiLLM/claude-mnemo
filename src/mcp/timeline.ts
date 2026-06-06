@@ -590,6 +590,44 @@ export function milestoneSignificance(
   return milestoneBaseScore(turn);
 }
 
+const FOLD_RUN_TYPES = new Set(["decision", "feature", "change", "refactor", "bugfix"]);
+const FOLD_FIRST_TYPES = new Set(["decision", "feature", "change", "refactor"]); // bugfix: last only
+
+export function foldMilestoneRuns(
+  seq: TurnRecord[],
+  endpoints: Set<number>,
+): Set<number> {
+  const kept = new Set<number>();
+  let runType: string | null | undefined = undefined;
+  let runMembers: TurnRecord[] = [];
+
+  const flush = (): void => {
+    if (typeof runType === "string" && FOLD_RUN_TYPES.has(runType)) {
+      const foldable = runMembers.filter(
+        (t) => milestoneBaseScore(t) > 0 && !isMilestoneAlwaysKeep(t, endpoints),
+      );
+      if (foldable.length > 0) {
+        kept.add(foldable[foldable.length - 1]!.promptNumber);
+        if (FOLD_FIRST_TYPES.has(runType) && foldable.length >= FOLD_FIRST_MIN_RUN) {
+          kept.add(foldable[0]!.promptNumber);
+        }
+      }
+    }
+    runMembers = [];
+  };
+
+  for (const turn of seq) {
+    if (turn.type !== runType) {
+      flush();
+      runType = turn.type;
+    }
+    runMembers.push(turn);
+  }
+  flush();
+
+  return kept;
+}
+
 function getCompactMetadata(tags: string[]): {
   preTokens: number;
   trigger: string;
