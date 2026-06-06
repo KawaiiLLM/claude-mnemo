@@ -844,7 +844,7 @@ function renderMilestoneDigest(view: TimelineView): string[] {
   for (const group of view.milestoneDayGroups) {
     const cont = group.continued ? " (cont.)" : "";
     lines.push(
-      `── ${formatLocalDateWithWeekday(group.label)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${cont} ──`,
+      `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${cont} ──`,
     );
     for (const milestone of group.rows) {
       const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];

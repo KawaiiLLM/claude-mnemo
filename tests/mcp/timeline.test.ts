@@ -1562,17 +1562,67 @@ describe("milestoneDayGroups (pagination)", () => {
     const page1 = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 5 });
     const page2 = buildTimelineView(db, { id: "S1", view: "milestones", page: 2, pageSize: 5 });
 
-    expect(page1.milestoneDayGroups.length).toBeGreaterThanOrEqual(1);
+    expect(page1.milestoneDayGroups).toHaveLength(1);
+    expect(page2.milestoneDayGroups).toHaveLength(1);
     const g1 = page1.milestoneDayGroups[0]!;
     const g2 = page2.milestoneDayGroups[0]!;
-    // same full-day metadata on both slices
-    expect(g2.date).toBe(g1.date);
-    expect(g2.keptCount).toBe(g1.keptCount);
+
+    // Full-day metadata is identical across both slices (cap=7 → kept {1,3,5,7,9,11,40}).
+    expect(g1.date).toBe(g2.date);
+    expect(g1.keptCount).toBe(7);
+    expect(g2.keptCount).toBe(7);
+    expect(g1.promptLo).toBe(1);
+    expect(g1.promptHi).toBe(40);
+    expect(g2.promptLo).toBe(g1.promptLo);
+    expect(g2.promptHi).toBe(g1.promptHi);
+
+    // First slice opens the day and is not the final slice → no overflow on it.
+    expect(g1.continued).toBe(false);
+    expect(g1.isFinalSliceForDay).toBe(false);
+    expect(g1.overflow).toBeNull();
+
+    // Second slice continues the day, is the final slice, and carries the one overflow.
     expect(g2.continued).toBe(true);
-    // overflow exists on exactly one slice (the final one)
-    const overflowSlices = [g1, g2].filter((g) => g.isFinalSliceForDay && g.overflow !== null);
-    expect(overflowSlices.length).toBeLessThanOrEqual(1);
-    expect(g1.overflow === null || g1.isFinalSliceForDay).toBe(true);
+    expect(g2.isFinalSliceForDay).toBe(true);
+    expect(g2.overflow).not.toBeNull();
+    expect(g2.overflow!.count).toBe(40 - 7);
+    expect(g2.overflow!.lastKeptPrompt).toBe(40);
+
+    // Overflow appears on exactly one slice across the whole day.
+    const overflowSlices = [g1, g2].filter((g) => g.overflow !== null);
+    expect(overflowSlices).toHaveLength(1);
+  });
+
+  it("keeps a single-page day's overflow on its only (final) slice", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    // 10 alternating turns on one day → cap = min(4 + floor(10/8), 7) = 5 kept, 5 dropped.
+    // A large pageSize fits all kept on one page, so the single group is BOTH the first
+    // and final slice for the day: continued=false, isFinalSliceForDay=true, overflow!=null.
+    const rows = Array.from({ length: 10 }, (_, i) =>
+      turn({
+        promptNumber: i + 1,
+        type: i % 2 === 0 ? "decision" : "change",
+        title: `m ${i + 1}`,
+        filesModified: i % 2 === 0 ? [] : ["a.ts"],
+        toolCallCount: 10 - i,
+        createdAtEpoch: base + i * 60,
+      }),
+    );
+    seedTimelineSession(db, rows);
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 30 });
+
+    expect(view.milestoneDayGroups).toHaveLength(1);
+    const g = view.milestoneDayGroups[0]!;
+    expect(g.keptCount).toBe(5);
+    expect(g.promptLo).toBe(1);
+    expect(g.promptHi).toBe(10);
+    expect(g.continued).toBe(false);
+    expect(g.isFinalSliceForDay).toBe(true);
+    expect(g.overflow).not.toBeNull();
+    expect(g.overflow!.count).toBe(5);
+    expect(g.overflow!.lastKeptPrompt).toBe(10);
   });
 });
 

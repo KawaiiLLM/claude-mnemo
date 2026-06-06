@@ -172,7 +172,7 @@ export interface MilestoneSelection {
 
 export interface MilestoneDayGroup {
   date: string;
-  label: number; // local-date epoch anchor for formatting (createdAtEpoch of first row)
+  labelEpoch: number; // local-date epoch anchor for formatting (createdAtEpoch of first row)
   promptLo: number; // full-day range, not page-local
   promptHi: number;
   keptCount: number; // full-day kept count, not page-local
@@ -1275,6 +1275,10 @@ function buildMilestoneDayGroups(
   }
   const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
 
+  // Precondition: pagedMilestones is in ascending promptNumber order (a contiguous
+  // slice of the prompt-sorted kept set), and prompt order tracks creation order, so
+  // same-day rows are always adjacent. The "append to last group if same day" merge
+  // below relies on that — a day can never appear as two non-consecutive groups.
   const groups: MilestoneDayGroup[] = [];
   for (const m of pagedMilestones) {
     const key = dayKey(m);
@@ -1286,7 +1290,7 @@ function buildMilestoneDayGroups(
       const fullPrompts = full.map((x) => x.turn.promptNumber);
       group = {
         date: key,
-        label: m.turn.createdAtEpoch,
+        labelEpoch: m.turn.createdAtEpoch,
         promptLo: Math.min(...fullPrompts),
         promptHi: Math.max(...fullPrompts),
         keptCount: full.length,
