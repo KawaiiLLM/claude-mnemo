@@ -791,7 +791,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.28-mq2iqghg" : "dev";
+var BUILD_ID = true ? "0.2.28-mq2o02td" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1934,7 +1934,29 @@ var TITLE_COLUMN_CAP = 80;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
-var MILESTONE_TIER2_PER_DAY = 4;
+var MILESTONE_TITLE_CAP = 90;
+var MILESTONE_DAY_BUDGET_BASE = 4;
+var MILESTONE_DAY_BUDGET_MAX = 7;
+var MILESTONE_DAY_BUDGET_DIVISOR = 8;
+var FOLD_FIRST_MIN_RUN = 4;
+var OUTCOME_TAGS = /* @__PURE__ */ new Set([
+  "merged",
+  "shipped",
+  "released",
+  "ready-to-merge",
+  "approved",
+  "finalized"
+]);
+var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
+  "reversal",
+  "reversed",
+  "superseded",
+  "supersede",
+  "reframed",
+  "reframe",
+  "design-pivot",
+  "pivot"
+]);
 var TYPE_EMOJI_MAP = {
   bugfix: "\u{1F534}",
   feature: "\u{1F7E3}",
@@ -1946,6 +1968,10 @@ var TYPE_EMOJI_MAP = {
 };
 var PENDING_EMOJI = "\u23F3";
 var MISSING_LINE_ANCHOR = "\u2014";
+function typeEmoji(type) {
+  if (type === null) return PENDING_EMOJI;
+  return TYPE_EMOJI_MAP[type] ?? "\u2022";
+}
 function paginateItems(items, page, pageSize) {
   const total = items.length;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -2160,33 +2186,77 @@ function getSystemTimezone(referenceEpochSeconds = Math.floor(Date.now() / 1e3),
 function extractSourceTags(tags) {
   return tags.filter((tag) => tag.startsWith("source:")).map((tag) => tag.slice("source:".length));
 }
-function extractReversalFlag(turn) {
-  if (turn.type !== "decision") {
-    return false;
+function milestoneMarker(turn, options = {}) {
+  if (turn.status === "undone" || turn.wasInterrupted) {
+    return "invalidated";
   }
-  const reversalTags = /* @__PURE__ */ new Set([
-    "reversal",
-    "reversed",
-    "superseded",
-    "supersede",
-    "reframed",
-    "reframe",
-    "design-pivot",
-    "pivot"
-  ]);
-  return turn.tags.some((tag) => reversalTags.has(tag));
+  const keywordReversal = options.enableReversalKeyword === true && turn.type === "decision" && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
+  if (turn.wasRolledBack || keywordReversal) {
+    return "reversed";
+  }
+  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag))) {
+    return "outcome";
+  }
+  return null;
 }
-function isInvalidatedTurn(turn) {
-  return turn.status === "undone" || turn.wasRolledBack || turn.wasInterrupted || turn.tags.some((tag) => tag.startsWith("invalidated:"));
+var MILESTONE_BASE_SCORE = {
+  decision: 4,
+  feature: 3,
+  refactor: 3,
+  bugfix: 2,
+  change: 1
+};
+function milestoneBaseScore(turn) {
+  const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
+  if ((turn.type === "feature" || turn.type === "refactor" || turn.type === "change") && turn.filesModified.length === 0) {
+    return 0;
+  }
+  return score;
 }
-function milestoneCandidateTurn(turn) {
-  if (turn.status === "skipped") {
-    return false;
+function isMilestoneAlwaysKeep(turn, endpoints) {
+  return milestoneMarker(turn) !== null || turn.type === "compact" || endpoints.has(turn.promptNumber);
+}
+function isReadmittedDiscovery(turn, toolBurstThreshold) {
+  return turn.type === "discovery" && (turn.toolCallCount ?? 0) > toolBurstThreshold;
+}
+function milestoneSignificance(turn, endpoints, toolBurstThreshold) {
+  if (isMilestoneAlwaysKeep(turn, endpoints)) {
+    return Number.POSITIVE_INFINITY;
   }
-  if (isInvalidatedTurn(turn)) {
-    return turn.type === "decision";
+  if (isReadmittedDiscovery(turn, toolBurstThreshold)) {
+    return 0.5;
   }
-  return true;
+  return milestoneBaseScore(turn);
+}
+var FOLD_RUN_TYPES = /* @__PURE__ */ new Set(["decision", "feature", "change", "refactor", "bugfix"]);
+var FOLD_FIRST_TYPES = /* @__PURE__ */ new Set(["decision", "feature", "change", "refactor"]);
+function foldMilestoneRuns(seq, endpoints) {
+  const kept = /* @__PURE__ */ new Set();
+  let runType = void 0;
+  let runMembers = [];
+  const flush = () => {
+    if (typeof runType === "string" && FOLD_RUN_TYPES.has(runType)) {
+      const foldable = runMembers.filter(
+        (t) => milestoneBaseScore(t) > 0 && !isMilestoneAlwaysKeep(t, endpoints)
+      );
+      if (foldable.length > 0) {
+        kept.add(foldable[foldable.length - 1].promptNumber);
+        if (FOLD_FIRST_TYPES.has(runType) && foldable.length >= FOLD_FIRST_MIN_RUN) {
+          kept.add(foldable[0].promptNumber);
+        }
+      }
+    }
+    runMembers = [];
+  };
+  for (const turn of seq) {
+    if (turn.type !== runType) {
+      flush();
+      runType = turn.type;
+    }
+    runMembers.push(turn);
+  }
+  flush();
+  return kept;
 }
 function getCompactMetadata(tags) {
   let preTokens = 0;
@@ -2232,7 +2302,7 @@ function segmentPhases(turns) {
       continue;
     }
     const kind = turn.type === null ? "pending" : "typed";
-    const emoji = turn.type === null ? PENDING_EMOJI : TYPE_EMOJI_MAP[turn.type] ?? "\u2022";
+    const emoji = typeEmoji(turn.type);
     if (current === null || current.kind !== kind || current.type !== turn.type) {
       if (current !== null) {
         current.durationMs = (currentEndEpoch - currentStartEpoch) * 1e3;
@@ -2401,105 +2471,71 @@ function detectShapeSignals(turns) {
   };
 }
 function selectMilestoneTurns(view) {
-  const sorted = sortTurnsForAnalysis(view.windowTurns);
-  const candidates = sorted.filter(milestoneCandidateTurn);
-  const keptByPrompt = /* @__PURE__ */ new Map();
-  const tier2Candidates = [];
-  const phaseLeads = new Set(segmentPhases(view.windowTurns).map((phase) => phase.startPromptNumber));
-  const firstCandidate = candidates[0]?.promptNumber ?? null;
-  const lastCandidate = candidates[candidates.length - 1]?.promptNumber ?? null;
-  const candidateByPrompt = new Map(candidates.map((turn, index) => [turn.promptNumber, { turn, index }]));
-  const addKept = (turn, tier) => {
-    const existing = keptByPrompt.get(turn.promptNumber);
-    if (existing && existing.tier <= tier) {
-      return;
-    }
-    keptByPrompt.set(turn.promptNumber, {
-      turn,
-      tier,
-      invalidated: isInvalidatedTurn(turn),
-      reversal: extractReversalFlag(turn)
-    });
-  };
-  for (const turn of candidates) {
-    const isEndpoint = turn.promptNumber === firstCandidate || turn.promptNumber === lastCandidate;
-    const isDeliverable = (turn.type === "change" || turn.type === "feature" || turn.type === "refactor") && turn.filesModified.length > 0;
-    if (isEndpoint || turn.type === "decision" || isDeliverable || turn.type === "compact") {
-      addKept(turn, 1);
-      continue;
-    }
-    if (turn.type === "bugfix") {
-      const current = candidateByPrompt.get(turn.promptNumber);
-      const next = current ? candidates[current.index + 1] : void 0;
-      if (next?.type !== "bugfix") {
-        tier2Candidates.push(turn);
-      }
-      continue;
-    }
-    if (turn.type === "discovery" && phaseLeads.has(turn.promptNumber)) {
-      const current = candidateByPrompt.get(turn.promptNumber);
-      const next = current ? candidates[current.index + 1] : void 0;
-      const feedsLiveDecision = next?.type === "decision" && !isInvalidatedTurn(next);
-      const isBurst = (turn.toolCallCount ?? 0) > view.windowSignals.toolBurstThreshold;
-      if (feedsLiveDecision || isBurst) {
-        tier2Candidates.push(turn);
-      }
+  const seq = sortTurnsForAnalysis(view.windowTurns).filter(
+    (turn) => turn.status !== "skipped"
+  );
+  if (seq.length === 0) {
+    return { kept: [], overflowByDay: [] };
+  }
+  const threshold = view.windowSignals.toolBurstThreshold;
+  const endpoints = /* @__PURE__ */ new Set();
+  endpoints.add(seq[0].promptNumber);
+  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
+  endpoints.add((lastTitled ?? seq[seq.length - 1]).promptNumber);
+  const keptPrompts = foldMilestoneRuns(seq, endpoints);
+  for (const turn of seq) {
+    if (isMilestoneAlwaysKeep(turn, endpoints) || isReadmittedDiscovery(turn, threshold)) {
+      keptPrompts.add(turn.promptNumber);
     }
   }
-  const tier2ByDay = /* @__PURE__ */ new Map();
-  for (const turn of tier2Candidates) {
+  const survivors = seq.filter((turn) => keptPrompts.has(turn.promptNumber));
+  const byDay = /* @__PURE__ */ new Map();
+  for (const turn of survivors) {
     const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = tier2ByDay.get(day) ?? [];
+    const bucket = byDay.get(day) ?? [];
     bucket.push(turn);
-    tier2ByDay.set(day, bucket);
+    byDay.set(day, bucket);
   }
+  const finalPrompts = /* @__PURE__ */ new Set();
   const overflowByDay = [];
-  for (const [date, turns] of tier2ByDay) {
-    const ranked = [...turns].sort((left, right) => {
-      const leftRank = left.type === "bugfix" ? 0 : 1;
-      const rightRank = right.type === "bugfix" ? 0 : 1;
-      if (leftRank !== rightRank) return leftRank - rightRank;
-      const toolDiff = (right.toolCallCount ?? 0) - (left.toolCallCount ?? 0);
-      if (toolDiff !== 0) return toolDiff;
-      return left.promptNumber - right.promptNumber;
+  for (const [date, dayTurns] of byDay) {
+    const cap = Math.min(
+      MILESTONE_DAY_BUDGET_BASE + Math.floor(dayTurns.length / MILESTONE_DAY_BUDGET_DIVISOR),
+      MILESTONE_DAY_BUDGET_MAX
+    );
+    const ranked = [...dayTurns].sort((a, b) => {
+      const sa = milestoneSignificance(a, endpoints, threshold);
+      const sb = milestoneSignificance(b, endpoints, threshold);
+      if (sa !== sb) return sb - sa;
+      const ta = a.toolCallCount ?? 0;
+      const tb = b.toolCallCount ?? 0;
+      if (ta !== tb) return tb - ta;
+      return a.promptNumber - b.promptNumber;
     });
-    for (const turn of ranked.slice(0, MILESTONE_TIER2_PER_DAY)) {
-      addKept(turn, 2);
+    const top = ranked.slice(0, cap);
+    for (const turn of top) finalPrompts.add(turn.promptNumber);
+    for (const turn of ranked.slice(cap)) {
+      if (isMilestoneAlwaysKeep(turn, endpoints)) finalPrompts.add(turn.promptNumber);
     }
-    const overflow = ranked.slice(MILESTONE_TIER2_PER_DAY);
-    if (overflow.length > 0) {
-      const byPrompt = [...overflow].sort((left, right) => left.promptNumber - right.promptNumber);
-      const hasBugfix = overflow.some((turn) => turn.type === "bugfix");
-      const hasDiscovery = overflow.some((turn) => turn.type === "discovery");
+    const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
+    if (dropped.length > 0) {
+      const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
+      const keptThatDay = dayTurns.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => turn.promptNumber);
       overflowByDay.push({
         date,
-        count: overflow.length,
+        count: dropped.length,
         firstPrompt: byPrompt[0].promptNumber,
         lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-        lastKeptPrompt: 0,
-        kind: hasBugfix && hasDiscovery ? "fixes/notes" : hasBugfix ? "fixes" : "notes"
+        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0
       });
     }
   }
-  const kept = [...keptByPrompt.values()].sort(
-    (left, right) => left.turn.promptNumber - right.turn.promptNumber
-  );
-  const lastKeptPromptByDay = /* @__PURE__ */ new Map();
-  for (const milestone of kept) {
-    lastKeptPromptByDay.set(
-      formatLocalDate(milestone.turn.createdAtEpoch),
-      milestone.turn.promptNumber
-    );
-  }
-  return {
-    kept,
-    overflowByDay: overflowByDay.map((overflow) => ({
-      ...overflow,
-      lastKeptPrompt: lastKeptPromptByDay.get(overflow.date) ?? 0
-    })).sort(
-      (left, right) => left.date === right.date ? left.firstPrompt - right.firstPrompt : left.date.localeCompare(right.date)
-    )
-  };
+  const kept = seq.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => ({
+    turn,
+    score: milestoneSignificance(turn, endpoints, threshold),
+    marker: milestoneMarker(turn)
+  }));
+  return { kept, overflowByDay };
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -2591,6 +2627,11 @@ function buildTimelineView(db, input, preloadedTurns) {
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
   const pagedMilestones = viewKind === "milestones" ? paginateItems(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
+  const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
+    pagedMilestones.items,
+    milestoneSelection.kept,
+    milestoneSelection.overflowByDay
+  ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
@@ -2608,8 +2649,8 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
+    milestoneDayGroups,
     pagedPhases: pagedPhases.items,
-    milestoneOverflowByDay: milestoneSelection.overflowByDay,
     viewItemTotal,
     pageAnchorEpoch,
     page,
@@ -2651,6 +2692,53 @@ function buildContextTimelineView(db, sessionId, view = "turns") {
     ...timelineView,
     hasEarlier: firstPromptNumber !== sortedTurns[0].promptNumber
   };
+}
+function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
+  if (pagedMilestones.length === 0) return [];
+  const dayKey = (m) => formatLocalDate(m.turn.createdAtEpoch);
+  const fullByDay = /* @__PURE__ */ new Map();
+  for (const m of allMilestones) {
+    const key = dayKey(m);
+    const bucket = fullByDay.get(key) ?? [];
+    bucket.push(m);
+    fullByDay.set(key, bucket);
+  }
+  const overflowFor = new Map(overflowByDay.map((o) => [o.date, o]));
+  const groups = [];
+  for (const m of pagedMilestones) {
+    const key = dayKey(m);
+    let group = groups.length > 0 && groups[groups.length - 1].date === key ? groups[groups.length - 1] : null;
+    if (group === null) {
+      const full = fullByDay.get(key) ?? [];
+      const fullPrompts = full.map((x) => x.turn.promptNumber);
+      group = {
+        date: key,
+        labelEpoch: m.turn.createdAtEpoch,
+        promptLo: Math.min(...fullPrompts),
+        promptHi: Math.max(...fullPrompts),
+        keptCount: full.length,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null
+      };
+      groups.push(group);
+    }
+    group.rows.push(m);
+  }
+  for (const group of groups) {
+    const full = fullByDay.get(group.date) ?? [];
+    const dayFirstPrompt = full[0]?.turn.promptNumber ?? -1;
+    const dayLastPrompt = full[full.length - 1]?.turn.promptNumber ?? -1;
+    const firstRowPrompt = group.rows[0]?.turn.promptNumber ?? -1;
+    const lastRowPrompt = group.rows[group.rows.length - 1]?.turn.promptNumber ?? -1;
+    group.continued = firstRowPrompt !== dayFirstPrompt;
+    group.isFinalSliceForDay = lastRowPrompt === dayLastPrompt;
+    if (group.isFinalSliceForDay) {
+      group.overflow = overflowFor.get(group.date) ?? null;
+    }
+  }
+  return groups;
 }
 function renderSessionHeader(view) {
   const sessionStart = view.session.createdAtEpoch;
@@ -2714,14 +2802,38 @@ function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
   }));
   return renderTurnRows(view, renderedTurns, promptCap);
 }
-function renderMilestoneDigest(view, promptCap = PROMPT_COLUMN_CAP) {
-  const renderedTurns = view.pagedMilestones.map((milestone) => ({
-    turn: milestone.turn,
-    marker: milestone.invalidated ? "\u{1F6AB}" : milestone.reversal ? "\u21A9\uFE0F" : null
-  }));
-  return renderTurnRows(view, renderedTurns, promptCap, view.milestoneOverflowByDay);
+var MILESTONE_MARKER_GLYPH = {
+  invalidated: "\u{1F6AB}",
+  reversed: "\u21A9\uFE0F",
+  outcome: "\u{1F3C1}"
+};
+function renderMilestoneDigest(view) {
+  if (view.milestoneDayGroups.length === 0) {
+    return [];
+  }
+  const lines = [""];
+  for (const group of view.milestoneDayGroups) {
+    const contSuffix = group.continued ? " (cont.)" : "";
+    lines.push(
+      `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount} kept${contSuffix} \u2500\u2500`
+    );
+    for (const milestone of group.rows) {
+      const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
+      const emoji = typeEmoji(milestone.turn.type);
+      const title = sanitizeTimelineField(
+        truncateText2(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP)
+      );
+      lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji} ${title}`);
+    }
+    if (group.overflow !== null) {
+      lines.push(
+        `        \u2026 +${group.overflow.count} more \u2192 timeline(id="S${view.session.id}", view="turns") @ T${group.overflow.firstPrompt}\u2013T${group.overflow.lastPrompt}`
+      );
+    }
+  }
+  return lines;
 }
-function renderTurnRows(view, renderedTurns, promptCap, overflowByDay = []) {
+function renderTurnRows(view, renderedTurns, promptCap) {
   if (renderedTurns.length === 0) {
     return [];
   }
@@ -2751,11 +2863,6 @@ function renderTurnRows(view, renderedTurns, promptCap, overflowByDay = []) {
       )
     );
     previousRenderedEpoch = turn.createdAtEpoch;
-    for (const overflow of overflowByDay) {
-      if (overflow.lastKeptPrompt === turn.promptNumber) {
-        lines.push(renderOverflowHint(view.session.id, overflow));
-      }
-    }
   }
   return lines;
 }
@@ -2770,9 +2877,6 @@ function computePreviousEpochByPrompt(turns) {
 }
 function renderDayDivider(currentEpoch, previousRenderedEpoch) {
   return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
-}
-function renderOverflowHint(sessionId, overflow) {
-  return `   \u2026 +${overflow.count} more ${overflow.kind} this day \u2192 timeline(id="S${sessionId}", view="turns") @ T${overflow.firstPrompt}\u2013T${overflow.lastPrompt}`;
 }
 function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, marker = null) {
   const isUndone = turn.status === "undone";
@@ -2956,7 +3060,7 @@ function renderLineagePointer(view) {
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
-  const body = view.view === "phases" ? renderPhases(view) : view.view === "milestones" ? renderMilestoneDigest(view, promptCap) : renderTurnTable(view, promptCap);
+  const body = view.view === "phases" ? renderPhases(view) : view.view === "milestones" ? renderMilestoneDigest(view) : renderTurnTable(view, promptCap);
   return [
     ...renderSessionHeader(view),
     ...body,

@@ -27,7 +27,6 @@ export interface TimelineView {
   pagedMilestones: KeptMilestone[];
   milestoneDayGroups: MilestoneDayGroup[];
   pagedPhases: Phase[];
-  milestoneOverflowByDay: OverflowHint[];
   viewItemTotal: number;
   pageAnchorEpoch: number | null;
   page: number;
@@ -61,7 +60,6 @@ export const TITLE_COLUMN_CAP = 80;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
-export const MILESTONE_TIER2_PER_DAY = 4;
 
 export const MILESTONE_TITLE_CAP = 90;
 export const MILESTONE_DAY_BUDGET_BASE = 4;
@@ -194,6 +192,11 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 
 export const PENDING_EMOJI = "⏳";
 const MISSING_LINE_ANCHOR = "—";
+
+function typeEmoji(type: string | null): string {
+  if (type === null) return PENDING_EMOJI;
+  return TYPE_EMOJI_MAP[type] ?? "•";
+}
 
 type PaginatedItems<T> = { items: T[]; total: number; pageCount: number };
 
@@ -696,8 +699,7 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
     }
 
     const kind: Phase["kind"] = turn.type === null ? "pending" : "typed";
-    const emoji =
-      turn.type === null ? PENDING_EMOJI : (TYPE_EMOJI_MAP[turn.type] ?? "•");
+    const emoji = typeEmoji(turn.type);
 
     if (current === null || current.kind !== kind || current.type !== turn.type) {
       if (current !== null) {
@@ -1203,7 +1205,6 @@ export function buildTimelineView(
     pagedMilestones: pagedMilestones.items,
     milestoneDayGroups,
     pagedPhases: pagedPhases.items,
-    milestoneOverflowByDay: milestoneSelection.overflowByDay,
     viewItemTotal,
     pageAnchorEpoch,
     page,
@@ -1421,13 +1422,13 @@ function renderMilestoneDigest(view: TimelineView): string[] {
 
   const lines: string[] = [""];
   for (const group of view.milestoneDayGroups) {
-    const cont = group.continued ? " (cont.)" : "";
+    const contSuffix = group.continued ? " (cont.)" : "";
     lines.push(
-      `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${cont} ──`,
+      `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${contSuffix} ──`,
     );
     for (const milestone of group.rows) {
       const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-      const emoji = TYPE_EMOJI_MAP[milestone.turn.type ?? ""] ?? (milestone.turn.type === null ? PENDING_EMOJI : "•");
+      const emoji = typeEmoji(milestone.turn.type);
       const title = sanitizeTimelineField(
         truncateText(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP),
       );
@@ -1447,7 +1448,6 @@ function renderTurnRows(
   view: TimelineView,
   renderedTurns: Array<{ turn: TurnRecord; marker: string | null }>,
   promptCap: number,
-  overflowByDay: OverflowHint[] = [],
 ): string[] {
   if (renderedTurns.length === 0) {
     return [];
@@ -1487,12 +1487,6 @@ function renderTurnRows(
       ),
     );
     previousRenderedEpoch = turn.createdAtEpoch;
-
-    for (const overflow of overflowByDay) {
-      if (overflow.lastKeptPrompt === turn.promptNumber) {
-        lines.push(renderOverflowHint(view.session.id, overflow));
-      }
-    }
   }
 
   return lines;
@@ -1512,10 +1506,6 @@ function computePreviousEpochByPrompt(turns: TurnRecord[]): Map<number, number |
 
 function renderDayDivider(currentEpoch: number, previousRenderedEpoch: number): string {
   return `── ${formatLocalDateWithWeekday(currentEpoch)} · ${formatGap(currentEpoch, previousRenderedEpoch)} idle ──`;
-}
-
-function renderOverflowHint(sessionId: number, overflow: OverflowHint): string {
-  return `   … +${overflow.count} more this day → timeline(id="S${sessionId}", view="turns") @ T${overflow.firstPrompt}–T${overflow.lastPrompt}`;
 }
 
 function renderTurnRow(

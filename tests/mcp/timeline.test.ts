@@ -25,6 +25,7 @@ import {
   milestoneCandidateTurn,
   milestoneMarker,
   milestoneSignificance,
+  OUTCOME_TAGS,
   parseTimelineId,
   renderTimeline,
   resolveWindow,
@@ -1301,6 +1302,57 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(result.overflowByDay[0]!.lastKeptPrompt).toBe(
       Math.max(...result.kept.map((k) => k.turn.promptNumber)),
     );
+  });
+});
+
+function milestoneFixtureTurns(): TurnRecord[] {
+  const day = 24 * 60 * 60;
+  const base = 1_779_782_400; // fixed; never Date.now()
+  const rows: TurnRecord[] = [];
+  let pn = 0;
+  const add = (over: Partial<TurnRecord>, epoch: number) => {
+    pn += 1;
+    rows.push(turn({ promptNumber: pn, createdAtEpoch: epoch, title: `t${pn}`, ...over }));
+  };
+  // 6 days × 20 turns = 120. Each day: 14 discovery (noise, tool_call_count 0 → dropped,
+  // and 0 keeps the burst threshold at 0 so none are re-admitted) + a 5-long decision run
+  // (folds to first+last = 2) + 1 merged feature (outcome → always-keep). Lands ~15.8%.
+  for (let d = 0; d < 6; d += 1) {
+    const dayBase = base + d * day;
+    for (let i = 0; i < 14; i += 1) add({ type: "discovery", toolCallCount: 0 }, dayBase + i * 60);
+    for (let i = 0; i < 5; i += 1) add({ type: "decision" }, dayBase + (14 + i) * 60);
+    add({ type: "feature", filesModified: ["a.ts"], tags: ["merged"] }, dayBase + 19 * 60);
+  }
+  return rows;
+}
+
+describe("milestone retention guard (frozen fixture)", () => {
+  it("keeps 12-20% of non-skipped turns on the frozen fixture", () => {
+    const rows = milestoneFixtureTurns();
+    const result = selectMilestoneTurns({
+      windowTurns: rows,
+      windowSignals: detectShapeSignals(rows),
+      compactBoundaries: [],
+    });
+    const ratio = result.kept.length / rows.length;
+    expect(ratio).toBeGreaterThanOrEqual(0.12);
+    expect(ratio).toBeLessThanOrEqual(0.20);
+  });
+
+  it("surfaces every outcome-only fixture turn with the outcome marker", () => {
+    const rows = milestoneFixtureTurns();
+    const result = selectMilestoneTurns({
+      windowTurns: rows,
+      windowSignals: detectShapeSignals(rows),
+      compactBoundaries: [],
+    });
+    const outcomeOnly = rows.filter(
+      (t) => t.tags.some((tag) => OUTCOME_TAGS.has(tag)) && !t.wasRolledBack && !t.wasInterrupted && t.status !== "undone",
+    );
+    for (const t of outcomeOnly) {
+      const k = result.kept.find((k) => k.turn.promptNumber === t.promptNumber);
+      expect(k?.marker).toBe("outcome");
+    }
   });
 });
 
