@@ -13,7 +13,6 @@ import {
   computeTypesDistribution,
   detectBrokenPromptPairs,
   detectShapeSignals,
-  extractReversalFlag,
   foldMilestoneRuns,
   formatDuration,
   formatGap,
@@ -22,7 +21,6 @@ import {
   getSystemTimezone,
   extractSourceTags,
   milestoneBaseScore,
-  milestoneCandidateTurn,
   milestoneMarker,
   milestoneSignificance,
   OUTCOME_TAGS,
@@ -1076,37 +1074,6 @@ describe("detectShapeSignals", () => {
   });
 });
 
-describe("milestoneCandidateTurn", () => {
-  it("keeps live rows and invalidated decisions, but rejects skipped and invalidated non-decisions", () => {
-    expect(milestoneCandidateTurn(turn({ type: "discovery" }))).toBe(true);
-    expect(
-      milestoneCandidateTurn(
-        turn({ type: "decision", status: "skipped" }),
-      ),
-    ).toBe(false);
-    expect(
-      milestoneCandidateTurn(
-        turn({ type: "decision", status: "undone" }),
-      ),
-    ).toBe(true);
-    expect(
-      milestoneCandidateTurn(
-        turn({ type: "decision", wasRolledBack: true }),
-      ),
-    ).toBe(true);
-    expect(
-      milestoneCandidateTurn(
-        turn({ type: "feature", status: "undone" }),
-      ),
-    ).toBe(false);
-    expect(
-      milestoneCandidateTurn(
-        turn({ type: "discovery", tags: ["invalidated:notify-pending:rollback"] }),
-      ),
-    ).toBe(false);
-  });
-});
-
 describe("milestoneBaseScore / milestoneSignificance", () => {
   const noEndpoints = new Set<number>();
 
@@ -1190,26 +1157,6 @@ describe("foldMilestoneRuns", () => {
   });
 });
 
-describe("extractReversalFlag", () => {
-  it("marks seeded reversal tags only on decision turns", () => {
-    expect(
-      extractReversalFlag(turn({ type: "decision", tags: ["reversal"] })),
-    ).toBe(true);
-    expect(
-      extractReversalFlag(turn({ type: "decision", tags: ["design-pivot"] })),
-    ).toBe(true);
-    expect(
-      extractReversalFlag(turn({ type: "feature", tags: ["reversal"] })),
-    ).toBe(false);
-    expect(
-      extractReversalFlag(turn({ type: "decision", tags: ["rollback"] })),
-    ).toBe(false);
-    expect(
-      extractReversalFlag(turn({ type: "discovery", tags: ["reverse-kl"] })),
-    ).toBe(false);
-  });
-});
-
 describe("milestoneMarker", () => {
   it("returns invalidated for undone or interrupted turns (precedence over all)", () => {
     expect(milestoneMarker(turn({ status: "undone", wasRolledBack: true }))).toBe("invalidated");
@@ -1281,7 +1228,7 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("outcome");
   });
 
-  it("caps a heavy day and emits one overflow hint on the last kept prompt", () => {
+  it("caps a heavy day and emits exactly one overflow hint", () => {
     const base = 1_779_782_400;
     // 30 turns ALTERNATING decision/change on one day -> 30 singleton runs, so folding
     // keeps each one (no consecutive same-type collapse). 30 survivors > cap -> overflow.
@@ -1299,9 +1246,6 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     // cap = min(4 + floor(30/8), 7) = 7 kept -> 23 dropped, exactly one overflow entry.
     expect(result.overflowByDay).toHaveLength(1);
     expect(result.overflowByDay[0]!.count).toBe(rows.length - result.kept.length);
-    expect(result.overflowByDay[0]!.lastKeptPrompt).toBe(
-      Math.max(...result.kept.map((k) => k.turn.promptNumber)),
-    );
   });
 });
 
@@ -1638,7 +1582,6 @@ describe("milestoneDayGroups (pagination)", () => {
     expect(g2.isFinalSliceForDay).toBe(true);
     expect(g2.overflow).not.toBeNull();
     expect(g2.overflow!.count).toBe(40 - 7);
-    expect(g2.overflow!.lastKeptPrompt).toBe(40);
 
     // Overflow appears on exactly one slice across the whole day.
     const overflowSlices = [g1, g2].filter((g) => g.overflow !== null);
@@ -1674,7 +1617,6 @@ describe("milestoneDayGroups (pagination)", () => {
     expect(g.isFinalSliceForDay).toBe(true);
     expect(g.overflow).not.toBeNull();
     expect(g.overflow!.count).toBe(5);
-    expect(g.overflow!.lastKeptPrompt).toBe(10);
   });
 });
 

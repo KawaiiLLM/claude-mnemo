@@ -791,7 +791,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.28-mq2o02td" : "dev";
+var BUILD_ID = true ? "0.2.28-mq2pjlkx" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2520,13 +2520,11 @@ function selectMilestoneTurns(view) {
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
     if (dropped.length > 0) {
       const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      const keptThatDay = dayTurns.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => turn.promptNumber);
       overflowByDay.push({
         date,
         count: dropped.length,
         firstPrompt: byPrompt[0].promptNumber,
-        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0
+        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
       });
     }
   }

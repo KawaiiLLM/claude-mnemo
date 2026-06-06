@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.28-mq2o02td" : "dev";
+var BUILD_ID = true ? "0.2.28-mq2pjlkx" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -39647,13 +39647,11 @@ function selectMilestoneTurns(view) {
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
     if (dropped.length > 0) {
       const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      const keptThatDay = dayTurns.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => turn.promptNumber);
       overflowByDay.push({
         date: date7,
         count: dropped.length,
         firstPrompt: byPrompt[0].promptNumber,
-        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0
+        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
       });
     }
   }

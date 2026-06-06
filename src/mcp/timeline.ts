@@ -76,8 +76,8 @@ export const OUTCOME_TAGS = new Set([
   "finalized",
 ]);
 
-// Duplicated from extractReversalFlag intentionally: the spec non-goal keeps
-// extractReversalFlag untouched (it still drives turns/phases strike-through).
+// Reversal-keyword tags for the optional, decision-gated reversal detection in
+// milestoneMarker (the enableReversalKeyword knob, off by default).
 export const REVERSAL_KEYWORD_TAGS = new Set([
   "reversal",
   "reversed",
@@ -160,7 +160,6 @@ export interface OverflowHint {
   count: number;
   firstPrompt: number;
   lastPrompt: number;
-  lastKeptPrompt: number;
 }
 
 export interface MilestoneSelection {
@@ -495,25 +494,6 @@ export function extractSourceTags(tags: string[]): string[] {
     .map((tag) => tag.slice("source:".length));
 }
 
-export function extractReversalFlag(turn: TurnRecord): boolean {
-  if (turn.type !== "decision") {
-    return false;
-  }
-
-  const reversalTags = new Set([
-    "reversal",
-    "reversed",
-    "superseded",
-    "supersede",
-    "reframed",
-    "reframe",
-    "design-pivot",
-    "pivot",
-  ]);
-
-  return turn.tags.some((tag) => reversalTags.has(tag));
-}
-
 export function milestoneMarker(
   turn: TurnRecord,
   options: { enableReversalKeyword?: boolean } = {},
@@ -536,27 +516,6 @@ export function milestoneMarker(
   }
 
   return null;
-}
-
-function isInvalidatedTurn(turn: TurnRecord): boolean {
-  return (
-    turn.status === "undone" ||
-    turn.wasRolledBack ||
-    turn.wasInterrupted ||
-    turn.tags.some((tag) => tag.startsWith("invalidated:"))
-  );
-}
-
-export function milestoneCandidateTurn(turn: TurnRecord): boolean {
-  if (turn.status === "skipped") {
-    return false;
-  }
-
-  if (isInvalidatedTurn(turn)) {
-    return turn.type === "decision";
-  }
-
-  return true;
 }
 
 const MILESTONE_BASE_SCORE: Record<string, number> = {
@@ -998,15 +957,11 @@ export function selectMilestoneTurns(view: {
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
     if (dropped.length > 0) {
       const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      const keptThatDay = dayTurns
-        .filter((turn) => finalPrompts.has(turn.promptNumber))
-        .map((turn) => turn.promptNumber);
       overflowByDay.push({
         date,
         count: dropped.length,
         firstPrompt: byPrompt[0]!.promptNumber,
         lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
-        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0,
       });
     }
   }

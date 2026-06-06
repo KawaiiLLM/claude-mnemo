@@ -33769,13 +33769,11 @@ function selectMilestoneTurns(view) {
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
     if (dropped.length > 0) {
       const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      const keptThatDay = dayTurns.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => turn.promptNumber);
       overflowByDay.push({
         date: date5,
         count: dropped.length,
         firstPrompt: byPrompt[0].promptNumber,
-        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
-        lastKeptPrompt: keptThatDay.length > 0 ? Math.max(...keptThatDay) : 0
+        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
       });
     }
   }
