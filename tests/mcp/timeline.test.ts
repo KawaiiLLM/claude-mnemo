@@ -21,6 +21,7 @@ import {
   getSystemTimezone,
   extractSourceTags,
   milestoneCandidateTurn,
+  milestoneMarker,
   parseTimelineId,
   renderTimeline,
   resolveWindow,
@@ -1119,6 +1120,35 @@ describe("extractReversalFlag", () => {
     expect(
       extractReversalFlag(turn({ type: "discovery", tags: ["reverse-kl"] })),
     ).toBe(false);
+  });
+});
+
+describe("milestoneMarker", () => {
+  it("returns invalidated for undone or interrupted turns (precedence over all)", () => {
+    expect(milestoneMarker(turn({ status: "undone", wasRolledBack: true }))).toBe("invalidated");
+    expect(milestoneMarker(turn({ wasInterrupted: true }))).toBe("invalidated");
+  });
+
+  it("returns reversed for rolled-back-but-live turns", () => {
+    expect(milestoneMarker(turn({ wasRolledBack: true, status: "extracted" }))).toBe("reversed");
+  });
+
+  it("returns outcome only when not invalidated/reversed", () => {
+    expect(milestoneMarker(turn({ type: "change", tags: ["merged"] }))).toBe("outcome");
+    expect(milestoneMarker(turn({ wasRolledBack: true, tags: ["merged"] }))).toBe("reversed");
+  });
+
+  it("ignores topic tags and the invalidated: namespace", () => {
+    expect(milestoneMarker(turn({ type: "decision", tags: ["rollback", "milestone"] }))).toBeNull();
+    expect(milestoneMarker(turn({ tags: ["invalidated:notified:rollback"] }))).toBeNull();
+  });
+
+  it("reads reversal keyword tags only when enabled and only on decisions", () => {
+    const decision = turn({ type: "decision", tags: ["design-pivot"] });
+    const discovery = turn({ type: "discovery", tags: ["design-pivot"] });
+    expect(milestoneMarker(decision)).toBeNull();
+    expect(milestoneMarker(decision, { enableReversalKeyword: true })).toBe("reversed");
+    expect(milestoneMarker(discovery, { enableReversalKeyword: true })).toBeNull();
   });
 });
 

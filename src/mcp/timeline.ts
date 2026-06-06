@@ -62,6 +62,36 @@ export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
 export const MILESTONE_TIER2_PER_DAY = 4;
 
+export const MILESTONE_TITLE_CAP = 90;
+export const MILESTONE_DAY_BUDGET_BASE = 4;
+export const MILESTONE_DAY_BUDGET_MAX = 7;
+export const MILESTONE_DAY_BUDGET_DIVISOR = 8;
+export const FOLD_FIRST_MIN_RUN = 4;
+
+export const OUTCOME_TAGS = new Set([
+  "merged",
+  "shipped",
+  "released",
+  "ready-to-merge",
+  "approved",
+  "finalized",
+]);
+
+// Duplicated from extractReversalFlag intentionally: the spec non-goal keeps
+// extractReversalFlag untouched (it still drives turns/phases strike-through).
+export const REVERSAL_KEYWORD_TAGS = new Set([
+  "reversal",
+  "reversed",
+  "superseded",
+  "supersede",
+  "reframed",
+  "reframe",
+  "design-pivot",
+  "pivot",
+]);
+
+export type MilestoneMarker = "invalidated" | "reversed" | "outcome" | null;
+
 export type RangeSpec =
   | { kind: "none" }
   | { kind: "all" }
@@ -468,6 +498,30 @@ export function extractReversalFlag(turn: TurnRecord): boolean {
   ]);
 
   return turn.tags.some((tag) => reversalTags.has(tag));
+}
+
+export function milestoneMarker(
+  turn: TurnRecord,
+  options: { enableReversalKeyword?: boolean } = {},
+): MilestoneMarker {
+  if (turn.status === "undone" || turn.wasInterrupted) {
+    return "invalidated";
+  }
+
+  const keywordReversal =
+    options.enableReversalKeyword === true &&
+    turn.type === "decision" &&
+    turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
+
+  if (turn.wasRolledBack || keywordReversal) {
+    return "reversed";
+  }
+
+  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag))) {
+    return "outcome";
+  }
+
+  return null;
 }
 
 function isInvalidatedTurn(turn: TurnRecord): boolean {
