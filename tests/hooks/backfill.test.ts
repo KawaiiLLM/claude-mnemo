@@ -343,4 +343,210 @@ describe("backfillFromTranscript", () => {
     expect(latestTurn?.contentPromptId).toBeNull();
     expect(latestTurn?.transcriptLineStart).toBe(99);
   });
+
+  test("stores the full assistant narration in assistantTranscript while assistantResponse keeps the final message", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-narration",
+      project: "/tmp/project",
+      title: "Narration session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 500,
+      updatedAtEpoch: 500,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 1, "Do the multi-step thing", 501);
+
+    // The transcript carries every assistant text block; the Stop hook only
+    // hands over the final block. assistant_transcript must capture the whole
+    // narration so replay can reconstruct the turn from SQLite alone.
+    const fullNarration =
+      "Let me check the config first.\n\nNow running the tests.\n\nAll green — shipping it.";
+
+    const transcriptTurns: ParsedReplayTurn[] = [
+      {
+        promptNumber: 1,
+        promptId: "pid-narration",
+        userPrompt: "Do the multi-step thing",
+        assistantText: fullNarration,
+        toolCalls: [],
+        transcriptLineStart: 5,
+      },
+    ];
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      undefined,
+      "All green — shipping it.",
+      transcriptTurns,
+    );
+
+    const turn = getTurn(db, session.id, 1);
+    expect(turn?.assistantResponse).toBe("All green — shipping it.");
+    expect(turn?.assistantTranscript).toBe(fullNarration);
+  });
+
+  test("strips <private> tags from the transcript-derived assistant_transcript", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-private-transcript",
+      project: "/tmp/project",
+      title: "Private session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 600,
+      updatedAtEpoch: 600,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 1, "Do it", 601);
+
+    const transcriptTurns: ParsedReplayTurn[] = [
+      {
+        promptNumber: 1,
+        promptId: "pid-private",
+        userPrompt: "Do it",
+        assistantText:
+          "Visible plan.\n\n<private>secret token abc</private>\n\nShipped.",
+        toolCalls: [],
+        transcriptLineStart: 3,
+      },
+    ];
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      undefined,
+      "Shipped.",
+      transcriptTurns,
+    );
+
+    const turn = getTurn(db, session.id, 1);
+    expect(turn?.assistantTranscript).toContain("Visible plan.");
+    expect(turn?.assistantTranscript).not.toContain("secret token abc");
+  });
+
+  test("strips <private> tags from an orphan turn's transcript-derived assistant_response", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-private-orphan",
+      project: "/tmp/project",
+      title: "Private orphan session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 620,
+      updatedAtEpoch: 620,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 1, "Earlier", 621);
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 2, "Latest", 622);
+
+    const transcriptTurns: ParsedReplayTurn[] = [
+      {
+        promptNumber: 1,
+        promptId: "pid-1",
+        userPrompt: "Earlier",
+        assistantText: "Public summary.\n\n<private>leaked</private>",
+        toolCalls: [],
+        transcriptLineStart: 1,
+      },
+      {
+        promptNumber: 2,
+        promptId: "pid-2",
+        userPrompt: "Latest",
+        assistantText: "Latest narration",
+        toolCalls: [],
+        transcriptLineStart: 5,
+      },
+    ];
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      undefined,
+      "Latest final",
+      transcriptTurns,
+    );
+
+    const orphan = getTurn(db, session.id, 1);
+    expect(orphan?.assistantResponse).toContain("Public summary.");
+    expect(orphan?.assistantResponse).not.toContain("leaked");
+    expect(orphan?.assistantTranscript).not.toContain("leaked");
+  });
+
+  test("uses the hook message for assistant_transcript when parsed narration is blank", () => {
+    const db = createDatabase(":memory:");
+    databases.push(db);
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "session-blank-narration",
+      project: "/tmp/project",
+      title: "Blank narration session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 640,
+      updatedAtEpoch: 640,
+      completedAtEpoch: null,
+    });
+
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)`,
+    ).run(session.id, 1, "Do it", 641);
+
+    // The transcript's final assistant message has not flushed yet, so the
+    // parser yields an empty narration; the Stop hook still has the answer.
+    const transcriptTurns: ParsedReplayTurn[] = [
+      {
+        promptNumber: 1,
+        promptId: "pid-blank",
+        userPrompt: "Do it",
+        assistantText: "",
+        toolCalls: [],
+        transcriptLineStart: 3,
+      },
+    ];
+
+    backfillFromTranscript(
+      db,
+      getTurnsForSession(db, session.id),
+      undefined,
+      "Final answer",
+      transcriptTurns,
+    );
+
+    const turn = getTurn(db, session.id, 1);
+    expect(turn?.assistantTranscript).toBe("Final answer");
+  });
 });

@@ -46,6 +46,7 @@ const SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
+    assistant_transcript TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -105,6 +106,7 @@ export function initializeSchema(db: Database): void {
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -147,6 +149,18 @@ function ensureTurnTranscriptLineStartColumn(db: Database): void {
   }
 
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+
+// The full interleaved assistant narration (every text block of the turn),
+// distinct from assistant_response which holds only the final block fed to the
+// extractor. Lets mnemo-replay reconstruct a turn from SQLite without the JSONL.
+// Forward-only: old rows keep NULL and fall back to the transcript on read.
+function ensureTurnAssistantTranscriptColumn(db: Database): void {
+  if (hasColumn(db, "turns", "assistant_transcript")) {
+    return;
+  }
+
+  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
 }
 
 function ensureTurnInvalidationColumns(db: Database): void {

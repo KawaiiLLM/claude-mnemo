@@ -11,9 +11,9 @@ Three axes of read access:
 
 - `recall` - content axis: structured semantic index
 - `timeline` - temporal axis: decision arc, turns, milestones, phases, gaps, bursts
-- `mnemo-replay` - raw axis: direct JSONL + SQLite access
+- `mnemo-replay` - raw axis: direct SQLite + JSONL access
 
-`remember` is the single write path. Use `timeline` for shape, `recall` for content, and `mnemo-replay` only for exact bytes.
+`remember` is the single write path. Use `timeline` for shape, `recall` for content, and `mnemo-replay` for a turn's full text and tool I/O from the database (raw JSONL only for exact bytes).
 
 ## When to use
 

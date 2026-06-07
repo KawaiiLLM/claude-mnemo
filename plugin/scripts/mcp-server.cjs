@@ -7560,6 +7560,7 @@ function initializeSchema(db) {
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -7591,6 +7592,12 @@ function ensureTurnTranscriptLineStartColumn(db) {
     return;
   }
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+function ensureTurnAssistantTranscriptColumn(db) {
+  if (hasColumn(db, "turns", "assistant_transcript")) {
+    return;
+  }
+  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
 }
 function ensureTurnInvalidationColumns(db) {
   if (!hasColumn(db, "turns", "was_interrupted")) {
@@ -7796,6 +7803,7 @@ var init_schema = __esm({
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
+    assistant_transcript TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -31186,7 +31194,7 @@ var StdioServerTransport = class {
 
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
-  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for raw JSONL bytes.",
+  recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview)."
 };
@@ -31406,6 +31414,7 @@ var TURN_SELECT = `
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
+    assistant_transcript AS assistantTranscript,
     title,
     content,
     insight,
@@ -31505,6 +31514,7 @@ function updateTurnById(db, turnId, input) {
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
+            assistant_transcript AS assistantTranscript,
             title,
             content,
             insight,
@@ -34362,7 +34372,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.30" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.31" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

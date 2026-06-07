@@ -243,6 +243,40 @@ describe("turn queries", () => {
     expect(getTurnById(db, turn.id)?.transcriptLineStart).toBe(7);
   });
 
+  test("updateTurnById returns assistantTranscript in the updated record", () => {
+    const turn = saveTurn(db, {
+      sessionId,
+      promptNumber: 8,
+      userPrompt: "Multi-step prompt",
+      assistantResponse: "Final block",
+      title: "Multi-step prompt",
+      content: "Stored content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 800,
+      updatedAtEpoch: 810,
+      observations: [],
+    });
+    updateTurnBackfill(
+      db,
+      turn.id,
+      "Final block",
+      0,
+      undefined,
+      undefined,
+      "Full narration across blocks",
+    );
+    // The value is stored (TURN_SELECT reads it) ...
+    expect(getTurnById(db, turn.id)?.assistantTranscript).toBe(
+      "Full narration across blocks",
+    );
+
+    // ... and the RETURNING clause of updateTurnById must surface it too.
+    const updated = updateTurnById(db, turn.id, { title: "Retitled" });
+    expect(updated?.assistantTranscript).toBe("Full narration across blocks");
+  });
+
   test("updateTurnBackfill skips an occupied contentPromptId instead of throwing", () => {
     const firstTurn = saveTurn(db, {
       sessionId,

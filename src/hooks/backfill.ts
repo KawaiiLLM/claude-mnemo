@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { updateTurnBackfill, type TurnRecord } from "../db/turns";
+import { stripPrivateTags } from "../shared/tag-stripping";
 import {
   parseReplayTranscript,
   type ParsedReplayTurn,
@@ -40,10 +41,20 @@ export function backfillFromTranscript(
       continue;
     }
 
+    // Parser output is raw — strip <private> before it can reach the DB. The
+    // Stop hook already strips lastAssistantMessage; the transcript-derived
+    // branches (orphan response + the full transcript) must do the same.
+    const transcriptText = transcriptTurn?.assistantText
+      ? stripPrivateTags(transcriptTurn.assistantText)
+      : "";
     const assistantResponse =
       isLatestPendingTurn && lastAssistantMessage !== undefined
         ? lastAssistantMessage
-        : transcriptTurn?.assistantText ?? "";
+        : transcriptText;
+    // Full interleaved narration (every assistant text block) for replay. Treat
+    // blank parser output as missing so we fall back to the (already-stripped)
+    // final message instead of overwriting with an empty string.
+    const assistantTranscript = transcriptText || assistantResponse || null;
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
     const contentPromptId =
       isLatestPendingTurn && transcriptTurn?.promptId
@@ -57,6 +68,7 @@ export function backfillFromTranscript(
       toolCallCount,
       contentPromptId,
       transcriptTurn?.transcriptLineStart,
+      assistantTranscript,
     );
   }
 }

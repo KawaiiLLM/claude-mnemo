@@ -329,6 +329,7 @@ var SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
+    assistant_transcript TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -387,6 +388,7 @@ function initializeSchema(db) {
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
+  ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -418,6 +420,12 @@ function ensureTurnTranscriptLineStartColumn(db) {
     return;
   }
   db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+}
+function ensureTurnAssistantTranscriptColumn(db) {
+  if (hasColumn(db, "turns", "assistant_transcript")) {
+    return;
+  }
+  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
 }
 function ensureTurnInvalidationColumns(db) {
   if (!hasColumn(db, "turns", "was_interrupted")) {
@@ -791,7 +799,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.30-mq3oad40" : "dev";
+var BUILD_ID = true ? "0.2.31-mq3tkvt7" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1684,6 +1692,7 @@ var TURN_SELECT = `
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
+    assistant_transcript AS assistantTranscript,
     title,
     content,
     insight,
@@ -1776,6 +1785,7 @@ function updateTurnById(db, turnId, input) {
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
+            assistant_transcript AS assistantTranscript,
             title,
             content,
             insight,
@@ -1873,7 +1883,7 @@ function getMaxPromptNumber(db, sessionId) {
   ).get(sessionId);
   return row?.max ?? null;
 }
-function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart) {
+function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, contentPromptId, transcriptLineStart, assistantTranscript) {
   const existing = getTurnById(db, turnId);
   if (!existing) {
     return;
@@ -1887,12 +1897,14 @@ function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, conten
   db.query(
     `UPDATE turns
      SET assistant_response = ?,
+         assistant_transcript = COALESCE(?, assistant_transcript),
          tool_call_count = ?,
          content_prompt_id = COALESCE(content_prompt_id, ?),
          transcript_line_start = COALESCE(?, transcript_line_start)
      WHERE id = ?`
   ).run(
     assistantResponse,
+    assistantTranscript ?? null,
     toolCallCount,
     safeContentPromptId,
     transcriptLineStart ?? null,
@@ -4563,7 +4575,9 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
     if (!transcriptTurn && !isLatestPendingTurn) {
       continue;
     }
-    const assistantResponse = isLatestPendingTurn && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptTurn?.assistantText ?? "";
+    const transcriptText = transcriptTurn?.assistantText ? stripPrivateTags(transcriptTurn.assistantText) : "";
+    const assistantResponse = isLatestPendingTurn && lastAssistantMessage !== void 0 ? lastAssistantMessage : transcriptText;
+    const assistantTranscript = transcriptText || assistantResponse || null;
     const toolCallCount = transcriptTurn?.toolCalls.length ?? 0;
     const contentPromptId = isLatestPendingTurn && transcriptTurn?.promptId ? transcriptTurn.promptId : void 0;
     updateTurnBackfill(
@@ -4572,7 +4586,8 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
       assistantResponse,
       toolCallCount,
       contentPromptId,
-      transcriptTurn?.transcriptLineStart
+      transcriptTurn?.transcriptLineStart,
+      assistantTranscript
     );
   }
 }

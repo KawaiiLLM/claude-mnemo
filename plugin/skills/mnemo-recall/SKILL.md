@@ -10,7 +10,7 @@ description: Search past sessions for the *why* behind this project's code — d
 **Three axes of read access**:
 - `recall` — content index: what happened, where, and what to inspect next
 - `timeline` — temporal narrative: how a single session unfolded
-- `mnemo-replay` skill — raw truth: direct JSONL and SQLite reads
+- `mnemo-replay` skill — raw truth: direct SQLite and JSONL reads
 
 **Rule of thumb**: start broad, then narrow. `collapsed` is the cheap browsing mode. Use `expanded` only once you have a target. If a `recall` result is good enough, stop there.
 
@@ -64,7 +64,7 @@ recall(id="S12/T3..7")                          # turn range
 recall(id="S12", depth="expanded")              # session content + raw transcript path
 ```
 
-At expanded session depth, the output includes a `raw:` path pointing at the source JSONL. That is the handoff point to `mnemo-replay` when exact bytes matter.
+At expanded session depth, the output includes a `raw:` path pointing at the source JSONL. `mnemo-replay` reads a turn's full text and tool I/O straight from the database; that `raw:` path is the handoff only when you need exact bytes the database does not mirror.
 
 ### Step 3 — Turn detail and observations
 
