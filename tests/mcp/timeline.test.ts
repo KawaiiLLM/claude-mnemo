@@ -1537,6 +1537,63 @@ describe("buildTimelineView", () => {
   });
 });
 
+describe("buildContextTimelineView milestone tail", () => {
+  it("selects milestones over the full session, not a trailing 30-turn window", () => {
+    const db = createDatabase(":memory:");
+    const session = seedLongSession(db, 40);
+
+    const view = buildContextTimelineView(db, session.id, "milestones");
+    const kept = view.pagedMilestones.map((m) => m.turn.promptNumber);
+
+    // Full-session selection keeps the true first-live endpoint T1. The old
+    // last-30-turns window (T11-T40) excluded T1 entirely and force-kept T11
+    // as that window's first-live endpoint instead.
+    expect(kept).toContain(1);
+    expect(kept).not.toContain(11);
+    expect(view.milestoneTail).toBe(true);
+    // window stays full-session so shape signals read "= full session".
+    expect(view.window.startPromptNumber).toBe(1);
+    expect(view.window.endPromptNumber).toBe(40);
+  });
+
+  it("shows only the trailing pageSize kept milestones with an earlier hint", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    // 40 alternating decision/change on one local day → full-session kept
+    // {1,3,5,7,9,11,40} (cap 7). Trailing 3 = {9,11,40}.
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      turn({
+        promptNumber: i + 1,
+        type: i % 2 === 0 ? "decision" : "change",
+        title: `m ${i + 1}`,
+        filesModified: i % 2 === 0 ? [] : ["a.ts"],
+        toolCallCount: 40 - i,
+        createdAtEpoch: base + i * 60,
+      }),
+    );
+    seedTimelineSession(db, rows);
+
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "milestones",
+      pageSize: 3,
+      milestoneTail: true,
+    });
+
+    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([9, 11, 40]);
+    expect(view.viewItemTotal).toBe(7);
+    expect(view.hasEarlier).toBe(true);
+    expect(view.milestoneTail).toBe(true);
+
+    const output = renderTimeline(view, { showEarlierHint: true });
+    // honest tail label (not "page X/Y"), earlier hint bounded by the first
+    // shown milestone, and the day header still reports full-day kept + cont.
+    expect(output).toContain("showing: milestones · last 3/7");
+    expect(output).toContain('earlier: timeline(id="S1/T1..8") or recall(id="S1")');
+    expect(output).toContain("· 7 kept (cont.) ──");
+  });
+});
+
 describe("milestoneDayGroups (pagination)", () => {
   it("splits a day across a page boundary, repeats the day header, overflow once on final slice", () => {
     const db = createDatabase(":memory:");

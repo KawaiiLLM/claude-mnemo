@@ -33238,6 +33238,14 @@ function emptyPaginatedItems(total, pageSize) {
     pageCount: Math.max(1, Math.ceil(total / pageSize))
   };
 }
+function tailItems(items, pageSize) {
+  const start = Math.max(0, items.length - pageSize);
+  return {
+    items: items.slice(start),
+    total: items.length,
+    pageCount: Math.max(1, Math.ceil(items.length / pageSize))
+  };
+}
 function parseTimelineId(id) {
   const trimmed = id.trim();
   if (!trimmed) {
@@ -33873,7 +33881,8 @@ function buildTimelineView(db, input, preloadedTurns) {
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems2(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
-  const pagedMilestones = viewKind === "milestones" ? paginateItems2(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
+  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
+  const pagedMilestones = viewKind === "milestones" ? milestoneTail ? tailItems(milestoneSelection.kept, pageSize) : paginateItems2(milestoneSelection.kept, page, pageSize) : emptyPaginatedItems(milestoneSelection.kept.length, pageSize);
   const milestoneDayGroups = viewKind === "milestones" ? buildMilestoneDayGroups(
     pagedMilestones.items,
     milestoneSelection.kept,
@@ -33906,7 +33915,8 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: false,
+    hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
+    milestoneTail,
     breadcrumb
   };
 }
@@ -34010,6 +34020,9 @@ function formatShowingLine(view) {
     return null;
   }
   const anchor = view.pageAnchorEpoch === null ? "" : ` \xB7 ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
+  if (view.milestoneTail) {
+    return `${view.view} \xB7 last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
+  }
   return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
 function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
@@ -34261,9 +34274,10 @@ function renderEarlierHint(view, options = {}) {
   if (!options.showEarlierHint || !view.hasEarlier) {
     return [];
   }
+  const upperBound = view.view === "milestones" && view.pagedMilestones.length > 0 ? view.pagedMilestones[0].turn.promptNumber - 1 : view.window.startPromptNumber - 1;
   return [
     "",
-    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${upperBound}") or recall(id="S${view.session.id}")`
   ];
 }
 function renderLineagePointer(view) {
@@ -34348,7 +34362,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.29" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.30" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

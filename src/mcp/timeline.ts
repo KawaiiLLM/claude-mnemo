@@ -8,6 +8,13 @@ export interface TimelineInput {
   page?: number;
   pageSize?: number;
   view?: TimelineViewKind;
+  /**
+   * Milestones only: show the trailing `pageSize` kept milestones (the most
+   * recent end) instead of front-aligned page 1. Selection still runs over the
+   * full window; only the displayed slice changes. Used by the SessionStart
+   * context render so compact/clear surface the recent milestone arc.
+   */
+  milestoneTail?: boolean;
 }
 
 export type TimelineViewKind = "turns" | "milestones" | "phases";
@@ -36,6 +43,8 @@ export interface TimelineView {
   jsonlPath: string | null;
   tz: { name: string; offsetLabel: string };
   hasEarlier: boolean;
+  /** True when this milestone view shows the trailing slice (see TimelineInput.milestoneTail). */
+  milestoneTail: boolean;
   /** Fork-lineage breadcrumb string, or null for root sessions. */
   breadcrumb: string | null;
 }
@@ -220,6 +229,18 @@ function emptyPaginatedItems<T>(total: number, pageSize: number): PaginatedItems
     items: [],
     total,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  };
+}
+
+// Trailing slice: the last `pageSize` items (most recent end), never a short
+// front-page artifact. `total`/`pageCount` stay honest so the showing line and
+// earlier hint can report the full set.
+function tailItems<T>(items: T[], pageSize: number): PaginatedItems<T> {
+  const start = Math.max(0, items.length - pageSize);
+  return {
+    items: items.slice(start),
+    total: items.length,
+    pageCount: Math.max(1, Math.ceil(items.length / pageSize)),
   };
 }
 
@@ -1110,9 +1131,12 @@ export function buildTimelineView(
     viewKind === "turns"
       ? paginateItems(nonSkippedTurns, page, pageSize)
       : emptyPaginatedItems<TurnRecord>(nonSkippedTurns.length, pageSize);
+  const milestoneTail = viewKind === "milestones" && input.milestoneTail === true;
   const pagedMilestones =
     viewKind === "milestones"
-      ? paginateItems(milestoneSelection.kept, page, pageSize)
+      ? milestoneTail
+        ? tailItems(milestoneSelection.kept, pageSize)
+        : paginateItems(milestoneSelection.kept, page, pageSize)
       : emptyPaginatedItems<KeptMilestone>(milestoneSelection.kept.length, pageSize);
   const milestoneDayGroups =
     viewKind === "milestones"
@@ -1168,7 +1192,10 @@ export function buildTimelineView(
     windowSignals,
     jsonlPath,
     tz,
-    hasEarlier: false,
+    hasEarlier: milestoneTail
+      ? pagedMilestones.items.length < milestoneSelection.kept.length
+      : false,
+    milestoneTail,
     breadcrumb,
   };
 }
@@ -1197,6 +1224,19 @@ export function buildContextTimelineView(
     return buildTimelineView(db, { id: `S${sessionId}` });
   }
 
+  // Milestones: select over the full session (correct endpoints/budget/retention)
+  // and display the trailing window of kept milestones — the recent arc, which is
+  // what compact/clear want to restore. buildTimelineView sets hasEarlier itself.
+  if (view === "milestones") {
+    return buildTimelineView(db, {
+      id: `S${sessionId}`,
+      view: "milestones",
+      pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
+      milestoneTail: true,
+    }, sortedTurns);
+  }
+
+  // Turns/phases: keep the recent 30-turn window (granular detail near the head).
   const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
   const firstPromptNumber = windowTurns[0]!.promptNumber;
   const lastPromptNumber = windowTurns[windowTurns.length - 1]!.promptNumber;
@@ -1349,6 +1389,9 @@ function formatShowingLine(view: TimelineView): string | null {
   const anchor = view.pageAnchorEpoch === null
     ? ""
     : ` · ${formatLocalDateWithWeekday(view.pageAnchorEpoch)}`;
+  if (view.milestoneTail) {
+    return `${view.view} · last ${view.pagedMilestones.length}/${view.viewItemTotal}${anchor}`;
+  }
   return `${view.view} · page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
 
@@ -1706,9 +1749,17 @@ function renderEarlierHint(
     return [];
   }
 
+  // Milestone views hide earlier *milestones*, not earlier turns: bound the hint
+  // by the first shown milestone so it points at the truncated head, not the
+  // (full-session) turn window start.
+  const upperBound =
+    view.view === "milestones" && view.pagedMilestones.length > 0
+      ? view.pagedMilestones[0]!.turn.promptNumber - 1
+      : view.window.startPromptNumber - 1;
+
   return [
     "",
-    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${view.window.startPromptNumber - 1}") or recall(id="S${view.session.id}")`,
+    `  earlier: timeline(id="S${view.session.id}/T${view.firstPromptNumber}..${upperBound}") or recall(id="S${view.session.id}")`,
   ];
 }
 

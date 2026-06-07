@@ -623,8 +623,14 @@ describe("handleContextHook", () => {
     expect(output).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
     expect(output).not.toContain("showing:");
     expect(output).not.toContain("phases (");
-    expect(output).toContain("shape signals (window T11-T40):");
-    expect(output).toContain('earlier: timeline(id="S3/T1..10") or recall(id="S3")');
+    // Full-session milestone selection (not the old last-30-turns window): the
+    // window is the whole session and the digest keeps the real first endpoint T1.
+    expect(output).toContain("shape signals (window T1-T40 = full session):");
+    expect(output).toMatch(/── .+ · T1–T40 · 2 kept ──/);
+    expect(output).toMatch(/^\s+T1 .+ Turn 1$/m);
+    expect(output).not.toContain("window T11-T40");
+    // All kept milestones fit the tail, so no earlier hint.
+    expect(output).not.toContain("earlier:");
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");
     expect(output).not.toContain('Expand: recall(id="Sx/Ty", depth="expanded")');
