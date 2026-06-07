@@ -446,9 +446,9 @@ Fields:
 - done: a markdown bullet list — one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list — one "- " item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+- reference: a markdown bullet list — one "- " item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md — already indexed by MEMORY.md). Empty string if none.
 
-decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here — keep summaries scoped to this session's work.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference — those belong in turn records — and reference takes only the durable pointers described above, never ephemeral working files. Do NOT record durable cross-project lessons here — keep summaries scoped to this session's work.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;

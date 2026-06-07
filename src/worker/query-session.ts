@@ -330,11 +330,11 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 - done: a markdown bullet list — one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list — one \`- \` item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+- reference: a markdown bullet list — one \`- \` item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md — already indexed by MEMORY.md). Empty string if none.
 
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
-Do not put file paths, tool counts, or code-level details anywhere but \`reference\` — those belong in turn records. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
+Do not put file paths, tool counts, or code-level details in any field except \`reference\` — those belong in turn records — and \`reference\` takes only the durable pointers described above, never ephemeral working files. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh — follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message — the \`prior_*\` fields are the only state to base the refresh decision on.
 

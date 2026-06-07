@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.31-mq3tkvt7" : "dev";
+var BUILD_ID = true ? "0.2.32-mq3xwney" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2755,9 +2755,9 @@ Fields:
 - done: a markdown bullet list \u2014 one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list \u2014 one "- " item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+- reference: a markdown bullet list \u2014 one "- " item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md \u2014 already indexed by MEMORY.md). Empty string if none.
 
-decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT mention file paths, tool counts, or code-level details except in reference. Those belong in turn records. Do NOT record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference \u2014 those belong in turn records \u2014 and reference takes only the durable pointers described above, never ephemeral working files. Do NOT record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
@@ -40579,11 +40579,11 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 - done: a markdown bullet list \u2014 one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list \u2014 one \`- \` item per line, external anchors only (reference repos, URLs, PRs, out-of-project paths). Empty string if none.
+- reference: a markdown bullet list \u2014 one \`- \` item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md \u2014 already indexed by MEMORY.md). Empty string if none.
 
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
-Do not put file paths, tool counts, or code-level details anywhere but \`reference\` \u2014 those belong in turn records. Do not record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+Do not put file paths, tool counts, or code-level details in any field except \`reference\` \u2014 those belong in turn records \u2014 and \`reference\` takes only the durable pointers described above, never ephemeral working files. Do not record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh \u2014 follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message \u2014 the \`prior_*\` fields are the only state to base the refresh decision on.
 
