@@ -57,6 +57,7 @@ describe("release artifacts", () => {
         "--error-unmatch",
         "plugin/scripts/hook-command.cjs",
         "plugin/scripts/mcp-server.cjs",
+        "plugin/scripts/worker.cjs",
         "plugin/scripts/replay-parse.cjs",
       ],
       {
@@ -65,6 +66,22 @@ describe("release artifacts", () => {
     );
 
     expect(result.status).toBe(0);
+  });
+
+  test("rebuilds BUILD_ID bundles to the current package version", () => {
+    const { version } = JSON.parse(readFileSync("package.json", "utf8")) as {
+      version?: string;
+    };
+    expect(typeof version).toBe("string");
+
+    // Only the long-lived entrypoints embed BUILD_ID (`<version>-<base36>`); the
+    // base36 suffix is non-deterministic, so pin just the version prefix. This
+    // catches a release that bumped the manifests but forgot `bun run build`.
+    const stamp = new RegExp(`BUILD_ID = [^;]*"${version!.replace(/\./g, "\\.")}-`);
+    for (const bundle of ["hook-command.cjs", "worker.cjs"]) {
+      const source = readFileSync(`plugin/scripts/${bundle}`, "utf8");
+      expect(source).toMatch(stamp);
+    }
   });
 
   test("bundles claude agent sdk into hook entrypoint", () => {
