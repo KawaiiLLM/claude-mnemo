@@ -414,58 +414,109 @@ describe("remember tool routing and validation", () => {
       `Reverted the fg inversion from [T${turnId}] due to arrow contamination.`,
     );
   });
+
+  test("turn remember leaves a cross-session / non-existent bare id untouched", () => {
+    // The turn being written (prompt 2, this session).
+    db.query(
+      "INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch) VALUES (?, ?, 'active', ?, ?)",
+    ).run(sessionId, 2, "Mention another session", 140);
+    const laterId = db
+      .query<{ id: number }, []>(
+        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+      )
+      .get(sessionId, 2)!.id;
+
+    // A turn in a DIFFERENT session — a bare mention of its id must NOT bracket,
+    // even though numerically it is below the current turn id.
+    const otherSessionId = upsertSession(db, {
+      contentSessionId: "other-session",
+      project: "claude-mnemo",
+      title: "Other",
+      content: "Other session",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 110,
+      completedAtEpoch: null,
+    }).id;
+    db.query(
+      "INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch) VALUES (?, ?, 'active', ?, ?)",
+    ).run(otherSessionId, 1, "Elsewhere", 150);
+    const otherTurnId = db
+      .query<{ id: number }, []>(
+        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+      )
+      .get(otherSessionId, 1)!.id;
+
+    rememberTool(db, {
+      id: `T${laterId}`,
+      title: "Unrelated work",
+      content: `Incidental mention of T${otherTurnId} and a forward T999999 ref.`,
+      type: "change",
+    });
+
+    // Cross-session id and non-existent forward id both stay bare.
+    expect(getTurn(db, sessionId, 2)?.content).toBe(
+      `Incidental mention of T${otherTurnId} and a forward T999999 ref.`,
+    );
+  });
 });
 
 describe("bracketBareTurnReferences", () => {
-  const ceiling = 4300;
+  // Stand-in for the DB-aware predicate: accept anything below 4300 as a valid
+  // predecessor. The same-session / prompt_number / existence logic is exercised
+  // end-to-end by the rememberTool integration tests above.
+  const isPred = (id: number) => id < 4300;
 
   test("unwraps a parenthesized bare id into brackets", () => {
-    expect(bracketBareTurnReferences("inversion (T4243) caused", ceiling)).toBe(
+    expect(bracketBareTurnReferences("inversion (T4243) caused", isPred)).toBe(
       "inversion [T4243] caused",
     );
   });
 
   test("brackets a bare id woven mid-sentence", () => {
-    expect(bracketBareTurnReferences("reverted in T4244 due", ceiling)).toBe(
+    expect(bracketBareTurnReferences("reverted in T4244 due", isPred)).toBe(
       "reverted in [T4244] due",
     );
   });
 
   test("brackets multiple bare ids in one pass", () => {
     expect(
-      bracketBareTurnReferences("from T4243 and (T4244)", ceiling),
+      bracketBareTurnReferences("from T4243 and (T4244)", isPred),
     ).toBe("from [T4243] and [T4244]");
   });
 
   test("inserts a space when the id abuts non-space text (comma)", () => {
-    expect(bracketBareTurnReferences("balance,T4243 ok", ceiling)).toBe(
+    expect(bracketBareTurnReferences("balance,T4243 ok", isPred)).toBe(
       "balance, [T4243] ok",
     );
   });
 
-  test("leaves a self / forward id untouched (predecessor-only)", () => {
-    expect(bracketBareTurnReferences("this is T4300 itself", ceiling)).toBe(
+  test("leaves an id the predicate rejects untouched", () => {
+    // self / forward / cross-session / missing all surface as predicate=false
+    expect(bracketBareTurnReferences("this is T4300 itself", isPred)).toBe(
       "this is T4300 itself",
     );
-    expect(bracketBareTurnReferences("see T9999 later", ceiling)).toBe(
+    expect(bracketBareTurnReferences("see T9999 later", isPred)).toBe(
       "see T9999 later",
+    );
+    expect(bracketBareTurnReferences("ref (T4243) here", () => false)).toBe(
+      "ref (T4243) here",
     );
   });
 
   test("never double-brackets an already-bracketed id", () => {
-    expect(bracketBareTurnReferences("see [T4243] ok", ceiling)).toBe(
+    expect(bracketBareTurnReferences("see [T4243] ok", isPred)).toBe(
       "see [T4243] ok",
     );
   });
 
   test("skips a digit run glued into a larger token", () => {
-    expect(bracketBareTurnReferences("fooT123bar baseline", ceiling)).toBe(
+    expect(bracketBareTurnReferences("fooT123bar baseline", isPred)).toBe(
       "fooT123bar baseline",
     );
   });
 
-  test("no-ops on empty content or a non-positive ceiling", () => {
-    expect(bracketBareTurnReferences("", 5)).toBe("");
-    expect(bracketBareTurnReferences("from T1 here", 0)).toBe("from T1 here");
+  test("no-ops on empty content", () => {
+    expect(bracketBareTurnReferences("", () => true)).toBe("");
   });
 });

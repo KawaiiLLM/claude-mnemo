@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.34-mqcikwwx" : "dev";
+var BUILD_ID = true ? "0.2.34-mqcixrwz" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -38943,15 +38943,15 @@ function parseObservationId(value) {
   const match = /^O(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
-function bracketBareTurnReferences(content, ceilingId) {
-  if (!content || ceilingId <= 0) {
+function bracketBareTurnReferences(content, isValidPredecessor) {
+  if (!content) {
     return content;
   }
   return content.replace(
     /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
     (match, lead, digits) => {
       const id = Number.parseInt(digits, 10);
-      if (!Number.isFinite(id) || id >= ceilingId) {
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
         return match;
       }
       const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
@@ -39000,10 +39000,18 @@ function handleTurnRemember(db, turnId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
+  const current = getTurnById(db, turnId);
+  const isValidPredecessor = (candidateId) => {
+    if (!current || candidateId === turnId) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
+  };
   const turn = updateTurnById(db, turnId, {
     status: deriveTurnStatus(input),
     title: input.title ?? null,
-    content: input.content != null ? bracketBareTurnReferences(input.content, turnId) : null,
+    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
     tags: input.tags ?? [],

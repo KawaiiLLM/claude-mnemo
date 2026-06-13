@@ -98,10 +98,12 @@ function parseObservationId(value: string): number | null {
  * causal link never reaches the temporal layer. This rewrites those bare
  * mentions to `[T<n>]` before persisting, under two guards:
  *
- *  - Predecessor-only: an id is bracketed only when strictly less than the
- *    turn's own id (`ceilingId`). A self/forward id cannot be a causal driver
- *    and is almost always incidental text (a measurement, a token), so it is
- *    left untouched.
+ *  - Valid predecessor only: `isValidPredecessor(id)` decides whether a bare id
+ *    is a real causal driver. The caller passes the SAME predicate the read-side
+ *    resolver applies (timeline.ts) — the cited turn must exist, share the
+ *    session, and precede this one by prompt_number. A numeric `id < turnId`
+ *    check is NOT enough: DB-id order ≠ prompt order, and an incidental bare
+ *    `T123` that happens to be a real earlier turn would become a false cite.
  *  - Boundary + spacing: a bare id glued into a larger token ("fooT4243") or
  *    already bracketed (`[T4243]`) is skipped; when the surviving neighbour is
  *    non-space text (it sat in parens or after a comma) a single space is
@@ -109,9 +111,9 @@ function parseObservationId(value: string): number | null {
  */
 export function bracketBareTurnReferences(
   content: string,
-  ceilingId: number,
+  isValidPredecessor: (candidateId: number) => boolean,
 ): string {
-  if (!content || ceilingId <= 0) {
+  if (!content) {
     return content;
   }
 
@@ -123,8 +125,8 @@ export function bracketBareTurnReferences(
     /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
     (match: string, lead: string, digits: string) => {
       const id = Number.parseInt(digits, 10);
-      if (!Number.isFinite(id) || id >= ceilingId) {
-        return match; // predecessor-only guard
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
+        return match;
       }
       const needsSpace =
         lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
@@ -194,12 +196,30 @@ function handleTurnRemember(
     return parameterError(statusError);
   }
 
+  // DB-aware predecessor predicate, mirroring the read-side resolver
+  // (timeline.ts resolveMilestoneReferences): a bare `T<n>` is bracketed only if
+  // the cited turn exists, shares this turn's session, and precedes it by
+  // prompt_number. `current` is null only when the turn itself is missing, in
+  // which case updateTurnById below returns null → "not found".
+  const current = getTurnById(db, turnId);
+  const isValidPredecessor = (candidateId: number): boolean => {
+    if (!current || candidateId === turnId) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return (
+      cited !== null &&
+      cited.sessionId === current.sessionId &&
+      cited.promptNumber < current.promptNumber
+    );
+  };
+
   const turn = updateTurnById(db, turnId, {
     status: deriveTurnStatus(input),
     title: input.title ?? null,
     content:
       input.content != null
-        ? bracketBareTurnReferences(input.content, turnId)
+        ? bracketBareTurnReferences(input.content, isValidPredecessor)
         : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
