@@ -9,7 +9,7 @@ import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
-import { rememberTool } from "../../src/mcp/remember";
+import { bracketBareTurnReferences, rememberTool } from "../../src/mcp/remember";
 
 describe("remember tool routing and validation", () => {
   let db: Database;
@@ -389,5 +389,83 @@ describe("remember tool routing and validation", () => {
 
     const turn = getTurn(db, sessionId, 1)!;
     expect(turn.status).toBe("extracted");
+  });
+
+  test("turn remember brackets a bare predecessor id woven into content", () => {
+    // Seed an earlier turn (lower DB id) and a later one; the later turn's
+    // content names the earlier by bare id, as the agent tends to mid-sentence.
+    db.query(
+      "INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch) VALUES (?, ?, 'active', ?, ?)",
+    ).run(sessionId, 2, "Revert it", 140);
+    const laterId = db
+      .query<{ id: number }, []>(
+        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+      )
+      .get(sessionId, 2)!.id;
+
+    rememberTool(db, {
+      id: `T${laterId}`,
+      title: "Revert the inversion",
+      content: `Reverted the fg inversion from T${turnId} due to arrow contamination.`,
+      type: "bugfix",
+    });
+
+    expect(getTurn(db, sessionId, 2)?.content).toBe(
+      `Reverted the fg inversion from [T${turnId}] due to arrow contamination.`,
+    );
+  });
+});
+
+describe("bracketBareTurnReferences", () => {
+  const ceiling = 4300;
+
+  test("unwraps a parenthesized bare id into brackets", () => {
+    expect(bracketBareTurnReferences("inversion (T4243) caused", ceiling)).toBe(
+      "inversion [T4243] caused",
+    );
+  });
+
+  test("brackets a bare id woven mid-sentence", () => {
+    expect(bracketBareTurnReferences("reverted in T4244 due", ceiling)).toBe(
+      "reverted in [T4244] due",
+    );
+  });
+
+  test("brackets multiple bare ids in one pass", () => {
+    expect(
+      bracketBareTurnReferences("from T4243 and (T4244)", ceiling),
+    ).toBe("from [T4243] and [T4244]");
+  });
+
+  test("inserts a space when the id abuts non-space text (comma)", () => {
+    expect(bracketBareTurnReferences("balance,T4243 ok", ceiling)).toBe(
+      "balance, [T4243] ok",
+    );
+  });
+
+  test("leaves a self / forward id untouched (predecessor-only)", () => {
+    expect(bracketBareTurnReferences("this is T4300 itself", ceiling)).toBe(
+      "this is T4300 itself",
+    );
+    expect(bracketBareTurnReferences("see T9999 later", ceiling)).toBe(
+      "see T9999 later",
+    );
+  });
+
+  test("never double-brackets an already-bracketed id", () => {
+    expect(bracketBareTurnReferences("see [T4243] ok", ceiling)).toBe(
+      "see [T4243] ok",
+    );
+  });
+
+  test("skips a digit run glued into a larger token", () => {
+    expect(bracketBareTurnReferences("fooT123bar baseline", ceiling)).toBe(
+      "fooT123bar baseline",
+    );
+  });
+
+  test("no-ops on empty content or a non-positive ceiling", () => {
+    expect(bracketBareTurnReferences("", 5)).toBe("");
+    expect(bracketBareTurnReferences("from T1 here", 0)).toBe("from T1 here");
   });
 });

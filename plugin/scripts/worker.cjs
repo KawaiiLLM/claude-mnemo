@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.33-mqcar834" : "dev";
+var BUILD_ID = true ? "0.2.34-mqcikwwx" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -38943,6 +38943,23 @@ function parseObservationId(value) {
   const match = /^O(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
+function bracketBareTurnReferences(content, ceilingId) {
+  if (!content || ceilingId <= 0) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match, lead, digits) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || id >= ceilingId) {
+        return match;
+      }
+      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    }
+  );
+}
 function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
     return null;
@@ -38986,7 +39003,7 @@ function handleTurnRemember(db, turnId, input) {
   const turn = updateTurnById(db, turnId, {
     status: deriveTurnStatus(input),
     title: input.title ?? null,
-    content: input.content ?? null,
+    content: input.content != null ? bracketBareTurnReferences(input.content, turnId) : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
     tags: input.tags ?? [],
@@ -40634,7 +40651,7 @@ For each \`<turn>\` block:
 
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
-   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` \u2014 a bare DB id (the same id from its \`<turn id="T...">\` block, or a \`dbid:T<n>\` from the recent-turn index / a recall result). Only causally-significant predecessor(s), at most ~2; omit if none.
+   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - tags: 0-5 lowercase-hyphenated keywords

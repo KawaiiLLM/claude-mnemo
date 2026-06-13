@@ -33058,6 +33058,23 @@ function parseObservationId(value) {
   const match = /^O(\d+)$/i.exec(value.trim());
   return match ? Number.parseInt(match[1], 10) : null;
 }
+function bracketBareTurnReferences(content, ceilingId) {
+  if (!content || ceilingId <= 0) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match, lead, digits) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || id >= ceilingId) {
+        return match;
+      }
+      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    }
+  );
+}
 function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   if (status === void 0) {
     return null;
@@ -33101,7 +33118,7 @@ function handleTurnRemember(db, turnId, input) {
   const turn = updateTurnById(db, turnId, {
     status: deriveTurnStatus(input),
     title: input.title ?? null,
-    content: input.content ?? null,
+    content: input.content != null ? bracketBareTurnReferences(input.content, turnId) : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
     tags: input.tags ?? [],
@@ -34477,7 +34494,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.33" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.34" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

@@ -90,6 +90,50 @@ function parseObservationId(value: string): number | null {
   return match ? Number.parseInt(match[1]!, 10) : null;
 }
 
+/**
+ * Backstop for fix #1: the memory agent reliably names the predecessor turn's
+ * DB id but, when the reference is woven mid-sentence ("reverted in T4244",
+ * "(T4243)"), writes it bare instead of the bracketed `[T<n>]` form the timeline
+ * resolver (parseContentReferences, /\[T(\d+)\]/g) and recall key on — so the
+ * causal link never reaches the temporal layer. This rewrites those bare
+ * mentions to `[T<n>]` before persisting, under two guards:
+ *
+ *  - Predecessor-only: an id is bracketed only when strictly less than the
+ *    turn's own id (`ceilingId`). A self/forward id cannot be a causal driver
+ *    and is almost always incidental text (a measurement, a token), so it is
+ *    left untouched.
+ *  - Boundary + spacing: a bare id glued into a larger token ("fooT4243") or
+ *    already bracketed (`[T4243]`) is skipped; when the surviving neighbour is
+ *    non-space text (it sat in parens or after a comma) a single space is
+ *    inserted so the bracket never abuts adjacent text.
+ */
+export function bracketBareTurnReferences(
+  content: string,
+  ceilingId: number,
+): string {
+  if (!content || ceilingId <= 0) {
+    return content;
+  }
+
+  // lead: start-of-string, or the single char before an optional `(` — never an
+  //   existing `[` or a word char, so we never reach into `[T..]` or a token.
+  // `\(?T(\d+)\)?`: the id, unwrapping a `(…)` form into brackets.
+  // lookahead: not already followed by `]` or a word char.
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match: string, lead: string, digits: string) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || id >= ceilingId) {
+        return match; // predecessor-only guard
+      }
+      const needsSpace =
+        lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    },
+  );
+}
+
 function validateStatusForRoute(
   status: string | undefined,
   allowedStatuses: readonly string[] | null,
@@ -153,7 +197,10 @@ function handleTurnRemember(
   const turn = updateTurnById(db, turnId, {
     status: deriveTurnStatus(input),
     title: input.title ?? null,
-    content: input.content ?? null,
+    content:
+      input.content != null
+        ? bracketBareTurnReferences(input.content, turnId)
+        : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
     tags: input.tags ?? [],

@@ -278,7 +278,7 @@ For each \`<turn>\` block:
 
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
-   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` — a bare DB id (the same id from its \`<turn id="T...">\` block, or a \`dbid:T<n>\` from the recent-turn index / a recall result). Only causally-significant predecessor(s), at most ~2; omit if none.
+   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets — write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` — even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (≤50 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - tags: 0-5 lowercase-hyphenated keywords
