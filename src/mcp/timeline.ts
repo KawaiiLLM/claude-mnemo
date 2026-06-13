@@ -71,6 +71,16 @@ export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
 
 export const MILESTONE_TITLE_CAP = 90;
+/** Max causal references rendered as sub-lines under a single milestone. */
+export const MILESTONE_REFERENCE_CAP = 2;
+/**
+ * Max raw `[T<n>]` candidates parsed out of one milestone's content before
+ * validation. Higher than the display cap so that invalid leading refs
+ * (cross-session, self/future, missing) don't crowd out valid predecessors —
+ * the resolver validates these candidates and keeps the first
+ * `MILESTONE_REFERENCE_CAP` that survive. Bounds work on pathological content.
+ */
+export const MILESTONE_REFERENCE_PARSE_CAP = 8;
 export const MILESTONE_DAY_BUDGET_BASE = 4;
 export const MILESTONE_DAY_BUDGET_MAX = 7;
 export const MILESTONE_DAY_BUDGET_DIVISOR = 8;
@@ -80,10 +90,43 @@ export const OUTCOME_TAGS = new Set([
   "merged",
   "shipped",
   "released",
+  // `release` (singular/imperative stem) is how release turns tag themselves;
+  // `released`/`shipped` are already present. Do NOT add the bare verbs
+  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
+  // always-keep outcome markers.
+  "release",
   "ready-to-merge",
   "approved",
   "finalized",
 ]);
+
+// Version-bump file set, per the project release ritual: package.json plus the
+// marketplace/plugin manifests. Matched on path suffix because stored paths may
+// be relative or absolute.
+const PLUGIN_MANIFEST_SUFFIXES = [
+  "marketplace.json",
+  "plugin/.claude-plugin/plugin.json",
+  ".claude-plugin/plugin.json",
+];
+
+/**
+ * Version-file backstop for outcome detection: a turn that modifies the
+ * version-bump file set (a `package.json` AND at least one plugin/marketplace
+ * manifest) is a release even when it carries no outcome tag. Suffix-matched so
+ * relative and absolute stored paths both resolve.
+ */
+export function isVersionBumpTurn(filesModified: string[]): boolean {
+  const hasPackageJson = filesModified.some((path) =>
+    path.endsWith("package.json"),
+  );
+  if (!hasPackageJson) {
+    return false;
+  }
+
+  return filesModified.some((path) =>
+    PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path.endsWith(suffix)),
+  );
+}
 
 // Reversal-keyword tags for the optional, decision-gated reversal detection in
 // milestoneMarker (the enableReversalKeyword knob, off by default).
@@ -158,10 +201,32 @@ export interface ShapeSignals {
   externalInputs: Array<{ promptNumber: number; source: string }>;
 }
 
+/**
+ * A causal reference cited in a milestone's `content` as `[T<dbid>]`, resolved
+ * to its driver turn. The renderer shows these as indented `↳` sub-lines so the
+ * "why" rides on the marker rather than competing for a per-day milestone slot.
+ * Resolution is done in the query layer (where `db` is available); the renderer
+ * stays pure and only formats the pre-resolved data.
+ */
+export interface CitedReference {
+  /** The driver's user-facing prompt number (for display). */
+  promptNumber: number;
+  /** The driver's title (already resolved; truncated at render time). */
+  title: string;
+  /** The driver's milestone marker, used to flag a rolled-back/invalidated cause. */
+  marker: MilestoneMarker;
+}
+
 export interface KeptMilestone {
   turn: TurnRecord;
   score: number;
   marker: MilestoneMarker;
+  /**
+   * Resolved causal references parsed from `turn.content` (`[T<dbid>]`), ≤2.
+   * Populated in the query layer via `resolveMilestoneReferences`; absent (or
+   * empty) when the milestone cites nothing resolvable in-session.
+   */
+  references?: CitedReference[];
 }
 
 export interface OverflowHint {
@@ -532,7 +597,10 @@ export function milestoneMarker(
     return "reversed";
   }
 
-  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag))) {
+  if (
+    turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) ||
+    isVersionBumpTurn(turn.filesModified)
+  ) {
     return "outcome";
   }
 
@@ -998,6 +1066,98 @@ export function selectMilestoneTurns(view: {
   return { kept, overflowByDay };
 }
 
+/**
+ * Parses bare DB-id causal references (`[T<n>]`) out of a milestone's content.
+ * Returns the cited DB turn ids in order, de-duplicated, capped at
+ * `MILESTONE_REFERENCE_CAP`. These are DB turn ids (the agent's id space, the
+ * same id passed to `remember()`), NOT user-facing prompt numbers — the caller
+ * resolves them via `getTurnById` and maps id → prompt number for display.
+ */
+export function parseContentReferences(
+  content: string | null,
+  cap: number = MILESTONE_REFERENCE_CAP,
+): number[] {
+  if (!content) {
+    return [];
+  }
+
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  const pattern = /\[T(\d+)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) {
+    const id = Number(match[1]);
+    if (!Number.isInteger(id) || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= cap) {
+      break;
+    }
+  }
+
+  return ids;
+}
+
+/**
+ * Resolves each kept milestone's `[T<dbid>]` causal references (≤2) against the
+ * DB and attaches them as `references`. Resolution goes through `getTurnById`
+ * (the durable DB id), NOT the in-memory window, so a kept milestone in a
+ * ranged view can still cite a driver outside that window. A cite is rejected —
+ * staying buried as raw `[T<n>]` in the undisplayed content — when it does not
+ * resolve, resolves to a different session (session-id guard), or is not an
+ * earlier turn in the same session (predecessor guard: a causal reference must
+ * point backward, so self/future cites are inert). Candidates are parsed up to
+ * `MILESTONE_REFERENCE_PARSE_CAP`, validated, then capped at the first
+ * `MILESTONE_REFERENCE_CAP` survivors so invalid leading refs don't hide valid
+ * predecessors. Mutates the milestones in place and returns them.
+ */
+export function resolveMilestoneReferences(
+  db: Database,
+  kept: KeptMilestone[],
+): KeptMilestone[] {
+  for (const milestone of kept) {
+    const ids = parseContentReferences(
+      milestone.turn.content,
+      MILESTONE_REFERENCE_PARSE_CAP,
+    );
+    if (ids.length === 0) {
+      continue;
+    }
+
+    const references: CitedReference[] = [];
+    for (const id of ids) {
+      const cited = getTurnById(db, id);
+      if (
+        cited === null ||
+        // Session-id guard: a cross-session (or missing) cite renders inert.
+        cited.sessionId !== milestone.turn.sessionId ||
+        // Predecessor guard: a causal reference points backward; a self/future
+        // cite is not a driver and renders inert.
+        cited.promptNumber >= milestone.turn.promptNumber
+      ) {
+        continue;
+      }
+      references.push({
+        promptNumber: cited.promptNumber,
+        title: cited.title ?? "(untitled)",
+        marker: milestoneMarker(cited),
+      });
+      // Stop once we have enough valid survivors (display cap).
+      if (references.length >= MILESTONE_REFERENCE_CAP) {
+        break;
+      }
+    }
+
+    if (references.length > 0) {
+      milestone.references = references;
+    }
+  }
+
+  return kept;
+}
+
 function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
@@ -1125,6 +1285,13 @@ export function buildTimelineView(
     windowSignals,
     compactBoundaries,
   });
+  // Resolve each kept milestone's `[T<dbid>]` causal references here, in the
+  // query layer where `db` is available, so the renderer stays pure. Goes
+  // through `getTurnById`, not the in-memory window, so a ranged view's kept
+  // milestone can still resolve a driver that sits outside its window.
+  if (viewKind === "milestones") {
+    resolveMilestoneReferences(db, milestoneSelection.kept);
+  }
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns =
@@ -1413,6 +1580,26 @@ const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
   outcome: "🏁",
 };
 
+/**
+ * Renders a kept milestone's pre-resolved causal references as `↳` sub-lines,
+ * indented to match the overflow-hint gutter. The cited turn is shown by its
+ * prompt number (mapped from the stored DB id in the query layer); an
+ * invalidated/reversed cause is prefixed with its marker glyph. Pure: it only
+ * formats data already resolved in `resolveMilestoneReferences`.
+ */
+function renderMilestoneReferenceLines(references: CitedReference[]): string[] {
+  return references.map((ref) => {
+    const markerGlyph =
+      ref.marker === "invalidated" || ref.marker === "reversed"
+        ? `${MILESTONE_MARKER_GLYPH[ref.marker]} `
+        : "";
+    const title = sanitizeTimelineField(
+      truncateText(ref.title, MILESTONE_TITLE_CAP),
+    );
+    return `      ↳ ${markerGlyph}T${ref.promptNumber} ${title}`;
+  });
+}
+
 function renderMilestoneDigest(view: TimelineView): string[] {
   if (view.milestoneDayGroups.length === 0) {
     return [];
@@ -1431,6 +1618,7 @@ function renderMilestoneDigest(view: TimelineView): string[] {
         truncateText(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP),
       );
       lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji} ${title}`);
+      lines.push(...renderMilestoneReferenceLines(milestone.references ?? []));
     }
     if (group.overflow !== null) {
       lines.push(

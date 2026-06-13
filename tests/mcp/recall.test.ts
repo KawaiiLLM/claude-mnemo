@@ -474,6 +474,69 @@ describe("recallMemory", () => {
     expect(byPromptNumber).toContain("Diagnose build break");
   });
 
+  test("worker audience appends dbid:T<dbid> to matched turns (query + id routes)", () => {
+    // A dedicated session whose prompt_number is high so the DB id and the
+    // prompt_number provably diverge — the token must carry the DB id, not T<promptNumber>.
+    const driverSession = upsertSession(db, {
+      contentSessionId: "session-driver",
+      project: "claude-mnemo",
+      title: "Driver session",
+      content: "Holds a citable driver turn",
+      insight: null,
+      createdAtEpoch: 92_000,
+      updatedAtEpoch: 92_010,
+      completedAtEpoch: null,
+    });
+    const driverTurn = saveTurn(db, {
+      sessionId: driverSession.id,
+      promptNumber: 57,
+      userPrompt: "Why did retention regress?",
+      assistantResponse: "Window too wide.",
+      title: "Driver discovery turn",
+      content: "Retention regressed because the window was too wide.",
+      insight: null,
+      type: "discovery",
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 92_001,
+      updatedAtEpoch: 92_002,
+      observations: [],
+    });
+    expect(driverTurn.id).not.toBe(driverTurn.promptNumber);
+
+    // query= route (the recall(query=...) path the extractor uses to find a driver).
+    const byQuery = recallMemory(db, {
+      query: "type:discovery",
+      includeDbTurnIds: true,
+    });
+    // The token carries the DB id, NOT the prompt number.
+    expect(byQuery).toContain(`dbid:T${driverTurn.id}`);
+    // The DB-id token rides alongside the existing prompt-number label, not in
+    // place of it.
+    expect(byQuery).toContain(`[S${driverSession.id}][T${driverTurn.promptNumber}] Driver discovery turn`);
+
+    // S/T id route also surfaces the DB id under worker audience.
+    const byPromptId = recallMemory(db, {
+      id: `S${driverSession.id}/T${driverTurn.promptNumber}`,
+      depth: "expanded",
+      includeDbTurnIds: true,
+    });
+    expect(byPromptId).toContain(`dbid:T${driverTurn.id}`);
+  });
+
+  test("main audience (default) keeps prompt-number labels and emits no dbid: token", () => {
+    // Regression on the existing public form pinned around line 369 (`[S...][T<prompt_number>]`).
+    const byQuery = recallMemory(db, { query: "type:bugfix" });
+    expect(byQuery).toContain(`[S${authSessionId}][T1:L4] Diagnose auth race`);
+    expect(byQuery).not.toContain("dbid:");
+
+    const byPromptId = recallMemory(db, {
+      id: `S${authSessionId}/T1`,
+      depth: "expanded",
+    });
+    expect(byPromptId).not.toContain("dbid:");
+  });
+
   test("recall rejects a tag: filter (removed with durable memory)", () => {
     expect(recallMemory(db, { query: "tag:feedback" })).toContain("Parameter error");
   });

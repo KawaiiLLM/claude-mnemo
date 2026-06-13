@@ -22,7 +22,7 @@ import {
   getObservation,
   hasSkippedObservationsForTurn,
 } from "../db/observations";
-import { getTurnById, updateTurnById } from "../db/turns";
+import { getMaxPromptNumber, getTurnById, updateTurnById } from "../db/turns";
 import {
   parseReplayTranscript,
   readLatestContextTokens,
@@ -77,7 +77,7 @@ import {
   type WorkUnitShape,
 } from "./derailment";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
-import { buildSessionSummary } from "../mcp/recall";
+import { buildSessionSummary, recallMemory } from "../mcp/recall";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
@@ -176,6 +176,12 @@ export interface SessionState {
   lastActivity: number;
   queryPid?: number;
   agentSessionId?: string;
+  // Set by the onCompactBoundary callback when the SDK auto-compacts the agent
+  // mid-stream (no explicit compact() awaiting). Re-prime can't be injected
+  // mid-stream, so the next work unit re-primes before its turn batch, then
+  // clears this flag. The worker-driven compact path re-primes synchronously and
+  // never sets this (see handleCompact / query-session compact_boundary gating).
+  needsReprime?: boolean;
   processingLock: Promise<void>;
   closing?: Promise<void>;
   pushMessage: (prompt: string) => Promise<void>;
@@ -913,6 +919,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         onPid: (pid) => {
           state!.queryPid = pid;
         },
+        // SDK-auto compact: an unsolicited compact_boundary wiped the agent's
+        // history. Re-prime can't be injected mid-stream, so flag it; the next
+        // work unit re-primes before its turn batch and clears the flag.
+        onCompactBoundary: () => {
+          state!.needsReprime = true;
+        },
         onRemember: (id: string) => {
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
@@ -934,6 +946,55 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return ensureQuerySession(state, { forceFresh: true });
   }
 
+  // Recall-style, collapsed index of the session's most recent (≤30) turns,
+  // rendered in the WORKER DB-id space (`dbid:T<dbid>` per line). The agent
+  // cites turns by DB id, so the re-prime must hand it citable ids for recent
+  // turns it can no longer see in its (compacted) history. Empty string when the
+  // session has no turns yet.
+  function buildRecentTurnIndex(sessionDbId: number): string {
+    const maxPromptNumber = getMaxPromptNumber(deps.db, sessionDbId);
+    if (maxPromptNumber === null) {
+      return "";
+    }
+    const lo = Math.max(1, maxPromptNumber - 29);
+    try {
+      return recallMemory(deps.db, {
+        id: `S${sessionDbId}/T${lo}..${maxPromptNumber}`,
+        depth: "collapsed",
+        // pageSize must cover the whole window so all 30 turns render in one page.
+        pageSize: 30,
+        includeDbTurnIds: true,
+      });
+    } catch {
+      // Re-prime must stay resilient even if the recent-turn index fails to
+      // render; the structured summary digest below is the primary payload.
+      return "";
+    }
+  }
+
+  // Re-cold-start the (existing) query session with the shared SessionStart
+  // render so a freshly-compacted / reopened agent regains the session's
+  // structured state, plus a recent-turn DB-id index it can cite. The re-prime
+  // response is exempt from derailment detection. Used by both the derailment
+  // reopen and the post-compact (worker-driven + SDK-auto) re-prime paths.
+  async function sendSessionReprime(state: SessionState): Promise<void> {
+    const runtime = ensureQuerySession(state);
+    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
+    const session = getSession(deps.db, state.sessionDbId);
+    if (formatted && session) {
+      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
+      const recentIndex = buildRecentTurnIndex(state.sessionDbId);
+      const body = recentIndex
+        ? `${coldStart}\n\nMost recent turns (cite by DB id):\n${recentIndex}`
+        : coldStart;
+      resetUnitSignals(state);
+      await runtime.sendPrompt(
+        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${body}\n</context>`,
+      );
+    }
+    resetUnitSignals(state); // re-prime response is exempt from detection
+  }
+
   // Tear down the current (poisoned) query and bring up a brand-new one that
   // never resumes the old transcript (T3). Re-cold-start it with the shared
   // SessionStart render so the fresh agent has the session's structured state;
@@ -946,17 +1007,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
     state.querySession = null;
     state.agentSessionId = undefined;
-    const runtime = ensureQuerySessionFresh(state);
-    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
-    const session = getSession(deps.db, state.sessionDbId);
-    if (formatted && session) {
-      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
-      resetUnitSignals(state);
-      await runtime.sendPrompt(
-        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${coldStart}\n</context>`,
-      );
-    }
-    resetUnitSignals(state); // cold-start response is exempt from detection
+    ensureQuerySessionFresh(state);
+    await sendSessionReprime(state);
   }
 
   const MAX_REMINDERS = 2; // K
@@ -1153,6 +1205,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const session = getSession(deps.db, state.sessionDbId);
     if (!session) {
       return;
+    }
+
+    // SDK-auto re-prime boundary: an unsolicited compact wiped the agent's
+    // history since the last work unit. Re-prime now — before this turn batch —
+    // so the agent regains the session's structured state + recent-turn DB-id
+    // index. Clear the flag only AFTER a successful re-prime so a transient
+    // send failure is retried by the next batch; on failure, proceed with this
+    // batch anyway so a doomed re-prime never wedges throughput.
+    if (state.needsReprime) {
+      try {
+        await sendSessionReprime(state);
+        state.needsReprime = false;
+      } catch (error) {
+        logger.error?.("session re-prime failed; will retry next batch", {
+          sessionDbId: state.sessionDbId,
+          error,
+        });
+      }
     }
 
     const miniTurns = batchMiniTurns(batch);
@@ -1788,16 +1858,27 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         });
       }
 
+      const compactState = sessions.get(sessionDbId);
       try {
-        const state = sessions.get(sessionDbId);
-        if (state?.querySession && shouldCompactAgent(state)) {
-          await state.querySession.compact?.();
+        if (compactState?.querySession && shouldCompactAgent(compactState)) {
+          await compactState.querySession.compact?.();
+          // Worker-driven path: re-prime synchronously now that the agent's
+          // history has been compacted away. The explicit compact() boundary is
+          // gated out of onCompactBoundary (query-session.ts), so this is the
+          // only re-prime for this compaction — no double re-prime.
+          await sendSessionReprime(compactState);
         }
       } catch (error) {
         logger.error?.("mnemosyne compact failed", {
           sessionDbId,
           error,
         });
+        // The agent's history may already be wiped while the re-prime failed;
+        // flag so the next work unit retries the re-prime rather than running
+        // the agent on compacted-away history.
+        if (compactState) {
+          compactState.needsReprime = true;
+        }
       }
     } finally {
       compactingSessions.delete(sessionDbId);

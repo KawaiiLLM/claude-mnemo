@@ -485,8 +485,10 @@ describe("worker query session", () => {
     expect(prompt).toContain("`remember()` — your only output");
     expect(prompt).toContain("`recall()` — the only read fallback");
     expect(prompt).toContain(
-      "`recall()` is usually unnecessary — the inline data and conversation history usually suffice. Only escalate when they genuinely do not.",
+      "`recall()` is usually unnecessary — the inline data, the recent-turn index, and conversation history usually suffice. Only escalate when they genuinely do not.",
     );
+    // Component 2: turn content may carry causal `[T<n>]` citations.
+    expect(prompt).toContain("cite that driver inline as `[T<n>]`");
     expect(prompt).not.toContain("from an obs message");
     expect(prompt).not.toContain(
       "Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored",
@@ -687,6 +689,132 @@ describe("worker query session", () => {
     await session.compact();
 
     expect(seenMessages).toEqual(["first", "/compact"]);
+
+    await session.close();
+  });
+
+  test("an explicit compact()'s own boundary does NOT fire onCompactBoundary", async () => {
+    const onCompactBoundary = mock(() => {});
+    const queryImpl = mock(
+      ({
+        prompt,
+      }: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+      }) =>
+        (async function* () {
+          for await (const message of prompt) {
+            if (message.message.content[0]?.text === "/compact") {
+              yield {
+                type: "system",
+                subtype: "compact_boundary",
+                session_id: "agent-session-compact",
+                uuid: "compact-boundary-explicit",
+              };
+              continue;
+            }
+
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 1,
+              duration_api_ms: 1,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              usage: {},
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-explicit",
+              session_id: "agent-session-compact",
+            };
+          }
+        })(),
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+        onCompactBoundary,
+      },
+    );
+
+    await session.sendPrompt("first");
+    await session.compact();
+
+    // The explicit compact() awaits its own boundary (pendingCompact !== null at
+    // the time the boundary arrives), so the unsolicited-only callback never
+    // fires — no double re-prime.
+    expect(onCompactBoundary).not.toHaveBeenCalled();
+
+    await session.close();
+  });
+
+  test("an unsolicited (SDK-auto) compact_boundary fires onCompactBoundary", async () => {
+    const onCompactBoundary = mock(() => {});
+    const queryImpl = mock(
+      ({
+        prompt,
+      }: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+      }) =>
+        (async function* () {
+          for await (const message of prompt) {
+            // The SDK injects an auto-compact boundary BEFORE the result for a
+            // normal prompt — no explicit compact() is awaiting it.
+            yield {
+              type: "system",
+              subtype: "compact_boundary",
+              session_id: "agent-session-auto",
+              uuid: "compact-boundary-auto",
+            };
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 1,
+              duration_api_ms: 1,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              usage: {},
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-auto",
+              session_id: "agent-session-auto",
+            };
+          }
+        })(),
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+        onCompactBoundary,
+      },
+    );
+
+    await session.sendPrompt("hello");
+
+    expect(onCompactBoundary).toHaveBeenCalledTimes(1);
 
     await session.close();
   });

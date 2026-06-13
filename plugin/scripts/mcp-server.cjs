@@ -31943,7 +31943,8 @@ function formatTurnLabel(turn, {
   sessionId,
   mode = "legacy",
   depth = "collapsed",
-  truncate
+  truncate,
+  includeDbTurnIds = false
 } = {}) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
   const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
@@ -31961,7 +31962,8 @@ function formatTurnLabel(turn, {
     mode,
     hintId
   });
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
 }
 function formatTurnCollapsedWithMode(turn, options = {}) {
   const { indent = "  ", mode = "legacy" } = options;
@@ -32522,7 +32524,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector) {
+function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds) {
   const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -32553,7 +32555,8 @@ function renderSession(db, session, depth, truncate, turnSelector) {
         depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
-        truncate
+        truncate,
+        includeDbTurnIds
       }
     );
     lines.push(turnLines);
@@ -32563,7 +32566,7 @@ function renderSession(db, session, depth, truncate, turnSelector) {
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate) {
+function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -32595,7 +32598,8 @@ function renderTurnScope(db, turns, depth, truncate) {
             depth,
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -32603,7 +32607,7 @@ function renderTurnScope(db, turns, depth, truncate) {
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate) {
+function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -32665,7 +32669,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -32706,9 +32711,9 @@ function buildObservationView(observation) {
     content: observation.content
   };
 }
-function renderSessionDetail(db, sessionId, depth, truncate) {
+function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds) {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate) : "Session not found.";
+  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds) : "Session not found.";
 }
 function renderObservationDetail(db, observationId, depth, truncate) {
   const observation = getObservation(db, observationId);
@@ -32753,7 +32758,7 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate) {
+function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds) {
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
@@ -32788,7 +32793,7 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
       return "";
     }
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate);
+      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds);
     }
     const lines = [
       renderNode(
@@ -32812,7 +32817,8 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -32842,7 +32848,7 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
   });
   return sessionLines.filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -32851,7 +32857,9 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     );
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items.map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate)).join("\n"),
+      paged.items.map(
+        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+      ).join("\n"),
       paged.pageCount
     );
   }
@@ -32868,13 +32876,13 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate),
+      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
+    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds) : "Turn not found.";
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
@@ -32897,7 +32905,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -32920,7 +32928,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -32930,7 +32938,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before) {
+function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
   const paged = paginateItems(
     listSessionIds(db, void 0, after, before),
     page,
@@ -32938,7 +32946,9 @@ function renderSessionList(db, depth, page, pageSize, truncate, after, before) {
   );
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
-    paged.items.map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate)).join("\n"),
+    paged.items.map(
+      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+    ).join("\n"),
     paged.pageCount
   );
 }
@@ -32963,6 +32973,7 @@ function recallMemory(db, input) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -32980,7 +32991,8 @@ function recallMemory(db, input) {
       pageSize,
       truncate,
       timeRange.after,
-      timeRange.before
+      timeRange.before,
+      includeDbTurnIds
     );
   }
   if (input.query) {
@@ -32994,7 +33006,7 @@ function recallMemory(db, input) {
     const paged = paginateItems(results, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate),
+      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -33005,7 +33017,8 @@ function recallMemory(db, input) {
     pageSize,
     truncate,
     timeRange.after,
-    timeRange.before
+    timeRange.before,
+    includeDbTurnIds
   );
 }
 
@@ -33194,6 +33207,8 @@ var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
 var MILESTONE_TITLE_CAP = 90;
+var MILESTONE_REFERENCE_CAP = 2;
+var MILESTONE_REFERENCE_PARSE_CAP = 8;
 var MILESTONE_DAY_BUDGET_BASE = 4;
 var MILESTONE_DAY_BUDGET_MAX = 7;
 var MILESTONE_DAY_BUDGET_DIVISOR = 8;
@@ -33202,10 +33217,31 @@ var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "merged",
   "shipped",
   "released",
+  // `release` (singular/imperative stem) is how release turns tag themselves;
+  // `released`/`shipped` are already present. Do NOT add the bare verbs
+  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
+  // always-keep outcome markers.
+  "release",
   "ready-to-merge",
   "approved",
   "finalized"
 ]);
+var PLUGIN_MANIFEST_SUFFIXES = [
+  "marketplace.json",
+  "plugin/.claude-plugin/plugin.json",
+  ".claude-plugin/plugin.json"
+];
+function isVersionBumpTurn(filesModified) {
+  const hasPackageJson = filesModified.some(
+    (path2) => path2.endsWith("package.json")
+  );
+  if (!hasPackageJson) {
+    return false;
+  }
+  return filesModified.some(
+    (path2) => PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path2.endsWith(suffix))
+  );
+}
 var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
   "reversal",
   "reversed",
@@ -33461,7 +33497,7 @@ function milestoneMarker(turn, options = {}) {
   if (turn.wasRolledBack || keywordReversal) {
     return "reversed";
   }
-  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag))) {
+  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
     return "outcome";
   }
   return null;
@@ -33802,6 +33838,60 @@ function selectMilestoneTurns(view) {
   }));
   return { kept, overflowByDay };
 }
+function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
+  if (!content) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  const pattern = /\[T(\d+)\]/g;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    const id = Number(match[1]);
+    if (!Number.isInteger(id) || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= cap) {
+      break;
+    }
+  }
+  return ids;
+}
+function resolveMilestoneReferences(db, kept) {
+  for (const milestone of kept) {
+    const ids = parseContentReferences(
+      milestone.turn.content,
+      MILESTONE_REFERENCE_PARSE_CAP
+    );
+    if (ids.length === 0) {
+      continue;
+    }
+    const references = [];
+    for (const id of ids) {
+      const cited = getTurnById(db, id);
+      if (cited === null || // Session-id guard: a cross-session (or missing) cite renders inert.
+      cited.sessionId !== milestone.turn.sessionId || // Predecessor guard: a causal reference points backward; a self/future
+      // cite is not a driver and renders inert.
+      cited.promptNumber >= milestone.turn.promptNumber) {
+        continue;
+      }
+      references.push({
+        promptNumber: cited.promptNumber,
+        title: cited.title ?? "(untitled)",
+        marker: milestoneMarker(cited)
+      });
+      if (references.length >= MILESTONE_REFERENCE_CAP) {
+        break;
+      }
+    }
+    if (references.length > 0) {
+      milestone.references = references;
+    }
+  }
+  return kept;
+}
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
@@ -33888,6 +33978,9 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     compactBoundaries
   });
+  if (viewKind === "milestones") {
+    resolveMilestoneReferences(db, milestoneSelection.kept);
+  }
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems2(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
@@ -34047,6 +34140,15 @@ var MILESTONE_MARKER_GLYPH = {
   reversed: "\u21A9\uFE0F",
   outcome: "\u{1F3C1}"
 };
+function renderMilestoneReferenceLines(references) {
+  return references.map((ref) => {
+    const markerGlyph = ref.marker === "invalidated" || ref.marker === "reversed" ? `${MILESTONE_MARKER_GLYPH[ref.marker]} ` : "";
+    const title = sanitizeTimelineField(
+      truncateText2(ref.title, MILESTONE_TITLE_CAP)
+    );
+    return `      \u21B3 ${markerGlyph}T${ref.promptNumber} ${title}`;
+  });
+}
 function renderMilestoneDigest(view) {
   if (view.milestoneDayGroups.length === 0) {
     return [];
@@ -34064,6 +34166,7 @@ function renderMilestoneDigest(view) {
         truncateText2(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP)
       );
       lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji3} ${title}`);
+      lines.push(...renderMilestoneReferenceLines(milestone.references ?? []));
     }
     if (group.overflow !== null) {
       lines.push(
@@ -34348,10 +34451,11 @@ function toTimelineQueryInput(args) {
   }
   return input;
 }
-function createDatabaseBackedHandlers(database, _options = {}) {
+function createDatabaseBackedHandlers(database, options = {}) {
   if (!database) {
     return {};
   }
+  const includeDbTurnIds = options.audience === "worker";
   return {
     recall: (args) => textResult2(
       recallMemory(database, {
@@ -34361,7 +34465,8 @@ function createDatabaseBackedHandlers(database, _options = {}) {
         depth: args.depth,
         page: args.page,
         pageSize: args.pageSize,
-        truncate: args.truncate
+        truncate: args.truncate,
+        includeDbTurnIds
       })
     ),
     remember: (args) => rememberTool(database, args),
@@ -34372,7 +34477,7 @@ function createDatabaseBackedHandlers(database, _options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.32" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.33" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

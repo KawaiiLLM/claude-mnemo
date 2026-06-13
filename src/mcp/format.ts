@@ -81,6 +81,10 @@ interface TurnFormatOptions {
   indent?: string;
   sessionId?: number;
   truncate?: number;
+  // Worker-only: append a `dbid:T<dbid>` token to the turn label so the memory
+  // worker can cite a turn it found via recall. Public/main rendering leaves
+  // this unset and the output is byte-identical to before.
+  includeDbTurnIds?: boolean;
 }
 
 interface ToolCallFormatOptions {
@@ -98,6 +102,7 @@ interface RenderNodeOptions {
   truncate?: number;
   mode?: RenderMode;
   includeChildren?: boolean;
+  includeDbTurnIds?: boolean;
 }
 
 type RenderNode =
@@ -463,6 +468,7 @@ function formatTurnLabel(
     mode = "legacy",
     depth = "collapsed",
     truncate,
+    includeDbTurnIds = false,
   }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
   const turnId = turn.transcriptLineStart === null
@@ -490,7 +496,13 @@ function formatTurnLabel(
           hintId,
         });
 
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
+  // Worker-only DB-id surface: recall labels turns by prompt number, but a
+  // citation needs the DB turn id (the same id remember() / `<turn id="T...">`
+  // use). Appending `dbid:T<dbid>` lets the worker cite a turn it found via
+  // recall(query=...). Unset → output is byte-identical to the public form.
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
 }
 
 function formatTurnCollapsedWithMode(

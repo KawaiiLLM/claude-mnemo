@@ -1112,10 +1112,13 @@ describe("worker server", () => {
     expect(pushed).toEqual([compactSessionId]);
     expect(compacted).toEqual([compactSessionId]);
     expect(closed).toEqual([]);
-    // One rendered batch (the drained turn) then the summary push, in order.
-    expect(sentPrompts).toHaveLength(2);
+    // One rendered batch (the drained turn), the summary push, then the
+    // post-compact re-prime, in order. The re-prime fires after compact() so the
+    // freshly-compacted agent regains the session's structured state.
+    expect(sentPrompts).toHaveLength(3);
     expect(sentPrompts[0]).toContain(`<obs id="O${compactObservationId}"`);
     expect(sentPrompts[1]).toBe(`summary:${compactSessionId}`);
+    expect(sentPrompts[2]).toContain("CONTEXT ONLY");
     const state = core.sessions.get(compactSessionId);
     expect(state?.lastPushAt).toBe(0);
     expect(
@@ -1132,6 +1135,288 @@ describe("worker server", () => {
         )
         .get(otherSessionId)?.count,
     ).toBe(1);
+  });
+
+  test("SDK-auto compact: needsReprime re-primes before the next work unit, then clears", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-auto-reprime",
+      project: "/tmp/project-auto-reprime",
+      title: "Auto reprime session",
+      content: "Some content",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    // A couple of finalized turns so the re-prime's recent-turn index has rows.
+    createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    createTurn(db, sessionId, 2, "Turn 2", "Reply 2");
+    const turn3 = createTurn(db, sessionId, 3, "Turn 3", "Reply 3");
+    queueObs(db, sessionId, turn3, 101, "auto-reprime");
+    queueTurnStop(db, sessionId, turn3, 201);
+
+    const sentPrompts: string[] = [];
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+        ...QUIET_STREAMING,
+      },
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
+    });
+
+    // Bring the (real) session state up so it has the worker's pushMessage
+    // routing, then simulate the onCompactBoundary callback: an unsolicited
+    // SDK-auto compact set the flag since the last work unit.
+    await core.scanAndDrainQueue(sessionId);
+    const state = core.sessions.get(sessionId)!;
+    state.needsReprime = true;
+
+    await core.flushSession(sessionId);
+
+    // Re-prime is sent BEFORE the turn-3 batch, and the flag is cleared.
+    expect(sentPrompts).toHaveLength(2);
+    expect(sentPrompts[0]).toContain("CONTEXT ONLY");
+    expect(sentPrompts[1]).toContain(`<turn id="T${turn3}"`);
+    expect(state.needsReprime).toBe(false);
+  });
+
+  test("the re-prime payload carries the recent-turn index with dbid:T<dbid> tokens", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reprime-index",
+      project: "/tmp/project-reprime-index",
+      title: "Reprime index session",
+      content: "Content here",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    const turn2 = createTurn(db, sessionId, 2, "Turn 2", "Reply 2");
+    const turn3 = createTurn(db, sessionId, 3, "Turn 3", "Reply 3");
+    queueObs(db, sessionId, turn3, 101, "reprime-index");
+    queueTurnStop(db, sessionId, turn3, 201);
+
+    const sentPrompts: string[] = [];
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+        ...QUIET_STREAMING,
+      },
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
+    });
+
+    await core.scanAndDrainQueue(sessionId);
+    core.sessions.get(sessionId)!.needsReprime = true;
+
+    await core.flushSession(sessionId);
+
+    const reprime = sentPrompts[0]!;
+    expect(reprime).toContain("Most recent turns (cite by DB id):");
+    // DB ids (not prompt numbers) are emitted so the agent can cite them.
+    expect(reprime).toContain(`dbid:T${turn2}`);
+    expect(reprime).toContain(`dbid:T${turn3}`);
+  });
+
+  test("worker-driven compact re-primes once and does NOT leave needsReprime set (no double re-prime)", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-no-double",
+      project: "/tmp/project-no-double",
+      title: "No double reprime",
+      content: "Content",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turn1 = createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    queueObs(db, sessionId, turn1, 101, "no-double");
+    queueTurnStop(db, sessionId, turn1, 201);
+
+    const sentPrompts: string[] = [];
+    const compacted: number[] = [];
+    const core = createWorkerCore({
+      db,
+      readAgentContextTokensImpl: () => 150_000, // >= 0.5 * 200K → compact runs
+      pushSessionSummaryPromptImpl: async (state, sid) => {
+        await state.pushMessage(`summary:${sid}`);
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args) as
+          | (FakeQueryDeps & { onCompactBoundary?: () => void })
+          | undefined;
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            deps?.onMessage?.({ session_id: "worker-query" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
+            return { session_id: "worker-query" };
+          },
+          async compact() {
+            compacted.push(sessionId);
+            // The explicit compact()'s own boundary is gated out of
+            // onCompactBoundary in query-session.ts, so a real session would
+            // NOT call deps.onCompactBoundary here. Asserting we don't is the
+            // negative guard.
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    // handleCompact drains the queued turn (bringing the query session up),
+    // pushes the summary, then compacts + re-primes.
+    await core.handleCompact(sessionId, null);
+
+    expect(compacted).toEqual([sessionId]);
+    // Exactly one re-prime (the synchronous worker-driven one); the explicit
+    // boundary did not set needsReprime.
+    const reprimes = sentPrompts.filter((p) => p.includes("CONTEXT ONLY"));
+    expect(reprimes).toHaveLength(1);
+    expect(core.sessions.get(sessionId)!.needsReprime ?? false).toBe(false);
+  });
+
+  test("SDK-auto compact: a failed re-prime keeps needsReprime set and still runs the batch", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reprime-fail",
+      project: "/tmp/project-reprime-fail",
+      title: "Reprime fail session",
+      content: "Some content",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    const turn2 = createTurn(db, sessionId, 2, "Turn 2", "Reply 2");
+    queueObs(db, sessionId, turn2, 101, "reprime-fail");
+    queueTurnStop(db, sessionId, turn2, 201);
+
+    const sentPrompts: string[] = [];
+    let failedReprimeOnce = false;
+    // Throws on the FIRST re-prime (the `CONTEXT ONLY` payload), succeeds on
+    // everything else, so the batch send still lands.
+    const failingReprimeImpl = ((...args: unknown[]) => {
+      const deps = fakeQueryDeps(args);
+      return {
+        sessionId: "worker-query",
+        queryPid: 1234,
+        async sendPrompt(prompt: string) {
+          if (prompt.includes("CONTEXT ONLY") && !failedReprimeOnce) {
+            failedReprimeOnce = true;
+            throw new Error("re-prime send failed");
+          }
+          sentPrompts.push(prompt);
+          deps?.onMessage?.({ session_id: "worker-query" });
+          for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+            deps?.onRemember?.(`T${match[1]}`);
+          }
+          return { session_id: "worker-query" };
+        },
+        async close() {},
+      } satisfies WorkerQuerySession;
+    }) as typeof import("../../src/worker/query-session").createWorkerQuerySession;
+
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      config: {
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+        ...QUIET_STREAMING,
+      },
+      createWorkerQuerySessionImpl: failingReprimeImpl,
+    });
+
+    await core.scanAndDrainQueue(sessionId);
+    const state = core.sessions.get(sessionId)!;
+    state.needsReprime = true;
+
+    await core.flushSession(sessionId);
+
+    // The re-prime threw, so the flag stays set for the next batch to retry...
+    expect(failedReprimeOnce).toBe(true);
+    expect(state.needsReprime).toBe(true);
+    // ...but the turn batch still ran — a doomed re-prime must not wedge throughput.
+    expect(sentPrompts.some((p) => p.includes(`<turn id="T${turn2}"`))).toBe(true);
+  });
+
+  test("worker-driven compact: a failed re-prime sets needsReprime so the next work unit retries", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reprime-retry",
+      project: "/tmp/project-reprime-retry",
+      title: "Reprime retry",
+      content: "Content",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turn1 = createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    queueObs(db, sessionId, turn1, 101, "reprime-retry");
+    queueTurnStop(db, sessionId, turn1, 201);
+
+    const sentPrompts: string[] = [];
+    const compacted: number[] = [];
+    const core = createWorkerCore({
+      db,
+      readAgentContextTokensImpl: () => 150_000, // >= 0.5 * 200K → compact runs
+      pushSessionSummaryPromptImpl: async (state, sid) => {
+        await state.pushMessage(`summary:${sid}`);
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args);
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            // The post-compact re-prime fails; the agent's history is already
+            // wiped, so the flag must be set for the next work unit to retry.
+            if (prompt.includes("CONTEXT ONLY")) {
+              throw new Error("re-prime send failed");
+            }
+            sentPrompts.push(prompt);
+            deps?.onMessage?.({ session_id: "worker-query" });
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
+            return { session_id: "worker-query" };
+          },
+          async compact() {
+            compacted.push(sessionId);
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.handleCompact(sessionId, null);
+
+    // compact() ran but the re-prime threw → flag set for retry, no re-prime landed.
+    expect(compacted).toEqual([sessionId]);
+    expect(sentPrompts.some((p) => p.includes("CONTEXT ONLY"))).toBe(false);
+    expect(core.sessions.get(sessionId)!.needsReprime).toBe(true);
   });
 
   function compactGateCore(

@@ -30,6 +30,11 @@ export interface TimelineQueryInput {
 
 export interface CreateDatabaseBackedHandlersOptions {
   defaultProject?: string;
+  // "worker" surfaces the DB turn id (`dbid:T<dbid>`) in recall output so the
+  // memory worker can cite a turn it found via `recall(query=...)`. The public
+  // main agent uses "main" (default) and keeps the prompt-number labels — this
+  // is wired here, NOT in `recallInputShape`, which is strict.
+  audience?: "main" | "worker";
 }
 
 export function textResult(text: string): ToolResult {
@@ -67,11 +72,13 @@ export function toTimelineQueryInput(args: Record<string, unknown>): TimelineQue
 
 export function createDatabaseBackedHandlers(
   database?: Database,
-  _options: CreateDatabaseBackedHandlersOptions = {},
+  options: CreateDatabaseBackedHandlersOptions = {},
 ): Partial<MnemoToolHandlers> {
   if (!database) {
     return {};
   }
+
+  const includeDbTurnIds = options.audience === "worker";
 
   return {
     recall: (args) =>
@@ -84,6 +91,7 @@ export function createDatabaseBackedHandlers(
           page: args.page as number | undefined,
           pageSize: args.pageSize as number | undefined,
           truncate: args.truncate as number | undefined,
+          includeDbTurnIds,
         }),
       ),
     remember: (args) =>

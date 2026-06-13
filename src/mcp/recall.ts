@@ -30,6 +30,11 @@ export interface RecallInput {
   page?: number;
   pageSize?: number;
   truncate?: number;
+  // Internal worker-only flag. When set, rendered turns append a `dbid:T<dbid>`
+  // token so the memory worker can cite a turn it found via recall. NOT exposed
+  // on the public `recallInputShape` (definitions.ts) — wired through the
+  // handler-construction `audience` option (handlers.ts) instead.
+  includeDbTurnIds?: boolean;
 }
 
 interface ParsedTimeRange {
@@ -530,6 +535,7 @@ function renderSession(
   depth: "collapsed" | "expanded",
   truncate?: number,
   turnSelector?: Set<number>,
+  includeDbTurnIds?: boolean,
 ): string {
   const view = depth === "expanded"
     ? buildSessionView(db, session)
@@ -568,6 +574,7 @@ function renderSession(
         mode: "unified",
         sessionId: session.id,
         truncate,
+        includeDbTurnIds,
       },
     );
     lines.push(turnLines);
@@ -585,6 +592,7 @@ function renderTurnScope(
   turns: TurnRecord[],
   depth: "collapsed" | "expanded",
   truncate?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -624,6 +632,7 @@ function renderTurnScope(
             mode: "unified",
             sessionId: session.id,
             truncate,
+            includeDbTurnIds,
           },
         ),
       );
@@ -639,6 +648,7 @@ function renderObservationScope(
   depth: "collapsed" | "expanded",
   includeParents: boolean,
   truncate?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -713,6 +723,7 @@ function renderObservationScope(
             mode: "unified",
             sessionId: session.id,
             truncate,
+            includeDbTurnIds,
           },
         ),
       );
@@ -766,9 +777,12 @@ function renderSessionDetail(
   sessionId: number,
   depth: "collapsed" | "expanded",
   truncate?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate) : "Session not found.";
+  return session
+    ? renderSession(db, session, depth, truncate, undefined, includeDbTurnIds)
+    : "Session not found.";
 }
 
 function renderTurnDetail(
@@ -777,9 +791,12 @@ function renderTurnDetail(
   promptNumber: number,
   depth: "collapsed" | "expanded",
   truncate?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const turn = getTurn(db, sessionId, promptNumber);
-  return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
+  return turn
+    ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds)
+    : "Turn not found.";
 }
 
 function renderObservationDetail(
@@ -867,6 +884,7 @@ function renderGroupedSearchResults(
   results: SearchMemoryResult[],
   depth: "collapsed" | "expanded",
   truncate?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const sessionGroups = new Map<
     number,
@@ -916,7 +934,7 @@ function renderGroupedSearchResults(
     }
 
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate);
+      return renderSession(db, session, depth, truncate, undefined, includeDbTurnIds);
     }
 
     const lines = [
@@ -948,6 +966,7 @@ function renderGroupedSearchResults(
             mode: "unified",
             sessionId: session.id,
             truncate,
+            includeDbTurnIds,
           },
         ),
       );
@@ -991,6 +1010,7 @@ function renderRoutedId(
   truncate?: number,
   after?: number,
   before?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1002,7 +1022,9 @@ function renderRoutedId(
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items
-        .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
+        .map((sessionId) =>
+          renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds),
+        )
         .join("\n"),
       paged.pageCount,
     );
@@ -1021,7 +1043,7 @@ function renderRoutedId(
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate),
+      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount,
     );
   }
@@ -1029,7 +1051,7 @@ function renderRoutedId(
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
     return turn
-      ? renderTurnScope(db, [turn], depth, truncate)
+      ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds)
       : "Turn not found.";
   }
 
@@ -1058,7 +1080,7 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount,
     );
   }
@@ -1086,7 +1108,7 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount,
     );
   }
@@ -1107,6 +1129,7 @@ function renderSessionList(
   truncate?: number,
   after?: number,
   before?: number,
+  includeDbTurnIds?: boolean,
 ): string {
   const paged = paginateItems(
     listSessionIds(db, undefined, after, before),
@@ -1117,7 +1140,9 @@ function renderSessionList(
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items
-      .map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate))
+      .map((sessionId) =>
+        renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds),
+      )
       .join("\n"),
     paged.pageCount,
   );
@@ -1151,6 +1176,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1172,6 +1198,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       truncate,
       timeRange.after,
       timeRange.before,
+      includeDbTurnIds,
     );
   }
 
@@ -1187,7 +1214,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate),
+      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount,
     );
   }
@@ -1200,5 +1227,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
     truncate,
     timeRange.after,
     timeRange.before,
+    includeDbTurnIds,
   );
 }

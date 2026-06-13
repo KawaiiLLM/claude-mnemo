@@ -17,7 +17,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.2.32", () => {
+  test("release metadata is consistently bumped to 0.2.33", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -33,10 +33,10 @@ describe("release artifacts", () => {
       plugins?: Array<{ version?: string }>;
     };
 
-    expect(packageJson.version).toBe("0.2.32");
-    expect(pluginManifest.version).toBe("0.2.32");
-    expect(marketplace.metadata?.version).toBe("0.2.32");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.2.32");
+    expect(packageJson.version).toBe("0.2.33");
+    expect(pluginManifest.version).toBe("0.2.33");
+    expect(marketplace.metadata?.version).toBe("0.2.33");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.2.33");
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -90,5 +90,33 @@ describe("release artifacts", () => {
     expect(hookCommand).not.toContain(
       'var import_claude_agent_sdk = require("@anthropic-ai/claude-agent-sdk")',
     );
+  });
+
+  test("built bundles embed current worker + timeline logic (stale-bundle guard)", () => {
+    // The BUILD_ID guard above catches a version bump WITHOUT a rebuild; it does
+    // NOT catch a SOURCE change without a rebuild — the version prefix is
+    // unchanged, so BUILD_ID still matches and the bundle silently runs old
+    // logic. These content sentinels are stable identifiers from shipped
+    // features; if `bun run build` was skipped after editing src/, a missing one
+    // fails here instead of shipping a stale bundle.
+    const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
+    for (const marker of [
+      "needsReprime", // compact re-prime, both paths
+      "onCompactBoundary", // SDK-auto compact boundary wiring
+      'audience: "worker"', // recall worker DB-id surface
+      "dbid:T", // DB-id token the worker recall emits
+      "OUTCOME_TAGS", // milestone marker logic
+    ]) {
+      expect(worker).toContain(marker);
+    }
+
+    const mcpServer = readFileSync("plugin/scripts/mcp-server.cjs", "utf8");
+    for (const marker of [
+      "OUTCOME_TAGS",
+      '"release"', // release tag → 🏁 milestone
+      "parseContentReferences", // [T<n>] causal-ref resolver
+    ]) {
+      expect(mcpServer).toContain(marker);
+    }
   });
 });

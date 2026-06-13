@@ -56,6 +56,11 @@ export interface WorkerQuerySessionDeps {
   onMessage?: (message: SDKMessage) => void;
   onPid?: (pid: number | undefined) => void;
   onRemember?: (id: string) => void;
+  // Fired ONLY for an unsolicited (SDK-auto) compact boundary — i.e. one that no
+  // explicit compact() call is awaiting (pendingCompact === null). The boundary
+  // an explicit compact() awaits does NOT fire this, so the worker re-primes
+  // exactly once per compaction (the explicit path re-primes synchronously).
+  onCompactBoundary?: () => void;
 }
 
 export interface WorkerQuerySession {
@@ -256,12 +261,12 @@ export function createWorkerQuerySession(
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed — usually one, sometimes zero (no material change → no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages — the exceptions are a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice, and a corrective resend (see Corrective resend). The conversation history exists for LLM continuity, not for re-extraction.
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed — usually one, sometimes zero (no material change → no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages — the exceptions are a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice, and a corrective resend (see Corrective resend). The conversation history exists for LLM continuity, not for re-extraction. (Citing an earlier turn's id as \`[T<n>]\` inside THIS turn's \`content\` is allowed and is NOT "revisiting" — it adds a reference; it does not update that earlier record.)
 
 ## Tools
 
 - \`remember()\` — your only output. Every record update is one remember() call.
-- \`recall()\` — the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call — use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. \`recall()\` is usually unnecessary — the inline data and conversation history usually suffice. Only escalate when they genuinely do not.
+- \`recall()\` — the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call — use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. Second permitted use: to resolve the DB id of a causally-significant earlier turn you want to cite as \`[T<n>]\` but cannot find in the recent-turn index or conversation history — call \`recall({ query: "..." })\` and read the \`dbid:T<n>\` from its output. \`recall()\` is usually unnecessary — the inline data, the recent-turn index, and conversation history usually suffice. Only escalate when they genuinely do not.
 
 Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only via tool calls.
 
@@ -273,7 +278,7 @@ For each \`<turn>\` block:
 
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
-   - content: 100-300 chars, what happened and why
+   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` — a bare DB id (the same id from its \`<turn id="T...">\` block, or a \`dbid:T<n>\` from the recent-turn index / a recall result). Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (≤50 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - tags: 0-5 lowercase-hyphenated keywords
@@ -284,7 +289,7 @@ For each \`<turn>\` block:
 
 Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them).
 
-Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
+Turn messages are the ONLY context where \`recall()\` is permitted as a fallback — under the truncation-critical condition OR the citation-id resolution described in the Tools section, and only for a significant need. Skip it entirely if the inline \`<turn>\` block (and the recent-turn index) already contain what you need.
 
 ## Streamed turns (mini-turns)
 
@@ -330,11 +335,11 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 - done: a markdown bullet list — one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list — one \`- \` item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md — already indexed by MEMORY.md). Empty string if none.
+- reference: a markdown bullet list — one \`- \` item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md — indexed by MEMORY.md). ≤8 bullets; evict the least-durable / already-superseded first. Empty string if none.
 
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
-Do not put file paths, tool counts, or code-level details in any field except \`reference\` — those belong in turn records — and \`reference\` takes only the durable pointers described above, never ephemeral working files. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
+Do not put file paths, tool counts, or code-level details in any field except \`reference\` — those belong in turn records — and \`reference\` follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh — follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message — the \`prior_*\` fields are the only state to base the refresh decision on.
 
@@ -392,6 +397,13 @@ this overrides the normal "extract once, never revisit" rule for that block.
           "subtype" in message &&
           message.subtype === "compact_boundary"
         ) {
+          // Gate on pendingCompact === null BEFORE resolvePendingCompact() clears
+          // it: an unsolicited (SDK-auto) boundary has no awaiting compact(), so
+          // the worker must re-prime; an explicit compact()'s own boundary is
+          // already handled synchronously and must NOT fire this.
+          if (pendingCompact === null) {
+            deps.onCompactBoundary?.();
+          }
           resolvePendingCompact();
           continue;
         }

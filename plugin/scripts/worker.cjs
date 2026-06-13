@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.32-mq3xwney" : "dev";
+var BUILD_ID = true ? "0.2.33-mqcar834" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1083,6 +1083,12 @@ function getFirstTurn(db, sessionId) {
       `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
     ).get(sessionId) ?? null
   );
+}
+function getMaxPromptNumber(db, sessionId) {
+  const row = db.query(
+    "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
+  ).get(sessionId);
+  return row?.max ?? null;
 }
 
 // src/shared/transcript-parser.ts
@@ -2755,9 +2761,9 @@ Fields:
 - done: a markdown bullet list \u2014 one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list \u2014 one "- " item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md \u2014 already indexed by MEMORY.md). Empty string if none.
+- reference: a markdown bullet list \u2014 one "- " item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md \u2014 indexed by MEMORY.md). \u22648 bullets; evict the least-durable / already-superseded first. Empty string if none.
 
-decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference \u2014 those belong in turn records \u2014 and reference takes only the durable pointers described above, never ephemeral working files. Do NOT record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference \u2014 those belong in turn records \u2014 and reference follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do NOT record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
@@ -37818,7 +37824,8 @@ function formatTurnLabel(turn, {
   sessionId,
   mode = "legacy",
   depth = "collapsed",
-  truncate
+  truncate,
+  includeDbTurnIds = false
 } = {}) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
   const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
@@ -37836,7 +37843,8 @@ function formatTurnLabel(turn, {
     mode,
     hintId
   });
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}`;
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
 }
 function formatTurnCollapsedWithMode(turn, options = {}) {
   const { indent = "  ", mode = "legacy" } = options;
@@ -38397,7 +38405,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector) {
+function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds) {
   const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -38428,7 +38436,8 @@ function renderSession(db, session, depth, truncate, turnSelector) {
         depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
-        truncate
+        truncate,
+        includeDbTurnIds
       }
     );
     lines.push(turnLines);
@@ -38438,7 +38447,7 @@ function renderSession(db, session, depth, truncate, turnSelector) {
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate) {
+function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -38470,7 +38479,8 @@ function renderTurnScope(db, turns, depth, truncate) {
             depth,
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -38478,7 +38488,7 @@ function renderTurnScope(db, turns, depth, truncate) {
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate) {
+function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -38540,7 +38550,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -38581,9 +38592,9 @@ function buildObservationView(observation) {
     content: observation.content
   };
 }
-function renderSessionDetail(db, sessionId, depth, truncate) {
+function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds) {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate) : "Session not found.";
+  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds) : "Session not found.";
 }
 function renderObservationDetail(db, observationId, depth, truncate) {
   const observation = getObservation(db, observationId);
@@ -38628,7 +38639,7 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate) {
+function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds) {
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
@@ -38663,7 +38674,7 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
       return "";
     }
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate);
+      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds);
     }
     const lines = [
       renderNode(
@@ -38687,7 +38698,8 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
-            truncate
+            truncate,
+            includeDbTurnIds
           }
         )
       );
@@ -38717,7 +38729,7 @@ function renderGroupedSearchResults(db, results, depth, truncate) {
   });
   return sessionLines.filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -38726,7 +38738,9 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     );
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      paged.items.map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate)).join("\n"),
+      paged.items.map(
+        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+      ).join("\n"),
       paged.pageCount
     );
   }
@@ -38743,13 +38757,13 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate),
+      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(db, [turn], depth, truncate) : "Turn not found.";
+    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds) : "Turn not found.";
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
@@ -38772,7 +38786,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -38795,7 +38809,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -38805,7 +38819,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before) {
+function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
   const paged = paginateItems(
     listSessionIds(db, void 0, after, before),
     page,
@@ -38813,7 +38827,9 @@ function renderSessionList(db, depth, page, pageSize, truncate, after, before) {
   );
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
-    paged.items.map((sessionId) => renderSessionDetail(db, sessionId, depth, truncate)).join("\n"),
+    paged.items.map(
+      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+    ).join("\n"),
     paged.pageCount
   );
 }
@@ -38838,6 +38854,7 @@ function recallMemory(db, input) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -38855,7 +38872,8 @@ function recallMemory(db, input) {
       pageSize,
       truncate,
       timeRange.after,
-      timeRange.before
+      timeRange.before,
+      includeDbTurnIds
     );
   }
   if (input.query) {
@@ -38869,7 +38887,7 @@ function recallMemory(db, input) {
     const paged = paginateItems(results, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate),
+      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds),
       paged.pageCount
     );
   }
@@ -38880,7 +38898,8 @@ function recallMemory(db, input) {
     pageSize,
     truncate,
     timeRange.after,
-    timeRange.before
+    timeRange.before,
+    includeDbTurnIds
   );
 }
 
@@ -39072,6 +39091,8 @@ var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
 var MILESTONE_TITLE_CAP = 90;
+var MILESTONE_REFERENCE_CAP = 2;
+var MILESTONE_REFERENCE_PARSE_CAP = 8;
 var MILESTONE_DAY_BUDGET_BASE = 4;
 var MILESTONE_DAY_BUDGET_MAX = 7;
 var MILESTONE_DAY_BUDGET_DIVISOR = 8;
@@ -39080,10 +39101,31 @@ var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "merged",
   "shipped",
   "released",
+  // `release` (singular/imperative stem) is how release turns tag themselves;
+  // `released`/`shipped` are already present. Do NOT add the bare verbs
+  // `push`/`pushed`/`merge`/`ship` — those occur mid-work and would mint false
+  // always-keep outcome markers.
+  "release",
   "ready-to-merge",
   "approved",
   "finalized"
 ]);
+var PLUGIN_MANIFEST_SUFFIXES = [
+  "marketplace.json",
+  "plugin/.claude-plugin/plugin.json",
+  ".claude-plugin/plugin.json"
+];
+function isVersionBumpTurn(filesModified) {
+  const hasPackageJson = filesModified.some(
+    (path2) => path2.endsWith("package.json")
+  );
+  if (!hasPackageJson) {
+    return false;
+  }
+  return filesModified.some(
+    (path2) => PLUGIN_MANIFEST_SUFFIXES.some((suffix) => path2.endsWith(suffix))
+  );
+}
 var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
   "reversal",
   "reversed",
@@ -39339,7 +39381,7 @@ function milestoneMarker(turn, options = {}) {
   if (turn.wasRolledBack || keywordReversal) {
     return "reversed";
   }
-  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag))) {
+  if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
     return "outcome";
   }
   return null;
@@ -39680,6 +39722,60 @@ function selectMilestoneTurns(view) {
   }));
   return { kept, overflowByDay };
 }
+function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
+  if (!content) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  const pattern = /\[T(\d+)\]/g;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    const id = Number(match[1]);
+    if (!Number.isInteger(id) || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+    if (ids.length >= cap) {
+      break;
+    }
+  }
+  return ids;
+}
+function resolveMilestoneReferences(db, kept) {
+  for (const milestone of kept) {
+    const ids = parseContentReferences(
+      milestone.turn.content,
+      MILESTONE_REFERENCE_PARSE_CAP
+    );
+    if (ids.length === 0) {
+      continue;
+    }
+    const references = [];
+    for (const id of ids) {
+      const cited = getTurnById(db, id);
+      if (cited === null || // Session-id guard: a cross-session (or missing) cite renders inert.
+      cited.sessionId !== milestone.turn.sessionId || // Predecessor guard: a causal reference points backward; a self/future
+      // cite is not a driver and renders inert.
+      cited.promptNumber >= milestone.turn.promptNumber) {
+        continue;
+      }
+      references.push({
+        promptNumber: cited.promptNumber,
+        title: cited.title ?? "(untitled)",
+        marker: milestoneMarker(cited)
+      });
+      if (references.length >= MILESTONE_REFERENCE_CAP) {
+        break;
+      }
+    }
+    if (references.length > 0) {
+      milestone.references = references;
+    }
+  }
+  return kept;
+}
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
     if (left.promptNumber !== right.promptNumber) {
@@ -39766,6 +39862,9 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowSignals,
     compactBoundaries
   });
+  if (viewKind === "milestones") {
+    resolveMilestoneReferences(db, milestoneSelection.kept);
+  }
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems2(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
@@ -39963,6 +40062,15 @@ var MILESTONE_MARKER_GLYPH = {
   reversed: "\u21A9\uFE0F",
   outcome: "\u{1F3C1}"
 };
+function renderMilestoneReferenceLines(references) {
+  return references.map((ref) => {
+    const markerGlyph = ref.marker === "invalidated" || ref.marker === "reversed" ? `${MILESTONE_MARKER_GLYPH[ref.marker]} ` : "";
+    const title = sanitizeTimelineField(
+      truncateText2(ref.title, MILESTONE_TITLE_CAP)
+    );
+    return `      \u21B3 ${markerGlyph}T${ref.promptNumber} ${title}`;
+  });
+}
 function renderMilestoneDigest(view) {
   if (view.milestoneDayGroups.length === 0) {
     return [];
@@ -39980,6 +40088,7 @@ function renderMilestoneDigest(view) {
         truncateText2(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP)
       );
       lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji4} ${title}`);
+      lines.push(...renderMilestoneReferenceLines(milestone.references ?? []));
     }
     if (group.overflow !== null) {
       lines.push(
@@ -40261,10 +40370,11 @@ function toTimelineQueryInput(args) {
   }
   return input;
 }
-function createDatabaseBackedHandlers(database, _options = {}) {
+function createDatabaseBackedHandlers(database, options = {}) {
   if (!database) {
     return {};
   }
+  const includeDbTurnIds = options.audience === "worker";
   return {
     recall: (args) => textResult2(
       recallMemory(database, {
@@ -40274,7 +40384,8 @@ function createDatabaseBackedHandlers(database, _options = {}) {
         depth: args.depth,
         page: args.page,
         pageSize: args.pageSize,
-        truncate: args.truncate
+        truncate: args.truncate,
+        includeDbTurnIds
       })
     ),
     remember: (args) => rememberTool(database, args),
@@ -40312,7 +40423,8 @@ function createMnemoSdkServer(database, defaultProject, deps = {
   toolImpl: tool
 }) {
   const partialHandlers = createDatabaseBackedHandlers(database, {
-    defaultProject
+    defaultProject,
+    audience: "worker"
   });
   const handlers = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
@@ -40505,12 +40617,12 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the exceptions are a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice, and a corrective resend (see Corrective resend). The conversation history exists for LLM continuity, not for re-extraction.
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the exceptions are a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice, and a corrective resend (see Corrective resend). The conversation history exists for LLM continuity, not for re-extraction. (Citing an earlier turn's id as \`[T<n>]\` inside THIS turn's \`content\` is allowed and is NOT "revisiting" \u2014 it adds a reference; it does not update that earlier record.)
 
 ## Tools
 
 - \`remember()\` \u2014 your only output. Every record update is one remember() call.
-- \`recall()\` \u2014 the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call \u2014 use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. \`recall()\` is usually unnecessary \u2014 the inline data and conversation history usually suffice. Only escalate when they genuinely do not.
+- \`recall()\` \u2014 the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call \u2014 use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. Second permitted use: to resolve the DB id of a causally-significant earlier turn you want to cite as \`[T<n>]\` but cannot find in the recent-turn index or conversation history \u2014 call \`recall({ query: "..." })\` and read the \`dbid:T<n>\` from its output. \`recall()\` is usually unnecessary \u2014 the inline data, the recent-turn index, and conversation history usually suffice. Only escalate when they genuinely do not.
 
 Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only via tool calls.
 
@@ -40522,7 +40634,7 @@ For each \`<turn>\` block:
 
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
    - title: 5-15 words summarizing the turn's outcome
-   - content: 100-300 chars, what happened and why
+   - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` \u2014 a bare DB id (the same id from its \`<turn id="T...">\` block, or a \`dbid:T<n>\` from the recent-turn index / a recall result). Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - tags: 0-5 lowercase-hyphenated keywords
@@ -40533,7 +40645,7 @@ For each \`<turn>\` block:
 
 Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them).
 
-Turn messages are the ONLY context where \`recall()\` is permitted as a fallback, and only under the truncation-critical condition described in the Tools section. Skip it entirely if the inline \`<turn>\` block already contains what you need.
+Turn messages are the ONLY context where \`recall()\` is permitted as a fallback \u2014 under the truncation-critical condition OR the citation-id resolution described in the Tools section, and only for a significant need. Skip it entirely if the inline \`<turn>\` block (and the recent-turn index) already contain what you need.
 
 ## Streamed turns (mini-turns)
 
@@ -40579,11 +40691,11 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 - done: a markdown bullet list \u2014 one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
-- reference: a markdown bullet list \u2014 one \`- \` item per line, of DURABLE pointers that stay useful as the project evolves: long-lived reference sources (e.g. an upstream or source-code checkout used for verification), external repos, canonical URLs, PRs, specs. EXCLUDE ephemeral working docs (plan/design files that get superseded as work progresses) and auto-memory files (memory/*.md \u2014 already indexed by MEMORY.md). Empty string if none.
+- reference: a markdown bullet list \u2014 one \`- \` item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md \u2014 indexed by MEMORY.md). \u22648 bullets; evict the least-durable / already-superseded first. Empty string if none.
 
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
-Do not put file paths, tool counts, or code-level details in any field except \`reference\` \u2014 those belong in turn records \u2014 and \`reference\` takes only the durable pointers described above, never ephemeral working files. Do not record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+Do not put file paths, tool counts, or code-level details in any field except \`reference\` \u2014 those belong in turn records \u2014 and \`reference\` follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do not record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh \u2014 follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message \u2014 the \`prior_*\` fields are the only state to base the refresh decision on.
 
@@ -40626,6 +40738,9 @@ this overrides the normal "extract once, never revisit" rule for that block.
           sessionId = message.session_id;
         }
         if (message.type === "system" && "subtype" in message && message.subtype === "compact_boundary") {
+          if (pendingCompact === null) {
+            deps.onCompactBoundary?.();
+          }
           resolvePendingCompact();
           continue;
         }
@@ -41321,6 +41436,12 @@ ${prompt}` : prompt;
         onPid: (pid) => {
           state.queryPid = pid;
         },
+        // SDK-auto compact: an unsolicited compact_boundary wiped the agent's
+        // history. Re-prime can't be injected mid-stream, so flag it; the next
+        // work unit re-primes before its turn batch and clears the flag.
+        onCompactBoundary: () => {
+          state.needsReprime = true;
+        },
         onRemember: (id) => {
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
@@ -41339,6 +41460,44 @@ ${prompt}` : prompt;
   function ensureQuerySessionFresh(state) {
     return ensureQuerySession(state, { forceFresh: true });
   }
+  function buildRecentTurnIndex(sessionDbId) {
+    const maxPromptNumber = getMaxPromptNumber(deps.db, sessionDbId);
+    if (maxPromptNumber === null) {
+      return "";
+    }
+    const lo = Math.max(1, maxPromptNumber - 29);
+    try {
+      return recallMemory(deps.db, {
+        id: `S${sessionDbId}/T${lo}..${maxPromptNumber}`,
+        depth: "collapsed",
+        // pageSize must cover the whole window so all 30 turns render in one page.
+        pageSize: 30,
+        includeDbTurnIds: true
+      });
+    } catch {
+      return "";
+    }
+  }
+  async function sendSessionReprime(state) {
+    const runtime = ensureQuerySession(state);
+    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
+    const session = getSession(deps.db, state.sessionDbId);
+    if (formatted && session) {
+      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
+      const recentIndex = buildRecentTurnIndex(state.sessionDbId);
+      const body = recentIndex ? `${coldStart}
+
+Most recent turns (cite by DB id):
+${recentIndex}` : coldStart;
+      resetUnitSignals(state);
+      await runtime.sendPrompt(
+        `<context note="Session so far. CONTEXT ONLY \u2014 do not remember anything from this message; await the next message.">
+${body}
+</context>`
+      );
+    }
+    resetUnitSignals(state);
+  }
   async function reopenQuerySessionFresh(state) {
     try {
       await state.querySession?.close();
@@ -41346,19 +41505,8 @@ ${prompt}` : prompt;
     }
     state.querySession = null;
     state.agentSessionId = void 0;
-    const runtime = ensureQuerySessionFresh(state);
-    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
-    const session = getSession(deps.db, state.sessionDbId);
-    if (formatted && session) {
-      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
-      resetUnitSignals(state);
-      await runtime.sendPrompt(
-        `<context note="Session so far. CONTEXT ONLY \u2014 do not remember anything from this message; await the next message.">
-${coldStart}
-</context>`
-      );
-    }
-    resetUnitSignals(state);
+    ensureQuerySessionFresh(state);
+    await sendSessionReprime(state);
   }
   const MAX_REMINDERS = 2;
   async function sendWorkUnit(state, message, requiredIds, isCompletionPoint) {
@@ -41489,6 +41637,17 @@ ${coldStart}
     const session = getSession(deps.db, state.sessionDbId);
     if (!session) {
       return;
+    }
+    if (state.needsReprime) {
+      try {
+        await sendSessionReprime(state);
+        state.needsReprime = false;
+      } catch (error49) {
+        logger.error?.("session re-prime failed; will retry next batch", {
+          sessionDbId: state.sessionDbId,
+          error: error49
+        });
+      }
     }
     const miniTurns = batchMiniTurns(batch);
     let currentPrompt = null;
@@ -41972,16 +42131,20 @@ ${coldStart}
           error: error49
         });
       }
+      const compactState = sessions.get(sessionDbId);
       try {
-        const state = sessions.get(sessionDbId);
-        if (state?.querySession && shouldCompactAgent(state)) {
-          await state.querySession.compact?.();
+        if (compactState?.querySession && shouldCompactAgent(compactState)) {
+          await compactState.querySession.compact?.();
+          await sendSessionReprime(compactState);
         }
       } catch (error49) {
         logger.error?.("mnemosyne compact failed", {
           sessionDbId,
           error: error49
         });
+        if (compactState) {
+          compactState.needsReprime = true;
+        }
       }
     } finally {
       compactingSessions.delete(sessionDbId);

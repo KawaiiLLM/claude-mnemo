@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession, type UpsertSessionInput } from "../../src/db/sessions";
-import type { TurnRecord } from "../../src/db/turns";
+import { getTurn, type TurnRecord } from "../../src/db/turns";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import {
   buildContextTimelineView,
@@ -20,6 +20,7 @@ import {
   formatLocalTime,
   getSystemTimezone,
   extractSourceTags,
+  isVersionBumpTurn,
   milestoneBaseScore,
   milestoneMarker,
   milestoneSignificance,
@@ -1183,6 +1184,65 @@ describe("milestoneMarker", () => {
     expect(milestoneMarker(decision)).toBeNull();
     expect(milestoneMarker(decision, { enableReversalKeyword: true })).toBe("reversed");
     expect(milestoneMarker(discovery, { enableReversalKeyword: true })).toBeNull();
+  });
+
+  it("returns outcome for the `release` tag stem", () => {
+    expect(milestoneMarker(turn({ type: "feature", tags: ["release"] }))).toBe("outcome");
+  });
+
+  it("returns outcome for released/shipped tags (no regression)", () => {
+    expect(milestoneMarker(turn({ type: "feature", tags: ["released"] }))).toBe("outcome");
+    expect(milestoneMarker(turn({ type: "feature", tags: ["shipped"] }))).toBe("outcome");
+  });
+
+  it("returns outcome for a version-bump turn with no outcome tag (backstop)", () => {
+    expect(
+      milestoneMarker(
+        turn({
+          type: "feature",
+          tags: ["push"],
+          filesModified: ["package.json", "plugin/.claude-plugin/plugin.json"],
+        }),
+      ),
+    ).toBe("outcome");
+  });
+
+  it("does NOT return outcome for bare push/merge verbs with no version files", () => {
+    expect(milestoneMarker(turn({ type: "feature", tags: ["pushed"] }))).toBeNull();
+    expect(milestoneMarker(turn({ type: "feature", tags: ["push"] }))).toBeNull();
+    expect(milestoneMarker(turn({ type: "feature", tags: ["merge"] }))).toBeNull();
+    expect(milestoneMarker(turn({ type: "feature", tags: ["ship"] }))).toBeNull();
+  });
+});
+
+describe("isVersionBumpTurn", () => {
+  it("is true when package.json + a plugin/marketplace manifest are modified", () => {
+    expect(
+      isVersionBumpTurn(["package.json", "plugin/.claude-plugin/plugin.json"]),
+    ).toBe(true);
+    expect(isVersionBumpTurn(["package.json", "marketplace.json"])).toBe(true);
+  });
+
+  it("matches on path suffix (relative or absolute stored paths)", () => {
+    expect(
+      isVersionBumpTurn([
+        "/Users/me/proj/package.json",
+        "/Users/me/proj/.claude-plugin/marketplace.json",
+      ]),
+    ).toBe(true);
+  });
+
+  it("is false without a package.json", () => {
+    expect(isVersionBumpTurn(["plugin/.claude-plugin/plugin.json"])).toBe(false);
+  });
+
+  it("is false for package.json alone (no manifest)", () => {
+    expect(isVersionBumpTurn(["package.json"])).toBe(false);
+    expect(isVersionBumpTurn(["package.json", "src/mcp/timeline.ts"])).toBe(false);
+  });
+
+  it("is false for an empty file set", () => {
+    expect(isVersionBumpTurn([])).toBe(false);
   });
 });
 
@@ -2386,5 +2446,313 @@ describe("fork-lineage breadcrumb in timeline", () => {
 
     expect(output).not.toContain("continues from");
     expect(output).not.toMatch(/earlier: recall\(id="S\d+"\)/);
+  });
+});
+
+describe("milestone causal references (Component 3)", () => {
+  // DB ids are auto-assigned at insert; resolve the driver's real id by prompt
+  // number, then embed `[T<dbid>]` into the milestone's content. This keeps the
+  // citation in the agent's DB-id space (what remember() uses), not the
+  // user-facing prompt number, exactly as the renderer must map.
+  function dbId(db: Database, sessionId: number, promptNumber: number): number {
+    const t = getTurn(db, sessionId, promptNumber);
+    if (t === null) throw new Error(`no turn S${sessionId}/T${promptNumber}`);
+    return t.id;
+  }
+
+  function setContent(
+    db: Database,
+    sessionId: number,
+    promptNumber: number,
+    content: string,
+  ): void {
+    db.query(
+      "UPDATE turns SET content = ? WHERE session_id = ? AND prompt_number = ?",
+    ).run(content, sessionId, promptNumber);
+  }
+
+  it("renders a ↳ sub-line for an in-session [T<dbid>] reference, mapped to its prompt number", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    // Driver is at promptNumber 7 but inserted first (DB id 1), so the DB-id
+    // space and prompt-number space genuinely differ — proving the renderer
+    // maps id → prompt number rather than echoing the cited id.
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 7,
+        type: "discovery",
+        title: "reference prompt has conflicting guidance",
+        toolCallCount: 99,
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 8,
+        type: "feature",
+        title: "0.2.32 released: reference field durable-pointers-only",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+    ]);
+    const driverId = dbId(db, 1, 7);
+    expect(driverId).not.toBe(7); // DB id != prompt number
+    // T8 (kept outcome) cites the driver via its DB id.
+    setContent(db, 1, 8, `Driven by [T${driverId}]. Final design.`);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(out).toContain("🏁 T8");
+    // Sub-line uses the driver's PROMPT number (T7), not the cited DB id.
+    expect(out).toContain("      ↳ T7 reference prompt has conflicting guidance");
+    expect(out).not.toContain(`↳ T${driverId} `); // not the DB id space
+  });
+
+  it("caps at 2 sub-lines even when content cites 3 references", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "discovery", title: "driver one", toolCallCount: 99, createdAtEpoch: base }),
+      turn({ promptNumber: 2, type: "discovery", title: "driver two", toolCallCount: 99, createdAtEpoch: base + 60 }),
+      turn({ promptNumber: 3, type: "discovery", title: "driver three", toolCallCount: 99, createdAtEpoch: base + 120 }),
+      turn({
+        promptNumber: 4,
+        type: "feature",
+        title: "release citing three drivers",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 180,
+      }),
+    ]);
+    const a = dbId(db, 1, 1);
+    const b = dbId(db, 1, 2);
+    const c = dbId(db, 1, 3);
+    setContent(db, 1, 4, `Builds on [T${a}], supersedes [T${b}], verifies [T${c}].`);
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const release = view.pagedMilestones.find((m) => m.turn.promptNumber === 4);
+    expect(release?.references).toHaveLength(2);
+    expect(release?.references?.map((r) => r.promptNumber)).toEqual([1, 2]);
+
+    const out = renderTimeline(view);
+    const subLines = out.split("\n").filter((l) => l.includes("↳"));
+    expect(subLines).toHaveLength(2);
+    expect(out).toContain("      ↳ T1 driver one");
+    expect(out).toContain("      ↳ T2 driver two");
+    expect(out).not.toContain("driver three");
+  });
+
+  it("prefixes the sub-line with the marker glyph when the cited turn is rolled back", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "approach we later reversed",
+        wasRolledBack: true,
+        status: "extracted",
+        toolCallCount: 99,
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "feature",
+        title: "release superseding the reversed approach",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+    ]);
+    const reversedId = dbId(db, 1, 1);
+    setContent(db, 1, 2, `Supersedes [T${reversedId}].`);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    // ↩️ reversed glyph rides the sub-line; the edge is kept.
+    expect(out).toContain("      ↳ ↩️ T1 approach we later reversed");
+  });
+
+  it("resolves a driver outside a ranged view's window via getTurnById, not the in-memory window", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    const rows: TurnRecord[] = [];
+    // The driver lives at T1 (out of the requested range).
+    rows.push(
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        title: "out-of-range driver discovery",
+        toolCallCount: 99,
+        createdAtEpoch: base,
+      }),
+    );
+    // Filler so the in-range milestone is not also T1.
+    for (let pn = 2; pn <= 9; pn += 1) {
+      rows.push(
+        turn({
+          promptNumber: pn,
+          type: "discovery",
+          title: `noise ${pn}`,
+          toolCallCount: 0,
+          createdAtEpoch: base + pn * 60,
+        }),
+      );
+    }
+    rows.push(
+      turn({
+        promptNumber: 10,
+        type: "feature",
+        title: "in-range release citing the out-of-range driver",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 600,
+      }),
+    );
+    seedTimelineSession(db, rows);
+    const driverId = dbId(db, 1, 1);
+    setContent(db, 1, 10, `Driven by [T${driverId}].`);
+
+    // Range excludes T1; the kept milestone T10 still resolves its driver.
+    const view = buildTimelineView(db, { id: "S1/T5..10", view: "milestones" });
+    expect(view.windowTurns.some((t) => t.promptNumber === 1)).toBe(false); // driver not in window
+    const out = renderTimeline(view);
+
+    expect(out).toContain("🏁 T10");
+    expect(out).toContain("      ↳ T1 out-of-range driver discovery");
+  });
+
+  it("renders no sub-line for a reference that resolves to a different session", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+
+    // Primary session S1 holds a kept release that will cite a FOREIGN turn id.
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "feature",
+        title: "release citing a cross-session id",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+    ]);
+
+    // A second session (S2) whose turn the milestone (wrongly) cites.
+    const foreign = upsertSession(db, {
+      contentSessionId: "foreign-session",
+      project: "/tmp/claude-mnemo-test",
+      title: "foreign",
+      insight: null,
+      createdAtEpoch: base,
+      updatedAtEpoch: base,
+      completedAtEpoch: null,
+    });
+    expect(foreign.id).not.toBe(1); // guarantee a genuine cross-session id
+    db.query(
+      `INSERT INTO turns (session_id, prompt_number, status, title, type, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, 'discovery', ?)`,
+    ).run(foreign.id, 1, "foreign-session driver", base);
+    const foreignTurnId = getTurn(db, foreign.id, 1)!.id;
+
+    // S1's milestone cites the foreign turn's DB id; the session guard rejects it.
+    setContent(db, 1, 1, `Driven by [T${foreignTurnId}].`);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    expect(out).toContain("🏁 T1"); // the milestone itself still renders
+    expect(out).not.toContain("↳"); // cross-session cite produces no sub-line
+    expect(out).not.toContain("foreign-session driver");
+  });
+
+  it("renders no sub-line for a self or future (non-predecessor) reference", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "feature",
+        title: "release citing itself and the future",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        title: "a later non-driver",
+        toolCallCount: 0,
+        createdAtEpoch: base + 60,
+      }),
+    ]);
+    const selfId = dbId(db, 1, 1);
+    const futureId = dbId(db, 1, 2);
+    // A causal reference must point backward; self (==) and future (>) are inert.
+    setContent(db, 1, 1, `Self [T${selfId}] and future [T${futureId}].`);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    expect(out).toContain("🏁 T1");
+    expect(out).not.toContain("↳"); // neither self nor future is a predecessor
+  });
+
+  it("surfaces a valid predecessor even when invalid refs (missing, future, self) are cited first", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    const rows: TurnRecord[] = [];
+    rows.push(
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        title: "the real driver",
+        toolCallCount: 99,
+        createdAtEpoch: base,
+      }),
+    );
+    for (let pn = 2; pn <= 9; pn += 1) {
+      rows.push(
+        turn({
+          promptNumber: pn,
+          type: "discovery",
+          title: `noise ${pn}`,
+          toolCallCount: 0,
+          createdAtEpoch: base + pn * 60,
+        }),
+      );
+    }
+    rows.push(
+      turn({
+        promptNumber: 10,
+        type: "feature",
+        title: "release with invalid leading cites",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 600,
+      }),
+    );
+    rows.push(
+      turn({
+        promptNumber: 11,
+        type: "discovery",
+        title: "a later turn",
+        toolCallCount: 0,
+        createdAtEpoch: base + 660,
+      }),
+    );
+    seedTimelineSession(db, rows);
+    const driverId = dbId(db, 1, 1);
+    const selfId = dbId(db, 1, 10);
+    const futureId = dbId(db, 1, 11);
+    // Missing id + future + self lead; the valid predecessor trails. Capping
+    // raw parse at the display cap (2) would lose it — parse-then-validate keeps it.
+    setContent(
+      db,
+      1,
+      10,
+      `[T999999] [T${futureId}] [T${selfId}] [T${driverId}].`,
+    );
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const release = view.pagedMilestones.find((m) => m.turn.promptNumber === 10);
+    expect(release?.references?.map((r) => r.promptNumber)).toEqual([1]);
+
+    const out = renderTimeline(view);
+    expect(out).toContain("      ↳ T1 the real driver");
   });
 });
