@@ -380,6 +380,26 @@ describe("remember tool routing and validation", () => {
     expect(turn.status).toBe("skipped");
   });
 
+  test("tags-only turn remember preserves an extracted turn status", () => {
+    rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      content: "Initial extracted content.",
+      type: "bugfix",
+    });
+
+    rememberTool(db, {
+      id: `T${turnId}`,
+      tags: ["rolled-back"],
+    });
+
+    const turn = getTurn(db, sessionId, 1)!;
+    expect(turn.status).toBe("extracted");
+    expect(turn.title).toBe("Fix auth race");
+    expect(turn.content).toBe("Initial extracted content.");
+    expect(turn.tags).toContain("rolled-back");
+  });
+
   test("turn remember with a title yields extracted status", () => {
     rememberTool(db, {
       id: `T${turnId}`,

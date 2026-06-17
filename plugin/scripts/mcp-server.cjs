@@ -33106,6 +33106,12 @@ function deriveObservationStatus(input) {
   }
   return input.title || input.content ? "extracted" : "skipped";
 }
+function deriveTurnStatusForUpdate(current, input) {
+  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
+    return void 0;
+  }
+  return deriveTurnStatus(input);
+}
 function handleTurnRemember(db, turnId, input) {
   const statusError = validateStatusForRoute(
     input.status,
@@ -33124,7 +33130,7 @@ function handleTurnRemember(db, turnId, input) {
     return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
   };
   const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatus(input),
+    status: deriveTurnStatusForUpdate(current, input),
     title: input.title ?? null,
     content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
     insight: input.insight ?? null,
@@ -33251,6 +33257,7 @@ var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "approved",
   "finalized"
 ]);
+var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
 var PLUGIN_MANIFEST_SUFFIXES = [
   "marketplace.json",
   "plugin/.claude-plugin/plugin.json",
@@ -33519,7 +33526,8 @@ function milestoneMarker(turn, options = {}) {
     return "invalidated";
   }
   const keywordReversal = options.enableReversalKeyword === true && turn.type === "decision" && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
-  if (turn.wasRolledBack || keywordReversal) {
+  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
+  if (turn.wasRolledBack || roleReversal || keywordReversal) {
     return "reversed";
   }
   if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
@@ -34502,7 +34510,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.34" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.35" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

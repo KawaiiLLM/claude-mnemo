@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.34-mqcixrwz" : "dev";
+var BUILD_ID = true ? "0.2.35-mqibvp4b" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -38991,6 +38991,12 @@ function deriveObservationStatus(input) {
   }
   return input.title || input.content ? "extracted" : "skipped";
 }
+function deriveTurnStatusForUpdate(current, input) {
+  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
+    return void 0;
+  }
+  return deriveTurnStatus(input);
+}
 function handleTurnRemember(db, turnId, input) {
   const statusError = validateStatusForRoute(
     input.status,
@@ -39009,7 +39015,7 @@ function handleTurnRemember(db, turnId, input) {
     return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
   };
   const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatus(input),
+    status: deriveTurnStatusForUpdate(current, input),
     title: input.title ?? null,
     content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
     insight: input.insight ?? null,
@@ -39135,6 +39141,7 @@ var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "approved",
   "finalized"
 ]);
+var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
 var PLUGIN_MANIFEST_SUFFIXES = [
   "marketplace.json",
   "plugin/.claude-plugin/plugin.json",
@@ -39403,7 +39410,8 @@ function milestoneMarker(turn, options = {}) {
     return "invalidated";
   }
   const keywordReversal = options.enableReversalKeyword === true && turn.type === "decision" && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
-  if (turn.wasRolledBack || keywordReversal) {
+  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
+  if (turn.wasRolledBack || roleReversal || keywordReversal) {
     return "reversed";
   }
   if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
@@ -40642,7 +40650,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
 
 ## Lifetime
 
-One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session). Never revisit records from earlier messages, never preempt future messages \u2014 the exceptions are a turn streamed across several messages as slices (see Streamed turns), which you refine on each slice, and a corrective resend (see Corrective resend). The conversation history exists for LLM continuity, not for re-extraction. (Citing an earlier turn's id as \`[T<n>]\` inside THIS turn's \`content\` is allowed and is NOT "revisiting" \u2014 it adds a reference; it does not update that earlier record.)
+One query session processes many user messages. Each user message is one unit of work. The blocks in the message tell you which record(s) to update: a \`<turn>\` (with inline \`<session>\` context) means extract the turn and optionally refresh the session on material change; a standalone \`<session>\` means refresh the session summary if warranted. Respond with the minimum number of \`remember()\` calls needed \u2014 usually one, sometimes zero (no material change \u2192 no call) or two (a turn that also refreshes its session), and rarely more when this turn explicitly corrects a cited earlier turn (see Correcting an earlier turn). Never revisit records from earlier messages, never preempt future messages \u2014 the exceptions are a turn streamed across several messages as slices (see Streamed turns), a corrective resend (see Corrective resend), and the cited-casualty correction rule below. The conversation history exists for LLM continuity, not for re-extraction. (Citing an earlier turn's id as \`[T<n>]\` inside THIS turn's \`content\` is allowed and is NOT "revisiting" \u2014 it adds a reference; it does not update that earlier record.)
 
 ## Tools
 
@@ -40662,15 +40670,23 @@ For each \`<turn>\` block:
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
-   - tags: 0-5 lowercase-hyphenated keywords
-   - tag style: use short stable conventional values, reuse existing concept stems, and include a reversal/supersede-style tag when the turn overturns an earlier decision.
+   - tags: 0-5 lowercase-hyphenated role keywords. A tag names the turn's role in the session arc, not its topic, file, UI area, or action. Put topics/actions in \`content\` where FTS can find them; an ordinary work turn usually has no tags.
+   - tag style: use short stable conventional values for session roles. If this turn itself was rejected, use a rejection role tag; if this turn merely performs a revert/restore, do NOT tag it \`rollback\`/\`revert\` \u2014 that action belongs in \`content\`. When this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets the literal \`rolled-back\` tag.
    - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
 
 2. Optionally refresh the session summary \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) \u2014 omitting any is rejected \u2014 editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
-Never update other turns (T<n-1>, T<n+1>, ...). Never update observations (worker has already processed them).
+Never update other turns (T<n-1>, T<n+1>, ...) except under Correcting an earlier turn below. Never update observations (worker has already processed them).
 
 Turn messages are the ONLY context where \`recall()\` is permitted as a fallback \u2014 under the truncation-critical condition OR the citation-id resolution described in the Tools section, and only for a significant need. Skip it entirely if the inline \`<turn>\` block (and the recent-turn index) already contain what you need.
+
+## Correcting an earlier turn
+
+You may reopen an earlier turn ONLY to correct a dead end or clear mislabeling made visible by the current turn. If the earlier turn's full context is not in this batch, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` first and read it; never edit blind from compacted memory.
+
+Negate-on-cite rule: when THIS turn overturns a causally-significant earlier turn that it cites as \`[T<n>]\`, update the cited casualty, not the surviving/reverting turn. Use the literal tag \`rolled-back\`; synonyms like \`rejected\` or \`superseded\` are metadata only and do not drive the milestone marker. This applies only to the "overturns" case, never when this turn merely builds on or verifies an earlier turn, and only to the cited ids (at most ~2).
+
+Visibility rule: if the cited casualty is already extracted, \`remember({ id: "T<n>", tags: ["rolled-back"] })\` is enough; tags append and the extracted status is preserved. If the casualty is skipped or otherwise lacks usable extraction, promote it by supplying \`title\`, \`content\`, \`type\`, and \`tags: ["rolled-back"]\` so it can appear in milestones; a skipped row with only a tag stays filtered out.
 
 ## Streamed turns (mini-turns)
 

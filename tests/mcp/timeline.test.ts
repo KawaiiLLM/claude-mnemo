@@ -1168,13 +1168,18 @@ describe("milestoneMarker", () => {
     expect(milestoneMarker(turn({ wasRolledBack: true, status: "extracted" }))).toBe("reversed");
   });
 
+  it("returns reversed for the literal rolled-back role tag on any live type", () => {
+    expect(milestoneMarker(turn({ type: "discovery", tags: ["rolled-back"] }))).toBe("reversed");
+    expect(milestoneMarker(turn({ type: "feature", tags: ["rolled-back"] }))).toBe("reversed");
+  });
+
   it("returns outcome only when not invalidated/reversed", () => {
     expect(milestoneMarker(turn({ type: "change", tags: ["merged"] }))).toBe("outcome");
     expect(milestoneMarker(turn({ wasRolledBack: true, tags: ["merged"] }))).toBe("reversed");
   });
 
   it("ignores topic tags and the invalidated: namespace", () => {
-    expect(milestoneMarker(turn({ type: "decision", tags: ["rollback", "milestone"] }))).toBeNull();
+    expect(milestoneMarker(turn({ type: "decision", tags: ["rollback", "revert", "milestone"] }))).toBeNull();
     expect(milestoneMarker(turn({ tags: ["invalidated:notified:rollback"] }))).toBeNull();
   });
 
@@ -1286,6 +1291,35 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(kept(result)).toContain(3); // outcome on a discovery is still force-kept
     expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
     expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("outcome");
+  });
+
+  it("force-keeps rolled-back-tagged casualties but still filters skipped tag-only rows", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        status: "skipped",
+        type: null,
+        title: null,
+        tags: ["rolled-back"],
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        title: "rejected discussion-only direction",
+        tags: ["rolled-back"],
+        toolCallCount: 0,
+        createdAtEpoch: base + 120,
+      }),
+      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+
+    const result = select(rows);
+    expect(kept(result)).not.toContain(2);
+    expect(kept(result)).toContain(3);
+    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("reversed");
   });
 
   it("caps a heavy day and emits exactly one overflow hint", () => {

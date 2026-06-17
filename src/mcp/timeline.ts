@@ -100,6 +100,8 @@ export const OUTCOME_TAGS = new Set([
   "finalized",
 ]);
 
+const REVERSED_ROLE_TAGS = new Set(["rolled-back"]);
+
 // Version-bump file set, per the project release ritual: package.json plus the
 // marketplace/plugin manifests. Matched on path suffix because stored paths may
 // be relative or absolute.
@@ -592,8 +594,9 @@ export function milestoneMarker(
     options.enableReversalKeyword === true &&
     turn.type === "decision" &&
     turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
+  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
 
-  if (turn.wasRolledBack || keywordReversal) {
+  if (turn.wasRolledBack || roleReversal || keywordReversal) {
     return "reversed";
   }
 

@@ -489,6 +489,11 @@ describe("worker query session", () => {
     );
     // Component 2: turn content may carry causal `[T<n>]` citations.
     expect(prompt).toContain("cite that driver inline as `[T<n>]`");
+    expect(prompt).toContain("A tag names the turn's role in the session arc");
+    expect(prompt).toContain("Correcting an earlier turn");
+    expect(prompt).toContain('Use the literal tag `rolled-back`');
+    expect(prompt).toContain('remember({ id: "T<n>", tags: ["rolled-back"] })');
+    expect(prompt).toContain("promote it by supplying `title`, `content`, `type`, and `tags: [\"rolled-back\"]`");
     expect(prompt).not.toContain("from an obs message");
     expect(prompt).not.toContain(
       "Routine operations (repeated reads, navigation, failed retries, environment probes) can be silently ignored",

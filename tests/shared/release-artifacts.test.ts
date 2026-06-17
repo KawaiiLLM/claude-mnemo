@@ -17,7 +17,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.2.34", () => {
+  test("release metadata is consistently bumped to 0.2.35", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -33,10 +33,10 @@ describe("release artifacts", () => {
       plugins?: Array<{ version?: string }>;
     };
 
-    expect(packageJson.version).toBe("0.2.34");
-    expect(pluginManifest.version).toBe("0.2.34");
-    expect(marketplace.metadata?.version).toBe("0.2.34");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.2.34");
+    expect(packageJson.version).toBe("0.2.35");
+    expect(pluginManifest.version).toBe("0.2.35");
+    expect(marketplace.metadata?.version).toBe("0.2.35");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.2.35");
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -114,10 +114,14 @@ describe("release artifacts", () => {
     for (const marker of [
       "OUTCOME_TAGS",
       '"release"', // release tag → 🏁 milestone
+      "REVERSED_ROLE_TAGS", // literal rolled-back role tag → ↩️ milestone
       "parseContentReferences", // [T<n>] causal-ref resolver
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
     ]) {
       expect(mcpServer).toContain(marker);
     }
+
+    expect(worker).toContain("Correcting an earlier turn");
+    expect(worker).toContain('tags: ["rolled-back"]');
   });
 });

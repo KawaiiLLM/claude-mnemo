@@ -181,6 +181,22 @@ function deriveObservationStatus(input: RememberToolInput): ObservationStatus {
   return input.title || input.content ? "extracted" : "skipped";
 }
 
+function deriveTurnStatusForUpdate(
+  current: ReturnType<typeof getTurnById>,
+  input: RememberToolInput,
+): TurnStatus | undefined {
+  if (
+    current?.status === "extracted" &&
+    input.status === undefined &&
+    input.title === undefined &&
+    input.content === undefined
+  ) {
+    return undefined;
+  }
+
+  return deriveTurnStatus(input);
+}
+
 function handleTurnRemember(
   db: Database,
   turnId: number,
@@ -215,7 +231,7 @@ function handleTurnRemember(
   };
 
   const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatus(input),
+    status: deriveTurnStatusForUpdate(current, input),
     title: input.title ?? null,
     content:
       input.content != null

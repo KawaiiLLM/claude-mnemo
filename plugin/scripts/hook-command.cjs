@@ -799,7 +799,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path3 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.34-mqcixrwz" : "dev";
+var BUILD_ID = true ? "0.2.35-mqibvp4b" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -1968,6 +1968,7 @@ var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "approved",
   "finalized"
 ]);
+var REVERSED_ROLE_TAGS = /* @__PURE__ */ new Set(["rolled-back"]);
 var PLUGIN_MANIFEST_SUFFIXES = [
   "marketplace.json",
   "plugin/.claude-plugin/plugin.json",
@@ -2236,7 +2237,8 @@ function milestoneMarker(turn, options = {}) {
     return "invalidated";
   }
   const keywordReversal = options.enableReversalKeyword === true && turn.type === "decision" && turn.tags.some((tag) => REVERSAL_KEYWORD_TAGS.has(tag));
-  if (turn.wasRolledBack || keywordReversal) {
+  const roleReversal = turn.tags.some((tag) => REVERSED_ROLE_TAGS.has(tag));
+  if (turn.wasRolledBack || roleReversal || keywordReversal) {
     return "reversed";
   }
   if (turn.tags.some((tag) => OUTCOME_TAGS.has(tag)) || isVersionBumpTurn(turn.filesModified)) {
