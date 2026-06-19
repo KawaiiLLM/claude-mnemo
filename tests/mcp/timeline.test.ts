@@ -12,6 +12,7 @@ import {
   cleanPromptForLabel,
   computeTypesDistribution,
   detectBrokenPromptPairs,
+  buildCorrectionGraph,
   detectShapeSignals,
   foldMilestoneRuns,
   formatDuration,
@@ -1156,6 +1157,72 @@ describe("foldMilestoneRuns", () => {
     );
     expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([]);
   });
+
+  it("honors an injected always-keep predicate over the default", () => {
+    const rows = decisions(4);
+    // Default predicate: a >=4 decision run keeps first + last = [1, 4].
+    expect([...foldMilestoneRuns(rows, noEndpoints)].sort((a, b) => a - b)).toEqual([1, 4]);
+    // Injecting "T1 is always-keep" pulls it out of the foldable pool, leaving 3
+    // foldable members (< FOLD_FIRST_MIN_RUN) → last-only = [4]. (The union that
+    // re-adds the always-kept T1 lives in selectMilestoneTurns, not here.)
+    const kept = foldMilestoneRuns(rows, noEndpoints, (t) => t.promptNumber === 1);
+    expect([...kept].sort((a, b) => a - b)).toEqual([4]);
+  });
+});
+
+describe("buildCorrectionGraph", () => {
+  const base = 1_779_782_400;
+
+  it("links a corrector to the reversed victim it cites", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T20]", createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq);
+    expect([...g.correctors]).toEqual([3]);
+    expect([...g.supersededVictims]).toEqual([2]);
+  });
+
+  it("ignores cites of a non-reversed predecessor (plain causal reference)", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "feature", content: "builds on [T20]", createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq);
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
+  it("ignores forward cites (predecessor guard: a correction points backward)", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "bugfix", content: "see [T30]", createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq);
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
+  it("ignores a cite that does not resolve to an in-window turn", () => {
+    const seq = [
+      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T999]", createdAtEpoch: base }),
+    ];
+    const g = buildCorrectionGraph(seq);
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
+  it("promotes a corrector that cites an out-of-window reversed victim via the resolver", () => {
+    // Ranged view: the victim sits OUTSIDE seq and is resolved from the full session.
+    const victim = turn({ id: 5, promptNumber: 5, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base });
+    const seq = [
+      turn({ id: 15, promptNumber: 15, type: "bugfix", content: "fixes the earlier figure [T5]", createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, (id) => (id === 5 ? victim : undefined));
+    expect([...g.correctors]).toEqual([15]);
+    // The out-of-window victim is not a selection candidate, so it is not demoted here.
+    expect(g.supersededVictims.size).toBe(0);
+  });
 });
 
 describe("milestoneMarker", () => {
@@ -1320,6 +1387,65 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(kept(result)).not.toContain(2);
     expect(kept(result)).toContain(3);
     expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("reversed");
+  });
+
+  it("promotes the corrector and demotes a trivial cited victim to a ↳-only casualty", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      // Low-value reversed victim (discovery → base score 0).
+      turn({
+        id: 20,
+        promptNumber: 2,
+        type: "discovery",
+        title: "concluded overhead is 2.5%",
+        tags: ["rolled-back"],
+        toolCallCount: 0,
+        createdAtEpoch: base + 60,
+      }),
+      // Corrector cites the victim by its DB id and overturns it.
+      turn({
+        id: 30,
+        promptNumber: 3,
+        type: "bugfix",
+        title: "pricing bug fixed; overhead is 7-10%",
+        content: "Corrected the earlier figure [T20].",
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+    const result = select(rows);
+    // The surviving corrector is force-kept as the anchor...
+    expect(kept(result)).toContain(3);
+    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.score).toBe(Number.POSITIVE_INFINITY);
+    // ...and carries no reversal glyph itself (it is the truth, not the casualty).
+    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBeNull();
+    // The trivial reversed victim no longer claims a first-class slot.
+    expect(kept(result)).not.toContain(2);
+  });
+
+  it("still force-keeps a reversed victim that has no in-window corrector (rewind case)", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        id: 20,
+        promptNumber: 2,
+        type: "discovery",
+        title: "rewound direction",
+        tags: ["rolled-back"],
+        toolCallCount: 0,
+        createdAtEpoch: base + 60,
+      }),
+      // Cites the victim but does NOT overturn-marker it; still, no corrector edge
+      // is needed — what matters is a later turn citing the reversed victim. Here
+      // nothing cites it, so it stays force-kept.
+      turn({ id: 30, promptNumber: 3, type: "decision", title: "end", createdAtEpoch: base + 120 }),
+    ];
+    const result = select(rows);
+    expect(kept(result)).toContain(2);
+    expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
   });
 
   it("caps a heavy day and emits exactly one overflow hint", () => {

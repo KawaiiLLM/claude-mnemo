@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.35-mqibvp4b" : "dev";
+var BUILD_ID = true ? "0.2.36-mqkxaov6" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -39439,25 +39439,16 @@ function isMilestoneAlwaysKeep(turn, endpoints) {
 function isReadmittedDiscovery(turn, toolBurstThreshold) {
   return turn.type === "discovery" && (turn.toolCallCount ?? 0) > toolBurstThreshold;
 }
-function milestoneSignificance(turn, endpoints, toolBurstThreshold) {
-  if (isMilestoneAlwaysKeep(turn, endpoints)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  if (isReadmittedDiscovery(turn, toolBurstThreshold)) {
-    return 0.5;
-  }
-  return milestoneBaseScore(turn);
-}
 var FOLD_RUN_TYPES = /* @__PURE__ */ new Set(["decision", "feature", "change", "refactor", "bugfix"]);
 var FOLD_FIRST_TYPES = /* @__PURE__ */ new Set(["decision", "feature", "change", "refactor"]);
-function foldMilestoneRuns(seq, endpoints) {
+function foldMilestoneRuns(seq, endpoints, alwaysKeep = (turn) => isMilestoneAlwaysKeep(turn, endpoints)) {
   const kept = /* @__PURE__ */ new Set();
   let runType = void 0;
   let runMembers = [];
   const flush = () => {
     if (typeof runType === "string" && FOLD_RUN_TYPES.has(runType)) {
       const foldable = runMembers.filter(
-        (t) => milestoneBaseScore(t) > 0 && !isMilestoneAlwaysKeep(t, endpoints)
+        (t) => milestoneBaseScore(t) > 0 && !alwaysKeep(t)
       );
       if (foldable.length > 0) {
         kept.add(foldable[foldable.length - 1].promptNumber);
@@ -39477,6 +39468,34 @@ function foldMilestoneRuns(seq, endpoints) {
   }
   flush();
   return kept;
+}
+function buildCorrectionGraph(seq, resolveCited) {
+  const correctors = /* @__PURE__ */ new Set();
+  const supersededVictims = /* @__PURE__ */ new Set();
+  const byDbId = /* @__PURE__ */ new Map();
+  for (const t of seq) {
+    byDbId.set(t.id, t);
+  }
+  for (const corrector of seq) {
+    const citedIds = parseContentReferences(
+      corrector.content,
+      MILESTONE_REFERENCE_PARSE_CAP
+    );
+    for (const id of citedIds) {
+      const inWindow = byDbId.get(id);
+      const victim = inWindow ?? resolveCited?.(id) ?? void 0;
+      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
+      victim.promptNumber >= corrector.promptNumber || // Only reversal pairs drive promotion/demotion.
+      milestoneMarker(victim) !== "reversed") {
+        continue;
+      }
+      correctors.add(corrector.promptNumber);
+      if (inWindow !== void 0) {
+        supersededVictims.add(victim.promptNumber);
+      }
+    }
+  }
+  return { correctors, supersededVictims };
 }
 function getCompactMetadata(tags) {
   let preTokens = 0;
@@ -39702,9 +39721,33 @@ function selectMilestoneTurns(view) {
   endpoints.add(seq[0].promptNumber);
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
   endpoints.add((lastTitled ?? seq[seq.length - 1]).promptNumber);
-  const keptPrompts = foldMilestoneRuns(seq, endpoints);
+  const sessionById = view.sessionTurns ? new Map(view.sessionTurns.map((t) => [t.id, t])) : void 0;
+  const { correctors, supersededVictims } = buildCorrectionGraph(
+    seq,
+    sessionById ? (id) => sessionById.get(id) : void 0
+  );
+  const alwaysKeep = (turn) => {
+    if (correctors.has(turn.promptNumber)) {
+      return true;
+    }
+    const structuralKeep = turn.type === "compact" || endpoints.has(turn.promptNumber);
+    if (supersededVictims.has(turn.promptNumber)) {
+      return structuralKeep;
+    }
+    return isMilestoneAlwaysKeep(turn, endpoints);
+  };
+  const significance = (turn) => {
+    if (alwaysKeep(turn)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (isReadmittedDiscovery(turn, threshold)) {
+      return 0.5;
+    }
+    return milestoneBaseScore(turn);
+  };
+  const keptPrompts = foldMilestoneRuns(seq, endpoints, alwaysKeep);
   for (const turn of seq) {
-    if (isMilestoneAlwaysKeep(turn, endpoints) || isReadmittedDiscovery(turn, threshold)) {
+    if (alwaysKeep(turn) || isReadmittedDiscovery(turn, threshold)) {
       keptPrompts.add(turn.promptNumber);
     }
   }
@@ -39724,8 +39767,8 @@ function selectMilestoneTurns(view) {
       MILESTONE_DAY_BUDGET_MAX
     );
     const ranked = [...dayTurns].sort((a, b) => {
-      const sa = milestoneSignificance(a, endpoints, threshold);
-      const sb = milestoneSignificance(b, endpoints, threshold);
+      const sa = significance(a);
+      const sb = significance(b);
       if (sa !== sb) return sb - sa;
       const ta = a.toolCallCount ?? 0;
       const tb = b.toolCallCount ?? 0;
@@ -39735,7 +39778,7 @@ function selectMilestoneTurns(view) {
     const top = ranked.slice(0, cap);
     for (const turn of top) finalPrompts.add(turn.promptNumber);
     for (const turn of ranked.slice(cap)) {
-      if (isMilestoneAlwaysKeep(turn, endpoints)) finalPrompts.add(turn.promptNumber);
+      if (alwaysKeep(turn)) finalPrompts.add(turn.promptNumber);
     }
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
     if (dropped.length > 0) {
@@ -39750,7 +39793,7 @@ function selectMilestoneTurns(view) {
   }
   const kept = seq.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => ({
     turn,
-    score: milestoneSignificance(turn, endpoints, threshold),
+    score: significance(turn),
     marker: milestoneMarker(turn)
   }));
   return { kept, overflowByDay };
@@ -39893,7 +39936,8 @@ function buildTimelineView(db, input, preloadedTurns) {
     session,
     windowTurns,
     windowSignals,
-    compactBoundaries
+    compactBoundaries,
+    sessionTurns: allTurns
   });
   if (viewKind === "milestones") {
     resolveMilestoneReferences(db, milestoneSelection.kept);

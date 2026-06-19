@@ -661,6 +661,8 @@ const FOLD_FIRST_TYPES = new Set(["decision", "feature", "change", "refactor"]);
 export function foldMilestoneRuns(
   seq: TurnRecord[],
   endpoints: Set<number>,
+  alwaysKeep: (turn: TurnRecord) => boolean = (turn) =>
+    isMilestoneAlwaysKeep(turn, endpoints),
 ): Set<number> {
   const kept = new Set<number>();
   let runType: string | null | undefined = undefined;
@@ -669,7 +671,7 @@ export function foldMilestoneRuns(
   const flush = (): void => {
     if (typeof runType === "string" && FOLD_RUN_TYPES.has(runType)) {
       const foldable = runMembers.filter(
-        (t) => milestoneBaseScore(t) > 0 && !isMilestoneAlwaysKeep(t, endpoints),
+        (t) => milestoneBaseScore(t) > 0 && !alwaysKeep(t),
       );
       if (foldable.length > 0) {
         kept.add(foldable[foldable.length - 1]!.promptNumber);
@@ -691,6 +693,68 @@ export function foldMilestoneRuns(
   flush();
 
   return kept;
+}
+
+/**
+ * Builds the in-window linear-correction graph from causal citations. A turn is
+ * a *corrector* when its `content` cites `[T<dbid>]` of an earlier same-session
+ * turn whose milestone marker is `reversed` (a `rolled-back` role tag or the
+ * rewind column). That cited turn is the *superseded victim*: it is already
+ * represented by the corrector's `↳` casualty sub-row, so it should not also
+ * claim a first-class always-keep slot just for being reversed.
+ *
+ * Promotion/demotion keys on the *existence of a corrector*, which leaves the
+ * pure-rewind case (no later turn cites the rewound turn) force-kept exactly as
+ * before. A plain "building on `[T<n>]`" cite of a non-reversed predecessor is
+ * not a correction and is ignored.
+ *
+ * A cited victim is matched first against the in-window `seq`, then via the
+ * optional `resolveCited` lookup (the full-session set) so a ranged view whose
+ * corrector cites a reversed victim *outside* the window still promotes that
+ * corrector. Only an in-window victim is added to `supersededVictims` — an
+ * out-of-window victim is not a selection candidate, so it cannot be demoted
+ * from a slot it never held; only its corrector's promotion matters.
+ */
+export function buildCorrectionGraph(
+  seq: TurnRecord[],
+  resolveCited?: (dbId: number) => TurnRecord | null | undefined,
+): {
+  correctors: Set<number>;
+  supersededVictims: Set<number>;
+} {
+  const correctors = new Set<number>();
+  const supersededVictims = new Set<number>();
+  const byDbId = new Map<number, TurnRecord>();
+  for (const t of seq) {
+    byDbId.set(t.id, t);
+  }
+
+  for (const corrector of seq) {
+    const citedIds = parseContentReferences(
+      corrector.content,
+      MILESTONE_REFERENCE_PARSE_CAP,
+    );
+    for (const id of citedIds) {
+      const inWindow = byDbId.get(id);
+      const victim = inWindow ?? resolveCited?.(id) ?? undefined;
+      if (
+        !victim ||
+        victim.sessionId !== corrector.sessionId ||
+        // Predecessor guard: a causal reference points backward.
+        victim.promptNumber >= corrector.promptNumber ||
+        // Only reversal pairs drive promotion/demotion.
+        milestoneMarker(victim) !== "reversed"
+      ) {
+        continue;
+      }
+      correctors.add(corrector.promptNumber);
+      if (inWindow !== undefined) {
+        supersededVictims.add(victim.promptNumber);
+      }
+    }
+  }
+
+  return { correctors, supersededVictims };
 }
 
 function getCompactMetadata(tags: string[]): {
@@ -983,6 +1047,12 @@ export function selectMilestoneTurns(view: {
   windowTurns: TurnRecord[];
   windowSignals: ShapeSignals;
   compactBoundaries: number[];
+  /**
+   * Full-session turns, used only to resolve a corrector's `[T<dbid>]` cite of a
+   * reversed victim that sits *outside* a ranged `windowTurns`. Omit for a
+   * full-window view (every cite is already in-window).
+   */
+  sessionTurns?: TurnRecord[];
 }): MilestoneSelection {
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
     (turn) => turn.status !== "skipped",
@@ -999,13 +1069,44 @@ export function selectMilestoneTurns(view: {
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
   endpoints.add((lastTitled ?? seq[seq.length - 1]!).promptNumber);
 
+  // Linear-correction reweighting: when a surviving turn cites a reversed
+  // predecessor (`[T<dbid>]`), the citing *corrector* becomes the always-keep
+  // anchor and the cited *victim* loses its reversed-marker guarantee — it falls
+  // back to its base score and survives only as the corrector's `↳` casualty
+  // sub-row (resolved post-selection). A rewound turn with no in-window corrector
+  // is untouched (still force-kept). Structural keeps (endpoint/compact) stand.
+  const sessionById = view.sessionTurns
+    ? new Map(view.sessionTurns.map((t) => [t.id, t]))
+    : undefined;
+  const { correctors, supersededVictims } = buildCorrectionGraph(
+    seq,
+    sessionById ? (id) => sessionById.get(id) : undefined,
+  );
+  const alwaysKeep = (turn: TurnRecord): boolean => {
+    if (correctors.has(turn.promptNumber)) {
+      return true;
+    }
+    const structuralKeep =
+      turn.type === "compact" || endpoints.has(turn.promptNumber);
+    if (supersededVictims.has(turn.promptNumber)) {
+      return structuralKeep;
+    }
+    return isMilestoneAlwaysKeep(turn, endpoints);
+  };
+  const significance = (turn: TurnRecord): number => {
+    if (alwaysKeep(turn)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    if (isReadmittedDiscovery(turn, threshold)) {
+      return 0.5;
+    }
+    return milestoneBaseScore(turn);
+  };
+
   // D2 fold + D1 always-keep / re-admitted discovery, unioned.
-  const keptPrompts = foldMilestoneRuns(seq, endpoints);
+  const keptPrompts = foldMilestoneRuns(seq, endpoints, alwaysKeep);
   for (const turn of seq) {
-    if (
-      isMilestoneAlwaysKeep(turn, endpoints) ||
-      isReadmittedDiscovery(turn, threshold)
-    ) {
+    if (alwaysKeep(turn) || isReadmittedDiscovery(turn, threshold)) {
       keptPrompts.add(turn.promptNumber);
     }
   }
@@ -1030,8 +1131,8 @@ export function selectMilestoneTurns(view: {
       MILESTONE_DAY_BUDGET_MAX,
     );
     const ranked = [...dayTurns].sort((a, b) => {
-      const sa = milestoneSignificance(a, endpoints, threshold);
-      const sb = milestoneSignificance(b, endpoints, threshold);
+      const sa = significance(a);
+      const sb = significance(b);
       if (sa !== sb) return sb - sa;
       const ta = a.toolCallCount ?? 0;
       const tb = b.toolCallCount ?? 0;
@@ -1043,7 +1144,7 @@ export function selectMilestoneTurns(view: {
     for (const turn of top) finalPrompts.add(turn.promptNumber);
     // Always-keep beyond the cap are force-kept (the spine is never dropped).
     for (const turn of ranked.slice(cap)) {
-      if (isMilestoneAlwaysKeep(turn, endpoints)) finalPrompts.add(turn.promptNumber);
+      if (alwaysKeep(turn)) finalPrompts.add(turn.promptNumber);
     }
 
     const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
@@ -1062,7 +1163,7 @@ export function selectMilestoneTurns(view: {
     .filter((turn) => finalPrompts.has(turn.promptNumber))
     .map((turn) => ({
       turn,
-      score: milestoneSignificance(turn, endpoints, threshold),
+      score: significance(turn),
       marker: milestoneMarker(turn),
     }));
 
@@ -1287,6 +1388,7 @@ export function buildTimelineView(
     windowTurns,
     windowSignals,
     compactBoundaries,
+    sessionTurns: allTurns,
   });
   // Resolve each kept milestone's `[T<dbid>]` causal references here, in the
   // query layer where `db` is available, so the renderer stays pure. Goes
