@@ -33,6 +33,7 @@ export interface SearchMemoryOptions {
   project?: string;
   type?: string;
   file?: string;
+  tag?: string;
   sessionId?: number;
   after?: number;
   before?: number;
@@ -142,6 +143,25 @@ function buildFileClause(
   return {
     clause: `(${readColumn} LIKE ? OR ${modifiedColumn} LIKE ?)`,
     params: [`%${file}%`, `%${file}%`],
+  };
+}
+
+// Exact-match a single tag value against the JSON-array `tags` column via
+// json_each, so the match is on a whole array ELEMENT — not a substring. This
+// makes `tag:` truly exact and immune to LIKE-wildcard pitfalls: `tag:%`
+// matches only a literal `%` tag (not everything), `topic:svg` never matches
+// `topic:svg-filter`, and a NULL or `[]` tags column simply yields no rows.
+function buildTagClause(
+  column: string,
+  tag?: string,
+): { clause: string; params: string[] } {
+  if (!tag) {
+    return { clause: "", params: [] };
+  }
+
+  return {
+    clause: `EXISTS (SELECT 1 FROM json_each(${column}) WHERE value = ?)`,
+    params: [tag],
   };
 }
 
@@ -528,6 +548,18 @@ function querySessionsByScope(
       params.push(`%${options.file}%`, `%${options.file}%`);
     }
 
+    if (options.tag) {
+      whereClauses.push(
+        `EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+        )`,
+      );
+      params.push(options.tag);
+    }
+
     return queryRows(
       db,
       applyLimit(`
@@ -582,6 +614,18 @@ function querySessionsByScope(
     params.push(`%${options.file}%`, `%${options.file}%`);
   }
 
+  if (options.tag) {
+    whereClauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`,
+    );
+    params.push(options.tag);
+  }
+
   return queryRows(
     db,
     applyLimit(`
@@ -616,11 +660,12 @@ function queryTurnsByScope(
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const tagClause = buildTagClause("t.tags", options.tag);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
     if (options.type) {
       whereClauses.push("t.type = ?");
@@ -655,8 +700,8 @@ function queryTurnsByScope(
     );
   }
 
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
   if (options.type) {
     whereClauses.push("t.type = ?");
@@ -700,6 +745,11 @@ function queryObservationsByScope(
   }
 
   if (options.type) {
+    return [];
+  }
+
+  // Tags live on turns, not observations — a tag filter excludes the obs layer.
+  if (options.tag) {
     return [];
   }
 
@@ -779,6 +829,7 @@ export function searchMemory(
   const hasFilters =
     Boolean(options.type) ||
     Boolean(options.file) ||
+    Boolean(options.tag) ||
     options.sessionId !== undefined ||
     options.after !== undefined ||
     options.before !== undefined;

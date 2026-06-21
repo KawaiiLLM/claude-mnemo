@@ -17,7 +17,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.2.36", () => {
+  test("release metadata is consistently bumped to 0.2.37", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -33,10 +33,10 @@ describe("release artifacts", () => {
       plugins?: Array<{ version?: string }>;
     };
 
-    expect(packageJson.version).toBe("0.2.36");
-    expect(pluginManifest.version).toBe("0.2.36");
-    expect(marketplace.metadata?.version).toBe("0.2.36");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.2.36");
+    expect(packageJson.version).toBe("0.2.37");
+    expect(pluginManifest.version).toBe("0.2.37");
+    expect(marketplace.metadata?.version).toBe("0.2.37");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.2.37");
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -118,11 +118,18 @@ describe("release artifacts", () => {
       "parseContentReferences", // [T<n>] causal-ref resolver
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
       "buildCorrectionGraph", // corrector-promotion / victim-demotion selection
+      "json_each", // tag: facet — json_each exact-match clause
     ]) {
       expect(mcpServer).toContain(marker);
     }
 
+    // The `tag:` rejection was removed when the turn-scoped facet landed; a
+    // stale bundle would still carry it and silently break `tag:` in the plugin.
+    expect(mcpServer).not.toContain("tag: filtering was removed");
+
     expect(worker).toContain("Correcting an earlier turn");
     expect(worker).toContain('tags: ["rolled-back"]');
+    // Two-class tag contract (bare role + topic: facet) in the extraction prompt.
+    expect(worker).toContain("topic tags NEVER affect milestones");
   });
 });

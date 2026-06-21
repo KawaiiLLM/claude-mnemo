@@ -46,6 +46,7 @@ interface QueryFilters {
   text?: string;
   type?: string;
   file?: string;
+  tag?: string;
   project?: string;
   session?: number;
 }
@@ -268,6 +269,17 @@ function parseQueryFilters(query: string | undefined): QueryFilters {
     }
     if (token.startsWith("file:")) {
       filters.file = token.slice("file:".length);
+      continue;
+    }
+    if (token.startsWith("tag:")) {
+      // Exact-match a stored tag (whole array element). The value keeps any
+      // namespace prefix, so `tag:rolled-back` matches a bare role tag and
+      // `tag:topic:svg-filter` matches a `topic:`-prefixed topic tag. An empty
+      // value (`tag:` alone) is dropped, never searched as free text.
+      const tag = token.slice("tag:".length);
+      if (tag) {
+        filters.tag = tag;
+      }
       continue;
     }
     if (token.startsWith("project:")) {
@@ -1158,6 +1170,7 @@ function searchQueryResults(
     query: filters.text,
     type: filters.type,
     file: filters.file,
+    tag: filters.tag,
     project: filters.project,
     sessionId: filters.session,
     after,
@@ -1166,12 +1179,6 @@ function searchQueryResults(
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
-  if (input.query && /(^|\s)tag:/.test(input.query)) {
-    return formatParameterError(
-      "tag: filtering was removed with durable memory; use type:/file:/project: or free-text search.",
-    );
-  }
-
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
@@ -1204,6 +1211,28 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
   if (input.query) {
     const filters = parseQueryFilters(input.query);
+
+    // A non-empty query that parses to nothing actionable (e.g. a bare `tag:`,
+    // `session:` with a malformed id, or whitespace) would otherwise silently
+    // run an unfiltered search and surface recent sessions as if they matched.
+    // Reject it so a typo'd filter reads as an error, not a false hit. A time
+    // range still counts as a criterion, so `tag:` + `time:` stays valid.
+    const hasCriteria =
+      Boolean(filters.text) ||
+      Boolean(filters.type) ||
+      Boolean(filters.file) ||
+      Boolean(filters.tag) ||
+      Boolean(filters.project) ||
+      filters.session !== undefined ||
+      timeRange.after !== undefined ||
+      timeRange.before !== undefined;
+
+    if (!hasCriteria) {
+      return formatParameterError(
+        `query "${input.query}" has no searchable terms or filters`,
+      );
+    }
+
     const results = searchQueryResults(
       db,
       filters,

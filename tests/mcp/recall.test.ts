@@ -58,6 +58,7 @@ describe("recallMemory", () => {
       content: "Refresh overlap diagnosed",
       insight: "- concurrent refreshes collide",
       type: "bugfix",
+      tags: ["rolled-back", "topic:auth-race"],
       filesRead: ["src/auth.ts"],
       filesModified: ["src/auth.ts", "tests/auth.test.ts"],
       createdAtEpoch: 86_630,
@@ -537,8 +538,31 @@ describe("recallMemory", () => {
     expect(byPromptId).not.toContain("dbid:");
   });
 
-  test("recall rejects a tag: filter (removed with durable memory)", () => {
-    expect(recallMemory(db, { query: "tag:feedback" })).toContain("Parameter error");
+  test("recall tag: filter matches a bare role tag", () => {
+    const byRole = recallMemory(db, { query: "tag:rolled-back" });
+    expect(byRole).toContain(`[S${authSessionId}]`);
+    expect(byRole).toContain("Diagnose auth race");
+  });
+
+  test("recall tag: filter matches a topic:-prefixed tag, exact element only", () => {
+    expect(recallMemory(db, { query: "tag:topic:auth-race" })).toContain(
+      "Diagnose auth race",
+    );
+    // The match is anchored to a whole array element: a prefix must NOT match.
+    expect(recallMemory(db, { query: "tag:topic:auth" })).not.toContain(
+      "Diagnose auth race",
+    );
+  });
+
+  test("recall rejects a query that parses to no criteria", () => {
+    // A bare `tag:` (empty value) must not silently degrade to an unfiltered
+    // search that surfaces recent sessions as false hits.
+    expect(recallMemory(db, { query: "tag:" })).toContain("Parameter error");
+    expect(recallMemory(db, { query: "   " })).toContain("Parameter error");
+    // ...but a degenerate filter alongside a real criterion still searches.
+    expect(recallMemory(db, { query: "tag:rolled-back" })).not.toContain(
+      "Parameter error",
+    );
   });
 
   test("S/T stays prompt_number-scoped and never falls back to a DB id", () => {

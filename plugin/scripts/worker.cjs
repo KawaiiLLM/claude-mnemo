@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.36-mqkxaov6" : "dev";
+var BUILD_ID = true ? "0.2.37-mqnndpwl" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -209,6 +209,15 @@ function buildFileClause(readColumn, modifiedColumn, file2) {
   return {
     clause: `(${readColumn} LIKE ? OR ${modifiedColumn} LIKE ?)`,
     params: [`%${file2}%`, `%${file2}%`]
+  };
+}
+function buildTagClause(column, tag) {
+  if (!tag) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `EXISTS (SELECT 1 FROM json_each(${column}) WHERE value = ?)`,
+    params: [tag]
   };
 }
 function buildProjectClause(project) {
@@ -480,6 +489,17 @@ function querySessionsByScope(db, options, query2) {
       );
       params2.push(`%${options.file}%`, `%${options.file}%`);
     }
+    if (options.tag) {
+      whereClauses2.push(
+        `EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+        )`
+      );
+      params2.push(options.tag);
+    }
     return queryRows(
       db,
       applyLimit(`
@@ -530,6 +550,17 @@ function querySessionsByScope(db, options, query2) {
     );
     params.push(`%${options.file}%`, `%${options.file}%`);
   }
+  if (options.tag) {
+    whereClauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`
+    );
+    params.push(options.tag);
+  }
   return queryRows(
     db,
     applyLimit(`
@@ -559,10 +590,11 @@ function queryTurnsByScope(db, options, query2) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const tagClause = buildTagClause("t.tags", options.tag);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query2) {
-    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-    const params2 = [query2, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const params2 = [query2, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
     if (options.type) {
       whereClauses2.push("t.type = ?");
       params2.push(options.type);
@@ -594,8 +626,8 @@ function queryTurnsByScope(db, options, query2) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
   if (options.type) {
     whereClauses.push("t.type = ?");
     params.push(options.type);
@@ -631,6 +663,9 @@ function queryObservationsByScope(db, options, query2) {
     return [];
   }
   if (options.type) {
+    return [];
+  }
+  if (options.tag) {
     return [];
   }
   const projectClause = buildProjectClause(options.project);
@@ -698,7 +733,7 @@ function queryObservationsByScope(db, options, query2) {
 }
 function searchMemory(db, options) {
   const query2 = buildSafeFtsQuery(options.query);
-  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || Boolean(options.tag) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
   if (!query2 && !hasFilters) {
     if (!options.scope || options.scope === "sessions") {
       return queryRecentSessions(db, options);
@@ -38277,6 +38312,13 @@ function parseQueryFilters(query2) {
       filters.file = token.slice("file:".length);
       continue;
     }
+    if (token.startsWith("tag:")) {
+      const tag = token.slice("tag:".length);
+      if (tag) {
+        filters.tag = tag;
+      }
+      continue;
+    }
     if (token.startsWith("project:")) {
       filters.project = token.slice("project:".length);
       continue;
@@ -38838,6 +38880,7 @@ function searchQueryResults(db, filters, after, before) {
     query: filters.text,
     type: filters.type,
     file: filters.file,
+    tag: filters.tag,
     project: filters.project,
     sessionId: filters.session,
     after,
@@ -38845,11 +38888,6 @@ function searchQueryResults(db, filters, after, before) {
   }).filter((r) => r.sessionId !== null);
 }
 function recallMemory(db, input) {
-  if (input.query && /(^|\s)tag:/.test(input.query)) {
-    return formatParameterError(
-      "tag: filtering was removed with durable memory; use type:/file:/project: or free-text search."
-    );
-  }
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
@@ -38878,6 +38916,12 @@ function recallMemory(db, input) {
   }
   if (input.query) {
     const filters = parseQueryFilters(input.query);
+    const hasCriteria = Boolean(filters.text) || Boolean(filters.type) || Boolean(filters.file) || Boolean(filters.tag) || Boolean(filters.project) || filters.session !== void 0 || timeRange.after !== void 0 || timeRange.before !== void 0;
+    if (!hasCriteria) {
+      return formatParameterError(
+        `query "${input.query}" has no searchable terms or filters`
+      );
+    }
     const results = searchQueryResults(
       db,
       filters,
@@ -40714,8 +40758,10 @@ For each \`<turn>\` block:
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
-   - tags: 0-5 lowercase-hyphenated role keywords. A tag names the turn's role in the session arc, not its topic, file, UI area, or action. Put topics/actions in \`content\` where FTS can find them; an ordinary work turn usually has no tags.
-   - tag style: use short stable conventional values for session roles. If this turn itself was rejected, use a rejection role tag; if this turn merely performs a revert/restore, do NOT tag it \`rollback\`/\`revert\` \u2014 that action belongs in \`content\`. When this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets the literal \`rolled-back\` tag.
+   - tags: lowercase-hyphenated tags in TWO namespaces \u2014 BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix \u2014 never a bare tag.
+     - ROLE (bare, \u22642, usually none): the turn's role in the session arc. Seed examples \u2014 \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) \u2014 richer role vocabulary is welcome. Keep the name the BARE role, short and general \u2014 \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
+     - TOPIC (\`topic:\` prefix, optional): what the turn is about \u2014 feature area, file, library, or action (e.g. \`topic:milestone-scoring\`, \`topic:recall-faceting\`). For faceted recall only; topic tags NEVER affect milestones. Skip if the title already conveys it.
+   - tag style: a turn that merely performs a revert/restore is NOT \`rolled-back\` (that action, if tagged at all, is \`topic:revert\`). The literal \`rolled-back\` marks a turn that was itself overturned \u2014 when this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets \`rolled-back\`.
    - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
 
 2. Optionally refresh the session summary \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) \u2014 omitting any is rejected \u2014 editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.

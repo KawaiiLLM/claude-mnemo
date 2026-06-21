@@ -90,7 +90,7 @@ If the result still is not enough, or you need exact wording, the full response,
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` | string | Selector. Supports wildcards (`*`), ranges (`5..10`), and nested paths (`S12/T3/O*`). |
-| `query` | string | Free text + optional prefixes `type:` / `file:` / `project:` / `session:`. Free-text terms are OR'd and ranked by relevance (bm25); the typed filters are AND'd with the text and each other. |
+| `query` | string | Free text + optional prefixes `type:` / `file:` / `tag:` / `project:` / `session:`. Free-text terms are OR'd and ranked by relevance (bm25); the typed filters are AND'd with the text and each other. |
 | `time` | string | `-7d` / `-2w` (relative), `YYYY-MM-DD` (single UTC day), `YYYY-MM-DD..YYYY-MM-DD` (inclusive UTC range). |
 | `depth` | string | `collapsed` (default) or `expanded`. |
 | `page` | number | 1-indexed page number for the target level. Default `1`. |
@@ -120,6 +120,7 @@ In the `S12/T3` form the turn id is a session-scoped prompt number. Bare `T418` 
 |---|---|---|
 | `type:bugfix` | turns, observations | Matches stored type tags. |
 | `file:src/auth.ts` | turns, observations | Substring match against `files_read` + `files_modified`. |
+| `tag:rolled-back` / `tag:topic:svg-filter` | sessions, turns | Exact-match a stored turn tag. Tags come in two namespaces: a **bare** tag is the turn's session-arc role (e.g. `rolled-back`); a **`topic:`-prefixed** tag is a topic facet. The match is anchored to a whole tag, so `tag:topic:svg` does NOT match `topic:svg-filter`. |
 | `project:/abs/path` | sessions, turns, observations | Exact match against `session.project`. |
 | `session:S12` | sessions, turns, observations | Restrict a full-text search to one session. Accepts `S12` or bare `12`; a malformed id is ignored. |
 

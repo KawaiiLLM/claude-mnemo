@@ -6855,6 +6855,15 @@ function buildFileClause(readColumn, modifiedColumn, file2) {
     params: [`%${file2}%`, `%${file2}%`]
   };
 }
+function buildTagClause(column, tag) {
+  if (!tag) {
+    return { clause: "", params: [] };
+  }
+  return {
+    clause: `EXISTS (SELECT 1 FROM json_each(${column}) WHERE value = ?)`,
+    params: [tag]
+  };
+}
 function buildProjectClause(project) {
   if (!project) {
     return { clause: "", params: [] };
@@ -7124,6 +7133,17 @@ function querySessionsByScope(db, options, query) {
       );
       params2.push(`%${options.file}%`, `%${options.file}%`);
     }
+    if (options.tag) {
+      whereClauses2.push(
+        `EXISTS (
+          SELECT 1
+          FROM turns t
+          WHERE t.session_id = s.id
+            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+        )`
+      );
+      params2.push(options.tag);
+    }
     return queryRows(
       db,
       applyLimit(`
@@ -7174,6 +7194,17 @@ function querySessionsByScope(db, options, query) {
     );
     params.push(`%${options.file}%`, `%${options.file}%`);
   }
+  if (options.tag) {
+    whereClauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`
+    );
+    params.push(options.tag);
+  }
   return queryRows(
     db,
     applyLimit(`
@@ -7203,10 +7234,11 @@ function queryTurnsByScope(db, options, query) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("t.created_at_epoch", options);
   const fileClause = buildFileClause("t.files_read", "t.files_modified", options.file);
+  const tagClause = buildTagClause("t.tags", options.tag);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
     if (options.type) {
       whereClauses2.push("t.type = ?");
       params2.push(options.type);
@@ -7238,8 +7270,8 @@ function queryTurnsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause];
-  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params];
+  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
   if (options.type) {
     whereClauses.push("t.type = ?");
     params.push(options.type);
@@ -7275,6 +7307,9 @@ function queryObservationsByScope(db, options, query) {
     return [];
   }
   if (options.type) {
+    return [];
+  }
+  if (options.tag) {
     return [];
   }
   const projectClause = buildProjectClause(options.project);
@@ -7342,7 +7377,7 @@ function queryObservationsByScope(db, options, query) {
 }
 function searchMemory(db, options) {
   const query = buildSafeFtsQuery(options.query);
-  const hasFilters = Boolean(options.type) || Boolean(options.file) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
+  const hasFilters = Boolean(options.type) || Boolean(options.file) || Boolean(options.tag) || options.sessionId !== void 0 || options.after !== void 0 || options.before !== void 0;
   if (!query && !hasFilters) {
     if (!options.scope || options.scope === "sessions") {
       return queryRecentSessions(db, options);
@@ -32396,6 +32431,13 @@ function parseQueryFilters(query) {
       filters.file = token.slice("file:".length);
       continue;
     }
+    if (token.startsWith("tag:")) {
+      const tag = token.slice("tag:".length);
+      if (tag) {
+        filters.tag = tag;
+      }
+      continue;
+    }
     if (token.startsWith("project:")) {
       filters.project = token.slice("project:".length);
       continue;
@@ -32957,6 +32999,7 @@ function searchQueryResults(db, filters, after, before) {
     query: filters.text,
     type: filters.type,
     file: filters.file,
+    tag: filters.tag,
     project: filters.project,
     sessionId: filters.session,
     after,
@@ -32964,11 +33007,6 @@ function searchQueryResults(db, filters, after, before) {
   }).filter((r) => r.sessionId !== null);
 }
 function recallMemory(db, input) {
-  if (input.query && /(^|\s)tag:/.test(input.query)) {
-    return formatParameterError(
-      "tag: filtering was removed with durable memory; use type:/file:/project: or free-text search."
-    );
-  }
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
@@ -32997,6 +33035,12 @@ function recallMemory(db, input) {
   }
   if (input.query) {
     const filters = parseQueryFilters(input.query);
+    const hasCriteria = Boolean(filters.text) || Boolean(filters.type) || Boolean(filters.file) || Boolean(filters.tag) || Boolean(filters.project) || filters.session !== void 0 || timeRange.after !== void 0 || timeRange.before !== void 0;
+    if (!hasCriteria) {
+      return formatParameterError(
+        `query "${input.query}" has no searchable terms or filters`
+      );
+    }
     const results = searchQueryResults(
       db,
       filters,
@@ -34554,7 +34598,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.36" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.2.37" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
