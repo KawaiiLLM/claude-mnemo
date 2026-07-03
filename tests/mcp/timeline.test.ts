@@ -24,7 +24,6 @@ import {
   isVersionBumpTurn,
   milestoneBaseScore,
   milestoneMarker,
-  milestoneSignificance,
   OUTCOME_TAGS,
   parseTimelineId,
   renderTimeline,
@@ -1076,27 +1075,15 @@ describe("detectShapeSignals", () => {
   });
 });
 
-describe("milestoneBaseScore / milestoneSignificance", () => {
-  const noEndpoints = new Set<number>();
-
+describe("milestoneBaseScore", () => {
   it("scores by type, requiring files for deliverables", () => {
     expect(milestoneBaseScore(turn({ type: "decision" }))).toBe(4);
-    expect(milestoneBaseScore(turn({ type: "feature", filesModified: ["a.ts"] }))).toBe(3);
+    expect(milestoneBaseScore(turn({ type: "feature", filesModified: ["a.ts"] }))).toBe(2);
+    expect(milestoneBaseScore(turn({ type: "refactor", filesModified: ["a.ts"] }))).toBe(2);
     expect(milestoneBaseScore(turn({ type: "feature", filesModified: [] }))).toBe(0);
     expect(milestoneBaseScore(turn({ type: "change", filesModified: [] }))).toBe(0);
     expect(milestoneBaseScore(turn({ type: "bugfix" }))).toBe(2);
-    expect(milestoneBaseScore(turn({ type: "discovery" }))).toBe(0);
-  });
-
-  it("gives always-keep turns +infinity", () => {
-    expect(milestoneSignificance(turn({ type: "compact" }), noEndpoints, 10)).toBe(Number.POSITIVE_INFINITY);
-    expect(milestoneSignificance(turn({ type: "change", tags: ["merged"], filesModified: [] }), noEndpoints, 10)).toBe(Number.POSITIVE_INFINITY);
-    expect(milestoneSignificance(turn({ promptNumber: 5 }), new Set([5]), 10)).toBe(Number.POSITIVE_INFINITY);
-  });
-
-  it("re-admits a bursting discovery as a 0.5 singleton, else 0", () => {
-    expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 50 }), noEndpoints, 10)).toBe(0.5);
-    expect(milestoneSignificance(turn({ type: "discovery", toolCallCount: 2 }), noEndpoints, 10)).toBe(0);
+    expect(milestoneBaseScore(turn({ type: "discovery" }))).toBe(1);
   });
 });
 
@@ -1425,6 +1412,36 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(kept(result)).not.toContain(2);
   });
 
+  it("hard-excludes a superseded victim even when its own score is high", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        id: 20,
+        promptNumber: 2,
+        type: "discovery",
+        title: "appealing but wrong discovery",
+        insight: "- looked important before correction",
+        tags: ["rolled-back"],
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        id: 30,
+        promptNumber: 3,
+        type: "bugfix",
+        title: "corrected the wrong discovery",
+        content: "Corrects [T20].",
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+
+    const result = select(rows);
+    expect(kept(result)).toContain(3);
+    expect(kept(result)).not.toContain(2);
+  });
+
   it("still force-keeps a reversed victim that has no in-window corrector (rewind case)", () => {
     const base = 1_779_782_400;
     const rows = [
@@ -1448,10 +1465,186 @@ describe("selectMilestoneTurns (narrative digest)", () => {
     expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
   });
 
+  it("coalesces same-day outcome chains so only the tail renders the outcome marker", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "feature",
+        title: "0.2.38 implementation complete",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "feature",
+        title: "0.2.38 verified",
+        tags: ["released"],
+        filesModified: ["b.ts"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "feature",
+        title: "0.2.38 merged",
+        tags: ["merged"],
+        filesModified: ["c.ts"],
+        createdAtEpoch: base + 180,
+      }),
+      turn({ promptNumber: 5, type: "decision", title: "end", createdAtEpoch: base + 240 }),
+    ];
+
+    const result = select(rows);
+    expect(
+      result.kept
+        .filter((milestone) => milestone.marker === "outcome")
+        .map((milestone) => milestone.turn.promptNumber),
+    ).toEqual([4]);
+  });
+
+  it("keeps separate outcome anchors when version or prompt-gap breaks the chain", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "feature",
+        title: "0.2.38 released",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "feature",
+        title: "0.2.39 released",
+        tags: ["release"],
+        filesModified: ["b.ts"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({
+        promptNumber: 10,
+        type: "feature",
+        title: "0.2.39 follow-up release",
+        tags: ["release"],
+        filesModified: ["c.ts"],
+        createdAtEpoch: base + 180,
+      }),
+      turn({ promptNumber: 11, type: "decision", title: "end", createdAtEpoch: base + 240 }),
+    ];
+
+    const result = select(rows);
+    expect(
+      result.kept
+        .filter((milestone) => milestone.marker === "outcome")
+        .map((milestone) => milestone.turn.promptNumber),
+    ).toEqual([2, 3, 10]);
+  });
+
+  it("keeps insight discoveries by score and does not readmit pure tool bursts", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        title: "found the actual root cause",
+        insight: "- root cause is prompt drift",
+        toolCallCount: 1,
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        title: "large noisy tool sweep",
+        insight: null,
+        toolCallCount: 100,
+        createdAtEpoch: base + 120,
+      }),
+      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+
+    const k = kept(select(rows));
+    expect(k).toContain(2);
+    expect(k).not.toContain(3);
+  });
+
+  it("uses the max content signal and ignores topic tags for milestone scoring", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "change",
+        title: "spec-only implementation plan",
+        insight: "- also has an insight",
+        tags: ["design", "topic:architecture"],
+        filesModified: ["docs/plans/scoring.md"],
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        title: "topic-only discovery",
+        tags: ["topic:design"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+    ];
+
+    const result = select(rows);
+    const scored = result.kept.find((milestone) => milestone.turn.promptNumber === 2);
+    expect(scored?.score).toBe(4); // change base 1 + max(spec 3, insight 2, bare tagFam 1)
+    expect(kept(result)).not.toContain(3);
+  });
+
+  it("keeps a run's final turn plus the highest-scored other candidate", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "discovery", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        title: "early insight decision",
+        insight: "- useful but not final",
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        title: "tagged design decision",
+        tags: ["design"],
+        createdAtEpoch: base + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "decision",
+        title: "highest scored spec decision",
+        filesModified: ["docs/plans/final.md"],
+        createdAtEpoch: base + 180,
+      }),
+      turn({
+        promptNumber: 5,
+        type: "decision",
+        title: "final decision in the run",
+        createdAtEpoch: base + 240,
+      }),
+      turn({ promptNumber: 6, type: "feature", title: "end", filesModified: ["a.ts"], createdAtEpoch: base + 300 }),
+    ];
+
+    const k = kept(select(rows));
+    expect(k).toContain(4); // highest-scored other
+    expect(k).toContain(5); // finality wins even with lower score
+    expect(k).not.toContain(2);
+    expect(k).not.toContain(3);
+  });
+
   it("caps a heavy day and emits exactly one overflow hint", () => {
     const base = 1_779_782_400;
-    // 30 turns ALTERNATING decision/change on one day -> 30 singleton runs, so folding
-    // keeps each one (no consecutive same-type collapse). 30 survivors > cap -> overflow.
+    // 30 alternating turns on one day. Low-score change rows are filtered before
+    // overflow; only score-gated candidates that lose the adaptive budget count.
     const rows = Array.from({ length: 30 }, (_, i) =>
       turn({
         promptNumber: i + 1,
@@ -1463,9 +1656,10 @@ describe("selectMilestoneTurns (narrative digest)", () => {
       }),
     );
     const result = select(rows);
-    // cap = min(4 + floor(30/8), 7) = 7 kept -> 23 dropped, exactly one overflow entry.
+    // 16 candidates, calibrated cap 6 -> 10 budget drops, exactly one overflow entry.
     expect(result.overflowByDay).toHaveLength(1);
-    expect(result.overflowByDay[0]!.count).toBe(rows.length - result.kept.length);
+    expect(result.kept).toHaveLength(6);
+    expect(result.overflowByDay[0]!.count).toBe(10);
   });
 });
 
@@ -1490,17 +1684,264 @@ function milestoneFixtureTurns(): TurnRecord[] {
   return rows;
 }
 
+function researchMilestoneFixtureTurns(): TurnRecord[] {
+  const day = 24 * 60 * 60;
+  const base = 1_779_782_400;
+  const rows: TurnRecord[] = [];
+  let pn = 0;
+  const add = (over: Partial<TurnRecord>, epoch: number) => {
+    pn += 1;
+    rows.push(turn({ id: pn, promptNumber: pn, createdAtEpoch: epoch, title: `r${pn}`, ...over }));
+  };
+
+  for (let d = 0; d < 5; d += 1) {
+    const dayBase = base + d * day;
+    for (let i = 0; i < 4; i += 1) {
+      add({ type: "discovery", insight: "- research finding" }, dayBase + i * 60);
+    }
+    for (let i = 0; i < 4; i += 1) {
+      add({ type: "decision" }, dayBase + (4 + i) * 60);
+    }
+    for (let i = 0; i < 4; i += 1) {
+      add({ type: "discovery", insight: "- follow-up finding" }, dayBase + (8 + i) * 60);
+    }
+    for (let i = 0; i < 4; i += 1) {
+      add({ type: "bugfix" }, dayBase + (12 + i) * 60);
+    }
+  }
+
+  return rows;
+}
+
+function citationDenseMilestoneFixtureTurns(): TurnRecord[] {
+  const base = 1_779_782_400;
+  const rows: TurnRecord[] = [];
+  for (let promptNumber = 1; promptNumber <= 16; promptNumber += 1) {
+    rows.push(
+      turn({
+        id: promptNumber,
+        promptNumber,
+        type:
+          promptNumber === 1 || (promptNumber >= 6 && promptNumber <= 12) || promptNumber === 16
+            ? "decision"
+            : "discovery",
+        title: `c${promptNumber}`,
+        content:
+          promptNumber >= 13
+            ? "Cites [T2], [T3], [T4], and [T5]."
+            : null,
+        createdAtEpoch: base + promptNumber * 60,
+      }),
+    );
+  }
+  return rows;
+}
+
+function calibratedBudgetFixtureTurns(): TurnRecord[] {
+  const day = 24 * 60 * 60;
+  const base = 1_779_782_400;
+  const rows: TurnRecord[] = [];
+  const used = new Set<number>();
+  const add = (
+    promptNumber: number,
+    dayIndex: number,
+    minute: number,
+    overrides: Partial<TurnRecord> = {},
+  ) => {
+    if (used.has(promptNumber)) {
+      throw new Error(`duplicate prompt ${promptNumber}`);
+    }
+    used.add(promptNumber);
+    rows.push(
+      turn({
+        id: promptNumber,
+        promptNumber,
+        createdAtEpoch: base + dayIndex * day + minute * 60,
+        title: `calibrated ${promptNumber}`,
+        type: "discovery",
+        ...overrides,
+      }),
+    );
+  };
+  const candidate = (
+    promptNumber: number,
+    dayIndex: number,
+    minute: number,
+    score: "high" | "medium" | "low" = "medium",
+    overrides: Partial<TurnRecord> = {},
+  ) => {
+    const byScore =
+      score === "high"
+        ? { type: "decision", insight: "- calibrated high" }
+        : score === "medium"
+          ? { type: "feature", filesModified: ["src/a.ts"], insight: "- calibrated medium" }
+          : { type: "discovery", insight: "- calibrated low" };
+    add(promptNumber, dayIndex, minute, { ...byScore, ...overrides });
+  };
+  const noise = (promptNumber: number, dayIndex: number, minute: number) => {
+    add(promptNumber, dayIndex, minute, { type: "discovery", insight: null, toolCallCount: 0 });
+  };
+
+  add(1, 0, 0, { type: "decision", title: "session start" });
+  for (const promptNumber of [2, 3, 4, 5]) {
+    candidate(promptNumber, 0, promptNumber, "high");
+  }
+  candidate(16, 0, 16, "medium", { title: "sparse-day gold spec" });
+  for (const promptNumber of [17, 18, 19, 20, 21, 22, 23, 24]) {
+    candidate(promptNumber, 0, promptNumber, "low");
+  }
+  for (let promptNumber = 25; promptNumber <= 27; promptNumber += 1) {
+    noise(promptNumber, 0, promptNumber);
+  }
+
+  for (const [index, promptNumber] of [130, 131, 132, 133, 134, 135].entries()) {
+    candidate(
+      promptNumber,
+      1,
+      promptNumber - 130,
+      "high",
+      index % 2 === 0
+        ? {}
+        : { type: "feature", filesModified: ["docs/plans/calibration.md"] },
+    );
+  }
+  candidate(143, 1, 13, "medium", { title: "high-candidate mud" });
+  for (let promptNumber = 144; promptNumber <= 158; promptNumber += 1) {
+    candidate(promptNumber, 1, promptNumber - 130, "low");
+  }
+  for (let promptNumber = 159; promptNumber <= 165; promptNumber += 1) {
+    noise(promptNumber, 1, promptNumber - 130);
+  }
+
+  for (const promptNumber of [501, 502, 503]) {
+    candidate(promptNumber, 2, promptNumber - 500, "high");
+  }
+  candidate(504, 2, 4, "low", { title: "short-day gold audit" });
+  candidate(505, 2, 5, "low");
+  for (let promptNumber = 506; promptNumber <= 509; promptNumber += 1) {
+    noise(promptNumber, 2, promptNumber - 500);
+  }
+
+  for (const promptNumber of [515, 516, 517, 518]) {
+    candidate(promptNumber, 3, promptNumber - 514, "high");
+  }
+  candidate(519, 3, 5, "medium", { title: "medium-day gold decision" });
+  for (let promptNumber = 520; promptNumber <= 526; promptNumber += 1) {
+    candidate(promptNumber, 3, promptNumber - 514, "low");
+  }
+  for (let promptNumber = 527; promptNumber <= 529; promptNumber += 1) {
+    noise(promptNumber, 3, promptNumber - 514);
+  }
+
+  for (const promptNumber of [560, 561, 562, 563]) {
+    candidate(promptNumber, 4, promptNumber - 560, "high");
+  }
+  candidate(564, 4, 4, "low", { title: "short-day gold tag audit" });
+  for (const promptNumber of [565, 566]) {
+    candidate(promptNumber, 4, promptNumber - 560, "low");
+  }
+  for (const promptNumber of [567, 568]) {
+    noise(promptNumber, 4, promptNumber - 560);
+  }
+
+  candidate(581, 5, 1, "high");
+  candidate(582, 5, 2, "low", { title: "two-candidate gold fork finding" });
+  for (let promptNumber = 590; promptNumber <= 596; promptNumber += 1) {
+    noise(promptNumber, 5, promptNumber - 580);
+  }
+
+  for (const promptNumber of [5830, 5831, 5832]) {
+    candidate(promptNumber, 6, promptNumber - 5830, "high");
+  }
+  candidate(585, 6, 5, "medium", { title: "short-day gold context audit" });
+  for (let promptNumber = 586; promptNumber <= 589; promptNumber += 1) {
+    noise(promptNumber, 6, promptNumber - 580);
+  }
+
+  for (let promptNumber = 700; promptNumber < 750; promptNumber += 1) {
+    candidate(
+      promptNumber,
+      7,
+      promptNumber - 700,
+      promptNumber % 3 === 0 ? "high" : "low",
+    );
+  }
+  for (let promptNumber = 750; promptNumber < 760; promptNumber += 1) {
+    noise(promptNumber, 7, promptNumber - 700);
+  }
+
+  return rows;
+}
+
+function withDenseBackgroundCitations(rows: TurnRecord[]): TurnRecord[] {
+  const assertedPrompts = new Set([16, 143, 504, 519, 564, 582, 585]);
+  const citedTargets = rows
+    .filter((row) => row.promptNumber < 700 && !assertedPrompts.has(row.promptNumber))
+    .slice(0, Math.ceil(rows.length * 0.3));
+  const citeRows = rows.filter((row) => row.promptNumber >= 700);
+  return rows.map((row) => {
+    const citeIndex = citeRows.findIndex((candidate) => candidate.promptNumber === row.promptNumber);
+    if (citeIndex < 0 || citeIndex >= citedTargets.length) {
+      return row;
+    }
+    return {
+      ...row,
+      content: `Background calibration cites [T${citedTargets[citeIndex]!.id}].`,
+    };
+  });
+}
+
+function assertCalibratedBudgetQuality(rows: TurnRecord[]): void {
+  const result = selectMilestoneTurns({
+    windowTurns: rows,
+    windowSignals: detectShapeSignals(rows),
+    compactBoundaries: [],
+  });
+  const kept = new Set(result.kept.map((k) => k.turn.promptNumber));
+  for (const promptNumber of [16, 504, 519, 564, 582, 585]) {
+    expect(kept.has(promptNumber)).toBe(true);
+  }
+  expect(kept.has(143)).toBe(false);
+  const ratio = result.kept.length / rows.filter((t) => t.status !== "skipped").length;
+  expect(ratio).toBeGreaterThanOrEqual(0.15);
+  expect(ratio).toBeLessThanOrEqual(0.25);
+}
+
+function assertMilestoneRetentionBand(rows: TurnRecord[]): MilestoneSelection {
+  const result = selectMilestoneTurns({
+    windowTurns: rows,
+    windowSignals: detectShapeSignals(rows),
+    compactBoundaries: [],
+  });
+  const ratio = result.kept.length / rows.filter((t) => t.status !== "skipped").length;
+  expect(ratio).toBeGreaterThanOrEqual(0.15);
+  expect(ratio).toBeLessThanOrEqual(0.25);
+  return result;
+}
+
 describe("milestone retention guard (frozen fixture)", () => {
-  it("keeps 12-20% of non-skipped turns on the frozen fixture", () => {
-    const rows = milestoneFixtureTurns();
-    const result = selectMilestoneTurns({
-      windowTurns: rows,
-      windowSignals: detectShapeSignals(rows),
-      compactBoundaries: [],
-    });
-    const ratio = result.kept.length / rows.length;
-    expect(ratio).toBeGreaterThanOrEqual(0.12);
-    expect(ratio).toBeLessThanOrEqual(0.20);
+  it("preserves calibrated gold-like turns while rejecting high-candidate mud", () => {
+    assertCalibratedBudgetQuality(calibratedBudgetFixtureTurns());
+  });
+
+  it("preserves calibrated gold-like turns when citation density is high", () => {
+    assertCalibratedBudgetQuality(
+      withDenseBackgroundCitations(calibratedBudgetFixtureTurns()),
+    );
+  });
+
+  it("keeps 15-25% of non-skipped turns on the release-heavy fixture", () => {
+    assertMilestoneRetentionBand(milestoneFixtureTurns());
+  });
+
+  it("keeps 15-25% of non-skipped turns on the no-outcome research fixture", () => {
+    assertMilestoneRetentionBand(researchMilestoneFixtureTurns());
+  });
+
+  it("keeps 15-25% of non-skipped turns on the short citation-dense fixture", () => {
+    const rows = citationDenseMilestoneFixtureTurns();
+    const result = assertMilestoneRetentionBand(rows);
+    expect(result.kept.map((k) => k.turn.promptNumber)).toContain(2);
   });
 
   it("surfaces every outcome-only fixture turn with the outcome marker", () => {
@@ -1800,17 +2241,17 @@ describe("buildContextTimelineView milestone tail", () => {
       milestoneTail: true,
     });
 
-    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([9, 11, 40]);
-    expect(view.viewItemTotal).toBe(7);
+    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([7, 9, 40]);
+    expect(view.viewItemTotal).toBe(6);
     expect(view.hasEarlier).toBe(true);
     expect(view.milestoneTail).toBe(true);
 
     const output = renderTimeline(view, { showEarlierHint: true });
     // honest tail label (not "page X/Y"), earlier hint bounded by the first
     // shown milestone, and the day header still reports full-day kept + cont.
-    expect(output).toContain("showing: milestones · last 3/7");
-    expect(output).toContain('earlier: timeline(id="S1/T1..8") or recall(id="S1")');
-    expect(output).toContain("· 7 kept (cont.) ──");
+    expect(output).toContain("showing: milestones · last 3/6");
+    expect(output).toContain('earlier: timeline(id="S1/T1..6") or recall(id="S1")');
+    expect(output).toContain("· 6 kept (cont.) ──");
   });
 });
 
@@ -1818,8 +2259,8 @@ describe("milestoneDayGroups (pagination)", () => {
   it("splits a day across a page boundary, repeats the day header, overflow once on final slice", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 40 turns ALTERNATING decision/change on one local day → 40 singleton runs (none
-    // fold away), so survivors exceed both the day cap (7) and the pageSize (5).
+    // 40 alternating turns on one local day → 21 score-gated candidates;
+    // calibrated cap 6 keeps the digest split across two pages.
     const rows = Array.from({ length: 40 }, (_, i) =>
       turn({
         promptNumber: i + 1,
@@ -1840,10 +2281,10 @@ describe("milestoneDayGroups (pagination)", () => {
     const g1 = page1.milestoneDayGroups[0]!;
     const g2 = page2.milestoneDayGroups[0]!;
 
-    // Full-day metadata is identical across both slices (cap=7 → kept {1,3,5,7,9,11,40}).
+    // Full-day metadata is identical across both slices (kept {1,3,5,7,9,40}).
     expect(g1.date).toBe(g2.date);
-    expect(g1.keptCount).toBe(7);
-    expect(g2.keptCount).toBe(7);
+    expect(g1.keptCount).toBe(6);
+    expect(g2.keptCount).toBe(6);
     expect(g1.promptLo).toBe(1);
     expect(g1.promptHi).toBe(40);
     expect(g2.promptLo).toBe(g1.promptLo);
@@ -1858,7 +2299,7 @@ describe("milestoneDayGroups (pagination)", () => {
     expect(g2.continued).toBe(true);
     expect(g2.isFinalSliceForDay).toBe(true);
     expect(g2.overflow).not.toBeNull();
-    expect(g2.overflow!.count).toBe(40 - 7);
+    expect(g2.overflow!.count).toBe(15);
 
     // Overflow appears on exactly one slice across the whole day.
     const overflowSlices = [g1, g2].filter((g) => g.overflow !== null);
@@ -1868,7 +2309,8 @@ describe("milestoneDayGroups (pagination)", () => {
   it("keeps a single-page day's overflow on its only (final) slice", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 10 alternating turns on one day → cap = min(4 + floor(10/8), 7) = 5 kept, 5 dropped.
+    // 10 alternating turns on one day with no dev artifact path → proportional
+    // budget keeps 4 candidates and drops 2 remaining score-gated candidates.
     // A large pageSize fits all kept on one page, so the single group is BOTH the first
     // and final slice for the day: continued=false, isFinalSliceForDay=true, overflow!=null.
     const rows = Array.from({ length: 10 }, (_, i) =>
@@ -1887,13 +2329,13 @@ describe("milestoneDayGroups (pagination)", () => {
 
     expect(view.milestoneDayGroups).toHaveLength(1);
     const g = view.milestoneDayGroups[0]!;
-    expect(g.keptCount).toBe(5);
+    expect(g.keptCount).toBe(4);
     expect(g.promptLo).toBe(1);
     expect(g.promptHi).toBe(10);
     expect(g.continued).toBe(false);
     expect(g.isFinalSliceForDay).toBe(true);
     expect(g.overflow).not.toBeNull();
-    expect(g.overflow!.count).toBe(5);
+    expect(g.overflow!.count).toBe(2);
   });
 });
 
@@ -2631,9 +3073,41 @@ describe("milestone causal references (Component 3)", () => {
     ).run(content, sessionId, promptNumber);
   }
 
+  it("keeps a low-base discovery when later turns cite it densely", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    const rows = [
+      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        title: "low-base finding later proven important",
+        createdAtEpoch: base + 60,
+      }),
+      ...Array.from({ length: 4 }, (_, i) =>
+        turn({
+          promptNumber: i + 3,
+          type: "discovery",
+          title: `later citation ${i + 1}`,
+          createdAtEpoch: base + (i + 2) * 60,
+        }),
+      ),
+      turn({ promptNumber: 7, type: "decision", title: "end", createdAtEpoch: base + 360 }),
+    ];
+    seedTimelineSession(db, rows);
+    const driverId = dbId(db, 1, 2);
+    for (const promptNumber of [3, 4, 5, 6]) {
+      setContent(db, 1, promptNumber, `Builds on [T${driverId}].`);
+    }
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    expect(view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)).toContain(2);
+  });
+
   it("renders a ↳ sub-line for an in-session [T<dbid>] reference, mapped to its prompt number", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
+    const previousDay = base - 24 * 60 * 60;
     // Driver is at promptNumber 7 but inserted first (DB id 1), so the DB-id
     // space and prompt-number space genuinely differ — proving the renderer
     // maps id → prompt number rather than echoing the cited id.
@@ -2643,7 +3117,7 @@ describe("milestone causal references (Component 3)", () => {
         type: "discovery",
         title: "reference prompt has conflicting guidance",
         toolCallCount: 99,
-        createdAtEpoch: base,
+        createdAtEpoch: previousDay,
       }),
       turn({
         promptNumber: 8,
@@ -2667,13 +3141,42 @@ describe("milestone causal references (Component 3)", () => {
     expect(out).not.toContain(`↳ T${driverId} `); // not the DB id space
   });
 
-  it("caps at 2 sub-lines even when content cites 3 references", () => {
+  it("suppresses a same-day reference sub-line when the cited turn is already kept", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
     seedTimelineSession(db, [
-      turn({ promptNumber: 1, type: "discovery", title: "driver one", toolCallCount: 99, createdAtEpoch: base }),
-      turn({ promptNumber: 2, type: "discovery", title: "driver two", toolCallCount: 99, createdAtEpoch: base + 60 }),
-      turn({ promptNumber: 3, type: "discovery", title: "driver three", toolCallCount: 99, createdAtEpoch: base + 120 }),
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "kept design driver",
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "feature",
+        title: "release citing already-kept driver",
+        tags: ["release"],
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 60,
+      }),
+    ]);
+    const driverId = dbId(db, 1, 1);
+    setContent(db, 1, 2, `Builds on [T${driverId}].`);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    expect(out).toContain("T1 ⚖️ kept design driver");
+    expect(out).toContain("🏁 T2 🟣 release citing already-kept driver");
+    expect(out).not.toContain("↳ T1 kept design driver");
+  });
+
+  it("caps at 2 sub-lines even when content cites 3 references", () => {
+    const db = createDatabase(":memory:");
+    const base = 1_779_782_400;
+    const previousDay = base - 24 * 60 * 60;
+    seedTimelineSession(db, [
+      turn({ promptNumber: 1, type: "discovery", title: "driver one", toolCallCount: 99, createdAtEpoch: previousDay }),
+      turn({ promptNumber: 2, type: "discovery", title: "driver two", toolCallCount: 99, createdAtEpoch: previousDay + 60 }),
+      turn({ promptNumber: 3, type: "discovery", title: "driver three", toolCallCount: 99, createdAtEpoch: previousDay + 120 }),
       turn({
         promptNumber: 4,
         type: "feature",
@@ -2698,12 +3201,13 @@ describe("milestone causal references (Component 3)", () => {
     expect(subLines).toHaveLength(2);
     expect(out).toContain("      ↳ T1 driver one");
     expect(out).toContain("      ↳ T2 driver two");
-    expect(out).not.toContain("driver three");
+    expect(subLines.join("\n")).not.toContain("driver three");
   });
 
   it("prefixes the sub-line with the marker glyph when the cited turn is rolled back", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
+    const previousDay = base - 24 * 60 * 60;
     seedTimelineSession(db, [
       turn({
         promptNumber: 1,
@@ -2712,7 +3216,7 @@ describe("milestone causal references (Component 3)", () => {
         wasRolledBack: true,
         status: "extracted",
         toolCallCount: 99,
-        createdAtEpoch: base,
+        createdAtEpoch: previousDay,
       }),
       turn({
         promptNumber: 2,
@@ -2862,7 +3366,7 @@ describe("milestone causal references (Component 3)", () => {
         type: "discovery",
         title: "the real driver",
         toolCallCount: 99,
-        createdAtEpoch: base,
+        createdAtEpoch: base - 24 * 60 * 60,
       }),
     );
     for (let pn = 2; pn <= 9; pn += 1) {

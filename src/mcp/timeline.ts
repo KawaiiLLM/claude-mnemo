@@ -81,9 +81,7 @@ export const MILESTONE_REFERENCE_CAP = 2;
  * `MILESTONE_REFERENCE_CAP` that survive. Bounds work on pathological content.
  */
 export const MILESTONE_REFERENCE_PARSE_CAP = 8;
-export const MILESTONE_DAY_BUDGET_BASE = 4;
 export const MILESTONE_DAY_BUDGET_MAX = 7;
-export const MILESTONE_DAY_BUDGET_DIVISOR = 8;
 export const FOLD_FIRST_MIN_RUN = 4;
 
 export const OUTCOME_TAGS = new Set([
@@ -612,11 +610,44 @@ export function milestoneMarker(
 
 const MILESTONE_BASE_SCORE: Record<string, number> = {
   decision: 4,
-  feature: 3,
-  refactor: 3,
+  feature: 2,
+  refactor: 2,
   bugfix: 2,
   change: 1,
+  discovery: 1,
 };
+
+const MILESTONE_POOL_MIN_SCORE = 2;
+const MILESTONE_INSIGHT_WEIGHT = 2;
+const MILESTONE_PURE_SPEC_WEIGHT = 3;
+const MILESTONE_TAG_FAMILY_WEIGHT = 1;
+const MILESTONE_IMPORTANCE_TAG_RE =
+  /design|architecture|spec|simulat|review|audit|verif|bug|root|regress|correction|pivot|hotfix|misfire|decision/;
+const MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
+const MILESTONE_DEV_ARTIFACT_RE =
+  /(^|\/)(?:src|tests|scripts|plugin|docs\/(?:plans|specs|superpowers))\//;
+const MILESTONE_DEV_ARTIFACT_MIN_TURNS = 3;
+const MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
+const MILESTONE_CITATION_CAP_SPARSE = 2;
+const MILESTONE_CITATION_CAP_DENSE = 4;
+const MILESTONE_DENSE_CITATION_SHARE = 0.25;
+const MILESTONE_TARGET_RETENTION_RATIO = 0.22;
+const MILESTONE_MIN_TARGET_COUNT = 4;
+const MILESTONE_DAY_COVERAGE_MIN_TURNS = 3;
+const MILESTONE_CALIBRATED_DAY_BUDGET_BASE = 4;
+const MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR = 8;
+const MILESTONE_SMALL_DAY_MAX_FLOOR = 5;
+const MILESTONE_SPARSE_DAY_DENSITY = 0.6;
+const MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
+const MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
+const MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
+
+interface MilestoneDayCandidates {
+  date: string;
+  seqTurns: TurnRecord[];
+  candidates: TurnRecord[];
+  structuralCount: number;
+}
 
 export function milestoneBaseScore(turn: TurnRecord): number {
   const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
@@ -629,30 +660,203 @@ export function milestoneBaseScore(turn: TurnRecord): number {
   return score;
 }
 
+function hasMilestoneInsight(turn: TurnRecord): boolean {
+  return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
+}
+
+function isPureSpecTurn(turn: TurnRecord): boolean {
+  return (
+    turn.filesModified.length > 0 &&
+    turn.filesModified.every((path) => MILESTONE_PURE_SPEC_RE.test(path))
+  );
+}
+
+function hasMilestoneDevArtifact(turn: TurnRecord): boolean {
+  return turn.filesModified.some((path) =>
+    MILESTONE_DEV_ARTIFACT_RE.test(path.replaceAll("\\", "/")),
+  );
+}
+
+function hasMilestoneTagFamily(turn: TurnRecord): boolean {
+  return turn.tags
+    .filter((tag) => !tag.includes(":"))
+    .some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
+}
+
+function milestoneContentScore(turn: TurnRecord): number {
+  return Math.max(
+    hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
+    isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
+    hasMilestoneTagFamily(turn) ? MILESTONE_TAG_FAMILY_WEIGHT : 0,
+  );
+}
+
+function milestoneWeightedScore(turn: TurnRecord, citedBy = 0, citationCap = 2): number {
+  return (
+    milestoneBaseScore(turn) +
+    milestoneContentScore(turn) +
+    Math.min(citedBy, citationCap)
+  );
+}
+
+function buildMilestoneCitationInDegree(turns: TurnRecord[]): {
+  citedByPrompt: Map<number, number>;
+  citationCap: number;
+} {
+  const seq = sortTurnsForAnalysis(turns).filter((turn) => turn.status !== "skipped");
+  const byDbId = new Map<number, TurnRecord>();
+  for (const turn of seq) {
+    byDbId.set(turn.id, turn);
+  }
+
+  const citedByPrompt = new Map<number, number>();
+  for (const citer of seq) {
+    for (const id of parseContentReferences(citer.content, MILESTONE_REFERENCE_PARSE_CAP)) {
+      const cited = byDbId.get(id);
+      if (
+        cited === undefined ||
+        cited.sessionId !== citer.sessionId ||
+        cited.promptNumber >= citer.promptNumber
+      ) {
+        continue;
+      }
+      citedByPrompt.set(
+        cited.promptNumber,
+        (citedByPrompt.get(cited.promptNumber) ?? 0) + 1,
+      );
+    }
+  }
+
+  const citedShare = seq.length === 0 ? 0 : citedByPrompt.size / seq.length;
+  return {
+    citedByPrompt,
+    citationCap:
+      citedShare >= MILESTONE_DENSE_CITATION_SHARE
+        ? MILESTONE_CITATION_CAP_DENSE
+        : MILESTONE_CITATION_CAP_SPARSE,
+  };
+}
+
+function adaptiveMilestoneDayCap(
+  day: MilestoneDayCandidates,
+  totalCandidateCount: number,
+  totalNonSkippedCount: number,
+  useScaledFloor: boolean,
+): number {
+  if (day.candidates.length === 0) {
+    return 0;
+  }
+
+  const targetTotal = Math.max(
+    MILESTONE_MIN_TARGET_COUNT,
+    Math.round(totalNonSkippedCount * MILESTONE_TARGET_RETENTION_RATIO),
+  );
+  const proportional =
+    totalCandidateCount === 0
+      ? targetTotal
+      : Math.ceil((targetTotal * day.candidates.length) / totalCandidateCount);
+  const calibratedCap = Math.min(
+    MILESTONE_DAY_BUDGET_MAX,
+    MILESTONE_CALIBRATED_DAY_BUDGET_BASE +
+      Math.floor(day.candidates.length / MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR),
+  );
+  const coverageFloor =
+    day.seqTurns.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS ? 1 : 0;
+  const candidateDensity = day.candidates.length / day.seqTurns.length;
+  const scaledFloor =
+    !useScaledFloor || day.seqTurns.length < MILESTONE_DAY_COVERAGE_MIN_TURNS
+      ? 0
+      : day.seqTurns.length <= 10
+        ? Math.min(day.candidates.length, MILESTONE_SMALL_DAY_MAX_FLOOR)
+        : candidateDensity < MILESTONE_SPARSE_DAY_DENSITY
+          ? Math.min(
+            day.candidates.length,
+            MILESTONE_SPARSE_DAY_MAX_FLOOR,
+            Math.ceil(day.seqTurns.length / MILESTONE_SPARSE_DAY_FLOOR_DIVISOR),
+          )
+          : Math.min(
+            day.candidates.length,
+            calibratedCap,
+            Math.ceil(day.seqTurns.length / MILESTONE_DENSE_DAY_FLOOR_DIVISOR),
+          );
+  const structuralFloor =
+    useScaledFloor && day.structuralCount >= MILESTONE_CALIBRATED_DAY_BUDGET_BASE
+      ? Math.min(
+        day.candidates.length,
+        MILESTONE_DAY_BUDGET_MAX,
+        day.structuralCount + 2,
+      )
+      : 0;
+
+  return Math.min(
+    day.candidates.length,
+    Math.max(
+      coverageFloor,
+      Math.min(proportional, calibratedCap),
+      scaledFloor,
+      structuralFloor,
+    ),
+  );
+}
+
+function extractMilestoneVersion(title: string | null): string | null {
+  if (!title) return null;
+  const matches = [...title.matchAll(MILESTONE_VERSION_RE)];
+  return matches.length > 0 ? matches[matches.length - 1]![0] : null;
+}
+
+function demotedOutcomePrompts(seq: TurnRecord[]): Set<number> {
+  const byDay = new Map<string, TurnRecord[]>();
+  for (const turn of seq) {
+    if (milestoneMarker(turn) !== "outcome") {
+      continue;
+    }
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = byDay.get(day) ?? [];
+    bucket.push(turn);
+    byDay.set(day, bucket);
+  }
+
+  const demoted = new Set<number>();
+  const closeChain = (chain: TurnRecord[]): void => {
+    for (const turn of chain.slice(0, -1)) {
+      demoted.add(turn.promptNumber);
+    }
+  };
+
+  for (const turns of byDay.values()) {
+    const sorted = [...turns].sort((a, b) => a.promptNumber - b.promptNumber);
+    let chain: TurnRecord[] = [];
+    for (const turn of sorted) {
+      if (chain.length === 0) {
+        chain = [turn];
+        continue;
+      }
+      const previous = chain[chain.length - 1]!;
+      const previousVersion = extractMilestoneVersion(previous.title);
+      const currentVersion = extractMilestoneVersion(turn.title);
+      const sameRelease =
+        turn.promptNumber - previous.promptNumber <= 5 &&
+        !(previousVersion !== null && currentVersion !== null && previousVersion !== currentVersion);
+      if (sameRelease) {
+        chain.push(turn);
+      } else {
+        closeChain(chain);
+        chain = [turn];
+      }
+    }
+    closeChain(chain);
+  }
+
+  return demoted;
+}
+
 export function isMilestoneAlwaysKeep(turn: TurnRecord, endpoints: Set<number>): boolean {
   return (
     milestoneMarker(turn) !== null ||
     turn.type === "compact" ||
     endpoints.has(turn.promptNumber)
   );
-}
-
-export function isReadmittedDiscovery(turn: TurnRecord, toolBurstThreshold: number): boolean {
-  return turn.type === "discovery" && (turn.toolCallCount ?? 0) > toolBurstThreshold;
-}
-
-export function milestoneSignificance(
-  turn: TurnRecord,
-  endpoints: Set<number>,
-  toolBurstThreshold: number,
-): number {
-  if (isMilestoneAlwaysKeep(turn, endpoints)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  if (isReadmittedDiscovery(turn, toolBurstThreshold)) {
-    return 0.5;
-  }
-  return milestoneBaseScore(turn);
 }
 
 const FOLD_RUN_TYPES = new Set(["decision", "feature", "change", "refactor", "bugfix"]);
@@ -1061,8 +1265,6 @@ export function selectMilestoneTurns(view: {
     return { kept: [], overflowByDay: [] };
   }
 
-  const threshold = view.windowSignals.toolBurstThreshold;
-
   // D4 endpoints: window first live + window last *titled* live.
   const endpoints = new Set<number>();
   endpoints.add(seq[0]!.promptNumber);
@@ -1082,6 +1284,17 @@ export function selectMilestoneTurns(view: {
     seq,
     sessionById ? (id) => sessionById.get(id) : undefined,
   );
+  const { citedByPrompt, citationCap } = buildMilestoneCitationInDegree(
+    view.sessionTurns ?? seq,
+  );
+  const demotedOutcomes = demotedOutcomePrompts(seq);
+  const markerForSelection = (turn: TurnRecord): MilestoneMarker => {
+    const marker = milestoneMarker(turn);
+    return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
+  };
+  const usesDevBudgetFloor =
+    seq.some((turn) => markerForSelection(turn) === "outcome") ||
+    seq.filter(hasMilestoneDevArtifact).length >= MILESTONE_DEV_ARTIFACT_MIN_TURNS;
   const alwaysKeep = (turn: TurnRecord): boolean => {
     if (correctors.has(turn.promptNumber)) {
       return true;
@@ -1091,54 +1304,144 @@ export function selectMilestoneTurns(view: {
     if (supersededVictims.has(turn.promptNumber)) {
       return structuralKeep;
     }
-    return isMilestoneAlwaysKeep(turn, endpoints);
+    const marker = markerForSelection(turn);
+    return marker !== null || structuralKeep;
   };
   const significance = (turn: TurnRecord): number => {
     if (alwaysKeep(turn)) {
       return Number.POSITIVE_INFINITY;
     }
-    if (isReadmittedDiscovery(turn, threshold)) {
-      return 0.5;
-    }
-    return milestoneBaseScore(turn);
+    return milestoneWeightedScore(
+      turn,
+      citedByPrompt.get(turn.promptNumber) ?? 0,
+      citationCap,
+    );
   };
 
-  // D2 fold + D1 always-keep / re-admitted discovery, unioned.
-  const keptPrompts = foldMilestoneRuns(seq, endpoints, alwaysKeep);
+  const runIds = new Map<number, number>();
+  let currentRunId = 0;
+  let currentRunType: string | null | undefined = undefined;
   for (const turn of seq) {
-    if (alwaysKeep(turn) || isReadmittedDiscovery(turn, threshold)) {
-      keptPrompts.add(turn.promptNumber);
+    if (turn.type !== currentRunType) {
+      currentRunId += 1;
+      currentRunType = turn.type;
     }
+    runIds.set(turn.promptNumber, currentRunId);
   }
 
-  const survivors = seq.filter((turn) => keptPrompts.has(turn.promptNumber));
+  // Weighted pool: structural milestones always enter; non-structural turns
+  // compete only when their multi-signal score clears the pool floor.
+  const pool = seq.filter(
+    (turn) =>
+      alwaysKeep(turn) ||
+      (!supersededVictims.has(turn.promptNumber) &&
+        significance(turn) >= MILESTONE_POOL_MIN_SCORE),
+  );
 
-  // D3 per-day adaptive budget.
-  const byDay = new Map<string, TurnRecord[]>();
-  for (const turn of survivors) {
+  const seqByDay = new Map<string, TurnRecord[]>();
+  for (const turn of seq) {
     const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = byDay.get(day) ?? [];
+    const bucket = seqByDay.get(day) ?? [];
     bucket.push(turn);
-    byDay.set(day, bucket);
+    seqByDay.set(day, bucket);
+  }
+
+  const poolByDay = new Map<string, TurnRecord[]>();
+  for (const turn of pool) {
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = poolByDay.get(day) ?? [];
+    bucket.push(turn);
+    poolByDay.set(day, bucket);
+  }
+
+  const rankBySignificance = (a: TurnRecord, b: TurnRecord): number => {
+    const sa = significance(a);
+    const sb = significance(b);
+    if (sa !== sb) return sb - sa;
+    const ta = a.toolCallCount ?? 0;
+    const tb = b.toolCallCount ?? 0;
+    if (ta !== tb) return tb - ta;
+    return a.promptNumber - b.promptNumber;
+  };
+
+  const dayCandidateEntries: MilestoneDayCandidates[] = [];
+  for (const [date, daySeq] of seqByDay) {
+    const dayTurns = poolByDay.get(date) ?? [];
+    const structural = dayTurns.filter((turn) => significance(turn) === Number.POSITIVE_INFINITY);
+    const weightedByRun = new Map<number, TurnRecord[]>();
+    for (const turn of dayTurns) {
+      if (significance(turn) === Number.POSITIVE_INFINITY) {
+        continue;
+      }
+      const runId = runIds.get(turn.promptNumber) ?? turn.promptNumber;
+      const bucket = weightedByRun.get(runId) ?? [];
+      bucket.push(turn);
+      weightedByRun.set(runId, bucket);
+    }
+
+    const runRepresentatives: TurnRecord[] = [];
+    for (const members of weightedByRun.values()) {
+      const byPrompt = [...members].sort((a, b) => a.promptNumber - b.promptNumber);
+      const last = byPrompt[byPrompt.length - 1]!;
+      runRepresentatives.push(last);
+      const others = members.filter((turn) => turn.promptNumber !== last.promptNumber);
+      if (others.length > 0) {
+        runRepresentatives.push([...others].sort(rankBySignificance)[0]!);
+      }
+    }
+
+    const seenCandidates = new Set<number>();
+    const dayCandidates = [...structural, ...runRepresentatives].filter((turn) => {
+      if (seenCandidates.has(turn.promptNumber)) {
+        return false;
+      }
+      seenCandidates.add(turn.promptNumber);
+      return true;
+    });
+
+    if (
+      dayCandidates.length === 0 &&
+      daySeq.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS
+    ) {
+      const coverageCandidate = [...daySeq]
+        .filter(
+          (turn) =>
+            !supersededVictims.has(turn.promptNumber) ||
+            turn.type === "compact" ||
+            endpoints.has(turn.promptNumber),
+        )
+        .sort((a, b) => {
+          const ranked = rankBySignificance(a, b);
+          return ranked !== 0 ? ranked : b.promptNumber - a.promptNumber;
+        })[0];
+      if (coverageCandidate) {
+        dayCandidates.push(coverageCandidate);
+      }
+    }
+
+    dayCandidateEntries.push({
+      date,
+      seqTurns: daySeq,
+      candidates: dayCandidates,
+      structuralCount: structural.length,
+    });
   }
 
   const finalPrompts = new Set<number>();
   const overflowByDay: OverflowHint[] = [];
+  const totalCandidateCount = dayCandidateEntries.reduce(
+    (sum, day) => sum + day.candidates.length,
+    0,
+  );
 
-  for (const [date, dayTurns] of byDay) {
-    const cap = Math.min(
-      MILESTONE_DAY_BUDGET_BASE + Math.floor(dayTurns.length / MILESTONE_DAY_BUDGET_DIVISOR),
-      MILESTONE_DAY_BUDGET_MAX,
+  for (const day of dayCandidateEntries) {
+    const cap = adaptiveMilestoneDayCap(
+      day,
+      totalCandidateCount,
+      seq.length,
+      usesDevBudgetFloor,
     );
-    const ranked = [...dayTurns].sort((a, b) => {
-      const sa = significance(a);
-      const sb = significance(b);
-      if (sa !== sb) return sb - sa;
-      const ta = a.toolCallCount ?? 0;
-      const tb = b.toolCallCount ?? 0;
-      if (ta !== tb) return tb - ta;
-      return a.promptNumber - b.promptNumber;
-    });
+    const ranked = [...day.candidates].sort(rankBySignificance);
 
     const top = ranked.slice(0, cap);
     for (const turn of top) finalPrompts.add(turn.promptNumber);
@@ -1151,7 +1454,7 @@ export function selectMilestoneTurns(view: {
     if (dropped.length > 0) {
       const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
       overflowByDay.push({
-        date,
+        date: day.date,
         count: dropped.length,
         firstPrompt: byPrompt[0]!.promptNumber,
         lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
@@ -1164,7 +1467,7 @@ export function selectMilestoneTurns(view: {
     .map((turn) => ({
       turn,
       score: significance(turn),
-      marker: milestoneMarker(turn),
+      marker: markerForSelection(turn),
     }));
 
   return { kept, overflowByDay };
@@ -1221,6 +1524,14 @@ export function resolveMilestoneReferences(
   db: Database,
   kept: KeptMilestone[],
 ): KeptMilestone[] {
+  const keptPromptsByDay = new Map<string, Set<number>>();
+  for (const milestone of kept) {
+    const day = formatLocalDate(milestone.turn.createdAtEpoch);
+    const prompts = keptPromptsByDay.get(day) ?? new Set<number>();
+    prompts.add(milestone.turn.promptNumber);
+    keptPromptsByDay.set(day, prompts);
+  }
+
   for (const milestone of kept) {
     const ids = parseContentReferences(
       milestone.turn.content,
@@ -1241,6 +1552,10 @@ export function resolveMilestoneReferences(
         // cite is not a driver and renders inert.
         cited.promptNumber >= milestone.turn.promptNumber
       ) {
+        continue;
+      }
+      const milestoneDay = formatLocalDate(milestone.turn.createdAtEpoch);
+      if (keptPromptsByDay.get(milestoneDay)?.has(cited.promptNumber) === true) {
         continue;
       }
       references.push({
