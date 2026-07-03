@@ -159,13 +159,25 @@ function classifyTimeGroup(epochSeconds: number, now: Date): string {
   return "Earlier";
 }
 
+function isHuskSession(
+  session: SessionRecord,
+  sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
+): boolean {
+  const untitled = !session.title || session.title.trim().length === 0;
+  const turnCount = sessionMetrics.get(session.id)?.turnCount ?? 0;
+  return untitled && turnCount === 0;
+}
+
 function buildRecentSessionsOutput(
   db: Database,
   recentSessions: SessionRecord[],
   sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
   primarySessionId: number,
 ): string[] {
-  const others = recentSessions.filter((session) => session.id !== primarySessionId).slice(0, 10);
+  const others = recentSessions
+    .filter((session) => session.id !== primarySessionId)
+    .filter((session) => !isHuskSession(session, sessionMetrics))
+    .slice(0, 10);
 
   if (others.length === 0) {
     return [];

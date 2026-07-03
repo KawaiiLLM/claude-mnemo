@@ -793,6 +793,151 @@ describe("handleContextHook", () => {
     capDb.close();
   });
 
+  test("husk sessions (untitled AND 0 turns) are excluded from Recent Sessions", async () => {
+    const huskDb = createDatabase(":memory:");
+    initializeSchema(huskDb);
+
+    upsertSession(huskDb, {
+      contentSessionId: "primary",
+      project: "/test/project",
+      title: "Primary",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Husk: untitled, no turns — must be excluded.
+    const huskNullTitleId = upsertSession(huskDb, {
+      contentSessionId: "husk-null-title",
+      project: "/test/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 900,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // Husk: whitespace-only title, no turns — must be excluded.
+    const huskBlankTitleId = upsertSession(huskDb, {
+      contentSessionId: "husk-blank-title",
+      project: "/test/project",
+      title: "   ",
+      content: null,
+      insight: null,
+      createdAtEpoch: 890,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // Titled but 0 turns — must still be shown (not a husk).
+    upsertSession(huskDb, {
+      contentSessionId: "titled-zero-turns",
+      project: "/test/project",
+      title: "Titled but empty",
+      content: null,
+      insight: null,
+      createdAtEpoch: 800,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Untitled but has a turn — must still be shown (not a husk), rendered
+    // with the format module's "Untitled" fallback for a null title.
+    const untitledWithTurn = upsertSession(huskDb, {
+      contentSessionId: "untitled-with-turn",
+      project: "/test/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 700,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    huskDb
+      .query(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 1, 'active', 'hello', ?)`,
+      )
+      .run(untitledWithTurn, 701);
+
+    const handler = createContextHandler({ db: huskDb });
+    const result = await handler(
+      createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+
+    expect(output).not.toContain(`[S${huskNullTitleId}]`);
+    expect(output).not.toContain(`[S${huskBlankTitleId}]`);
+    expect(output).toContain("Titled but empty");
+    expect(output).toContain(`[S${untitledWithTurn}] Untitled`);
+    // Only the untitled-with-turn session should render as "Untitled" — the
+    // two husks must not contribute a line of their own.
+    const untitledLines = output
+      .split("\n")
+      .filter((line) => /^- \[S\d+\] Untitled\b/.test(line));
+    expect(untitledLines).toHaveLength(1);
+
+    huskDb.close();
+  });
+
+  test("husk filter applies before the 10-slice so a real session survives 11 husks", async () => {
+    const capDb = createDatabase(":memory:");
+    initializeSchema(capDb);
+
+    upsertSession(capDb, {
+      contentSessionId: "primary",
+      project: "/test/project",
+      title: "Primary",
+      content: null,
+      insight: null,
+      createdAtEpoch: 2000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // 11 husks, all more recent than the one real session below — without the
+    // pre-slice filter these alone would fill the 10-cap and push the real
+    // session out entirely.
+    for (let i = 1; i <= 11; i++) {
+      upsertSession(capDb, {
+        contentSessionId: `husk-${i}`,
+        project: "/test/project",
+        title: null,
+        content: null,
+        insight: null,
+        createdAtEpoch: 1900 - i,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+    }
+
+    upsertSession(capDb, {
+      contentSessionId: "real-session",
+      project: "/test/project",
+      title: "Real session",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1800,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    const handler = createContextHandler({ db: capDb });
+    const result = await handler(
+      createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
+    );
+
+    const output = result.hookSpecificOutput ?? "";
+    expect(output).toContain("Real session");
+
+    capDb.close();
+  });
+
   test("compact falls back to session summary when timeline rendering throws", async () => {
     const turnId = insertTurn(db, {
       sessionId: currentSessionId,
