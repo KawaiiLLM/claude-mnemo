@@ -55,6 +55,40 @@ const SESSION_SUMMARY_KEYS = [
   "reference",
 ] as const;
 
+const HTML_ENTITY_MAP: Record<string, string> = { lt: "<", gt: ">", amp: "&" };
+
+// The memory agent sometimes emits HTML-escaped text (e.g. `T&lt;n&gt;`) even
+// though summaries are plain text; decode once at the persistence boundary.
+// Single-pass (one replace call) so `&amp;lt;` decodes to `&lt;`, never `<`.
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name: string) => HTML_ENTITY_MAP[name]!);
+}
+
+function decodeRememberInput(input: RememberToolInput): RememberToolInput {
+  const decoded: RememberToolInput = { ...input };
+  for (const key of [
+    "id",
+    "type",
+    "title",
+    "content",
+    "insight",
+    "next_steps",
+    "decision",
+    "done",
+    "current",
+    "reference",
+  ] as const) {
+    const value = decoded[key];
+    if (typeof value === "string") {
+      decoded[key] = decodeHtmlEntities(value);
+    }
+  }
+  if (decoded.tags) {
+    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
+  }
+  return decoded;
+}
+
 function textResult(text: string): ToolTextResult {
   return {
     content: [{ type: "text", text }],
@@ -347,8 +381,10 @@ function handleSessionRemember(
 
 export function rememberTool(
   db: Database,
-  input: RememberToolInput,
+  rawInput: RememberToolInput,
 ): ToolTextResult {
+  const input = decodeRememberInput(rawInput);
+
   if (!input.id) {
     return parameterError(
       "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed.",

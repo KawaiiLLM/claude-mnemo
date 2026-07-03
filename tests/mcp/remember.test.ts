@@ -336,6 +336,80 @@ describe("remember tool routing and validation", () => {
     expect(expanded).toContain("Did the thing");
   });
 
+  test("session remember decodes HTML entities in decision (single pass)", () => {
+    rememberTool(db, {
+      id: `S${sessionId}`,
+      title: "Auth work",
+      content: "Session about the auth refactor",
+      decision: "Reverted the change from T&lt;n&gt; due to a regression",
+      done: "Shipped the fix",
+      current: "Reviewing",
+      next_steps: "Ship it",
+      reference: "",
+    });
+
+    const session = getSession(db, sessionId)!;
+    expect(session.decision).toBe(
+      "Reverted the change from T<n> due to a regression",
+    );
+  });
+
+  test("session remember decodes &amp;lt; to &lt; without double-decoding to <", () => {
+    rememberTool(db, {
+      id: `S${sessionId}`,
+      title: "Auth work",
+      content: "Session about the auth refactor",
+      decision: "Literal entity in the wild: &amp;lt;",
+      done: "Shipped the fix",
+      current: "Reviewing",
+      next_steps: "Ship it",
+      reference: "",
+    });
+
+    const session = getSession(db, sessionId)!;
+    expect(session.decision).toBe("Literal entity in the wild: &lt;");
+  });
+
+  test("turn remember decodes HTML entities before bracketing bare turn references", () => {
+    db.query(
+      "INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch) VALUES (?, ?, 'active', ?, ?)",
+    ).run(sessionId, 2, "Revert it", 140);
+    const laterId = db
+      .query<{ id: number }, []>(
+        "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+      )
+      .get(sessionId, 2)!.id;
+
+    rememberTool(db, {
+      id: `T${laterId}`,
+      title: "Revert the inversion",
+      content: `Reverted the fg inversion from T&lt;${turnId}&gt; and bare T${turnId} due to arrow contamination.`,
+      type: "bugfix",
+    });
+
+    // The entity-wrapped form decodes to a bracket-shaped string that never
+    // matches the bare-id pattern (its digits are wrapped in literal `<`/`>`,
+    // not left bare), so only the genuinely bare `T<id>` mention gets bracketed.
+    expect(getTurn(db, sessionId, 2)?.content).toBe(
+      `Reverted the fg inversion from T<${turnId}> and bare [T${turnId}] due to arrow contamination.`,
+    );
+  });
+
+  test("turn remember decodes HTML entities in tags elements", () => {
+    const result = rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      content: "Persists the extracted turn.",
+      type: "bugfix",
+      tags: ["topic:a&amp;b", "rolled-back"],
+    });
+
+    expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
+    const turn = getTurn(db, sessionId, 1)!;
+    expect(turn.tags).toContain("topic:a&b");
+    expect(turn.tags).toContain("rolled-back");
+  });
+
   test("always advances summaryUpdatedAtEpoch on a successful rewrite (D5)", () => {
     const before = getSession(db, sessionId)!;
 
