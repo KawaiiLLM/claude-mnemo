@@ -1,13 +1,13 @@
 # Milestone Weighted Scoring & Context-Quality Fixes
 
 **Target version:** 0.2.38
-**Status:** Part 1 implemented (src/hooks/handlers/context.ts, src/mcp/remember.ts, src/worker/query-session.ts + 2 test files); Part 3 spec'd — calibrated on S1730, cross-validated on S5233/S9262, verdict: ship with the §3.5 amendments
+**Status:** Part 1 committed locally (`2693d43`, `74931de`, `60eba62` — src/hooks/handlers/context.ts, src/mcp/remember.ts, src/worker/query-session.ts + 2 test files), ahead of origin/main. Part 3 spec + calibration scripts committed (`152b22b`) — calibrated on S1730, cross-validated on S5233/S9262; verdict: ship with the §3.5 amendments.
 
 ## Goal
 
 This cycle audited the two token-hot read surfaces against live DB data — what SessionStart injects, and what the timeline milestone view selects — then fixed the three cheap defects in code and converged a redesign of milestone selection. The selection redesign replaces the type-only base score with a weighted multi-signal score inside the existing selection frame, killing the two big distortions found on real data: release rituals eating whole day budgets, and 85% of `discovery` turns being structurally invisible. Weights were calibrated by a 4,608-config grid search against hand-judged gold/mud lists on S1730 (458 live turns).
 
-## Part 1 — Landed changes (implemented this cycle, uncommitted)
+## Part 1 — Landed changes (committed locally, ahead of origin)
 
 ### 1.1 Husk-session filter (context injection)
 
@@ -56,16 +56,19 @@ significance(turn):
   otherwise:
     score = TYPE_BASE[type]                          # decision 4 · feature/refactor 2 · bugfix 2 ·
                                                      # change 1 · discovery 1 (0-file gate kept)
-          + max(insight·2, pureSpec·3,               # content group takes MAX — signals co-occur;
-                tagFam·1, roleTag·1)                 # summing triple-counts spec churn
-          + min(citedBy, 2)·1                        # graph group, additive
-                                                     # NO burst term (calibrated to 0)
+          + max(insight·2, pureSpec·3, tagFam·1)     # content group takes MAX — signals co-occur;
+                                                     # summing triple-counts spec churn. roleTag folds
+                                                     # into tagFam (bare-only) — no separate term (§3.2)
+          + min(citedBy, 2)·1        ⟵ §3.5.2        # graph: additive; the cap is density-ADAPTIVE
+                                                     # at build, NOT the flat 2 shown. NO burst (=0)
   pool entry: score ≥ 2                              # replaces fold gate + burst readmission
-  budget:     per-day TOTAL cap = min(4 + pool_day/8, 7); structural picks consume slots,
-              overflow always-keep force-kept (production semantics)
+  budget:     per-day TOTAL cap = min(4 + pool_day/8, 7)   ⟵ §3.5.1: size-ADAPTIVE at build, NOT flat
+              structural picks consume slots, overflow always-keep force-kept (production semantics)
   run rule:   per same-type consecutive run per day ≤2 picks = run-LAST + highest-scored other
               (fold's keep-last carries finality; pure top-2-by-score dropped T517 final-design)
 ```
+
+**The box is the S1730-calibrated configuration, not the full implementation contract.** Two lines are overridden before this ships: the per-day budget cap becomes size-adaptive (§3.5.1) and the citation cap becomes density-adaptive (§3.5.2). Both are blocking amendments; everything else in the box implements as written.
 
 **Rule A — outcome coalescing** (fixes P1): same-day outcome-marked turns chain when prompt gap ≤5; the chain breaks when the title's version string changes (use the LAST `0.x.y` match = bump target). Only the chain tail keeps ∞ and renders 🏁; demoted members compete flagless at base score. Validated: 0.2.20's 4 turns → 1 anchor (T181, the merge); multi-release 05-29 keeps one anchor per version (6→4 flags); separated ship events (06-07, gaps >5) untouched.
 
@@ -92,7 +95,8 @@ significance(turn):
 
 - **pureSpec**: `files_modified` non-empty ∧ every path matches `docs/(plans|specs|superpowers)/**/*.md`. Precision check: 11/11 tag-mined spec-authorship turns hit; 92 pure-spec turns exist in S1730. Structural analogue of `isVersionBumpTurn` — pollution-free, era-stable.
 - **citedBy** (in-degree): later same-session turns citing this turn's `[T<dbid>]`. Strong when present (T515/T516 surfaced immediately at ←2) but sparse — 31 turns, only since 0.2.33 introduced citations; grows over time. Weight stays minimal.
-- **tagFam**: importance keyword families (`design|architecture|spec|simulat|review|audit|verif|bug|root|regress|correction|pivot|hotfix|misfire|decision`) over bare tags and `topic:`-stripped tags.
+- **tagFam**: importance keyword families (`design|architecture|spec|simulat|review|audit|verif|bug|root|regress|correction|pivot|hotfix|misfire|decision`) over **bare tags only**. `topic:` tags are never read — the 0.2.37 two-class contract keeps them DB-only, out of milestone scoring (§1.3). New-era bare tags are role-only, so tagFam is now largely a legacy-session signal; weight 1.
+- **roleTag folds into tagFam — no separate detector in v1**. The role vocabulary (`correction`, `final-decision`) is already matched by the tagFam family (`correction` and `decision` are keywords), so an exact-match role term at the same weight under the same `max()` is fully redundant — verified: every `role_hit` turn is also a `tag_fam` turn, so dropping the term leaves the S1730 winner and all three cross-session selections bit-identical. A dedicated role channel (its own weight, an exact-match set expandable to `deferred` and future role tags) is deferred to §3.5.6.
 
 ### 3.3 Calibration (S1730, 4,608-config grid, Opus worker)
 
@@ -141,7 +145,7 @@ Winner config re-run (via `/tmp/milestone-sim5.py`, verified bit-identical to si
 3. **Off-code-project signal degradation (accepted, documented)**: `pureSpec` is dead (0 hits — no plan docs) and `insight` saturates (82–85% coverage → the max() content term goes near-constant), so ranking collapses to type base + citations + tagFam. Acceptable with amendment 2; future signal work should target insight quality tiers rather than presence.
 4. **Confirmed safe defaults**: `W_burst=0` and `feature=2` generalize (burst=1 degrades S1730, is lateral on S5233, mildly helps S9262 — not an artifact, keep 0; feature base is near-inert off dev sessions).
 5. **Title-only reversal blind spot (new, minor)**: S5233 T58 "Reversed decision: scene_summary" is a reversal narrated in the title with no `rolled-back` tag/column → marker None → not force-kept. Partly era-bound: S5233 mostly predates 0.2.35's negate-on-cite back-tagging, which today would tag the casualty when the reversing turn cites it. Residual gap: reversals the extractor narrates but neither cites nor tags.
-6. **Role-tag weights stay deferred** (T546): `correction` (38) / `deferred` (13) are accumulating; revisit once the pool clusters — the citedBy and roleTag channels give them a slot to plug into.
+6. **Dedicated role-tag channel deferred** (T546): in v1, role tags score only through tagFam (§3.2), which covers `correction`/`decision` but not `deferred` (13) or future role vocab. A separate role channel — its own weight and an exact-match set — waits until the pool clusters enough to calibrate; `correction` (38) / `deferred` (13) are still accumulating.
 7. **Data cleanups blocked by the read-only DB boundary**: entity residue (44 rows, §1.2) and legacy topic fragmentation (§1.3) both need authorized writes + FTS reindex.
 
 ## Testing & acceptance

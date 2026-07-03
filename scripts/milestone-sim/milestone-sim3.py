@@ -37,12 +37,13 @@ RUN_CAP = 2
 turns = json.load(open("/tmp/s1730_turns.json"))
 for t in turns:
     t["tags_list"] = json.loads(t["tags"]) if t["tags"] else []
-    stripped = [x.split(":",1)[1] if x.startswith("topic:") else x
-                for x in t["tags_list"] if ":" not in x or x.startswith("topic:")]
+    # tagFam reads BARE tags only. topic: tags are DB-only and NEVER affect
+    # milestones (0.2.37 two-class contract); bare tags are the role/session-arc class.
+    bare = [x for x in t["tags_list"] if ":" not in x]
     t["files_mod"] = json.loads(t["files_modified"]) if t["files_modified"] else []
     t["has_insight"] = bool(t["insight"]) and t["insight"] not in ("[]","")
-    t["tag_fam"] = any(FAM_RE.search(x) for x in stripped)
-    t["role_hit"] = any(x in ROLE_BONUS for x in t["tags_list"])
+    t["tag_fam"] = any(FAM_RE.search(x) for x in bare)
+    t["role_hit"] = any(x in ROLE_BONUS for x in bare)   # ⊆ tag_fam (correction/decision ∈ FAM_RE)
     t["pure_spec"] = bool(t["files_mod"]) and all(SPEC_RE.search(p) for p in t["files_mod"])
     t["day"] = datetime.fromtimestamp(t["created_at_epoch"], TZ).strftime("%Y-%m-%d")
 

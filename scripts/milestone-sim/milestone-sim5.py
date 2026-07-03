@@ -49,12 +49,11 @@ def build_session(path):
     turns = json.load(open(path))
     for t in turns:
         t["tags_list"] = json.loads(t["tags"]) if t["tags"] else []
-        stripped = [x.split(":",1)[1] if x.startswith("topic:") else x
-                    for x in t["tags_list"] if ":" not in x or x.startswith("topic:")]
+        bare = [x for x in t["tags_list"] if ":" not in x]   # role class; topic: never read
         t["files_mod"] = json.loads(t["files_modified"]) if t["files_modified"] else []
         t["has_insight"] = bool(t["insight"]) and t["insight"] not in ("[]","")
-        t["tag_fam"] = any(FAM_RE.search(x) for x in stripped)
-        t["role_hit"] = any(x in ROLE_BONUS for x in t["tags_list"])
+        t["tag_fam"] = any(FAM_RE.search(x) for x in bare)
+        t["role_hit"] = any(x in ROLE_BONUS for x in bare)   # ⊆ tag_fam
         t["pure_spec"] = bool(t["files_mod"]) and all(SPEC_RE.search(p) for p in t["files_mod"])
         t["day"] = datetime.fromtimestamp(t["created_at_epoch"], TZ).strftime("%Y-%m-%d")
 
@@ -133,14 +132,14 @@ def always_keep(S, t):
 def make_score(S, cfg):
     TB = {"decision":cfg["decision"],"feature":cfg["feature"],"refactor":cfg["feature"],
           "bugfix":2,"change":1,"discovery":cfg["discovery"]}
-    Wi,Ws,Wf,Wr = cfg["W_insight"],cfg["W_spec"],1,1
+    Wi,Ws,Wf = cfg["W_insight"],cfg["W_spec"],1
     Wc,Ccap,Wb = cfg["W_cite"],cfg["CITE_CAP"],cfg["W_burst"]
     def sc(t):
         if always_keep(S, t): return INF
         ty = t["type"] or ""
         s = TB.get(ty, 0)
         if ty in ("feature","refactor","change") and not t["files_mod"]: s = 0
-        s += max(Wi*t["has_insight"], Ws*t["pure_spec"], Wf*t["tag_fam"], Wr*t["role_hit"])
+        s += max(Wi*t["has_insight"], Ws*t["pure_spec"], Wf*t["tag_fam"])   # role folds into tag_fam
         s += min(S.indeg.get(t["prompt_number"],0), Ccap)*Wc
         if (t["tool_call_count"] or 0) > S.THRESHOLD: s += Wb
         return s

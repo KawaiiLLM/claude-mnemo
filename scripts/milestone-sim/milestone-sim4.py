@@ -7,8 +7,9 @@ Fixed converged architecture (weights are the only free variables):
      hard-excluded from the pool unless they are themselves structural.
   2. Weighted score for everyone else:
        score = TYPE_BASE[type]
-             + max(W_insight*has_insight, W_spec*pure_spec,
-                   W_fam*tag_fam, W_role*role_hit)
+             + max(W_insight*has_insight, W_spec*pure_spec, W_fam*tag_fam)
+             # role tags fold into tag_fam (bare-only; correction/decision ∈ FAM_RE);
+             # topic: tags never read. A dedicated role channel is deferred (T546).
              + min(indeg, CITE_CAP)*W_cite
              + W_burst*(toolCount > THRESHOLD)
      0-file gate: feature/refactor/change with empty files_modified -> base 0
@@ -93,7 +94,7 @@ def make_score(cfg):
     TB = {"decision": cfg["decision"], "feature": cfg["feature"],
           "refactor": cfg["feature"], "bugfix": 2, "change": 1,
           "discovery": cfg["discovery"]}
-    Wi, Ws, Wf, Wr = cfg["W_insight"], cfg["W_spec"], 1, 1
+    Wi, Ws, Wf = cfg["W_insight"], cfg["W_spec"], 1
     Wc, Ccap, Wb = cfg["W_cite"], cfg["CITE_CAP"], cfg["W_burst"]
 
     def sc(t):
@@ -103,8 +104,8 @@ def make_score(cfg):
         s = TB.get(ty, 0)
         if ty in ("feature", "refactor", "change") and not t["files_mod"]:
             s = 0
-        s += max(Wi * t["has_insight"], Ws * t["pure_spec"],
-                 Wf * t["tag_fam"], Wr * t["role_hit"])
+        # role tags fold into tag_fam (bare-only); dedicated role channel deferred (T546)
+        s += max(Wi * t["has_insight"], Ws * t["pure_spec"], Wf * t["tag_fam"])
         s += min(indeg.get(t["prompt_number"], 0), Ccap) * Wc
         if (t["tool_call_count"] or 0) > THRESHOLD:
             s += Wb

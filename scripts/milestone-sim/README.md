@@ -38,7 +38,11 @@ c787396fd8e0705548827f775baf3a111863260de6b243b5c968eec1e406ae85  s9262_turns.js
 
 Calibration result to reproduce: `milestone-sim4.py` winner
 `decision=4, feature=refactor=2, bugfix=2, change=1, discovery=1, W_insight=2,
-W_spec=3, W_fam=1, W_role=1, W_cite=1, CITE_CAP=2, W_burst=0, POOL_MIN=2,
+W_spec=3, W_fam=1 (bare tags only), W_cite=1, CITE_CAP=2, W_burst=0, POOL_MIN=2,
 DAY_BASE=4, DAY_MAX=7` → objective +38, GOLD 19/28, MUD 0/12, kept 102 (22.3%),
 all hard constraints OK (with the structural core including invalidated +
 reversed-without-corrector).
+
+`tagFam` reads bare tags only (topic: tags never affect milestones, per the
+0.2.37 two-class contract); the redundant `roleTag` term was dropped — both
+changes leave the winner and all three cross-session selections bit-identical.
