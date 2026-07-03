@@ -22,9 +22,10 @@ Fixed converged architecture (weights are the only free variables):
      those reps then compete for the day cap by score.
 
 Signals / graph facts (indeg, correctors, victims, demoted_outcome, endpoints,
-run_id, marker, THRESHOLD, per-turn has_insight/pure_spec/tag_fam/role_hit) are
-reused verbatim from milestone-sim3.py so they stay in lock-step with the
-converged design. sim2.ref is the 94-turn A+B+D reference for the diff.
+run_id, marker, THRESHOLD, per-turn has_insight/pure_spec/tag_fam) are reused
+verbatim from milestone-sim3.py so they stay in lock-step with the converged
+design; role_hit is imported for diagnostic labels only (⊆ tag_fam, not scored).
+sim2.ref is the 94-turn A+B+D reference for the diff.
 """
 import importlib.util, io, contextlib
 from collections import defaultdict

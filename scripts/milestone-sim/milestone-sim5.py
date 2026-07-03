@@ -2,10 +2,12 @@
 """Cross-session validation of the calibrated milestone winner (post Part-1 fix).
 
 Self-contained: build_session(path) replicates milestone-sim3.py's signal logic
-verbatim (FAM_RE / SPEC_RE / ROLE_BONUS / marker / THRESHOLD / indeg-correctors-
+verbatim (FAM_RE bare-only / SPEC_RE / marker / THRESHOLD / indeg-correctors-
 victims / outcome coalescing / endpoints / run_id) so the identical selector can
 run on ANY <session>_turns.json. always_keep() carries the Part-1 fix
-(invalidated + pure-rewind reversed added to the inf core).
+(invalidated + pure-rewind reversed added to the inf core). ROLE_BONUS/role_hit
+are computed for DIAGNOSTIC output only — role tags fold into tag_fam and are
+NOT scored (see make_score).
 
 No GOLD/MUD objective for the new sessions — qualitative validation only.
 """

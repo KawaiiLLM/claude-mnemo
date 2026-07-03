@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Weighted multi-signal milestone scoring (user-proposed architecture).
 
+This is the EXPLORATION arm (v1-v3): a SUM of weighted signals with a partial
+structural core — it flooded / broke the spine / went dark, and is SUPERSEDED by
+the converged max()-based winner in milestone-sim4.py. Run standalone it prints
+kept~110 (a rejected arm), NOT the calibrated 102. sim4/sim5 import only the
+shared signal graph below (indeg, correctors, markers, run_id), never this score().
+
 Score = type base + weighted signals; always-keep(∞) shrinks to a structural
 core (endpoints, compact). Fold becomes a diversity constraint (max 2 picks per
 same-type consecutive run per day). Per-day adaptive budget kept.
@@ -10,8 +16,8 @@ Weights:
                    (feature/refactor/change with 0 files -> 0, gate kept)
   insight          +2
   pure-spec files  +2   (all files_modified match docs/(plans|specs|superpowers)/*.md)
-  tag family       +1   (bare OR topic:-stripped tags matching importance families)
-  role tag         +1   (correction / final-decision)
+  tag family       +1   (BARE tags only matching importance families; topic: never read)
+  role tag         (diagnostic only — NOT scored; role_hit ⊆ tag family, correction/decision ∈ FAM_RE)
   tool burst       +1   (toolCount > window threshold)
   cited-by         +1 per later in-session citation, cap +3
   marker: outcome anchor (post-coalesce) +6 · corrector +5 ·
@@ -112,8 +118,7 @@ def score(t):
     if ty in ("feature","refactor","change") and not t["files_mod"]: s = 0
     if t["has_insight"]: s += 2
     if t["pure_spec"]: s += 2
-    if t["tag_fam"]: s += 1
-    if t["role_hit"]: s += 1
+    if t["tag_fam"]: s += 1                    # role_hit ⊆ tag_fam → no separate role term (diagnostic only)
     if (t["tool_call_count"] or 0) > THRESHOLD: s += 1
     s += min(indeg.get(pn, 0), 3)
     mk = marker(t)
