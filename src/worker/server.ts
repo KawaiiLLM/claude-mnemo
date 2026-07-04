@@ -87,9 +87,15 @@ const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
 const TURN_STOP_TIMEOUT_MS = 30_000;
-// Memory agent runs on claude-sonnet-4-6 (200K window, no 1M beta). Used to
-// turn config.compactContextRatio into an absolute token gate for /compact.
-const AGENT_CONTEXT_WINDOW_TOKENS = 200_000;
+// Memory agent runs on claude-sonnet-5 (1M window). Used to turn
+// config.compactContextRatio into an absolute token gate for /compact.
+const AGENT_CONTEXT_WINDOW_TOKENS = 1_000_000;
+// Hard ceiling on the /compact trigger. Even with the 1M window we keep each
+// memory-agent turn lean by compacting no later than 100K context, so the gate
+// is min(window * ratio, this). With the 1M window this cap governs for every
+// in-range ratio (0.1..0.95 → 100K..950K), pinning the effective trigger at
+// 100K; the ratio only re-engages if the window is set below 200K.
+const AGENT_COMPACT_MAX_TOKENS = 100_000;
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
@@ -1788,7 +1794,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return true;
     }
     return (
-      contextTokens >= AGENT_CONTEXT_WINDOW_TOKENS * config.compactContextRatio
+      contextTokens >=
+      Math.min(
+        AGENT_CONTEXT_WINDOW_TOKENS * config.compactContextRatio,
+        AGENT_COMPACT_MAX_TOKENS,
+      )
     );
   }
 

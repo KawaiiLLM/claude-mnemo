@@ -1459,7 +1459,7 @@ describe("worker server", () => {
     }).id;
 
     const compacted: number[] = [];
-    // 50K < 0.5 * 200K window → below threshold, skip.
+    // 50K < min(0.5 * 1M, 100K) = 100K → below threshold, skip.
     await compactGateCore(sessionId, 50_000, compacted).handleCompact(
       sessionId,
       null,
@@ -1481,8 +1481,32 @@ describe("worker server", () => {
     }).id;
 
     const compacted: number[] = [];
-    // 150K >= 0.5 * 200K window → compact.
+    // 150K >= 100K cap (= min(0.5 * 1M, 100K)) → compact; below 0.5 * 1M, so
+    // this only compacts because the absolute cap, not the ratio, governs.
     await compactGateCore(sessionId, 150_000, compacted).handleCompact(
+      sessionId,
+      null,
+    );
+
+    expect(compacted).toEqual([sessionId]);
+  });
+
+  test("handleCompact caps the /compact trigger at 100K under the 1M window", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "compact-cap-ctx",
+      project: "/tmp/p-cap",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    const compacted: number[] = [];
+    // 400K is far below 0.5 * 1M (500K) but at/above the 100K absolute cap, so
+    // the agent still compacts — the cap governs, the ratio no longer does.
+    await compactGateCore(sessionId, 400_000, compacted).handleCompact(
       sessionId,
       null,
     );

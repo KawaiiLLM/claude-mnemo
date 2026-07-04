@@ -247,7 +247,7 @@ export function createWorkerQuerySession(
   const execution: Query = queryImpl({
     prompt: promptStream,
     options: {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       cwd: DATA_DIR,
       ...(resumeTarget ? { resume: resumeTarget } : {}),
       allowedTools: [...MNEMO_ALLOWED_TOOLS],

@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.38-mr4qonet" : "dev";
+var BUILD_ID = true ? "0.2.39-mr6g5d3g" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40962,7 +40962,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const execution = queryImpl({
     prompt: promptStream,
     options: {
-      model: "claude-sonnet-4-6",
+      model: "claude-sonnet-5",
       cwd: DATA_DIR,
       ...resumeTarget ? { resume: resumeTarget } : {},
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
@@ -41308,7 +41308,8 @@ var STALLED_QUERY_MS = 3e4;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
-var AGENT_CONTEXT_WINDOW_TOKENS = 2e5;
+var AGENT_CONTEXT_WINDOW_TOKENS = 1e6;
+var AGENT_COMPACT_MAX_TOKENS = 1e5;
 function batchMiniTurns(batch) {
   return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
 }
@@ -42441,7 +42442,10 @@ ${body}
     if (contextTokens === null) {
       return true;
     }
-    return contextTokens >= AGENT_CONTEXT_WINDOW_TOKENS * config3.compactContextRatio;
+    return contextTokens >= Math.min(
+      AGENT_CONTEXT_WINDOW_TOKENS * config3.compactContextRatio,
+      AGENT_COMPACT_MAX_TOKENS
+    );
   }
   async function handleCompact(sessionDbId, transcriptPath) {
     compactingSessions.add(sessionDbId);

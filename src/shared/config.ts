@@ -14,7 +14,10 @@ export interface MnemoConfig {
   /**
    * Fraction of the memory agent's context window at/above which a
    * worker-driven /compact is allowed. Below it, compact is skipped so a
-   * small agent session is never needlessly compressed.
+   * small agent session is never needlessly compressed. The effective gate is
+   * min(window * ratio, AGENT_COMPACT_MAX_TOKENS): an absolute 100K ceiling caps
+   * the trigger even under the 1M window, so this ratio only governs when the
+   * window is set below 200K (see server.ts).
    */
   compactContextRatio: number;
 }
