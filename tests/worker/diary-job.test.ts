@@ -412,7 +412,7 @@ describe("createDiaryJobProcessor", () => {
       });
     }
 
-    const requestTokenGate = 1_200;
+    const requestTokenGate = 1_400;
     const requestOverheadTokens = 40;
     const seenPrompts: string[] = [];
     let mapCalls = 0;
@@ -574,7 +574,7 @@ describe("createDiaryJobProcessor", () => {
     }
 
     const seenMapRefs: string[] = [];
-    const requestTokenGate = 1_200;
+    const requestTokenGate = 1_400;
     const requestOverheadTokens = 40;
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
@@ -679,7 +679,7 @@ describe("createDiaryJobProcessor", () => {
       db,
       stateStore,
       fileStore: new DiaryFileStore(dataRoot),
-      requestTokenGate: 1_200,
+      requestTokenGate: 1_400,
       requestOverheadTokens: 40,
       agentRunner: createDiaryAgentRunner({
         async runQuery(request) {

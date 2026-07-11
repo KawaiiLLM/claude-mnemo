@@ -50,7 +50,7 @@ var import_node_os5 = require("node:os");
 var import_node_path9 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.3.0-mrgray6u" : "dev";
+var BUILD_ID = true ? "0.3.0-mrgrvjwx" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -43052,10 +43052,10 @@ var CANONICAL_DIARY_WIRE_FORMAT_EXAMPLE = [
   "===DIARY_V2_BEGIN===",
   "## \u5DE5\u4F5C",
   "**<\u9879\u76EE\u540D>**",
-  "- <\u4E00\u6761\u7B2C\u4E00\u4EBA\u79F0\u4E8B\u5B9E> [S1/T1]",
+  "- \u6211\u5E2E\u7528\u6237\u5B8C\u6210\u4E86\u4E00\u9879\u534F\u4F5C\u5DE5\u4F5C [S1/T1]",
   "  <\u5C5E\u4E8E\u4E0A\u4E00\u6761 bullet \u7684\u53EF\u9009\u7EED\u884C>",
   "## \u4EBA\u7269",
-  "- <\u4E00\u6761\u4EBA\u7269\u76F8\u5173\u4E8B\u5B9E> [S1/T1\uFF0CT2\uFF0CS2/T1]",
+  "- \u7528\u6237\u62D2\u7EDD\u4E86\u4E0D\u7B26\u5408\u5176\u5224\u65AD\u7684\u5EFA\u8BAE [S1/T1\uFF0CT2\uFF0CS2/T1]",
   "## \u53CD\u601D",
   "- <\u4E00\u6761\u53CD\u601D> [S1/T1]",
   "===DIARY_V2_END===",
@@ -43065,15 +43065,15 @@ var CANONICAL_DIARY_WIRE_FORMAT_EXAMPLE = [
 var CANONICAL_PERSONA_WIRE_FORMAT_EXAMPLE = [
   "===USER_PROFILE_V1_BEGIN===",
   "## \u8EAB\u4EFD\u4E0E\u80CC\u666F",
-  "- <\u4E00\u6761\u6709\u4F9D\u636E\u7684\u7279\u5F81> [S1/T1]",
+  "- \u7528\u6237\u6709\u4E00\u9879\u6709\u4F9D\u636E\u7684\u80CC\u666F\u7279\u5F81 [S1/T1]",
   "## \u4E13\u957F\u4E0E\u5224\u65AD\u529B",
-  "- <\u4E00\u6761\u6709\u4F9D\u636E\u7684\u7279\u5F81> [S1/T1]",
+  "- \u7528\u6237\u5C55\u73B0\u4E86\u4E00\u9879\u6709\u4F9D\u636E\u7684\u4E13\u957F [S1/T1]",
   "## \u54C1\u5473\u4E0E\u5174\u8DA3",
-  "- <\u4E00\u6761\u6709\u4F9D\u636E\u7684\u7279\u5F81> [S1/T1]",
+  "- \u7528\u6237\u6709\u4E00\u9879\u6709\u4F9D\u636E\u7684\u54C1\u5473\u504F\u597D [S1/T1]",
   "## \u6C9F\u901A\u98CE\u683C",
-  "- <\u4E00\u6761\u6709\u4F9D\u636E\u7684\u7279\u5F81> [S1/T1]",
+  "- \u7528\u6237\u91C7\u7528\u4E00\u79CD\u6709\u4F9D\u636E\u7684\u6C9F\u901A\u65B9\u5F0F [S1/T1]",
   "## \u534F\u4F5C\u504F\u597D",
-  "- <\u4E00\u6761\u6709\u4F9D\u636E\u7684\u7279\u5F81> [S1/T1]",
+  "- \u7528\u6237\u504F\u597D\u4E00\u79CD\u6709\u4F9D\u636E\u7684\u534F\u4F5C\u65B9\u5F0F [S1/T1]",
   "===USER_PROFILE_V1_END===",
   "===EXPERIENCE_V1_BEGIN===",
   "## \u9879\u76EE",
@@ -43083,7 +43083,7 @@ var CANONICAL_PERSONA_WIRE_FORMAT_EXAMPLE = [
   "    - \u53CD\u9988\uFF1A<\u534F\u4F5C\u7ECF\u9A8C> [S1/T1]",
   "    - [2026-07] <\u5370\u8C61\u4E8B\u4EF6> [S1/T1]",
   "## \u901A\u7528",
-  "- <\u8DE8\u9879\u76EE\u7ECF\u9A8C> [S1/T1]",
+  "- \u6211\u5E2E\u52A9\u7528\u6237\u65F6\u5F62\u6210\u4E86\u4E00\u6761\u8DE8\u9879\u76EE\u7ECF\u9A8C [S1/T1]",
   "===EXPERIENCE_V1_END==="
 ].join("\n");
 
@@ -43214,7 +43214,9 @@ function sessionSummaryLines(row) {
   );
 }
 var DIARY_V2_POLICY_LINES = [
-  "Write in the first person with headings ## \u5DE5\u4F5C, ## \u4EBA\u7269, ## \u53CD\u601D in order; \u4EBA\u7269 checks \u504F\u597D\u3001\u54C1\u5473\u3001\u751F\u6D3B\u9762\u3001\u5BF9 AI \u7684\u7EA0\u6B63\u4E0E\u8BA4\u53EF; \u53CD\u601D has at most 5 bullets and uses uncertainty wording for speculation."
+  "\u8FD9\u662F agent \u7684\u65E5\u8BB0\uFF1A\u5168\u6587\u4E2D\u7684\u300C\u6211\u300D\u59CB\u7EC8\u53EA\u6307 agent\uFF0C\u7528\u6237\u4E00\u5F8B\u79F0\u4E3A\u300C\u7528\u6237\u300D\uFF0C\u4E0D\u5F97\u7528\u300C\u6211\u300D\u4EE3\u6307\u7528\u6237\u3002",
+  "\u5DE5\u4F5C\u8282\u7684\u534F\u4F5C\u53D9\u4E8B\u5199\u6210\u300C\u6211\u5E2E\u7528\u6237\u2026\u2026\u300D\u6216\u300C\u7528\u6237\u8981\u6C42\u2026\u2026\u6211\u2026\u2026\u300D\uFF1B\u4EBA\u7269\u8282\u4EE5\u7B2C\u4E09\u4EBA\u79F0\u89C2\u5BDF\u7528\u6237\uFF0C\u6BCF\u6761 bullet \u4EE5\u300C\u7528\u6237\u300D\u5F00\u5934\uFF08\u4F8B\u5982\u300C\u7528\u6237\u62D2\u7EDD\u4E86\u2026\u2026\u300D\uFF09\uFF1B\u53CD\u601D\u8282\u4FDD\u6301 agent \u7B2C\u4E00\u4EBA\u79F0\u3002",
+  "Write in first person with headings ## \u5DE5\u4F5C, ## \u4EBA\u7269, ## \u53CD\u601D in order, subject to the voice rules above; \u4EBA\u7269 checks \u504F\u597D\u3001\u54C1\u5473\u3001\u751F\u6D3B\u9762\u3001\u5BF9 AI \u7684\u7EA0\u6B63\u4E0E\u8BA4\u53EF; \u53CD\u601D has at most 5 bullets and uses uncertainty wording for speculation."
 ];
 var DIARY_V2_WIRE_FORMAT_LINES = [
   "Output this exact wire format (replace placeholder text, keep every sentinel and heading):",
@@ -43242,7 +43244,7 @@ function diaryMaterialLines(rows, memoryLines) {
   }
   return lines;
 }
-function buildPrompt(date7, rows, memoryLines) {
+function buildDiaryPrompt(date7, rows, memoryLines) {
   return [
     `Write the person-centric diary for ${date7}.`,
     "Return exactly one DIARY_V2 envelope.",
@@ -43442,7 +43444,7 @@ function createDiaryJobProcessor(options) {
     return batches;
   }
   async function generateEnvelope(date7, rows, memoryLines) {
-    const directPrompt = buildPrompt(date7, rows, memoryLines);
+    const directPrompt = buildDiaryPrompt(date7, rows, memoryLines);
     if (fitsRequest(directPrompt)) {
       return runBounded(date7, directPrompt, turnRefsFromRows(rows));
     }
@@ -44312,6 +44314,13 @@ function createPersonaMaintainer(options) {
 }
 
 // src/worker/diary-runtime.ts
+var PERSONA_V1_POLICY_LINES = [
+  "USER_PROFILE_V1 \u5168\u6587\u4EE5\u7B2C\u4E09\u4EBA\u79F0\u63CF\u8FF0\u300C\u7528\u6237\u300D\uFF0C\u7981\u6B62\u51FA\u73B0\u300C\u6211\u300D\uFF1B\u5176\u4E2D\u7684\u7279\u5F81\u3001\u884C\u4E3A\u548C\u504F\u597D\u90FD\u5C5E\u4E8E\u7528\u6237\u3002",
+  "EXPERIENCE_V1 \u4E2D\u7684\u300C\u6211\u300D\u59CB\u7EC8\u53EA\u6307 agent \u7684\u7ECF\u5386\u89C6\u89D2\uFF0C\u7528\u6237\u4E00\u5F8B\u79F0\u4E3A\u300C\u7528\u6237\u300D\uFF0C\u4E0D\u5F97\u7528\u300C\u6211\u300D\u4EE3\u6307\u7528\u6237\u3002",
+  "\u9879\u76EE lead bullet \u7684\u4E00\u53E5\u8BDD\u5370\u8C61\u5FC5\u987B\u662F\u6982\u62EC\u6027\u603B\u7ED3\uFF0C\u4E0D\u5F97\u4E0E\u4EFB\u4F55 dated impression bullet \u91CD\u590D\u8868\u8FF0\uFF1B\u53EF\u4EE5\u590D\u7528\u540C\u4E00\u5F15\u7528\uFF0C\u4F46\u63AA\u8F9E\u5FC5\u987B\u4FDD\u6301\u6982\u62EC\u5C42\u7EA7\u3002",
+  "\u53CD\u9988\uFF1A\u53EA\u8BB0\u5F55\u534F\u4F5C\u4E2D\u7684\u7EA0\u6B63\u6216\u6559\u8BAD\uFF1B\u8BBE\u8BA1\u51B3\u7B56\u5FC5\u987B\u5199\u5165 dated impressions \u6216\u8FDB\u5EA6\uFF0C\u4E0D\u5F97\u5199\u5165\u53CD\u9988\u3002",
+  "\u8FDB\u5EA6\uFF1A\u53EA\u8BB0\u5F55\u9879\u76EE\u5F53\u524D\u72B6\u6001\uFF0C\u4E0D\u5F97\u6DF7\u5165\u6210\u672C\u4F30\u7B97\u6216\u5176\u4ED6\u65C1\u652F\u4E8B\u5B9E\u3002"
+];
 function buildPersonaPrompt(request) {
   const lines = [
     "Maintain the two person-memory documents from the supplied trusted artifacts.",
@@ -44322,6 +44331,7 @@ function buildPersonaPrompt(request) {
     "Do not use code fences. Do not write any text before, between, or after these two adjacent blocks. USER_PROFILE_V1 must come first and EXPERIENCE_V1 second.",
     "USER_PROFILE_V1 must contain exactly these level-2 headings in order: \u8EAB\u4EFD\u4E0E\u80CC\u666F, \u4E13\u957F\u4E0E\u5224\u65AD\u529B, \u54C1\u5473\u4E0E\u5174\u8DA3, \u6C9F\u901A\u98CE\u683C, \u534F\u4F5C\u504F\u597D.",
     "EXPERIENCE_V1 must contain exactly these level-2 headings in order: \u9879\u76EE, \u901A\u7528.",
+    ...PERSONA_V1_POLICY_LINES,
     'Under \u9879\u76EE, write each project exactly as: - **<semantic project name>**\uFF1A<one-sentence impression> [citation]; then sub-items indented with exactly four ASCII spaces: - \u8DEF\u5F84\uFF1A["/absolute/path"] as a JSON string-array line; exactly one - \u8FDB\u5EA6\uFF1A<current state> [citation]; zero to two - \u53CD\u9988\uFF1A<collaboration lessons joined by semicolons> [citation] lines; and - [YYYY-MM] <impression event> [citation] lines.',
     "On every fold, overwrite the project's single \u8FDB\u5EA6 line; never accumulate progress history.",
     "Admission: every bullet states one fact only. Exclude diagnostic observations and meta observations about the memory process. Put projectless material and cross-project lessons in \u901A\u7528, even when learned in a project session.",

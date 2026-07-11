@@ -217,8 +217,10 @@ function sessionSummaryLines(row: DiaryMaterialRow): string[] {
   );
 }
 
-const DIARY_V2_POLICY_LINES = [
-  "Write in the first person with headings ## 工作, ## 人物, ## 反思 in order; 人物 checks 偏好、品味、生活面、对 AI 的纠正与认可; 反思 has at most 5 bullets and uses uncertainty wording for speculation.",
+export const DIARY_V2_POLICY_LINES = [
+  "这是 agent 的日记：全文中的「我」始终只指 agent，用户一律称为「用户」，不得用「我」代指用户。",
+  "工作节的协作叙事写成「我帮用户……」或「用户要求……我……」；人物节以第三人称观察用户，每条 bullet 以「用户」开头（例如「用户拒绝了……」）；反思节保持 agent 第一人称。",
+  "Write in first person with headings ## 工作, ## 人物, ## 反思 in order, subject to the voice rules above; 人物 checks 偏好、品味、生活面、对 AI 的纠正与认可; 反思 has at most 5 bullets and uses uncertainty wording for speculation.",
 ] as const;
 
 const DIARY_V2_WIRE_FORMAT_LINES = [
@@ -253,7 +255,7 @@ function diaryMaterialLines(
   return lines;
 }
 
-function buildPrompt(
+export function buildDiaryPrompt(
   date: string,
   rows: readonly DiaryMaterialRow[],
   memoryLines: readonly string[],
@@ -517,7 +519,7 @@ export function createDiaryJobProcessor(
     rows: readonly DiaryMaterialRow[],
     memoryLines: readonly string[],
   ): Promise<string> {
-    const directPrompt = buildPrompt(date, rows, memoryLines);
+    const directPrompt = buildDiaryPrompt(date, rows, memoryLines);
     if (fitsRequest(directPrompt)) {
       return runBounded(date, directPrompt, turnRefsFromRows(rows));
     }

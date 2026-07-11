@@ -33,7 +33,15 @@ export interface DiaryRuntime {
   runPersonaMaintenance(): Promise<PersonaMaintenanceResult>;
 }
 
-function buildPersonaPrompt(request: PersonaRunRequest): string {
+export const PERSONA_V1_POLICY_LINES = [
+  "USER_PROFILE_V1 全文以第三人称描述「用户」，禁止出现「我」；其中的特征、行为和偏好都属于用户。",
+  "EXPERIENCE_V1 中的「我」始终只指 agent 的经历视角，用户一律称为「用户」，不得用「我」代指用户。",
+  "项目 lead bullet 的一句话印象必须是概括性总结，不得与任何 dated impression bullet 重复表述；可以复用同一引用，但措辞必须保持概括层级。",
+  "反馈：只记录协作中的纠正或教训；设计决策必须写入 dated impressions 或进度，不得写入反馈。",
+  "进度：只记录项目当前状态，不得混入成本估算或其他旁支事实。",
+] as const;
+
+export function buildPersonaPrompt(request: PersonaRunRequest): string {
   const lines = [
     "Maintain the two person-memory documents from the supplied trusted artifacts.",
     `op: ${request.op}`,
@@ -43,6 +51,7 @@ function buildPersonaPrompt(request: PersonaRunRequest): string {
     "Do not use code fences. Do not write any text before, between, or after these two adjacent blocks. USER_PROFILE_V1 must come first and EXPERIENCE_V1 second.",
     "USER_PROFILE_V1 must contain exactly these level-2 headings in order: 身份与背景, 专长与判断力, 品味与兴趣, 沟通风格, 协作偏好.",
     "EXPERIENCE_V1 must contain exactly these level-2 headings in order: 项目, 通用.",
+    ...PERSONA_V1_POLICY_LINES,
     "Under 项目, write each project exactly as: - **<semantic project name>**：<one-sentence impression> [citation]; then sub-items indented with exactly four ASCII spaces: - 路径：[\"/absolute/path\"] as a JSON string-array line; exactly one - 进度：<current state> [citation]; zero to two - 反馈：<collaboration lessons joined by semicolons> [citation] lines; and - [YYYY-MM] <impression event> [citation] lines.",
     "On every fold, overwrite the project's single 进度 line; never accumulate progress history.",
     "Admission: every bullet states one fact only. Exclude diagnostic observations and meta observations about the memory process. Put projectless material and cross-project lessons in 通用, even when learned in a project session.",
