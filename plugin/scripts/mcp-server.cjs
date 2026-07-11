@@ -7471,7 +7471,7 @@ function ensureParentDirectory(databasePath) {
   if (databasePath === ":memory:") {
     return;
   }
-  const parentDirectory = (0, import_node_path3.dirname)(databasePath);
+  const parentDirectory = (0, import_node_path2.dirname)(databasePath);
   if (!(0, import_node_fs.existsSync)(parentDirectory)) {
     (0, import_node_fs.mkdirSync)(parentDirectory, { recursive: true });
   }
@@ -7569,12 +7569,12 @@ function runHookWriteTransaction(db, fn, options = {}) {
     }
   }
 }
-var import_node_fs, import_node_path3, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
+var import_node_fs, import_node_path2, import_bun_sqlite, DEFAULT_BUSY_TIMEOUT_MS, DEFAULT_HOOK_TRANSACTION_BUDGET_MS;
 var init_database = __esm({
   "src/db/database.ts"() {
     "use strict";
     import_node_fs = require("node:fs");
-    import_node_path3 = require("node:path");
+    import_node_path2 = require("node:path");
     import_bun_sqlite = require("bun:sqlite");
     init_paths();
     DEFAULT_BUSY_TIMEOUT_MS = 5e3;
@@ -7597,11 +7597,47 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureDiaryValidationReportColumn(db);
+  ensurePersonaOperationGenerationColumns(db);
+  ensurePersonaOperationConsumedPendingDatesColumn(db);
+  ensurePersonaOperationPublicationSnapshotColumns(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+function ensurePersonaOperationPublicationSnapshotColumns(db) {
+  if (!hasColumn(db, "persona_operation_state", "rebuild_request_epoch")) {
+    db.exec("ALTER TABLE persona_operation_state ADD COLUMN rebuild_request_epoch INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "persona_operation_state", "partial_missing_dates")) {
+    db.exec("ALTER TABLE persona_operation_state ADD COLUMN partial_missing_dates TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+function ensurePersonaOperationConsumedPendingDatesColumn(db) {
+  if (!hasColumn(db, "persona_operation_state", "consumed_pending_dates")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN consumed_pending_dates TEXT NOT NULL DEFAULT '[]'"
+    );
+  }
+}
+function ensurePersonaOperationGenerationColumns(db) {
+  if (!hasColumn(db, "persona_operation_state", "base_generation")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "persona_operation_state", "target_generation")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN target_generation INTEGER NOT NULL DEFAULT 1"
+    );
+  }
+}
+function ensureDiaryValidationReportColumn(db) {
+  if (!hasColumn(db, "diary_day_state", "validation_report_json")) {
+    db.exec("ALTER TABLE diary_day_state ADD COLUMN validation_report_json TEXT");
+  }
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -7773,7 +7809,11 @@ function hasLegacySchema(db) {
   return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || hasLegacyObservationColumns && isMissingCurrentObservationColumns;
 }
 function resetSchema(db) {
+  db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP TABLE IF EXISTS diary_state");
+  db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
@@ -7871,6 +7911,9 @@ var init_schema = __esm({
   CREATE INDEX IF NOT EXISTS idx_turns_status
     ON turns(status);
 
+  CREATE INDEX IF NOT EXISTS idx_turns_created_at
+    ON turns(created_at_epoch);
+
   CREATE INDEX IF NOT EXISTS idx_observations_turn_id
     ON observations(turn_id);
 
@@ -7888,6 +7931,55 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
+    ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  CREATE TABLE IF NOT EXISTS diary_day_state (
+    date TEXT PRIMARY KEY,
+    watermark TEXT,
+    file_sha256 TEXT,
+    index_hook TEXT,
+    validation_report_json TEXT,
+    settled_at_epoch INTEGER,
+    needs_regen INTEGER NOT NULL DEFAULT 0,
+    pending_rebase INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_epoch INTEGER,
+    last_error TEXT,
+    terminal INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS diary_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS persona_operation_state (
+    operation_id TEXT PRIMARY KEY,
+    op TEXT NOT NULL,
+    base_current_operation_id TEXT,
+    base_generation INTEGER NOT NULL DEFAULT 0,
+    target_generation INTEGER NOT NULL DEFAULT 1,
+    input_dates_snapshot TEXT NOT NULL,
+    consumed_pending_dates TEXT NOT NULL DEFAULT '[]',
+    rebuild_request_epoch INTEGER NOT NULL DEFAULT 0,
+    partial_missing_dates TEXT NOT NULL DEFAULT '[]',
+    batch_plan TEXT NOT NULL,
+    input_artifact_dir TEXT NOT NULL,
+    next_batch_index INTEGER NOT NULL DEFAULT 0,
+    accumulator_generation INTEGER,
+    accumulator_hash TEXT,
+    checkpoint_path TEXT,
+    checkpoint_sha256 TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_epoch INTEGER,
+    last_error TEXT,
+    terminal INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_operation_active
+    ON persona_operation_state(terminal) WHERE terminal = 0;
 
   ${MEMORY_FTS_DDL}
 `;
@@ -31435,6 +31527,37 @@ function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
 
+// src/db/diary-state.ts
+init_database();
+
+// src/diary/domain.ts
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+var DIARY_BODY_LIMIT = 64 * 1024;
+function diaryDayOf(epochSeconds) {
+  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+}
+
+// src/db/diary-state.ts
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const date5 = diaryDayOf(createdAtEpoch);
+  db.query(
+    `
+      UPDATE diary_day_state
+      SET needs_regen = 1,
+          attempt_count = 0,
+          next_attempt_epoch = NULL,
+          last_error = NULL,
+          terminal = 0
+      WHERE date = ?
+        AND settled_at_epoch IS NOT NULL
+        AND date >= COALESCE(
+          (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+          '9999-12-31'
+        )
+    `
+  ).run(date5);
+}
+
 // src/db/turns.ts
 init_search();
 var TURN_SELECT = `
@@ -31590,6 +31713,9 @@ function updateTurnById(db, turnId, input) {
       "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
     ).run(turnId);
   }
+  if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
   return updated;
 }
 function getTurnsForSession(db, sessionId) {
@@ -31609,7 +31735,7 @@ function getFirstTurn(db, sessionId) {
 init_paths();
 
 // src/shared/file-tree.ts
-var import_node_path2 = __toESM(require("node:path"), 1);
+var import_node_path3 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -31706,7 +31832,7 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path2.default.posix.relative(root, value);
+    const relative = import_node_path3.default.posix.relative(root, value);
     if (!relative || relative === "") {
       continue;
     }
@@ -34835,7 +34961,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.2.39" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.3.0" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 
 describe("release artifacts", () => {
   test("plugin manifest declares an author", () => {
@@ -17,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.2.39", () => {
+  test("release metadata is consistently bumped to 0.3.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -33,10 +35,16 @@ describe("release artifacts", () => {
       plugins?: Array<{ version?: string }>;
     };
 
-    expect(packageJson.version).toBe("0.2.39");
-    expect(pluginManifest.version).toBe("0.2.39");
-    expect(marketplace.metadata?.version).toBe("0.2.39");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.2.39");
+    const diarySdkQuery = readFileSync(
+      "src/worker/diary-sdk-query.ts",
+      "utf8",
+    );
+
+    expect(packageJson.version).toBe("0.3.0");
+    expect(pluginManifest.version).toBe("0.3.0");
+    expect(marketplace.metadata?.version).toBe("0.3.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.3.0");
+    expect(diarySdkQuery).toContain('version: "0.3.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -93,6 +101,24 @@ describe("release artifacts", () => {
   });
 
   test("built bundles embed current worker + timeline logic (stale-bundle guard)", () => {
+    const output = mkdtempSync(join(tmpdir(), "mnemo-release-build-"));
+    try {
+      const outputRelative = relative(process.cwd(), output);
+      const build = spawnSync("node", ["scripts/build.js"], {
+        encoding: "utf8",
+        env: { ...process.env, MNEMO_BUILD_OUTPUT_DIR: outputRelative },
+      });
+      expect(build.status).toBe(0);
+      const stripBuildId = (source: string) => source.replace(/^var BUILD_ID = .*;\n/m, "");
+      for (const bundle of ["hook-command.cjs", "mcp-server.cjs", "worker.cjs", "replay-parse.cjs"]) {
+        expect(stripBuildId(readFileSync(join(output, bundle), "utf8"))).toBe(
+          stripBuildId(readFileSync(join("plugin", "scripts", bundle), "utf8")),
+        );
+      }
+    } finally {
+      rmSync(output, { recursive: true, force: true });
+    }
+
     // The BUILD_ID guard above catches a version bump WITHOUT a rebuild; it does
     // NOT catch a SOURCE change without a rebuild — the version prefix is
     // unchanged, so BUILD_ID still matches and the bundle silently runs old
@@ -106,6 +132,9 @@ describe("release artifacts", () => {
       'audience: "worker"', // recall worker DB-id surface
       "dbid:T", // DB-id token the worker recall emits
       "OUTCOME_TAGS", // milestone marker logic
+      "Maintain the two person-memory documents", // diary runtime
+      "===DIARY_V2_BEGIN===", // canonical prompt wire format
+      "Persona CURRENT re-validation failed", // persona crash recovery
     ]) {
       expect(worker).toContain(marker);
     }

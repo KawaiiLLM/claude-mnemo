@@ -8,7 +8,9 @@ import esbuild from "esbuild";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = dirname(__dirname);
-const pluginScriptsDirectory = join(projectRoot, "plugin", "scripts");
+const pluginScriptsDirectory = process.env.MNEMO_BUILD_OUTPUT_DIR
+  ? join(projectRoot, process.env.MNEMO_BUILD_OUTPUT_DIR)
+  : join(projectRoot, "plugin", "scripts");
 const packageJson = await import(join(projectRoot, "package.json"), {
   with: { type: "json" },
 });

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import {
   getSession,
@@ -140,6 +141,35 @@ describe("handleStopHook", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
     expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/wake");
+  });
+
+  test("marks a settled diary day stale only when Stop changes the assistant response", async () => {
+    const createdAtEpoch = Date.parse("2026-07-10T04:00:00Z") / 1_000;
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Pending work', 'Original answer', ?)`,
+    ).run(sessionId, createdAtEpoch);
+
+    const stateStore = createDiaryStateStore(db);
+    stateStore.initializeBootstrap("2026-07-11");
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const claimed = stateStore.claimNextDiaryItem(200)!;
+    stateStore.settleDay({
+      date: "2026-07-10",
+      queueSeq: claimed.seq,
+      watermark: "watermark",
+      fileSha256: "sha",
+      indexHook: "hook",
+      settledAtEpoch: 250,
+    });
+
+    const handler = createStopHandler({ db, now: () => 500 });
+    await handler(createInput({ lastAssistantMessage: "Original answer" }));
+    expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(false);
+
+    await handler(createInput({ lastAssistantMessage: "Corrected answer" }));
+    expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(true);
   });
 
   test("runs foreground writes through the bounded hook transaction runner", async () => {

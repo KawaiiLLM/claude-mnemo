@@ -31,6 +31,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/hooks/hook-command.ts
 var hook_command_exports = {};
 __export(hook_command_exports, {
+  createDefaultHookHandlers: () => createDefaultHookHandlers,
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
@@ -105,6 +106,9 @@ function syncSleep(ms) {
   const wakeSignal = new Int32Array(new SharedArrayBuffer(4));
   Atomics.wait(wakeSignal, 0, 0, ms);
 }
+function genericWriteBackoffMs(attempt) {
+  return Math.min(25, 5 * (attempt + 1));
+}
 function hookWriteBackoffMs(attempt) {
   return Math.min(100, 25 * 2 ** attempt);
 }
@@ -134,6 +138,20 @@ function isSqliteBusy(err) {
   }
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   return /\bSQLITE_BUSY(?:_SNAPSHOT)?\b/.test(message) || /\bdatabase is locked\b/i.test(message) || /\bdatabase table is locked\b/i.test(message);
+}
+function runWriteTransaction(db, fn, attempts = 3) {
+  const txn = db.transaction(fn);
+  const maxAttempts = Math.max(1, Math.floor(attempts));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return txn.immediate();
+    } catch (err) {
+      if (attempt >= maxAttempts - 1 || !isSqliteBusy(err)) {
+        throw err;
+      }
+      syncSleep(genericWriteBackoffMs(attempt));
+    }
+  }
 }
 function runHookWriteTransaction(db, fn, options = {}) {
   const txn = db.transaction(fn);
@@ -167,6 +185,799 @@ function runHookWriteTransaction(db, fn, options = {}) {
       sleep2(delayMs);
     }
   }
+}
+
+// src/diary/domain.ts
+var import_node_crypto = require("node:crypto");
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+var DIARY_BODY_LIMIT = 64 * 1024;
+var DIARY_SECTION_HEADINGS = [
+  "## \u5DE5\u4F5C",
+  "## \u4EBA\u7269",
+  "## \u53CD\u601D"
+];
+function diaryDayOf(epochSeconds) {
+  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+}
+function truncateDiaryResponse(value) {
+  return Array.from(value).slice(0, 2e3).join("");
+}
+function computeDiaryWatermark(material) {
+  if (material.length === 0) return "empty";
+  const turnHashes = [...material].sort((left, right) => left.turnId - right.turnId).map(
+    (turn) => (0, import_node_crypto.createHash)("sha256").update(
+      [
+        turn.userPrompt ?? "",
+        truncateDiaryResponse(turn.assistantResponse ?? ""),
+        turn.title ?? "",
+        turn.content ?? "",
+        turn.insight ?? "",
+        turn.status
+      ].join("\0")
+    ).digest("hex")
+  );
+  return (0, import_node_crypto.createHash)("sha256").update(turnHashes.join("\0")).digest("hex").slice(0, 16);
+}
+function findDiaryCitationGroups(text) {
+  return [...text.matchAll(/\[(S\d+\/T[^\]\r\n]*)\]/g)].map((match) => {
+    const content = match[1];
+    const parts = content.split("\uFF0C").map((part) => part.trim());
+    const first = parts[0].match(/^S(\d+)\/T(\d+)$/);
+    const refs = [];
+    if (first) {
+      let session = `S${first[1]}`;
+      refs.push(`${session}/T${first[2]}`);
+      for (const part of parts.slice(1)) {
+        const next = part.match(/^(?:S(\d+)\/)?T(\d+)$/);
+        if (!next) {
+          refs.length = 0;
+          break;
+        }
+        if (next[1]) session = `S${next[1]}`;
+        refs.push(`${session}/T${next[2]}`);
+      }
+    }
+    return { raw: match[0], refs, index: match.index };
+  });
+}
+function validateDiaryDocument(document) {
+  let text;
+  try {
+    text = typeof document === "string" ? document : new TextDecoder("utf-8", { fatal: true }).decode(document);
+  } catch {
+    return { ok: false, code: "invalid_utf8" };
+  }
+  const lines = text.split("\n");
+  if (lines[0] !== "---") return { ok: false, code: "invalid_frontmatter" };
+  const end = lines.indexOf("---", 1);
+  if (end < 0) return { ok: false, code: "invalid_frontmatter" };
+  const formatLines = lines.slice(1, end).filter((line) => line.startsWith("format:"));
+  if (formatLines.length !== 1 || formatLines[0] !== "format: 2") {
+    return { ok: false, code: "invalid_format" };
+  }
+  return { ok: true, format: 2 };
+}
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
+  }
+  return Math.ceil(weightedCodePoints * 1.2);
+}
+
+// src/db/diary-state.ts
+var DIARY_QUEUE_SELECT = `
+  SELECT
+    q.seq,
+    q.kind,
+    q.target_id AS targetId,
+    q.session_db_id AS sessionDbId,
+    q.claimed_at_epoch AS claimedAtEpoch,
+    q.enqueued_at_epoch AS enqueuedAtEpoch
+  FROM pending_queue q
+  JOIN diary_day_state d
+    ON CAST(REPLACE(d.date, '-', '') AS INTEGER) = q.target_id
+`;
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const date = diaryDayOf(createdAtEpoch);
+  db.query(
+    `
+      UPDATE diary_day_state
+      SET needs_regen = 1,
+          attempt_count = 0,
+          next_attempt_epoch = NULL,
+          last_error = NULL,
+          terminal = 0
+      WHERE date = ?
+        AND settled_at_epoch IS NOT NULL
+        AND date >= COALESCE(
+          (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+          '9999-12-31'
+        )
+    `
+  ).run(date);
+}
+function createDiaryStateStore(db) {
+  return {
+    enqueueDay(input) {
+      const targetId = Number(input.date.replaceAll("-", ""));
+      runWriteTransaction(db, () => {
+        db.query(
+          `
+            INSERT INTO diary_day_state (date)
+            VALUES (?)
+            ON CONFLICT DO NOTHING
+          `
+        ).run(input.date);
+        db.query(
+          `
+            INSERT INTO pending_queue (
+              kind,
+              target_id,
+              session_db_id,
+              enqueued_at_epoch
+            ) VALUES ('diary', ?, 0, ?)
+            ON CONFLICT DO NOTHING
+          `
+        ).run(targetId, input.enqueuedAtEpoch);
+      });
+    },
+    claimNextDiaryItem(claimedAtEpoch) {
+      return runWriteTransaction(db, () => {
+        const row = db.query(
+          `${DIARY_QUEUE_SELECT}
+             WHERE q.kind = 'diary'
+               AND q.claimed_at_epoch IS NULL
+               AND d.terminal = 0
+               AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
+             ORDER BY q.seq ASC
+             LIMIT 1`
+        ).get(claimedAtEpoch);
+        if (!row) {
+          return null;
+        }
+        const result = db.query(
+          `
+              UPDATE pending_queue
+              SET claimed_at_epoch = ?
+              WHERE seq = ? AND claimed_at_epoch IS NULL
+            `
+        ).run(claimedAtEpoch, row.seq);
+        if (result.changes !== 1) {
+          throw new Error(`unexpected claim race on diary queue seq=${row.seq}`);
+        }
+        return {
+          ...row,
+          claimedAtEpoch
+        };
+      });
+    },
+    hasReadyDiaryItem(nowEpoch) {
+      return db.query(
+        `${DIARY_QUEUE_SELECT}
+             WHERE q.kind = 'diary'
+               AND q.claimed_at_epoch IS NULL
+               AND d.terminal = 0
+               AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
+             LIMIT 1`
+      ).get(nowEpoch) !== null;
+    },
+    getDayState(date) {
+      const row = db.query(
+        `
+            SELECT
+              date,
+              watermark,
+              file_sha256 AS fileSha256,
+              index_hook AS indexHook,
+              validation_report_json AS validationReportJson,
+              settled_at_epoch AS settledAtEpoch,
+              needs_regen AS needsRegen,
+              pending_rebase AS pendingRebase,
+              attempt_count AS attemptCount,
+              next_attempt_epoch AS nextAttemptEpoch,
+              last_error AS lastError,
+              terminal
+            FROM diary_day_state
+            WHERE date = ?
+          `
+      ).get(date);
+      if (!row) {
+        return null;
+      }
+      return {
+        ...row,
+        needsRegen: row.needsRegen === 1,
+        pendingRebase: row.pendingRebase === 1,
+        terminal: row.terminal === 1
+      };
+    },
+    recordFailure(input) {
+      runWriteTransaction(db, () => {
+        db.query(
+          `
+            UPDATE diary_day_state
+            SET attempt_count = attempt_count + 1,
+                next_attempt_epoch = CASE
+                  WHEN attempt_count + 1 >= 3 THEN NULL
+                  ELSE ?
+                END,
+                last_error = ?,
+                terminal = CASE
+                  WHEN attempt_count + 1 >= 3 THEN 1
+                  ELSE terminal
+                END
+            WHERE date = ?
+          `
+        ).run(input.nextAttemptEpoch, input.error, input.date);
+        db.query(
+          `
+            DELETE FROM pending_queue
+            WHERE seq = ?
+              AND kind = 'diary'
+              AND EXISTS (
+                SELECT 1
+                FROM diary_day_state
+                WHERE date = ? AND terminal = 1
+              )
+          `
+        ).run(input.queueSeq, input.date);
+        db.query(
+          `
+            UPDATE pending_queue
+            SET claimed_at_epoch = NULL
+            WHERE seq = ? AND kind = 'diary'
+          `
+        ).run(input.queueSeq);
+      });
+    },
+    settleDay(input) {
+      runWriteTransaction(db, () => {
+        db.query(
+          `
+            UPDATE diary_day_state
+            SET watermark = ?,
+                file_sha256 = ?,
+                index_hook = ?,
+                validation_report_json = ?,
+                settled_at_epoch = ?,
+                needs_regen = 0,
+                attempt_count = 0,
+                next_attempt_epoch = NULL,
+                last_error = NULL,
+                terminal = 0
+            WHERE date = ?
+          `
+        ).run(
+          input.watermark,
+          input.fileSha256,
+          input.indexHook,
+          input.validationReportJson,
+          input.settledAtEpoch,
+          input.date
+        );
+        db.query(
+          "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
+        ).run(input.queueSeq);
+      });
+    },
+    commitDayState(input) {
+      db.query(
+        `
+          UPDATE diary_day_state
+          SET watermark = ?,
+              file_sha256 = ?,
+              index_hook = ?,
+              validation_report_json = ?,
+              settled_at_epoch = ?,
+              pending_rebase = CASE
+                WHEN ? = 1 THEN 1
+                ELSE pending_rebase
+              END,
+              needs_regen = 0,
+              attempt_count = 0,
+              next_attempt_epoch = NULL,
+              last_error = NULL,
+              terminal = 0
+          WHERE date = ?
+        `
+      ).run(
+        input.watermark,
+        input.fileSha256,
+        input.indexHook,
+        input.validationReportJson,
+        input.settledAtEpoch,
+        input.pendingRebase ? 1 : 0,
+        input.date
+      );
+    },
+    commitDayTombstone(input) {
+      runWriteTransaction(db, () => {
+        const result = db.query(
+          `
+            UPDATE diary_day_state
+            SET watermark = 'empty',
+                file_sha256 = NULL,
+                index_hook = NULL,
+                validation_report_json = NULL,
+                needs_regen = 0,
+                pending_rebase = 0,
+                attempt_count = 0,
+                next_attempt_epoch = NULL,
+                last_error = NULL,
+                terminal = 0
+            WHERE date = ?
+          `
+        ).run(input.date);
+        if (result.changes !== 1) {
+          throw new Error(`Cannot tombstone missing diary day: ${input.date}`);
+        }
+        if (input.requestRebuild) {
+          db.query(
+            `
+              INSERT INTO diary_state (key, value) VALUES ('rebuild_request_epoch', '1')
+              ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+            `
+          ).run();
+        }
+      });
+    },
+    acknowledgeDiaryItem(queueSeq) {
+      db.query(
+        "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
+      ).run(queueSeq);
+    },
+    hasQueuedDay(date) {
+      const targetId = Number(date.replaceAll("-", ""));
+      return db.query(
+        `
+              SELECT 1 AS one
+              FROM pending_queue
+              WHERE kind = 'diary' AND target_id = ?
+              LIMIT 1
+            `
+      ).get(targetId) !== null;
+    },
+    markDayStale(date) {
+      db.query(
+        `
+          UPDATE diary_day_state
+          SET needs_regen = 1,
+              attempt_count = 0,
+              next_attempt_epoch = NULL,
+              last_error = NULL,
+              terminal = 0
+          WHERE date = ?
+        `
+      ).run(date);
+    },
+    markDayStaleAndEnqueue(input) {
+      runWriteTransaction(db, () => {
+        this.markDayStale(input.date);
+        this.enqueueDay(input);
+      });
+    },
+    reconcileBacklog(input) {
+      const recentStart = new Date(
+        Date.parse(`${input.today}T00:00:00Z`) - 14 * 24 * 60 * 60 * 1e3
+      ).toISOString().slice(0, 10);
+      const windowStart = input.cutoverDate > recentStart ? input.cutoverDate : recentStart;
+      const startEpoch = Date.parse(`${windowStart}T00:00:00+08:00`) / 1e3;
+      const endEpoch = Date.parse(`${input.today}T00:00:00+08:00`) / 1e3;
+      const dates = new Set(
+        db.query(
+          `
+              SELECT created_at_epoch AS createdAtEpoch
+              FROM turns
+              WHERE created_at_epoch >= ?
+                AND created_at_epoch < ?
+                AND status != 'undone'
+            `
+        ).all(startEpoch, endEpoch).map((row) => diaryDayOf(row.createdAtEpoch))
+      );
+      for (const row of db.query(
+        `
+            SELECT date
+            FROM diary_day_state
+            WHERE (date >= ? AND date < ?)
+               OR (needs_regen = 1 AND date >= ? AND date < ?)
+          `
+      ).all(windowStart, input.today, input.cutoverDate, input.today)) {
+        dates.add(row.date);
+      }
+      const sortedDates = Array.from(dates).sort();
+      const datesNeedingWork = [];
+      for (const date of sortedDates) {
+        const dayStartEpoch = Date.parse(`${date}T00:00:00+08:00`) / 1e3;
+        const material = db.query(
+          `
+              SELECT
+                id AS turnId,
+                status,
+                user_prompt AS userPrompt,
+                assistant_response AS assistantResponse,
+                title,
+                content,
+                insight
+              FROM turns
+              WHERE created_at_epoch >= ?
+                AND created_at_epoch < ?
+                AND status != 'undone'
+              ORDER BY id ASC
+            `
+        ).all(dayStartEpoch, dayStartEpoch + 24 * 60 * 60);
+        const currentWatermark = computeDiaryWatermark(material);
+        const state = this.getDayState(date);
+        if (state !== null && !state.needsRegen && state.watermark === currentWatermark) {
+          continue;
+        }
+        if (state !== null && state.watermark !== currentWatermark) {
+          this.markDayStale(date);
+        }
+        this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
+        datesNeedingWork.push(date);
+      }
+      return datesNeedingWork;
+    },
+    listIndexRows() {
+      return db.query(
+        `
+            SELECT date, index_hook AS indexHook
+            FROM diary_day_state
+            ORDER BY date ASC
+          `
+      ).all();
+    },
+    initializeBootstrap(today) {
+      const defaultCutoverDate = new Date(
+        Date.parse(`${today}T00:00:00Z`) - 14 * 24 * 60 * 60 * 1e3
+      ).toISOString().slice(0, 10);
+      return runWriteTransaction(db, () => {
+        db.query(
+          `
+            INSERT INTO diary_state (key, value)
+            VALUES ('cutover_date', ?), ('rebuild_requested', ?), ('rebuild_request_epoch', ?)
+            ON CONFLICT DO NOTHING
+          `
+        ).run(defaultCutoverDate, "1", "1");
+        const rows = db.query(
+          `
+              SELECT key, value
+              FROM diary_state
+              WHERE key IN ('cutover_date', 'rebuild_requested')
+            `
+        ).all();
+        const values = new Map(rows.map((row) => [row.key, row.value]));
+        return {
+          cutoverDate: values.get("cutover_date"),
+          rebuildRequested: values.get("rebuild_requested") === "1"
+        };
+      });
+    },
+    listSettledDays() {
+      return db.query(
+        `
+            SELECT
+              date,
+              watermark,
+              file_sha256 AS fileSha256,
+              index_hook AS indexHook
+            FROM diary_day_state
+            WHERE settled_at_epoch IS NOT NULL
+              AND watermark IS NOT NULL
+              AND watermark != 'empty'
+              AND file_sha256 IS NOT NULL
+              AND index_hook IS NOT NULL
+            ORDER BY date ASC
+          `
+      ).all();
+    },
+    nextIntegrityScanBatch(input) {
+      if (!Number.isInteger(input.limit) || input.limit <= 0) {
+        return [];
+      }
+      return runWriteTransaction(db, () => {
+        const days = this.listSettledDays().filter(
+          (day) => day.date < input.beforeDate
+        );
+        if (days.length === 0) {
+          return [];
+        }
+        const cursor = db.query(
+          "SELECT value FROM diary_state WHERE key = 'integrity_cursor'"
+        ).get()?.value;
+        const nextIndex = cursor ? days.findIndex((day) => day.date > cursor) : 0;
+        const startIndex = nextIndex >= 0 ? nextIndex : 0;
+        const batchSize = Math.min(input.limit, days.length);
+        const batch = Array.from(
+          { length: batchSize },
+          (_, offset) => days[(startIndex + offset) % days.length]
+        );
+        db.query(
+          `
+            INSERT INTO diary_state (key, value)
+            VALUES ('integrity_cursor', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          `
+        ).run(batch.at(-1).date);
+        return batch;
+      });
+    },
+    listPendingRebaseDays() {
+      return db.query(
+        `
+            SELECT
+              date,
+              watermark,
+              file_sha256 AS fileSha256,
+              index_hook AS indexHook
+            FROM diary_day_state
+            WHERE pending_rebase = 1
+              AND settled_at_epoch IS NOT NULL
+              AND watermark IS NOT NULL
+              AND watermark != 'empty'
+              AND file_sha256 IS NOT NULL
+              AND index_hook IS NOT NULL
+            ORDER BY date ASC
+          `
+      ).all();
+    },
+    getPersonaRebuildGate(today) {
+      const rows = db.query(
+        `
+            SELECT date, terminal
+            FROM diary_day_state
+            WHERE date >= COALESCE(
+                (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+                '9999-12-31'
+              )
+              AND date < ?
+              AND (settled_at_epoch IS NULL OR needs_regen = 1)
+            ORDER BY date ASC
+          `
+      ).all(today);
+      return {
+        blockingDates: rows.filter((row) => row.terminal === 0).map((row) => row.date),
+        partialMissingDates: rows.filter((row) => row.terminal === 1).map((row) => row.date)
+      };
+    },
+    getPersonaCursor() {
+      const rows = db.query(
+        `
+            SELECT key, value
+            FROM diary_state
+            WHERE key IN (
+              'last_folded_date',
+              'last_applied_operation_id',
+              'folds_since_rebase',
+              'rebuild_requested',
+              'rebuild_request_epoch',
+              'rebuild_confirmed_epoch'
+            )
+          `
+      ).all();
+      const values = new Map(rows.map((row) => [row.key, row.value]));
+      const rebuildRequestEpoch = Number(values.get("rebuild_request_epoch") ?? (values.get("rebuild_requested") === "1" ? "1" : "0"));
+      const rebuildConfirmedEpoch = Number(values.get("rebuild_confirmed_epoch") ?? "0");
+      const cursor = {
+        lastFoldedDate: values.get("last_folded_date") ?? null,
+        lastAppliedOperationId: values.get("last_applied_operation_id") ?? null,
+        foldsSinceRebase: Number(values.get("folds_since_rebase") ?? "0"),
+        rebuildRequested: rebuildRequestEpoch > rebuildConfirmedEpoch
+      };
+      Object.defineProperties(cursor, {
+        rebuildRequestEpoch: { value: rebuildRequestEpoch, enumerable: false },
+        rebuildConfirmedEpoch: { value: rebuildConfirmedEpoch, enumerable: false }
+      });
+      return cursor;
+    },
+    commitPersonaCursor(input) {
+      runWriteTransaction(db, () => {
+        const entries = [
+          ["last_folded_date", input.lastFoldedDate],
+          ["last_applied_operation_id", input.lastAppliedOperationId],
+          ["folds_since_rebase", String(input.foldsSinceRebase ?? 0)]
+        ];
+        for (const [key, value] of entries) {
+          db.query(
+            `
+              INSERT INTO diary_state (key, value)
+              VALUES (?, ?)
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            `
+          ).run(key, value);
+        }
+        if (input.confirmedRebuildEpoch !== void 0) {
+          db.query(`
+            INSERT INTO diary_state (key, value) VALUES ('rebuild_confirmed_epoch', ?)
+            ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))
+          `).run(String(input.confirmedRebuildEpoch));
+        } else if (input.rebuildRequested === false) {
+          const requested = this.getPersonaCursor().rebuildRequestEpoch;
+          db.query(`
+            INSERT INTO diary_state (key, value) VALUES ('rebuild_confirmed_epoch', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+          `).run(String(requested));
+        }
+        for (const day of input.consumedPendingDays ?? []) {
+          db.query(
+            "UPDATE diary_day_state SET pending_rebase = 0 WHERE date = ? AND watermark = ? AND file_sha256 = ?"
+          ).run(day.date, day.watermark, day.fileSha256);
+        }
+      });
+    },
+    requestPersonaRebuild() {
+      runWriteTransaction(db, () => {
+        db.query(
+          `
+            INSERT INTO diary_state (key, value) VALUES ('rebuild_request_epoch', '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+          `
+        ).run();
+      });
+    },
+    getPersonaOperation() {
+      const row = db.query(
+        `
+            SELECT
+              operation_id AS operationId,
+              op,
+              base_current_operation_id AS baseCurrentOperationId,
+              base_generation AS baseGeneration,
+              target_generation AS targetGeneration,
+              input_dates_snapshot AS inputDatesSnapshot,
+              consumed_pending_dates AS consumedPendingDates,
+              rebuild_request_epoch AS rebuildRequestEpoch,
+              partial_missing_dates AS partialMissingDates,
+              batch_plan AS batchPlan,
+              input_artifact_dir AS inputArtifactDir,
+              next_batch_index AS nextBatchIndex,
+              accumulator_generation AS accumulatorGeneration,
+              accumulator_hash AS accumulatorHash,
+              checkpoint_path AS checkpointPath,
+              checkpoint_sha256 AS checkpointSha256,
+              attempt_count AS attemptCount,
+              next_attempt_epoch AS nextAttemptEpoch,
+              last_error AS lastError,
+              terminal
+            FROM persona_operation_state
+            ORDER BY terminal DESC, rowid DESC
+            LIMIT 1
+          `
+      ).get();
+      if (!row) {
+        return null;
+      }
+      const inputDatesSnapshot = JSON.parse(row.inputDatesSnapshot);
+      const consumedPendingDates = JSON.parse(row.consumedPendingDates);
+      const partialMissingDates = JSON.parse(row.partialMissingDates);
+      const batchPlan = JSON.parse(row.batchPlan);
+      if (!Array.isArray(inputDatesSnapshot) || !inputDatesSnapshot.every((date) => typeof date === "string") || !Array.isArray(consumedPendingDates) || !consumedPendingDates.every((value) => typeof value === "string" || typeof value === "object" && value !== null && typeof value.date === "string" && typeof value.watermark === "string" && typeof value.fileSha256 === "string") || !Array.isArray(partialMissingDates) || !partialMissingDates.every((date) => typeof date === "string") || !Array.isArray(batchPlan) || !batchPlan.every(
+        (batch) => Array.isArray(batch) && batch.every((date) => typeof date === "string")
+      )) {
+        throw new Error(`invalid persona input snapshot: ${row.operationId}`);
+      }
+      return {
+        ...row,
+        inputDatesSnapshot,
+        consumedPendingDates: consumedPendingDates.map((value) => typeof value === "string" ? value : value.date),
+        consumedPendingDays: consumedPendingDates.map((value) => typeof value === "string" ? { date: value, watermark: "", fileSha256: "" } : value),
+        partialMissingDates,
+        batchPlan,
+        terminal: row.terminal === 1
+      };
+    },
+    beginPersonaOperation(input) {
+      db.query(
+        `
+          INSERT INTO persona_operation_state (
+            operation_id,
+            op,
+            base_current_operation_id,
+            base_generation,
+            target_generation,
+            input_dates_snapshot,
+            consumed_pending_dates,
+            rebuild_request_epoch,
+            partial_missing_dates,
+            batch_plan,
+            input_artifact_dir
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      ).run(
+        input.operationId,
+        input.op,
+        input.baseCurrentOperationId ?? null,
+        input.baseGeneration ?? 0,
+        input.targetGeneration ?? (input.baseGeneration ?? 0) + 1,
+        JSON.stringify(input.inputDatesSnapshot),
+        JSON.stringify(input.consumedPendingDays ?? input.consumedPendingDates ?? []),
+        input.rebuildRequestEpoch ?? this.getPersonaCursor().rebuildRequestEpoch,
+        JSON.stringify(input.partialMissingDates ?? []),
+        JSON.stringify(input.batchPlan ?? [input.inputDatesSnapshot]),
+        input.inputArtifactDir ?? ""
+      );
+    },
+    initializePersonaOperationArtifacts(input) {
+      db.query(
+        `
+          UPDATE persona_operation_state
+          SET base_current_operation_id = ?,
+              base_generation = ?,
+              target_generation = ?,
+              batch_plan = ?,
+              input_artifact_dir = ?
+          WHERE operation_id = ? AND input_artifact_dir = '' AND terminal = 0
+        `
+      ).run(
+        input.baseCurrentOperationId,
+        input.baseGeneration,
+        input.targetGeneration,
+        JSON.stringify(input.batchPlan),
+        input.inputArtifactDir,
+        input.operationId
+      );
+    },
+    advancePersonaCheckpoint(input) {
+      runWriteTransaction(db, () => {
+        db.query(
+          `
+            UPDATE persona_operation_state
+            SET next_batch_index = ?,
+                accumulator_generation = ?,
+                accumulator_hash = ?,
+                checkpoint_path = ?,
+                checkpoint_sha256 = ?,
+                attempt_count = 0,
+                next_attempt_epoch = NULL,
+                last_error = NULL
+            WHERE operation_id = ? AND terminal = 0
+          `
+        ).run(
+          input.nextBatchIndex,
+          input.accumulatorGeneration,
+          input.accumulatorHash,
+          input.checkpointPath,
+          input.checkpointSha256,
+          input.operationId
+        );
+      });
+    },
+    terminalPersonaOperation(operationId, error) {
+      db.query(
+        `
+          UPDATE persona_operation_state
+          SET terminal = 1,
+              next_attempt_epoch = NULL,
+              last_error = ?
+          WHERE operation_id = ?
+        `
+      ).run(error, operationId);
+    },
+    recordPersonaOperationFailure(input) {
+      db.query(
+        `
+          UPDATE persona_operation_state
+          SET attempt_count = attempt_count + 1,
+              next_attempt_epoch = CASE
+                WHEN attempt_count + 1 >= 3 THEN NULL
+                ELSE ?
+              END,
+              last_error = ?,
+              terminal = CASE
+                WHEN attempt_count + 1 >= 3 THEN 1
+                ELSE terminal
+              END
+          WHERE operation_id = ? AND terminal = 0
+        `
+      ).run(input.nextAttemptEpoch, input.error, input.operationId);
+    },
+    completePersonaOperation(operationId) {
+      db.query(
+        "DELETE FROM persona_operation_state WHERE operation_id = ?"
+      ).run(operationId);
+    }
+  };
 }
 
 // src/db/search.ts
@@ -362,6 +1173,9 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turns_status
     ON turns(status);
 
+  CREATE INDEX IF NOT EXISTS idx_turns_created_at
+    ON turns(created_at_epoch);
+
   CREATE INDEX IF NOT EXISTS idx_observations_turn_id
     ON observations(turn_id);
 
@@ -380,6 +1194,55 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_pending_queue_session
     ON pending_queue(session_db_id, seq);
 
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
+    ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  CREATE TABLE IF NOT EXISTS diary_day_state (
+    date TEXT PRIMARY KEY,
+    watermark TEXT,
+    file_sha256 TEXT,
+    index_hook TEXT,
+    validation_report_json TEXT,
+    settled_at_epoch INTEGER,
+    needs_regen INTEGER NOT NULL DEFAULT 0,
+    pending_rebase INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_epoch INTEGER,
+    last_error TEXT,
+    terminal INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS diary_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS persona_operation_state (
+    operation_id TEXT PRIMARY KEY,
+    op TEXT NOT NULL,
+    base_current_operation_id TEXT,
+    base_generation INTEGER NOT NULL DEFAULT 0,
+    target_generation INTEGER NOT NULL DEFAULT 1,
+    input_dates_snapshot TEXT NOT NULL,
+    consumed_pending_dates TEXT NOT NULL DEFAULT '[]',
+    rebuild_request_epoch INTEGER NOT NULL DEFAULT 0,
+    partial_missing_dates TEXT NOT NULL DEFAULT '[]',
+    batch_plan TEXT NOT NULL,
+    input_artifact_dir TEXT NOT NULL,
+    next_batch_index INTEGER NOT NULL DEFAULT 0,
+    accumulator_generation INTEGER,
+    accumulator_hash TEXT,
+    checkpoint_path TEXT,
+    checkpoint_sha256 TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_epoch INTEGER,
+    last_error TEXT,
+    terminal INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_operation_active
+    ON persona_operation_state(terminal) WHERE terminal = 0;
+
   ${MEMORY_FTS_DDL}
 `;
 function initializeSchema(db) {
@@ -390,11 +1253,47 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureDiaryValidationReportColumn(db);
+  ensurePersonaOperationGenerationColumns(db);
+  ensurePersonaOperationConsumedPendingDatesColumn(db);
+  ensurePersonaOperationPublicationSnapshotColumns(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+function ensurePersonaOperationPublicationSnapshotColumns(db) {
+  if (!hasColumn(db, "persona_operation_state", "rebuild_request_epoch")) {
+    db.exec("ALTER TABLE persona_operation_state ADD COLUMN rebuild_request_epoch INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn(db, "persona_operation_state", "partial_missing_dates")) {
+    db.exec("ALTER TABLE persona_operation_state ADD COLUMN partial_missing_dates TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+function ensurePersonaOperationConsumedPendingDatesColumn(db) {
+  if (!hasColumn(db, "persona_operation_state", "consumed_pending_dates")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN consumed_pending_dates TEXT NOT NULL DEFAULT '[]'"
+    );
+  }
+}
+function ensurePersonaOperationGenerationColumns(db) {
+  if (!hasColumn(db, "persona_operation_state", "base_generation")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "persona_operation_state", "target_generation")) {
+    db.exec(
+      "ALTER TABLE persona_operation_state ADD COLUMN target_generation INTEGER NOT NULL DEFAULT 1"
+    );
+  }
+}
+function ensureDiaryValidationReportColumn(db) {
+  if (!hasColumn(db, "diary_day_state", "validation_report_json")) {
+    db.exec("ALTER TABLE diary_day_state ADD COLUMN validation_report_json TEXT");
+  }
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -575,7 +1474,11 @@ function hasLegacySchema(db) {
   return sessionsLegacyColumns.some((column) => hasColumn(db, "sessions", column)) || turnsLegacyColumns.some((column) => hasColumn(db, "turns", column)) || hasLegacyObservationColumns && isMissingCurrentObservationColumns;
 }
 function resetSchema(db) {
+  db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP TABLE IF EXISTS diary_state");
+  db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
@@ -590,6 +1493,873 @@ function initializeDatabase(db) {
   initializeSchema(db);
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
+  }
+}
+
+// src/diary/file-store.ts
+var import_promises = require("node:fs/promises");
+var import_node_path3 = require("node:path");
+var import_node_crypto2 = require("node:crypto");
+function assertDiaryDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`Invalid diary date: ${date}`);
+  }
+}
+function readFrontmatterString(lines, field) {
+  const prefix = `${field}: `;
+  const matches = lines.filter((line) => line.startsWith(prefix));
+  if (matches.length !== 1) {
+    throw new Error(`Invalid diary frontmatter field: ${field}`);
+  }
+  let value;
+  try {
+    value = JSON.parse(matches[0].slice(prefix.length));
+  } catch {
+    throw new Error(`Invalid diary frontmatter field: ${field}`);
+  }
+  if (typeof value !== "string") {
+    throw new Error(`Invalid diary frontmatter field: ${field}`);
+  }
+  return value;
+}
+var DiaryFileStore = class {
+  constructor(dataRoot) {
+    this.dataRoot = dataRoot;
+  }
+  dataRoot;
+  async commitDiary(date, canonicalBytes) {
+    assertDiaryDate(date);
+    await this.assertDiaryRootIsNotSymlink();
+    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
+    await this.assertPathIsNotSymlink(diaryPath);
+    await this.commitAtomically(diaryPath, canonicalBytes);
+  }
+  async commitAtomically(finalPath, canonicalBytes) {
+    const parentPath = (0, import_node_path3.dirname)(finalPath);
+    const temporaryPath = (0, import_node_path3.join)(
+      parentPath,
+      `.${(0, import_node_path3.basename)(finalPath)}.${process.pid}.${(0, import_node_crypto2.randomUUID)()}.tmp`
+    );
+    await (0, import_promises.mkdir)(parentPath, { recursive: true });
+    try {
+      const temporaryFile = await (0, import_promises.open)(temporaryPath, "wx");
+      try {
+        await temporaryFile.writeFile(canonicalBytes);
+        await temporaryFile.sync();
+      } finally {
+        await temporaryFile.close();
+      }
+      await (0, import_promises.rename)(temporaryPath, finalPath);
+      await this.syncDirectory(parentPath);
+    } catch (error) {
+      await (0, import_promises.unlink)(temporaryPath).catch(() => void 0);
+      throw error;
+    }
+  }
+  async syncDirectory(path2) {
+    const directory = await (0, import_promises.open)(path2, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  }
+  async readDiary(date) {
+    assertDiaryDate(date);
+    await this.assertDiaryRootIsNotSymlink();
+    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
+    await this.assertPathIsNotSymlink(diaryPath);
+    return (0, import_promises.readFile)(diaryPath);
+  }
+  async deleteDiary(date) {
+    assertDiaryDate(date);
+    await this.assertDiaryRootIsNotSymlink();
+    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
+    await this.assertPathIsNotSymlink(diaryPath);
+    try {
+      await (0, import_promises.unlink)(diaryPath);
+      await this.syncDirectory((0, import_node_path3.join)(this.dataRoot, "diary"));
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  async assertDiaryRootIsNotSymlink() {
+    const diaryRoot = (0, import_node_path3.join)(this.dataRoot, "diary");
+    try {
+      const metadata = await (0, import_promises.lstat)(diaryRoot);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(`Diary root must not be a symlink: ${diaryRoot}`);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+  }
+  async assertPathIsNotSymlink(path2) {
+    try {
+      const metadata = await (0, import_promises.lstat)(path2);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(`Diary path must not be a symlink: ${path2}`);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+  }
+  async readValidatedDiary(expected) {
+    const bytes = await this.readDiary(expected.date);
+    const actualSha256 = (0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex");
+    if (actualSha256 !== expected.fileSha256) {
+      throw new Error(`Diary hash mismatch: ${expected.date}`);
+    }
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(`Diary is not valid UTF-8: ${expected.date}`);
+    }
+    const lines = text.split("\n");
+    const documentValidation = validateDiaryDocument(text);
+    if (!documentValidation.ok) {
+      throw new Error(
+        `Invalid diary document (${documentValidation.code}): ${expected.date}`
+      );
+    }
+    if (lines[0] !== "---") {
+      throw new Error(`Invalid diary frontmatter: ${expected.date}`);
+    }
+    const frontmatterEnd = lines.indexOf("---", 1);
+    if (frontmatterEnd < 0) {
+      throw new Error(`Invalid diary frontmatter: ${expected.date}`);
+    }
+    const frontmatter = lines.slice(1, frontmatterEnd);
+    if (readFrontmatterString(frontmatter, "date") !== expected.date || readFrontmatterString(frontmatter, "watermark") !== expected.watermark || readFrontmatterString(frontmatter, "index_hook") !== expected.indexHook) {
+      throw new Error(`Diary state mismatch: ${expected.date}`);
+    }
+    const headings = lines.slice(frontmatterEnd + 1).filter((line) => line.startsWith("## "));
+    if (headings.length !== DIARY_SECTION_HEADINGS.length || headings.some((heading, index) => heading !== DIARY_SECTION_HEADINGS[index])) {
+      throw new Error(`Invalid diary section structure: ${expected.date}`);
+    }
+    return bytes;
+  }
+  async ensureIndex(rows) {
+    await this.assertDiaryRootIsNotSymlink();
+    const indexPath = (0, import_node_path3.join)(this.dataRoot, "diary", "INDEX.md");
+    await this.assertPathIsNotSymlink(indexPath);
+    const lines = rows.filter(
+      (row) => row.indexHook !== null
+    ).sort((left, right) => right.date.localeCompare(left.date)).map((row) => `- ${row.date}\uFF1A${row.indexHook}`);
+    const canonicalBytes = new TextEncoder().encode(
+      ["# Diary Index", ...lines, ""].join("\n")
+    );
+    try {
+      const existingBytes = await this.readIndex();
+      if (existingBytes.length === canonicalBytes.length && existingBytes.every((byte, index) => byte === canonicalBytes[index])) {
+        return canonicalBytes;
+      }
+    } catch {
+    }
+    await this.commitAtomically(indexPath, canonicalBytes);
+    return canonicalBytes;
+  }
+  async readIndex() {
+    await this.assertDiaryRootIsNotSymlink();
+    const indexPath = (0, import_node_path3.join)(this.dataRoot, "diary", "INDEX.md");
+    await this.assertPathIsNotSymlink(indexPath);
+    return (0, import_promises.readFile)(indexPath);
+  }
+  async commitPersonaGeneration(input) {
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1 || input.manifest.generation !== input.generation) {
+      throw new Error("Invalid persona generation");
+    }
+    const userProfileBytes = new TextEncoder().encode(input.userProfile);
+    const experienceBytes = new TextEncoder().encode(input.experience);
+    const manifest = {
+      ...input.manifest,
+      user_profile_sha256: (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex"),
+      experience_sha256: (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex")
+    };
+    const manifestBytes = new TextEncoder().encode(
+      `${JSON.stringify(manifest, null, 2)}
+`
+    );
+    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
+    const generationsRoot = (0, import_node_path3.join)(personaRoot, "generations");
+    const generationRoot = (0, import_node_path3.join)(generationsRoot, String(input.generation));
+    const temporaryGenerationRoot = (0, import_node_path3.join)(
+      generationsRoot,
+      `.${input.generation}.${(0, import_node_crypto2.randomUUID)()}.tmp`
+    );
+    await (0, import_promises.mkdir)(generationsRoot, { recursive: true });
+    await this.syncDirectory(generationsRoot);
+    await this.syncDirectory(personaRoot);
+    await this.syncDirectory(this.dataRoot);
+    await (0, import_promises.mkdir)(temporaryGenerationRoot);
+    try {
+      await this.commitAtomically(
+        (0, import_node_path3.join)(temporaryGenerationRoot, "manifest.json"),
+        manifestBytes
+      );
+      await this.commitAtomically(
+        (0, import_node_path3.join)(temporaryGenerationRoot, "user-profile.md"),
+        userProfileBytes
+      );
+      await this.commitAtomically(
+        (0, import_node_path3.join)(temporaryGenerationRoot, "experience.md"),
+        experienceBytes
+      );
+      await this.syncDirectory(temporaryGenerationRoot);
+      await (0, import_promises.rename)(temporaryGenerationRoot, generationRoot);
+      await this.syncDirectory(generationsRoot);
+    } catch (error) {
+      await (0, import_promises.rm)(temporaryGenerationRoot, { recursive: true, force: true }).catch(
+        () => void 0
+      );
+      throw error;
+    }
+    await this.publishPersonaCurrent(input.generation);
+  }
+  /** Idempotently publishes an already-complete generation as CURRENT. */
+  async publishPersonaCurrent(generation) {
+    const loaded = await this.loadPersonaGeneration(generation);
+    const manifestBytes = new TextEncoder().encode(
+      `${JSON.stringify(loaded.manifest, null, 2)}
+`
+    );
+    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
+    await this.commitAtomically((0, import_node_path3.join)(personaRoot, "CURRENT"), manifestBytes);
+    const published = await this.loadCurrentPersona();
+    if (published.generation !== generation || published.manifest.user_profile_sha256 !== loaded.manifest.user_profile_sha256 || published.manifest.experience_sha256 !== loaded.manifest.experience_sha256) {
+      throw new Error("Persona CURRENT re-validation failed");
+    }
+  }
+  async freezePersonaOperationInputs(input) {
+    this.assertPersonaOperationId(input.operationId);
+    const operationRoot = (0, import_node_path3.join)(
+      this.dataRoot,
+      "persona",
+      "operations",
+      input.operationId
+    );
+    const inputRoot = (0, import_node_path3.join)(operationRoot, "inputs");
+    await (0, import_promises.mkdir)(operationRoot, { recursive: true });
+    await (0, import_promises.mkdir)(inputRoot);
+    const manifest = {
+      version: 1,
+      operation_id: input.operationId,
+      base_current_operation_id: input.baseCurrentOperationId,
+      diaries: [],
+      baseline: null,
+      consumed_pending_dates: [...input.consumedPendingDays],
+      rebuild_request_epoch: input.rebuildRequestEpoch,
+      partial_missing_dates: [...input.partialMissingDates]
+    };
+    for (const [index, diary] of input.diaries.entries()) {
+      assertDiaryDate(diary.date);
+      const file = `diary-${String(index).padStart(4, "0")}-${diary.date}.md`;
+      await this.commitAtomically((0, import_node_path3.join)(inputRoot, file), diary.bytes);
+      manifest.diaries.push({
+        date: diary.date,
+        file,
+        sha256: (0, import_node_crypto2.createHash)("sha256").update(diary.bytes).digest("hex")
+      });
+    }
+    if (input.baseline !== null) {
+      const userProfileBytes = new TextEncoder().encode(
+        input.baseline.userProfile
+      );
+      const experienceBytes = new TextEncoder().encode(input.baseline.experience);
+      await this.commitAtomically(
+        (0, import_node_path3.join)(inputRoot, "baseline-user-profile.md"),
+        userProfileBytes
+      );
+      await this.commitAtomically(
+        (0, import_node_path3.join)(inputRoot, "baseline-experience.md"),
+        experienceBytes
+      );
+      manifest.baseline = {
+        user_profile_file: "baseline-user-profile.md",
+        user_profile_sha256: (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex"),
+        experience_file: "baseline-experience.md",
+        experience_sha256: (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex")
+      };
+    }
+    await this.commitAtomically(
+      (0, import_node_path3.join)(inputRoot, "manifest.json"),
+      new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}
+`)
+    );
+    await this.syncDirectory(inputRoot);
+    await this.syncDirectory(operationRoot);
+    return inputRoot;
+  }
+  async loadPersonaOperationInputs(inputArtifactDir, operationId) {
+    this.assertPersonaOperationId(operationId);
+    const expectedRoot = (0, import_node_path3.join)(
+      this.dataRoot,
+      "persona",
+      "operations",
+      operationId,
+      "inputs"
+    );
+    if (inputArtifactDir !== expectedRoot) {
+      throw new Error("Invalid persona input artifact directory");
+    }
+    const manifest = JSON.parse(
+      await (0, import_promises.readFile)((0, import_node_path3.join)(expectedRoot, "manifest.json"), "utf8")
+    );
+    if (manifest.version !== 1 || manifest.operation_id !== operationId || !Array.isArray(manifest.diaries) || !Array.isArray(manifest.consumed_pending_dates) || !manifest.consumed_pending_dates.every(
+      (day) => typeof day?.date === "string" && typeof day.watermark === "string" && typeof day.fileSha256 === "string"
+    ) || !Number.isInteger(manifest.rebuild_request_epoch) || !Array.isArray(manifest.partial_missing_dates) || !manifest.partial_missing_dates.every((date) => typeof date === "string")) {
+      throw new Error("Invalid persona input manifest");
+    }
+    const diaries = [];
+    for (const diary of manifest.diaries) {
+      assertDiaryDate(diary.date);
+      if (typeof diary.file !== "string" || !/^diary-\d{4}-\d{4}-\d{2}-\d{2}\.md$/.test(diary.file)) {
+        throw new Error("Invalid persona diary artifact path");
+      }
+      const bytes = await (0, import_promises.readFile)((0, import_node_path3.join)(expectedRoot, diary.file));
+      if ((0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex") !== diary.sha256) {
+        throw new Error(`Persona input artifact hash mismatch: ${diary.date}`);
+      }
+      diaries.push({
+        date: diary.date,
+        content: new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+      });
+    }
+    let baseline = null;
+    if (manifest.baseline !== null) {
+      if (manifest.baseline.user_profile_file !== "baseline-user-profile.md" || manifest.baseline.experience_file !== "baseline-experience.md") {
+        throw new Error("Invalid persona baseline artifact path");
+      }
+      const userProfileBytes = await (0, import_promises.readFile)(
+        (0, import_node_path3.join)(expectedRoot, manifest.baseline.user_profile_file)
+      );
+      const experienceBytes = await (0, import_promises.readFile)(
+        (0, import_node_path3.join)(expectedRoot, manifest.baseline.experience_file)
+      );
+      if ((0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex") !== manifest.baseline.user_profile_sha256 || (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex") !== manifest.baseline.experience_sha256) {
+        throw new Error("Persona baseline artifact hash mismatch");
+      }
+      baseline = {
+        userProfile: new TextDecoder("utf-8", { fatal: true }).decode(
+          userProfileBytes
+        ),
+        experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
+      };
+    }
+    return {
+      operationId,
+      baseCurrentOperationId: manifest.base_current_operation_id,
+      diaries,
+      baseline,
+      consumedPendingDates: manifest.consumed_pending_dates.map((day) => day.date),
+      consumedPendingDays: manifest.consumed_pending_dates,
+      rebuildRequestEpoch: manifest.rebuild_request_epoch,
+      partialMissingDates: manifest.partial_missing_dates
+    };
+  }
+  async commitPersonaCheckpoint(input) {
+    this.assertPersonaOperationId(input.operationId);
+    const checkpointRoot = (0, import_node_path3.join)(
+      this.dataRoot,
+      "persona",
+      "operations",
+      input.operationId,
+      "checkpoints"
+    );
+    await (0, import_promises.mkdir)(checkpointRoot, { recursive: true });
+    const accumulatorFile = `accumulator-${input.accumulatorGeneration}.json`;
+    const checkpointFile = `checkpoint-${input.accumulatorGeneration}.json`;
+    const accumulatorBytes = new TextEncoder().encode(
+      `${JSON.stringify(input.accumulator)}
+`
+    );
+    const accumulatorHash = (0, import_node_crypto2.createHash)("sha256").update(accumulatorBytes).digest("hex");
+    await this.commitAtomically(
+      (0, import_node_path3.join)(checkpointRoot, accumulatorFile),
+      accumulatorBytes
+    );
+    const manifest = {
+      version: 1,
+      operation_id: input.operationId,
+      next_batch_index: input.nextBatchIndex,
+      accumulator_generation: input.accumulatorGeneration,
+      accumulator_file: accumulatorFile,
+      accumulator_hash: accumulatorHash
+    };
+    const checkpointPath = (0, import_node_path3.join)(checkpointRoot, checkpointFile);
+    const checkpointBytes = new TextEncoder().encode(
+      `${JSON.stringify(manifest, null, 2)}
+`
+    );
+    await this.commitAtomically(checkpointPath, checkpointBytes);
+    await this.syncDirectory(checkpointRoot);
+    return {
+      accumulatorGeneration: input.accumulatorGeneration,
+      accumulatorHash,
+      checkpointPath,
+      checkpointSha256: (0, import_node_crypto2.createHash)("sha256").update(checkpointBytes).digest("hex"),
+      nextBatchIndex: input.nextBatchIndex
+    };
+  }
+  async loadPersonaCheckpoint(input) {
+    this.assertPersonaOperationId(input.operationId);
+    const checkpointRoot = (0, import_node_path3.join)(
+      this.dataRoot,
+      "persona",
+      "operations",
+      input.operationId,
+      "checkpoints"
+    );
+    const expectedPath = (0, import_node_path3.join)(
+      checkpointRoot,
+      `checkpoint-${input.accumulatorGeneration}.json`
+    );
+    if (input.checkpointPath !== expectedPath) {
+      throw new Error("Invalid persona checkpoint path");
+    }
+    const checkpointBytes = await (0, import_promises.readFile)(expectedPath);
+    if ((0, import_node_crypto2.createHash)("sha256").update(checkpointBytes).digest("hex") !== input.checkpointSha256) {
+      throw new Error("Persona checkpoint hash mismatch");
+    }
+    const manifest = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(checkpointBytes)
+    );
+    if (manifest.version !== 1 || manifest.operation_id !== input.operationId || manifest.next_batch_index !== input.nextBatchIndex || manifest.accumulator_generation !== input.accumulatorGeneration || manifest.accumulator_hash !== input.accumulatorHash) {
+      throw new Error("Persona checkpoint state mismatch");
+    }
+    if (manifest.accumulator_file !== `accumulator-${input.accumulatorGeneration}.json`) {
+      throw new Error("Invalid persona accumulator path");
+    }
+    const accumulatorBytes = await (0, import_promises.readFile)(
+      (0, import_node_path3.join)(checkpointRoot, manifest.accumulator_file)
+    );
+    if ((0, import_node_crypto2.createHash)("sha256").update(accumulatorBytes).digest("hex") !== input.accumulatorHash) {
+      throw new Error("Persona accumulator hash mismatch");
+    }
+    const accumulator = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(accumulatorBytes)
+    );
+    if (typeof accumulator.userProfile !== "string" || typeof accumulator.experience !== "string") {
+      throw new Error("Invalid persona accumulator");
+    }
+    return {
+      userProfile: accumulator.userProfile,
+      experience: accumulator.experience
+    };
+  }
+  assertPersonaOperationId(operationId) {
+    if (!/^[A-Za-z0-9._-]+$/.test(operationId)) {
+      throw new Error("Invalid persona operation id");
+    }
+  }
+  async loadCurrentPersona() {
+    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
+    const currentBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(personaRoot, "CURRENT"));
+    let manifest;
+    try {
+      manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
+    } catch {
+      throw new Error("Invalid persona CURRENT manifest");
+    }
+    if (!Number.isSafeInteger(manifest.generation) || manifest.generation < 1) {
+      throw new Error("Invalid persona CURRENT generation");
+    }
+    const generationRoot = (0, import_node_path3.join)(
+      personaRoot,
+      "generations",
+      String(manifest.generation)
+    );
+    const [generationManifestBytes, userProfileBytes, experienceBytes] = await Promise.all([
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json")),
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "user-profile.md")),
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "experience.md"))
+    ]);
+    if (generationManifestBytes.length !== currentBytes.length || !generationManifestBytes.every(
+      (byte, index) => byte === currentBytes[index]
+    )) {
+      throw new Error("Persona generation manifest does not match CURRENT");
+    }
+    this.verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes);
+    return {
+      generation: manifest.generation,
+      manifest,
+      userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
+      experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
+    };
+  }
+  async loadPersonaGeneration(generation) {
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error("Invalid persona generation");
+    }
+    const generationRoot = (0, import_node_path3.join)(
+      this.dataRoot,
+      "persona",
+      "generations",
+      String(generation)
+    );
+    const [manifestBytes, userProfileBytes, experienceBytes] = await Promise.all([
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json")),
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "user-profile.md")),
+      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "experience.md"))
+    ]);
+    let manifest;
+    try {
+      manifest = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)
+      );
+    } catch {
+      throw new Error("Invalid persona generation manifest");
+    }
+    if (manifest.generation !== generation) {
+      throw new Error("Persona generation manifest has wrong generation");
+    }
+    this.verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes);
+    return {
+      generation,
+      manifest,
+      userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
+      experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
+    };
+  }
+  verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes) {
+    if (typeof manifest.user_profile_sha256 !== "string" || (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex") !== manifest.user_profile_sha256) {
+      throw new Error("Persona user profile hash mismatch");
+    }
+    if (typeof manifest.experience_sha256 !== "string" || (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex") !== manifest.experience_sha256) {
+      throw new Error("Persona experience hash mismatch");
+    }
+  }
+  async deletePersonaGeneration(generation) {
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error("Invalid persona generation");
+    }
+    const generationsRoot = (0, import_node_path3.join)(this.dataRoot, "persona", "generations");
+    await (0, import_promises.rm)((0, import_node_path3.join)(generationsRoot, String(generation)), { recursive: true, force: true });
+    try {
+      await this.syncDirectory(generationsRoot);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  async prunePersonaGenerations(currentGeneration) {
+    const generationsRoot = (0, import_node_path3.join)(this.dataRoot, "persona", "generations");
+    const entries = await (0, import_promises.readdir)(generationsRoot, { withFileTypes: true });
+    const generations = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter((generation) => Number.isSafeInteger(generation)).sort((left, right) => right - left);
+    const keep = /* @__PURE__ */ new Set([
+      currentGeneration,
+      ...generations.filter((generation) => generation < currentGeneration).slice(0, 2)
+    ]);
+    for (const generation of generations) {
+      if (!keep.has(generation)) {
+        await (0, import_promises.rm)((0, import_node_path3.join)(generationsRoot, String(generation)), { recursive: true });
+      }
+    }
+    await this.syncDirectory(generationsRoot);
+  }
+  async loadCurrentPersonaCoverage() {
+    let current;
+    try {
+      current = await this.loadCurrentPersona();
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }
+    const lastFoldedDate = current.manifest.last_folded_date_after;
+    const partialMissingDates = current.manifest.partial_missing_dates_after;
+    if (lastFoldedDate !== null && typeof lastFoldedDate !== "string" || !Array.isArray(partialMissingDates) || partialMissingDates.some((date) => typeof date !== "string")) {
+      throw new Error("Invalid persona CURRENT coverage");
+    }
+    if (lastFoldedDate !== null) {
+      assertDiaryDate(lastFoldedDate);
+    }
+    for (const date of partialMissingDates) {
+      assertDiaryDate(date);
+    }
+    return {
+      lastFoldedDate,
+      partialMissingDates: [...partialMissingDates]
+    };
+  }
+};
+
+// src/worker/client.ts
+var import_node_child_process = require("node:child_process");
+var import_node_fs2 = require("node:fs");
+var import_node_path4 = require("node:path");
+
+// src/shared/build-id.ts
+var BUILD_ID = true ? "0.3.0-mrgray6u" : "dev";
+
+// src/worker/client.ts
+var WORKER_PORT = 37778;
+var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
+var WAKE_TIMEOUT_MS = 500;
+var FLUSH_TIMEOUT_MS = 500;
+var COMPACT_TIMEOUT_MS = 5e3;
+function createAbortSignal(timeoutMs) {
+  return AbortSignal.timeout(timeoutMs);
+}
+function sleep(ms, setTimeoutImpl = setTimeout) {
+  return new Promise((resolvePromise) => {
+    setTimeoutImpl(resolvePromise, ms);
+  });
+}
+function resolvePluginRoot(env = process.env) {
+  if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
+    return env.CLAUDE_PLUGIN_ROOT;
+  }
+  const currentDir = (0, import_node_path4.dirname)(__filename);
+  if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
+    return (0, import_node_path4.resolve)(currentDir, "..");
+  }
+  return (0, import_node_path4.resolve)(currentDir, "..", "..", "plugin");
+}
+function resolveWorkerScriptPaths(env = process.env) {
+  const pluginRoot = resolvePluginRoot(env);
+  return {
+    bunRunnerPath: (0, import_node_path4.join)(pluginRoot, "scripts", "bun-runner.js"),
+    workerPath: (0, import_node_path4.join)(pluginRoot, "scripts", "worker.cjs")
+  };
+}
+async function readWorkerHealth(fetchImpl, timeoutMs) {
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
+      method: "GET",
+      signal: createAbortSignal(timeoutMs)
+    });
+    if (!response.ok) {
+      return { status: "down" };
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return { status: "compatible" };
+    }
+    if (body.buildId && body.buildId !== BUILD_ID) {
+      return {
+        status: "stale",
+        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+      };
+    }
+    return {
+      status: "compatible",
+      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+    };
+  } catch {
+    return { status: "down" };
+  }
+}
+function readWorkerPidFallback(deps = {}) {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
+  if (!existsSyncImpl(pidPath)) {
+    return null;
+  }
+  try {
+    const pid = Number((0, import_node_fs2.readFileSync)(pidPath, "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      return pid;
+    }
+  } catch {
+  }
+  return null;
+}
+function killWorkerPid(pid, killImpl = process.kill) {
+  try {
+    killImpl(pid, "SIGTERM");
+  } catch {
+  }
+}
+function logUnrecoverableStaleWorker() {
+  console.error("stale worker detected but no pid handle is available");
+}
+function resolveStaleWorkerPid(health, deps = {}) {
+  if (health.status !== "stale") {
+    return null;
+  }
+  if (typeof health.pid === "number") {
+    return health.pid;
+  }
+  return readWorkerPidFallback(deps);
+}
+function spawnWorkerProcess(deps = {}, env = process.env) {
+  const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
+  const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
+  if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
+    return;
+  }
+  const child = spawnImpl("node", [bunRunnerPath, workerPath], {
+    detached: true,
+    stdio: "ignore",
+    env
+  });
+  child.unref();
+}
+async function waitForWorkerDown(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "down") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function waitForCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "compatible") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function ensureCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (health.status === "compatible") {
+    return "compatible";
+  }
+  if (health.status === "down") {
+    return "down";
+  }
+  const pid = resolveStaleWorkerPid(health, deps);
+  if (!pid) {
+    return "unrecoverable-stale";
+  }
+  killWorkerPid(pid);
+  if (!await waitForWorkerDown(deps)) {
+    return "unrecoverable-stale";
+  }
+  return "down";
+}
+async function kickWorkerFast(deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (health.status === "down") {
+    spawnWorkerProcess(deps, env);
+    return;
+  }
+  if (health.status === "stale") {
+    const pid = resolveStaleWorkerPid(health, deps);
+    if (!pid) {
+      return;
+    }
+    killWorkerPid(pid, deps.killImpl);
+    spawnWorkerProcess(deps, env);
+    return;
+  }
+  if (health.status !== "compatible") {
+    return;
+  }
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS)
+    });
+  } catch {
+  }
+}
+async function notifyWorkerWake(deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    if (!await waitForCompatibleWorker(deps)) {
+      return;
+    }
+  }
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS)
+    });
+  } catch {
+    spawnWorkerProcess(deps, env);
+  }
+}
+async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const flushEnv = {
+    ...env,
+    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
+  };
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, flushEnv);
+    return;
+  }
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionDbId
+      }),
+      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
+    });
+    if (response.ok) {
+      return;
+    }
+  } catch {
+  }
+  spawnWorkerProcess(deps, flushEnv);
+}
+async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    throw new Error("Stale worker detected but no pid handle is available for restart.");
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    const ready = await waitForCompatibleWorker(deps);
+    if (!ready) {
+      throw new Error("Worker did not become ready before compact request.");
+    }
+  }
+  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionDbId,
+      transcript_path: transcriptPath ?? null
+    }),
+    signal: createAbortSignal(COMPACT_TIMEOUT_MS)
+  });
+  if (!response.ok) {
+    throw new Error(`Worker compact request failed with status ${response.status}.`);
   }
 }
 
@@ -793,248 +2563,6 @@ function setSessionLineageStatus(db, sessionId, status) {
   ).run(status, sessionId);
 }
 
-// src/worker/client.ts
-var import_node_child_process = require("node:child_process");
-var import_node_fs2 = require("node:fs");
-var import_node_path3 = require("node:path");
-
-// src/shared/build-id.ts
-var BUILD_ID = true ? "0.2.39-mr6g5d3g" : "dev";
-
-// src/worker/client.ts
-var WORKER_PORT = 37778;
-var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
-var WAKE_TIMEOUT_MS = 500;
-var FLUSH_TIMEOUT_MS = 500;
-var COMPACT_TIMEOUT_MS = 5e3;
-function createAbortSignal(timeoutMs) {
-  return AbortSignal.timeout(timeoutMs);
-}
-function sleep(ms, setTimeoutImpl = setTimeout) {
-  return new Promise((resolvePromise) => {
-    setTimeoutImpl(resolvePromise, ms);
-  });
-}
-function resolvePluginRoot(env = process.env) {
-  if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
-    return env.CLAUDE_PLUGIN_ROOT;
-  }
-  const currentDir = (0, import_node_path3.dirname)(__filename);
-  if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
-    return (0, import_node_path3.resolve)(currentDir, "..");
-  }
-  return (0, import_node_path3.resolve)(currentDir, "..", "..", "plugin");
-}
-function resolveWorkerScriptPaths(env = process.env) {
-  const pluginRoot = resolvePluginRoot(env);
-  return {
-    bunRunnerPath: (0, import_node_path3.join)(pluginRoot, "scripts", "bun-runner.js"),
-    workerPath: (0, import_node_path3.join)(pluginRoot, "scripts", "worker.cjs")
-  };
-}
-async function readWorkerHealth(fetchImpl, timeoutMs) {
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
-      method: "GET",
-      signal: createAbortSignal(timeoutMs)
-    });
-    if (!response.ok) {
-      return { status: "down" };
-    }
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      return { status: "compatible" };
-    }
-    if (body.buildId && body.buildId !== BUILD_ID) {
-      return {
-        status: "stale",
-        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
-      };
-    }
-    return {
-      status: "compatible",
-      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
-    };
-  } catch {
-    return { status: "down" };
-  }
-}
-function readWorkerPidFallback(deps = {}) {
-  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
-  if (!existsSyncImpl(pidPath)) {
-    return null;
-  }
-  try {
-    const pid = Number((0, import_node_fs2.readFileSync)(pidPath, "utf8").trim());
-    if (Number.isInteger(pid) && pid > 0) {
-      return pid;
-    }
-  } catch {
-  }
-  return null;
-}
-function killWorkerPid(pid) {
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-  }
-}
-function logUnrecoverableStaleWorker() {
-  console.error("stale worker detected but no pid handle is available");
-}
-function resolveStaleWorkerPid(health, deps = {}) {
-  if (health.status !== "stale") {
-    return null;
-  }
-  if (typeof health.pid === "number") {
-    return health.pid;
-  }
-  return readWorkerPidFallback(deps);
-}
-function spawnWorkerProcess(deps = {}, env = process.env) {
-  const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
-  const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
-  if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
-    return;
-  }
-  const child = spawnImpl("node", [bunRunnerPath, workerPath], {
-    detached: true,
-    stdio: "ignore",
-    env
-  });
-  child.unref();
-}
-async function waitForWorkerDown(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (health.status === "down") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-  return false;
-}
-async function waitForCompatibleWorker(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (health.status === "compatible") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-  return false;
-}
-async function ensureCompatibleWorker(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-  if (health.status === "compatible") {
-    return "compatible";
-  }
-  if (health.status === "down") {
-    return "down";
-  }
-  const pid = resolveStaleWorkerPid(health, deps);
-  if (!pid) {
-    return "unrecoverable-stale";
-  }
-  killWorkerPid(pid);
-  if (!await waitForWorkerDown(deps)) {
-    return "unrecoverable-stale";
-  }
-  return "down";
-}
-async function notifyWorkerWake(deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, env);
-    if (!await waitForCompatibleWorker(deps)) {
-      return;
-    }
-  }
-  try {
-    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-      method: "POST",
-      body: "{}",
-      signal: createAbortSignal(WAKE_TIMEOUT_MS)
-    });
-  } catch {
-    spawnWorkerProcess(deps, env);
-  }
-}
-async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const flushEnv = {
-    ...env,
-    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
-  };
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, flushEnv);
-    return;
-  }
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionDbId
-      }),
-      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
-    });
-    if (response.ok) {
-      return;
-    }
-  } catch {
-  }
-  spawnWorkerProcess(deps, flushEnv);
-}
-async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    throw new Error("Stale worker detected but no pid handle is available for restart.");
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, env);
-    const ready = await waitForCompatibleWorker(deps);
-    if (!ready) {
-      throw new Error("Worker did not become ready before compact request.");
-    }
-  }
-  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: sessionDbId,
-      transcript_path: transcriptPath ?? null
-    }),
-    signal: createAbortSignal(COMPACT_TIMEOUT_MS)
-  });
-  if (!response.ok) {
-    throw new Error(`Worker compact request failed with status ${response.status}.`);
-  }
-}
-
 // src/hooks/handlers/compact.ts
 function createCompactHandler(dependencies) {
   return async function handleCompactHook(input) {
@@ -1056,7 +2584,7 @@ function createCompactHandler(dependencies) {
 }
 
 // src/shared/file-tree.ts
-var import_node_path4 = __toESM(require("node:path"), 1);
+var import_node_path5 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -1153,7 +2681,7 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path4.default.posix.relative(root, value);
+    const relative = import_node_path5.default.posix.relative(root, value);
     if (!relative || relative === "") {
       continue;
     }
@@ -1828,6 +3356,9 @@ function updateTurnById(db, turnId, input) {
       "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
     ).run(turnId);
   }
+  if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
   return updated;
 }
 function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
@@ -1850,6 +3381,9 @@ function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
   db.query(
     "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
   ).run(turnId);
+  if (existing.status !== "active" || existing.title !== null || existing.content !== null || existing.insight !== null) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
 }
 function getTurnsForSession(db, sessionId) {
   return db.query(
@@ -1912,6 +3446,9 @@ function updateTurnBackfill(db, turnId, assistantResponse, toolCallCount, conten
     transcriptLineStart ?? null,
     turnId
   );
+  if (existing.assistantResponse !== assistantResponse) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
 }
 function hasOtherTurnWithContentPromptId(db, sessionId, turnId, contentPromptId) {
   return db.query(
@@ -3575,8 +5112,306 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
   return recovered;
 }
 
+// src/diary/experience-render.ts
+var PROFILE_INJECTION_TOKEN_BUDGET = 1e3;
+var EXPERIENCE_INJECTION_TOKEN_BUDGET = 2e3;
+var PERSONA_INJECTION_TOKEN_BUDGET = 3e3;
+var PROFILE_HEADINGS = [
+  "## \u8EAB\u4EFD\u4E0E\u80CC\u666F",
+  "## \u4E13\u957F\u4E0E\u5224\u65AD\u529B",
+  "## \u54C1\u5473\u4E0E\u5174\u8DA3",
+  "## \u6C9F\u901A\u98CE\u683C",
+  "## \u534F\u4F5C\u504F\u597D"
+];
+function isValidProfileInjectionSource(userProfile) {
+  const lines = userProfile.trim().split(/\r?\n/);
+  const headings = lines.filter((line) => /^##\s/.test(line));
+  return headings.length === PROFILE_HEADINGS.length && headings.every((heading, index) => heading === PROFILE_HEADINGS[index]) && lines.every(
+    (line) => line === "" || /^##\s/.test(line) || line.startsWith("- ") && findDiaryCitationGroups(line).length === 1
+  );
+}
+function renderProfileInjection(userProfile) {
+  return ["## Persona", "", userProfile.trim()].join("\n");
+}
+function citationAge(db, lines) {
+  const ages = [];
+  for (const group of findDiaryCitationGroups(lines.join("\n"))) {
+    for (const reference of group.refs) {
+      const match = reference.match(/^S(\d+)\/T(\d+)$/);
+      const row = db.query(
+        `SELECT t.created_at_epoch AS createdAtEpoch
+           FROM turns t
+           WHERE t.session_id = ? AND t.prompt_number = ?`
+      ).get(Number(match[1]), Number(match[2]));
+      ages.push(row?.createdAtEpoch ?? Number.NEGATIVE_INFINITY);
+    }
+  }
+  return ages.length > 0 ? Math.max(...ages) : Number.NEGATIVE_INFINITY;
+}
+function isContinuation(line) {
+  return /^\s+/.test(line);
+}
+function parseExperience(experience, db) {
+  const lines = experience.trim().split(/\r?\n/);
+  const projectHeadingIndex = lines.indexOf("## \u9879\u76EE");
+  const generalHeadingIndex = lines.indexOf("## \u901A\u7528");
+  if (projectHeadingIndex !== 0 || generalHeadingIndex <= projectHeadingIndex || lines.filter((line) => line === "## \u9879\u76EE").length !== 1 || lines.filter((line) => line === "## \u901A\u7528").length !== 1 || lines.some((line) => /^##\s/.test(line) && line !== "## \u9879\u76EE" && line !== "## \u901A\u7528")) {
+    return null;
+  }
+  let documentOrder = 0;
+  const projectUnits = [];
+  const projectLines = lines.slice(1, generalHeadingIndex);
+  for (let index = 0; index < projectLines.length; ) {
+    if (projectLines[index].trim() === "") {
+      index += 1;
+      continue;
+    }
+    if (!projectLines[index].startsWith("- ")) return null;
+    const block = [projectLines[index]];
+    index += 1;
+    while (index < projectLines.length && isContinuation(projectLines[index])) {
+      block.push(projectLines[index]);
+      index += 1;
+    }
+    const progress = block.find((line) => /^\s+- 进度：/.test(line));
+    const pathLines = block.filter((line) => /^\s+- 路径：/.test(line));
+    const progressLines = block.filter((line) => /^\s+- 进度：/.test(line));
+    const feedbackLines = block.filter((line) => /^\s+- 反馈：/.test(line));
+    if (!progress || pathLines.length !== 1 || progressLines.length !== 1 || feedbackLines.length > 2) return null;
+    try {
+      const paths = JSON.parse(pathLines[0].replace(/^\s+- 路径：/, ""));
+      if (!Array.isArray(paths) || paths.some((path2) => typeof path2 !== "string" || !path2.startsWith("/"))) return null;
+    } catch {
+      return null;
+    }
+    if (findDiaryCitationGroups(block[0]).length !== 1 || findDiaryCitationGroups(progress).length !== 1 || feedbackLines.some((line) => findDiaryCitationGroups(line).length !== 1) || block.slice(1).some(
+      (line) => /^\s+- /.test(line) && !/^\s+- (?:路径：|进度：|反馈：|\[\d{4}-\d{2}\]\s)/.test(line)
+    )) return null;
+    projectUnits.push({
+      kind: "project",
+      lines: block,
+      documentOrder: documentOrder++,
+      age: citationAge(db, [progress]),
+      removed: false
+    });
+  }
+  const impressionUnits = [];
+  for (const project of projectUnits) {
+    for (let index = 1; index < project.lines.length; ) {
+      const line = project.lines[index];
+      if (!/^\s+- \[\d{4}-\d{2}\]\s/.test(line)) {
+        index += 1;
+        continue;
+      }
+      const unitLines = [line];
+      let end = index + 1;
+      while (end < project.lines.length && /^\s{4,}\S/.test(project.lines[end]) && !/^\s+- /.test(project.lines[end])) {
+        unitLines.push(project.lines[end]);
+        end += 1;
+      }
+      if (findDiaryCitationGroups(unitLines.join("\n")).length !== 1) return null;
+      impressionUnits.push({
+        kind: "impression",
+        lines: unitLines,
+        documentOrder: documentOrder++,
+        age: citationAge(db, unitLines),
+        removed: false,
+        sourceProjectOrder: project.documentOrder,
+        sourceLineIndexes: Array.from(
+          { length: end - index },
+          (_, offset) => index + offset
+        )
+      });
+      index = end;
+    }
+  }
+  const generalUnits = [];
+  const generalLines = lines.slice(generalHeadingIndex + 1);
+  for (let index = 0; index < generalLines.length; ) {
+    if (generalLines[index].trim() === "") {
+      index += 1;
+      continue;
+    }
+    if (!generalLines[index].startsWith("- ")) return null;
+    const unitLines = [generalLines[index]];
+    index += 1;
+    while (index < generalLines.length && isContinuation(generalLines[index])) {
+      unitLines.push(generalLines[index]);
+      index += 1;
+    }
+    generalUnits.push({
+      kind: "general",
+      lines: unitLines,
+      documentOrder: documentOrder++,
+      age: citationAge(db, unitLines),
+      removed: false
+    });
+    if (findDiaryCitationGroups(unitLines.join("\n")).length !== 1) return null;
+  }
+  return {
+    projectHeading: "## \u9879\u76EE",
+    projectUnits: [...projectUnits, ...impressionUnits],
+    generalHeading: "## \u901A\u7528",
+    generalUnits
+  };
+}
+function renderExperienceBody(parsed) {
+  const removedImpressionLines = /* @__PURE__ */ new Map();
+  for (const unit of parsed.projectUnits.filter((candidate) => candidate.kind === "impression" && candidate.removed)) {
+    const indexes = removedImpressionLines.get(unit.sourceProjectOrder) ?? /* @__PURE__ */ new Set();
+    for (const index of unit.sourceLineIndexes) indexes.add(index);
+    removedImpressionLines.set(unit.sourceProjectOrder, indexes);
+  }
+  const projects = parsed.projectUnits.filter((unit) => unit.kind === "project" && !unit.removed).flatMap((unit) => {
+    const removedIndexes = removedImpressionLines.get(unit.documentOrder);
+    return unit.lines.filter((_, index) => !removedIndexes?.has(index));
+  });
+  const general = parsed.generalUnits.filter((unit) => !unit.removed).flatMap((unit) => unit.lines);
+  return [parsed.projectHeading, ...projects, parsed.generalHeading, ...general].join("\n");
+}
+function renderExperienceInjection(body, recent) {
+  return [
+    "## Experience",
+    "",
+    body,
+    "",
+    "## \u8FD1\u671F",
+    "",
+    ...recent.map((line) => line.text)
+  ].join("\n");
+}
+function orderedOldestFirst(units) {
+  return units.slice().sort((left, right) => left.age - right.age || left.documentOrder - right.documentOrder);
+}
+function renderTrimmedExperienceInjection(input) {
+  const parsed = parseExperience(input.experience, input.db);
+  if (!parsed) return null;
+  const recent = input.recentLines.map((line) => ({ ...line }));
+  const render = () => renderExperienceInjection(renderExperienceBody(parsed), recent);
+  const withinBudget = (rendered2) => estimateDiaryTokens(rendered2) <= EXPERIENCE_INJECTION_TOKEN_BUDGET && estimateDiaryTokens(`${input.profileBlock}
+
+${rendered2}`) <= PERSONA_INJECTION_TOKEN_BUDGET;
+  let rendered = render();
+  const trimRecent = (kind) => {
+    const candidates = recent.filter((line) => line.kind === kind).sort((left, right) => left.date.localeCompare(right.date));
+    for (const candidate of candidates) {
+      if (withinBudget(rendered)) break;
+      recent.splice(recent.indexOf(candidate), 1);
+      rendered = render();
+    }
+  };
+  trimRecent("monthly");
+  trimRecent("daily");
+  const impressionUnits = orderedOldestFirst(
+    parsed.projectUnits.filter((unit) => unit.kind === "impression")
+  );
+  const stages = [
+    impressionUnits,
+    orderedOldestFirst(parsed.generalUnits),
+    orderedOldestFirst(parsed.projectUnits.filter((unit) => unit.kind === "project"))
+  ];
+  for (const units of stages) {
+    for (const unit of units) {
+      if (withinBudget(rendered)) break;
+      unit.removed = true;
+      rendered = render();
+    }
+  }
+  return withinBudget(rendered) ? rendered : null;
+}
+function buildRollingRecentLines(indexText, today) {
+  const rows = indexText.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^- (\d{4}-\d{2}-\d{2})：(.*)$/);
+    return match ? [{ date: match[1], hook: match[2] }] : [];
+  }).filter((row) => row.date < today).sort((left, right) => right.date.localeCompare(left.date));
+  const recentStart = new Date(Date.parse(`${today}T00:00:00Z`) - 14 * 864e5).toISOString().slice(0, 10);
+  const daily = rows.filter((row) => row.date >= recentStart).map((row) => ({ kind: "daily", date: row.date, text: `- ${row.date}\uFF1A${row.hook}` }));
+  const monthHooks = /* @__PURE__ */ new Map();
+  for (const row of rows.filter((candidate) => candidate.date < recentStart)) {
+    const month = row.date.slice(0, 7);
+    if (!monthHooks.has(month)) {
+      if (monthHooks.size >= 6) continue;
+      monthHooks.set(month, []);
+    }
+    const hooks = monthHooks.get(month);
+    if (hooks.length < 3 && !hooks.includes(row.hook)) hooks.push(row.hook);
+  }
+  return [
+    ...daily,
+    ...[...monthHooks].map(([month, hooks]) => ({
+      kind: "monthly",
+      date: month,
+      text: `- ${month}\uFF1A${Array.from(hooks.join("\uFF1B")).slice(0, 240).join("")}`
+    }))
+  ];
+}
+
+// src/diary/validate-and-mark-stale.ts
+async function validateAndMarkStale(options, day) {
+  try {
+    return await options.fileStore.readValidatedDiary(day);
+  } catch (error) {
+    options.stateStore.markDayStaleAndEnqueue({
+      date: day.date,
+      enqueuedAtEpoch: options.nowEpoch?.() ?? Math.floor(Date.now() / 1e3)
+    });
+    throw error;
+  }
+}
+
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
+var FAST_WORKER_KICK_BUDGET_MS = 500;
+async function kickWorkerWithinBudget(kickWorkerFast2) {
+  let timeout;
+  try {
+    await Promise.race([
+      kickWorkerFast2(),
+      new Promise((resolve2) => {
+        timeout = setTimeout(resolve2, FAST_WORKER_KICK_BUDGET_MS);
+      })
+    ]);
+  } finally {
+    if (timeout !== void 0) {
+      clearTimeout(timeout);
+    }
+  }
+}
+async function appendDiaryContext(hookSpecificOutput, fileStore, db, today, requestRebuild, indexRows) {
+  let persona;
+  try {
+    persona = await fileStore.loadCurrentPersona();
+  } catch {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  let recentLines = [];
+  const indexBytes = await fileStore.ensureIndex(indexRows).catch(() => null);
+  if (indexBytes) {
+    try {
+      const indexText = new TextDecoder("utf-8", { fatal: true }).decode(indexBytes).replace(/^# Diary Index(?:\r?\n|$)/, "").trim();
+      recentLines = buildRollingRecentLines(indexText, today);
+    } catch {
+      recentLines = [];
+    }
+  }
+  const profileBlock = renderProfileInjection(persona.userProfile);
+  if (!isValidProfileInjectionSource(persona.userProfile) || estimateDiaryTokens(profileBlock) > PROFILE_INJECTION_TOKEN_BUDGET) {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  const experienceBlock = renderTrimmedExperienceInjection({
+    db,
+    experience: persona.experience,
+    recentLines,
+    profileBlock
+  });
+  if (!experienceBlock) {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
+}
 function splitInsight(insight) {
   if (!insight) {
     return [];
@@ -3763,13 +5598,71 @@ function buildContextOutput(db, input, timelineRenderer) {
 }
 function createContextHandler(dependencies) {
   return async function handleContextHook(input) {
+    let hookSpecificOutput = buildContextOutput(
+      dependencies.db,
+      input,
+      dependencies.timelineRenderer
+    );
+    const nowEpoch = dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1e3);
+    const today = diaryDayOf(nowEpoch);
+    try {
+      if (dependencies.diaryStateStore) {
+        const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
+        if (dependencies.fileStore) {
+          const recentStart = new Date(
+            Date.parse(`${today}T00:00:00Z`) - 14 * 864e5
+          ).toISOString().slice(0, 10);
+          const recentDays = dependencies.diaryStateStore.listSettledDays().filter((day) => day.date >= recentStart && day.date < today);
+          const integrityDays = dependencies.diaryStateStore.nextIntegrityScanBatch({
+            beforeDate: today,
+            limit: 10
+          });
+          const validationDays = new Map(
+            [...recentDays, ...integrityDays].map((day) => [day.date, day])
+          );
+          for (const day of validationDays.values()) {
+            try {
+              await validateAndMarkStale(
+                {
+                  stateStore: dependencies.diaryStateStore,
+                  fileStore: dependencies.fileStore,
+                  nowEpoch: () => nowEpoch
+                },
+                day
+              );
+            } catch {
+            }
+          }
+        }
+        const reconciledDates = dependencies.diaryStateStore.reconcileBacklog({
+          today,
+          cutoverDate: bootstrap.cutoverDate,
+          enqueuedAtEpoch: nowEpoch
+        });
+        if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
+          await kickWorkerWithinBudget(dependencies.kickWorkerFast);
+        }
+      }
+    } catch {
+    }
+    if (dependencies.fileStore) {
+      const requestRebuild = () => {
+        const store = dependencies.diaryStateStore;
+        if (!store) return;
+        store.requestPersonaRebuild();
+      };
+      hookSpecificOutput = await appendDiaryContext(
+        hookSpecificOutput,
+        dependencies.fileStore,
+        dependencies.db,
+        today,
+        requestRebuild,
+        dependencies.diaryStateStore?.listIndexRows() ?? []
+      );
+    }
     return {
       continue: true,
-      hookSpecificOutput: buildContextOutput(
-        dependencies.db,
-        input,
-        dependencies.timelineRenderer
-      )
+      hookSpecificOutput
     };
   };
 }
@@ -4947,7 +6840,11 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
 function getLatestTurn(db, sessionDbId) {
   const row = db.query(
     `
-        SELECT id, prompt_number AS promptNumber
+        SELECT
+          id,
+          prompt_number AS promptNumber,
+          assistant_response AS assistantResponse,
+          created_at_epoch AS createdAtEpoch
         FROM turns
         WHERE session_id = ?
         ORDER BY prompt_number DESC
@@ -5065,6 +6962,12 @@ function createStopHandler(dependencies) {
             WHERE id = ?
           `
       ).run(assistantResponse, epoch, turn.id);
+      if (assistantResponse !== null && assistantResponse !== turn.assistantResponse) {
+        markSettledDiaryDayStaleForTurn(
+          dependencies.db,
+          turn.createdAtEpoch
+        );
+      }
       if (!hasTurnStopTask(dependencies.db, turn.id)) {
         enqueueQueueItem(dependencies.db, {
           kind: "turn-stop",
@@ -5109,23 +7012,37 @@ function createStopHandler(dependencies) {
 // src/hooks/hook-command.ts
 var defaultHandlers;
 var HOOK_DB_BUSY_TIMEOUT_MS = 800;
+function createDefaultHookHandlers({
+  db,
+  dataRoot = DATA_DIR,
+  kickWorkerFast: kickWorkerFast2 = kickWorkerFast,
+  nowEpoch
+}) {
+  const diaryStateStore = createDiaryStateStore(db);
+  const fileStore = new DiaryFileStore(dataRoot);
+  return {
+    SessionStart: createContextHandler({
+      db,
+      diaryStateStore,
+      fileStore,
+      kickWorkerFast: kickWorkerFast2,
+      nowEpoch
+    }),
+    SessionEnd: createSessionEndHandler({ db }),
+    PostToolUse: createPostToolUseHandler({ db }),
+    PostCompact: createPostCompactHandler({ db }),
+    PreCompact: createCompactHandler({ db }),
+    UserPromptSubmit: createSessionInitHandler({ db }),
+    Stop: createStopHandler({ db })
+  };
+}
 function getDefaultHandlers() {
   if (defaultHandlers) {
     return defaultHandlers;
   }
   const db = createDatabase(void 0, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
-  defaultHandlers = {
-    SessionStart: createContextHandler({ db }),
-    SessionEnd: createSessionEndHandler({ db }),
-    PostToolUse: createPostToolUseHandler({ db }),
-    PostCompact: createPostCompactHandler({ db }),
-    PreCompact: createCompactHandler({ db }),
-    UserPromptSubmit: createSessionInitHandler({ db }),
-    Stop: createStopHandler({
-      db
-    })
-  };
+  defaultHandlers = createDefaultHookHandlers({ db });
   return defaultHandlers;
 }
 function readJsonFromStdin() {
@@ -5220,5 +7137,6 @@ if (isDirectExecution()) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  createDefaultHookHandlers,
   runHookCommand
 });

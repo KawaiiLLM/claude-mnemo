@@ -39,6 +39,15 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("memory_fts");
   });
 
+  test("creates the diary validation report column", () => {
+    initializeSchema(db);
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(diary_day_state)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("validation_report_json");
+  });
+
   test("creates the expected columns on sessions", () => {
     initializeSchema(db);
 
@@ -816,6 +825,30 @@ describe("initializeSchema", () => {
     ]);
     expect(queueIndexes).toContain("idx_pending_queue_unclaimed");
     expect(queueIndexes).toContain("idx_pending_queue_session");
+  });
+
+  test("creates the diary and persona persistence schema", () => {
+    initializeSchema(db);
+
+    const tableNames = db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'table'`,
+      )
+      .all()
+      .map((row) => row.name);
+    const indexNames = db
+      .query<{ name: string }, []>(
+        `SELECT name FROM sqlite_master WHERE type = 'index'`,
+      )
+      .all()
+      .map((row) => row.name);
+
+    expect(tableNames).toContain("diary_state");
+    expect(tableNames).toContain("diary_day_state");
+    expect(tableNames).toContain("persona_operation_state");
+    expect(indexNames).toContain("idx_turns_created_at");
+    expect(indexNames).toContain("idx_pending_queue_diary_target");
+    expect(indexNames).toContain("idx_persona_operation_active");
   });
 
   test("skips rebuilding the search index when the database is empty", () => {

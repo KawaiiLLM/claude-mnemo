@@ -5,7 +5,11 @@ import {
   HOOK_SUCCESS_EXIT_CODE,
 } from "../shared/hook-constants";
 import { createDatabase } from "../db/database";
+import { createDiaryStateStore } from "../db/diary-state";
 import { initializeDatabase } from "../db/schema";
+import { DiaryFileStore } from "../diary/file-store";
+import { DATA_DIR } from "../shared/paths";
+import { kickWorkerFast as kickDefaultWorkerFast } from "../worker/client";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import { createContextHandler } from "./handlers/context";
@@ -29,6 +33,39 @@ export interface HookCommandDependencies {
 let defaultHandlers: Record<string, HookHandler> | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
+export interface DefaultHookHandlersDependencies {
+  db: ReturnType<typeof createDatabase>;
+  dataRoot?: string;
+  kickWorkerFast?: () => Promise<void>;
+  nowEpoch?: () => number;
+}
+
+export function createDefaultHookHandlers({
+  db,
+  dataRoot = DATA_DIR,
+  kickWorkerFast = kickDefaultWorkerFast,
+  nowEpoch,
+}: DefaultHookHandlersDependencies): Record<string, HookHandler> {
+  const diaryStateStore = createDiaryStateStore(db);
+  const fileStore = new DiaryFileStore(dataRoot);
+
+  return {
+    SessionStart: createContextHandler({
+      db,
+      diaryStateStore,
+      fileStore,
+      kickWorkerFast,
+      nowEpoch,
+    }),
+    SessionEnd: createSessionEndHandler({ db }),
+    PostToolUse: createPostToolUseHandler({ db }),
+    PostCompact: createPostCompactHandler({ db }),
+    PreCompact: createCompactHandler({ db }),
+    UserPromptSubmit: createSessionInitHandler({ db }),
+    Stop: createStopHandler({ db }),
+  };
+}
+
 function getDefaultHandlers(): Record<string, HookHandler> {
   if (defaultHandlers) {
     return defaultHandlers;
@@ -37,17 +74,7 @@ function getDefaultHandlers(): Record<string, HookHandler> {
   const db = createDatabase(undefined, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
 
-  defaultHandlers = {
-    SessionStart: createContextHandler({ db }),
-    SessionEnd: createSessionEndHandler({ db }),
-    PostToolUse: createPostToolUseHandler({ db }),
-    PostCompact: createPostCompactHandler({ db }),
-    PreCompact: createCompactHandler({ db }),
-    UserPromptSubmit: createSessionInitHandler({ db }),
-    Stop: createStopHandler({
-      db,
-    }),
-  };
+  defaultHandlers = createDefaultHookHandlers({ db });
 
   return defaultHandlers;
 }

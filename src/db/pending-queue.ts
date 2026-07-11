@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
 
-export type PendingQueueKind = "obs" | "turn-stop";
+export type PendingQueueKind = "obs" | "turn-stop" | "diary";
 
 export interface PendingQueueItem {
   seq: number;
@@ -91,7 +91,7 @@ export function claimNextQueueItem(
   options: ClaimNextQueueItemOptions = {},
 ): PendingQueueItem | null {
   return runWriteTransaction(db, () => {
-    const clauses = ["claimed_at_epoch IS NULL"];
+    const clauses = ["claimed_at_epoch IS NULL", "kind != 'diary'"];
     const params: Array<number> = [];
 
     if (options.sessionFilter !== undefined) {

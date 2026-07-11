@@ -18,6 +18,7 @@ const COMPACT_TIMEOUT_MS = 5_000;
 export interface WorkerClientDeps {
   fetchImpl?: typeof fetch;
   spawnImpl?: typeof spawn;
+  killImpl?: typeof process.kill;
   existsSyncImpl?: typeof existsSync;
   setTimeoutImpl?: typeof setTimeout;
   nowMsImpl?: () => number;
@@ -129,9 +130,12 @@ function readWorkerPidFallback(deps: WorkerClientDeps = {}): number | null {
   return null;
 }
 
-function killWorkerPid(pid: number): void {
+function killWorkerPid(
+  pid: number,
+  killImpl: typeof process.kill = process.kill,
+): void {
   try {
-    process.kill(pid, "SIGTERM");
+    killImpl(pid, "SIGTERM");
   } catch {
     // If the worker is already gone or we lack permission, continue.
   }
@@ -241,6 +245,43 @@ async function ensureCompatibleWorker(
   }
 
   return "down";
+}
+
+export async function kickWorkerFast(
+  deps: WorkerClientDeps = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+
+  if (health.status === "down") {
+    spawnWorkerProcess(deps, env);
+    return;
+  }
+
+  if (health.status === "stale") {
+    const pid = resolveStaleWorkerPid(health, deps);
+    if (!pid) {
+      return;
+    }
+    killWorkerPid(pid, deps.killImpl);
+    spawnWorkerProcess(deps, env);
+    return;
+  }
+
+  if (health.status !== "compatible") {
+    return;
+  }
+
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS),
+    });
+  } catch {
+    // SessionStart treats this as a best-effort bounded wake-up.
+  }
 }
 
 export async function notifyWorkerWake(

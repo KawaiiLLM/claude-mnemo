@@ -85,6 +85,27 @@ describe("pending_queue helpers", () => {
     ]);
   });
 
+  test("generic claims leave diary rows for the dedicated worker path", () => {
+    const diary = enqueueQueueItem(db, {
+      kind: "diary",
+      targetId: 20260710,
+      sessionDbId: 0,
+      enqueuedAtEpoch: 100,
+    });
+    const observation = enqueueQueueItem(db, {
+      kind: "obs",
+      targetId: 11,
+      sessionDbId: 1,
+      enqueuedAtEpoch: 101,
+    });
+
+    expect(claimNextQueueItem(db, 500)?.seq).toBe(observation.seq);
+    expect(listPendingQueueItems(db)).toEqual([
+      { ...diary, claimedAtEpoch: null },
+      { ...observation, claimedAtEpoch: 500 },
+    ]);
+  });
+
   test("claims through an immediate retrying write transaction", () => {
     let immediateCalls = 0;
     const fakeDb = {

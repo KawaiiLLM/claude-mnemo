@@ -1,13 +1,14 @@
 {
   "name": "claude-mnemo",
-  "version": "0.2.39",
+  "version": "0.3.0",
   "type": "module",
   "description": "Structured memory system for Claude Code powered by Mnemosyne",
   "license": "MIT",
   "scripts": {
     "build": "node scripts/build.js",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:diary": "bun run src/cli/verify-diary.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

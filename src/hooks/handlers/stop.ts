@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
 import { relinkSessionLineageFromEntries } from "../../db/lineage";
@@ -32,11 +33,28 @@ export interface StopHandlerDependencies {
 function getLatestTurn(
   db: Database,
   sessionDbId: number,
-): { id: number; promptNumber: number } | null {
+): {
+  id: number;
+  promptNumber: number;
+  assistantResponse: string | null;
+  createdAtEpoch: number;
+} | null {
   const row = db
-    .query<{ id: number; promptNumber: number }, [number]>(
+    .query<
+      {
+        id: number;
+        promptNumber: number;
+        assistantResponse: string | null;
+        createdAtEpoch: number;
+      },
+      [number]
+    >(
       `
-        SELECT id, prompt_number AS promptNumber
+        SELECT
+          id,
+          prompt_number AS promptNumber,
+          assistant_response AS assistantResponse,
+          created_at_epoch AS createdAtEpoch
         FROM turns
         WHERE session_id = ?
         ORDER BY prompt_number DESC
@@ -204,6 +222,16 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           `,
         )
         .run(assistantResponse, epoch, turn.id);
+
+      if (
+        assistantResponse !== null &&
+        assistantResponse !== turn.assistantResponse
+      ) {
+        markSettledDiaryDayStaleForTurn(
+          dependencies.db,
+          turn.createdAtEpoch,
+        );
+      }
 
       if (!hasTurnStopTask(dependencies.db, turn.id)) {
         enqueueQueueItem(dependencies.db, {

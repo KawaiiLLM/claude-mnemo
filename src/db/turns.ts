@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 
+import { markSettledDiaryDayStaleForTurn } from "./diary-state";
+
 import { indexTurnToFTS } from "./search";
 
 export type TurnStatus =
@@ -286,6 +288,17 @@ export function updateTurnById(
     ).run(turnId);
   }
 
+  if (
+    existing.status !== updated.status ||
+    existing.userPrompt !== updated.userPrompt ||
+    existing.assistantResponse !== updated.assistantResponse ||
+    existing.title !== updated.title ||
+    existing.content !== updated.content ||
+    existing.insight !== updated.insight
+  ) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
+
   return updated;
 }
 
@@ -314,6 +327,15 @@ export function resetTurnExtractionFields(
   db.query(
     "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
   ).run(turnId);
+
+  if (
+    existing.status !== "active" ||
+    existing.title !== null ||
+    existing.content !== null ||
+    existing.insight !== null
+  ) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
 }
 
 export function getTurnsForSession(
@@ -425,6 +447,10 @@ export function updateTurnBackfill(
     transcriptLineStart ?? null,
     turnId,
   );
+
+  if (existing.assistantResponse !== assistantResponse) {
+    markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
+  }
 }
 
 function hasOtherTurnWithContentPromptId(

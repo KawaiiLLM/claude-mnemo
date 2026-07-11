@@ -1,6 +1,17 @@
 import { describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { runHookCommand } from "../../src/hooks/hook-command";
+import { createDatabase } from "../../src/db/database";
+import { createDiaryStateStore } from "../../src/db/diary-state";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import { DiaryFileStore } from "../../src/diary/file-store";
+import {
+  createDefaultHookHandlers,
+  runHookCommand,
+} from "../../src/hooks/hook-command";
 import {
   HOOK_SUCCESS_EXIT_CODE,
 } from "../../src/shared/hook-constants";
@@ -61,6 +72,143 @@ function createRunner(handler: HookHandler) {
 }
 
 describe("runHookCommand", () => {
+  test("production SessionStart wiring queues diary backlog, injects persona/index, and kicks the worker", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-default-hooks-"));
+    const nowEpoch = Date.parse("2026-07-11T12:00:00+08:00") / 1_000;
+
+    try {
+      const session = upsertSession(db, {
+        contentSessionId: "default-hook-wiring",
+        project: "/projects/default-hook-wiring",
+        title: "Default hook wiring",
+        content: "The normal SessionStart context remains present.",
+        insight: null,
+        createdAtEpoch: nowEpoch,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+      db.query(
+        `INSERT INTO turns (
+          session_id,
+          prompt_number,
+          status,
+          user_prompt,
+          assistant_response,
+          created_at_epoch
+        ) VALUES (?, 1, 'active', ?, ?, ?)`,
+      ).run(
+        session.id,
+        "Yesterday through the production handler factory",
+        "Queue this material for the diary",
+        Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
+      );
+
+      const fileStore = new DiaryFileStore(dataRoot);
+      await fileStore.commitPersonaGeneration({
+        generation: 1,
+        manifest: {
+          operation_id: "default-hook-persona",
+          op: "fold",
+          generation: 1,
+        },
+        userProfile: "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 生产 wiring 中的用户画像 [S1/T1]\n",
+        experience: "## 项目\n## 通用\n- 生产 wiring 中的协作经历 [S1/T1]\n",
+      });
+      await fileStore.ensureIndex([
+        { date: "2026-07-10", indexHook: "生产 wiring 日记索引" },
+      ]);
+      const diaryStateStore = createDiaryStateStore(db);
+      diaryStateStore.initializeBootstrap("2026-07-11");
+      diaryStateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: nowEpoch });
+      diaryStateStore.commitDayState({
+        date: "2026-07-10",
+        watermark: "production-wiring-watermark",
+        fileSha256: "missing-diary-hash",
+        indexHook: "生产 wiring 日记索引",
+        settledAtEpoch: nowEpoch,
+      });
+      diaryStateStore.markDayStale("2026-07-10");
+      let kickCalls = 0;
+      const handlers = createDefaultHookHandlers({
+        db,
+        dataRoot,
+        nowEpoch: () => nowEpoch,
+        kickWorkerFast: async () => {
+          kickCalls += 1;
+        },
+      });
+
+      const result = await handlers.SessionStart!({
+        eventName: "SessionStart",
+        source: "startup",
+        sessionId: "default-hook-wiring",
+        cwd: "/projects/default-hook-wiring",
+        stopHookActive: false,
+        raw: {},
+      });
+
+      expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(true);
+      expect(result.hookSpecificOutput).toContain("## Persona");
+      expect(result.hookSpecificOutput).toContain(
+        "- 生产 wiring 中的用户画像 [S1/T1]",
+      );
+      expect(result.hookSpecificOutput).toContain("## Experience");
+      expect(result.hookSpecificOutput).toContain("## 近期");
+      expect(result.hookSpecificOutput).not.toContain("## Diary Index");
+      expect(result.hookSpecificOutput).toContain(
+        "- 2026-07-10：生产 wiring 日记索引",
+      );
+      expect(kickCalls).toBe(1);
+      expect(result.asyncWork).toBeUndefined();
+    } finally {
+      db.close();
+      rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("production SessionStart wiring preserves base context before diary artifacts exist", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-empty-default-hooks-"));
+
+    try {
+      upsertSession(db, {
+        contentSessionId: "default-hook-before-artifacts",
+        project: "/projects/default-hook-before-artifacts",
+        title: "Before diary artifacts",
+        content: "Existing memory context must survive missing diary files.",
+        insight: null,
+        createdAtEpoch: Date.parse("2026-07-11T12:00:00+08:00") / 1_000,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      });
+      const handlers = createDefaultHookHandlers({
+        db,
+        dataRoot,
+        nowEpoch: () => Date.parse("2026-07-11T12:00:00+08:00") / 1_000,
+        kickWorkerFast: async () => {},
+      });
+
+      const result = await handlers.SessionStart!({
+        eventName: "SessionStart",
+        source: "startup",
+        sessionId: "default-hook-before-artifacts",
+        cwd: "/projects/default-hook-before-artifacts",
+        stopHookActive: false,
+        raw: {},
+      });
+
+      expect(result.hookSpecificOutput).toContain("claude-mnemo: 1 sessions");
+      expect(result.hookSpecificOutput).toContain("## Recent Sessions");
+      expect(result.asyncWork).toBeUndefined();
+    } finally {
+      db.close();
+      rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   test("maps the tool-use command argument to PostToolUse", async () => {
     const handler = mock(async () => ({
       continue: true,

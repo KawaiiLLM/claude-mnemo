@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import type { DiaryStateStore } from "../../db/diary-state";
 import {
   getRecentSessions,
   getSessionByContentId,
@@ -18,13 +19,109 @@ import {
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
+import { diaryDayOf, estimateDiaryTokens } from "../../diary/domain";
+import type { DiaryFileStore } from "../../diary/file-store";
+import {
+  buildRollingRecentLines,
+  isValidProfileInjectionSource,
+  PROFILE_INJECTION_TOKEN_BUDGET,
+  renderProfileInjection,
+  renderTrimmedExperienceInjection,
+  type RecentLine,
+} from "../../diary/experience-render";
+import { validateAndMarkStale } from "../../diary/validate-and-mark-stale";
 
 export interface ContextHandlerDependencies {
   db: Database;
   timelineRenderer?: CurrentSessionTimelineRenderer;
+  diaryStateStore?: Pick<
+    DiaryStateStore,
+    | "initializeBootstrap"
+    | "reconcileBacklog"
+    | "listSettledDays"
+    | "nextIntegrityScanBatch"
+    | "markDayStaleAndEnqueue"
+    | "requestPersonaRebuild"
+    | "listIndexRows"
+  >;
+  nowEpoch?: () => number;
+  kickWorkerFast?: () => Promise<void>;
+  fileStore?: Pick<
+    DiaryFileStore,
+    "loadCurrentPersona" | "ensureIndex" | "readIndex" | "readValidatedDiary"
+  >;
 }
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
+const FAST_WORKER_KICK_BUDGET_MS = 500;
+
+async function kickWorkerWithinBudget(
+  kickWorkerFast: () => Promise<void>,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    await Promise.race([
+      kickWorkerFast(),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, FAST_WORKER_KICK_BUDGET_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function appendDiaryContext(
+  hookSpecificOutput: string,
+  fileStore: Pick<DiaryFileStore, "loadCurrentPersona" | "ensureIndex" | "readIndex">,
+  db: Database,
+  today: string,
+  requestRebuild: () => void,
+  indexRows: ReturnType<DiaryStateStore["listIndexRows"]>,
+): Promise<string> {
+  let persona;
+  try {
+    persona = await fileStore.loadCurrentPersona();
+  } catch {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  let recentLines: RecentLine[] = [];
+  const indexBytes = await fileStore.ensureIndex(indexRows).catch(() => null);
+  if (indexBytes) {
+    try {
+      const indexText = new TextDecoder("utf-8", { fatal: true })
+        .decode(indexBytes)
+        .replace(/^# Diary Index(?:\r?\n|$)/, "")
+        .trim();
+      recentLines = buildRollingRecentLines(indexText, today);
+    } catch {
+      recentLines = [];
+    }
+  }
+  const profileBlock = renderProfileInjection(persona.userProfile);
+  if (
+    !isValidProfileInjectionSource(persona.userProfile) ||
+    estimateDiaryTokens(profileBlock) > PROFILE_INJECTION_TOKEN_BUDGET
+  ) {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  const experienceBlock = renderTrimmedExperienceInjection({
+    db,
+    experience: persona.experience,
+    recentLines,
+    profileBlock,
+  });
+  if (!experienceBlock) {
+    requestRebuild();
+    return hookSpecificOutput;
+  }
+  return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
+}
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -292,13 +389,83 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
   return async function handleContextHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
+    let hookSpecificOutput = buildContextOutput(
+      dependencies.db,
+      input,
+      dependencies.timelineRenderer,
+    );
+    const nowEpoch =
+      dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1_000);
+    const today = diaryDayOf(nowEpoch);
+
+    try {
+      if (dependencies.diaryStateStore) {
+        const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
+        if (dependencies.fileStore) {
+          const recentStart = new Date(
+            Date.parse(`${today}T00:00:00Z`) - 14 * 86_400_000,
+          )
+            .toISOString()
+            .slice(0, 10);
+          const recentDays = dependencies.diaryStateStore
+            .listSettledDays()
+            .filter((day) => day.date >= recentStart && day.date < today);
+          const integrityDays =
+            dependencies.diaryStateStore.nextIntegrityScanBatch({
+              beforeDate: today,
+              limit: 10,
+            });
+          const validationDays = new Map(
+            [...recentDays, ...integrityDays].map((day) => [day.date, day]),
+          );
+          for (const day of validationDays.values()) {
+            try {
+              await validateAndMarkStale(
+                {
+                  stateStore: dependencies.diaryStateStore,
+                  fileStore: dependencies.fileStore,
+                  nowEpoch: () => nowEpoch,
+                },
+                day,
+              );
+            } catch {
+              // Invalid diary days are requeued by the canonical validation path.
+            }
+          }
+        }
+        const reconciledDates = dependencies.diaryStateStore.reconcileBacklog({
+          today,
+          cutoverDate: bootstrap.cutoverDate,
+          enqueuedAtEpoch: nowEpoch,
+        });
+
+        if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
+          await kickWorkerWithinBudget(dependencies.kickWorkerFast);
+        }
+      }
+    } catch {
+      // Diary backfill is best-effort: SessionStart context must still be returned.
+    }
+
+    if (dependencies.fileStore) {
+      const requestRebuild = () => {
+        const store = dependencies.diaryStateStore;
+        if (!store) return;
+        store.requestPersonaRebuild();
+      };
+      hookSpecificOutput = await appendDiaryContext(
+        hookSpecificOutput,
+        dependencies.fileStore,
+        dependencies.db,
+        today,
+        requestRebuild,
+        dependencies.diaryStateStore?.listIndexRows() ?? [],
+      );
+    }
+
     return {
       continue: true,
-      hookSpecificOutput: buildContextOutput(
-        dependencies.db,
-        input,
-        dependencies.timelineRenderer,
-      ),
+      hookSpecificOutput,
     };
   };
 }

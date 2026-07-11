@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface MnemoConfig {
+  /** Optional prior-persona material supplied to diary generation. */
+  priorPersonaPath: string;
   mergeThresholdChars: number;
   maxQueuedBatches: number;
   keepaliveLeadMs: number;
@@ -23,6 +25,7 @@ export interface MnemoConfig {
 }
 
 export const DEFAULT_CONFIG: MnemoConfig = {
+  priorPersonaPath: "~/.claude/CLAUDE.md",
   mergeThresholdChars: 1000,
   maxQueuedBatches: 3,
   keepaliveLeadMs: 60_000,

@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite";
 
 import { BUILD_ID } from "../shared/build-id";
 import { createDatabase } from "../db/database";
+import { createDiaryStateStore } from "../db/diary-state";
 import {
   getSession,
   updateCompactAnchor,
@@ -76,6 +77,7 @@ import {
   deriveRequiredTargetIds,
   type WorkUnitShape,
 } from "./derailment";
+import { createDiaryRuntime } from "./diary-runtime";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
 import { buildSessionSummary, recallMemory } from "../mcp/recall";
 
@@ -215,6 +217,13 @@ export interface WorkerCoreDeps {
   db: Database;
   now?: () => number;
   nowMs?: () => number;
+  processDiaryItem?: (item: PendingQueueItem) => Promise<void>;
+  runPersonaMaintenance?: () => Promise<void>;
+  setTimeoutImpl?: (
+    callback: () => void | Promise<void>,
+    delayMs: number,
+  ) => unknown;
+  clearTimeoutImpl?: (handle: unknown) => void;
   pushSessionSummaryPromptImpl?: (
     state: SessionState,
     sessionId: number,
@@ -232,6 +241,8 @@ export interface WorkerCoreDeps {
 }
 
 export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
+  dataRoot?: string;
+  createDiaryRuntimeImpl?: typeof createDiaryRuntime;
   BunServeImpl?: typeof Bun.serve;
   scanAndDrainQueue?: QueueDrain;
   handleFlushImpl?: (sessionId: number) => Promise<void>;
@@ -447,11 +458,23 @@ function pruneBufferedUndoneItems(
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const nowMs = deps.nowMs ?? Date.now;
+  const setTimeoutImpl =
+    deps.setTimeoutImpl ??
+    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
+      setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl =
+    deps.clearTimeoutImpl ??
+    ((handle: unknown): void =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>));
   const logger = deps.logger ?? console;
   const config = deps.config ?? DEFAULT_CONFIG;
   const sessions = new Map<number, SessionState>();
   const buffers = new Map<number, BufferState>();
   const compactingSessions = new Set<number>();
+  const diaryStateStore = createDiaryStateStore(deps.db);
+  let persistentRetryTimer: { handle: unknown; dueEpoch: number } | null = null;
+  let diaryContinuationTimer: unknown | null = null;
+  let globalScanInFlight: Promise<void> | null = null;
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
@@ -1582,8 +1605,107 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  async function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
+  function schedulePersistentRetry(): void {
+    if (!deps.processDiaryItem && !deps.runPersonaMaintenance) {
+      return;
+    }
+
+    const diaryDueEpoch = deps.processDiaryItem
+      ? (deps.db
+          .query<{ nextAttemptEpoch: number | null }, []>(
+            `
+              SELECT MIN(d.next_attempt_epoch) AS nextAttemptEpoch
+              FROM diary_day_state d
+              WHERE d.terminal = 0
+                AND d.next_attempt_epoch IS NOT NULL
+                AND EXISTS (
+                  SELECT 1
+                  FROM pending_queue q
+                  WHERE q.kind = 'diary'
+                    AND q.claimed_at_epoch IS NULL
+                    AND q.target_id = CAST(REPLACE(d.date, '-', '') AS INTEGER)
+                )
+            `,
+          )
+          .get()?.nextAttemptEpoch ?? null)
+      : null;
+    const personaDueEpoch = deps.runPersonaMaintenance
+      ? (deps.db
+          .query<{ nextAttemptEpoch: number | null }, []>(
+            `
+              SELECT MIN(next_attempt_epoch) AS nextAttemptEpoch
+              FROM persona_operation_state
+              WHERE terminal = 0
+                AND next_attempt_epoch IS NOT NULL
+            `,
+          )
+          .get()?.nextAttemptEpoch ?? null)
+      : null;
+    let dueEpoch: number | null = null;
+    for (const candidate of [diaryDueEpoch, personaDueEpoch]) {
+      if (candidate !== null && (dueEpoch === null || candidate < dueEpoch)) {
+        dueEpoch = candidate;
+      }
+    }
+
+    if (dueEpoch === null) {
+      if (persistentRetryTimer) {
+        clearTimeoutImpl(persistentRetryTimer.handle);
+        persistentRetryTimer = null;
+      }
+      return;
+    }
+
+    if (persistentRetryTimer?.dueEpoch === dueEpoch) {
+      return;
+    }
+    if (persistentRetryTimer) {
+      clearTimeoutImpl(persistentRetryTimer.handle);
+    }
+
+    const handle = setTimeoutImpl(
+      async () => {
+        if (persistentRetryTimer?.dueEpoch !== dueEpoch) {
+          return;
+        }
+        persistentRetryTimer = null;
+        await scanAndDrainQueue();
+      },
+      Math.max(0, dueEpoch - now()) * 1_000,
+    );
+    persistentRetryTimer = { handle, dueEpoch };
+  }
+
+  function scheduleDiaryContinuation(): void {
+    if (!deps.processDiaryItem) {
+      return;
+    }
+
+    if (!diaryStateStore.hasReadyDiaryItem(now())) {
+      if (diaryContinuationTimer !== null) {
+        clearTimeoutImpl(diaryContinuationTimer);
+        diaryContinuationTimer = null;
+      }
+      return;
+    }
+    if (diaryContinuationTimer !== null) {
+      return;
+    }
+
+    let handle: unknown;
+    handle = setTimeoutImpl(async () => {
+      if (diaryContinuationTimer !== handle) {
+        return;
+      }
+      diaryContinuationTimer = null;
+      await scanAndDrainQueue();
+    }, 0);
+    diaryContinuationTimer = handle;
+  }
+
+  async function drainQueue(sessionFilter?: number): Promise<void> {
     const skippedSeqs = new Set<number>();
+    let diaryProcessed = false;
 
     while (true) {
       const item = claimNextItem(deps.db, now(), {
@@ -1594,6 +1716,40 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       });
 
       if (!item) {
+        if (
+          sessionFilter === undefined &&
+          deps.processDiaryItem &&
+          !diaryProcessed
+        ) {
+          const diaryItem = diaryStateStore.claimNextDiaryItem(now());
+          if (diaryItem) {
+            diaryProcessed = true;
+            try {
+              await deps.processDiaryItem(diaryItem);
+            } catch (error) {
+              logger.error?.("diary queue item failed", {
+                seq: diaryItem.seq,
+                targetId: diaryItem.targetId,
+                error,
+              });
+            }
+            continue;
+          }
+        }
+        if (sessionFilter === undefined) {
+          if (deps.runPersonaMaintenance) {
+            try {
+              await deps.runPersonaMaintenance();
+            } catch (error) {
+              logger.error?.("persona maintenance failed", { error });
+            }
+          }
+          schedulePersistentRetry();
+          // A long persona call must not let the timer fire while this global
+          // scan is still in flight: the dedupe path would return this same
+          // promise and lose the continuation.
+          scheduleDiaryContinuation();
+        }
         return;
       }
 
@@ -1646,6 +1802,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         });
       }
     }
+  }
+
+  function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
+    if (sessionFilter !== undefined) {
+      return drainQueue(sessionFilter);
+    }
+    if (globalScanInFlight) {
+      return globalScanInFlight;
+    }
+
+    const scan = drainQueue();
+    const tracked = scan.finally(() => {
+      if (globalScanInFlight === tracked) {
+        globalScanInFlight = null;
+      }
+    });
+    globalScanInFlight = tracked;
+    return tracked;
   }
 
   async function drainSessionCompletely(sessionDbId: number): Promise<void> {
@@ -2263,6 +2437,14 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
+  const diaryRuntime =
+    deps.processDiaryItem || deps.runPersonaMaintenance
+      ? null
+      : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
+          db,
+          dataRoot: deps.dataRoot ?? DATA_DIR,
+          nowEpoch: deps.now,
+        });
 
   const core = createWorkerCore({
     db,
@@ -2274,6 +2456,15 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl,
+    processDiaryItem:
+      deps.processDiaryItem ?? diaryRuntime?.processDiaryItem,
+    runPersonaMaintenance:
+      deps.runPersonaMaintenance ??
+      (diaryRuntime
+        ? async () => {
+            await diaryRuntime.runPersonaMaintenance();
+          }
+        : undefined),
     logger: deps.logger ?? createLogger("MNEMOSYNE"),
   });
 

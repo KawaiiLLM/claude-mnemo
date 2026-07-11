@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { unlinkSync, writeFileSync } from "node:fs";
 
 import {
+  kickWorkerFast,
   notifyWorkerCompact,
   notifyWorkerFlush,
   notifyWorkerWake,
@@ -27,6 +28,118 @@ function staleHealthResponseWithPid(pid: number): Response {
 }
 
 describe("worker client", () => {
+  test("kickWorkerFast immediately wakes a compatible worker without spawning or polling readiness", async () => {
+    const calls: Array<{ url: string; method: string }> = [];
+    const timeoutCalls: number[] = [];
+    const originalTimeout = AbortSignal.timeout;
+    const fetchImpl = mock(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, method: init?.method ?? "GET" });
+      if (url.endsWith("/health")) {
+        return healthResponse();
+      }
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
+    const setTimeoutImpl = mock(() => 0 as unknown as NodeJS.Timeout) as unknown as typeof setTimeout;
+
+    (AbortSignal as typeof AbortSignal & {
+      timeout: (ms: number) => AbortSignal;
+    }).timeout = ((ms: number) => {
+      timeoutCalls.push(ms);
+      return new AbortController().signal;
+    }) as typeof AbortSignal.timeout;
+
+    try {
+      await kickWorkerFast({
+        fetchImpl,
+        spawnImpl,
+        setTimeoutImpl,
+      });
+    } finally {
+      (AbortSignal as typeof AbortSignal & {
+        timeout: typeof AbortSignal.timeout;
+      }).timeout = originalTimeout;
+    }
+
+    expect(calls.map(({ url, method }) => ({ path: new URL(url).pathname, method }))).toEqual([
+      { path: "/health", method: "GET" },
+      { path: "/wake", method: "POST" },
+    ]);
+    expect(timeoutCalls).toEqual([3_000, 500]);
+    expect(spawnImpl).not.toHaveBeenCalled();
+    expect(setTimeoutImpl).not.toHaveBeenCalled();
+  });
+
+  test("kickWorkerFast immediately spawns once when the worker is down without waking or polling readiness", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        throw new Error("connection refused");
+      }
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    const unref = mock(() => {});
+    const spawnImpl = mock(() => ({ unref })) as unknown as typeof import("node:child_process").spawn;
+    const setTimeoutImpl = mock(() => 0 as unknown as NodeJS.Timeout) as unknown as typeof setTimeout;
+
+    await kickWorkerFast(
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: () => true,
+        setTimeoutImpl,
+      },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(spawnImpl.mock.calls[0]?.[0]).toBe("node");
+    expect(spawnImpl.mock.calls[0]?.[1]).toEqual([
+      "/tmp/plugin-root/scripts/bun-runner.js",
+      "/tmp/plugin-root/scripts/worker.cjs",
+    ]);
+    expect(spawnImpl.mock.calls[0]?.[2]).toMatchObject({
+      detached: true,
+      stdio: "ignore",
+    });
+    expect(unref).toHaveBeenCalledTimes(1);
+    expect(setTimeoutImpl).not.toHaveBeenCalled();
+  });
+
+  test("kickWorkerFast terminates a stale worker by reported pid then immediately spawns once", async () => {
+    const fetchImpl = mock(async (input: string | URL) => {
+      if (String(input).endsWith("/health")) {
+        return staleHealthResponseWithPid(4321);
+      }
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    const killImpl = mock(() => true) as unknown as typeof process.kill;
+    const unref = mock(() => {});
+    const spawnImpl = mock(() => ({ unref })) as unknown as typeof import("node:child_process").spawn;
+    const setTimeoutImpl = mock(() => 0 as unknown as NodeJS.Timeout) as unknown as typeof setTimeout;
+
+    await kickWorkerFast(
+      {
+        fetchImpl,
+        killImpl,
+        spawnImpl,
+        existsSyncImpl: () => true,
+        setTimeoutImpl,
+      },
+      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toEndWith("/health");
+    expect(killImpl).toHaveBeenCalledTimes(1);
+    expect(killImpl).toHaveBeenCalledWith(4321, "SIGTERM");
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(unref).toHaveBeenCalledTimes(1);
+    expect(setTimeoutImpl).not.toHaveBeenCalled();
+  });
+
   test("resolveWorkerScriptPaths uses CLAUDE_PLUGIN_ROOT when present", () => {
     expect(
       resolveWorkerScriptPaths({
