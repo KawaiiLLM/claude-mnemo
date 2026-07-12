@@ -279,8 +279,8 @@ describe("createPersonaMaintainer", () => {
   test("rejects rendered profile and experience bodies over their commit budgets", () => {
     const request: PersonaRunRequest = { op: "rebuild", diaries: [{ date: "2026-07-10", content: "- source [S1/T1]" }] };
     const raw = [
-      "===USER_PROFILE_V1_BEGIN===", `${validUserProfile}\n- ${"汉".repeat(900)} [S1/T1]`, "===USER_PROFILE_V1_END===",
-      "===EXPERIENCE_V1_BEGIN===", `${validExperience}\n- ${"汉".repeat(1_200)} [S1/T1]`, "===EXPERIENCE_V1_END===",
+      "===USER_PROFILE_V1_BEGIN===", `${validUserProfile}\n- ${"汉".repeat(1_300)} [S1/T1]`, "===USER_PROFILE_V1_END===",
+      "===EXPERIENCE_V1_BEGIN===", `${validExperience}\n- ${"汉".repeat(2_300)} [S1/T1]`, "===EXPERIENCE_V1_END===",
     ].join("\n");
     expect(() => validatePersonaEnvelopeForRequest(raw, request)).toThrow("profile_budget");
     expect(() => validatePersonaEnvelopeForRequest(raw, request)).toThrow("experience_budget");
@@ -1087,6 +1087,194 @@ describe("createPersonaMaintainer", () => {
         "persona-terminal-operation",
       );
       await expect(fileStore.loadCurrentPersona()).rejects.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("supersedes a stale terminal tombstone when new diary days await a rebase", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-persona-supersede-"));
+    roots.push(dataRoot);
+    const stateStore = createDiaryStateStore(db);
+    const fileStore = new DiaryFileStore(dataRoot);
+    stateStore.initializeBootstrap("2026-07-11");
+
+    const settlePendingDiary = async (date: string, promptNumber: number) => {
+      const watermark = `watermark-${date}`;
+      const indexHook = `supersede ${date}`;
+      const bytes = compileDiaryDocument({
+        date,
+        sessions: ["S1"],
+        projects: ["/projects/mnemo"],
+        watermark,
+        indexHook,
+        body: [
+          "## 工作",
+          `- 回填历史日记 ${date} [S1/T${promptNumber}]`,
+          "## 人物",
+          `- 记录 ${date} 人物信号 [S1/T${promptNumber}]`,
+          "## 反思",
+          `- 陈旧墓碑不应永久阻塞 [S1/T${promptNumber}]`,
+
+          "- 无",
+        ].join("\n"),
+      });
+      const fileSha256 = createHash("sha256").update(bytes).digest("hex");
+      stateStore.enqueueDay({ date, enqueuedAtEpoch: 100 + promptNumber });
+      const claimed = stateStore.claimNextDiaryItem(200 + promptNumber)!;
+      await fileStore.commitDiary(date, bytes);
+      stateStore.settleDay({
+        date,
+        queueSeq: claimed.seq,
+        watermark,
+        fileSha256,
+        indexHook,
+        settledAtEpoch: 300 + promptNumber,
+      });
+      stateStore.commitDayState({
+        date,
+        watermark,
+        fileSha256,
+        indexHook,
+        settledAtEpoch: 400 + promptNumber,
+        pendingRebase: true,
+      });
+      return new TextDecoder().decode(bytes);
+    };
+
+    // The older day was already folded into the baseline; the newer day is a
+    // backfilled diary awaiting a rebase — the world the tombstone never saw.
+    const olderDiary = await settlePendingDiary("2026-07-09", 1);
+    const newerDiary = await settlePendingDiary("2026-07-10", 2);
+
+    const baseUserProfile =
+      "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 用户重视可追溯的历史 [S1/T1]\n";
+    const baseExperience =
+      "## 项目\n## 通用\n- 我记得旧日记的基线印象 [S1/T1]\n";
+    await fileStore.commitPersonaGeneration({
+      generation: 1,
+      manifest: {
+        operation_id: "baseline-op",
+        op: "rebuild",
+        generation: 1,
+        source_diary_date: "2026-07-09",
+        last_folded_date_after: "2026-07-09",
+        folds_since_rebase_after: 0,
+        consumed_pending_dates: [],
+        partial_missing_dates_after: [],
+      },
+      userProfile: baseUserProfile,
+      experience: baseExperience,
+    });
+    stateStore.commitPersonaCursor({
+      lastFoldedDate: "2026-07-09",
+      lastAppliedOperationId: "baseline-op",
+      foldsSinceRebase: 0,
+      rebuildRequested: false,
+    });
+
+    // Fabricate the deadlocking tombstone: a rebase that only ever attempted the
+    // older day and died on the pre-0.3.1 executable-path crash.
+    stateStore.beginPersonaOperation({
+      operationId: "stale-tombstone",
+      op: "rebase",
+      baseGeneration: 1,
+      targetGeneration: 2,
+      inputDatesSnapshot: ["2026-07-09"],
+    });
+    stateStore.terminalPersonaOperation(
+      "stale-tombstone",
+      'The "url" argument must be of type string. Received undefined',
+    );
+    expect(stateStore.getPersonaOperation()).toMatchObject({
+      operationId: "stale-tombstone",
+      terminal: true,
+    });
+
+    const rebasedUserProfile =
+      "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 用户重视经修正且可追溯的事实 [S1/T1]\n";
+    const rebasedExperience =
+      "## 项目\n## 通用\n- 我已吸收回填的历史日记 [S1/T2]\n";
+    const requests: PersonaRunRequest[] = [];
+    let agentCalls = 0;
+    const maintainer = createPersonaMaintainer({
+      stateStore,
+      fileStore,
+      operationId: () => "persona-fresh",
+      async runPersona(request) {
+        agentCalls += 1;
+        requests.push(request);
+        return [
+          "===USER_PROFILE_V1_BEGIN===",
+          rebasedUserProfile,
+          "===USER_PROFILE_V1_END===",
+          "===EXPERIENCE_V1_BEGIN===",
+          rebasedExperience,
+          "===EXPERIENCE_V1_END===",
+        ].join("\n");
+      },
+    });
+
+    try {
+      // Old behaviour returned "blocked" without ever calling the agent.
+      expect(await maintainer.runPersonaMaintenance()).toBe("completed");
+      expect(agentCalls).toBe(1);
+      expect(requests[0]).toMatchObject({ op: "rebase" });
+      expect(
+        (requests[0] as { diaries: Array<{ date: string; content: string }> })
+          .diaries.map((diary) => diary.date),
+      ).toEqual(["2026-07-09", "2026-07-10"]);
+      expect(
+        (requests[0] as { diaries: Array<{ date: string; content: string }> })
+          .diaries.map((diary) => diary.content),
+      ).toEqual([olderDiary, newerDiary]);
+      // The tombstone is gone; a fresh generation folded the backfilled day.
+      expect(stateStore.getPersonaOperation()).toBeNull();
+      expect(await fileStore.loadCurrentPersona()).toMatchObject({
+        generation: 2,
+        manifest: { operation_id: "persona-fresh", op: "rebase" },
+        userProfile: rebasedUserProfile,
+        experience: rebasedExperience,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("keeps a terminal tombstone blocked when no new work has appeared", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-persona-still-blocked-"));
+    roots.push(dataRoot);
+    const stateStore = createDiaryStateStore(db);
+    const fileStore = new DiaryFileStore(dataRoot);
+    stateStore.initializeBootstrap("2026-07-11");
+
+    stateStore.beginPersonaOperation({
+      operationId: "stuck-tombstone",
+      op: "rebuild",
+      inputDatesSnapshot: ["2026-07-10"],
+    });
+    stateStore.terminalPersonaOperation("stuck-tombstone", "persona failure 3");
+
+    let agentCalls = 0;
+    const maintainer = createPersonaMaintainer({
+      stateStore,
+      fileStore,
+      async runPersona() {
+        agentCalls += 1;
+        throw new Error("agent must not run for a still-blocked tombstone");
+      },
+    });
+
+    try {
+      expect(await maintainer.runPersonaMaintenance()).toBe("blocked");
+      expect(agentCalls).toBe(0);
+      expect(stateStore.getPersonaOperation()?.operationId).toBe(
+        "stuck-tombstone",
+      );
     } finally {
       db.close();
     }

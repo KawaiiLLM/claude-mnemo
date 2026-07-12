@@ -1,7 +1,7 @@
 import { estimateDiaryTokens } from "./domain";
 
-export const PROFILE_PUBLISHED_TOKEN_BUDGET = 1_000;
-export const EXPERIENCE_PUBLISHED_TOKEN_BUDGET = 1_400;
+export const PROFILE_PUBLISHED_TOKEN_BUDGET = 1_500;
+export const EXPERIENCE_PUBLISHED_TOKEN_BUDGET = 2_800;
 
 export function renderPersonaProfile(userProfile: string): string {
   return ["## Persona", "", userProfile.trim()].join("\n");

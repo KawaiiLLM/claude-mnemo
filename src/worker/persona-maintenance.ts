@@ -540,7 +540,7 @@ export function createPersonaMaintainer(
     async runPersonaMaintenance(): Promise<PersonaMaintenanceResult> {
       const nowEpoch =
         options.nowEpoch?.() ?? Math.floor(Date.now() / 1_000);
-      const activeOperation = options.stateStore.getPersonaOperation();
+      let activeOperation = options.stateStore.getPersonaOperation();
       if (activeOperation !== null) {
         let publishedPersona = null;
         try {
@@ -579,7 +579,24 @@ export function createPersonaMaintainer(
           return "completed";
         }
         if (activeOperation.terminal) {
-          return "blocked";
+          // A terminal tombstone must not deadlock persona maintenance forever
+          // (the analogue of the diary terminal-day trap). Discard it only when
+          // its frozen inputs are stale — diary days now await a rebase that this
+          // operation never attempted, or a fresh rebuild was requested after it
+          // failed. Otherwise stay blocked so a genuinely unrecoverable operation
+          // does not hot-loop the agent.
+          const terminalSnapshot = new Set(activeOperation.inputDatesSnapshot);
+          const hasNewPendingWork = options.stateStore
+            .listPendingRebaseDays()
+            .some((day) => !terminalSnapshot.has(day.date));
+          const rebuildRequestedAfterFailure =
+            options.stateStore.getPersonaCursor().rebuildRequestEpoch >
+            activeOperation.rebuildRequestEpoch;
+          if (!hasNewPendingWork && !rebuildRequestedAfterFailure) {
+            return "blocked";
+          }
+          options.stateStore.completePersonaOperation(activeOperation.operationId);
+          activeOperation = null;
         }
       }
 

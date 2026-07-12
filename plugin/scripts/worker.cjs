@@ -50,7 +50,7 @@ var import_node_os5 = require("node:os");
 var import_node_path9 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.3.1-mrh9xrmc" : "dev";
+var BUILD_ID = true ? "0.3.2-mrhfjb0x" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -43034,8 +43034,8 @@ var import_node_os3 = require("node:os");
 var import_node_path7 = require("node:path");
 
 // src/diary/persona-render.ts
-var PROFILE_PUBLISHED_TOKEN_BUDGET = 1e3;
-var EXPERIENCE_PUBLISHED_TOKEN_BUDGET = 1400;
+var PROFILE_PUBLISHED_TOKEN_BUDGET = 1500;
+var EXPERIENCE_PUBLISHED_TOKEN_BUDGET = 2800;
 function renderPersonaProfile(userProfile) {
   return ["## Persona", "", userProfile.trim()].join("\n");
 }
@@ -43617,7 +43617,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.3.1",
+        version: "0.3.2",
         tools: [
           toolImpl(
             "read_turn",
@@ -44032,7 +44032,7 @@ function createPersonaMaintainer(options) {
   return {
     async runPersonaMaintenance() {
       const nowEpoch = options.nowEpoch?.() ?? Math.floor(Date.now() / 1e3);
-      const activeOperation = options.stateStore.getPersonaOperation();
+      let activeOperation = options.stateStore.getPersonaOperation();
       if (activeOperation !== null) {
         let publishedPersona = null;
         try {
@@ -44066,7 +44066,14 @@ function createPersonaMaintainer(options) {
           return "completed";
         }
         if (activeOperation.terminal) {
-          return "blocked";
+          const terminalSnapshot = new Set(activeOperation.inputDatesSnapshot);
+          const hasNewPendingWork = options.stateStore.listPendingRebaseDays().some((day) => !terminalSnapshot.has(day.date));
+          const rebuildRequestedAfterFailure = options.stateStore.getPersonaCursor().rebuildRequestEpoch > activeOperation.rebuildRequestEpoch;
+          if (!hasNewPendingWork && !rebuildRequestedAfterFailure) {
+            return "blocked";
+          }
+          options.stateStore.completePersonaOperation(activeOperation.operationId);
+          activeOperation = null;
         }
       }
       const cursor = options.stateStore.getPersonaCursor();

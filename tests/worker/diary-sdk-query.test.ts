@@ -187,7 +187,7 @@ describe("diary SDK query", () => {
     expect(createSdkMcpServerImpl).toHaveBeenCalledTimes(1);
     expect(serverDefinition).toMatchObject({
       name: "diary",
-      version: "0.3.1",
+      version: "0.3.2",
     });
     expect(toolImpl.mock.calls.map(([name]) => name)).toEqual([
       "read_turn",
