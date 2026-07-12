@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.3.2", () => {
+  test("release metadata is consistently bumped to 0.3.3", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -40,11 +40,11 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.3.2");
-    expect(pluginManifest.version).toBe("0.3.2");
-    expect(marketplace.metadata?.version).toBe("0.3.2");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.3.2");
-    expect(diarySdkQuery).toContain('version: "0.3.2"');
+    expect(packageJson.version).toBe("0.3.3");
+    expect(pluginManifest.version).toBe("0.3.3");
+    expect(marketplace.metadata?.version).toBe("0.3.3");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.3.3");
+    expect(diarySdkQuery).toContain('version: "0.3.3"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -125,6 +125,9 @@ describe("release artifacts", () => {
     // logic. These content sentinels are stable identifiers from shipped
     // features; if `bun run build` was skipped after editing src/, a missing one
     // fails here instead of shipping a stale bundle.
+    const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
+    expect(hookCommand).toContain("renderPersonaDocumentInjection");
+
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [
       "needsReprime", // compact re-prime, both paths
@@ -132,7 +135,10 @@ describe("release artifacts", () => {
       'audience: "worker"', // recall worker DB-id surface
       "dbid:T", // DB-id token the worker recall emits
       "OUTCOME_TAGS", // milestone marker logic
-      "Maintain the two person-memory documents", // diary runtime
+      "workerRecallInputShape", // uncapped worker recall schema
+      "allowedDocumentSubtrees", // read_doc request scope
+      "session_manifest", // diary pull-material checklist
+      "\\u5EFA\\u8BAE\\u7EF4\\u5EA6\\uFF08\\u975E\\u5F3A\\u5236\\uFF0C\\u53EF\\u81EA\\u7531\\u589E\\u5220\\u6539\\u7EC4\\u7EC7\\uFF09", // free-form persona prompt (escaped bundle bytes)
       "===DIARY_V2_BEGIN===", // canonical prompt wire format
       "Persona CURRENT re-validation failed", // persona crash recovery
       "stripIndexHookDatePrefix", // 0.3.1 index-hook date-prefix strip
@@ -149,6 +155,7 @@ describe("release artifacts", () => {
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
       "buildCorrectionGraph", // corrector-promotion / victim-demotion selection
       "json_each", // tag: facet — json_each exact-match clause
+      "workerRecallInputShape", // worker recall schema shared by SDK agents
     ]) {
       expect(mcpServer).toContain(marker);
     }

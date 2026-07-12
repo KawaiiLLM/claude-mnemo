@@ -6,7 +6,9 @@ import {
   timelineInputSchema,
   recallInputSchema,
   rememberInputSchema,
+  workerRecallInputShape,
 } from "../../src/mcp/definitions";
+import { z } from "zod";
 
 describe("recallInputSchema", () => {
   it("accepts page + pageSize + truncate and rejects limit + depth=full", () => {
@@ -38,6 +40,12 @@ describe("recallInputSchema", () => {
     expect(() =>
       recallInputSchema.parse({ id: "S1", truncate: 0 }),
     ).toThrow();
+  });
+});
+
+describe("workerRecallInputShape", () => {
+  it("accepts truncate above the main-session cap", () => {
+    expect(z.object(workerRecallInputShape).strict().parse({ truncate: 5000 })).toEqual({ truncate: 5000 });
   });
 });
 

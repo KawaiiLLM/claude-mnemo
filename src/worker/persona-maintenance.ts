@@ -1,13 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { isAbsolute, normalize, resolve } from "node:path";
 
 import type { DiaryStateStore } from "../db/diary-state";
 import {
   collectDiaryCitationRefs,
   diaryDayOf,
   estimateDiaryTokens,
-  findDiaryCitationGroups,
 } from "../diary/domain";
 import type { DiaryFileStore, PersonaManifest } from "../diary/file-store";
 import { validateAndMarkStale } from "../diary/validate-and-mark-stale";
@@ -16,6 +13,12 @@ import {
   measurePublishedPersona,
   PROFILE_PUBLISHED_TOKEN_BUDGET,
 } from "../diary/persona-render";
+import {
+  createCitationLineLocator,
+  stripInvalidCitations,
+  type CitationValidationReport,
+} from "../shared/citation-validation";
+import { parseMarkdownSections } from "../shared/markdown-sections";
 
 export interface PersonaDiaryInput {
   date: string;
@@ -70,6 +73,8 @@ export interface CreatePersonaMaintainerOptions {
   requestGateTokens?: number;
   requestOverheadTokens?: number;
   accumulatorReserveTokens?: number;
+  /** Additional real turn refs available through persona worker tools. */
+  allowedTurnRefs?: () => ReadonlySet<string>;
 }
 
 export type PersonaMaintenanceResult =
@@ -236,15 +241,6 @@ function readPublishedOperationState(manifest: PersonaManifest): {
   };
 }
 
-const USER_PROFILE_SECTION_HEADINGS = [
-  "## 身份与背景",
-  "## 专长与判断力",
-  "## 品味与兴趣",
-  "## 沟通风格",
-  "## 协作偏好",
-] as const;
-const EXPERIENCE_SECTION_HEADINGS = ["## 项目", "## 通用"] as const;
-
 function readEnvelopeBlock(
   raw: string,
   name: "USER_PROFILE" | "EXPERIENCE",
@@ -265,21 +261,8 @@ function readEnvelopeBlock(
   }
 
   const content = raw.slice(contentStart, contentEnd);
-  if (content.length > 16 * 1_024) {
-    throw new Error(`persona block exceeds 16K characters: ${name}`);
-  }
-  const expectedHeadings =
-    name === "USER_PROFILE"
-      ? USER_PROFILE_SECTION_HEADINGS
-      : EXPERIENCE_SECTION_HEADINGS;
-  const actualHeadings = content
-    .split("\n")
-    .filter((line) => /^##\s/.test(line));
-  if (
-    actualHeadings.length !== expectedHeadings.length ||
-    actualHeadings.some((heading, index) => heading !== expectedHeadings[index])
-  ) {
-    throw new Error(`invalid persona section headings: ${name}`);
+  if (!parseMarkdownSections(content).some((section) => section.level >= 1)) {
+    throw new Error(`missing persona heading: ${name}`);
   }
   return content;
 }
@@ -314,47 +297,6 @@ class PersonaValidationError extends Error {
   }
 }
 
-function normalizeProjectPath(value: string): string | null {
-  const expanded = value === "~" ? homedir() : value.startsWith("~/")
-    ? resolve(homedir(), value.slice(2))
-    : value;
-  if (!isAbsolute(expanded)) return null;
-  const normalized = normalize(expanded);
-  return normalized === "/" ? normalized : normalized.replace(/[\\/]+$/, "");
-}
-
-function diaryProjectPaths(content: string): string[] {
-  const lines = content.split("\n");
-  const end = lines.indexOf("---", 1);
-  const line = end < 0 ? undefined : lines.slice(1, end).find((item) => item.startsWith("projects: "));
-  if (!line) return [];
-  try {
-    const parsed: unknown = JSON.parse(line.slice("projects: ".length));
-    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string")
-      ? parsed
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-function personaProjectPaths(experience: string): string[] {
-  const paths: string[] = [];
-  for (const line of experience.split("\n")) {
-    const match = line.match(/^\s+- 路径：(.*)$/);
-    if (!match) continue;
-    try {
-      const parsed: unknown = JSON.parse(match[1]!);
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) if (typeof item === "string") paths.push(item);
-      }
-    } catch {
-      // Malformed baseline paths contribute nothing to an allow-set.
-    }
-  }
-  return paths;
-}
-
 function requestSources(request: PersonaRunRequest): string[] {
   const sources = request.diaries.map((diary) => diary.content);
   if ("previousPersona" in request) {
@@ -366,147 +308,45 @@ function requestSources(request: PersonaRunRequest): string[] {
   return sources;
 }
 
-export function buildPersonaAllowSets(request: PersonaRunRequest): {
-  allowedTurnRefs: Set<string>;
-  allowedProjectPaths: Set<string>;
-} {
-  const allowedProjectPaths = new Set<string>();
-  for (const diary of request.diaries) {
-    for (const path of diaryProjectPaths(diary.content)) {
-      const normalized = normalizeProjectPath(path);
-      if (normalized) allowedProjectPaths.add(normalized);
-    }
-  }
-  const persona = "previousPersona" in request
-    ? request.previousPersona
-    : "accumulator" in request
-      ? request.accumulator
-      : undefined;
-  if (persona) {
-    for (const path of personaProjectPaths(persona.experience)) {
-      const normalized = normalizeProjectPath(path);
-      if (normalized) allowedProjectPaths.add(normalized);
-    }
-  }
-  return {
-    allowedTurnRefs: collectDiaryCitationRefs(requestSources(request)),
-    allowedProjectPaths,
-  };
-}
-
-function validateCitation(
-  line: string,
+function stripPersonaDocumentCitations(
+  document: string,
+  documentName: string,
   allowedRefs: ReadonlySet<string>,
-): string | null {
-  const groups = findDiaryCitationGroups(line);
-  if (groups.length !== 1 || groups[0]!.refs.length === 0) return "citation_group";
-  if (groups[0]!.refs.some((ref) => !allowedRefs.has(ref))) return "citation_not_allowed";
-  return null;
+) {
+  const lines = document.split("\n");
+  const sectionByLine: string[] = [];
+  let mappedLine = 0;
+  for (const section of parseMarkdownSections(document)) {
+    if (section.level >= 1) {
+      sectionByLine[mappedLine] = `${documentName}/${section.title}`;
+      mappedLine += 1;
+    }
+    for (let index = 0; index < section.bodyLines.length; index += 1) {
+      sectionByLine[mappedLine] = section.level >= 1
+        ? `${documentName}/${section.title}`
+        : documentName;
+      mappedLine += 1;
+    }
+  }
+  const locateLine = createCitationLineLocator(document);
+  return stripInvalidCitations(document, allowedRefs, (citationOffset) => {
+    const { lineIndex, line } = locateLine(citationOffset);
+    return { section: sectionByLine[lineIndex] ?? documentName, line };
+  });
 }
 
-function validatePersonaOutput(
+function sanitizePersonaOutput(
   persona: { userProfile: string; experience: string },
   request: PersonaRunRequest,
-): void {
-  const { allowedTurnRefs, allowedProjectPaths } = buildPersonaAllowSets(request);
+  additionalAllowedTurnRefs: ReadonlySet<string> = new Set(),
+): { persona: { userProfile: string; experience: string }; report: CitationValidationReport } {
+  const allowedTurnRefs = collectDiaryCitationRefs(requestSources(request));
+  for (const ref of additionalAllowedTurnRefs) allowedTurnRefs.add(ref);
+  const profile = stripPersonaDocumentCitations(persona.userProfile, "USER_PROFILE", allowedTurnRefs);
+  const experience = stripPersonaDocumentCitations(persona.experience, "EXPERIENCE", allowedTurnRefs);
+  const sanitized = { userProfile: profile.text, experience: experience.text };
   const errors: PersonaValidatorFeedback["errors"] = [];
-  const add = (code: string, entryIndex?: number) => {
-    const existing = errors.find((error) => error.code === code);
-    if (entryIndex === undefined) {
-      if (!existing) errors.push({ code });
-    } else if (existing) {
-      existing.entryIndexes = [...new Set([...(existing.entryIndexes ?? []), entryIndex])];
-    } else errors.push({ code, entryIndexes: [entryIndex] });
-  };
-
-  let profileEntry = 0;
-  for (const line of persona.userProfile.split("\n")) {
-    if (line === "" || line.startsWith("## ")) continue;
-    if (!line.startsWith("- ")) add("profile_shape", profileEntry);
-    else {
-      const code = validateCitation(line, allowedTurnRefs);
-      if (code) add(code, profileEntry);
-      profileEntry += 1;
-    }
-  }
-
-  const lines = persona.experience.split("\n");
-  const projectStart = lines.indexOf("## 项目") + 1;
-  const generalStart = lines.indexOf("## 通用");
-  const projectLines = lines.slice(projectStart, generalStart);
-  let entryIndex = -1;
-  let block: { paths: string[]; pathCount: number; progress: number; feedback: number } | null = null;
-  const pathOwners = new Map<string, number>();
-  const finishBlock = () => {
-    if (!block) return;
-    if (block.pathCount !== 1 || block.progress !== 1) add("project_shape", entryIndex);
-    for (const path of block.paths) {
-      if (!isAbsolute(path)) {
-        add("project_path_absolute", entryIndex);
-        continue;
-      }
-      const normalized = normalizeProjectPath(path);
-      if (!normalized) add("project_path_absolute", entryIndex);
-      else if (!allowedProjectPaths.has(normalized)) add("project_path_not_allowed", entryIndex);
-      else {
-        const owner = pathOwners.get(normalized);
-        if (owner !== undefined && owner !== entryIndex) {
-          add("project_path_overlap", owner);
-          add("project_path_overlap", entryIndex);
-        } else pathOwners.set(normalized, entryIndex);
-      }
-    }
-  };
-
-  for (const line of projectLines) {
-    if (line === "") continue;
-    if (line.startsWith("- ")) {
-      finishBlock();
-      entryIndex += 1;
-      block = { paths: [], pathCount: 0, progress: 0, feedback: 0 };
-      if (!/^- \*\*[^*\r\n]+\*\*：.+/.test(line)) add("project_lead", entryIndex);
-      const code = validateCitation(line, allowedTurnRefs);
-      if (code) add(code, entryIndex);
-      continue;
-    }
-    if (!block || !line.startsWith("    - ")) {
-      add("project_orphan_or_indent", Math.max(entryIndex, 0));
-      continue;
-    }
-    if (line.startsWith("    - 路径：")) {
-      block.pathCount += 1;
-      try {
-        const parsed: unknown = JSON.parse(line.slice("    - 路径：".length));
-        if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((item) => typeof item === "string")) {
-          add("project_path_json", entryIndex);
-        } else block.paths.push(...parsed);
-      } catch { add("project_path_json", entryIndex); }
-      continue;
-    }
-    if (line.startsWith("    - 进度：")) block.progress += 1;
-    else if (line.startsWith("    - 反馈：")) {
-      block.feedback += 1;
-      if (block.feedback > 2) add("project_feedback_count", entryIndex);
-    } else if (!/^    - \[\d{4}-\d{2}\] /.test(line)) {
-      add("project_child_shape", entryIndex);
-    }
-    const code = validateCitation(line, allowedTurnRefs);
-    if (code) add(code, entryIndex);
-  }
-  finishBlock();
-
-  let generalEntry = 0;
-  for (const line of lines.slice(generalStart + 1)) {
-    if (line === "") continue;
-    if (!line.startsWith("- ")) add("general_shape", generalEntry);
-    else {
-      const code = validateCitation(line, allowedTurnRefs);
-      if (code) add(code, generalEntry);
-      generalEntry += 1;
-    }
-  }
-
-  const measured = measurePublishedPersona(persona);
+  const measured = measurePublishedPersona(sanitized);
   if (measured.profileTokens > PROFILE_PUBLISHED_TOKEN_BUDGET) {
     errors.push({ code: "profile_budget", tokens: measured.profileTokens, limit: PROFILE_PUBLISHED_TOKEN_BUDGET });
   }
@@ -514,6 +354,15 @@ function validatePersonaOutput(
     errors.push({ code: "experience_budget", tokens: measured.experienceTokens, limit: EXPERIENCE_PUBLISHED_TOKEN_BUDGET });
   }
   if (errors.length > 0) throw new PersonaValidationError({ version: 1, errors });
+  return {
+    persona: sanitized,
+    report: {
+      version: 2,
+      total: profile.report.total + experience.report.total,
+      stripped: profile.report.stripped + experience.report.stripped,
+      items: [...profile.report.items, ...experience.report.items],
+    },
+  };
 }
 
 export function validatePersonaEnvelopeForRequest(
@@ -521,8 +370,7 @@ export function validatePersonaEnvelopeForRequest(
   request: PersonaRunRequest,
 ): { userProfile: string; experience: string } {
   const persona = parsePersonaEnvelope(raw);
-  validatePersonaOutput(persona, request);
-  return persona;
+  return sanitizePersonaOutput(persona, request).persona;
 }
 
 function feedbackFromLastError(lastError: string | null | undefined): PersonaValidatorFeedback | undefined {
@@ -573,9 +421,6 @@ export function createPersonaMaintainer(
             consumedPendingDays: activeOperation.consumedPendingDays,
           });
           options.stateStore.completePersonaOperation(activeOperation.operationId);
-          await options.fileStore
-            .prunePersonaGenerations(publishedPersona.generation)
-            .catch((error) => console.error("Failed to prune persona generations", error));
           return "completed";
         }
         if (activeOperation.terminal) {
@@ -786,6 +631,12 @@ export function createPersonaMaintainer(
       const selectedDates = inputSnapshot.diaries.map((diary) => diary.date);
       let nextBatchIndex = activeOperation?.nextBatchIndex ?? 0;
       let accumulator: { userProfile: string; experience: string } | null = null;
+      let validationReport: CitationValidationReport = {
+        version: 2,
+        total: 0,
+        stripped: 0,
+        items: [],
+      };
       if (nextBatchIndex > 0) {
         if (
           activeOperation === null ||
@@ -801,7 +652,7 @@ export function createPersonaMaintainer(
           return "blocked";
         }
         try {
-          accumulator = await options.fileStore.loadPersonaCheckpoint({
+          const checkpoint = await options.fileStore.loadPersonaCheckpoint({
             operationId,
             accumulatorGeneration: activeOperation.accumulatorGeneration,
             accumulatorHash: activeOperation.accumulatorHash,
@@ -809,6 +660,11 @@ export function createPersonaMaintainer(
             checkpointSha256: activeOperation.checkpointSha256,
             nextBatchIndex,
           });
+          accumulator = {
+            userProfile: checkpoint.userProfile,
+            experience: checkpoint.experience,
+          };
+          validationReport = checkpoint.validationReport;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           options.stateStore.terminalPersonaOperation(operationId, message);
@@ -847,13 +703,25 @@ export function createPersonaMaintainer(
             throw new Error("persona request exceeds 150K gate");
           }
           const raw = await options.runPersona(request);
-          accumulator = validatePersonaEnvelopeForRequest(raw, request);
+          const validated = sanitizePersonaOutput(
+            parsePersonaEnvelope(raw),
+            request,
+            options.allowedTurnRefs?.(),
+          );
+          accumulator = validated.persona;
+          validationReport = {
+            version: 2,
+            total: validationReport.total + validated.report.total,
+            stripped: validationReport.stripped + validated.report.stripped,
+            items: [...validationReport.items, ...validated.report.items],
+          };
           nextBatchIndex = batchIndex + 1;
           const pointer = await options.fileStore.commitPersonaCheckpoint({
             operationId,
             accumulatorGeneration: nextBatchIndex,
             nextBatchIndex,
             accumulator,
+            validationReport,
           });
           options.stateStore.advancePersonaCheckpoint({
             operationId,
@@ -900,6 +768,7 @@ export function createPersonaMaintainer(
         folds_since_rebase_after: foldsSinceRebase,
         consumed_pending_dates: consumedPendingDates,
         partial_missing_dates_after: partialMissingDatesAfter,
+        validation_report: validationReport,
       };
 
       await options.fileStore.commitPersonaGeneration({
@@ -916,9 +785,6 @@ export function createPersonaMaintainer(
         consumedPendingDays: inputSnapshot.consumedPendingDays,
       });
       options.stateStore.completePersonaOperation(operationId);
-      await options.fileStore
-        .prunePersonaGenerations(generation)
-        .catch((error) => console.error("Failed to prune persona generations", error));
       return "completed";
     },
   };

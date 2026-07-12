@@ -18,6 +18,13 @@ export const recallInputShape = {
   truncate: z.number().int().min(1).max(2000).optional(),
 };
 
+// SDK workers share recall's public selector grammar, but may request long
+// fields. The main MCP schema above deliberately retains its 2000-char cap.
+export const workerRecallInputShape = {
+  ...recallInputShape,
+  truncate: z.number().int().min(1).optional(),
+};
+
 export const rememberInputShape = {
   id: z.string().optional(),
   type: z.string().optional(),

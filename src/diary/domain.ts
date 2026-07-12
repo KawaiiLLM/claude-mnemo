@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import {
+  createCitationLineLocator,
+  findCitationGroups,
+  stripInvalidCitations,
+  type CitationGroup,
+  type CitationValidationReport,
+} from "../shared/citation-validation";
 
 const UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
 const DIARY_BODY_LIMIT = 64 * 1_024;
@@ -239,34 +246,11 @@ export function compileDiaryDocument(input: CompileDiaryDocumentInput): Uint8Arr
   return new TextEncoder().encode(document);
 }
 
-export interface DiaryCitationGroup {
-  raw: string;
-  refs: string[];
-  index: number;
-}
+export type DiaryCitationGroup = CitationGroup;
 
 /** Finds only bracket groups whose content begins with a full S<n>/T<n> ref. */
 export function findDiaryCitationGroups(text: string): DiaryCitationGroup[] {
-  return [...text.matchAll(/\[(S\d+\/T[^\]\r\n]*)\]/g)].map((match) => {
-    const content = match[1]!;
-    const parts = content.split("，").map((part) => part.trim());
-    const first = parts[0]!.match(/^S(\d+)\/T(\d+)$/);
-    const refs: string[] = [];
-    if (first) {
-      let session = `S${first[1]}`;
-      refs.push(`${session}/T${first[2]}`);
-      for (const part of parts.slice(1)) {
-        const next = part.match(/^(?:S(\d+)\/)?T(\d+)$/);
-        if (!next) {
-          refs.length = 0;
-          break;
-        }
-        if (next[1]) session = `S${next[1]}`;
-        refs.push(`${session}/T${next[2]}`);
-      }
-    }
-    return { raw: match[0], refs, index: match.index };
-  });
+  return findCitationGroups(text);
 }
 
 export function collectDiaryCitationRefs(values: readonly string[]): Set<string> {
@@ -279,18 +263,7 @@ export function collectDiaryCitationRefs(values: readonly string[]): Set<string>
   return refs;
 }
 
-export interface DiaryValidationReportItem {
-  section: DiarySectionName;
-  sha256: string;
-  preview: string;
-}
-
-export interface DiaryValidationReport {
-  version: 1;
-  total: number;
-  deleted: number;
-  items: DiaryValidationReportItem[];
-}
+export type DiaryValidationReport = CitationValidationReport;
 
 export interface ValidatedDiaryCitations {
   ok: true;
@@ -299,98 +272,35 @@ export interface ValidatedDiaryCitations {
   report: DiaryValidationReport;
 }
 
-export interface InvalidDiaryCitations {
-  ok: false;
-  code: "empty_diary" | "excessive_deletions";
-  report: DiaryValidationReport;
-}
-
-export type DiaryCitationValidationResult =
-  | ValidatedDiaryCitations
-  | InvalidDiaryCitations;
-
-function bulletIsValid(bullet: string, allowedRefs: ReadonlySet<string>): boolean {
-  const groups = findDiaryCitationGroups(bullet);
-  if (
-    groups.length !== 1 ||
-    groups[0]!.refs.length === 0 ||
-    groups[0]!.refs.some((ref) => !allowedRefs.has(ref))
-  ) {
-    return false;
-  }
-  const withoutCitation = bullet
-    .replace(groups[0]!.raw, "")
-    .replace(/^- /, "")
-    .replace(/\s/gu, "");
-  return Array.from(withoutCitation).length >= 1;
-}
-
-function bulletTextWithoutCitation(bullet: string): string {
-  let text = bullet.replace(/^- /, "");
-  for (const group of findDiaryCitationGroups(text)) text = text.replace(group.raw, "");
-  return text.replace(/\r?\n/g, "").trim();
-}
+export type DiaryCitationValidationResult = ValidatedDiaryCitations;
 
 export function validateDiaryCitations(
   body: string,
   allowedRefs: ReadonlySet<string>,
   agentIndexHook = "",
 ): DiaryCitationValidationResult {
-  const ast = parseDiaryBody(body);
-  const report: DiaryValidationReport = { version: 1, total: 0, deleted: 0, items: [] };
-  const survivingByBlock = new Map<DiaryBlock, DiaryBullet[]>();
-
-  for (const section of ast) {
-    for (const block of section.blocks) {
-      const surviving: DiaryBullet[] = [];
-      survivingByBlock.set(block, surviving);
-      for (const bullet of block.bullets) {
-        report.total += 1;
-        const completeBullet = bullet.lines.join("\n");
-        if (bulletIsValid(completeBullet, allowedRefs)) {
-          surviving.push(bullet);
-          continue;
-        }
-        report.deleted += 1;
-        if (report.items.length < 20) {
-          report.items.push({
-            section: section.heading.slice(3) as DiarySectionName,
-            sha256: createHash("sha256").update(completeBullet, "utf8").digest("hex"),
-            preview: Array.from(stripDiaryPrivateContent(completeBullet)).slice(0, 80).join(""),
-          });
-        }
+  parseDiaryBody(body);
+  const lines = body.split("\n");
+  const locateLine = createCitationLineLocator(body);
+  const located = stripInvalidCitations(body, allowedRefs, (citationOffset) => {
+    const { lineIndex, line } = locateLine(citationOffset);
+    let section: DiarySectionName = "工作";
+    for (let index = lineIndex; index >= 0; index -= 1) {
+      const heading = lines[index];
+      if (heading?.startsWith("## ")) {
+        section = heading.slice(3) as DiarySectionName;
+        break;
       }
     }
-  }
+    return { section, line };
+  });
 
-  if (report.total === 0) return { ok: false, code: "empty_diary", report };
-  if (report.deleted * 3 > report.total) {
-    return { ok: false, code: "excessive_deletions", report };
-  }
-
-  const output: string[] = [];
-  for (const section of ast) {
-    output.push(section.heading);
-    for (const block of section.blocks) {
-      const surviving = survivingByBlock.get(block)!;
-      if (surviving.length === 0) continue;
-      if (block.guide !== undefined) output.push(block.guide);
-      for (const bullet of surviving) output.push(...bullet.lines);
-    }
-  }
-
-  const indexHook = report.deleted === 0
-    ? agentIndexHook
-    : Array.from(
-        ast.flatMap((section) =>
-          section.blocks.flatMap((block) => {
-            const first = survivingByBlock.get(block)?.[0];
-            return first ? [bulletTextWithoutCitation(first.lines.join("\n"))] : [];
-          }),
-        ).join("；"),
-      ).slice(0, INDEX_HOOK_LIMIT).join("");
-
-  return { ok: true, body: output.join("\n"), indexHook, report };
+  return {
+    ok: true,
+    body: located.text,
+    indexHook: agentIndexHook,
+    report: located.report,
+  };
 }
 
 export type DiaryDocumentValidationResult =

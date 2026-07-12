@@ -1,10 +1,17 @@
 import type { Database } from "bun:sqlite";
 
 import { estimateDiaryTokens, findDiaryCitationGroups } from "./domain";
+import {
+  EXPERIENCE_INJECTION_TOKEN_BUDGET,
+  PERSONA_INJECTION_TOKEN_BUDGET,
+  PROFILE_INJECTION_TOKEN_BUDGET,
+} from "./persona-render";
 
-export const PROFILE_INJECTION_TOKEN_BUDGET = 1_000;
-export const EXPERIENCE_INJECTION_TOKEN_BUDGET = 2_000;
-export const PERSONA_INJECTION_TOKEN_BUDGET = 3_000;
+export {
+  EXPERIENCE_INJECTION_TOKEN_BUDGET,
+  PERSONA_INJECTION_TOKEN_BUDGET,
+  PROFILE_INJECTION_TOKEN_BUDGET,
+};
 
 const PROFILE_HEADINGS = [
   "## 身份与背景",

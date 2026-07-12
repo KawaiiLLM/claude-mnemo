@@ -15,6 +15,7 @@ import {
 } from "../../src/diary/domain";
 import { DiaryFileStore } from "../../src/diary/file-store";
 import { computeDiaryWatermark } from "../../src/diary/domain";
+import { PERSONA_INJECTION_TOKEN_BUDGET } from "../../src/diary/persona-render";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 
 function seedIndexRows(
@@ -216,7 +217,7 @@ describe("SessionStart diary scheduling", () => {
     expect(result.asyncWork).toBeUndefined();
   });
 
-  test("treats an over-budget profile as corrupt without trimming bullets", async () => {
+  test("loads an over-budget profile dynamically without requesting a rebuild", async () => {
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-context-budget-"));
     dataRoots.push(dataRoot);
     const fileStore = new DiaryFileStore(dataRoot);
@@ -265,10 +266,20 @@ describe("SessionStart diary scheduling", () => {
       raw: {},
     });
     const output = result.hookSpecificOutput ?? "";
-    expect(output).not.toContain("## Persona");
-    expect(output).not.toContain("用户条目00");
-    expect(stateStore.getPersonaCursor().rebuildRequested).toBe(true);
+    const profileStart = output.indexOf("## Persona");
+    const experienceStart = output.indexOf("## Experience");
+    const profileBlock = output.slice(profileStart, experienceStart).trim();
+    expect(profileStart).toBeGreaterThan(-1);
+    expect(profileBlock).toContain("用户条目00");
+    expect(profileBlock).toContain(
+      `完整见 ${join(dataRoot, "persona", "generations", "1", "user-profile.md")}）`,
+    );
+    expect(estimateDiaryTokens(profileBlock)).toBeLessThanOrEqual(1_000);
     expect(result.asyncWork).toBeUndefined();
+    const personaBlocks = output.slice(profileStart).trim();
+    expect(estimateDiaryTokens(personaBlocks)).toBeLessThanOrEqual(
+      PERSONA_INJECTION_TOKEN_BUDGET,
+    );
   });
 
   test("renders fourteen UTC+8 daily lines and at most six monthly lines under the experience budget", async () => {

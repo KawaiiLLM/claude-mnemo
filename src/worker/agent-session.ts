@@ -11,7 +11,7 @@ import {
 import {
   MNEMO_ALLOWED_TOOLS,
   MNEMO_TOOL_DESCRIPTIONS,
-  recallInputShape,
+  workerRecallInputShape,
   rememberInputShape,
 } from "../mcp/definitions";
 import {
@@ -102,7 +102,7 @@ export function createMnemoSdkServer(
       deps.toolImpl(
         "recall",
         MNEMO_TOOL_DESCRIPTIONS.recall,
-        recallInputShape,
+        workerRecallInputShape,
         async (args) => handlers.recall(args as Record<string, unknown>),
       ),
     ],

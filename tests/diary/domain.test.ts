@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import {
   compileDiaryDocument,
@@ -115,116 +114,75 @@ describe("citation group grammar", () => {
     expect(findDiaryCitationGroups("[2026-07] 事件 [S1/T2， T3]")).toEqual([{
       raw: "[S1/T2， T3]", refs: ["S1/T2", "S1/T3"], index: 13,
     }]);
+    expect(findDiaryCitationGroups("[S1/Tbad]")).toEqual([{
+      raw: "[S1/Tbad]", refs: [], index: 0,
+    }]);
   });
 
-  test("date plus one citation is valid; two citations and date-only are deleted", () => {
+  test("strips invalid members from mixed groups and canonicalizes the survivors", () => {
     const body = threeSections([
-      "- [2026-07] 合法 [S1/T1]",
-      "- 双组 [S1/T1] [S1/T2]",
-      "- [2026-07] 只有日期",
-      "- 合法二 [S1/T1]",
-      "- 合法三 [S1/T1]",
-      "- 合法四 [S1/T1]",
+      "- 混合 [S1/T1，T2，S2/T3]",
     ]);
-    const result = validateDiaryCitations(body, new Set(["S1/T1", "S1/T2"]), "agent");
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.report).toMatchObject({ version: 1, total: 6, deleted: 2 });
-    expect(result.body).toContain("- [2026-07] 合法 [S1/T1]");
-    expect(result.body).not.toContain("双组");
-    expect(result.body).not.toContain("只有日期");
-  });
-
-  test("counts malformed S<n>/T-prefixed brackets as citation groups", () => {
-    const body = threeSections([
-      "- malformed second group [S1/T1] [S2/Tbad]",
-      "- valid one [S1/T1]",
-      "- valid two [S1/T1]",
-    ]);
-    const result = validateDiaryCitations(body, new Set(["S1/T1"]));
-    expect(result).toMatchObject({ ok: true, report: { total: 3, deleted: 1 } });
-    if (result.ok) expect(result.body).not.toContain("malformed second group");
-  });
-});
-
-describe("citation deletion and report", () => {
-  test("deletes invalid bullets with continuations and removes emptied project guides", () => {
-    const deletedBullet = "- 越界 <private>secret</private> [S9/T9]\n延续也删除";
-    const body = threeSections([
-      "**empty project**", deletedBullet,
-      "**kept project**", "- 保留 [S1/T1]",
-      "- 也保留 [S1/T2]",
-    ]);
-    const result = validateDiaryCitations(body, new Set(["S1/T1", "S1/T2"]), "unsafe agent hook");
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.body).not.toContain("empty project");
-    expect(result.body).not.toContain("延续也删除");
-    expect(result.report).toEqual({
-      version: 1, total: 3, deleted: 1,
-      items: [{
-        section: "工作",
-        sha256: createHash("sha256").update(deletedBullet, "utf8").digest("hex"),
-        preview: "- 越界  [S9/T9]\n延续也删除",
-      }],
+    const result = validateDiaryCitations(body, new Set(["S1/T1", "S2/T3"]), "agent");
+    expect(result).toEqual({
+      ok: true,
+      body: threeSections(["- 混合 [S1/T1，S2/T3]"]),
+      indexHook: "agent",
+      report: {
+        version: 2,
+        total: 3,
+        stripped: 1,
+        items: [{ section: "工作", line: 2, original: "T2" }],
+      },
     });
   });
 
-  test("deletes citation-only bullets and caps report items and previews by code point", () => {
-    const invalid = `- ${"🙂".repeat(100)} [S9/T9]`;
+  test("does not recognize or alter malformed citation-like brackets", () => {
     const body = threeSections([
-      "- [S1/T1]", ...Array.from({ length: 21 }, () => invalid),
-      ...Array.from({ length: 44 }, (_, i) => `- valid ${i} [S1/T1]`),
+      "- malformed [S2/Tbad] [S1/T1, T2] [T3]",
     ]);
     const result = validateDiaryCitations(body, new Set(["S1/T1"]));
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.report).toMatchObject({ total: 66, deleted: 22 });
-    expect(result.report.items).toHaveLength(20);
-    expect(Array.from(result.report.items[1]!.preview)).toHaveLength(80);
+    expect(result.body).toBe(body);
+    expect(result.report).toEqual({ version: 2, total: 0, stripped: 0, items: [] });
+  });
+});
+
+describe("citation stripping and v2 report", () => {
+  test("strips a wholly invalid group while preserving every content line", () => {
+    const invalidBullet = "- 越界 <private>secret</private> [S9/T9]\n延续仍保留";
+    const body = threeSections([
+      "**project**", invalidBullet,
+      "**kept project**", "- 保留 [S1/T1]",
+    ]);
+    const result = validateDiaryCitations(body, new Set(["S1/T1"]), "agent hook");
+    expect(result.body).toContain("**project**\n- 越界 <private>secret</private> \n延续仍保留");
+    expect(result.report).toEqual({
+      version: 2, total: 2, stripped: 1,
+      items: [{ section: "工作", line: 3, original: "[S9/T9]" }],
+    });
   });
 
-  test("passes exactly one-third deletion, fails above it, and fails total zero", () => {
-    const exact = validateDiaryCitations(threeSections([
-      "- valid [S1/T1]", "- valid [S1/T1]", "- invalid",
-    ]), new Set(["S1/T1"]));
-    expect(exact.ok).toBe(true);
-    expect(validateDiaryCitations(threeSections([
-      "- valid [S1/T1]", "- invalid",
-    ]), new Set(["S1/T1"]))).toMatchObject({ ok: false, code: "excessive_deletions" });
-    expect(validateDiaryCitations(threeSections([]), new Set())).toMatchObject({
-      ok: false, code: "empty_diary", report: { total: 0, deleted: 0 },
+  test("strips syntactically valid references to missing turns", () => {
+    const body = threeSections([], ["- 人物事实 [S9/T9]"]);
+    const result = validateDiaryCitations(body, new Set());
+    expect(result.body).toContain("- 人物事实 ");
+    expect(result.report).toEqual({
+      version: 2, total: 1, stripped: 1,
+      items: [{ section: "人物", line: 3, original: "[S9/T9]" }],
     });
   });
 });
 
 describe("index hook contamination defense", () => {
-  test("uses agent hook with no deletions and deterministic section-first fallback otherwise", () => {
+  test("keeps the agent hook even when invalid citations are stripped", () => {
     const clean = validateDiaryCitations(threeSections(["- work [S1/T1]"]), new Set(["S1/T1"]), "agent");
-    expect(clean).toMatchObject({ ok: true, indexHook: "agent", report: { deleted: 0 } });
+    expect(clean).toMatchObject({ ok: true, indexHook: "agent", report: { stripped: 0 } });
     const dirty = validateDiaryCitations(threeSections([
-      "- work [S1/T1]", "- bad",
-    ], ["- person [S1/T1]\ncontinued"], ["- reflect [S1/T1]"]), new Set(["S1/T1"]), "unsafe");
+      "- work [S9/T9]",
+    ]), new Set(), "still valid summary");
     expect(dirty).toMatchObject({
-      ok: true, indexHook: "work；person continued；reflect", report: { deleted: 1 },
+      ok: true, indexHook: "still valid summary", report: { stripped: 1 },
     });
-  });
-
-  test("truncates deterministic hook to 160 Unicode code points", () => {
-    const result = validateDiaryCitations(threeSections([
-      `- ${"🙂".repeat(170)} [S1/T1]`, "- invalid",
-      "- valid [S1/T1]", "- valid [S1/T1]", "- valid [S1/T1]",
-    ]), new Set(["S1/T1"]));
-    expect(result.ok).toBe(true);
-    if (result.ok) expect(Array.from(result.indexHook)).toHaveLength(160);
-  });
-
-  test("uses the first surviving bullet from every project block", () => {
-    const result = validateDiaryCitations(threeSections([
-      "**one**", "- first [S1/T1]", "- later [S1/T1]",
-      "**two**", "- second [S1/T1]", "- invalid",
-    ]), new Set(["S1/T1"]));
-    expect(result).toMatchObject({ ok: true, indexHook: "first；second" });
   });
 });
 

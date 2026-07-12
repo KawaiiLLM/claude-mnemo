@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,8 @@ describe("createDiaryRuntime", () => {
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-runtime-"));
     roots.push(dataRoot);
+    const globalClaudeMd = join(dataRoot, "global-CLAUDE.md");
+    writeFileSync(globalClaudeMd, "# Global material\nPrefer runtime evidence.");
     const session = upsertSession(db, {
       contentSessionId: "runtime-session",
       project: "/projects/runtime",
@@ -61,16 +63,13 @@ describe("createDiaryRuntime", () => {
       db,
       dataRoot,
       nowEpoch: () => 300,
+      priorPersonaPath: globalClaudeMd,
       async runQuery(request) {
         prompts.push(request.prompt);
         if (request.prompt.includes("op: rebuild")) {
           expect(
-            await request.toolHandlers.readDiary("2026-07-10"),
-          ).toBeInstanceOf(Uint8Array);
-          expect(request.toolHandlers.readTurn(session.id, 1)).toMatchObject({
-            sessionId: session.id,
-            promptNumber: 1,
-          });
+            await request.toolHandlers.readDoc("diary/2026-07-10.md"),
+          ).toContain("runtime");
           return [
             "===USER_PROFILE_V1_BEGIN===",
             `## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 用户要求端到端验证 runtime [S${session.id}/T1]`,
@@ -80,6 +79,14 @@ describe("createDiaryRuntime", () => {
             "===EXPERIENCE_V1_END===",
           ].join("\n");
         }
+
+        const pulled = await request.toolHandlers.recall({
+          id: `S${session.id}/T1`,
+          fields: ["prompt", "response"],
+        });
+        expect(JSON.stringify(pulled)).toContain(
+          "Remember that I want runtime wiring tested end to end.",
+        );
 
         return [
           "===DIARY_V2_BEGIN===",
@@ -121,26 +128,21 @@ describe("createDiaryRuntime", () => {
         "===INDEX_HOOK_V1===",
       ]) expect(prompts[0]).toContain(sentinel);
       expect(prompts[0]).toContain(CANONICAL_DIARY_WIRE_FORMAT_EXAMPLE);
+      expect(prompts[0]).toContain('"kind":"session_manifest"');
+      expect(prompts[0]).toContain('"kind":"turn_manifest"');
+      expect(prompts[0]).toContain('"kind":"global_claude_md"');
+      expect(prompts[0]).toContain("Prefer runtime evidence.");
+      expect(prompts[0]).not.toContain("source_response");
       expect(prompts[0]).not.toContain("### 项目");
       expect(prompts[0]).not.toMatch(/^\s*- 无\s*$/m);
       expect(prompts[1]).toContain(CANONICAL_PERSONA_WIRE_FORMAT_EXAMPLE);
-      expect(prompts[1]).toContain("exactly four ASCII spaces");
-      expect(prompts[1]).not.toMatch(
-        /^ {2}- (?:路径|进度|反馈|\[\d{4}-\d{2}\])/m,
-      );
       expect(prompts[1]).toContain("2026-07-10");
       expect(prompts[1]).toContain("完成 runtime tracer");
       expect(prompts[1]).toContain("USER_PROFILE_V1 block followed by one EXPERIENCE_V1 block");
-      expect(prompts[1]).toContain("路径：[\"/absolute/path\"]");
-      expect(prompts[1]).toContain("overwrite the project's single 进度 line");
-      expect(prompts[1]).toContain("one fact only");
-      expect(prompts[1]).toContain("diagnostic observations and meta observations");
-      expect(prompts[1]).toContain("cross-project lessons in 通用");
-      expect(prompts[1]).toContain("append its citation");
-      expect(prompts[1]).toContain("（已变化）");
-      expect(prompts[1]).toContain("merge into that project");
-      expect(prompts[1]).toContain("merge the weakest project impression upward");
-      expect(prompts[1]).toContain("进度：已归档——<one sentence>");
+      expect(prompts[1]).toContain("非强制，可自由增删改组织");
+      expect(prompts[1]).toContain("会话注入只取每节前序行");
+      expect(prompts[1]).toContain('"kind":"global_claude_md"');
+      expect(prompts[1]).toContain("Prefer runtime evidence.");
       expect(
         (await new DiaryFileStore(dataRoot).loadCurrentPersona()).manifest,
       ).toMatchObject({
@@ -153,7 +155,7 @@ describe("createDiaryRuntime", () => {
     }
   });
 
-  test("trusts references from every section of a validated v2 diary", async () => {
+  test("trusts real database turn references even when absent from persona input material", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-runtime-allowset-"));
@@ -222,8 +224,6 @@ describe("createDiaryRuntime", () => {
         "## 反思",
         `- 可信协作反馈 [S${trustedSession.id}/T1]`,
 
-        `- [引用待核] 不可信引用 [S${pendingOnlySession.id}/T9]`,
-        "- [背景] 不可信日期 2026-06-01",
       ].join("\n"),
     });
     const stateStore = createDiaryStateStore(db);
@@ -246,28 +246,14 @@ describe("createDiaryRuntime", () => {
       dataRoot,
       nowEpoch: () => Date.parse("2026-07-11T04:00:00Z") / 1_000,
       async runQuery(request) {
-        expect(request.toolHandlers.readTurn(trustedSession.id, 1)).toMatchObject({
-          sessionId: trustedSession.id,
-          promptNumber: 1,
-        });
-        expect(
-          request.toolHandlers.readTurn(pendingOnlySession.id, 9),
-        ).toMatchObject({
-          sessionId: pendingOnlySession.id,
-          promptNumber: 9,
-        });
-        await expect(request.toolHandlers.readDiary(date)).resolves.toBeInstanceOf(
-          Uint8Array,
-        );
+        await expect(request.toolHandlers.readDoc(`diary/${date}.md`)).resolves.toContain("可信");
         await expect(
-          request.toolHandlers.readDiary("2026-06-01"),
-        ).rejects.toThrow(
-          "Diary 2026-06-01 is not allowed for this request.",
-        );
+          request.toolHandlers.readDoc("persona/user-profile.md"),
+        ).rejects.toThrow("outside the allowed scope");
 
         return [
           "===USER_PROFILE_V1_BEGIN===",
-          `## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 只吸收可信输入 [S${trustedSession.id}/T1]`,
+          `## 身份与背景\n- recall 可引入当前 diary 未引用的真实 turn [S${pendingOnlySession.id}/T9]`,
           "===USER_PROFILE_V1_END===",
           "===EXPERIENCE_V1_BEGIN===",
           `## 项目\n## 通用\n- 维持来源边界 [S${trustedSession.id}/T1]`,
@@ -278,6 +264,9 @@ describe("createDiaryRuntime", () => {
 
     try {
       expect(await runtime.runPersonaMaintenance()).toBe("completed");
+      expect((await fileStore.loadCurrentPersona()).userProfile).toContain(
+        `[S${pendingOnlySession.id}/T9]`,
+      );
     } finally {
       db.close();
     }
@@ -340,7 +329,7 @@ describe("createDiaryRuntime", () => {
         const date = dates[batchNumber - 1]!;
         return [
           "===USER_PROFILE_V1_BEGIN===",
-          `## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- runtime accumulator user ${batchNumber} [S1/T${batchNumber}]`,
+          `## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- runtime accumulator user ${batchNumber} [S1/T${batchNumber}${batchNumber === 1 ? "，S9/T9" : ""}]`,
           "===USER_PROFILE_V1_END===",
           "===EXPERIENCE_V1_BEGIN===",
           `## 项目\n## 通用\n- runtime accumulator experience ${batchNumber} [S1/T${batchNumber}]`,
@@ -373,6 +362,12 @@ describe("createDiaryRuntime", () => {
         expect(prompt).not.toContain('"kind":"previous_user_profile"');
         expect(prompt).not.toContain('"kind":"previous_experience"');
       }
+      expect((await fileStore.loadCurrentPersona()).manifest.validation_report).toEqual({
+        version: 2,
+        total: 7,
+        stripped: 1,
+        items: [{ section: "USER_PROFILE/协作偏好", line: 6, original: "S9/T9" }],
+      });
     } finally {
       db.close();
     }

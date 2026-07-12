@@ -1,58 +1,31 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import {
-  createDiaryStateStore,
-  type DiaryStateStore,
-} from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
-import { DiaryFileStore } from "../../src/diary/file-store";
-import { createDiaryAgentToolHandlers } from "../../src/worker/diary-agent-tools";
+import {
+  AGENT_READ_DOC_MAX_BYTES,
+  createDiaryAgentToolHandlers,
+} from "../../src/worker/diary-agent-tools";
 
-describe("diary agent tools", () => {
+describe("shared SDK agent tools", () => {
   let db: Database;
-  let sessionId: number;
   let dataRoot: string;
-  let fileStore: DiaryFileStore;
-  let stateStore: DiaryStateStore;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
-    stateStore = createDiaryStateStore(db);
-    dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-tools-"));
-    fileStore = new DiaryFileStore(dataRoot);
-
-    sessionId = upsertSession(db, {
-      contentSessionId: "diary-tools-session",
-      project: "/projects/diary-tools",
-      title: "Diary tool fixtures",
-      content: null,
-      insight: null,
-      createdAtEpoch: 1,
-      updatedAtEpoch: null,
-      completedAtEpoch: null,
-    }).id;
-
-    const insertTurn = db.query(
-      `INSERT INTO turns (
-         session_id,
-         prompt_number,
-         status,
-         user_prompt,
-         assistant_response,
-         created_at_epoch
-       ) VALUES (?, ?, 'skipped', ?, ?, ?)`,
-    );
-
-    insertTurn.run(sessionId, 2, "allowed prompt", "allowed response", 2);
-    insertTurn.run(sessionId, 3, "secret prompt", "secret response", 3);
+    dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-agent-tools-"));
+    mkdirSync(join(dataRoot, "diary"));
+    mkdirSync(join(dataRoot, "persona"));
+    writeFileSync(join(dataRoot, "diary", "2026-07-10.md"), "diary text");
+    writeFileSync(join(dataRoot, "persona", "user-profile.md"), "persona text");
+    writeFileSync(join(dataRoot, "mnemo.db"), "database");
+    mkdirSync(join(dataRoot, "persona", "operations", "op-1"), { recursive: true });
+    writeFileSync(join(dataRoot, "persona", "operations", "op-1", "checkpoint.md"), "internal");
   });
 
   afterEach(() => {
@@ -60,155 +33,69 @@ describe("diary agent tools", () => {
     rmSync(dataRoot, { recursive: true, force: true });
   });
 
-  test("reads only turns in this SDK request's allow-set", () => {
+  test("reads Markdown documents from the allowed diary and persona subtrees", async () => {
     const handlers = createDiaryAgentToolHandlers({
       db,
-      stateStore,
-      allowedTurnRefs: new Set([`S${sessionId}/T2`]),
-      fileStore,
-      allowedDiaryDates: new Set(),
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["diary", "persona"]),
     });
-
-    expect(handlers.readTurn(sessionId, 2)).toEqual({
-      sessionId,
-      promptNumber: 2,
-      userPrompt: "allowed prompt",
-      assistantResponse: "allowed response",
-    });
-    expect(() => handlers.readTurn(sessionId, 3)).toThrow(
-      `Turn S${sessionId}/T3 is not allowed for this request.`,
-    );
+    expect(await handlers.readDoc("diary/2026-07-10.md")).toBe("diary text");
+    expect(await handlers.readDoc("persona/user-profile.md")).toBe("persona text");
   });
 
-  test("reads only diaries in this SDK request's allow-set", async () => {
-    const allowedBytes = new TextEncoder().encode(
-      [
-        "---",
-        "format: 2",
-        'date: "2026-07-10"',
-        'sessions: ["S1"]',
-        'projects: ["/project"]',
-        'watermark: "watermark-1"',
-        'index_hook: "允许读取"',
-        "---",
-        "## 工作",
-        "- work [S1/T1]",
-        "## 人物",
-        "- signal [S1/T1]",
-        "## 反思",
-        "- reflection [S1/T1]",
-        "",
-      ].join("\n"),
-    );
-    const deniedBytes = new TextEncoder().encode(
-      "---\ndate: 2026-07-09\n---\n\n不得读取的日记。\n",
-    );
-    await fileStore.commitDiary("2026-07-10", allowedBytes);
-    await fileStore.commitDiary("2026-07-09", deniedBytes);
-    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
-    stateStore.commitDayState({
-      date: "2026-07-10",
-      watermark: "watermark-1",
-      fileSha256: createHash("sha256").update(allowedBytes).digest("hex"),
-      indexHook: "允许读取",
-      settledAtEpoch: 2,
-    });
-
+  test("rejects paths outside document scope and database files", async () => {
     const handlers = createDiaryAgentToolHandlers({
       db,
-      stateStore,
-      allowedTurnRefs: new Set(),
-      fileStore,
-      allowedDiaryDates: new Set(["2026-07-10"]),
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["diary", "persona"]),
     });
-
-    expect(await handlers.readDiary("2026-07-10")).toEqual(allowedBytes);
-    await expect(handlers.readDiary("2026-07-09")).rejects.toThrow(
-      "Diary 2026-07-09 is not allowed for this request.",
-    );
+    await expect(handlers.readDoc("../config.json")).rejects.toThrow("outside");
+    await expect(handlers.readDoc("mnemo.db")).rejects.toThrow("outside");
+    await expect(handlers.readDoc("diary/../config.md")).rejects.toThrow("outside");
+    await expect(
+      handlers.readDoc("persona/operations/op-1/checkpoint.md"),
+    ).rejects.toThrow("Operation artifacts");
   });
 
-  test("rejects missing or corrupt allow-listed diaries and marks their public day state stale", async () => {
-    const date = "2026-07-10";
-    const missingDate = "2026-07-11";
-    const canonicalBytes = new TextEncoder().encode(
-      [
-        "---",
-        "format: 2",
-        `date: ${JSON.stringify(date)}`,
-        'sessions: ["S1"]',
-        'projects: ["/project"]',
-        'watermark: "watermark-1"',
-        'index_hook: "validated hook"',
-        "---",
-        "## 工作",
-        "- work [S1/T1]",
-        "## 人物",
-        "- signal [S1/T1]",
-        "## 反思",
-        "- reflection [S1/T1]",
-        "",
-      ].join("\n"),
-    );
-    stateStore.enqueueDay({ date, enqueuedAtEpoch: 1 });
-    stateStore.commitDayState({
-      date,
-      watermark: "watermark-1",
-      fileSha256: createHash("sha256").update(canonicalBytes).digest("hex"),
-      indexHook: "validated hook",
-      settledAtEpoch: 2,
-    });
-    stateStore.enqueueDay({ date: missingDate, enqueuedAtEpoch: 1 });
-    stateStore.commitDayState({
-      date: missingDate,
-      watermark: "watermark-2",
-      fileSha256: createHash("sha256").update(canonicalBytes).digest("hex"),
-      indexHook: "missing hook",
-      settledAtEpoch: 2,
-    });
-    await fileStore.commitDiary(
-      date,
-      new TextEncoder().encode("corrupt diary bytes"),
-    );
-    const handlers = createDiaryAgentToolHandlers({
+  test("rejects symlink roots and symlink targets", async () => {
+    const target = join(dataRoot, "target.md");
+    writeFileSync(target, "target");
+    symlinkSync(target, join(dataRoot, "diary", "linked.md"));
+    let handlers = createDiaryAgentToolHandlers({
       db,
-      stateStore,
-      allowedTurnRefs: new Set(),
-      fileStore,
-      allowedDiaryDates: new Set([date, missingDate]),
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["diary"]),
     });
+    await expect(handlers.readDoc("diary/linked.md")).rejects.toThrow("symlink");
 
-    await expect(handlers.readDiary(date)).rejects.toThrow();
-    expect(stateStore.getDayState(date)?.needsRegen).toBe(true);
-    expect(stateStore.hasQueuedDay(date)).toBe(true);
-    await expect(handlers.readDiary(missingDate)).rejects.toThrow();
-    expect(stateStore.getDayState(missingDate)?.needsRegen).toBe(true);
+    rmSync(join(dataRoot, "persona"), { recursive: true });
+    symlinkSync(join(dataRoot, "diary"), join(dataRoot, "persona"));
+    handlers = createDiaryAgentToolHandlers({
+      db,
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["persona"]),
+    });
+    await expect(handlers.readDoc("persona/2026-07-10.md")).rejects.toThrow("symlink");
   });
 
-  test("atomically marks an invalid day state stale and enqueues a missing queue row", async () => {
-    const date = "2026-07-12";
-    stateStore.enqueueDay({ date, enqueuedAtEpoch: 1 });
-    const claimed = stateStore.claimNextDiaryItem(2)!;
-    stateStore.acknowledgeDiaryItem(claimed.seq);
-    stateStore.commitDayState({
-      date,
-      watermark: "empty",
-      fileSha256: "unused",
-      indexHook: "invalid precheck",
-      settledAtEpoch: 2,
-    });
-    expect(stateStore.hasQueuedDay(date)).toBe(false);
+  test("rejects oversized and invalid UTF-8 documents", async () => {
+    writeFileSync(join(dataRoot, "diary", "large.md"), Buffer.alloc(AGENT_READ_DOC_MAX_BYTES + 1));
+    writeFileSync(join(dataRoot, "diary", "invalid.md"), new Uint8Array([0xff]));
     const handlers = createDiaryAgentToolHandlers({
       db,
-      stateStore,
-      allowedTurnRefs: new Set(),
-      fileStore,
-      allowedDiaryDates: new Set([date]),
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["diary"]),
     });
-    await expect(handlers.readDiary(date)).rejects.toThrow(
-      "has no valid settled day state",
-    );
-    expect(stateStore.getDayState(date)?.needsRegen).toBe(true);
-    expect(stateStore.hasQueuedDay(date)).toBe(true);
+    await expect(handlers.readDoc("diary/large.md")).rejects.toThrow("exceeds");
+    await expect(handlers.readDoc("diary/invalid.md")).rejects.toThrow("UTF-8");
+  });
+
+  test("rebuild scope cannot see the persona subtree", async () => {
+    const handlers = createDiaryAgentToolHandlers({
+      db,
+      dataRoot,
+      allowedDocumentSubtrees: new Set(["diary"]),
+    });
+    await expect(handlers.readDoc("persona/user-profile.md")).rejects.toThrow("outside");
   });
 });

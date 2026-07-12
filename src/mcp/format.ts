@@ -36,6 +36,7 @@ interface ObservationFormatOptions {
   sessionId?: number;
   turnPromptNumber?: number;
   truncate?: number;
+  truncateCap?: number;
 }
 
 export interface FormattedTurn {
@@ -81,6 +82,7 @@ interface TurnFormatOptions {
   indent?: string;
   sessionId?: number;
   truncate?: number;
+  truncateCap?: number;
   // Worker-only: append a `dbid:T<dbid>` token to the turn label so the memory
   // worker can cite a turn it found via recall. Public/main rendering leaves
   // this unset and the output is byte-identical to before.
@@ -92,6 +94,7 @@ interface ToolCallFormatOptions {
   sessionId?: number;
   turnPromptNumber?: number;
   truncate?: number;
+  truncateCap?: number;
 }
 
 interface RenderNodeOptions {
@@ -100,6 +103,7 @@ interface RenderNodeOptions {
   sessionId?: number;
   turnPromptNumber?: number;
   truncate?: number;
+  truncateCap?: number;
   mode?: RenderMode;
   includeChildren?: boolean;
   includeDbTurnIds?: boolean;
@@ -232,7 +236,7 @@ function truncateText(
     hintId?: string;
   },
 ): string {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
 
   if (text.length <= boundedLimit) {
     return text;
@@ -257,7 +261,7 @@ function truncateFileTree(
     hintId?: string;
   },
 ): string[] {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
   const lines = tree.split("\n");
   const kept: string[] = [];
   let used = 0;
@@ -286,8 +290,11 @@ function truncateFileTree(
   ];
 }
 
-function resolveExplicitTruncate(truncate?: number): number {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
+function resolveExplicitTruncate(
+  truncate?: number,
+  truncateCap = MAX_TRUNCATE,
+): number {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 
 function buildSessionHintId(sessionId: number): string {
@@ -380,8 +387,9 @@ function formatSessionCollapsedWithMode(
   session: FormattedSession,
   mode: RenderMode,
   truncate?: number,
+  truncateCap?: number,
 ): string {
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -405,9 +413,10 @@ function formatSessionExpandedWithMode(
   session: FormattedSession,
   mode: RenderMode,
   truncate?: number,
+  truncateCap?: number,
 ): string {
-  const limit = resolveExplicitTruncate(truncate);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
   const hintId = buildSessionHintId(session.id);
   const pushField = (label: string, value: string | null | undefined): void => {
     if (!value) {
@@ -468,6 +477,7 @@ function formatTurnLabel(
     mode = "legacy",
     depth = "collapsed",
     truncate,
+    truncateCap,
     includeDbTurnIds = false,
   }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
@@ -481,7 +491,7 @@ function formatTurnLabel(
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title =
     turn.title === null && turn.promptPreview
@@ -510,7 +520,7 @@ function formatTurnCollapsedWithMode(
   options: TurnFormatOptions & { mode?: RenderMode } = {},
 ): string {
   const { indent = "  ", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [
     formatTurnLabel(turn, {
       ...options,
@@ -534,12 +544,12 @@ function formatTurnCollapsedWithMode(
 
 function formatToolCallLabel(
   toolCall: FormattedToolCall,
-  { indent = "    ", mode = "unified", depth = "collapsed", truncate }: ToolCallFormatOptions & {
+  { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap }: ToolCallFormatOptions & {
     mode?: RenderMode;
     depth?: RenderDepth;
   } = {},
 ): string {
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam
     ? ` ${truncateText(keyParam, { limit, mode })}`
@@ -564,7 +574,7 @@ function formatToolCallExpandedWithMode(
   options: ToolCallFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
   const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
   const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
@@ -670,7 +680,7 @@ function formatTurnExpandedWithMode(
     includeChildren = mode === "unified",
   } = options;
   const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
 
@@ -763,7 +773,7 @@ function formatObservationCollapsedWithMode(
   options: ObservationFormatOptions & { mode?: RenderMode } = {},
 ): string {
   const { indent = "", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.content) {
@@ -798,24 +808,25 @@ function formatObservationExpandedWithMode(
 
 export function renderNode(node: RenderNode, options: RenderNodeOptions): string {
   const mode = options.mode ?? "unified";
+  const effectiveOptions = options;
 
   switch (node.type) {
     case "session":
-      return options.depth === "collapsed"
-        ? formatSessionCollapsedWithMode(node.value, mode, options.truncate)
-        : formatSessionExpandedWithMode(node.value, mode, options.truncate);
+      return effectiveOptions.depth === "collapsed"
+        ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap)
+        : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
     case "turn":
-      return options.depth === "collapsed"
-        ? formatTurnCollapsedWithMode(node.value, { ...options, mode })
-        : formatTurnExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed"
+        ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode })
+        : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "observation":
-      return options.depth === "collapsed"
-        ? formatObservationCollapsedWithMode(node.value, { ...options, mode })
-        : formatObservationExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed"
+        ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode })
+        : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "toolCall":
-      return options.depth === "collapsed"
-        ? formatToolCallCollapsedWithMode(node.value, { ...options, mode })
-        : formatToolCallExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed"
+        ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode })
+        : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
   }
 }
 

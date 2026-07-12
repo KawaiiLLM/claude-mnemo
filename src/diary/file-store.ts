@@ -2,7 +2,6 @@ import {
   lstat,
   mkdir,
   open,
-  readdir,
   readFile,
   rename,
   rm,
@@ -11,6 +10,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { FrozenPendingRebaseDay } from "../db/diary-state";
+import type { CitationValidationReport } from "../shared/citation-validation";
 import {
   DIARY_SECTION_HEADINGS,
   validateDiaryDocument,
@@ -50,6 +50,11 @@ export interface LoadedPersona {
   manifest: PersonaManifest;
   userProfile: string;
   experience: string;
+}
+
+export interface CurrentPersonaMaterialBlocks {
+  userProfile: string | null;
+  experience: string | null;
 }
 
 export interface PersonaCoverage {
@@ -127,7 +132,7 @@ function readFrontmatterString(lines: string[], field: string): string {
 }
 
 export class DiaryFileStore {
-  constructor(private readonly dataRoot: string) {}
+  constructor(readonly dataRoot: string) {}
 
   async commitDiary(date: string, canonicalBytes: Uint8Array): Promise<void> {
     assertDiaryDate(date);
@@ -563,6 +568,7 @@ export class DiaryFileStore {
     accumulatorGeneration: number;
     nextBatchIndex: number;
     accumulator: { userProfile: string; experience: string };
+    validationReport: CitationValidationReport;
   }): Promise<PersonaCheckpointPointer> {
     this.assertPersonaOperationId(input.operationId);
     const checkpointRoot = join(
@@ -576,7 +582,10 @@ export class DiaryFileStore {
     const accumulatorFile = `accumulator-${input.accumulatorGeneration}.json`;
     const checkpointFile = `checkpoint-${input.accumulatorGeneration}.json`;
     const accumulatorBytes = new TextEncoder().encode(
-      `${JSON.stringify(input.accumulator)}\n`,
+      `${JSON.stringify({
+        ...input.accumulator,
+        validationReport: input.validationReport,
+      })}\n`,
     );
     const accumulatorHash = createHash("sha256")
       .update(accumulatorBytes)
@@ -612,7 +621,11 @@ export class DiaryFileStore {
 
   async loadPersonaCheckpoint(input: PersonaCheckpointPointer & {
     operationId: string;
-  }): Promise<{ userProfile: string; experience: string }> {
+  }): Promise<{
+    userProfile: string;
+    experience: string;
+    validationReport: CitationValidationReport;
+  }> {
     this.assertPersonaOperationId(input.operationId);
     const checkpointRoot = join(
       this.dataRoot,
@@ -664,16 +677,25 @@ export class DiaryFileStore {
     }
     const accumulator = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(accumulatorBytes),
-    ) as { userProfile?: unknown; experience?: unknown };
+    ) as {
+      userProfile?: unknown;
+      experience?: unknown;
+      validationReport?: Partial<CitationValidationReport>;
+    };
     if (
       typeof accumulator.userProfile !== "string" ||
-      typeof accumulator.experience !== "string"
+      typeof accumulator.experience !== "string" ||
+      accumulator.validationReport?.version !== 2 ||
+      !Number.isSafeInteger(accumulator.validationReport.total) ||
+      !Number.isSafeInteger(accumulator.validationReport.stripped) ||
+      !Array.isArray(accumulator.validationReport.items)
     ) {
       throw new Error("Invalid persona accumulator");
     }
     return {
       userProfile: accumulator.userProfile,
       experience: accumulator.experience,
+      validationReport: accumulator.validationReport as CitationValidationReport,
     };
   }
 
@@ -723,6 +745,50 @@ export class DiaryFileStore {
       userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
       experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes),
     };
+  }
+
+  async loadCurrentPersonaMaterialBlocks(): Promise<CurrentPersonaMaterialBlocks> {
+    const personaRoot = join(this.dataRoot, "persona");
+    const currentBytes = await readFile(join(personaRoot, "CURRENT"));
+    let manifest: PersonaManifest;
+    try {
+      manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
+    } catch {
+      throw new Error("Invalid persona CURRENT manifest");
+    }
+    if (!Number.isSafeInteger(manifest.generation) || manifest.generation < 1) {
+      throw new Error("Invalid persona CURRENT generation");
+    }
+
+    const generationRoot = join(personaRoot, "generations", String(manifest.generation));
+    const generationManifestBytes = await readFile(join(generationRoot, "manifest.json"));
+    if (
+      generationManifestBytes.length !== currentBytes.length ||
+      !generationManifestBytes.every((byte, index) => byte === currentBytes[index])
+    ) {
+      throw new Error("Persona generation manifest does not match CURRENT");
+    }
+
+    const loadBlock = async (
+      filename: string,
+      expectedSha256: string,
+    ): Promise<string | null> => {
+      try {
+        const bytes = await readFile(join(generationRoot, filename));
+        if (createHash("sha256").update(bytes).digest("hex") !== expectedSha256) {
+          return null;
+        }
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        return null;
+      }
+    };
+
+    const [userProfile, experience] = await Promise.all([
+      loadBlock("user-profile.md", manifest.user_profile_sha256),
+      loadBlock("experience.md", manifest.experience_sha256),
+    ]);
+    return { userProfile, experience };
   }
 
   async loadPersonaGeneration(generation: number): Promise<LoadedPersona> {
@@ -792,26 +858,6 @@ export class DiaryFileStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  }
-
-  async prunePersonaGenerations(currentGeneration: number): Promise<void> {
-    const generationsRoot = join(this.dataRoot, "persona", "generations");
-    const entries = await readdir(generationsRoot, { withFileTypes: true });
-    const generations = entries
-      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-      .map((entry) => Number(entry.name))
-      .filter((generation) => Number.isSafeInteger(generation))
-      .sort((left, right) => right - left);
-    const keep = new Set([
-      currentGeneration,
-      ...generations.filter((generation) => generation < currentGeneration).slice(0, 2),
-    ]);
-    for (const generation of generations) {
-      if (!keep.has(generation)) {
-        await rm(join(generationsRoot, String(generation)), { recursive: true });
-      }
-    }
-    await this.syncDirectory(generationsRoot);
   }
 
   async loadCurrentPersonaCoverage(): Promise<PersonaCoverage | null> {

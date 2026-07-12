@@ -1,99 +1,107 @@
 import type { Database } from "bun:sqlite";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
-import type { DiaryStateStore } from "../db/diary-state";
-import { getTurn } from "../db/turns";
-import { stripDiaryPrivateContent } from "../diary/domain";
-import type { DiaryFileStore } from "../diary/file-store";
-import { validateAndMarkStale } from "../diary/validate-and-mark-stale";
+import {
+  createDatabaseBackedHandlers,
+  type ToolHandler,
+} from "../mcp/handlers";
+
+export const AGENT_READ_DOC_MAX_BYTES = 1_048_576;
+
+export type AgentDocumentSubtree = "diary" | "persona";
 
 export interface CreateDiaryAgentToolHandlersOptions {
   db: Database;
-  stateStore: Pick<
-    DiaryStateStore,
-    "getDayState" | "markDayStaleAndEnqueue"
-  >;
-  allowedTurnRefs: ReadonlySet<string>;
-  fileStore: DiaryFileStore;
-  allowedDiaryDates: ReadonlySet<string>;
-}
-
-export interface DiaryAgentTurn {
-  sessionId: number;
-  promptNumber: number;
-  userPrompt: string | null;
-  assistantResponse: string | null;
+  dataRoot: string;
+  allowedDocumentSubtrees: ReadonlySet<AgentDocumentSubtree>;
 }
 
 export interface DiaryAgentToolHandlers {
-  readTurn(sessionId: number, promptNumber: number): DiaryAgentTurn;
-  readDiary(date: string): Promise<Uint8Array>;
+  recall: ToolHandler;
+  timeline: ToolHandler;
+  readDoc(path: string): Promise<string>;
 }
 
-function turnRef(sessionId: number, promptNumber: number): string {
-  return `S${sessionId}/T${promptNumber}`;
+function isWithin(root: string, target: string): boolean {
+  const pathFromRoot = relative(root, target);
+  return pathFromRoot === "" || (
+    pathFromRoot !== ".." &&
+    !pathFromRoot.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromRoot)
+  );
+}
+
+async function assertNotSymlink(path: string, label: string): Promise<void> {
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symlink: ${path}`);
+  }
 }
 
 export function createDiaryAgentToolHandlers(
   options: CreateDiaryAgentToolHandlersOptions,
 ): DiaryAgentToolHandlers {
-  const allowedTurnRefs = new Set(options.allowedTurnRefs);
-  const allowedDiaryDates = new Set(options.allowedDiaryDates);
+  const databaseHandlers = createDatabaseBackedHandlers(options.db, {
+    audience: "worker",
+  });
+  const recall = databaseHandlers.recall;
+  const timeline = databaseHandlers.timeline;
+  if (!recall || !timeline) {
+    throw new Error("Worker recall/timeline handlers are unavailable.");
+  }
+  const allowedSubtrees = new Set(options.allowedDocumentSubtrees);
 
   return {
-    readTurn(sessionId, promptNumber) {
-      const ref = turnRef(sessionId, promptNumber);
-
-      if (!allowedTurnRefs.has(ref)) {
-        throw new Error(`Turn ${ref} is not allowed for this request.`);
+    recall,
+    timeline,
+    async readDoc(requestedPath) {
+      if (isAbsolute(requestedPath) || requestedPath.includes("\0")) {
+        throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
       }
 
-      const turn = getTurn(options.db, sessionId, promptNumber);
-
-      if (!turn) {
-        throw new Error(`Turn ${ref} was not found.`);
+      const normalized = requestedPath.replaceAll("\\", "/");
+      const subtree = normalized.split("/", 1)[0] as AgentDocumentSubtree;
+      if (!allowedSubtrees.has(subtree)) {
+        throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
+      }
+      if (!normalized.endsWith(".md")) {
+        throw new Error(`Document must be a Markdown file: ${requestedPath}`);
+      }
+      if (normalized === "persona/operations" || normalized.startsWith("persona/operations/")) {
+        throw new Error(`Operation artifacts are outside the allowed document scope: ${requestedPath}`);
       }
 
-      return {
-        sessionId: turn.sessionId,
-        promptNumber: turn.promptNumber,
-        userPrompt:
-          turn.userPrompt === null
-            ? null
-            : stripDiaryPrivateContent(turn.userPrompt),
-        assistantResponse:
-          turn.assistantResponse === null
-            ? null
-            : stripDiaryPrivateContent(turn.assistantResponse),
-      };
-    },
-    async readDiary(date) {
-      if (!allowedDiaryDates.has(date)) {
-        throw new Error(`Diary ${date} is not allowed for this request.`);
+      const rootPath = resolve(options.dataRoot, subtree);
+      const targetPath = resolve(options.dataRoot, normalized);
+      if (!isWithin(rootPath, targetPath)) {
+        throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
       }
 
-      const state = options.stateStore.getDayState(date);
-      if (
-        state === null ||
-        state.settledAtEpoch === null ||
-        state.watermark === null ||
-        state.watermark === "empty" ||
-        state.fileSha256 === null ||
-        state.indexHook === null ||
-        state.needsRegen
-      ) {
-        options.stateStore.markDayStaleAndEnqueue({
-          date,
-          enqueuedAtEpoch: Math.floor(Date.now() / 1_000),
-        });
-        throw new Error(`Diary ${date} has no valid settled day state.`);
+      await assertNotSymlink(rootPath, "Document root");
+      await assertNotSymlink(targetPath, "Document path");
+      const [realRoot, realTarget] = await Promise.all([
+        realpath(rootPath),
+        realpath(targetPath),
+      ]);
+      if (!isWithin(realRoot, realTarget)) {
+        throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
       }
 
-      return validateAndMarkStale(options, {
-        date: state.date,
-        watermark: state.watermark,
-        fileSha256: state.fileSha256,
-        indexHook: state.indexHook,
-      });
+      const metadata = await stat(realTarget);
+      if (!metadata.isFile()) {
+        throw new Error(`Document is not a regular file: ${requestedPath}`);
+      }
+      if (metadata.size > AGENT_READ_DOC_MAX_BYTES) {
+        throw new Error(`Document exceeds the ${AGENT_READ_DOC_MAX_BYTES}-byte limit: ${requestedPath}`);
+      }
+
+      const bytes = await readFile(realTarget);
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new Error(`Document is not valid UTF-8: ${requestedPath}`);
+      }
     },
   };
 }

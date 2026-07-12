@@ -31334,6 +31334,10 @@ var recallInputShape = {
   pageSize: external_exports3.number().int().positive().optional(),
   truncate: external_exports3.number().int().min(1).max(2e3).optional()
 };
+var workerRecallInputShape = {
+  ...recallInputShape,
+  truncate: external_exports3.number().int().min(1).optional()
+};
 var rememberInputShape = {
   id: external_exports3.string().optional(),
   type: external_exports3.string().optional(),
@@ -31948,7 +31952,7 @@ function truncateText(text, {
   mode = "legacy",
   hintId
 }) {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
   if (text.length <= boundedLimit) {
     return text;
   }
@@ -31959,7 +31963,7 @@ function truncateFileTree(tree, {
   mode = "legacy",
   hintId
 }) {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
   const lines = tree.split("\n");
   const kept = [];
   let used = 0;
@@ -31980,8 +31984,8 @@ function truncateFileTree(tree, {
     `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
   ];
 }
-function resolveExplicitTruncate(truncate) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
+function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function buildSessionHintId(sessionId) {
   return `S${sessionId}`;
@@ -32039,8 +32043,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate) {
-  const limit = resolveExplicitTruncate(truncate);
+function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -32057,9 +32061,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate) {
-  const limit = resolveExplicitTruncate(truncate);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+function formatSessionExpandedWithMode(session, mode, truncate, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
   const hintId = buildSessionHintId(session.id);
   const pushField = (label, value) => {
     if (!value) {
@@ -32105,6 +32109,7 @@ function formatTurnLabel(turn, {
   mode = "legacy",
   depth = "collapsed",
   truncate,
+  truncateCap,
   includeDbTurnIds = false
 } = {}) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
@@ -32112,7 +32117,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
     limit,
@@ -32128,7 +32133,7 @@ function formatTurnLabel(turn, {
 }
 function formatTurnCollapsedWithMode(turn, options = {}) {
   const { indent = "  ", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [
     formatTurnLabel(turn, {
       ...options,
@@ -32147,8 +32152,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate } = {}) {
-  const limit = resolveExplicitTruncate(truncate);
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap } = {}) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -32162,7 +32167,7 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
   const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
   const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
@@ -32245,7 +32250,7 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     includeChildren = mode === "unified"
   } = options;
   const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
@@ -32321,7 +32326,7 @@ function formatObservationLabel(observation, { indent = "" } = {}) {
 }
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
@@ -32348,15 +32353,16 @@ function formatObservationExpandedWithMode(observation, options = {}) {
 }
 function renderNode(node, options) {
   const mode = options.mode ?? "unified";
+  const effectiveOptions = options;
   switch (node.type) {
     case "session":
-      return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, options.truncate) : formatSessionExpandedWithMode(node.value, mode, options.truncate);
+      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap) : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
     case "turn":
-      return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...options, mode }) : formatTurnExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "observation":
-      return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...options, mode }) : formatObservationExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "toolCall":
-      return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...options, mode }) : formatToolCallExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
   }
 }
 
@@ -32692,7 +32698,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds) {
+function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds, truncateCap) {
   const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -32701,7 +32707,9 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
       {
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
-        truncate
+        truncate,
+        includeDbTurnIds,
+        truncateCap
       }
     )
   ];
@@ -32724,7 +32732,8 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
         mode: "unified",
         sessionId: session.id,
         truncate,
-        includeDbTurnIds
+        includeDbTurnIds,
+        truncateCap
       }
     );
     lines.push(turnLines);
@@ -32734,7 +32743,7 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
+function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateCap) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -32753,7 +32762,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap }
       )
     );
     const sessionTurns = grouped.get(session.id) ?? [];
@@ -32767,7 +32776,8 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
             mode: "unified",
             sessionId: session.id,
             truncate,
-            includeDbTurnIds
+            includeDbTurnIds,
+            truncateCap
           }
         )
       );
@@ -32775,7 +32785,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds) {
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds) {
+function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds, truncateCap) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -32803,7 +32813,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
           {
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
-            truncate
+            truncate,
+            truncateCap
           }
         )
       );
@@ -32821,7 +32832,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap }
       )
     );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
@@ -32838,7 +32849,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             mode: "unified",
             sessionId: session.id,
             truncate,
-            includeDbTurnIds
+            includeDbTurnIds,
+            truncateCap
           }
         )
       );
@@ -32863,7 +32875,8 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate
+              truncate,
+              truncateCap
             }
           )
         );
@@ -32879,11 +32892,11 @@ function buildObservationView(observation) {
     content: observation.content
   };
 }
-function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds) {
+function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap) {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds) : "Session not found.";
+  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap) : "Session not found.";
 }
-function renderObservationDetail(db, observationId, depth, truncate) {
+function renderObservationDetail(db, observationId, depth, truncate, truncateCap) {
   const observation = getObservation(db, observationId);
   if (!observation) {
     return "Observation not found.";
@@ -32894,7 +32907,8 @@ function renderObservationDetail(db, observationId, depth, truncate) {
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
-      truncate
+      truncate,
+      truncateCap
     }
   );
 }
@@ -32926,7 +32940,7 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds) {
+function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds, truncateCap) {
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
@@ -32961,7 +32975,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
       return "";
     }
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds);
+      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap);
     }
     const lines = [
       renderNode(
@@ -32969,7 +32983,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
           type: "session",
           value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session)
         },
-        { depth: "collapsed", mode: "unified", truncate }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap }
       )
     ];
     const turns = getTurnsForSession(db, session.id).filter(
@@ -32986,7 +33000,8 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
             mode: "unified",
             sessionId: session.id,
             truncate,
-            includeDbTurnIds
+            includeDbTurnIds,
+            truncateCap
           }
         )
       );
@@ -33006,7 +33021,8 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate
+              truncate,
+              truncateCap
             }
           )
         );
@@ -33016,7 +33032,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
   });
   return sessionLines.filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -33026,7 +33042,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items.map(
-        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
       ).join("\n"),
       paged.pageCount
     );
@@ -33044,13 +33060,13 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds),
+      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds) : "Turn not found.";
+    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap) : "Turn not found.";
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
@@ -33073,7 +33089,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount
     );
   }
@@ -33096,17 +33112,17 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount
     );
   }
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth, truncate);
+    return renderObservationDetail(db, routed.observationId, depth, truncate, truncateCap);
   }
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds) {
+function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
   const paged = paginateItems(
     listSessionIds(db, void 0, after, before),
     page,
@@ -33115,7 +33131,7 @@ function renderSessionList(db, depth, page, pageSize, truncate, after, before, i
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items.map(
-      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds)
+      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
     ).join("\n"),
     paged.pageCount
   );
@@ -33136,8 +33152,9 @@ function recallMemory(db, input) {
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
+  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const truncateCap = input.truncateCap;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -33156,7 +33173,8 @@ function recallMemory(db, input) {
       truncate,
       timeRange.after,
       timeRange.before,
-      includeDbTurnIds
+      includeDbTurnIds,
+      truncateCap
     );
   }
   if (input.query) {
@@ -33176,7 +33194,7 @@ function recallMemory(db, input) {
     const paged = paginateItems(results, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds),
+      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount
     );
   }
@@ -33188,7 +33206,8 @@ function recallMemory(db, input) {
     truncate,
     timeRange.after,
     timeRange.before,
-    includeDbTurnIds
+    includeDbTurnIds,
+    truncateCap
   );
 }
 
@@ -34906,7 +34925,26 @@ function timelineQuery(db, input) {
   }
 }
 
+// src/shared/tag-stripping.ts
+var MAX_TAG_OCCURRENCES = 100;
+function stripTag(text, tagName) {
+  const openTagPattern = new RegExp(`<${tagName}\\b`, "g");
+  const matches = text.match(openTagPattern);
+  if ((matches?.length ?? 0) > MAX_TAG_OCCURRENCES) {
+    return text;
+  }
+  return text.replace(
+    new RegExp(`<${tagName}\\b[^>]*>[\\s\\S]*?<\\/${tagName}>`, "g"),
+    ""
+  );
+}
+function stripPrivateTags(text) {
+  return stripTag(text, "private");
+}
+
 // src/mcp/handlers.ts
+var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
+var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult2(text) {
   return {
     content: [
@@ -34940,8 +34978,24 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
+  const workerTextResult = (text) => {
+    if (!includeDbTurnIds) {
+      return textResult2(text);
+    }
+    const stripped = stripPrivateTags(text);
+    if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
+      return textResult2(stripped);
+    }
+    const contentLimit = Math.max(
+      0,
+      WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length
+    );
+    return textResult2(
+      stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT
+    );
+  };
   return {
-    recall: (args) => textResult2(
+    recall: (args) => workerTextResult(
       recallMemory(database, {
         id: args.id,
         query: args.query,
@@ -34950,18 +35004,19 @@ function createDatabaseBackedHandlers(database, options = {}) {
         page: args.page,
         pageSize: args.pageSize,
         truncate: args.truncate,
-        includeDbTurnIds
+        includeDbTurnIds,
+        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0
       })
     ),
     remember: (args) => rememberTool(database, args),
-    timeline: (args) => textResult2(
+    timeline: (args) => workerTextResult(
       timelineQuery(database, toTimelineQueryInput(args))
     )
   };
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.3.2" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.3.3" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

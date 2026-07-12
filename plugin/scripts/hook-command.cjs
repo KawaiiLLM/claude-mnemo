@@ -218,28 +218,6 @@ function computeDiaryWatermark(material) {
   );
   return (0, import_node_crypto.createHash)("sha256").update(turnHashes.join("\0")).digest("hex").slice(0, 16);
 }
-function findDiaryCitationGroups(text) {
-  return [...text.matchAll(/\[(S\d+\/T[^\]\r\n]*)\]/g)].map((match) => {
-    const content = match[1];
-    const parts = content.split("\uFF0C").map((part) => part.trim());
-    const first = parts[0].match(/^S(\d+)\/T(\d+)$/);
-    const refs = [];
-    if (first) {
-      let session = `S${first[1]}`;
-      refs.push(`${session}/T${first[2]}`);
-      for (const part of parts.slice(1)) {
-        const next = part.match(/^(?:S(\d+)\/)?T(\d+)$/);
-        if (!next) {
-          refs.length = 0;
-          break;
-        }
-        if (next[1]) session = `S${next[1]}`;
-        refs.push(`${session}/T${next[2]}`);
-      }
-    }
-    return { raw: match[0], refs, index: match.index };
-  });
-}
 function validateDiaryDocument(document) {
   let text;
   try {
@@ -1879,7 +1857,10 @@ var DiaryFileStore = class {
     const accumulatorFile = `accumulator-${input.accumulatorGeneration}.json`;
     const checkpointFile = `checkpoint-${input.accumulatorGeneration}.json`;
     const accumulatorBytes = new TextEncoder().encode(
-      `${JSON.stringify(input.accumulator)}
+      `${JSON.stringify({
+        ...input.accumulator,
+        validationReport: input.validationReport
+      })}
 `
     );
     const accumulatorHash = (0, import_node_crypto2.createHash)("sha256").update(accumulatorBytes).digest("hex");
@@ -1948,12 +1929,13 @@ var DiaryFileStore = class {
     const accumulator = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(accumulatorBytes)
     );
-    if (typeof accumulator.userProfile !== "string" || typeof accumulator.experience !== "string") {
+    if (typeof accumulator.userProfile !== "string" || typeof accumulator.experience !== "string" || accumulator.validationReport?.version !== 2 || !Number.isSafeInteger(accumulator.validationReport.total) || !Number.isSafeInteger(accumulator.validationReport.stripped) || !Array.isArray(accumulator.validationReport.items)) {
       throw new Error("Invalid persona accumulator");
     }
     return {
       userProfile: accumulator.userProfile,
-      experience: accumulator.experience
+      experience: accumulator.experience,
+      validationReport: accumulator.validationReport
     };
   }
   assertPersonaOperationId(operationId) {
@@ -1995,6 +1977,40 @@ var DiaryFileStore = class {
       userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
       experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
     };
+  }
+  async loadCurrentPersonaMaterialBlocks() {
+    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
+    const currentBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(personaRoot, "CURRENT"));
+    let manifest;
+    try {
+      manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
+    } catch {
+      throw new Error("Invalid persona CURRENT manifest");
+    }
+    if (!Number.isSafeInteger(manifest.generation) || manifest.generation < 1) {
+      throw new Error("Invalid persona CURRENT generation");
+    }
+    const generationRoot = (0, import_node_path3.join)(personaRoot, "generations", String(manifest.generation));
+    const generationManifestBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json"));
+    if (generationManifestBytes.length !== currentBytes.length || !generationManifestBytes.every((byte, index) => byte === currentBytes[index])) {
+      throw new Error("Persona generation manifest does not match CURRENT");
+    }
+    const loadBlock = async (filename, expectedSha256) => {
+      try {
+        const bytes = await (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, filename));
+        if ((0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex") !== expectedSha256) {
+          return null;
+        }
+        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        return null;
+      }
+    };
+    const [userProfile, experience] = await Promise.all([
+      loadBlock("user-profile.md", manifest.user_profile_sha256),
+      loadBlock("experience.md", manifest.experience_sha256)
+    ]);
+    return { userProfile, experience };
   }
   async loadPersonaGeneration(generation) {
     if (!Number.isSafeInteger(generation) || generation < 1) {
@@ -2050,21 +2066,6 @@ var DiaryFileStore = class {
       if (error.code !== "ENOENT") throw error;
     }
   }
-  async prunePersonaGenerations(currentGeneration) {
-    const generationsRoot = (0, import_node_path3.join)(this.dataRoot, "persona", "generations");
-    const entries = await (0, import_promises.readdir)(generationsRoot, { withFileTypes: true });
-    const generations = entries.filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name)).map((entry) => Number(entry.name)).filter((generation) => Number.isSafeInteger(generation)).sort((left, right) => right - left);
-    const keep = /* @__PURE__ */ new Set([
-      currentGeneration,
-      ...generations.filter((generation) => generation < currentGeneration).slice(0, 2)
-    ]);
-    for (const generation of generations) {
-      if (!keep.has(generation)) {
-        await (0, import_promises.rm)((0, import_node_path3.join)(generationsRoot, String(generation)), { recursive: true });
-      }
-    }
-    await this.syncDirectory(generationsRoot);
-  }
   async loadCurrentPersonaCoverage() {
     let current;
     try {
@@ -2099,7 +2100,7 @@ var import_node_fs2 = require("node:fs");
 var import_node_path4 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.3.2-mrhfjb0x" : "dev";
+var BUILD_ID = true ? "0.3.3-mrhozuij" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2583,6 +2584,9 @@ function createCompactHandler(dependencies) {
   };
 }
 
+// src/hooks/handlers/context.ts
+var import_node_path7 = require("node:path");
+
 // src/shared/file-tree.ts
 var import_node_path5 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
@@ -2797,7 +2801,7 @@ function truncateText(text, {
   mode = "legacy",
   hintId
 }) {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
   if (text.length <= boundedLimit) {
     return text;
   }
@@ -2808,7 +2812,7 @@ function truncateFileTree(tree, {
   mode = "legacy",
   hintId
 }) {
-  const boundedLimit = Math.min(Math.max(limit, 1), MAX_TRUNCATE);
+  const boundedLimit = Math.max(limit, 1);
   const lines = tree.split("\n");
   const kept = [];
   let used = 0;
@@ -2829,8 +2833,8 @@ function truncateFileTree(tree, {
     `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
   ];
 }
-function resolveExplicitTruncate(truncate) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), MAX_TRUNCATE);
+function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function buildSessionHintId(sessionId) {
   return `S${sessionId}`;
@@ -2888,8 +2892,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate) {
-  const limit = resolveExplicitTruncate(truncate);
+function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -2906,9 +2910,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate) {
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate) {
-  const limit = resolveExplicitTruncate(truncate);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate)];
+function formatSessionExpandedWithMode(session, mode, truncate, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
   const hintId = buildSessionHintId(session.id);
   const pushField = (label, value) => {
     if (!value) {
@@ -2954,6 +2958,7 @@ function formatTurnLabel(turn, {
   mode = "legacy",
   depth = "collapsed",
   truncate,
+  truncateCap,
   includeDbTurnIds = false
 } = {}) {
   const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
@@ -2961,7 +2966,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
     limit,
@@ -2977,7 +2982,7 @@ function formatTurnLabel(turn, {
 }
 function formatTurnCollapsedWithMode(turn, options = {}) {
   const { indent = "  ", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [
     formatTurnLabel(turn, {
       ...options,
@@ -2996,8 +3001,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate } = {}) {
-  const limit = resolveExplicitTruncate(truncate);
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap } = {}) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -3011,7 +3016,7 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
   const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate);
+  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
   const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
@@ -3094,7 +3099,7 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     includeChildren = mode === "unified"
   } = options;
   const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
@@ -3170,7 +3175,7 @@ function formatObservationLabel(observation, { indent = "" } = {}) {
 }
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate);
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
@@ -3197,15 +3202,16 @@ function formatObservationExpandedWithMode(observation, options = {}) {
 }
 function renderNode(node, options) {
   const mode = options.mode ?? "unified";
+  const effectiveOptions = options;
   switch (node.type) {
     case "session":
-      return options.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, options.truncate) : formatSessionExpandedWithMode(node.value, mode, options.truncate);
+      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap) : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
     case "turn":
-      return options.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...options, mode }) : formatTurnExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "observation":
-      return options.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...options, mode }) : formatObservationExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
     case "toolCall":
-      return options.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...options, mode }) : formatToolCallExpandedWithMode(node.value, { ...options, mode });
+      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
   }
 }
 
@@ -5112,213 +5118,130 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
   return recovered;
 }
 
-// src/diary/experience-render.ts
-var PROFILE_INJECTION_TOKEN_BUDGET = 1e3;
-var EXPERIENCE_INJECTION_TOKEN_BUDGET = 2e3;
-var PERSONA_INJECTION_TOKEN_BUDGET = 3e3;
-var PROFILE_HEADINGS = [
-  "## \u8EAB\u4EFD\u4E0E\u80CC\u666F",
-  "## \u4E13\u957F\u4E0E\u5224\u65AD\u529B",
-  "## \u54C1\u5473\u4E0E\u5174\u8DA3",
-  "## \u6C9F\u901A\u98CE\u683C",
-  "## \u534F\u4F5C\u504F\u597D"
-];
-function isValidProfileInjectionSource(userProfile) {
-  const lines = userProfile.trim().split(/\r?\n/);
-  const headings = lines.filter((line) => /^##\s/.test(line));
-  return headings.length === PROFILE_HEADINGS.length && headings.every((heading, index) => heading === PROFILE_HEADINGS[index]) && lines.every(
-    (line) => line === "" || /^##\s/.test(line) || line.startsWith("- ") && findDiaryCitationGroups(line).length === 1
-  );
-}
-function renderProfileInjection(userProfile) {
-  return ["## Persona", "", userProfile.trim()].join("\n");
-}
-function citationAge(db, lines) {
-  const ages = [];
-  for (const group of findDiaryCitationGroups(lines.join("\n"))) {
-    for (const reference of group.refs) {
-      const match = reference.match(/^S(\d+)\/T(\d+)$/);
-      const row = db.query(
-        `SELECT t.created_at_epoch AS createdAtEpoch
-           FROM turns t
-           WHERE t.session_id = ? AND t.prompt_number = ?`
-      ).get(Number(match[1]), Number(match[2]));
-      ages.push(row?.createdAtEpoch ?? Number.NEGATIVE_INFINITY);
-    }
-  }
-  return ages.length > 0 ? Math.max(...ages) : Number.NEGATIVE_INFINITY;
-}
-function isContinuation(line) {
-  return /^\s+/.test(line);
-}
-function parseExperience(experience, db) {
-  const lines = experience.trim().split(/\r?\n/);
-  const projectHeadingIndex = lines.indexOf("## \u9879\u76EE");
-  const generalHeadingIndex = lines.indexOf("## \u901A\u7528");
-  if (projectHeadingIndex !== 0 || generalHeadingIndex <= projectHeadingIndex || lines.filter((line) => line === "## \u9879\u76EE").length !== 1 || lines.filter((line) => line === "## \u901A\u7528").length !== 1 || lines.some((line) => /^##\s/.test(line) && line !== "## \u9879\u76EE" && line !== "## \u901A\u7528")) {
-    return null;
-  }
-  let documentOrder = 0;
-  const projectUnits = [];
-  const projectLines = lines.slice(1, generalHeadingIndex);
-  for (let index = 0; index < projectLines.length; ) {
-    if (projectLines[index].trim() === "") {
-      index += 1;
-      continue;
-    }
-    if (!projectLines[index].startsWith("- ")) return null;
-    const block = [projectLines[index]];
-    index += 1;
-    while (index < projectLines.length && isContinuation(projectLines[index])) {
-      block.push(projectLines[index]);
-      index += 1;
-    }
-    const progress = block.find((line) => /^\s+- 进度：/.test(line));
-    const pathLines = block.filter((line) => /^\s+- 路径：/.test(line));
-    const progressLines = block.filter((line) => /^\s+- 进度：/.test(line));
-    const feedbackLines = block.filter((line) => /^\s+- 反馈：/.test(line));
-    if (!progress || pathLines.length !== 1 || progressLines.length !== 1 || feedbackLines.length > 2) return null;
-    try {
-      const paths = JSON.parse(pathLines[0].replace(/^\s+- 路径：/, ""));
-      if (!Array.isArray(paths) || paths.some((path2) => typeof path2 !== "string" || !path2.startsWith("/"))) return null;
-    } catch {
-      return null;
-    }
-    if (findDiaryCitationGroups(block[0]).length !== 1 || findDiaryCitationGroups(progress).length !== 1 || feedbackLines.some((line) => findDiaryCitationGroups(line).length !== 1) || block.slice(1).some(
-      (line) => /^\s+- /.test(line) && !/^\s+- (?:路径：|进度：|反馈：|\[\d{4}-\d{2}\]\s)/.test(line)
-    )) return null;
-    projectUnits.push({
-      kind: "project",
-      lines: block,
-      documentOrder: documentOrder++,
-      age: citationAge(db, [progress]),
-      removed: false
-    });
-  }
-  const impressionUnits = [];
-  for (const project of projectUnits) {
-    for (let index = 1; index < project.lines.length; ) {
-      const line = project.lines[index];
-      if (!/^\s+- \[\d{4}-\d{2}\]\s/.test(line)) {
-        index += 1;
-        continue;
-      }
-      const unitLines = [line];
-      let end = index + 1;
-      while (end < project.lines.length && /^\s{4,}\S/.test(project.lines[end]) && !/^\s+- /.test(project.lines[end])) {
-        unitLines.push(project.lines[end]);
-        end += 1;
-      }
-      if (findDiaryCitationGroups(unitLines.join("\n")).length !== 1) return null;
-      impressionUnits.push({
-        kind: "impression",
-        lines: unitLines,
-        documentOrder: documentOrder++,
-        age: citationAge(db, unitLines),
-        removed: false,
-        sourceProjectOrder: project.documentOrder,
-        sourceLineIndexes: Array.from(
-          { length: end - index },
-          (_, offset) => index + offset
-        )
-      });
-      index = end;
-    }
-  }
-  const generalUnits = [];
-  const generalLines = lines.slice(generalHeadingIndex + 1);
-  for (let index = 0; index < generalLines.length; ) {
-    if (generalLines[index].trim() === "") {
-      index += 1;
-      continue;
-    }
-    if (!generalLines[index].startsWith("- ")) return null;
-    const unitLines = [generalLines[index]];
-    index += 1;
-    while (index < generalLines.length && isContinuation(generalLines[index])) {
-      unitLines.push(generalLines[index]);
-      index += 1;
-    }
-    generalUnits.push({
-      kind: "general",
-      lines: unitLines,
-      documentOrder: documentOrder++,
-      age: citationAge(db, unitLines),
-      removed: false
-    });
-    if (findDiaryCitationGroups(unitLines.join("\n")).length !== 1) return null;
-  }
-  return {
-    projectHeading: "## \u9879\u76EE",
-    projectUnits: [...projectUnits, ...impressionUnits],
-    generalHeading: "## \u901A\u7528",
-    generalUnits
-  };
-}
-function renderExperienceBody(parsed) {
-  const removedImpressionLines = /* @__PURE__ */ new Map();
-  for (const unit of parsed.projectUnits.filter((candidate) => candidate.kind === "impression" && candidate.removed)) {
-    const indexes = removedImpressionLines.get(unit.sourceProjectOrder) ?? /* @__PURE__ */ new Set();
-    for (const index of unit.sourceLineIndexes) indexes.add(index);
-    removedImpressionLines.set(unit.sourceProjectOrder, indexes);
-  }
-  const projects = parsed.projectUnits.filter((unit) => unit.kind === "project" && !unit.removed).flatMap((unit) => {
-    const removedIndexes = removedImpressionLines.get(unit.documentOrder);
-    return unit.lines.filter((_, index) => !removedIndexes?.has(index));
-  });
-  const general = parsed.generalUnits.filter((unit) => !unit.removed).flatMap((unit) => unit.lines);
-  return [parsed.projectHeading, ...projects, parsed.generalHeading, ...general].join("\n");
-}
-function renderExperienceInjection(body, recent) {
-  return [
-    "## Experience",
-    "",
-    body,
-    "",
-    "## \u8FD1\u671F",
-    "",
-    ...recent.map((line) => line.text)
-  ].join("\n");
-}
-function orderedOldestFirst(units) {
-  return units.slice().sort((left, right) => left.age - right.age || left.documentOrder - right.documentOrder);
-}
-function renderTrimmedExperienceInjection(input) {
-  const parsed = parseExperience(input.experience, input.db);
-  if (!parsed) return null;
-  const recent = input.recentLines.map((line) => ({ ...line }));
-  const render = () => renderExperienceInjection(renderExperienceBody(parsed), recent);
-  const withinBudget = (rendered2) => estimateDiaryTokens(rendered2) <= EXPERIENCE_INJECTION_TOKEN_BUDGET && estimateDiaryTokens(`${input.profileBlock}
+// src/diary/persona-render.ts
+var import_node_path6 = require("node:path");
 
-${rendered2}`) <= PERSONA_INJECTION_TOKEN_BUDGET;
-  let rendered = render();
-  const trimRecent = (kind) => {
-    const candidates = recent.filter((line) => line.kind === kind).sort((left, right) => left.date.localeCompare(right.date));
-    for (const candidate of candidates) {
-      if (withinBudget(rendered)) break;
-      recent.splice(recent.indexOf(candidate), 1);
-      rendered = render();
-    }
-  };
-  trimRecent("monthly");
-  trimRecent("daily");
-  const impressionUnits = orderedOldestFirst(
-    parsed.projectUnits.filter((unit) => unit.kind === "impression")
-  );
-  const stages = [
-    impressionUnits,
-    orderedOldestFirst(parsed.generalUnits),
-    orderedOldestFirst(parsed.projectUnits.filter((unit) => unit.kind === "project"))
-  ];
-  for (const units of stages) {
-    for (const unit of units) {
-      if (withinBudget(rendered)) break;
-      unit.removed = true;
-      rendered = render();
-    }
-  }
-  return withinBudget(rendered) ? rendered : null;
+// src/shared/markdown-sections.ts
+var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
+var ATX_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+function splitDocumentLines(document) {
+  if (document.length === 0) return [];
+  const lines = document.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
 }
+function openingFence(line) {
+  const match = FENCE_START.exec(line);
+  if (!match) return null;
+  const run = match[1];
+  return {
+    marker: run[0],
+    length: run.length
+  };
+}
+function closesFence(line, fence) {
+  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+  return Boolean(
+    match && match[1][0] === fence.marker && match[1].length >= fence.length
+  );
+}
+function parseMarkdownSections(document) {
+  const lines = splitDocumentLines(document);
+  if (lines.length === 0) return [];
+  const sections = [];
+  let current = null;
+  let fence = null;
+  for (const line of lines) {
+    if (fence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      if (closesFence(line, fence)) fence = null;
+      continue;
+    }
+    const nextFence = openingFence(line);
+    if (nextFence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      fence = nextFence;
+      continue;
+    }
+    const heading = ATX_HEADING.exec(line);
+    if (heading) {
+      if (current) sections.push(current);
+      current = {
+        title: heading[2],
+        level: heading[1].length,
+        bodyLines: []
+      };
+      continue;
+    }
+    current ??= { title: "", level: 0, bodyLines: [] };
+    current.bodyLines.push(line);
+  }
+  if (current) sections.push(current);
+  return sections;
+}
+
+// src/diary/persona-render.ts
+var PROFILE_INJECTION_TOKEN_BUDGET = 1e3;
+var EXPERIENCE_INJECTION_TOKEN_BUDGET = 1500;
+var PERSONA_INJECTION_TOKEN_BUDGET = PROFILE_INJECTION_TOKEN_BUDGET + EXPERIENCE_INJECTION_TOKEN_BUDGET;
+var sectionPointer = (remainingLines, displayPath) => `\uFF08\u672C\u8282\u8FD8\u6709 ${remainingLines} \u884C\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+function headingLine(section) {
+  return section.level === 0 ? null : `${"#".repeat(section.level)} ${section.title}`;
+}
+function renderSections(sections, includedLineCounts, displayPath, reserveEveryPointer = false) {
+  const lines = [];
+  sections.forEach((section, index) => {
+    const heading = headingLine(section);
+    if (heading !== null) lines.push(heading);
+    const included = includedLineCounts[index] ?? 0;
+    lines.push(...section.bodyLines.slice(0, included));
+    const remaining = section.bodyLines.length - included;
+    if (remaining > 0 || reserveEveryPointer) {
+      lines.push(sectionPointer(Math.max(remaining, 0), displayPath));
+    }
+  });
+  return lines.join("\n");
+}
+function renderPersonaDocumentInjection(document, injectionTokenBudget, displayPath) {
+  const sections = parseMarkdownSections(document);
+  if (sections.length === 0) return "";
+  const includedLineCounts = sections.map(() => 0);
+  const skeleton = renderSections(
+    sections,
+    includedLineCounts,
+    displayPath,
+    true
+  );
+  if (estimateDiaryTokens(skeleton) <= injectionTokenBudget) {
+    outer: for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
+      const section = sections[sectionIndex];
+      for (let lineIndex = 0; lineIndex < section.bodyLines.length; lineIndex += 1) {
+        includedLineCounts[sectionIndex] = lineIndex + 1;
+        const candidate = renderSections(
+          sections,
+          includedLineCounts,
+          displayPath
+        );
+        if (estimateDiaryTokens(candidate) > injectionTokenBudget) {
+          includedLineCounts[sectionIndex] = lineIndex;
+          break outer;
+        }
+      }
+    }
+    return renderSections(sections, includedLineCounts, displayPath);
+  }
+  const topLevelHeadings = sections.filter((section) => section.level === 1).map((section) => headingLine(section));
+  const documentPointer = `\uFF08\u5185\u5BB9\u7701\u7565\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+  const headingFallback = [...topLevelHeadings, documentPointer].join("\n");
+  if (estimateDiaryTokens(headingFallback) <= injectionTokenBudget) {
+    return headingFallback;
+  }
+  return `\uFF08${(0, import_node_path6.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+}
+
+// src/diary/experience-render.ts
 function buildRollingRecentLines(indexText, today) {
   const rows = indexText.split(/\r?\n/).flatMap((line) => {
     const match = line.match(/^- (\d{4}-\d{2}-\d{2})：(.*)$/);
@@ -5367,8 +5290,8 @@ async function kickWorkerWithinBudget(kickWorkerFast2) {
   try {
     await Promise.race([
       kickWorkerFast2(),
-      new Promise((resolve2) => {
-        timeout = setTimeout(resolve2, FAST_WORKER_KICK_BUDGET_MS);
+      new Promise((resolve3) => {
+        timeout = setTimeout(resolve3, FAST_WORKER_KICK_BUDGET_MS);
       })
     ]);
   } finally {
@@ -5377,7 +5300,7 @@ async function kickWorkerWithinBudget(kickWorkerFast2) {
     }
   }
 }
-async function appendDiaryContext(hookSpecificOutput, fileStore, db, today, requestRebuild, indexRows) {
+async function appendDiaryContext(hookSpecificOutput, fileStore, today, requestRebuild, indexRows) {
   let persona;
   try {
     persona = await fileStore.loadCurrentPersona();
@@ -5395,22 +5318,70 @@ async function appendDiaryContext(hookSpecificOutput, fileStore, db, today, requ
       recentLines = [];
     }
   }
-  const profileBlock = renderProfileInjection(persona.userProfile);
-  if (!isValidProfileInjectionSource(persona.userProfile) || estimateDiaryTokens(profileBlock) > PROFILE_INJECTION_TOKEN_BUDGET) {
-    requestRebuild();
-    return hookSpecificOutput;
-  }
-  const experienceBlock = renderTrimmedExperienceInjection({
-    db,
-    experience: persona.experience,
-    recentLines,
-    profileBlock
+  const generationRoot = (0, import_node_path7.resolve)(
+    fileStore.dataRoot,
+    "persona",
+    "generations",
+    String(persona.generation)
+  );
+  const profileBlock = renderBoundedPersonaBlock({
+    heading: "## Persona",
+    document: persona.userProfile,
+    displayPath: (0, import_node_path7.join)(generationRoot, "user-profile.md"),
+    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
   });
-  if (!experienceBlock) {
-    requestRebuild();
-    return hookSpecificOutput;
-  }
+  const experienceBlock = renderBoundedExperienceBlock({
+    document: persona.experience,
+    displayPath: (0, import_node_path7.join)(generationRoot, "experience.md"),
+    recentLines
+  });
   return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
+}
+function renderBoundedPersonaBlock(input) {
+  const suffixLines = input.suffixLines ?? [];
+  for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
+    const documentView = renderPersonaDocumentInjection(
+      input.document,
+      documentBudget,
+      input.displayPath
+    );
+    const block = [
+      input.heading,
+      ...documentView ? ["", documentView] : [],
+      ...suffixLines
+    ].join("\n");
+    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
+  }
+  const lowerBound = renderPersonaDocumentInjection(
+    input.document,
+    0,
+    input.displayPath
+  );
+  return [
+    input.heading,
+    ...lowerBound ? ["", lowerBound] : [],
+    ...suffixLines
+  ].join("\n");
+}
+function renderBoundedExperienceBlock(input) {
+  const recent = input.recentLines.map((line) => ({ ...line }));
+  const render = () => renderBoundedPersonaBlock({
+    heading: "## Experience",
+    document: input.document,
+    displayPath: input.displayPath,
+    tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
+    suffixLines: recent.length > 0 ? ["", "## \u8FD1\u671F", "", ...recent.map((line) => line.text)] : []
+  });
+  let block = render();
+  for (const kind of ["monthly", "daily"]) {
+    const candidates = recent.filter((line) => line.kind === kind).sort((left, right) => left.date.localeCompare(right.date));
+    for (const candidate of candidates) {
+      if (estimateDiaryTokens(block) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) break;
+      recent.splice(recent.indexOf(candidate), 1);
+      block = render();
+    }
+  }
+  return block;
 }
 function splitInsight(insight) {
   if (!insight) {
@@ -5654,7 +5625,6 @@ function createContextHandler(dependencies) {
       hookSpecificOutput = await appendDiaryContext(
         hookSpecificOutput,
         dependencies.fileStore,
-        dependencies.db,
         today,
         requestRebuild,
         dependencies.diaryStateStore?.listIndexRows() ?? []

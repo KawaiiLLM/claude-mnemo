@@ -7,6 +7,8 @@ import { upsertSession } from "../../src/db/sessions";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import {
   createDatabaseBackedHandlers,
+  WORKER_TOOL_RESULT_MAX_CHARS,
+  WORKER_TOOL_RESULT_TRUNCATION_HINT,
   toTimelineQueryInput,
 } from "../../src/mcp/handlers";
 
@@ -157,6 +159,40 @@ describe("database-backed MCP handlers", () => {
     expect(result?.content[0]?.text).toContain("showing: turns · page 2/2 (2)");
     expect(result?.content[0]?.text).toContain("T2");
     expect(result?.content[0]?.text).not.toContain("T1  ");
+  });
+
+  test("worker recall accepts fields beyond 2000, strips private tags, and gates the total result", async () => {
+    const visible = "v".repeat(3_000);
+    const session = upsertSession(db, {
+      contentSessionId: "worker-long-recall",
+      project: "claude-mnemo",
+      title: "Long worker recall",
+      content: `${visible}<private>hidden</private>`,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const worker = createDatabaseBackedHandlers(db, { audience: "worker" });
+    const longResult = await worker.recall?.({
+      id: `S${session.id}`,
+      depth: "expanded",
+      truncate: 5_000,
+    });
+    expect(longResult?.content[0]?.text).toContain(visible);
+    expect(longResult?.content[0]?.text).not.toContain("hidden");
+
+    db.query("UPDATE sessions SET content = ? WHERE id = ?").run(
+      "x".repeat(WORKER_TOOL_RESULT_MAX_CHARS + 10_000),
+      session.id,
+    );
+    const capped = await worker.recall?.({
+      id: `S${session.id}`,
+      depth: "expanded",
+      truncate: WORKER_TOOL_RESULT_MAX_CHARS + 10_000,
+    });
+    expect(capped?.content[0]?.text.length).toBe(WORKER_TOOL_RESULT_MAX_CHARS);
+    expect(capped?.content[0]?.text).toEndWith(WORKER_TOOL_RESULT_TRUNCATION_HINT);
   });
 
   test("timeline handler input forwards view enum and drops removed flags", () => {

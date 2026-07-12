@@ -3,6 +3,11 @@ import type { Database } from "bun:sqlite";
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
+import { stripPrivateTags } from "../shared/tag-stripping";
+
+export const WORKER_TOOL_RESULT_MAX_CHARS = 100_000;
+export const WORKER_TOOL_RESULT_TRUNCATION_HINT =
+  "\n\n[工具返回已达上限；请用分页或收窄选择器继续。]";
 
 export type ToolResult = {
   content: Array<{
@@ -79,10 +84,26 @@ export function createDatabaseBackedHandlers(
   }
 
   const includeDbTurnIds = options.audience === "worker";
+  const workerTextResult = (text: string): ToolResult => {
+    if (!includeDbTurnIds) {
+      return textResult(text);
+    }
+    const stripped = stripPrivateTags(text);
+    if (stripped.length <= WORKER_TOOL_RESULT_MAX_CHARS) {
+      return textResult(stripped);
+    }
+    const contentLimit = Math.max(
+      0,
+      WORKER_TOOL_RESULT_MAX_CHARS - WORKER_TOOL_RESULT_TRUNCATION_HINT.length,
+    );
+    return textResult(
+      stripped.slice(0, contentLimit) + WORKER_TOOL_RESULT_TRUNCATION_HINT,
+    );
+  };
 
   return {
     recall: (args) =>
-      textResult(
+      workerTextResult(
         recallMemory(database, {
           id: args.id as string | undefined,
           query: args.query as string | undefined,
@@ -92,12 +113,13 @@ export function createDatabaseBackedHandlers(
           pageSize: args.pageSize as number | undefined,
           truncate: args.truncate as number | undefined,
           includeDbTurnIds,
+          truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
         }),
       ),
     remember: (args) =>
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
     timeline: (args) =>
-      textResult(
+      workerTextResult(
         timelineQuery(database, toTimelineQueryInput(args)),
       ),
   };

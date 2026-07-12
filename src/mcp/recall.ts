@@ -35,6 +35,8 @@ export interface RecallInput {
   // on the public `recallInputShape` (definitions.ts) — wired through the
   // handler-construction `audience` option (handlers.ts) instead.
   includeDbTurnIds?: boolean;
+  // Internal audience rendering policy. Public/main callers leave this unset.
+  truncateCap?: number;
 }
 
 interface ParsedTimeRange {
@@ -548,6 +550,7 @@ function renderSession(
   truncate?: number,
   turnSelector?: Set<number>,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const view = depth === "expanded"
     ? buildSessionView(db, session)
@@ -560,6 +563,8 @@ function renderSession(
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
         truncate,
+        includeDbTurnIds,
+        truncateCap,
       },
     ),
   ];
@@ -587,6 +592,7 @@ function renderSession(
         sessionId: session.id,
         truncate,
         includeDbTurnIds,
+        truncateCap,
       },
     );
     lines.push(turnLines);
@@ -605,6 +611,7 @@ function renderTurnScope(
   depth: "collapsed" | "expanded",
   truncate?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -629,7 +636,7 @@ function renderTurnScope(
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap },
       ),
     );
 
@@ -645,6 +652,7 @@ function renderTurnScope(
             sessionId: session.id,
             truncate,
             includeDbTurnIds,
+            truncateCap,
           },
         ),
       );
@@ -661,6 +669,7 @@ function renderObservationScope(
   includeParents: boolean,
   truncate?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -694,6 +703,7 @@ function renderObservationScope(
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
             truncate,
+            truncateCap,
           },
         ),
       );
@@ -717,7 +727,7 @@ function renderObservationScope(
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap },
       ),
     );
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
@@ -736,6 +746,7 @@ function renderObservationScope(
             sessionId: session.id,
             truncate,
             includeDbTurnIds,
+            truncateCap,
           },
         ),
       );
@@ -764,6 +775,7 @@ function renderObservationScope(
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
               truncate,
+              truncateCap,
             },
           ),
         );
@@ -790,10 +802,11 @@ function renderSessionDetail(
   depth: "collapsed" | "expanded",
   truncate?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const session = getSession(db, sessionId);
   return session
-    ? renderSession(db, session, depth, truncate, undefined, includeDbTurnIds)
+    ? renderSession(db, session, depth, truncate, undefined, includeDbTurnIds, truncateCap)
     : "Session not found.";
 }
 
@@ -804,10 +817,11 @@ function renderTurnDetail(
   depth: "collapsed" | "expanded",
   truncate?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const turn = getTurn(db, sessionId, promptNumber);
   return turn
-    ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds)
+    ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap)
     : "Turn not found.";
 }
 
@@ -816,6 +830,7 @@ function renderObservationDetail(
   observationId: number,
   depth: "collapsed" | "expanded",
   truncate?: number,
+  truncateCap?: number,
 ): string {
   const observation = getObservation(db, observationId);
   if (!observation) {
@@ -829,6 +844,7 @@ function renderObservationDetail(
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
       truncate,
+      truncateCap,
     },
   );
 }
@@ -897,6 +913,7 @@ function renderGroupedSearchResults(
   depth: "collapsed" | "expanded",
   truncate?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const sessionGroups = new Map<
     number,
@@ -946,7 +963,7 @@ function renderGroupedSearchResults(
     }
 
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate, undefined, includeDbTurnIds);
+      return renderSession(db, session, depth, truncate, undefined, includeDbTurnIds, truncateCap);
     }
 
     const lines = [
@@ -955,7 +972,7 @@ function renderGroupedSearchResults(
           type: "session",
           value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session),
         },
-        { depth: "collapsed", mode: "unified", truncate },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap },
       ),
     ];
     const turns = getTurnsForSession(db, session.id).filter(
@@ -979,6 +996,7 @@ function renderGroupedSearchResults(
             sessionId: session.id,
             truncate,
             includeDbTurnIds,
+            truncateCap,
           },
         ),
       );
@@ -1001,6 +1019,7 @@ function renderGroupedSearchResults(
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
               truncate,
+              truncateCap,
             },
           ),
         );
@@ -1023,6 +1042,7 @@ function renderRoutedId(
   after?: number,
   before?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1035,7 +1055,7 @@ function renderRoutedId(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items
         .map((sessionId) =>
-          renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds),
+          renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap),
         )
         .join("\n"),
       paged.pageCount,
@@ -1055,7 +1075,7 @@ function renderRoutedId(
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds),
+      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount,
     );
   }
@@ -1063,7 +1083,7 @@ function renderRoutedId(
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
     return turn
-      ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds)
+      ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap)
       : "Turn not found.";
   }
 
@@ -1092,7 +1112,7 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount,
     );
   }
@@ -1120,13 +1140,13 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds),
+      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount,
     );
   }
 
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth, truncate);
+    return renderObservationDetail(db, routed.observationId, depth, truncate, truncateCap);
   }
 
   routed satisfies never;
@@ -1142,6 +1162,7 @@ function renderSessionList(
   after?: number,
   before?: number,
   includeDbTurnIds?: boolean,
+  truncateCap?: number,
 ): string {
   const paged = paginateItems(
     listSessionIds(db, undefined, after, before),
@@ -1153,7 +1174,7 @@ function renderSessionList(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items
       .map((sessionId) =>
-        renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds),
+        renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap),
       )
       .join("\n"),
     paged.pageCount,
@@ -1182,8 +1203,9 @@ export function recallMemory(db: Database, input: RecallInput): string {
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
+  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const truncateCap = input.truncateCap;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1206,6 +1228,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       timeRange.after,
       timeRange.before,
       includeDbTurnIds,
+      truncateCap,
     );
   }
 
@@ -1243,7 +1266,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds),
+      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
       paged.pageCount,
     );
   }
@@ -1257,5 +1280,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
     timeRange.after,
     timeRange.before,
     includeDbTurnIds,
+    truncateCap,
   );
 }

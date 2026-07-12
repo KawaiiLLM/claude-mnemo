@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { join, resolve } from "node:path";
 
 import type { DiaryStateStore } from "../../db/diary-state";
 import {
@@ -23,12 +24,13 @@ import { diaryDayOf, estimateDiaryTokens } from "../../diary/domain";
 import type { DiaryFileStore } from "../../diary/file-store";
 import {
   buildRollingRecentLines,
-  isValidProfileInjectionSource,
-  PROFILE_INJECTION_TOKEN_BUDGET,
-  renderProfileInjection,
-  renderTrimmedExperienceInjection,
   type RecentLine,
 } from "../../diary/experience-render";
+import {
+  EXPERIENCE_INJECTION_TOKEN_BUDGET,
+  PROFILE_INJECTION_TOKEN_BUDGET,
+  renderPersonaDocumentInjection,
+} from "../../diary/persona-render";
 import { validateAndMarkStale } from "../../diary/validate-and-mark-stale";
 
 export interface ContextHandlerDependencies {
@@ -48,7 +50,11 @@ export interface ContextHandlerDependencies {
   kickWorkerFast?: () => Promise<void>;
   fileStore?: Pick<
     DiaryFileStore,
-    "loadCurrentPersona" | "ensureIndex" | "readIndex" | "readValidatedDiary"
+    | "dataRoot"
+    | "loadCurrentPersona"
+    | "ensureIndex"
+    | "readIndex"
+    | "readValidatedDiary"
   >;
 }
 
@@ -76,8 +82,10 @@ async function kickWorkerWithinBudget(
 
 async function appendDiaryContext(
   hookSpecificOutput: string,
-  fileStore: Pick<DiaryFileStore, "loadCurrentPersona" | "ensureIndex" | "readIndex">,
-  db: Database,
+  fileStore: Pick<
+    DiaryFileStore,
+    "dataRoot" | "loadCurrentPersona" | "ensureIndex" | "readIndex"
+  >,
   today: string,
   requestRebuild: () => void,
   indexRows: ReturnType<DiaryStateStore["listIndexRows"]>,
@@ -102,25 +110,92 @@ async function appendDiaryContext(
       recentLines = [];
     }
   }
-  const profileBlock = renderProfileInjection(persona.userProfile);
-  if (
-    !isValidProfileInjectionSource(persona.userProfile) ||
-    estimateDiaryTokens(profileBlock) > PROFILE_INJECTION_TOKEN_BUDGET
-  ) {
-    requestRebuild();
-    return hookSpecificOutput;
-  }
-  const experienceBlock = renderTrimmedExperienceInjection({
-    db,
-    experience: persona.experience,
-    recentLines,
-    profileBlock,
+  const generationRoot = resolve(
+    fileStore.dataRoot,
+    "persona",
+    "generations",
+    String(persona.generation),
+  );
+  const profileBlock = renderBoundedPersonaBlock({
+    heading: "## Persona",
+    document: persona.userProfile,
+    displayPath: join(generationRoot, "user-profile.md"),
+    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET,
   });
-  if (!experienceBlock) {
-    requestRebuild();
-    return hookSpecificOutput;
-  }
+  const experienceBlock = renderBoundedExperienceBlock({
+    document: persona.experience,
+    displayPath: join(generationRoot, "experience.md"),
+    recentLines,
+  });
   return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
+}
+
+function renderBoundedPersonaBlock(input: {
+  heading: string;
+  document: string;
+  displayPath: string;
+  tokenBudget: number;
+  suffixLines?: readonly string[];
+}): string {
+  const suffixLines = input.suffixLines ?? [];
+  for (
+    let documentBudget = input.tokenBudget;
+    documentBudget >= 0;
+    documentBudget -= 1
+  ) {
+    const documentView = renderPersonaDocumentInjection(
+      input.document,
+      documentBudget,
+      input.displayPath,
+    );
+    const block = [
+      input.heading,
+      ...(documentView ? ["", documentView] : []),
+      ...suffixLines,
+    ].join("\n");
+    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
+  }
+
+  const lowerBound = renderPersonaDocumentInjection(
+    input.document,
+    0,
+    input.displayPath,
+  );
+  return [
+    input.heading,
+    ...(lowerBound ? ["", lowerBound] : []),
+    ...suffixLines,
+  ].join("\n");
+}
+
+function renderBoundedExperienceBlock(input: {
+  document: string;
+  displayPath: string;
+  recentLines: readonly RecentLine[];
+}): string {
+  const recent = input.recentLines.map((line) => ({ ...line }));
+  const render = () =>
+    renderBoundedPersonaBlock({
+      heading: "## Experience",
+      document: input.document,
+      displayPath: input.displayPath,
+      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
+      suffixLines: recent.length > 0
+        ? ["", "## 近期", "", ...recent.map((line) => line.text)]
+        : [],
+    });
+  let block = render();
+  for (const kind of ["monthly", "daily"] as const) {
+    const candidates = recent
+      .filter((line) => line.kind === kind)
+      .sort((left, right) => left.date.localeCompare(right.date));
+    for (const candidate of candidates) {
+      if (estimateDiaryTokens(block) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) break;
+      recent.splice(recent.indexOf(candidate), 1);
+      block = render();
+    }
+  }
+  return block;
 }
 
 function splitInsight(insight: string | null): string[] {
@@ -456,7 +531,6 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
       hookSpecificOutput = await appendDiaryContext(
         hookSpecificOutput,
         dependencies.fileStore,
-        dependencies.db,
         today,
         requestRebuild,
         dependencies.diaryStateStore?.listIndexRows() ?? [],

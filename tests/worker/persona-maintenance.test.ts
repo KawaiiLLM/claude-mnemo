@@ -13,6 +13,10 @@ import {
 } from "../../src/diary/domain";
 import { DiaryFileStore } from "../../src/diary/file-store";
 import {
+  EXPERIENCE_PUBLISHED_TOKEN_BUDGET,
+  PROFILE_PUBLISHED_TOKEN_BUDGET,
+} from "../../src/diary/persona-render";
+import {
   createPersonaMaintainer,
   decidePersonaOperation,
   selectPersonaInputDays,
@@ -202,7 +206,7 @@ describe("createPersonaMaintainer", () => {
       async runPersona(request) {
         calls += 1;
         if (calls === 2) throw new Error("pause after batch one");
-        const ref = calls === 1 ? "S1/T1" : "S1/T2";
+        const ref = calls === 1 ? "S1/T1，S9/T9" : "S1/T2";
         return [
           "===USER_PROFILE_V1_BEGIN===",
           `${validUserProfile}\n- frozen profile [${ref}]`,
@@ -229,36 +233,55 @@ describe("createPersonaMaintainer", () => {
     expect(published.generation).toBe(6);
     expect(published.manifest.generation).toBe(6);
     expect(published.manifest.operation_id).toBe("frozen-generation-operation");
+    expect(published.manifest.validation_report).toEqual({
+      version: 2,
+      total: 6,
+      stripped: 2,
+      items: [
+        { section: "USER_PROFILE/协作偏好", line: 6, original: "S9/T9" },
+        { section: "EXPERIENCE/通用", line: 3, original: "S9/T9" },
+      ],
+    });
     expect(stateStore.getPersonaCursor().rebuildRequested).toBe(false);
     expect(stateStore.getPersonaOperation()).toBeNull();
     db.close();
   });
 
-  test("accepts archived project shape and enforces citation/path allow-sets", () => {
+  test("accepts free-form and legacy envelopes across rebuild, fold, and rebase", () => {
     const diary = [
       "---", "format: 2", 'projects: ["/projects/mnemo/../mnemo"]', "---",
       "- source [S1/T1]",
     ].join("\n");
-    const request: PersonaRunRequest = { op: "rebuild", diaries: [{ date: "2026-07-10", content: diary }] };
-    const envelope = (experience: string, profile = `${validUserProfile}\n- trait [S1/T1]`) => [
+    const freeFormProfile = [
+      "# 此刻与长期倾向",
+      "用户偏爱用证据推进复杂工作 [S1/T1]",
+      "## 文化兴趣",
+      "尚待更多材料。",
+    ].join("\n");
+    const freeFormExperience = [
+      "### 2026 年轨迹",
+      "2026-07-10：用户启动了记忆系统维护 [S1/T1]",
+    ].join("\n");
+    const envelope = (profile: string, experience: string) => [
       "===USER_PROFILE_V1_BEGIN===", profile, "===USER_PROFILE_V1_END===",
       "===EXPERIENCE_V1_BEGIN===", experience, "===EXPERIENCE_V1_END===",
     ].join("\n");
-    const archived = [
-      "## 项目",
-      "- **mnemo**：共同维护记忆系统 [S1/T1]",
-      '    - 路径：["/projects/mnemo/"]',
-      "    - 进度：已归档——阶段工作完成 [S1/T1]",
-      "## 通用",
-      "- 先验证再发布 [S1/T1]",
-    ].join("\n");
-    expect(validatePersonaEnvelopeForRequest(envelope(archived), request).experience).toBe(archived);
-    expect(() => validatePersonaEnvelopeForRequest(
-      envelope(archived.replace("/projects/mnemo/", "/projects/invented")), request,
-    )).toThrow("project_path_not_allowed");
-    expect(() => validatePersonaEnvelopeForRequest(
-      envelope(archived.replace("## 通用", `${archived.split("\n").slice(1, 4).join("\n")}\n## 通用`)), request,
-    )).toThrow("project_path_overlap");
+    const previousPersona = { userProfile: validUserProfile, experience: validExperience };
+    const requests: PersonaRunRequest[] = [
+      { op: "rebuild", diaries: [{ date: "2026-07-10", content: diary }] },
+      { op: "fold", previousPersona, diaries: [{ date: "2026-07-10", content: diary }] },
+      { op: "rebase", previousPersona, diaries: [{ date: "2026-07-10", content: diary }] },
+    ];
+    for (const request of requests) {
+      expect(validatePersonaEnvelopeForRequest(
+        envelope(freeFormProfile, freeFormExperience),
+        request,
+      )).toEqual({ userProfile: freeFormProfile, experience: freeFormExperience });
+      expect(() => validatePersonaEnvelopeForRequest(
+        envelope(validUserProfile, validExperience),
+        request,
+      )).not.toThrow();
+    }
   });
 
   test("rebuild later batches allow accumulator refs but never old CURRENT-only refs", () => {
@@ -272,21 +295,23 @@ describe("createPersonaMaintainer", () => {
       "===USER_PROFILE_V1_BEGIN===", `${validUserProfile}\n- trait [${ref}]`, "===USER_PROFILE_V1_END===",
       "===EXPERIENCE_V1_BEGIN===", `${validExperience}\n- memory [${ref}]`, "===EXPERIENCE_V1_END===",
     ].join("\n");
-    expect(() => validatePersonaEnvelopeForRequest(make("S1/T1"), request)).not.toThrow();
-    expect(() => validatePersonaEnvelopeForRequest(make("S9/T9"), request)).toThrow("citation_not_allowed");
+    expect(validatePersonaEnvelopeForRequest(make("S1/T1"), request).userProfile).toContain("[S1/T1]");
+    expect(validatePersonaEnvelopeForRequest(make("S9/T9"), request).userProfile).not.toContain("[S9/T9]");
   });
 
-  test("rejects rendered profile and experience bodies over their commit budgets", () => {
+  test("anchors expanded budgets and rejects bodies over their commit budgets", () => {
+    expect(PROFILE_PUBLISHED_TOKEN_BUDGET).toBe(4_000);
+    expect(EXPERIENCE_PUBLISHED_TOKEN_BUDGET).toBe(6_000);
     const request: PersonaRunRequest = { op: "rebuild", diaries: [{ date: "2026-07-10", content: "- source [S1/T1]" }] };
     const raw = [
-      "===USER_PROFILE_V1_BEGIN===", `${validUserProfile}\n- ${"汉".repeat(1_300)} [S1/T1]`, "===USER_PROFILE_V1_END===",
-      "===EXPERIENCE_V1_BEGIN===", `${validExperience}\n- ${"汉".repeat(2_300)} [S1/T1]`, "===EXPERIENCE_V1_END===",
+      "===USER_PROFILE_V1_BEGIN===", `# Profile\n${"汉".repeat(4_100)}`, "===USER_PROFILE_V1_END===",
+      "===EXPERIENCE_V1_BEGIN===", `# Experience\n${"汉".repeat(6_100)}`, "===EXPERIENCE_V1_END===",
     ].join("\n");
     expect(() => validatePersonaEnvelopeForRequest(raw, request)).toThrow("profile_budget");
     expect(() => validatePersonaEnvelopeForRequest(raw, request)).toThrow("experience_budget");
   });
 
-  test("requires both v1 blocks with their exact closed section headings", () => {
+  test("requires both v1 blocks and at least one parsed heading in each", () => {
     const envelope = [
       "===USER_PROFILE_V1_BEGIN===",
       validUserProfile,
@@ -308,12 +333,12 @@ describe("createPersonaMaintainer", () => {
         ),
       ),
     ).toThrow("invalid persona envelope: EXPERIENCE");
-    expect(() =>
-      parsePersonaEnvelope(envelope.replace("## 项目\n## 通用", "## 通用\n## 项目")),
-    ).toThrow("invalid persona section headings: EXPERIENCE");
-    expect(() =>
-      parsePersonaEnvelope(envelope.replace("## 协作偏好", "## 其他")),
-    ).toThrow("invalid persona section headings: USER_PROFILE");
+    expect(() => parsePersonaEnvelope(
+      envelope.replace("## 项目\n## 通用", "plain experience without headings"),
+    )).toThrow("missing persona heading: EXPERIENCE");
+    expect(() => parsePersonaEnvelope(
+      envelope.replace(validUserProfile, "plain profile without headings"),
+    )).toThrow("missing persona heading: USER_PROFILE");
     expect(() =>
       parsePersonaEnvelope(
         envelope.replace(
@@ -372,14 +397,17 @@ describe("createPersonaMaintainer", () => {
       settledAtEpoch: 300,
     });
 
-    const userProfile = "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 用户要求严格 TDD [S1/T1]\n";
+    const userProfile = "# 工作方式\n用户要求严格 TDD [S1/T1，S9/T9]\n";
+    const publishedUserProfile = "# 工作方式\n用户要求严格 TDD [S1/T1]\n";
     const experience = "## 项目\n## 通用\n- 我应先验证再发布 [S1/T1]\n";
     let observedDiary = "";
+    let personaCalls = 0;
     const maintainer = createPersonaMaintainer({
       stateStore,
       fileStore,
       operationId: () => "persona-operation-1",
       async runPersona(request) {
+        personaCalls += 1;
         observedDiary = request.diaries[0]!.content;
         return [
           "===USER_PROFILE_V1_BEGIN===",
@@ -395,6 +423,7 @@ describe("createPersonaMaintainer", () => {
     try {
       await maintainer.runPersonaMaintenance();
 
+      expect(personaCalls).toBe(1);
       expect(observedDiary).toBe(new TextDecoder().decode(diaryBytes));
       expect(await fileStore.loadCurrentPersona()).toMatchObject({
         generation: 1,
@@ -407,8 +436,14 @@ describe("createPersonaMaintainer", () => {
           folds_since_rebase_after: 0,
           consumed_pending_dates: [],
           partial_missing_dates_after: [],
+          validation_report: {
+            version: 2,
+            total: 3,
+            stripped: 1,
+            items: [{ section: "USER_PROFILE/工作方式", line: 2, original: "S9/T9" }],
+          },
         },
-        userProfile,
+        userProfile: publishedUserProfile,
         experience,
       });
       expect(stateStore.getPersonaCursor()).toMatchObject({
@@ -943,7 +978,7 @@ describe("createPersonaMaintainer", () => {
         requests.push(request);
         if (requests.length === 1) {
           return [
-            "===USER_PROFILE_V1_BEGIN===", `${validUserProfile}\ninvalid failed output`, "===USER_PROFILE_V1_END===",
+            "===USER_PROFILE_V1_BEGIN===", `# Too large\n${"汉".repeat(4_100)}`, "===USER_PROFILE_V1_END===",
             "===EXPERIENCE_V1_BEGIN===", validExperience, "===EXPERIENCE_V1_END===",
           ].join("\n");
         }
