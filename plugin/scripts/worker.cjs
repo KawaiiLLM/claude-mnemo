@@ -50,7 +50,7 @@ var import_node_os5 = require("node:os");
 var import_node_path9 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.3.0-mrgrvjwx" : "dev";
+var BUILD_ID = true ? "0.3.1-mrh9xrmc" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -280,6 +280,10 @@ function parseDiaryEnvelope(raw) {
   }
   parseDiaryBody(body);
   return { body, indexHook };
+}
+function stripIndexHookDatePrefix(indexHook, date7) {
+  const stripped = indexHook.replace(new RegExp(`^${date7}\\s*[\uFF1A:]\\s*`), "").trim();
+  return stripped.length > 0 ? stripped : indexHook;
 }
 function compileDiaryDocument(input) {
   const sessions = [...new Set(input.sessions)].sort();
@@ -43060,7 +43064,7 @@ var CANONICAL_DIARY_WIRE_FORMAT_EXAMPLE = [
   "- <\u4E00\u6761\u53CD\u601D> [S1/T1]",
   "===DIARY_V2_END===",
   "===INDEX_HOOK_V1===",
-  "<\u4E00\u6761\u975E\u7A7A\u5355\u884C\u7D22\u5F15\u94A9\u5B50>"
+  "<\u4E00\u6761\u975E\u7A7A\u5355\u884C\u7D22\u5F15\u94A9\u5B50\uFF0C\u4E0D\u4EE5\u65E5\u671F\u5F00\u5934>"
 ].join("\n");
 var CANONICAL_PERSONA_WIRE_FORMAT_EXAMPLE = [
   "===USER_PROFILE_V1_BEGIN===",
@@ -43534,7 +43538,7 @@ function createDiaryJobProcessor(options) {
         const citationValidation = validateDiaryCitations(
           envelope.body,
           allowedTurnRefs,
-          envelope.indexHook
+          stripIndexHookDatePrefix(envelope.indexHook, date7)
         );
         if (!citationValidation.ok) {
           throw new Error(`Diary citation validation failed: ${citationValidation.code}`);
@@ -43613,7 +43617,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.3.0",
+        version: "0.3.1",
         tools: [
           toolImpl(
             "read_turn",
@@ -43646,6 +43650,10 @@ function createDiarySdkQuery(options) {
           options: {
             model: request.model,
             cwd: options.dataRoot,
+            // The bundled CJS worker breaks the SDK's import.meta.url-based CLI
+            // resolution ("url must be of type string"); resolve explicitly,
+            // matching query-session.
+            pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
             tools: [],
             allowedTools: [...DIARY_ALLOWED_TOOLS],
             mcpServers: { diary: diaryServer },

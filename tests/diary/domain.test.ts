@@ -9,6 +9,7 @@ import {
   findDiaryCitationGroups,
   parseDiaryEnvelope,
   stripDiaryPrivateContent,
+  stripIndexHookDatePrefix,
   validateDiaryCitations,
   validateDiaryDocument,
 } from "../../src/diary/domain";
@@ -224,5 +225,23 @@ describe("index hook contamination defense", () => {
       "**two**", "- second [S1/T1]", "- invalid",
     ]), new Set(["S1/T1"]));
     expect(result).toMatchObject({ ok: true, indexHook: "first；second" });
+  });
+});
+
+describe("stripIndexHookDatePrefix", () => {
+  test("removes a leading date prefix matching the diary date", () => {
+    expect(stripIndexHookDatePrefix("2026-07-11：三段式定稿", "2026-07-11")).toBe("三段式定稿");
+    expect(stripIndexHookDatePrefix("2026-07-11: work done", "2026-07-11")).toBe("work done");
+  });
+
+  test("leaves a non-matching or absent prefix untouched", () => {
+    expect(stripIndexHookDatePrefix("三段式定稿", "2026-07-11")).toBe("三段式定稿");
+    expect(stripIndexHookDatePrefix("2026-07-10：other day", "2026-07-11")).toBe(
+      "2026-07-10：other day",
+    );
+  });
+
+  test("never strips down to an empty hook", () => {
+    expect(stripIndexHookDatePrefix("2026-07-11：", "2026-07-11")).toBe("2026-07-11：");
   });
 });

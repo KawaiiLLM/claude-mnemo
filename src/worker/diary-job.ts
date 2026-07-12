@@ -14,6 +14,7 @@ import {
   estimateDiaryTokens,
   parseDiaryEnvelope,
   stripDiaryPrivateContent,
+  stripIndexHookDatePrefix,
   truncateDiaryResponse,
   validateDiaryCitations,
 } from "../diary/domain";
@@ -628,7 +629,7 @@ export function createDiaryJobProcessor(
         const citationValidation = validateDiaryCitations(
           envelope.body,
           allowedTurnRefs,
-          envelope.indexHook,
+          stripIndexHookDatePrefix(envelope.indexHook, date),
         );
         if (!citationValidation.ok) {
           throw new Error(`Diary citation validation failed: ${citationValidation.code}`);

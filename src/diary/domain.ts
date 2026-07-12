@@ -203,6 +203,13 @@ export function parseDiaryEnvelope(raw: string): ParsedDiaryEnvelope {
   return { body, indexHook };
 }
 
+export function stripIndexHookDatePrefix(indexHook: string, date: string): string {
+  const stripped = indexHook
+    .replace(new RegExp(`^${date}\\s*[：:]\\s*`), "")
+    .trim();
+  return stripped.length > 0 ? stripped : indexHook;
+}
+
 export interface CompileDiaryDocumentInput {
   date: string;
   sessions: readonly string[];

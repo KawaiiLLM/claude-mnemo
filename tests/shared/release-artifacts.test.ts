@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.3.0", () => {
+  test("release metadata is consistently bumped to 0.3.1", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -40,11 +40,11 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.3.0");
-    expect(pluginManifest.version).toBe("0.3.0");
-    expect(marketplace.metadata?.version).toBe("0.3.0");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.3.0");
-    expect(diarySdkQuery).toContain('version: "0.3.0"');
+    expect(packageJson.version).toBe("0.3.1");
+    expect(pluginManifest.version).toBe("0.3.1");
+    expect(marketplace.metadata?.version).toBe("0.3.1");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.3.1");
+    expect(diarySdkQuery).toContain('version: "0.3.1"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -135,6 +135,7 @@ describe("release artifacts", () => {
       "Maintain the two person-memory documents", // diary runtime
       "===DIARY_V2_BEGIN===", // canonical prompt wire format
       "Persona CURRENT re-validation failed", // persona crash recovery
+      "stripIndexHookDatePrefix", // 0.3.1 index-hook date-prefix strip
     ]) {
       expect(worker).toContain(marker);
     }

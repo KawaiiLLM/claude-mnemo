@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 
 import { encodeSource } from "../diary/domain";
+import { resolveClaudeCodeExecutablePath } from "./agent-session";
 import type { DiaryAgentQueryRequest } from "./diary-agent-runner";
 import type { DiaryAgentTurn } from "./diary-agent-tools";
 
@@ -68,7 +69,7 @@ export function createDiarySdkQuery(
 
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.3.0",
+        version: "0.3.1",
         tools: [
           toolImpl(
             "read_turn",
@@ -104,6 +105,10 @@ export function createDiarySdkQuery(
           options: {
             model: request.model,
             cwd: options.dataRoot,
+            // The bundled CJS worker breaks the SDK's import.meta.url-based CLI
+            // resolution ("url must be of type string"); resolve explicitly,
+            // matching query-session.
+            pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
             tools: [],
             allowedTools: [...DIARY_ALLOWED_TOOLS],
             mcpServers: { diary: diaryServer },

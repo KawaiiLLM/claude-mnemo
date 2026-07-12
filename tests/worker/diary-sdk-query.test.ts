@@ -170,6 +170,11 @@ describe("diary SDK query", () => {
     expect(seenCalls[0]?.prompt).toBe("write the diary");
     expect(seenCalls[0]?.options.model).toBe("claude-sonnet-5");
     expect(seenCalls[0]?.options.cwd).toBe("/tmp/claude-mnemo-diary-sdk");
+    // The bundled CJS worker cannot rely on the SDK's import.meta.url CLI
+    // resolution, so the option key must always be present explicitly.
+    expect(
+      Object.hasOwn(seenCalls[0]?.options ?? {}, "pathToClaudeCodeExecutable"),
+    ).toBe(true);
     expect(seenCalls[0]?.options.tools).toEqual([]);
     expect(seenCalls[0]?.options.allowedTools).toEqual([
       "mcp__diary__read_turn",
@@ -182,7 +187,7 @@ describe("diary SDK query", () => {
     expect(createSdkMcpServerImpl).toHaveBeenCalledTimes(1);
     expect(serverDefinition).toMatchObject({
       name: "diary",
-      version: "0.3.0",
+      version: "0.3.1",
     });
     expect(toolImpl.mock.calls.map(([name]) => name)).toEqual([
       "read_turn",

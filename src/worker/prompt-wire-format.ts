@@ -10,7 +10,7 @@ export const CANONICAL_DIARY_WIRE_FORMAT_EXAMPLE = [
   "- <一条反思> [S1/T1]",
   "===DIARY_V2_END===",
   "===INDEX_HOOK_V1===",
-  "<一条非空单行索引钩子>",
+  "<一条非空单行索引钩子，不以日期开头>",
 ].join("\n");
 
 export const CANONICAL_PERSONA_WIRE_FORMAT_EXAMPLE = [
