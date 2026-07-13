@@ -1,13 +1,20 @@
 import type { DiaryAgentToolHandlers } from "./diary-agent-tools";
+import {
+  DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  DEFAULT_DREAM_AGENT_MODEL,
+  type DreamAgentModel,
+} from "../shared/config";
 
 export interface DiaryAgentRunInput {
   date: string;
   prompt: string;
   toolHandlers: DiaryAgentToolHandlers;
+  /** Defaults to the configured product generation's reviewed dream model. */
+  model?: DreamAgentModel;
 }
 
 export interface DiaryAgentQueryRequest extends DiaryAgentRunInput {
-  model: "claude-sonnet-5";
+  model: DreamAgentModel;
   timeoutMs: number;
   watchdogMs: number;
   signal: AbortSignal;
@@ -27,7 +34,7 @@ export interface DiaryAgentRunner {
 export function createDiaryAgentRunner(
   options: CreateDiaryAgentRunnerOptions,
 ): DiaryAgentRunner {
-  const timeoutMs = options.timeoutMs ?? 600_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_DREAM_AGENT_TIMEOUT_MS;
   const watchdogMs = options.watchdogMs ?? 120_000;
 
   return {
@@ -59,7 +66,7 @@ export function createDiaryAgentRunner(
       try {
         return await options.runQuery({
           ...input,
-          model: "claude-sonnet-5",
+          model: input.model ?? DEFAULT_DREAM_AGENT_MODEL,
           timeoutMs,
           watchdogMs,
           signal: controller.signal,

@@ -106,48 +106,17 @@ const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
     watermark TEXT,
-    file_sha256 TEXT,
-    index_hook TEXT,
-    validation_report_json TEXT,
     settled_at_epoch INTEGER,
     needs_regen INTEGER NOT NULL DEFAULT 0,
-    pending_rebase INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
+    last_error TEXT
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS persona_operation_state (
-    operation_id TEXT PRIMARY KEY,
-    op TEXT NOT NULL,
-    base_current_operation_id TEXT,
-    base_generation INTEGER NOT NULL DEFAULT 0,
-    target_generation INTEGER NOT NULL DEFAULT 1,
-    input_dates_snapshot TEXT NOT NULL,
-    consumed_pending_dates TEXT NOT NULL DEFAULT '[]',
-    rebuild_request_epoch INTEGER NOT NULL DEFAULT 0,
-    partial_missing_dates TEXT NOT NULL DEFAULT '[]',
-    batch_plan TEXT NOT NULL,
-    input_artifact_dir TEXT NOT NULL,
-    next_batch_index INTEGER NOT NULL DEFAULT 0,
-    accumulator_generation INTEGER,
-    accumulator_hash TEXT,
-    checkpoint_path TEXT,
-    checkpoint_sha256 TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_operation_active
-    ON persona_operation_state(terminal) WHERE terminal = 0;
 
   ${MEMORY_FTS_DDL}
 `;
@@ -160,10 +129,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
-  ensureDiaryValidationReportColumn(db);
-  ensurePersonaOperationGenerationColumns(db);
-  ensurePersonaOperationConsumedPendingDatesColumn(db);
-  ensurePersonaOperationPublicationSnapshotColumns(db);
+  dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
@@ -171,40 +137,10 @@ export function initializeSchema(db: Database): void {
   dropLegacyMemoriesTable(db);
 }
 
-function ensurePersonaOperationPublicationSnapshotColumns(db: Database): void {
-  if (!hasColumn(db, "persona_operation_state", "rebuild_request_epoch")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN rebuild_request_epoch INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!hasColumn(db, "persona_operation_state", "partial_missing_dates")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN partial_missing_dates TEXT NOT NULL DEFAULT '[]'");
-  }
-}
-
-function ensurePersonaOperationConsumedPendingDatesColumn(db: Database): void {
-  if (!hasColumn(db, "persona_operation_state", "consumed_pending_dates")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN consumed_pending_dates TEXT NOT NULL DEFAULT '[]'",
-    );
-  }
-}
-
-function ensurePersonaOperationGenerationColumns(db: Database): void {
-  if (!hasColumn(db, "persona_operation_state", "base_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!hasColumn(db, "persona_operation_state", "target_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN target_generation INTEGER NOT NULL DEFAULT 1",
-    );
-  }
-}
-
-function ensureDiaryValidationReportColumn(db: Database): void {
-  if (!hasColumn(db, "diary_day_state", "validation_report_json")) {
-    db.exec("ALTER TABLE diary_day_state ADD COLUMN validation_report_json TEXT");
-  }
+function dropRetiredMaintenanceState(db: Database): void {
+  // Installed 0.3.2 databases may still contain the old maintenance table.
+  // Dropping it makes the retired terminal-state deadlock unrepresentable.
+  db.exec("DROP TABLE IF EXISTS persona_operation_state");
 }
 
 function ensureSessionLastAgentSessionIdColumn(db: Database): void {

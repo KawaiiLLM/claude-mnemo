@@ -3,8 +3,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export interface MnemoConfig {
-  /** Optional prior-persona material supplied to diary generation. */
-  priorPersonaPath: string;
   mergeThresholdChars: number;
   maxQueuedBatches: number;
   keepaliveLeadMs: number;
@@ -22,10 +20,40 @@ export interface MnemoConfig {
    * window is set below 200K (see server.ts).
    */
   compactContextRatio: number;
+  /** Model used by the merged nightly dream agent. */
+  dreamAgentModel: DreamAgentModel;
+  /** Total wall-clock timeout for one merged nightly dream-agent request. */
+  dreamAgentTimeoutMs: number;
+  /** Local wall-clock hour after which SessionStart may enqueue dream work. */
+  dreamAgentHour: number;
+  /** IANA timezone used for dream calendar dates and the trigger hour. */
+  dreamAgentTimeZone: string;
+  /** Maximum dates enqueued by one SessionStart. */
+  dreamAgentBacklogLimit: number;
 }
 
+export const KNOWN_DREAM_AGENT_MODELS = [
+  "claude-opus-4-8",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+] as const;
+
+export type DreamAgentModel = (typeof KNOWN_DREAM_AGENT_MODELS)[number];
+
+// Deliberately concrete: upgrading the default is a reviewed product change,
+// not an alias that can silently drift underneath irreversible curation.
+export const DEFAULT_DREAM_AGENT_MODEL: DreamAgentModel = "claude-opus-4-8";
+export const DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+// A real Sonnet 5 dream run exceeded the old ten-minute ceiling after doing
+// several recall/Grep pulls and committing all nightly documents. Thirty
+// minutes leaves 3x measured headroom while retaining a finite fail-safe.
+export const DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1_000;
+
 export const DEFAULT_CONFIG: MnemoConfig = {
-  priorPersonaPath: "~/.claude/CLAUDE.md",
   mergeThresholdChars: 1000,
   maxQueuedBatches: 3,
   keepaliveLeadMs: 60_000,
@@ -33,6 +61,11 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   maxMiniTurnChars: 24_000,
   maxFlushAttempts: 3,
   compactContextRatio: 0.5,
+  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentHour: 4,
+  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+  dreamAgentBacklogLimit: 7,
 };
 
 // Floor for maxMiniTurnChars: guarantees a final slice's fixed overhead
@@ -68,9 +101,69 @@ function clampNumber(
   return Math.min(Math.max(value, min), max);
 }
 
-function clampConfig(config: MnemoConfig): MnemoConfig {
+interface ConfigWarningLogger {
+  warn(message: string): void;
+}
+
+function resolveDreamAgentModel(
+  value: unknown,
+  logger: ConfigWarningLogger,
+): DreamAgentModel {
+  if (
+    typeof value === "string" &&
+    (KNOWN_DREAM_AGENT_MODELS as readonly string[]).includes(value)
+  ) {
+    return value as DreamAgentModel;
+  }
+
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`,
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+
+function resolveDreamAgentTimeZone(
+  value: unknown,
+  logger: ConfigWarningLogger,
+): string {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+      // Fall through to the stable product default and warn below.
+    }
+  }
+
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`,
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+
+function clampInteger(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+
+function clampConfig(
+  config: MnemoConfig,
+  rawDreamAgentModel: unknown,
+  rawDreamAgentTimeZone: unknown,
+  logger: ConfigWarningLogger,
+): MnemoConfig {
   return {
-    ...config,
+    mergeThresholdChars: config.mergeThresholdChars,
+    maxQueuedBatches: config.maxQueuedBatches,
+    keepaliveLeadMs: config.keepaliveLeadMs,
+    cacheMode: config.cacheMode,
     maxMiniTurnChars: clampNumber(
       config.maxMiniTurnChars,
       MIN_MINI_TURN_CHARS,
@@ -89,10 +182,36 @@ function clampConfig(config: MnemoConfig): MnemoConfig {
       MAX_COMPACT_CONTEXT_RATIO,
       DEFAULT_CONFIG.compactContextRatio,
     ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config.dreamAgentTimeoutMs,
+      60_000,
+      86_400_000,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs,
+    ),
+    dreamAgentHour: clampInteger(
+      config.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour,
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger,
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit,
+    ),
   };
 }
 
-export function loadConfig(homePath = homedir()): MnemoConfig {
+export function loadConfig(
+  homePath = homedir(),
+  logger: ConfigWarningLogger = { warn: (message) => console.warn(message) },
+): MnemoConfig {
   const path = resolveConfigPath(homePath);
   if (!existsSync(path)) {
     return DEFAULT_CONFIG;
@@ -100,10 +219,22 @@ export function loadConfig(homePath = homedir()): MnemoConfig {
 
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<MnemoConfig>;
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel",
+    )
+      ? raw.dreamAgentModel
+      : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone",
+    )
+      ? raw.dreamAgentTimeZone
+      : DEFAULT_DREAM_AGENT_TIME_ZONE;
     return clampConfig({
       ...DEFAULT_CONFIG,
       ...raw,
-    });
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
   } catch {
     return DEFAULT_CONFIG;
   }

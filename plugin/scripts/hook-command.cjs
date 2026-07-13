@@ -35,7 +35,7 @@ __export(hook_command_exports, {
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
-var import_node_fs4 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 
 // src/shared/hook-constants.ts
 var HOOK_HEALTH_TIMEOUT_MS = 3e3;
@@ -187,60 +187,214 @@ function runHookWriteTransaction(db, fn, options = {}) {
   }
 }
 
-// src/diary/domain.ts
-var import_node_crypto = require("node:crypto");
-var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-var DIARY_BODY_LIMIT = 64 * 1024;
-var DIARY_SECTION_HEADINGS = [
-  "## \u5DE5\u4F5C",
-  "## \u4EBA\u7269",
-  "## \u53CD\u601D"
-];
-function diaryDayOf(epochSeconds) {
-  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+// src/diary/calendar.ts
+var dateFormatters = /* @__PURE__ */ new Map();
+var timeFormatters = /* @__PURE__ */ new Map();
+function dateFormatter(timeZone) {
+  let formatter = dateFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
+    dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
 }
-function truncateDiaryResponse(value) {
-  return Array.from(value).slice(0, 2e3).join("");
+function timeFormatter(timeZone) {
+  let formatter = timeFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    });
+    timeFormatters.set(timeZone, formatter);
+  }
+  return formatter;
 }
-function computeDiaryWatermark(material) {
-  if (material.length === 0) return "empty";
-  const turnHashes = [...material].sort((left, right) => left.turnId - right.turnId).map(
-    (turn) => (0, import_node_crypto.createHash)("sha256").update(
-      [
-        turn.userPrompt ?? "",
-        truncateDiaryResponse(turn.assistantResponse ?? ""),
-        turn.title ?? "",
-        turn.content ?? "",
-        turn.insight ?? "",
-        turn.status
-      ].join("\0")
-    ).digest("hex")
+function partNumber(parts, type) {
+  const value = parts.find((part) => part.type === type)?.value;
+  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
+  return Number.parseInt(value, 10);
+}
+function assertCalendarDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`Invalid calendar date: ${date}`);
+  }
+}
+function calendarDateAt(epochSeconds, timeZone) {
+  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
+  const year = String(partNumber(parts, "year")).padStart(4, "0");
+  const month = String(partNumber(parts, "month")).padStart(2, "0");
+  const day = String(partNumber(parts, "day")).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function addCalendarDays(date, days) {
+  assertCalendarDate(date);
+  const value = /* @__PURE__ */ new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+function dreamTriggerWindow(input) {
+  const today = calendarDateAt(input.nowEpoch, input.timeZone);
+  const parts = timeFormatter(input.timeZone).formatToParts(
+    input.nowEpoch * 1e3
   );
-  return (0, import_node_crypto.createHash)("sha256").update(turnHashes.join("\0")).digest("hex").slice(0, 16);
+  const hour = partNumber(parts, "hour");
+  return {
+    today,
+    yesterday: addCalendarDays(today, -1),
+    hasPassedTrigger: hour >= input.triggerHour
+  };
 }
-function validateDiaryDocument(document) {
-  let text;
+
+// src/shared/config.ts
+var import_node_fs2 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path3 = require("node:path");
+var KNOWN_DREAM_AGENT_MODELS = [
+  "claude-opus-4-8",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5"
+];
+var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
+var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+var DEFAULT_CONFIG = {
+  mergeThresholdChars: 1e3,
+  maxQueuedBatches: 3,
+  keepaliveLeadMs: 6e4,
+  cacheMode: "auto",
+  maxMiniTurnChars: 24e3,
+  maxFlushAttempts: 3,
+  compactContextRatio: 0.5,
+  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentHour: 4,
+  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+  dreamAgentBacklogLimit: 7
+};
+var MIN_MINI_TURN_CHARS = 10240;
+var MIN_FLUSH_ATTEMPTS = 1;
+var MIN_COMPACT_CONTEXT_RATIO = 0.1;
+var MAX_COMPACT_CONTEXT_RATIO = 0.95;
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function clampNumber(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    mergeThresholdChars: config.mergeThresholdChars,
+    maxQueuedBatches: config.maxQueuedBatches,
+    keepaliveLeadMs: config.keepaliveLeadMs,
+    cacheMode: config.cacheMode,
+    maxMiniTurnChars: clampNumber(
+      config.maxMiniTurnChars,
+      MIN_MINI_TURN_CHARS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxMiniTurnChars
+    ),
+    maxFlushAttempts: clampNumber(
+      config.maxFlushAttempts,
+      MIN_FLUSH_ATTEMPTS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    compactContextRatio: clampNumber(
+      config.compactContextRatio,
+      MIN_COMPACT_CONTEXT_RATIO,
+      MAX_COMPACT_CONTEXT_RATIO,
+      DEFAULT_CONFIG.compactContextRatio
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentHour: clampInteger(
+      config.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
   try {
-    text = typeof document === "string" ? document : new TextDecoder("utf-8", { fatal: true }).decode(document);
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
   } catch {
-    return { ok: false, code: "invalid_utf8" };
+    return DEFAULT_CONFIG;
   }
-  const lines = text.split("\n");
-  if (lines[0] !== "---") return { ok: false, code: "invalid_frontmatter" };
-  const end = lines.indexOf("---", 1);
-  if (end < 0) return { ok: false, code: "invalid_frontmatter" };
-  const formatLines = lines.slice(1, end).filter((line) => line.startsWith("format:"));
-  if (formatLines.length !== 1 || formatLines[0] !== "format: 2") {
-    return { ok: false, code: "invalid_format" };
-  }
-  return { ok: true, format: 2 };
-}
-function estimateDiaryTokens(text) {
-  let weightedCodePoints = 0;
-  for (const codePoint of text) {
-    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
-  }
-  return Math.ceil(weightedCodePoints * 1.2);
 }
 
 // src/db/diary-state.ts
@@ -257,22 +411,22 @@ var DIARY_QUEUE_SELECT = `
     ON CAST(REPLACE(d.date, '-', '') AS INTEGER) = q.target_id
 `;
 function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
-  const date = diaryDayOf(createdAtEpoch);
+  const timeZone = db.query(
+    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
+  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
+  const date = calendarDateAt(createdAtEpoch, timeZone);
   db.query(
-    `
-      UPDATE diary_day_state
-      SET needs_regen = 1,
-          attempt_count = 0,
-          next_attempt_epoch = NULL,
-          last_error = NULL,
-          terminal = 0
-      WHERE date = ?
-        AND settled_at_epoch IS NOT NULL
-        AND date >= COALESCE(
-          (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-          '9999-12-31'
-        )
-    `
+    `UPDATE diary_day_state
+     SET needs_regen = 1,
+         attempt_count = 0,
+         next_attempt_epoch = NULL,
+         last_error = NULL
+     WHERE date = ?
+       AND settled_at_epoch IS NOT NULL
+       AND date >= COALESCE(
+         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+         '9999-12-31'
+       )`
   ).run(date);
 }
 function createDiaryStateStore(db) {
@@ -281,22 +435,15 @@ function createDiaryStateStore(db) {
       const targetId = Number(input.date.replaceAll("-", ""));
       runWriteTransaction(db, () => {
         db.query(
-          `
-            INSERT INTO diary_day_state (date)
-            VALUES (?)
-            ON CONFLICT DO NOTHING
-          `
+          `INSERT INTO diary_day_state (date)
+           VALUES (?)
+           ON CONFLICT DO NOTHING`
         ).run(input.date);
         db.query(
-          `
-            INSERT INTO pending_queue (
-              kind,
-              target_id,
-              session_db_id,
-              enqueued_at_epoch
-            ) VALUES ('diary', ?, 0, ?)
-            ON CONFLICT DO NOTHING
-          `
+          `INSERT INTO pending_queue (
+             kind, target_id, session_db_id, enqueued_at_epoch
+           ) VALUES ('diary', ?, 0, ?)
+           ON CONFLICT DO NOTHING`
         ).run(targetId, input.enqueuedAtEpoch);
       });
     },
@@ -306,198 +453,78 @@ function createDiaryStateStore(db) {
           `${DIARY_QUEUE_SELECT}
              WHERE q.kind = 'diary'
                AND q.claimed_at_epoch IS NULL
-               AND d.terminal = 0
                AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
              ORDER BY q.seq ASC
              LIMIT 1`
         ).get(claimedAtEpoch);
-        if (!row) {
-          return null;
-        }
+        if (!row) return null;
         const result = db.query(
-          `
-              UPDATE pending_queue
-              SET claimed_at_epoch = ?
-              WHERE seq = ? AND claimed_at_epoch IS NULL
-            `
+          `UPDATE pending_queue
+           SET claimed_at_epoch = ?
+           WHERE seq = ? AND claimed_at_epoch IS NULL`
         ).run(claimedAtEpoch, row.seq);
         if (result.changes !== 1) {
-          throw new Error(`unexpected claim race on diary queue seq=${row.seq}`);
+          throw new Error(`unexpected claim race on dream queue seq=${row.seq}`);
         }
-        return {
-          ...row,
-          claimedAtEpoch
-        };
+        return { ...row, claimedAtEpoch };
       });
     },
     hasReadyDiaryItem(nowEpoch) {
       return db.query(
         `${DIARY_QUEUE_SELECT}
-             WHERE q.kind = 'diary'
-               AND q.claimed_at_epoch IS NULL
-               AND d.terminal = 0
-               AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-             LIMIT 1`
+           WHERE q.kind = 'diary'
+             AND q.claimed_at_epoch IS NULL
+             AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
+           LIMIT 1`
       ).get(nowEpoch) !== null;
     },
     getDayState(date) {
       const row = db.query(
-        `
-            SELECT
-              date,
-              watermark,
-              file_sha256 AS fileSha256,
-              index_hook AS indexHook,
-              validation_report_json AS validationReportJson,
-              settled_at_epoch AS settledAtEpoch,
-              needs_regen AS needsRegen,
-              pending_rebase AS pendingRebase,
-              attempt_count AS attemptCount,
-              next_attempt_epoch AS nextAttemptEpoch,
-              last_error AS lastError,
-              terminal
-            FROM diary_day_state
-            WHERE date = ?
-          `
+        `SELECT
+           date,
+           watermark,
+           settled_at_epoch AS settledAtEpoch,
+           needs_regen AS needsRegen,
+           attempt_count AS attemptCount,
+           next_attempt_epoch AS nextAttemptEpoch,
+           last_error AS lastError
+         FROM diary_day_state
+         WHERE date = ?`
       ).get(date);
-      if (!row) {
-        return null;
-      }
-      return {
-        ...row,
-        needsRegen: row.needsRegen === 1,
-        pendingRebase: row.pendingRebase === 1,
-        terminal: row.terminal === 1
-      };
+      return row ? { ...row, needsRegen: row.needsRegen === 1 } : null;
     },
-    recordFailure(input) {
+    recordDreamFailure(input) {
       runWriteTransaction(db, () => {
         db.query(
-          `
-            UPDATE diary_day_state
-            SET attempt_count = attempt_count + 1,
-                next_attempt_epoch = CASE
-                  WHEN attempt_count + 1 >= 3 THEN NULL
-                  ELSE ?
-                END,
-                last_error = ?,
-                terminal = CASE
-                  WHEN attempt_count + 1 >= 3 THEN 1
-                  ELSE terminal
-                END
-            WHERE date = ?
-          `
+          `UPDATE diary_day_state
+           SET needs_regen = 1,
+               attempt_count = attempt_count + 1,
+               next_attempt_epoch = ?,
+               last_error = ?
+           WHERE date = ?`
         ).run(input.nextAttemptEpoch, input.error, input.date);
         db.query(
-          `
-            DELETE FROM pending_queue
-            WHERE seq = ?
-              AND kind = 'diary'
-              AND EXISTS (
-                SELECT 1
-                FROM diary_day_state
-                WHERE date = ? AND terminal = 1
-              )
-          `
-        ).run(input.queueSeq, input.date);
-        db.query(
-          `
-            UPDATE pending_queue
-            SET claimed_at_epoch = NULL
-            WHERE seq = ? AND kind = 'diary'
-          `
+          `UPDATE pending_queue
+           SET claimed_at_epoch = NULL
+           WHERE seq = ? AND kind = 'diary'`
         ).run(input.queueSeq);
       });
     },
-    settleDay(input) {
+    settleDreamDay(input) {
       runWriteTransaction(db, () => {
         db.query(
-          `
-            UPDATE diary_day_state
-            SET watermark = ?,
-                file_sha256 = ?,
-                index_hook = ?,
-                validation_report_json = ?,
-                settled_at_epoch = ?,
-                needs_regen = 0,
-                attempt_count = 0,
-                next_attempt_epoch = NULL,
-                last_error = NULL,
-                terminal = 0
-            WHERE date = ?
-          `
-        ).run(
-          input.watermark,
-          input.fileSha256,
-          input.indexHook,
-          input.validationReportJson,
-          input.settledAtEpoch,
-          input.date
-        );
+          `UPDATE diary_day_state
+           SET watermark = ?,
+               settled_at_epoch = ?,
+               needs_regen = 0,
+               attempt_count = 0,
+               next_attempt_epoch = NULL,
+               last_error = NULL
+           WHERE date = ?`
+        ).run(input.watermark, input.settledAtEpoch, input.date);
         db.query(
           "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
         ).run(input.queueSeq);
-      });
-    },
-    commitDayState(input) {
-      db.query(
-        `
-          UPDATE diary_day_state
-          SET watermark = ?,
-              file_sha256 = ?,
-              index_hook = ?,
-              validation_report_json = ?,
-              settled_at_epoch = ?,
-              pending_rebase = CASE
-                WHEN ? = 1 THEN 1
-                ELSE pending_rebase
-              END,
-              needs_regen = 0,
-              attempt_count = 0,
-              next_attempt_epoch = NULL,
-              last_error = NULL,
-              terminal = 0
-          WHERE date = ?
-        `
-      ).run(
-        input.watermark,
-        input.fileSha256,
-        input.indexHook,
-        input.validationReportJson,
-        input.settledAtEpoch,
-        input.pendingRebase ? 1 : 0,
-        input.date
-      );
-    },
-    commitDayTombstone(input) {
-      runWriteTransaction(db, () => {
-        const result = db.query(
-          `
-            UPDATE diary_day_state
-            SET watermark = 'empty',
-                file_sha256 = NULL,
-                index_hook = NULL,
-                validation_report_json = NULL,
-                needs_regen = 0,
-                pending_rebase = 0,
-                attempt_count = 0,
-                next_attempt_epoch = NULL,
-                last_error = NULL,
-                terminal = 0
-            WHERE date = ?
-          `
-        ).run(input.date);
-        if (result.changes !== 1) {
-          throw new Error(`Cannot tombstone missing diary day: ${input.date}`);
-        }
-        if (input.requestRebuild) {
-          db.query(
-            `
-              INSERT INTO diary_state (key, value) VALUES ('rebuild_request_epoch', '1')
-              ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
-            `
-          ).run();
-        }
       });
     },
     acknowledgeDiaryItem(queueSeq) {
@@ -508,25 +535,20 @@ function createDiaryStateStore(db) {
     hasQueuedDay(date) {
       const targetId = Number(date.replaceAll("-", ""));
       return db.query(
-        `
-              SELECT 1 AS one
-              FROM pending_queue
-              WHERE kind = 'diary' AND target_id = ?
-              LIMIT 1
-            `
+        `SELECT 1 AS one
+         FROM pending_queue
+         WHERE kind = 'diary' AND target_id = ?
+         LIMIT 1`
       ).get(targetId) !== null;
     },
     markDayStale(date) {
       db.query(
-        `
-          UPDATE diary_day_state
-          SET needs_regen = 1,
-              attempt_count = 0,
-              next_attempt_epoch = NULL,
-              last_error = NULL,
-              terminal = 0
-          WHERE date = ?
-        `
+        `UPDATE diary_day_state
+         SET needs_regen = 1,
+             attempt_count = 0,
+             next_attempt_epoch = NULL,
+             last_error = NULL
+         WHERE date = ?`
       ).run(date);
     },
     markDayStaleAndEnqueue(input) {
@@ -536,424 +558,57 @@ function createDiaryStateStore(db) {
       });
     },
     reconcileBacklog(input) {
-      const recentStart = new Date(
-        Date.parse(`${input.today}T00:00:00Z`) - 14 * 24 * 60 * 60 * 1e3
-      ).toISOString().slice(0, 10);
-      const windowStart = input.cutoverDate > recentStart ? input.cutoverDate : recentStart;
-      const startEpoch = Date.parse(`${windowStart}T00:00:00+08:00`) / 1e3;
-      const endEpoch = Date.parse(`${input.today}T00:00:00+08:00`) / 1e3;
-      const dates = new Set(
-        db.query(
-          `
-              SELECT created_at_epoch AS createdAtEpoch
-              FROM turns
-              WHERE created_at_epoch >= ?
-                AND created_at_epoch < ?
-                AND status != 'undone'
-            `
-        ).all(startEpoch, endEpoch).map((row) => diaryDayOf(row.createdAtEpoch))
-      );
+      if (!Number.isSafeInteger(input.maxDays) || input.maxDays < 1) {
+        throw new Error("Dream backlog maxDays must be a positive integer");
+      }
+      db.query(
+        `INSERT INTO diary_state (key, value) VALUES ('dream_timezone', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+      ).run(input.timeZone);
+      const startDate = input.lastSuccessfulDate === null ? input.cutoverDate : addCalendarDays(input.lastSuccessfulDate, 1);
+      const dates = /* @__PURE__ */ new Set();
+      for (let date = startDate < input.cutoverDate ? input.cutoverDate : startDate; date < input.today; date = addCalendarDays(date, 1)) {
+        dates.add(date);
+      }
       for (const row of db.query(
-        `
-            SELECT date
-            FROM diary_day_state
-            WHERE (date >= ? AND date < ?)
-               OR (needs_regen = 1 AND date >= ? AND date < ?)
-          `
-      ).all(windowStart, input.today, input.cutoverDate, input.today)) {
+        `SELECT date
+         FROM diary_day_state
+         WHERE needs_regen = 1
+           AND date >= ?
+           AND date < ?
+           AND (
+             settled_at_epoch IS NOT NULL
+             OR ? IS NULL
+             OR date <> ?
+           )`
+      ).all(
+        input.cutoverDate,
+        input.today,
+        input.lastSuccessfulDate,
+        input.lastSuccessfulDate
+      )) {
         dates.add(row.date);
       }
-      const sortedDates = Array.from(dates).sort();
-      const datesNeedingWork = [];
-      for (const date of sortedDates) {
-        const dayStartEpoch = Date.parse(`${date}T00:00:00+08:00`) / 1e3;
-        const material = db.query(
-          `
-              SELECT
-                id AS turnId,
-                status,
-                user_prompt AS userPrompt,
-                assistant_response AS assistantResponse,
-                title,
-                content,
-                insight
-              FROM turns
-              WHERE created_at_epoch >= ?
-                AND created_at_epoch < ?
-                AND status != 'undone'
-              ORDER BY id ASC
-            `
-        ).all(dayStartEpoch, dayStartEpoch + 24 * 60 * 60);
-        const currentWatermark = computeDiaryWatermark(material);
-        const state = this.getDayState(date);
-        if (state !== null && !state.needsRegen && state.watermark === currentWatermark) {
-          continue;
-        }
-        if (state !== null && state.watermark !== currentWatermark) {
-          this.markDayStale(date);
-        }
+      const selected = Array.from(dates).sort().slice(0, input.maxDays);
+      for (const date of selected) {
         this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
-        datesNeedingWork.push(date);
       }
-      return datesNeedingWork;
-    },
-    listIndexRows() {
-      return db.query(
-        `
-            SELECT date, index_hook AS indexHook
-            FROM diary_day_state
-            ORDER BY date ASC
-          `
-      ).all();
+      return selected;
     },
     initializeBootstrap(today) {
-      const defaultCutoverDate = new Date(
-        Date.parse(`${today}T00:00:00Z`) - 14 * 24 * 60 * 60 * 1e3
-      ).toISOString().slice(0, 10);
+      const defaultCutoverDate = addCalendarDays(today, -14);
       return runWriteTransaction(db, () => {
         db.query(
-          `
-            INSERT INTO diary_state (key, value)
-            VALUES ('cutover_date', ?), ('rebuild_requested', ?), ('rebuild_request_epoch', ?)
-            ON CONFLICT DO NOTHING
-          `
-        ).run(defaultCutoverDate, "1", "1");
-        const rows = db.query(
-          `
-              SELECT key, value
-              FROM diary_state
-              WHERE key IN ('cutover_date', 'rebuild_requested')
-            `
-        ).all();
-        const values = new Map(rows.map((row) => [row.key, row.value]));
-        return {
-          cutoverDate: values.get("cutover_date"),
-          rebuildRequested: values.get("rebuild_requested") === "1"
-        };
-      });
-    },
-    listSettledDays() {
-      return db.query(
-        `
-            SELECT
-              date,
-              watermark,
-              file_sha256 AS fileSha256,
-              index_hook AS indexHook
-            FROM diary_day_state
-            WHERE settled_at_epoch IS NOT NULL
-              AND watermark IS NOT NULL
-              AND watermark != 'empty'
-              AND file_sha256 IS NOT NULL
-              AND index_hook IS NOT NULL
-            ORDER BY date ASC
-          `
-      ).all();
-    },
-    nextIntegrityScanBatch(input) {
-      if (!Number.isInteger(input.limit) || input.limit <= 0) {
-        return [];
-      }
-      return runWriteTransaction(db, () => {
-        const days = this.listSettledDays().filter(
-          (day) => day.date < input.beforeDate
-        );
-        if (days.length === 0) {
-          return [];
-        }
-        const cursor = db.query(
-          "SELECT value FROM diary_state WHERE key = 'integrity_cursor'"
+          `INSERT INTO diary_state (key, value)
+           VALUES ('cutover_date', ?)
+           ON CONFLICT DO NOTHING`
+        ).run(defaultCutoverDate);
+        const cutoverDate = db.query(
+          "SELECT value FROM diary_state WHERE key = 'cutover_date'"
         ).get()?.value;
-        const nextIndex = cursor ? days.findIndex((day) => day.date > cursor) : 0;
-        const startIndex = nextIndex >= 0 ? nextIndex : 0;
-        const batchSize = Math.min(input.limit, days.length);
-        const batch = Array.from(
-          { length: batchSize },
-          (_, offset) => days[(startIndex + offset) % days.length]
-        );
-        db.query(
-          `
-            INSERT INTO diary_state (key, value)
-            VALUES ('integrity_cursor', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-          `
-        ).run(batch.at(-1).date);
-        return batch;
+        if (!cutoverDate) throw new Error("Dream cutover date was not initialized");
+        return { cutoverDate };
       });
-    },
-    listPendingRebaseDays() {
-      return db.query(
-        `
-            SELECT
-              date,
-              watermark,
-              file_sha256 AS fileSha256,
-              index_hook AS indexHook
-            FROM diary_day_state
-            WHERE pending_rebase = 1
-              AND settled_at_epoch IS NOT NULL
-              AND watermark IS NOT NULL
-              AND watermark != 'empty'
-              AND file_sha256 IS NOT NULL
-              AND index_hook IS NOT NULL
-            ORDER BY date ASC
-          `
-      ).all();
-    },
-    getPersonaRebuildGate(today) {
-      const rows = db.query(
-        `
-            SELECT date, terminal
-            FROM diary_day_state
-            WHERE date >= COALESCE(
-                (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-                '9999-12-31'
-              )
-              AND date < ?
-              AND (settled_at_epoch IS NULL OR needs_regen = 1)
-            ORDER BY date ASC
-          `
-      ).all(today);
-      return {
-        blockingDates: rows.filter((row) => row.terminal === 0).map((row) => row.date),
-        partialMissingDates: rows.filter((row) => row.terminal === 1).map((row) => row.date)
-      };
-    },
-    getPersonaCursor() {
-      const rows = db.query(
-        `
-            SELECT key, value
-            FROM diary_state
-            WHERE key IN (
-              'last_folded_date',
-              'last_applied_operation_id',
-              'folds_since_rebase',
-              'rebuild_requested',
-              'rebuild_request_epoch',
-              'rebuild_confirmed_epoch'
-            )
-          `
-      ).all();
-      const values = new Map(rows.map((row) => [row.key, row.value]));
-      const rebuildRequestEpoch = Number(values.get("rebuild_request_epoch") ?? (values.get("rebuild_requested") === "1" ? "1" : "0"));
-      const rebuildConfirmedEpoch = Number(values.get("rebuild_confirmed_epoch") ?? "0");
-      const cursor = {
-        lastFoldedDate: values.get("last_folded_date") ?? null,
-        lastAppliedOperationId: values.get("last_applied_operation_id") ?? null,
-        foldsSinceRebase: Number(values.get("folds_since_rebase") ?? "0"),
-        rebuildRequested: rebuildRequestEpoch > rebuildConfirmedEpoch
-      };
-      Object.defineProperties(cursor, {
-        rebuildRequestEpoch: { value: rebuildRequestEpoch, enumerable: false },
-        rebuildConfirmedEpoch: { value: rebuildConfirmedEpoch, enumerable: false }
-      });
-      return cursor;
-    },
-    commitPersonaCursor(input) {
-      runWriteTransaction(db, () => {
-        const entries = [
-          ["last_folded_date", input.lastFoldedDate],
-          ["last_applied_operation_id", input.lastAppliedOperationId],
-          ["folds_since_rebase", String(input.foldsSinceRebase ?? 0)]
-        ];
-        for (const [key, value] of entries) {
-          db.query(
-            `
-              INSERT INTO diary_state (key, value)
-              VALUES (?, ?)
-              ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            `
-          ).run(key, value);
-        }
-        if (input.confirmedRebuildEpoch !== void 0) {
-          db.query(`
-            INSERT INTO diary_state (key, value) VALUES ('rebuild_confirmed_epoch', ?)
-            ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))
-          `).run(String(input.confirmedRebuildEpoch));
-        } else if (input.rebuildRequested === false) {
-          const requested = this.getPersonaCursor().rebuildRequestEpoch;
-          db.query(`
-            INSERT INTO diary_state (key, value) VALUES ('rebuild_confirmed_epoch', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-          `).run(String(requested));
-        }
-        for (const day of input.consumedPendingDays ?? []) {
-          db.query(
-            "UPDATE diary_day_state SET pending_rebase = 0 WHERE date = ? AND watermark = ? AND file_sha256 = ?"
-          ).run(day.date, day.watermark, day.fileSha256);
-        }
-      });
-    },
-    requestPersonaRebuild() {
-      runWriteTransaction(db, () => {
-        db.query(
-          `
-            INSERT INTO diary_state (key, value) VALUES ('rebuild_request_epoch', '1')
-            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
-          `
-        ).run();
-      });
-    },
-    getPersonaOperation() {
-      const row = db.query(
-        `
-            SELECT
-              operation_id AS operationId,
-              op,
-              base_current_operation_id AS baseCurrentOperationId,
-              base_generation AS baseGeneration,
-              target_generation AS targetGeneration,
-              input_dates_snapshot AS inputDatesSnapshot,
-              consumed_pending_dates AS consumedPendingDates,
-              rebuild_request_epoch AS rebuildRequestEpoch,
-              partial_missing_dates AS partialMissingDates,
-              batch_plan AS batchPlan,
-              input_artifact_dir AS inputArtifactDir,
-              next_batch_index AS nextBatchIndex,
-              accumulator_generation AS accumulatorGeneration,
-              accumulator_hash AS accumulatorHash,
-              checkpoint_path AS checkpointPath,
-              checkpoint_sha256 AS checkpointSha256,
-              attempt_count AS attemptCount,
-              next_attempt_epoch AS nextAttemptEpoch,
-              last_error AS lastError,
-              terminal
-            FROM persona_operation_state
-            ORDER BY terminal DESC, rowid DESC
-            LIMIT 1
-          `
-      ).get();
-      if (!row) {
-        return null;
-      }
-      const inputDatesSnapshot = JSON.parse(row.inputDatesSnapshot);
-      const consumedPendingDates = JSON.parse(row.consumedPendingDates);
-      const partialMissingDates = JSON.parse(row.partialMissingDates);
-      const batchPlan = JSON.parse(row.batchPlan);
-      if (!Array.isArray(inputDatesSnapshot) || !inputDatesSnapshot.every((date) => typeof date === "string") || !Array.isArray(consumedPendingDates) || !consumedPendingDates.every((value) => typeof value === "string" || typeof value === "object" && value !== null && typeof value.date === "string" && typeof value.watermark === "string" && typeof value.fileSha256 === "string") || !Array.isArray(partialMissingDates) || !partialMissingDates.every((date) => typeof date === "string") || !Array.isArray(batchPlan) || !batchPlan.every(
-        (batch) => Array.isArray(batch) && batch.every((date) => typeof date === "string")
-      )) {
-        throw new Error(`invalid persona input snapshot: ${row.operationId}`);
-      }
-      return {
-        ...row,
-        inputDatesSnapshot,
-        consumedPendingDates: consumedPendingDates.map((value) => typeof value === "string" ? value : value.date),
-        consumedPendingDays: consumedPendingDates.map((value) => typeof value === "string" ? { date: value, watermark: "", fileSha256: "" } : value),
-        partialMissingDates,
-        batchPlan,
-        terminal: row.terminal === 1
-      };
-    },
-    beginPersonaOperation(input) {
-      db.query(
-        `
-          INSERT INTO persona_operation_state (
-            operation_id,
-            op,
-            base_current_operation_id,
-            base_generation,
-            target_generation,
-            input_dates_snapshot,
-            consumed_pending_dates,
-            rebuild_request_epoch,
-            partial_missing_dates,
-            batch_plan,
-            input_artifact_dir
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
-      ).run(
-        input.operationId,
-        input.op,
-        input.baseCurrentOperationId ?? null,
-        input.baseGeneration ?? 0,
-        input.targetGeneration ?? (input.baseGeneration ?? 0) + 1,
-        JSON.stringify(input.inputDatesSnapshot),
-        JSON.stringify(input.consumedPendingDays ?? input.consumedPendingDates ?? []),
-        input.rebuildRequestEpoch ?? this.getPersonaCursor().rebuildRequestEpoch,
-        JSON.stringify(input.partialMissingDates ?? []),
-        JSON.stringify(input.batchPlan ?? [input.inputDatesSnapshot]),
-        input.inputArtifactDir ?? ""
-      );
-    },
-    initializePersonaOperationArtifacts(input) {
-      db.query(
-        `
-          UPDATE persona_operation_state
-          SET base_current_operation_id = ?,
-              base_generation = ?,
-              target_generation = ?,
-              batch_plan = ?,
-              input_artifact_dir = ?
-          WHERE operation_id = ? AND input_artifact_dir = '' AND terminal = 0
-        `
-      ).run(
-        input.baseCurrentOperationId,
-        input.baseGeneration,
-        input.targetGeneration,
-        JSON.stringify(input.batchPlan),
-        input.inputArtifactDir,
-        input.operationId
-      );
-    },
-    advancePersonaCheckpoint(input) {
-      runWriteTransaction(db, () => {
-        db.query(
-          `
-            UPDATE persona_operation_state
-            SET next_batch_index = ?,
-                accumulator_generation = ?,
-                accumulator_hash = ?,
-                checkpoint_path = ?,
-                checkpoint_sha256 = ?,
-                attempt_count = 0,
-                next_attempt_epoch = NULL,
-                last_error = NULL
-            WHERE operation_id = ? AND terminal = 0
-          `
-        ).run(
-          input.nextBatchIndex,
-          input.accumulatorGeneration,
-          input.accumulatorHash,
-          input.checkpointPath,
-          input.checkpointSha256,
-          input.operationId
-        );
-      });
-    },
-    terminalPersonaOperation(operationId, error) {
-      db.query(
-        `
-          UPDATE persona_operation_state
-          SET terminal = 1,
-              next_attempt_epoch = NULL,
-              last_error = ?
-          WHERE operation_id = ?
-        `
-      ).run(error, operationId);
-    },
-    recordPersonaOperationFailure(input) {
-      db.query(
-        `
-          UPDATE persona_operation_state
-          SET attempt_count = attempt_count + 1,
-              next_attempt_epoch = CASE
-                WHEN attempt_count + 1 >= 3 THEN NULL
-                ELSE ?
-              END,
-              last_error = ?,
-              terminal = CASE
-                WHEN attempt_count + 1 >= 3 THEN 1
-                ELSE terminal
-              END
-          WHERE operation_id = ? AND terminal = 0
-        `
-      ).run(input.nextAttemptEpoch, input.error, input.operationId);
-    },
-    completePersonaOperation(operationId) {
-      db.query(
-        "DELETE FROM persona_operation_state WHERE operation_id = ?"
-      ).run(operationId);
     }
   };
 }
@@ -1178,48 +833,17 @@ var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
     watermark TEXT,
-    file_sha256 TEXT,
-    index_hook TEXT,
-    validation_report_json TEXT,
     settled_at_epoch INTEGER,
     needs_regen INTEGER NOT NULL DEFAULT 0,
-    pending_rebase INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
+    last_error TEXT
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS persona_operation_state (
-    operation_id TEXT PRIMARY KEY,
-    op TEXT NOT NULL,
-    base_current_operation_id TEXT,
-    base_generation INTEGER NOT NULL DEFAULT 0,
-    target_generation INTEGER NOT NULL DEFAULT 1,
-    input_dates_snapshot TEXT NOT NULL,
-    consumed_pending_dates TEXT NOT NULL DEFAULT '[]',
-    rebuild_request_epoch INTEGER NOT NULL DEFAULT 0,
-    partial_missing_dates TEXT NOT NULL DEFAULT '[]',
-    batch_plan TEXT NOT NULL,
-    input_artifact_dir TEXT NOT NULL,
-    next_batch_index INTEGER NOT NULL DEFAULT 0,
-    accumulator_generation INTEGER,
-    accumulator_hash TEXT,
-    checkpoint_path TEXT,
-    checkpoint_sha256 TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_operation_active
-    ON persona_operation_state(terminal) WHERE terminal = 0;
 
   ${MEMORY_FTS_DDL}
 `;
@@ -1231,47 +855,15 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
-  ensureDiaryValidationReportColumn(db);
-  ensurePersonaOperationGenerationColumns(db);
-  ensurePersonaOperationConsumedPendingDatesColumn(db);
-  ensurePersonaOperationPublicationSnapshotColumns(db);
+  dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
 }
-function ensurePersonaOperationPublicationSnapshotColumns(db) {
-  if (!hasColumn(db, "persona_operation_state", "rebuild_request_epoch")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN rebuild_request_epoch INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!hasColumn(db, "persona_operation_state", "partial_missing_dates")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN partial_missing_dates TEXT NOT NULL DEFAULT '[]'");
-  }
-}
-function ensurePersonaOperationConsumedPendingDatesColumn(db) {
-  if (!hasColumn(db, "persona_operation_state", "consumed_pending_dates")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN consumed_pending_dates TEXT NOT NULL DEFAULT '[]'"
-    );
-  }
-}
-function ensurePersonaOperationGenerationColumns(db) {
-  if (!hasColumn(db, "persona_operation_state", "base_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "persona_operation_state", "target_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN target_generation INTEGER NOT NULL DEFAULT 1"
-    );
-  }
-}
-function ensureDiaryValidationReportColumn(db) {
-  if (!hasColumn(db, "diary_day_state", "validation_report_json")) {
-    db.exec("ALTER TABLE diary_day_state ADD COLUMN validation_report_json TEXT");
-  }
+function dropRetiredMaintenanceState(db) {
+  db.exec("DROP TABLE IF EXISTS persona_operation_state");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -1476,631 +1068,1058 @@ function initializeDatabase(db) {
 
 // src/diary/file-store.ts
 var import_promises = require("node:fs/promises");
-var import_node_path3 = require("node:path");
-var import_node_crypto2 = require("node:crypto");
-function assertDiaryDate(date) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new Error(`Invalid diary date: ${date}`);
-  }
-}
-function readFrontmatterString(lines, field) {
-  const prefix = `${field}: `;
-  const matches = lines.filter((line) => line.startsWith(prefix));
-  if (matches.length !== 1) {
-    throw new Error(`Invalid diary frontmatter field: ${field}`);
-  }
-  let value;
-  try {
-    value = JSON.parse(matches[0].slice(prefix.length));
-  } catch {
-    throw new Error(`Invalid diary frontmatter field: ${field}`);
-  }
-  if (typeof value !== "string") {
-    throw new Error(`Invalid diary frontmatter field: ${field}`);
-  }
-  return value;
-}
+var import_node_path4 = require("node:path");
 var DiaryFileStore = class {
   constructor(dataRoot) {
     this.dataRoot = dataRoot;
   }
   dataRoot;
-  async commitDiary(date, canonicalBytes) {
-    assertDiaryDate(date);
-    await this.assertDiaryRootIsNotSymlink();
-    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
-    await this.assertPathIsNotSymlink(diaryPath);
-    await this.commitAtomically(diaryPath, canonicalBytes);
-  }
-  async commitAtomically(finalPath, canonicalBytes) {
-    const parentPath = (0, import_node_path3.dirname)(finalPath);
-    const temporaryPath = (0, import_node_path3.join)(
-      parentPath,
-      `.${(0, import_node_path3.basename)(finalPath)}.${process.pid}.${(0, import_node_crypto2.randomUUID)()}.tmp`
-    );
-    await (0, import_promises.mkdir)(parentPath, { recursive: true });
+  async readIndex() {
+    const diaryRoot = (0, import_node_path4.join)(this.dataRoot, "diary");
     try {
-      const temporaryFile = await (0, import_promises.open)(temporaryPath, "wx");
-      try {
-        await temporaryFile.writeFile(canonicalBytes);
-        await temporaryFile.sync();
-      } finally {
-        await temporaryFile.close();
+      const rootMetadata = await (0, import_promises.lstat)(diaryRoot);
+      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+        throw new Error(`Diary root must be a real directory: ${diaryRoot}`);
       }
-      await (0, import_promises.rename)(temporaryPath, finalPath);
-      await this.syncDirectory(parentPath);
     } catch (error) {
-      await (0, import_promises.unlink)(temporaryPath).catch(() => void 0);
+      if (error.code !== "ENOENT") throw error;
+    }
+    const indexPath = (0, import_node_path4.join)(diaryRoot, "INDEX.md");
+    try {
+      const indexMetadata = await (0, import_promises.lstat)(indexPath);
+      if (indexMetadata.isSymbolicLink() || !indexMetadata.isFile()) {
+        throw new Error(`Diary index must be a regular file: ${indexPath}`);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    return (0, import_promises.readFile)(indexPath);
+  }
+};
+
+// src/diary/memory-store.ts
+var import_node_crypto = require("node:crypto");
+var import_promises2 = require("node:fs/promises");
+var import_node_path6 = require("node:path");
+
+// src/shared/markdown-sections.ts
+var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
+var ATX_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+function splitDocumentLines(document) {
+  if (document.length === 0) return [];
+  const lines = document.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+function openingFence(line) {
+  const match = FENCE_START.exec(line);
+  if (!match) return null;
+  const run = match[1];
+  return {
+    marker: run[0],
+    length: run.length
+  };
+}
+function closesFence(line, fence) {
+  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+  return Boolean(
+    match && match[1][0] === fence.marker && match[1].length >= fence.length
+  );
+}
+function parseMarkdownSections(document) {
+  const lines = splitDocumentLines(document);
+  if (lines.length === 0) return [];
+  const sections = [];
+  let current = null;
+  let fence = null;
+  for (const line of lines) {
+    if (fence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      if (closesFence(line, fence)) fence = null;
+      continue;
+    }
+    const nextFence = openingFence(line);
+    if (nextFence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      fence = nextFence;
+      continue;
+    }
+    const heading = ATX_HEADING.exec(line);
+    if (heading) {
+      if (current) sections.push(current);
+      current = {
+        title: heading[2],
+        level: heading[1].length,
+        bodyLines: []
+      };
+      continue;
+    }
+    current ??= { title: "", level: 0, bodyLines: [] };
+    current.bodyLines.push(line);
+  }
+  if (current) sections.push(current);
+  return sections;
+}
+
+// src/shared/logger.ts
+var import_node_fs3 = require("node:fs");
+var import_node_path5 = require("node:path");
+var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
+var dirEnsured = false;
+function ensureLogDir() {
+  if (!dirEnsured) {
+    (0, import_node_fs3.mkdirSync)(DATA_DIR, { recursive: true });
+    dirEnsured = true;
+  }
+}
+function writeLog(level, component, message, context) {
+  const line = JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    level,
+    component,
+    message,
+    context: context ?? null
+  });
+  try {
+    ensureLogDir();
+    (0, import_node_fs3.appendFileSync)(LOG_PATH, `${line}
+`);
+  } catch {
+    process.stderr.write(`${line}
+`);
+  }
+}
+function createLogger(component) {
+  return {
+    debug(message, context) {
+      writeLog("debug", component, message, context);
+    },
+    info(message, context) {
+      writeLog("info", component, message, context);
+    },
+    warn(message, context) {
+      writeLog("warn", component, message, context);
+    },
+    error(message, context) {
+      writeLog("error", component, message, context);
+    }
+  };
+}
+
+// src/diary/diary-index.ts
+var openingFence2 = (line) => {
+  const run = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+  return run ? { marker: run[0], length: run.length } : null;
+};
+var closesFence2 = (line, fence) => {
+  const run = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
+  return Boolean(
+    run && run[0] === fence.marker && run.length >= fence.length
+  );
+};
+function datedDiaryIndexLines(lines) {
+  const entries = [];
+  let fence = null;
+  let inDiaryIndex = false;
+  lines.forEach((line, lineIndex) => {
+    if (fence) {
+      if (closesFence2(line, fence)) fence = null;
+      return;
+    }
+    const nextFence = openingFence2(line);
+    if (nextFence) {
+      fence = nextFence;
+      return;
+    }
+    const heading = /^ {0,3}(#{1,6})[ \t]+(.*)$/.exec(line);
+    if (heading) {
+      if (heading[1] === "#") inDiaryIndex = heading[2].trim() === "Diary Index";
+      return;
+    }
+    if (!inDiaryIndex) return;
+    const date = /^-\s+(\d{4}-\d{2}-\d{2})(?:：|:)/.exec(line)?.[1];
+    if (date) entries.push({ line, date, order: entries.length, lineIndex });
+  });
+  return entries;
+}
+function sortDiaryIndexRecentFirst(document) {
+  const hasTrailingNewline = document.endsWith("\n");
+  const lines = document.replaceAll("\r\n", "\n").split("\n");
+  if (hasTrailingNewline) lines.pop();
+  const entries = datedDiaryIndexLines(lines);
+  const entryLineIndexes = new Set(entries.map((entry) => entry.lineIndex));
+  const blocks = entries.map((entry) => {
+    let endLineIndex = entry.lineIndex + 1;
+    while (endLineIndex < lines.length && !entryLineIndexes.has(endLineIndex) && (lines[endLineIndex].trim() === "" || /^[ \t]+/.test(lines[endLineIndex]))) {
+      endLineIndex += 1;
+    }
+    return {
+      ...entry,
+      lines: lines.slice(entry.lineIndex, endLineIndex),
+      endLineIndex
+    };
+  });
+  const sortedBlocks = blocks.slice().sort(
+    (left, right) => right.date.localeCompare(left.date) || left.order - right.order
+  );
+  const blocksByStart = new Map(
+    blocks.map((block) => [block.lineIndex, block])
+  );
+  const sorted = [];
+  let sortedIndex = 0;
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const originalBlock = blocksByStart.get(lineIndex);
+    if (!originalBlock) {
+      sorted.push(lines[lineIndex]);
+      continue;
+    }
+    sorted.push(...sortedBlocks[sortedIndex++].lines);
+    lineIndex = originalBlock.endLineIndex - 1;
+  }
+  return `${sorted.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
+}
+
+// src/diary/domain.ts
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+function diaryDayOf(epochSeconds) {
+  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+}
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
+  }
+  return Math.ceil(weightedCodePoints * 1.2);
+}
+
+// src/diary/memory-store.ts
+var MEMORY_DOCUMENT_TOKEN_LIMIT = 5e3;
+var DEFAULT_MEMORY_HISTORY_RETENTION = {
+  newest: 30,
+  monthly: true
+};
+var EMPTY_PROFILE_DOCUMENT = "# User Profile\n";
+var EMPTY_EXPERIENCE_DOCUMENT = "# Experience\n";
+var EMPTY_ARCHIVE_DOCUMENT = "# Memory Archive\n";
+var MEMORY_FILES = [
+  "user-profile.md",
+  "experience.md",
+  "archive.md"
+];
+var SNAPSHOT_MANIFEST_FILE = "manifest.json";
+var LegacyPersonaUnavailableError = class extends Error {
+};
+var encoder = new TextEncoder();
+var decoder = new TextDecoder("utf-8", { fatal: true });
+function assertDiaryDate(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    throw new Error(`Invalid dream date: ${date}`);
+  }
+}
+function sha256(bytes) {
+  return (0, import_node_crypto.createHash)("sha256").update(bytes).digest("hex");
+}
+function decodeUtf8(bytes, label) {
+  try {
+    return decoder.decode(bytes);
+  } catch {
+    throw new Error(`${label} is not valid UTF-8`);
+  }
+}
+function assertParseableMarkdown(label, document) {
+  if (!parseMarkdownSections(document).some((section) => section.level >= 1)) {
+    throw new Error(`${label} must contain at least one Markdown ATX heading`);
+  }
+}
+function assertHotMemoryWithinLimit(label, document) {
+  const tokens = estimateDiaryTokens(document);
+  if (tokens > MEMORY_DOCUMENT_TOKEN_LIMIT) {
+    throw new Error(
+      `${label} has ${tokens} estimated tokens and exceeds the ${MEMORY_DOCUMENT_TOKEN_LIMIT}-token limit; demote the oldest or least valuable entries to archive and retry`
+    );
+  }
+}
+function defaultCurrentMemory() {
+  return {
+    userProfile: EMPTY_PROFILE_DOCUMENT,
+    experience: EMPTY_EXPERIENCE_DOCUMENT,
+    archive: EMPTY_ARCHIVE_DOCUMENT
+  };
+}
+function documentForFilename(documents, filename) {
+  switch (filename) {
+    case "user-profile.md":
+      return documents.userProfile;
+    case "experience.md":
+      return documents.experience;
+    case "archive.md":
+      return documents.archive;
+  }
+}
+function snapshotId(now) {
+  const timestamp = now.toISOString().replace(/[:.]/g, "-");
+  return `${timestamp}-${(0, import_node_crypto.randomUUID)()}`;
+}
+function assertSafeId(id) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id) || id.startsWith(".")) {
+    throw new Error(`Invalid memory snapshot id: ${id}`);
+  }
+}
+function isWithin(root, target) {
+  const pathFromRoot = (0, import_node_path6.relative)(root, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path6.sep}`) && !pathFromRoot.startsWith(import_node_path6.sep);
+}
+var DreamMemoryStore = class {
+  constructor(dataRoot, options = {}) {
+    this.dataRoot = dataRoot;
+    this.retention = {
+      newest: options.retention?.newest ?? DEFAULT_MEMORY_HISTORY_RETENTION.newest,
+      monthly: options.retention?.monthly ?? DEFAULT_MEMORY_HISTORY_RETENTION.monthly
+    };
+    if (!Number.isSafeInteger(this.retention.newest) || this.retention.newest < 0) {
+      throw new Error("Memory history retention newest must be a non-negative integer");
+    }
+    this.now = options.now ?? (() => /* @__PURE__ */ new Date());
+    this.logger = options.logger ?? createLogger("MNEMOSYNE");
+    this.faultInjector = options.faultInjector;
+  }
+  dataRoot;
+  retention;
+  now;
+  logger;
+  faultInjector;
+  /**
+   * Atomically publishes the complete output of one dream run.
+   *
+   * Snapshot and validation order is part of the public contract. The success
+   * marker is deliberately separate and last: without it the date is unprocessed.
+   */
+  async commitNight(input) {
+    assertDiaryDate(input.date);
+    await this.recoverIncompleteTransactions();
+    await this.assertWorkspaceRootsAreSafe();
+    const previous = await this.readCurrentMemoryWithoutRecovery();
+    const snapshot = await this.createSnapshot(input.date, previous);
+    await this.injectFault("after-snapshot");
+    const normalizedInput = {
+      ...input,
+      diaryIndex: sortDiaryIndexRecentFirst(input.diaryIndex)
+    };
+    this.validateCommitDocuments(normalizedInput);
+    const transaction = await this.prepareTransaction("commit", input.date, {
+      "memory/user-profile.md": normalizedInput.userProfile,
+      "memory/experience.md": normalizedInput.experience,
+      "memory/archive.md": normalizedInput.archive,
+      "memory/migration-state.json": this.serializeMigrationState(false),
+      [`diary/${input.date}.md`]: normalizedInput.diary,
+      "diary/INDEX.md": normalizedInput.diaryIndex
+    });
+    try {
+      await this.injectFault("after-staging");
+      await this.publishTransaction(transaction);
+      await this.injectFault("after-publish");
+      await this.injectFault("before-success-marker");
+      await this.writeSuccessMarker(input.date, transaction.id);
+    } catch (error) {
+      const marker = await this.readSuccessMarkerWithoutRecovery().catch(
+        () => null
+      );
+      if (marker?.transactionId !== transaction.id) {
+        try {
+          await this.rollbackTransaction(transaction);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            `Dream commit failed and rollback could not complete for ${input.date}`
+          );
+        }
+        throw error;
+      } else {
+        await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true }).catch(
+          () => void 0
+        );
+      }
+    }
+    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+    await this.syncDirectory(this.transactionsRoot()).catch(() => void 0);
+    await this.applyRetention().catch((error) => {
+      this.logger.warn("Memory snapshot retention failed after a successful commit", {
+        date: input.date,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return { snapshot, lastSuccessfulDate: input.date };
+  }
+  async readCurrentMemory() {
+    await this.recoverIncompleteTransactions();
+    await this.assertWorkspaceRootsAreSafe();
+    return this.readCurrentMemoryWithoutRecovery();
+  }
+  async readInjectionDocuments() {
+    await this.recoverIncompleteTransactions();
+    await this.assertWorkspaceRootsAreSafe();
+    const defaults = defaultCurrentMemory();
+    const [userProfile, experience] = await Promise.all([
+      this.readMemoryDocument("user-profile.md", defaults.userProfile),
+      this.readMemoryDocument("experience.md", defaults.experience)
+    ]);
+    return { userProfile, experience };
+  }
+  async requiresInitialFullFill() {
+    await this.recoverIncompleteTransactions();
+    return (await this.readMigrationStateWithoutRecovery())?.requires_full_fill ?? false;
+  }
+  async readLastSuccessfulDate() {
+    await this.recoverIncompleteTransactions();
+    return this.readLastSuccessfulDateWithoutRecovery();
+  }
+  async listSnapshots() {
+    await this.recoverIncompleteTransactions();
+    return this.listSnapshotsWithoutRecovery();
+  }
+  async verifySnapshot(id) {
+    await this.recoverIncompleteTransactions();
+    return this.verifySnapshotWithoutRecovery(id);
+  }
+  async restoreSnapshot(id) {
+    await this.recoverIncompleteTransactions();
+    await this.assertWorkspaceRootsAreSafe();
+    const snapshot = await this.verifySnapshotWithoutRecovery(id);
+    const transaction = await this.prepareTransaction("restore", snapshot.date, {
+      "memory/user-profile.md": snapshot.documents.userProfile,
+      "memory/experience.md": snapshot.documents.experience,
+      "memory/archive.md": snapshot.documents.archive
+    });
+    await this.executeTransaction(
+      transaction,
+      `Memory snapshot restore failed and rollback could not complete: ${id}`
+    );
+  }
+  /**
+   * One-time cutover adapter. It reads the old published snapshot once, copies
+   * it into the single-current dream layout, then removes the old layout.
+   */
+  async migrateLegacyPersona() {
+    await this.recoverIncompleteTransactions();
+    await this.assertWorkspaceRootsAreSafe();
+    const hasProfile = await this.pathExists(this.memoryPath("user-profile.md"));
+    const hasExperience = await this.pathExists(this.memoryPath("experience.md"));
+    if (hasProfile && hasExperience) {
+      const migrationState = await this.readMigrationStateWithoutRecovery();
+      if (!await this.pathExists(this.memoryPath("archive.md")) || migrationState === null) {
+        await this.publishMigrationDocumentsAtomically(
+          await this.readCurrentMemoryWithoutRecovery(),
+          migrationState?.requires_full_fill ?? false
+        );
+      }
+      await this.retireLegacyPersonaLayout();
+      return { status: "already-current" };
+    }
+    let legacy = null;
+    try {
+      legacy = await this.loadLegacyCurrentPersona();
+    } catch (error) {
+      if (!(error instanceof LegacyPersonaUnavailableError)) throw error;
+      this.logger.warn(
+        "Legacy persona CURRENT is missing or invalid; starting dream memory from empty documents",
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+    if (legacy === null) {
+      await this.publishMigrationDocumentsAtomically(defaultCurrentMemory(), true);
+      await this.retireLegacyPersonaLayout();
+      return { status: "empty", reason: "legacy-current-unavailable" };
+    }
+    await this.publishMigrationDocumentsAtomically(legacy.documents, false);
+    await this.retireLegacyPersonaLayout();
+    return { status: "migrated", generation: legacy.generation };
+  }
+  validateCommitDocuments(input) {
+    assertParseableMarkdown("userProfile", input.userProfile);
+    assertParseableMarkdown("experience", input.experience);
+    assertParseableMarkdown("archive", input.archive);
+    assertParseableMarkdown("diary", input.diary);
+    assertParseableMarkdown("diaryIndex", input.diaryIndex);
+    assertHotMemoryWithinLimit("userProfile", input.userProfile);
+    assertHotMemoryWithinLimit("experience", input.experience);
+  }
+  async injectFault(point) {
+    await this.faultInjector?.(point);
+  }
+  memoryRoot() {
+    return (0, import_node_path6.join)(this.dataRoot, "memory");
+  }
+  memoryPath(filename) {
+    return (0, import_node_path6.join)(this.memoryRoot(), filename);
+  }
+  historyRoot() {
+    return (0, import_node_path6.join)(this.memoryRoot(), "history");
+  }
+  transactionsRoot() {
+    return (0, import_node_path6.join)(this.memoryRoot(), ".transactions");
+  }
+  successMarkerPath() {
+    return (0, import_node_path6.join)(this.memoryRoot(), "last-successful.json");
+  }
+  migrationStatePath() {
+    return (0, import_node_path6.join)(this.memoryRoot(), "migration-state.json");
+  }
+  async assertWorkspaceRootsAreSafe() {
+    await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+    for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path6.join)(this.dataRoot, "diary")]) {
+      try {
+        const metadata = await (0, import_promises2.lstat)(root);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+          throw new Error(`Dream workspace root must be a real directory: ${root}`);
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  async assertFileIsSafe(path2) {
+    const absoluteRoot = (0, import_node_path6.resolve)(this.dataRoot);
+    const absolutePath = (0, import_node_path6.resolve)(path2);
+    if (!isWithin(absoluteRoot, absolutePath)) {
+      throw new Error(`Dream workspace path is outside data root: ${path2}`);
+    }
+    try {
+      const metadata = await (0, import_promises2.lstat)(path2);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error(`Dream workspace document must be a regular file: ${path2}`);
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  async readCurrentMemoryWithoutRecovery() {
+    const defaults = defaultCurrentMemory();
+    const [userProfile, experience, archive] = await Promise.all([
+      this.readMemoryDocument("user-profile.md", defaults.userProfile),
+      this.readMemoryDocument("experience.md", defaults.experience),
+      this.readMemoryDocument("archive.md", defaults.archive)
+    ]);
+    return { userProfile, experience, archive };
+  }
+  async readMemoryDocument(filename, fallback) {
+    const path2 = this.memoryPath(filename);
+    await this.assertFileIsSafe(path2);
+    try {
+      return decodeUtf8(await (0, import_promises2.readFile)(path2), `memory/${filename}`);
+    } catch (error) {
+      if (error.code === "ENOENT") return fallback;
+      throw error;
+    }
+  }
+  async createSnapshot(date, documents) {
+    const createdAt = this.now().toISOString();
+    const id = snapshotId(new Date(createdAt));
+    const historyRoot = this.historyRoot();
+    const finalRoot = (0, import_node_path6.join)(historyRoot, id);
+    const temporaryRoot = (0, import_node_path6.join)(historyRoot, `.${id}.tmp`);
+    await (0, import_promises2.mkdir)(historyRoot, { recursive: true });
+    await (0, import_promises2.mkdir)(temporaryRoot);
+    try {
+      const files = {};
+      for (const filename of MEMORY_FILES) {
+        const bytes = encoder.encode(documentForFilename(documents, filename));
+        await this.writeFileSynced((0, import_node_path6.join)(temporaryRoot, filename), bytes);
+        files[filename] = sha256(bytes);
+      }
+      const manifest = {
+        version: 1,
+        id,
+        date,
+        created_at: createdAt,
+        files
+      };
+      await this.writeFileSynced(
+        (0, import_node_path6.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
+        encoder.encode(`${JSON.stringify(manifest, null, 2)}
+`)
+      );
+      await this.syncDirectory(temporaryRoot);
+      await (0, import_promises2.rename)(temporaryRoot, finalRoot);
+      await this.syncDirectory(historyRoot);
+      return { id, date, createdAt };
+    } catch (error) {
+      await (0, import_promises2.rm)(temporaryRoot, { recursive: true, force: true }).catch(
+        () => void 0
+      );
+      throw error;
+    }
+  }
+  async listSnapshotsWithoutRecovery() {
+    let entries;
+    try {
+      entries = await (0, import_promises2.readdir)(this.historyRoot(), { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
+    const snapshots = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error(`Invalid entry in memory history: ${entry.name}`);
+      }
+      const manifest = await this.readSnapshotManifest(entry.name);
+      snapshots.push({
+        id: manifest.id,
+        date: manifest.date,
+        createdAt: manifest.created_at
+      });
+    }
+    return snapshots.sort(
+      (left, right) => right.date.localeCompare(left.date) || right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+    );
+  }
+  async readSnapshotManifest(id) {
+    assertSafeId(id);
+    const root = (0, import_node_path6.join)(this.historyRoot(), id);
+    const metadata = await (0, import_promises2.lstat)(root);
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error(`Memory snapshot is not a real directory: ${id}`);
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(
+        decodeUtf8(
+          await (0, import_promises2.readFile)((0, import_node_path6.join)(root, SNAPSHOT_MANIFEST_FILE)),
+          `memory snapshot manifest ${id}`
+        )
+      );
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(`Invalid memory snapshot manifest: ${id}`);
+      }
+      throw error;
+    }
+    if (manifest.version !== 1 || manifest.id !== id || typeof manifest.created_at !== "string" || Number.isNaN(Date.parse(manifest.created_at)) || typeof manifest.files !== "object" || manifest.files === null) {
+      throw new Error(`Invalid memory snapshot manifest: ${id}`);
+    }
+    assertDiaryDate(manifest.date);
+    for (const filename of MEMORY_FILES) {
+      if (!/^[a-f0-9]{64}$/.test(manifest.files[filename] ?? "")) {
+        throw new Error(`Invalid memory snapshot manifest hash: ${id}/${filename}`);
+      }
+    }
+    return manifest;
+  }
+  async verifySnapshotWithoutRecovery(id) {
+    const manifest = await this.readSnapshotManifest(id);
+    const root = (0, import_node_path6.join)(this.historyRoot(), id);
+    const loaded = {};
+    for (const filename of MEMORY_FILES) {
+      const path2 = (0, import_node_path6.join)(root, filename);
+      const metadata = await (0, import_promises2.lstat)(path2);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new Error(`Invalid memory snapshot document: ${id}/${filename}`);
+      }
+      const bytes = await (0, import_promises2.readFile)(path2);
+      if (sha256(bytes) !== manifest.files[filename]) {
+        throw new Error(`Memory snapshot hash mismatch: ${id}/${filename}`);
+      }
+      loaded[filename] = decodeUtf8(bytes, `memory snapshot ${id}/${filename}`);
+    }
+    return {
+      id,
+      date: manifest.date,
+      createdAt: manifest.created_at,
+      documents: {
+        userProfile: loaded["user-profile.md"],
+        experience: loaded["experience.md"],
+        archive: loaded["archive.md"]
+      }
+    };
+  }
+  async applyRetention() {
+    const snapshots = await this.listSnapshotsWithoutRecovery();
+    const keep = new Set(
+      snapshots.slice(0, this.retention.newest).map((snapshot) => snapshot.id)
+    );
+    if (this.retention.monthly) {
+      const seenMonths = /* @__PURE__ */ new Set();
+      for (const snapshot of snapshots.slice(this.retention.newest)) {
+        const month = snapshot.date.slice(0, 7);
+        if (!seenMonths.has(month)) {
+          seenMonths.add(month);
+          keep.add(snapshot.id);
+        }
+      }
+    }
+    for (const snapshot of snapshots) {
+      if (!keep.has(snapshot.id)) {
+        await (0, import_promises2.rm)((0, import_node_path6.join)(this.historyRoot(), snapshot.id), {
+          recursive: true,
+          force: true
+        });
+      }
+    }
+    await this.syncDirectory(this.historyRoot());
+  }
+  async prepareTransaction(kind, date, documents) {
+    if (date !== null) assertDiaryDate(date);
+    const id = (0, import_node_crypto.randomUUID)();
+    const root = (0, import_node_path6.join)(this.transactionsRoot(), id);
+    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "backups"), { recursive: true });
+    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "staged"), { recursive: true });
+    const targets = [];
+    try {
+      for (const [relativePath, document] of Object.entries(documents)) {
+        this.assertTransactionPath(relativePath);
+        const finalPath = (0, import_node_path6.join)(this.dataRoot, relativePath);
+        await this.assertFileIsSafe(finalPath);
+        let existed = true;
+        try {
+          const bytes = await (0, import_promises2.readFile)(finalPath);
+          await this.writeFileSynced((0, import_node_path6.join)(root, "backups", relativePath), bytes);
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          existed = false;
+        }
+        await this.writeFileSynced(
+          (0, import_node_path6.join)(root, "staged", relativePath),
+          encoder.encode(document)
+        );
+        targets.push({ path: relativePath, existed });
+      }
+      const manifest = { version: 1, id, kind, date, targets };
+      await this.writeFileSynced(
+        (0, import_node_path6.join)(root, "manifest.json"),
+        encoder.encode(`${JSON.stringify(manifest, null, 2)}
+`)
+      );
+      await this.syncDirectory(root);
+      return { id, root, manifest };
+    } catch (error) {
+      await (0, import_promises2.rm)(root, { recursive: true, force: true }).catch(() => void 0);
+      throw error;
+    }
+  }
+  async publishTransaction(transaction) {
+    for (const target of transaction.manifest.targets) {
+      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
+      await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(finalPath), { recursive: true });
+      await (0, import_promises2.rename)((0, import_node_path6.join)(transaction.root, "staged", target.path), finalPath);
+      await this.syncDirectory((0, import_node_path6.dirname)(finalPath));
+    }
+  }
+  async rollbackTransaction(transaction) {
+    for (const target of transaction.manifest.targets) {
+      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
+      if (target.existed) {
+        const backup = await (0, import_promises2.readFile)((0, import_node_path6.join)(transaction.root, "backups", target.path));
+        await this.writeAtomically(finalPath, backup);
+      } else {
+        await (0, import_promises2.unlink)(finalPath).catch((error) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+        await this.syncDirectory((0, import_node_path6.dirname)(finalPath)).catch(() => void 0);
+      }
+    }
+    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+  }
+  async executeTransaction(transaction, rollbackFailureMessage) {
+    try {
+      await this.publishTransaction(transaction);
+    } catch (error) {
+      try {
+        await this.rollbackTransaction(transaction);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          rollbackFailureMessage
+        );
+      }
+      throw error;
+    }
+    await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
+  }
+  async recoverIncompleteTransactions() {
+    let entries;
+    try {
+      entries = await (0, import_promises2.readdir)(this.transactionsRoot(), { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    const marker = await this.readSuccessMarkerWithoutRecovery().catch(
+      () => null
+    );
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        throw new Error(`Invalid dream transaction entry: ${entry.name}`);
+      }
+      const root = (0, import_node_path6.join)(this.transactionsRoot(), entry.name);
+      let manifest;
+      try {
+        manifest = JSON.parse(
+          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path6.join)(root, "manifest.json")), "dream transaction manifest")
+        );
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          await (0, import_promises2.rm)(root, { recursive: true, force: true });
+          continue;
+        }
+        throw new Error(`Invalid dream transaction manifest: ${entry.name}`);
+      }
+      this.validateTransactionManifest(manifest);
+      const transaction = { id: manifest.id, root, manifest };
+      if (manifest.kind === "commit" && marker?.transactionId === manifest.id) {
+        await (0, import_promises2.rm)(root, { recursive: true, force: true });
+      } else {
+        await this.rollbackTransaction(transaction);
+      }
+    }
+  }
+  validateTransactionManifest(manifest) {
+    if (manifest.version !== 1 || typeof manifest.id !== "string" || !["commit", "restore", "migration"].includes(manifest.kind) || !Array.isArray(manifest.targets) || manifest.date !== null && typeof manifest.date !== "string") {
+      throw new Error("Invalid dream transaction manifest");
+    }
+    assertSafeId(manifest.id);
+    if (manifest.date !== null) assertDiaryDate(manifest.date);
+    for (const target of manifest.targets) {
+      if (typeof target?.path !== "string" || typeof target.existed !== "boolean") {
+        throw new Error("Invalid dream transaction target");
+      }
+      this.assertTransactionPath(target.path);
+    }
+  }
+  assertTransactionPath(path2) {
+    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path6.resolve)(this.dataRoot), (0, import_node_path6.resolve)(this.dataRoot, path2))) {
+      throw new Error(`Invalid dream transaction path: ${path2}`);
+    }
+  }
+  async writeSuccessMarker(date, transactionId) {
+    const previous = await this.readSuccessMarkerWithoutRecovery();
+    const lastSuccessfulDate = previous !== null && previous.lastSuccessfulDate > date ? previous.lastSuccessfulDate : date;
+    await this.writeAtomically(
+      this.successMarkerPath(),
+      encoder.encode(
+        `${JSON.stringify({
+          last_successful_date: lastSuccessfulDate,
+          transaction_id: transactionId
+        }, null, 2)}
+`
+      )
+    );
+  }
+  async readLastSuccessfulDateWithoutRecovery() {
+    return (await this.readSuccessMarkerWithoutRecovery())?.lastSuccessfulDate ?? null;
+  }
+  async readSuccessMarkerWithoutRecovery() {
+    try {
+      const value = JSON.parse(
+        decodeUtf8(await (0, import_promises2.readFile)(this.successMarkerPath()), "dream success marker")
+      );
+      if (typeof value.last_successful_date !== "string" || typeof value.transaction_id !== "string") {
+        throw new Error("Invalid dream success marker");
+      }
+      assertDiaryDate(value.last_successful_date);
+      assertSafeId(value.transaction_id);
+      return {
+        lastSuccessfulDate: value.last_successful_date,
+        transactionId: value.transaction_id
+      };
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+  serializeMigrationState(requiresFullFill) {
+    return `${JSON.stringify({
+      version: 1,
+      requires_full_fill: requiresFullFill
+    }, null, 2)}
+`;
+  }
+  async readMigrationStateWithoutRecovery() {
+    try {
+      const value = JSON.parse(
+        decodeUtf8(await (0, import_promises2.readFile)(this.migrationStatePath()), "dream migration state")
+      );
+      if (value.version !== 1 || typeof value.requires_full_fill !== "boolean") {
+        throw new Error("Invalid dream migration state");
+      }
+      return value;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+  async publishMigrationDocumentsAtomically(documents, requiresFullFill) {
+    assertParseableMarkdown("userProfile", documents.userProfile);
+    assertParseableMarkdown("experience", documents.experience);
+    assertParseableMarkdown("archive", documents.archive);
+    const transaction = await this.prepareTransaction("migration", null, {
+      "memory/user-profile.md": documents.userProfile,
+      "memory/experience.md": documents.experience,
+      "memory/archive.md": documents.archive,
+      "memory/migration-state.json": this.serializeMigrationState(requiresFullFill)
+    });
+    await this.executeTransaction(
+      transaction,
+      "Memory migration failed and rollback could not complete"
+    );
+  }
+  async loadLegacyCurrentPersona() {
+    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    await this.assertLegacyPersonaRootIsSafe();
+    const currentBytes = await this.readLegacyFile(
+      (0, import_node_path6.join)(personaRoot, "CURRENT"),
+      "persona CURRENT"
+    );
+    let current;
+    try {
+      current = JSON.parse(
+        decodeUtf8(currentBytes, "legacy persona CURRENT")
+      );
+    } catch {
+      throw new LegacyPersonaUnavailableError("Invalid legacy persona CURRENT manifest");
+    }
+    if (!Number.isSafeInteger(current.generation) || current.generation < 1) {
+      throw new LegacyPersonaUnavailableError("Invalid legacy persona CURRENT generation");
+    }
+    const generationRoot = (0, import_node_path6.join)(
+      personaRoot,
+      "generations",
+      String(current.generation)
+    );
+    const [manifestBytes, profileBytes, experienceBytes] = await Promise.all([
+      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "manifest.json"), "generation manifest"),
+      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "user-profile.md"), "user profile"),
+      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "experience.md"), "experience")
+    ]);
+    if (manifestBytes.length !== currentBytes.length || !manifestBytes.every((byte, index) => byte === currentBytes[index])) {
+      throw new LegacyPersonaUnavailableError(
+        "Legacy persona generation manifest does not match CURRENT"
+      );
+    }
+    if (!/^[a-f0-9]{64}$/.test(current.user_profile_sha256 ?? "") || sha256(profileBytes) !== current.user_profile_sha256 || !/^[a-f0-9]{64}$/.test(current.experience_sha256 ?? "") || sha256(experienceBytes) !== current.experience_sha256) {
+      throw new LegacyPersonaUnavailableError("Legacy persona generation hash mismatch");
+    }
+    let userProfile;
+    let experience;
+    try {
+      userProfile = decodeUtf8(profileBytes, "legacy persona user profile");
+      experience = decodeUtf8(experienceBytes, "legacy persona experience");
+    } catch (error) {
+      throw new LegacyPersonaUnavailableError(
+        error instanceof Error ? error.message : "Invalid legacy persona UTF-8"
+      );
+    }
+    if (!parseMarkdownSections(userProfile).some((section) => section.level >= 1)) {
+      throw new LegacyPersonaUnavailableError("Legacy user profile is not parseable Markdown");
+    }
+    if (!parseMarkdownSections(experience).some((section) => section.level >= 1)) {
+      throw new LegacyPersonaUnavailableError("Legacy experience is not parseable Markdown");
+    }
+    return {
+      generation: current.generation,
+      documents: {
+        userProfile,
+        experience,
+        archive: EMPTY_ARCHIVE_DOCUMENT
+      }
+    };
+  }
+  async retireLegacyPersonaLayout() {
+    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    await this.assertLegacyPersonaRootIsSafe();
+    await (0, import_promises2.rm)((0, import_node_path6.join)(personaRoot, "generations"), { recursive: true, force: true });
+    await (0, import_promises2.unlink)((0, import_node_path6.join)(personaRoot, "CURRENT")).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    if (await this.pathExists(personaRoot)) {
+      await this.syncDirectory(personaRoot);
+    }
+  }
+  async assertLegacyPersonaRootIsSafe() {
+    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    try {
+      const metadata = await (0, import_promises2.lstat)(personaRoot);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error(`Legacy persona root must be a real directory: ${personaRoot}`);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+  }
+  async readLegacyFile(path2, label) {
+    try {
+      const metadata = await (0, import_promises2.lstat)(path2);
+      if (metadata.isSymbolicLink() || !metadata.isFile()) {
+        throw new LegacyPersonaUnavailableError(
+          `Legacy ${label} is not a regular file`
+        );
+      }
+      return await (0, import_promises2.readFile)(path2);
+    } catch (error) {
+      if (error instanceof LegacyPersonaUnavailableError) throw error;
+      const code = error.code;
+      if (code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR") {
+        throw new LegacyPersonaUnavailableError(`Legacy ${label} is unavailable`);
+      }
+      throw error;
+    }
+  }
+  async pathExists(path2) {
+    try {
+      await (0, import_promises2.lstat)(path2);
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  async writeFileSynced(path2, bytes) {
+    await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(path2), { recursive: true });
+    const file = await (0, import_promises2.open)(path2, "wx");
+    try {
+      await file.writeFile(bytes);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  }
+  async writeAtomically(path2, bytes) {
+    await this.assertFileIsSafe(path2);
+    const parent = (0, import_node_path6.dirname)(path2);
+    const temporary = (0, import_node_path6.join)(
+      parent,
+      `.${(0, import_node_path6.basename)(path2)}.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`
+    );
+    await (0, import_promises2.mkdir)(parent, { recursive: true });
+    try {
+      await this.writeFileSynced(temporary, bytes);
+      await (0, import_promises2.rename)(temporary, path2);
+      await this.syncDirectory(parent);
+    } catch (error) {
+      await (0, import_promises2.unlink)(temporary).catch(() => void 0);
       throw error;
     }
   }
   async syncDirectory(path2) {
-    const directory = await (0, import_promises.open)(path2, "r");
+    const directory = await (0, import_promises2.open)(path2, "r");
     try {
       await directory.sync();
     } finally {
       await directory.close();
     }
   }
-  async readDiary(date) {
-    assertDiaryDate(date);
-    await this.assertDiaryRootIsNotSymlink();
-    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
-    await this.assertPathIsNotSymlink(diaryPath);
-    return (0, import_promises.readFile)(diaryPath);
-  }
-  async deleteDiary(date) {
-    assertDiaryDate(date);
-    await this.assertDiaryRootIsNotSymlink();
-    const diaryPath = (0, import_node_path3.join)(this.dataRoot, "diary", `${date}.md`);
-    await this.assertPathIsNotSymlink(diaryPath);
-    try {
-      await (0, import_promises.unlink)(diaryPath);
-      await this.syncDirectory((0, import_node_path3.join)(this.dataRoot, "diary"));
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-  }
-  async assertDiaryRootIsNotSymlink() {
-    const diaryRoot = (0, import_node_path3.join)(this.dataRoot, "diary");
-    try {
-      const metadata = await (0, import_promises.lstat)(diaryRoot);
-      if (metadata.isSymbolicLink()) {
-        throw new Error(`Diary root must not be a symlink: ${diaryRoot}`);
-      }
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return;
-      }
-      throw error;
-    }
-  }
-  async assertPathIsNotSymlink(path2) {
-    try {
-      const metadata = await (0, import_promises.lstat)(path2);
-      if (metadata.isSymbolicLink()) {
-        throw new Error(`Diary path must not be a symlink: ${path2}`);
-      }
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return;
-      }
-      throw error;
-    }
-  }
-  async readValidatedDiary(expected) {
-    const bytes = await this.readDiary(expected.date);
-    const actualSha256 = (0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex");
-    if (actualSha256 !== expected.fileSha256) {
-      throw new Error(`Diary hash mismatch: ${expected.date}`);
-    }
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      throw new Error(`Diary is not valid UTF-8: ${expected.date}`);
-    }
-    const lines = text.split("\n");
-    const documentValidation = validateDiaryDocument(text);
-    if (!documentValidation.ok) {
-      throw new Error(
-        `Invalid diary document (${documentValidation.code}): ${expected.date}`
-      );
-    }
-    if (lines[0] !== "---") {
-      throw new Error(`Invalid diary frontmatter: ${expected.date}`);
-    }
-    const frontmatterEnd = lines.indexOf("---", 1);
-    if (frontmatterEnd < 0) {
-      throw new Error(`Invalid diary frontmatter: ${expected.date}`);
-    }
-    const frontmatter = lines.slice(1, frontmatterEnd);
-    if (readFrontmatterString(frontmatter, "date") !== expected.date || readFrontmatterString(frontmatter, "watermark") !== expected.watermark || readFrontmatterString(frontmatter, "index_hook") !== expected.indexHook) {
-      throw new Error(`Diary state mismatch: ${expected.date}`);
-    }
-    const headings = lines.slice(frontmatterEnd + 1).filter((line) => line.startsWith("## "));
-    if (headings.length !== DIARY_SECTION_HEADINGS.length || headings.some((heading, index) => heading !== DIARY_SECTION_HEADINGS[index])) {
-      throw new Error(`Invalid diary section structure: ${expected.date}`);
-    }
-    return bytes;
-  }
-  async ensureIndex(rows) {
-    await this.assertDiaryRootIsNotSymlink();
-    const indexPath = (0, import_node_path3.join)(this.dataRoot, "diary", "INDEX.md");
-    await this.assertPathIsNotSymlink(indexPath);
-    const lines = rows.filter(
-      (row) => row.indexHook !== null
-    ).sort((left, right) => right.date.localeCompare(left.date)).map((row) => `- ${row.date}\uFF1A${row.indexHook}`);
-    const canonicalBytes = new TextEncoder().encode(
-      ["# Diary Index", ...lines, ""].join("\n")
-    );
-    try {
-      const existingBytes = await this.readIndex();
-      if (existingBytes.length === canonicalBytes.length && existingBytes.every((byte, index) => byte === canonicalBytes[index])) {
-        return canonicalBytes;
-      }
-    } catch {
-    }
-    await this.commitAtomically(indexPath, canonicalBytes);
-    return canonicalBytes;
-  }
-  async readIndex() {
-    await this.assertDiaryRootIsNotSymlink();
-    const indexPath = (0, import_node_path3.join)(this.dataRoot, "diary", "INDEX.md");
-    await this.assertPathIsNotSymlink(indexPath);
-    return (0, import_promises.readFile)(indexPath);
-  }
-  async commitPersonaGeneration(input) {
-    if (!Number.isSafeInteger(input.generation) || input.generation < 1 || input.manifest.generation !== input.generation) {
-      throw new Error("Invalid persona generation");
-    }
-    const userProfileBytes = new TextEncoder().encode(input.userProfile);
-    const experienceBytes = new TextEncoder().encode(input.experience);
-    const manifest = {
-      ...input.manifest,
-      user_profile_sha256: (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex"),
-      experience_sha256: (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex")
-    };
-    const manifestBytes = new TextEncoder().encode(
-      `${JSON.stringify(manifest, null, 2)}
-`
-    );
-    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
-    const generationsRoot = (0, import_node_path3.join)(personaRoot, "generations");
-    const generationRoot = (0, import_node_path3.join)(generationsRoot, String(input.generation));
-    const temporaryGenerationRoot = (0, import_node_path3.join)(
-      generationsRoot,
-      `.${input.generation}.${(0, import_node_crypto2.randomUUID)()}.tmp`
-    );
-    await (0, import_promises.mkdir)(generationsRoot, { recursive: true });
-    await this.syncDirectory(generationsRoot);
-    await this.syncDirectory(personaRoot);
-    await this.syncDirectory(this.dataRoot);
-    await (0, import_promises.mkdir)(temporaryGenerationRoot);
-    try {
-      await this.commitAtomically(
-        (0, import_node_path3.join)(temporaryGenerationRoot, "manifest.json"),
-        manifestBytes
-      );
-      await this.commitAtomically(
-        (0, import_node_path3.join)(temporaryGenerationRoot, "user-profile.md"),
-        userProfileBytes
-      );
-      await this.commitAtomically(
-        (0, import_node_path3.join)(temporaryGenerationRoot, "experience.md"),
-        experienceBytes
-      );
-      await this.syncDirectory(temporaryGenerationRoot);
-      await (0, import_promises.rename)(temporaryGenerationRoot, generationRoot);
-      await this.syncDirectory(generationsRoot);
-    } catch (error) {
-      await (0, import_promises.rm)(temporaryGenerationRoot, { recursive: true, force: true }).catch(
-        () => void 0
-      );
-      throw error;
-    }
-    await this.publishPersonaCurrent(input.generation);
-  }
-  /** Idempotently publishes an already-complete generation as CURRENT. */
-  async publishPersonaCurrent(generation) {
-    const loaded = await this.loadPersonaGeneration(generation);
-    const manifestBytes = new TextEncoder().encode(
-      `${JSON.stringify(loaded.manifest, null, 2)}
-`
-    );
-    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
-    await this.commitAtomically((0, import_node_path3.join)(personaRoot, "CURRENT"), manifestBytes);
-    const published = await this.loadCurrentPersona();
-    if (published.generation !== generation || published.manifest.user_profile_sha256 !== loaded.manifest.user_profile_sha256 || published.manifest.experience_sha256 !== loaded.manifest.experience_sha256) {
-      throw new Error("Persona CURRENT re-validation failed");
-    }
-  }
-  async freezePersonaOperationInputs(input) {
-    this.assertPersonaOperationId(input.operationId);
-    const operationRoot = (0, import_node_path3.join)(
-      this.dataRoot,
-      "persona",
-      "operations",
-      input.operationId
-    );
-    const inputRoot = (0, import_node_path3.join)(operationRoot, "inputs");
-    await (0, import_promises.mkdir)(operationRoot, { recursive: true });
-    await (0, import_promises.mkdir)(inputRoot);
-    const manifest = {
-      version: 1,
-      operation_id: input.operationId,
-      base_current_operation_id: input.baseCurrentOperationId,
-      diaries: [],
-      baseline: null,
-      consumed_pending_dates: [...input.consumedPendingDays],
-      rebuild_request_epoch: input.rebuildRequestEpoch,
-      partial_missing_dates: [...input.partialMissingDates]
-    };
-    for (const [index, diary] of input.diaries.entries()) {
-      assertDiaryDate(diary.date);
-      const file = `diary-${String(index).padStart(4, "0")}-${diary.date}.md`;
-      await this.commitAtomically((0, import_node_path3.join)(inputRoot, file), diary.bytes);
-      manifest.diaries.push({
-        date: diary.date,
-        file,
-        sha256: (0, import_node_crypto2.createHash)("sha256").update(diary.bytes).digest("hex")
-      });
-    }
-    if (input.baseline !== null) {
-      const userProfileBytes = new TextEncoder().encode(
-        input.baseline.userProfile
-      );
-      const experienceBytes = new TextEncoder().encode(input.baseline.experience);
-      await this.commitAtomically(
-        (0, import_node_path3.join)(inputRoot, "baseline-user-profile.md"),
-        userProfileBytes
-      );
-      await this.commitAtomically(
-        (0, import_node_path3.join)(inputRoot, "baseline-experience.md"),
-        experienceBytes
-      );
-      manifest.baseline = {
-        user_profile_file: "baseline-user-profile.md",
-        user_profile_sha256: (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex"),
-        experience_file: "baseline-experience.md",
-        experience_sha256: (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex")
-      };
-    }
-    await this.commitAtomically(
-      (0, import_node_path3.join)(inputRoot, "manifest.json"),
-      new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}
-`)
-    );
-    await this.syncDirectory(inputRoot);
-    await this.syncDirectory(operationRoot);
-    return inputRoot;
-  }
-  async loadPersonaOperationInputs(inputArtifactDir, operationId) {
-    this.assertPersonaOperationId(operationId);
-    const expectedRoot = (0, import_node_path3.join)(
-      this.dataRoot,
-      "persona",
-      "operations",
-      operationId,
-      "inputs"
-    );
-    if (inputArtifactDir !== expectedRoot) {
-      throw new Error("Invalid persona input artifact directory");
-    }
-    const manifest = JSON.parse(
-      await (0, import_promises.readFile)((0, import_node_path3.join)(expectedRoot, "manifest.json"), "utf8")
-    );
-    if (manifest.version !== 1 || manifest.operation_id !== operationId || !Array.isArray(manifest.diaries) || !Array.isArray(manifest.consumed_pending_dates) || !manifest.consumed_pending_dates.every(
-      (day) => typeof day?.date === "string" && typeof day.watermark === "string" && typeof day.fileSha256 === "string"
-    ) || !Number.isInteger(manifest.rebuild_request_epoch) || !Array.isArray(manifest.partial_missing_dates) || !manifest.partial_missing_dates.every((date) => typeof date === "string")) {
-      throw new Error("Invalid persona input manifest");
-    }
-    const diaries = [];
-    for (const diary of manifest.diaries) {
-      assertDiaryDate(diary.date);
-      if (typeof diary.file !== "string" || !/^diary-\d{4}-\d{4}-\d{2}-\d{2}\.md$/.test(diary.file)) {
-        throw new Error("Invalid persona diary artifact path");
-      }
-      const bytes = await (0, import_promises.readFile)((0, import_node_path3.join)(expectedRoot, diary.file));
-      if ((0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex") !== diary.sha256) {
-        throw new Error(`Persona input artifact hash mismatch: ${diary.date}`);
-      }
-      diaries.push({
-        date: diary.date,
-        content: new TextDecoder("utf-8", { fatal: true }).decode(bytes)
-      });
-    }
-    let baseline = null;
-    if (manifest.baseline !== null) {
-      if (manifest.baseline.user_profile_file !== "baseline-user-profile.md" || manifest.baseline.experience_file !== "baseline-experience.md") {
-        throw new Error("Invalid persona baseline artifact path");
-      }
-      const userProfileBytes = await (0, import_promises.readFile)(
-        (0, import_node_path3.join)(expectedRoot, manifest.baseline.user_profile_file)
-      );
-      const experienceBytes = await (0, import_promises.readFile)(
-        (0, import_node_path3.join)(expectedRoot, manifest.baseline.experience_file)
-      );
-      if ((0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex") !== manifest.baseline.user_profile_sha256 || (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex") !== manifest.baseline.experience_sha256) {
-        throw new Error("Persona baseline artifact hash mismatch");
-      }
-      baseline = {
-        userProfile: new TextDecoder("utf-8", { fatal: true }).decode(
-          userProfileBytes
-        ),
-        experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
-      };
-    }
-    return {
-      operationId,
-      baseCurrentOperationId: manifest.base_current_operation_id,
-      diaries,
-      baseline,
-      consumedPendingDates: manifest.consumed_pending_dates.map((day) => day.date),
-      consumedPendingDays: manifest.consumed_pending_dates,
-      rebuildRequestEpoch: manifest.rebuild_request_epoch,
-      partialMissingDates: manifest.partial_missing_dates
-    };
-  }
-  async commitPersonaCheckpoint(input) {
-    this.assertPersonaOperationId(input.operationId);
-    const checkpointRoot = (0, import_node_path3.join)(
-      this.dataRoot,
-      "persona",
-      "operations",
-      input.operationId,
-      "checkpoints"
-    );
-    await (0, import_promises.mkdir)(checkpointRoot, { recursive: true });
-    const accumulatorFile = `accumulator-${input.accumulatorGeneration}.json`;
-    const checkpointFile = `checkpoint-${input.accumulatorGeneration}.json`;
-    const accumulatorBytes = new TextEncoder().encode(
-      `${JSON.stringify({
-        ...input.accumulator,
-        validationReport: input.validationReport
-      })}
-`
-    );
-    const accumulatorHash = (0, import_node_crypto2.createHash)("sha256").update(accumulatorBytes).digest("hex");
-    await this.commitAtomically(
-      (0, import_node_path3.join)(checkpointRoot, accumulatorFile),
-      accumulatorBytes
-    );
-    const manifest = {
-      version: 1,
-      operation_id: input.operationId,
-      next_batch_index: input.nextBatchIndex,
-      accumulator_generation: input.accumulatorGeneration,
-      accumulator_file: accumulatorFile,
-      accumulator_hash: accumulatorHash
-    };
-    const checkpointPath = (0, import_node_path3.join)(checkpointRoot, checkpointFile);
-    const checkpointBytes = new TextEncoder().encode(
-      `${JSON.stringify(manifest, null, 2)}
-`
-    );
-    await this.commitAtomically(checkpointPath, checkpointBytes);
-    await this.syncDirectory(checkpointRoot);
-    return {
-      accumulatorGeneration: input.accumulatorGeneration,
-      accumulatorHash,
-      checkpointPath,
-      checkpointSha256: (0, import_node_crypto2.createHash)("sha256").update(checkpointBytes).digest("hex"),
-      nextBatchIndex: input.nextBatchIndex
-    };
-  }
-  async loadPersonaCheckpoint(input) {
-    this.assertPersonaOperationId(input.operationId);
-    const checkpointRoot = (0, import_node_path3.join)(
-      this.dataRoot,
-      "persona",
-      "operations",
-      input.operationId,
-      "checkpoints"
-    );
-    const expectedPath = (0, import_node_path3.join)(
-      checkpointRoot,
-      `checkpoint-${input.accumulatorGeneration}.json`
-    );
-    if (input.checkpointPath !== expectedPath) {
-      throw new Error("Invalid persona checkpoint path");
-    }
-    const checkpointBytes = await (0, import_promises.readFile)(expectedPath);
-    if ((0, import_node_crypto2.createHash)("sha256").update(checkpointBytes).digest("hex") !== input.checkpointSha256) {
-      throw new Error("Persona checkpoint hash mismatch");
-    }
-    const manifest = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(checkpointBytes)
-    );
-    if (manifest.version !== 1 || manifest.operation_id !== input.operationId || manifest.next_batch_index !== input.nextBatchIndex || manifest.accumulator_generation !== input.accumulatorGeneration || manifest.accumulator_hash !== input.accumulatorHash) {
-      throw new Error("Persona checkpoint state mismatch");
-    }
-    if (manifest.accumulator_file !== `accumulator-${input.accumulatorGeneration}.json`) {
-      throw new Error("Invalid persona accumulator path");
-    }
-    const accumulatorBytes = await (0, import_promises.readFile)(
-      (0, import_node_path3.join)(checkpointRoot, manifest.accumulator_file)
-    );
-    if ((0, import_node_crypto2.createHash)("sha256").update(accumulatorBytes).digest("hex") !== input.accumulatorHash) {
-      throw new Error("Persona accumulator hash mismatch");
-    }
-    const accumulator = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(accumulatorBytes)
-    );
-    if (typeof accumulator.userProfile !== "string" || typeof accumulator.experience !== "string" || accumulator.validationReport?.version !== 2 || !Number.isSafeInteger(accumulator.validationReport.total) || !Number.isSafeInteger(accumulator.validationReport.stripped) || !Array.isArray(accumulator.validationReport.items)) {
-      throw new Error("Invalid persona accumulator");
-    }
-    return {
-      userProfile: accumulator.userProfile,
-      experience: accumulator.experience,
-      validationReport: accumulator.validationReport
-    };
-  }
-  assertPersonaOperationId(operationId) {
-    if (!/^[A-Za-z0-9._-]+$/.test(operationId)) {
-      throw new Error("Invalid persona operation id");
-    }
-  }
-  async loadCurrentPersona() {
-    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
-    const currentBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(personaRoot, "CURRENT"));
-    let manifest;
-    try {
-      manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
-    } catch {
-      throw new Error("Invalid persona CURRENT manifest");
-    }
-    if (!Number.isSafeInteger(manifest.generation) || manifest.generation < 1) {
-      throw new Error("Invalid persona CURRENT generation");
-    }
-    const generationRoot = (0, import_node_path3.join)(
-      personaRoot,
-      "generations",
-      String(manifest.generation)
-    );
-    const [generationManifestBytes, userProfileBytes, experienceBytes] = await Promise.all([
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json")),
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "user-profile.md")),
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "experience.md"))
-    ]);
-    if (generationManifestBytes.length !== currentBytes.length || !generationManifestBytes.every(
-      (byte, index) => byte === currentBytes[index]
-    )) {
-      throw new Error("Persona generation manifest does not match CURRENT");
-    }
-    this.verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes);
-    return {
-      generation: manifest.generation,
-      manifest,
-      userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
-      experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
-    };
-  }
-  async loadCurrentPersonaMaterialBlocks() {
-    const personaRoot = (0, import_node_path3.join)(this.dataRoot, "persona");
-    const currentBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(personaRoot, "CURRENT"));
-    let manifest;
-    try {
-      manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(currentBytes));
-    } catch {
-      throw new Error("Invalid persona CURRENT manifest");
-    }
-    if (!Number.isSafeInteger(manifest.generation) || manifest.generation < 1) {
-      throw new Error("Invalid persona CURRENT generation");
-    }
-    const generationRoot = (0, import_node_path3.join)(personaRoot, "generations", String(manifest.generation));
-    const generationManifestBytes = await (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json"));
-    if (generationManifestBytes.length !== currentBytes.length || !generationManifestBytes.every((byte, index) => byte === currentBytes[index])) {
-      throw new Error("Persona generation manifest does not match CURRENT");
-    }
-    const loadBlock = async (filename, expectedSha256) => {
-      try {
-        const bytes = await (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, filename));
-        if ((0, import_node_crypto2.createHash)("sha256").update(bytes).digest("hex") !== expectedSha256) {
-          return null;
-        }
-        return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        return null;
-      }
-    };
-    const [userProfile, experience] = await Promise.all([
-      loadBlock("user-profile.md", manifest.user_profile_sha256),
-      loadBlock("experience.md", manifest.experience_sha256)
-    ]);
-    return { userProfile, experience };
-  }
-  async loadPersonaGeneration(generation) {
-    if (!Number.isSafeInteger(generation) || generation < 1) {
-      throw new Error("Invalid persona generation");
-    }
-    const generationRoot = (0, import_node_path3.join)(
-      this.dataRoot,
-      "persona",
-      "generations",
-      String(generation)
-    );
-    const [manifestBytes, userProfileBytes, experienceBytes] = await Promise.all([
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "manifest.json")),
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "user-profile.md")),
-      (0, import_promises.readFile)((0, import_node_path3.join)(generationRoot, "experience.md"))
-    ]);
-    let manifest;
-    try {
-      manifest = JSON.parse(
-        new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes)
-      );
-    } catch {
-      throw new Error("Invalid persona generation manifest");
-    }
-    if (manifest.generation !== generation) {
-      throw new Error("Persona generation manifest has wrong generation");
-    }
-    this.verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes);
-    return {
-      generation,
-      manifest,
-      userProfile: new TextDecoder("utf-8", { fatal: true }).decode(userProfileBytes),
-      experience: new TextDecoder("utf-8", { fatal: true }).decode(experienceBytes)
-    };
-  }
-  verifyPersonaBodyHashes(manifest, userProfileBytes, experienceBytes) {
-    if (typeof manifest.user_profile_sha256 !== "string" || (0, import_node_crypto2.createHash)("sha256").update(userProfileBytes).digest("hex") !== manifest.user_profile_sha256) {
-      throw new Error("Persona user profile hash mismatch");
-    }
-    if (typeof manifest.experience_sha256 !== "string" || (0, import_node_crypto2.createHash)("sha256").update(experienceBytes).digest("hex") !== manifest.experience_sha256) {
-      throw new Error("Persona experience hash mismatch");
-    }
-  }
-  async deletePersonaGeneration(generation) {
-    if (!Number.isSafeInteger(generation) || generation < 1) {
-      throw new Error("Invalid persona generation");
-    }
-    const generationsRoot = (0, import_node_path3.join)(this.dataRoot, "persona", "generations");
-    await (0, import_promises.rm)((0, import_node_path3.join)(generationsRoot, String(generation)), { recursive: true, force: true });
-    try {
-      await this.syncDirectory(generationsRoot);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
-  async loadCurrentPersonaCoverage() {
-    let current;
-    try {
-      current = await this.loadCurrentPersona();
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return null;
-      }
-      throw error;
-    }
-    const lastFoldedDate = current.manifest.last_folded_date_after;
-    const partialMissingDates = current.manifest.partial_missing_dates_after;
-    if (lastFoldedDate !== null && typeof lastFoldedDate !== "string" || !Array.isArray(partialMissingDates) || partialMissingDates.some((date) => typeof date !== "string")) {
-      throw new Error("Invalid persona CURRENT coverage");
-    }
-    if (lastFoldedDate !== null) {
-      assertDiaryDate(lastFoldedDate);
-    }
-    for (const date of partialMissingDates) {
-      assertDiaryDate(date);
-    }
-    return {
-      lastFoldedDate,
-      partialMissingDates: [...partialMissingDates]
-    };
-  }
 };
 
 // src/worker/client.ts
 var import_node_child_process = require("node:child_process");
-var import_node_fs2 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_fs4 = require("node:fs");
+var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.3.3-mrhozuij" : "dev";
+var BUILD_ID = true ? "0.4.0-mrjbsiap" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2120,17 +2139,17 @@ function resolvePluginRoot(env = process.env) {
   if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
     return env.CLAUDE_PLUGIN_ROOT;
   }
-  const currentDir = (0, import_node_path4.dirname)(__filename);
+  const currentDir = (0, import_node_path7.dirname)(__filename);
   if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
-    return (0, import_node_path4.resolve)(currentDir, "..");
+    return (0, import_node_path7.resolve)(currentDir, "..");
   }
-  return (0, import_node_path4.resolve)(currentDir, "..", "..", "plugin");
+  return (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
 }
 function resolveWorkerScriptPaths(env = process.env) {
   const pluginRoot = resolvePluginRoot(env);
   return {
-    bunRunnerPath: (0, import_node_path4.join)(pluginRoot, "scripts", "bun-runner.js"),
-    workerPath: (0, import_node_path4.join)(pluginRoot, "scripts", "worker.cjs")
+    bunRunnerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "bun-runner.js"),
+    workerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "worker.cjs")
   };
 }
 async function readWorkerHealth(fetchImpl, timeoutMs) {
@@ -2164,12 +2183,12 @@ async function readWorkerHealth(fetchImpl, timeoutMs) {
 }
 function readWorkerPidFallback(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
   if (!existsSyncImpl(pidPath)) {
     return null;
   }
   try {
-    const pid = Number((0, import_node_fs2.readFileSync)(pidPath, "utf8").trim());
+    const pid = Number((0, import_node_fs4.readFileSync)(pidPath, "utf8").trim());
     if (Number.isInteger(pid) && pid > 0) {
       return pid;
     }
@@ -2197,7 +2216,7 @@ function resolveStaleWorkerPid(health, deps = {}) {
 }
 function spawnWorkerProcess(deps = {}, env = process.env) {
   const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs2.existsSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
   const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
   if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
     return;
@@ -2585,10 +2604,10 @@ function createCompactHandler(dependencies) {
 }
 
 // src/hooks/handlers/context.ts
-var import_node_path7 = require("node:path");
+var import_node_path10 = require("node:path");
 
 // src/shared/file-tree.ts
-var import_node_path5 = __toESM(require("node:path"), 1);
+var import_node_path8 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -2685,11 +2704,11 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path5.default.posix.relative(root, value);
-    if (!relative || relative === "") {
+    const relative2 = import_node_path8.default.posix.relative(root, value);
+    if (!relative2 || relative2 === "") {
       continue;
     }
-    const segments = relative.split("/").filter(Boolean);
+    const segments = relative2.split("/").filter(Boolean);
     if (segments.length === 0) {
       continue;
     }
@@ -5119,73 +5138,10 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
 }
 
 // src/diary/persona-render.ts
-var import_node_path6 = require("node:path");
-
-// src/shared/markdown-sections.ts
-var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
-var ATX_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
-function splitDocumentLines(document) {
-  if (document.length === 0) return [];
-  const lines = document.split(/\r?\n/);
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
-}
-function openingFence(line) {
-  const match = FENCE_START.exec(line);
-  if (!match) return null;
-  const run = match[1];
-  return {
-    marker: run[0],
-    length: run.length
-  };
-}
-function closesFence(line, fence) {
-  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-  return Boolean(
-    match && match[1][0] === fence.marker && match[1].length >= fence.length
-  );
-}
-function parseMarkdownSections(document) {
-  const lines = splitDocumentLines(document);
-  if (lines.length === 0) return [];
-  const sections = [];
-  let current = null;
-  let fence = null;
-  for (const line of lines) {
-    if (fence) {
-      current ??= { title: "", level: 0, bodyLines: [] };
-      current.bodyLines.push(line);
-      if (closesFence(line, fence)) fence = null;
-      continue;
-    }
-    const nextFence = openingFence(line);
-    if (nextFence) {
-      current ??= { title: "", level: 0, bodyLines: [] };
-      current.bodyLines.push(line);
-      fence = nextFence;
-      continue;
-    }
-    const heading = ATX_HEADING.exec(line);
-    if (heading) {
-      if (current) sections.push(current);
-      current = {
-        title: heading[2],
-        level: heading[1].length,
-        bodyLines: []
-      };
-      continue;
-    }
-    current ??= { title: "", level: 0, bodyLines: [] };
-    current.bodyLines.push(line);
-  }
-  if (current) sections.push(current);
-  return sections;
-}
-
-// src/diary/persona-render.ts
-var PROFILE_INJECTION_TOKEN_BUDGET = 1e3;
-var EXPERIENCE_INJECTION_TOKEN_BUDGET = 1500;
-var PERSONA_INJECTION_TOKEN_BUDGET = PROFILE_INJECTION_TOKEN_BUDGET + EXPERIENCE_INJECTION_TOKEN_BUDGET;
+var import_node_path9 = require("node:path");
+var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
+var EXPERIENCE_INJECTION_TOKEN_BUDGET = 2e3;
+var DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1e3;
 var sectionPointer = (remainingLines, displayPath) => `\uFF08\u672C\u8282\u8FD8\u6709 ${remainingLines} \u884C\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
 function headingLine(section) {
   return section.level === 0 ? null : `${"#".repeat(section.level)} ${section.title}`;
@@ -5238,48 +5194,43 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
   if (estimateDiaryTokens(headingFallback) <= injectionTokenBudget) {
     return headingFallback;
   }
-  return `\uFF08${(0, import_node_path6.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
 }
-
-// src/diary/experience-render.ts
-function buildRollingRecentLines(indexText, today) {
-  const rows = indexText.split(/\r?\n/).flatMap((line) => {
-    const match = line.match(/^- (\d{4}-\d{2}-\d{2})：(.*)$/);
-    return match ? [{ date: match[1], hook: match[2] }] : [];
-  }).filter((row) => row.date < today).sort((left, right) => right.date.localeCompare(left.date));
-  const recentStart = new Date(Date.parse(`${today}T00:00:00Z`) - 14 * 864e5).toISOString().slice(0, 10);
-  const daily = rows.filter((row) => row.date >= recentStart).map((row) => ({ kind: "daily", date: row.date, text: `- ${row.date}\uFF1A${row.hook}` }));
-  const monthHooks = /* @__PURE__ */ new Map();
-  for (const row of rows.filter((candidate) => candidate.date < recentStart)) {
-    const month = row.date.slice(0, 7);
-    if (!monthHooks.has(month)) {
-      if (monthHooks.size >= 6) continue;
-      monthHooks.set(month, []);
-    }
-    const hooks = monthHooks.get(month);
-    if (hooks.length < 3 && !hooks.includes(row.hook)) hooks.push(row.hook);
+function renderBoundedInjectionBlock(input) {
+  for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
+    const documentView = renderPersonaDocumentInjection(
+      input.document,
+      documentBudget,
+      input.displayPath
+    );
+    const block = [
+      input.heading,
+      ...documentView ? ["", documentView] : []
+    ].join("\n");
+    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
   }
-  return [
-    ...daily,
-    ...[...monthHooks].map(([month, hooks]) => ({
-      kind: "monthly",
-      date: month,
-      text: `- ${month}\uFF1A${Array.from(hooks.join("\uFF1B")).slice(0, 240).join("")}`
-    }))
-  ];
+  return input.heading;
 }
-
-// src/diary/validate-and-mark-stale.ts
-async function validateAndMarkStale(options, day) {
-  try {
-    return await options.fileStore.readValidatedDiary(day);
-  } catch (error) {
-    options.stateStore.markDayStaleAndEnqueue({
-      date: day.date,
-      enqueuedAtEpoch: options.nowEpoch?.() ?? Math.floor(Date.now() / 1e3)
-    });
-    throw error;
-  }
+function renderSessionStartMemoryInjection(input) {
+  return {
+    profile: renderBoundedInjectionBlock({
+      heading: "## Persona",
+      document: input.userProfile,
+      displayPath: input.paths.userProfile,
+      tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
+    }),
+    experience: renderBoundedInjectionBlock({
+      heading: "## Experience",
+      document: input.experience,
+      displayPath: input.paths.experience,
+      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET
+    }),
+    diaryIndex: renderPersonaDocumentInjection(
+      sortDiaryIndexRecentFirst(input.diaryIndex),
+      DIARY_INDEX_INJECTION_TOKEN_BUDGET,
+      input.paths.diaryIndex
+    )
+  };
 }
 
 // src/hooks/handlers/context.ts
@@ -5300,88 +5251,35 @@ async function kickWorkerWithinBudget(kickWorkerFast2) {
     }
   }
 }
-async function appendDiaryContext(hookSpecificOutput, fileStore, today, requestRebuild, indexRows) {
-  let persona;
+async function appendDreamMemoryContext(hookSpecificOutput, memoryStore, fileStore) {
   try {
-    persona = await fileStore.loadCurrentPersona();
+    const [memory, indexBytes] = await Promise.all([
+      memoryStore.readInjectionDocuments(),
+      fileStore.readIndex()
+    ]);
+    const diaryIndex = new TextDecoder("utf-8", { fatal: true }).decode(indexBytes);
+    const paths = {
+      userProfile: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "user-profile.md"),
+      experience: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "experience.md"),
+      diaryIndex: (0, import_node_path10.join)(memoryStore.dataRoot, "diary", "INDEX.md")
+    };
+    const rendered = renderSessionStartMemoryInjection({
+      ...memory,
+      diaryIndex,
+      paths
+    });
+    return [
+      hookSpecificOutput,
+      "",
+      rendered.profile,
+      "",
+      rendered.experience,
+      "",
+      rendered.diaryIndex
+    ].join("\n");
   } catch {
-    requestRebuild();
     return hookSpecificOutput;
   }
-  let recentLines = [];
-  const indexBytes = await fileStore.ensureIndex(indexRows).catch(() => null);
-  if (indexBytes) {
-    try {
-      const indexText = new TextDecoder("utf-8", { fatal: true }).decode(indexBytes).replace(/^# Diary Index(?:\r?\n|$)/, "").trim();
-      recentLines = buildRollingRecentLines(indexText, today);
-    } catch {
-      recentLines = [];
-    }
-  }
-  const generationRoot = (0, import_node_path7.resolve)(
-    fileStore.dataRoot,
-    "persona",
-    "generations",
-    String(persona.generation)
-  );
-  const profileBlock = renderBoundedPersonaBlock({
-    heading: "## Persona",
-    document: persona.userProfile,
-    displayPath: (0, import_node_path7.join)(generationRoot, "user-profile.md"),
-    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
-  });
-  const experienceBlock = renderBoundedExperienceBlock({
-    document: persona.experience,
-    displayPath: (0, import_node_path7.join)(generationRoot, "experience.md"),
-    recentLines
-  });
-  return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
-}
-function renderBoundedPersonaBlock(input) {
-  const suffixLines = input.suffixLines ?? [];
-  for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
-    const documentView = renderPersonaDocumentInjection(
-      input.document,
-      documentBudget,
-      input.displayPath
-    );
-    const block = [
-      input.heading,
-      ...documentView ? ["", documentView] : [],
-      ...suffixLines
-    ].join("\n");
-    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
-  }
-  const lowerBound = renderPersonaDocumentInjection(
-    input.document,
-    0,
-    input.displayPath
-  );
-  return [
-    input.heading,
-    ...lowerBound ? ["", lowerBound] : [],
-    ...suffixLines
-  ].join("\n");
-}
-function renderBoundedExperienceBlock(input) {
-  const recent = input.recentLines.map((line) => ({ ...line }));
-  const render = () => renderBoundedPersonaBlock({
-    heading: "## Experience",
-    document: input.document,
-    displayPath: input.displayPath,
-    tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
-    suffixLines: recent.length > 0 ? ["", "## \u8FD1\u671F", "", ...recent.map((line) => line.text)] : []
-  });
-  let block = render();
-  for (const kind of ["monthly", "daily"]) {
-    const candidates = recent.filter((line) => line.kind === kind).sort((left, right) => left.date.localeCompare(right.date));
-    for (const candidate of candidates) {
-      if (estimateDiaryTokens(block) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) break;
-      recent.splice(recent.indexOf(candidate), 1);
-      block = render();
-    }
-  }
-  return block;
 }
 function splitInsight(insight) {
   if (!insight) {
@@ -5575,59 +5473,34 @@ function createContextHandler(dependencies) {
       dependencies.timelineRenderer
     );
     const nowEpoch = dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1e3);
-    const today = diaryDayOf(nowEpoch);
+    const triggerWindow = dependencies.dreamSchedule ? dreamTriggerWindow({
+      nowEpoch,
+      timeZone: dependencies.dreamSchedule.timeZone,
+      triggerHour: dependencies.dreamSchedule.hour
+    }) : null;
+    const today = triggerWindow?.today ?? diaryDayOf(nowEpoch);
     try {
       if (dependencies.diaryStateStore) {
         const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        if (dependencies.fileStore) {
-          const recentStart = new Date(
-            Date.parse(`${today}T00:00:00Z`) - 14 * 864e5
-          ).toISOString().slice(0, 10);
-          const recentDays = dependencies.diaryStateStore.listSettledDays().filter((day) => day.date >= recentStart && day.date < today);
-          const integrityDays = dependencies.diaryStateStore.nextIntegrityScanBatch({
-            beforeDate: today,
-            limit: 10
-          });
-          const validationDays = new Map(
-            [...recentDays, ...integrityDays].map((day) => [day.date, day])
-          );
-          for (const day of validationDays.values()) {
-            try {
-              await validateAndMarkStale(
-                {
-                  stateStore: dependencies.diaryStateStore,
-                  fileStore: dependencies.fileStore,
-                  nowEpoch: () => nowEpoch
-                },
-                day
-              );
-            } catch {
-            }
-          }
-        }
-        const reconciledDates = dependencies.diaryStateStore.reconcileBacklog({
+        const reconciledDates = triggerWindow?.hasPassedTrigger ? dependencies.diaryStateStore.reconcileBacklog({
           today,
           cutoverDate: bootstrap.cutoverDate,
+          lastSuccessfulDate: await dependencies.readLastSuccessfulDate?.() ?? null,
+          maxDays: dependencies.dreamSchedule.backlogLimit,
+          timeZone: dependencies.dreamSchedule.timeZone,
           enqueuedAtEpoch: nowEpoch
-        });
+        }) : [];
         if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
           await kickWorkerWithinBudget(dependencies.kickWorkerFast);
         }
       }
     } catch {
     }
-    if (dependencies.fileStore) {
-      const requestRebuild = () => {
-        const store = dependencies.diaryStateStore;
-        if (!store) return;
-        store.requestPersonaRebuild();
-      };
-      hookSpecificOutput = await appendDiaryContext(
+    if (dependencies.fileStore && dependencies.memoryStore) {
+      hookSpecificOutput = await appendDreamMemoryContext(
         hookSpecificOutput,
-        dependencies.fileStore,
-        today,
-        requestRebuild,
-        dependencies.diaryStateStore?.listIndexRows() ?? []
+        dependencies.memoryStore,
+        dependencies.fileStore
       );
     }
     return {
@@ -5638,7 +5511,7 @@ function createContextHandler(dependencies) {
 }
 
 // src/shared/transcript-parser.ts
-var import_node_fs3 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -5724,10 +5597,10 @@ function detectInterruptedPromptIdsInEntries(entries) {
   return collectInterruptedPromptIds(entries);
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -6986,17 +6859,26 @@ function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
   kickWorkerFast: kickWorkerFast2 = kickWorkerFast,
-  nowEpoch
+  nowEpoch,
+  config = loadConfig()
 }) {
   const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
+  const dreamStore = new DreamMemoryStore(dataRoot);
   return {
     SessionStart: createContextHandler({
       db,
       diaryStateStore,
       fileStore,
+      memoryStore: dreamStore,
       kickWorkerFast: kickWorkerFast2,
-      nowEpoch
+      nowEpoch,
+      dreamSchedule: {
+        hour: config.dreamAgentHour,
+        timeZone: config.dreamAgentTimeZone,
+        backlogLimit: config.dreamAgentBacklogLimit
+      },
+      readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate()
     }),
     SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
@@ -7016,7 +6898,7 @@ function getDefaultHandlers() {
   return defaultHandlers;
 }
 function readJsonFromStdin() {
-  const input = (0, import_node_fs4.readFileSync)(0, "utf8").trim();
+  const input = (0, import_node_fs6.readFileSync)(0, "utf8").trim();
   if (input === "") {
     return {};
   }

@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
 import type { DiaryStateStore } from "../../db/diary-state";
 import {
@@ -20,18 +20,13 @@ import {
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
-import { diaryDayOf, estimateDiaryTokens } from "../../diary/domain";
+import { diaryDayOf } from "../../diary/domain";
 import type { DiaryFileStore } from "../../diary/file-store";
+import type { DreamMemoryStore } from "../../diary/memory-store";
 import {
-  buildRollingRecentLines,
-  type RecentLine,
-} from "../../diary/experience-render";
-import {
-  EXPERIENCE_INJECTION_TOKEN_BUDGET,
-  PROFILE_INJECTION_TOKEN_BUDGET,
-  renderPersonaDocumentInjection,
+  renderSessionStartMemoryInjection,
 } from "../../diary/persona-render";
-import { validateAndMarkStale } from "../../diary/validate-and-mark-stale";
+import { dreamTriggerWindow } from "../../diary/calendar";
 
 export interface ContextHandlerDependencies {
   db: Database;
@@ -40,21 +35,22 @@ export interface ContextHandlerDependencies {
     DiaryStateStore,
     | "initializeBootstrap"
     | "reconcileBacklog"
-    | "listSettledDays"
-    | "nextIntegrityScanBatch"
-    | "markDayStaleAndEnqueue"
-    | "requestPersonaRebuild"
-    | "listIndexRows"
   >;
   nowEpoch?: () => number;
   kickWorkerFast?: () => Promise<void>;
+  dreamSchedule?: {
+    hour: number;
+    timeZone: string;
+    backlogLimit: number;
+  };
+  readLastSuccessfulDate?: () => Promise<string | null>;
   fileStore?: Pick<
     DiaryFileStore,
-    | "dataRoot"
-    | "loadCurrentPersona"
-    | "ensureIndex"
-    | "readIndex"
-    | "readValidatedDiary"
+    "readIndex"
+  >;
+  memoryStore?: Pick<
+    DreamMemoryStore,
+    "dataRoot" | "readInjectionDocuments"
   >;
 }
 
@@ -80,122 +76,40 @@ async function kickWorkerWithinBudget(
   }
 }
 
-async function appendDiaryContext(
+async function appendDreamMemoryContext(
   hookSpecificOutput: string,
-  fileStore: Pick<
-    DiaryFileStore,
-    "dataRoot" | "loadCurrentPersona" | "ensureIndex" | "readIndex"
-  >,
-  today: string,
-  requestRebuild: () => void,
-  indexRows: ReturnType<DiaryStateStore["listIndexRows"]>,
+  memoryStore: Pick<DreamMemoryStore, "dataRoot" | "readInjectionDocuments">,
+  fileStore: Pick<DiaryFileStore, "readIndex">,
 ): Promise<string> {
-  let persona;
   try {
-    persona = await fileStore.loadCurrentPersona();
+    const [memory, indexBytes] = await Promise.all([
+      memoryStore.readInjectionDocuments(),
+      fileStore.readIndex(),
+    ]);
+    const diaryIndex = new TextDecoder("utf-8", { fatal: true })
+      .decode(indexBytes);
+    const paths = {
+      userProfile: join(memoryStore.dataRoot, "memory", "user-profile.md"),
+      experience: join(memoryStore.dataRoot, "memory", "experience.md"),
+      diaryIndex: join(memoryStore.dataRoot, "diary", "INDEX.md"),
+    };
+    const rendered = renderSessionStartMemoryInjection({
+      ...memory,
+      diaryIndex,
+      paths,
+    });
+    return [
+      hookSpecificOutput,
+      "",
+      rendered.profile,
+      "",
+      rendered.experience,
+      "",
+      rendered.diaryIndex,
+    ].join("\n");
   } catch {
-    requestRebuild();
     return hookSpecificOutput;
   }
-  let recentLines: RecentLine[] = [];
-  const indexBytes = await fileStore.ensureIndex(indexRows).catch(() => null);
-  if (indexBytes) {
-    try {
-      const indexText = new TextDecoder("utf-8", { fatal: true })
-        .decode(indexBytes)
-        .replace(/^# Diary Index(?:\r?\n|$)/, "")
-        .trim();
-      recentLines = buildRollingRecentLines(indexText, today);
-    } catch {
-      recentLines = [];
-    }
-  }
-  const generationRoot = resolve(
-    fileStore.dataRoot,
-    "persona",
-    "generations",
-    String(persona.generation),
-  );
-  const profileBlock = renderBoundedPersonaBlock({
-    heading: "## Persona",
-    document: persona.userProfile,
-    displayPath: join(generationRoot, "user-profile.md"),
-    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET,
-  });
-  const experienceBlock = renderBoundedExperienceBlock({
-    document: persona.experience,
-    displayPath: join(generationRoot, "experience.md"),
-    recentLines,
-  });
-  return [hookSpecificOutput, "", profileBlock, "", experienceBlock].join("\n");
-}
-
-function renderBoundedPersonaBlock(input: {
-  heading: string;
-  document: string;
-  displayPath: string;
-  tokenBudget: number;
-  suffixLines?: readonly string[];
-}): string {
-  const suffixLines = input.suffixLines ?? [];
-  for (
-    let documentBudget = input.tokenBudget;
-    documentBudget >= 0;
-    documentBudget -= 1
-  ) {
-    const documentView = renderPersonaDocumentInjection(
-      input.document,
-      documentBudget,
-      input.displayPath,
-    );
-    const block = [
-      input.heading,
-      ...(documentView ? ["", documentView] : []),
-      ...suffixLines,
-    ].join("\n");
-    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
-  }
-
-  const lowerBound = renderPersonaDocumentInjection(
-    input.document,
-    0,
-    input.displayPath,
-  );
-  return [
-    input.heading,
-    ...(lowerBound ? ["", lowerBound] : []),
-    ...suffixLines,
-  ].join("\n");
-}
-
-function renderBoundedExperienceBlock(input: {
-  document: string;
-  displayPath: string;
-  recentLines: readonly RecentLine[];
-}): string {
-  const recent = input.recentLines.map((line) => ({ ...line }));
-  const render = () =>
-    renderBoundedPersonaBlock({
-      heading: "## Experience",
-      document: input.document,
-      displayPath: input.displayPath,
-      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
-      suffixLines: recent.length > 0
-        ? ["", "## 近期", "", ...recent.map((line) => line.text)]
-        : [],
-    });
-  let block = render();
-  for (const kind of ["monthly", "daily"] as const) {
-    const candidates = recent
-      .filter((line) => line.kind === kind)
-      .sort((left, right) => left.date.localeCompare(right.date));
-    for (const candidate of candidates) {
-      if (estimateDiaryTokens(block) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) break;
-      recent.splice(recent.indexOf(candidate), 1);
-      block = render();
-    }
-  }
-  return block;
 }
 
 function splitInsight(insight: string | null): string[] {
@@ -471,48 +385,29 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
     );
     const nowEpoch =
       dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1_000);
-    const today = diaryDayOf(nowEpoch);
+    const triggerWindow = dependencies.dreamSchedule
+      ? dreamTriggerWindow({
+          nowEpoch,
+          timeZone: dependencies.dreamSchedule.timeZone,
+          triggerHour: dependencies.dreamSchedule.hour,
+        })
+      : null;
+    const today = triggerWindow?.today ?? diaryDayOf(nowEpoch);
 
     try {
       if (dependencies.diaryStateStore) {
         const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        if (dependencies.fileStore) {
-          const recentStart = new Date(
-            Date.parse(`${today}T00:00:00Z`) - 14 * 86_400_000,
-          )
-            .toISOString()
-            .slice(0, 10);
-          const recentDays = dependencies.diaryStateStore
-            .listSettledDays()
-            .filter((day) => day.date >= recentStart && day.date < today);
-          const integrityDays =
-            dependencies.diaryStateStore.nextIntegrityScanBatch({
-              beforeDate: today,
-              limit: 10,
-            });
-          const validationDays = new Map(
-            [...recentDays, ...integrityDays].map((day) => [day.date, day]),
-          );
-          for (const day of validationDays.values()) {
-            try {
-              await validateAndMarkStale(
-                {
-                  stateStore: dependencies.diaryStateStore,
-                  fileStore: dependencies.fileStore,
-                  nowEpoch: () => nowEpoch,
-                },
-                day,
-              );
-            } catch {
-              // Invalid diary days are requeued by the canonical validation path.
-            }
-          }
-        }
-        const reconciledDates = dependencies.diaryStateStore.reconcileBacklog({
-          today,
-          cutoverDate: bootstrap.cutoverDate,
-          enqueuedAtEpoch: nowEpoch,
-        });
+        const reconciledDates = triggerWindow?.hasPassedTrigger
+          ? dependencies.diaryStateStore.reconcileBacklog({
+              today,
+              cutoverDate: bootstrap.cutoverDate,
+              lastSuccessfulDate:
+                await dependencies.readLastSuccessfulDate?.() ?? null,
+              maxDays: dependencies.dreamSchedule!.backlogLimit,
+              timeZone: dependencies.dreamSchedule!.timeZone,
+              enqueuedAtEpoch: nowEpoch,
+            })
+          : [];
 
         if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
           await kickWorkerWithinBudget(dependencies.kickWorkerFast);
@@ -522,18 +417,11 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
       // Diary backfill is best-effort: SessionStart context must still be returned.
     }
 
-    if (dependencies.fileStore) {
-      const requestRebuild = () => {
-        const store = dependencies.diaryStateStore;
-        if (!store) return;
-        store.requestPersonaRebuild();
-      };
-      hookSpecificOutput = await appendDiaryContext(
+    if (dependencies.fileStore && dependencies.memoryStore) {
+      hookSpecificOutput = await appendDreamMemoryContext(
         hookSpecificOutput,
+        dependencies.memoryStore,
         dependencies.fileStore,
-        today,
-        requestRebuild,
-        dependencies.diaryStateStore?.listIndexRows() ?? [],
       );
     }
 

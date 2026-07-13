@@ -8,7 +8,9 @@ import { createDatabase } from "../db/database";
 import { createDiaryStateStore } from "../db/diary-state";
 import { initializeDatabase } from "../db/schema";
 import { DiaryFileStore } from "../diary/file-store";
+import { DreamMemoryStore } from "../diary/memory-store";
 import { DATA_DIR } from "../shared/paths";
+import { loadConfig, type MnemoConfig } from "../shared/config";
 import { kickWorkerFast as kickDefaultWorkerFast } from "../worker/client";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
@@ -38,6 +40,7 @@ export interface DefaultHookHandlersDependencies {
   dataRoot?: string;
   kickWorkerFast?: () => Promise<void>;
   nowEpoch?: () => number;
+  config?: MnemoConfig;
 }
 
 export function createDefaultHookHandlers({
@@ -45,17 +48,26 @@ export function createDefaultHookHandlers({
   dataRoot = DATA_DIR,
   kickWorkerFast = kickDefaultWorkerFast,
   nowEpoch,
+  config = loadConfig(),
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
   const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
+  const dreamStore = new DreamMemoryStore(dataRoot);
 
   return {
     SessionStart: createContextHandler({
       db,
       diaryStateStore,
       fileStore,
+      memoryStore: dreamStore,
       kickWorkerFast,
       nowEpoch,
+      dreamSchedule: {
+        hour: config.dreamAgentHour,
+        timeZone: config.dreamAgentTimeZone,
+        backlogLimit: config.dreamAgentBacklogLimit,
+      },
+      readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     }),
     SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),

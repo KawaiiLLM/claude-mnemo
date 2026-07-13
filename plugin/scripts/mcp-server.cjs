@@ -7597,47 +7597,15 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
-  ensureDiaryValidationReportColumn(db);
-  ensurePersonaOperationGenerationColumns(db);
-  ensurePersonaOperationConsumedPendingDatesColumn(db);
-  ensurePersonaOperationPublicationSnapshotColumns(db);
+  dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
 }
-function ensurePersonaOperationPublicationSnapshotColumns(db) {
-  if (!hasColumn(db, "persona_operation_state", "rebuild_request_epoch")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN rebuild_request_epoch INTEGER NOT NULL DEFAULT 0");
-  }
-  if (!hasColumn(db, "persona_operation_state", "partial_missing_dates")) {
-    db.exec("ALTER TABLE persona_operation_state ADD COLUMN partial_missing_dates TEXT NOT NULL DEFAULT '[]'");
-  }
-}
-function ensurePersonaOperationConsumedPendingDatesColumn(db) {
-  if (!hasColumn(db, "persona_operation_state", "consumed_pending_dates")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN consumed_pending_dates TEXT NOT NULL DEFAULT '[]'"
-    );
-  }
-}
-function ensurePersonaOperationGenerationColumns(db) {
-  if (!hasColumn(db, "persona_operation_state", "base_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN base_generation INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "persona_operation_state", "target_generation")) {
-    db.exec(
-      "ALTER TABLE persona_operation_state ADD COLUMN target_generation INTEGER NOT NULL DEFAULT 1"
-    );
-  }
-}
-function ensureDiaryValidationReportColumn(db) {
-  if (!hasColumn(db, "diary_day_state", "validation_report_json")) {
-    db.exec("ALTER TABLE diary_day_state ADD COLUMN validation_report_json TEXT");
-  }
+function dropRetiredMaintenanceState(db) {
+  db.exec("DROP TABLE IF EXISTS persona_operation_state");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -7938,48 +7906,17 @@ var init_schema = __esm({
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
     watermark TEXT,
-    file_sha256 TEXT,
-    index_hook TEXT,
-    validation_report_json TEXT,
     settled_at_epoch INTEGER,
     needs_regen INTEGER NOT NULL DEFAULT 0,
-    pending_rebase INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
+    last_error TEXT
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
   );
-
-  CREATE TABLE IF NOT EXISTS persona_operation_state (
-    operation_id TEXT PRIMARY KEY,
-    op TEXT NOT NULL,
-    base_current_operation_id TEXT,
-    base_generation INTEGER NOT NULL DEFAULT 0,
-    target_generation INTEGER NOT NULL DEFAULT 1,
-    input_dates_snapshot TEXT NOT NULL,
-    consumed_pending_dates TEXT NOT NULL DEFAULT '[]',
-    rebuild_request_epoch INTEGER NOT NULL DEFAULT 0,
-    partial_missing_dates TEXT NOT NULL DEFAULT '[]',
-    batch_plan TEXT NOT NULL,
-    input_artifact_dir TEXT NOT NULL,
-    next_batch_index INTEGER NOT NULL DEFAULT 0,
-    accumulator_generation INTEGER,
-    accumulator_hash TEXT,
-    checkpoint_path TEXT,
-    checkpoint_sha256 TEXT,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_epoch INTEGER,
-    last_error TEXT,
-    terminal INTEGER NOT NULL DEFAULT 0
-  );
-
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_persona_operation_active
-    ON persona_operation_state(terminal) WHERE terminal = 0;
 
   ${MEMORY_FTS_DDL}
 `;
@@ -31531,34 +31468,57 @@ function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
 
-// src/db/diary-state.ts
-init_database();
-
-// src/diary/domain.ts
-var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-var DIARY_BODY_LIMIT = 64 * 1024;
-function diaryDayOf(epochSeconds) {
-  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+// src/diary/calendar.ts
+var dateFormatters = /* @__PURE__ */ new Map();
+function dateFormatter(timeZone) {
+  let formatter = dateFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
+    dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+function partNumber(parts, type) {
+  const value = parts.find((part) => part.type === type)?.value;
+  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
+  return Number.parseInt(value, 10);
+}
+function calendarDateAt(epochSeconds, timeZone) {
+  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
+  const year = String(partNumber(parts, "year")).padStart(4, "0");
+  const month = String(partNumber(parts, "month")).padStart(2, "0");
+  const day = String(partNumber(parts, "day")).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
+// src/shared/config.ts
+var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+
 // src/db/diary-state.ts
+init_database();
 function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
-  const date5 = diaryDayOf(createdAtEpoch);
+  const timeZone = db.query(
+    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
+  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
+  const date5 = calendarDateAt(createdAtEpoch, timeZone);
   db.query(
-    `
-      UPDATE diary_day_state
-      SET needs_regen = 1,
-          attempt_count = 0,
-          next_attempt_epoch = NULL,
-          last_error = NULL,
-          terminal = 0
-      WHERE date = ?
-        AND settled_at_epoch IS NOT NULL
-        AND date >= COALESCE(
-          (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-          '9999-12-31'
-        )
-    `
+    `UPDATE diary_day_state
+     SET needs_regen = 1,
+         attempt_count = 0,
+         next_attempt_epoch = NULL,
+         last_error = NULL
+     WHERE date = ?
+       AND settled_at_epoch IS NOT NULL
+       AND date >= COALESCE(
+         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+         '9999-12-31'
+       )`
   ).run(date5);
 }
 
@@ -35016,7 +34976,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.3.3" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.4.0" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

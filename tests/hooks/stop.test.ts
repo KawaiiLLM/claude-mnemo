@@ -155,12 +155,10 @@ describe("handleStopHook", () => {
     stateStore.initializeBootstrap("2026-07-11");
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const claimed = stateStore.claimNextDiaryItem(200)!;
-    stateStore.settleDay({
+    stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
       watermark: "watermark",
-      fileSha256: "sha",
-      indexHook: "hook",
       settledAtEpoch: 250,
     });
 

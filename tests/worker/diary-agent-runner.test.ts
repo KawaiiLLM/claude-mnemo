@@ -4,14 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
-import { DiaryFileStore } from "../../src/diary/file-store";
 import {
   createDiaryAgentRunner,
   type DiaryAgentQueryRequest,
 } from "../../src/worker/diary-agent-runner";
-import { createDiaryAgentToolHandlers } from "../../src/worker/diary-agent-tools";
+import { DEFAULT_DREAM_AGENT_TIMEOUT_MS } from "../../src/shared/config";
+import { createDreamAgentToolHandlers } from "../../src/worker/diary-agent-tools";
 
 const roots: string[] = [];
 
@@ -22,18 +21,12 @@ afterEach(() => {
 });
 
 describe("diary agent runner", () => {
-  test("runs one diary request with the fixed Sonnet and timeout contract", async () => {
+  test("runs one dream-agent request with the default model and timeout contract", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-runner-"));
     roots.push(dataRoot);
-    const toolHandlers = createDiaryAgentToolHandlers({
-      db,
-      stateStore: createDiaryStateStore(db),
-      allowedTurnRefs: new Set(),
-      fileStore: new DiaryFileStore(dataRoot),
-      allowedDiaryDates: new Set(),
-    });
+    const toolHandlers = createDreamAgentToolHandlers({ db, dataRoot });
     const rawEnvelope = [
       "===DIARY_V1_BEGIN===",
       "---",
@@ -67,8 +60,8 @@ describe("diary agent runner", () => {
         date: "2026-07-10",
         prompt: "Write the diary for 2026-07-10.",
         toolHandlers,
-        model: "claude-sonnet-5",
-        timeoutMs: 600_000,
+        model: "claude-opus-4-8",
+        timeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
         watchdogMs: 120_000,
       });
     } finally {
@@ -81,13 +74,7 @@ describe("diary agent runner", () => {
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-timeout-"));
     roots.push(dataRoot);
-    const toolHandlers = createDiaryAgentToolHandlers({
-      db,
-      stateStore: createDiaryStateStore(db),
-      allowedTurnRefs: new Set(),
-      fileStore: new DiaryFileStore(dataRoot),
-      allowedDiaryDates: new Set(),
-    });
+    const toolHandlers = createDreamAgentToolHandlers({ db, dataRoot });
     const runner = createDiaryAgentRunner({
       timeoutMs: 1,
       runQuery: (request) =>
@@ -118,13 +105,7 @@ describe("diary agent runner", () => {
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-watchdog-"));
     roots.push(dataRoot);
-    const toolHandlers = createDiaryAgentToolHandlers({
-      db,
-      stateStore: createDiaryStateStore(db),
-      allowedTurnRefs: new Set(),
-      fileStore: new DiaryFileStore(dataRoot),
-      allowedDiaryDates: new Set(),
-    });
+    const toolHandlers = createDreamAgentToolHandlers({ db, dataRoot });
     let seenRequest: DiaryAgentQueryRequest | null = null;
     const runner = createDiaryAgentRunner({
       timeoutMs: 50,

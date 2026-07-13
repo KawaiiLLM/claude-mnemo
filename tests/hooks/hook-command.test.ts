@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,7 +7,7 @@ import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
-import { DiaryFileStore } from "../../src/diary/file-store";
+import { DreamMemoryStore } from "../../src/diary/memory-store";
 import {
   createDefaultHookHandlers,
   runHookCommand,
@@ -105,28 +105,26 @@ describe("runHookCommand", () => {
         Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
       );
 
-      const fileStore = new DiaryFileStore(dataRoot);
-      await fileStore.commitPersonaGeneration({
-        generation: 1,
-        manifest: {
-          operation_id: "default-hook-persona",
-          op: "fold",
-          generation: 1,
-        },
+      await new DreamMemoryStore(dataRoot).commitNight({
+        date: "2026-07-10",
         userProfile: "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 生产 wiring 中的用户画像 [S1/T1]\n",
         experience: "## 项目\n## 通用\n- 生产 wiring 中的协作经历 [S1/T1]\n",
+        archive: "# Memory Archive\n\n- 不应注入的归档内容\n",
+        diary: "# 2026-07-10\n\n- production wiring\n",
+        diaryIndex: "# Diary Index\n\n- 2026-07-10：生产 wiring 日记索引\n",
       });
-      await fileStore.ensureIndex([
-        { date: "2026-07-10", indexHook: "生产 wiring 日记索引" },
-      ]);
+      const indexBeforeSessionStart = readFileSync(
+        join(dataRoot, "diary", "INDEX.md"),
+        "utf8",
+      );
       const diaryStateStore = createDiaryStateStore(db);
       diaryStateStore.initializeBootstrap("2026-07-11");
       diaryStateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: nowEpoch });
-      diaryStateStore.commitDayState({
+      const claimed = diaryStateStore.claimNextDiaryItem(nowEpoch)!;
+      diaryStateStore.settleDreamDay({
         date: "2026-07-10",
+        queueSeq: claimed.seq,
         watermark: "production-wiring-watermark",
-        fileSha256: "missing-diary-hash",
-        indexHook: "生产 wiring 日记索引",
         settledAtEpoch: nowEpoch,
       });
       diaryStateStore.markDayStale("2026-07-10");
@@ -155,13 +153,15 @@ describe("runHookCommand", () => {
         "- 生产 wiring 中的用户画像 [S1/T1]",
       );
       expect(result.hookSpecificOutput).toContain("## Experience");
-      expect(result.hookSpecificOutput).toContain("## 近期");
-      expect(result.hookSpecificOutput).not.toContain("## Diary Index");
+      expect(result.hookSpecificOutput).toContain("# Diary Index");
       expect(result.hookSpecificOutput).toContain(
         "- 2026-07-10：生产 wiring 日记索引",
       );
+      expect(result.hookSpecificOutput).not.toContain("不应注入的归档内容");
       expect(kickCalls).toBe(1);
       expect(result.asyncWork).toBeUndefined();
+      expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
+        .toBe(indexBeforeSessionStart);
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });

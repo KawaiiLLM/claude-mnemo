@@ -39,13 +39,21 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("memory_fts");
   });
 
-  test("creates the diary validation report column", () => {
+  test("creates only the dream scheduling columns for each date", () => {
     initializeSchema(db);
     const columns = db
       .query<{ name: string }, []>("PRAGMA table_info(diary_day_state)")
       .all()
       .map((row) => row.name);
-    expect(columns).toContain("validation_report_json");
+    expect(columns).toEqual([
+      "date",
+      "watermark",
+      "settled_at_epoch",
+      "needs_regen",
+      "attempt_count",
+      "next_attempt_epoch",
+      "last_error",
+    ]);
   });
 
   test("creates the expected columns on sessions", () => {
@@ -827,7 +835,7 @@ describe("initializeSchema", () => {
     expect(queueIndexes).toContain("idx_pending_queue_session");
   });
 
-  test("creates the diary and persona persistence schema", () => {
+  test("creates dream persistence without the retired persona state machine", () => {
     initializeSchema(db);
 
     const tableNames = db
@@ -845,10 +853,10 @@ describe("initializeSchema", () => {
 
     expect(tableNames).toContain("diary_state");
     expect(tableNames).toContain("diary_day_state");
-    expect(tableNames).toContain("persona_operation_state");
+    expect(tableNames).not.toContain("persona_operation_state");
     expect(indexNames).toContain("idx_turns_created_at");
     expect(indexNames).toContain("idx_pending_queue_diary_target");
-    expect(indexNames).toContain("idx_persona_operation_active");
+    expect(indexNames).not.toContain("idx_persona_operation_active");
   });
 
   test("skips rebuilding the search index when the database is empty", () => {

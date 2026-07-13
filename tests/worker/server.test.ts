@@ -770,15 +770,6 @@ describe("worker server", () => {
       delayMs: number;
     }> = [];
     const bufferedCounts: number[] = [];
-    let signalPersonaStarted!: () => void;
-    const personaStarted = new Promise<void>((resolve) => {
-      signalPersonaStarted = resolve;
-    });
-    let releasePersona!: () => void;
-    const personaReleased = new Promise<void>((resolve) => {
-      releasePersona = resolve;
-    });
-    let personaCalls = 0;
     let core!: ReturnType<typeof createWorkerCore>;
     core = createWorkerCore({
       db,
@@ -803,21 +794,10 @@ describe("worker server", () => {
           );
         }
       },
-      async runPersonaMaintenance() {
-        personaCalls += 1;
-        if (personaCalls === 1) {
-          signalPersonaStarted();
-          await personaReleased;
-        }
-      },
     });
 
-    const firstScan = core.scanAndDrainQueue();
-    await personaStarted;
+    await core.scanAndDrainQueue();
     expect(bufferedCounts).toEqual([1]);
-    expect(scheduled).toEqual([]);
-    releasePersona();
-    await firstScan;
     expect(scheduled.map((entry) => entry.delayMs)).toEqual([0]);
 
     await scheduled.shift()!.callback();
@@ -857,7 +837,7 @@ describe("worker server", () => {
       processDiaryItem: async (item) => {
         attempts += 1;
         if (attempts === 1) {
-          stateStore.recordFailure({
+          stateStore.recordDreamFailure({
             date: "2026-07-10",
             queueSeq: item.seq,
             error: "temporary failure",
@@ -884,112 +864,6 @@ describe("worker server", () => {
     await scheduled!.callback();
     expect(attempts).toBe(2);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
-  });
-
-  test("a persisted persona backoff shares the global retry timer", async () => {
-    const stateStore = createDiaryStateStore(db);
-    stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 90 });
-    const laterDiary = stateStore.claimNextDiaryItem(100)!;
-    stateStore.recordFailure({
-      date: "2026-07-09",
-      queueSeq: laterDiary.seq,
-      error: "later diary retry",
-      nextAttemptEpoch: 180,
-    });
-    let nowEpoch = 100;
-    let personaCalls = 0;
-    const scheduled: Array<{
-      callback: () => void | Promise<void>;
-      delayMs: number;
-    }> = [];
-    const setTimeoutImpl = mock(
-      (callback: () => void | Promise<void>, delayMs: number): unknown => {
-        scheduled.push({ callback, delayMs });
-        return Symbol("persona-retry");
-      },
-    );
-    const core = createWorkerCore({
-      db,
-      now: () => nowEpoch,
-      setTimeoutImpl,
-      clearTimeoutImpl: () => {},
-      logger: { warn: () => {}, error: () => {} },
-      processDiaryItem: async () => {
-        throw new Error("later diary must not run before its due time");
-      },
-      runPersonaMaintenance: async () => {
-        personaCalls += 1;
-        const active = stateStore.getPersonaOperation();
-        if (personaCalls === 1) {
-          stateStore.beginPersonaOperation({
-            operationId: "persona-retry-op",
-            op: "fold",
-            inputDatesSnapshot: ["2026-07-10"],
-          });
-          stateStore.recordPersonaOperationFailure({
-            operationId: "persona-retry-op",
-            error: "temporary persona failure",
-            nextAttemptEpoch: nowEpoch + 60,
-          });
-          throw new Error("temporary persona failure");
-        }
-        if (active && !active.terminal) {
-          stateStore.completePersonaOperation(active.operationId);
-          stateStore.acknowledgeDiaryItem(laterDiary.seq);
-        }
-      },
-    });
-
-    await core.scanAndDrainQueue();
-
-    expect(personaCalls).toBe(1);
-    expect(scheduled.map((entry) => entry.delayMs)).toEqual([60_000]);
-
-    nowEpoch = 160;
-    await scheduled[0]!.callback();
-    expect(personaCalls).toBe(2);
-    expect(stateStore.getPersonaOperation()).toBeNull();
-    expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
-
-    stateStore.beginPersonaOperation({
-      operationId: "persona-terminal-op",
-      op: "fold",
-      inputDatesSnapshot: ["2026-07-10"],
-    });
-    stateStore.terminalPersonaOperation(
-      "persona-terminal-op",
-      "manual intervention required",
-    );
-    await core.scanAndDrainQueue();
-    expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
-  });
-
-  test("global drain runs the persona tail after diary work and on an empty queue", async () => {
-    const stateStore = createDiaryStateStore(db);
-    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const events: string[] = [];
-    const core = createWorkerCore({
-      db,
-      now: () => 123,
-      logger: { warn: () => {}, error: () => {} },
-      processDiaryItem: async (item) => {
-        events.push("diary");
-        stateStore.acknowledgeDiaryItem(item.seq);
-      },
-      runPersonaMaintenance: async () => {
-        events.push("persona");
-        throw new Error("persona maintenance failed");
-      },
-    });
-
-    await core.scanAndDrainQueue();
-    expect(events).toEqual(["diary", "persona"]);
-
-    await core.scanAndDrainQueue();
-    expect(events).toEqual(["diary", "persona", "persona"]);
-
-    await core.scanAndDrainQueue(99);
-    expect(events).toEqual(["diary", "persona", "persona"]);
   });
 
   test("scanAndDrainQueue flushes the oldest completed batch when queue overflow exceeds the cap", async () => {

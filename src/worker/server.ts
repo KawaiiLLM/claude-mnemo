@@ -218,7 +218,6 @@ export interface WorkerCoreDeps {
   now?: () => number;
   nowMs?: () => number;
   processDiaryItem?: (item: PendingQueueItem) => Promise<void>;
-  runPersonaMaintenance?: () => Promise<void>;
   setTimeoutImpl?: (
     callback: () => void | Promise<void>,
     delayMs: number,
@@ -1606,47 +1605,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   function schedulePersistentRetry(): void {
-    if (!deps.processDiaryItem && !deps.runPersonaMaintenance) {
+    if (!deps.processDiaryItem) {
       return;
     }
 
-    const diaryDueEpoch = deps.processDiaryItem
-      ? (deps.db
-          .query<{ nextAttemptEpoch: number | null }, []>(
-            `
-              SELECT MIN(d.next_attempt_epoch) AS nextAttemptEpoch
-              FROM diary_day_state d
-              WHERE d.terminal = 0
-                AND d.next_attempt_epoch IS NOT NULL
-                AND EXISTS (
-                  SELECT 1
-                  FROM pending_queue q
-                  WHERE q.kind = 'diary'
-                    AND q.claimed_at_epoch IS NULL
-                    AND q.target_id = CAST(REPLACE(d.date, '-', '') AS INTEGER)
-                )
-            `,
-          )
-          .get()?.nextAttemptEpoch ?? null)
-      : null;
-    const personaDueEpoch = deps.runPersonaMaintenance
-      ? (deps.db
-          .query<{ nextAttemptEpoch: number | null }, []>(
-            `
-              SELECT MIN(next_attempt_epoch) AS nextAttemptEpoch
-              FROM persona_operation_state
-              WHERE terminal = 0
-                AND next_attempt_epoch IS NOT NULL
-            `,
-          )
-          .get()?.nextAttemptEpoch ?? null)
-      : null;
-    let dueEpoch: number | null = null;
-    for (const candidate of [diaryDueEpoch, personaDueEpoch]) {
-      if (candidate !== null && (dueEpoch === null || candidate < dueEpoch)) {
-        dueEpoch = candidate;
-      }
-    }
+    const dueEpoch = deps.db
+      .query<{ nextAttemptEpoch: number | null }, []>(
+        `SELECT MIN(d.next_attempt_epoch) AS nextAttemptEpoch
+         FROM diary_day_state d
+         WHERE d.next_attempt_epoch IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM pending_queue q
+             WHERE q.kind = 'diary'
+               AND q.claimed_at_epoch IS NULL
+               AND q.target_id = CAST(REPLACE(d.date, '-', '') AS INTEGER)
+           )`,
+      )
+      .get()?.nextAttemptEpoch ?? null;
 
     if (dueEpoch === null) {
       if (persistentRetryTimer) {
@@ -1737,17 +1713,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           }
         }
         if (sessionFilter === undefined) {
-          if (deps.runPersonaMaintenance) {
-            try {
-              await deps.runPersonaMaintenance();
-            } catch (error) {
-              logger.error?.("persona maintenance failed", { error });
-            }
-          }
           schedulePersistentRetry();
-          // A long persona call must not let the timer fire while this global
-          // scan is still in flight: the dedupe path would return this same
-          // promise and lose the continuation.
           scheduleDiaryContinuation();
         }
         return;
@@ -2438,12 +2404,13 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
   const diaryRuntime =
-    deps.processDiaryItem || deps.runPersonaMaintenance
+    deps.processDiaryItem
       ? null
       : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
           db,
           dataRoot: deps.dataRoot ?? DATA_DIR,
           nowEpoch: deps.now,
+          config,
         });
 
   const core = createWorkerCore({
@@ -2457,14 +2424,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl,
     processDiaryItem:
-      deps.processDiaryItem ?? diaryRuntime?.processDiaryItem,
-    runPersonaMaintenance:
-      deps.runPersonaMaintenance ??
-      (diaryRuntime
-        ? async () => {
-            await diaryRuntime.runPersonaMaintenance();
-          }
-        : undefined),
+      deps.processDiaryItem ??
+      diaryRuntime?.processDreamItem,
     logger: deps.logger ?? createLogger("MNEMOSYNE"),
   });
 

@@ -53,12 +53,10 @@ describe("turn diary invalidation", () => {
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const claimed = stateStore.claimNextDiaryItem(200)!;
-    stateStore.settleDay({
+    stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
       watermark: "watermark",
-      fileSha256: "sha",
-      indexHook: "hook",
       settledAtEpoch: 250,
     });
 
@@ -70,7 +68,6 @@ describe("turn diary invalidation", () => {
     expect(stateStore.getDayState("2026-07-10")).toMatchObject({
       needsRegen: true,
       attemptCount: 0,
-      terminal: false,
     });
   });
 
@@ -103,12 +100,10 @@ describe("turn diary invalidation", () => {
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const claimed = stateStore.claimNextDiaryItem(200)!;
-    stateStore.settleDay({
+    stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
       watermark: "watermark",
-      fileSha256: "sha",
-      indexHook: "hook",
       settledAtEpoch: 250,
     });
 
@@ -146,12 +141,10 @@ describe("turn diary invalidation", () => {
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const claimed = stateStore.claimNextDiaryItem(200)!;
-    stateStore.settleDay({
+    stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
       watermark: "watermark",
-      fileSha256: "sha",
-      indexHook: "hook",
       settledAtEpoch: 250,
     });
 

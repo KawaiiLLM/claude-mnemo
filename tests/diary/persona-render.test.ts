@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
 import { estimateDiaryTokens } from "../../src/diary/domain";
-import { renderPersonaDocumentInjection } from "../../src/diary/persona-render";
+import {
+  DIARY_INDEX_INJECTION_TOKEN_BUDGET,
+  EXPERIENCE_INJECTION_TOKEN_BUDGET,
+  PROFILE_INJECTION_TOKEN_BUDGET,
+  renderPersonaDocumentInjection,
+  renderSessionStartMemoryInjection,
+} from "../../src/diary/persona-render";
 
-const path = "/data/persona/generations/7/user-profile.md";
+const path = "/data/memory/user-profile.md";
 
 describe("renderPersonaDocumentInjection", () => {
   test("renders an in-budget document in full without pointers", () => {
@@ -56,5 +62,81 @@ describe("renderPersonaDocumentInjection", () => {
     expect(renderPersonaDocumentInjection("# One\na", 1, path)).toBe(
       `（user-profile.md 过大，完整见 ${path}）`,
     );
+  });
+});
+
+describe("renderSessionStartMemoryInjection", () => {
+  test("bounds all three current documents and preserves per-section overflow pointers", () => {
+    const paths = {
+      userProfile: "/data/memory/user-profile.md",
+      experience: "/data/memory/experience.md",
+      diaryIndex: "/data/diary/INDEX.md",
+    };
+    const longLines = (prefix: string, count: number) =>
+      Array.from(
+        { length: count },
+        (_, index) => `- ${prefix} ${String(index).padStart(3, "0")} ${"中文内容".repeat(12)}`,
+      ).join("\n");
+    const rendered = renderSessionStartMemoryInjection({
+      userProfile: `# User Profile\n${longLines("profile", 300)}`,
+      experience: `# Experience\n${longLines("experience", 300)}`,
+      diaryIndex: [
+        "# Diary Index",
+        ...Array.from(
+          { length: 300 },
+          (_, index) => `- 2025-${String(12 - Math.floor(index / 28)).padStart(2, "0")}-${String(28 - (index % 28)).padStart(2, "0")}：${"日记摘要".repeat(10)}`,
+        ),
+      ].join("\n"),
+      paths,
+    });
+
+    expect(PROFILE_INJECTION_TOKEN_BUDGET).toBe(2_000);
+    expect(EXPERIENCE_INJECTION_TOKEN_BUDGET).toBe(2_000);
+    expect(DIARY_INDEX_INJECTION_TOKEN_BUDGET).toBe(1_000);
+    expect(estimateDiaryTokens(rendered.profile)).toBeLessThanOrEqual(2_000);
+    expect(estimateDiaryTokens(rendered.experience)).toBeLessThanOrEqual(2_000);
+    expect(estimateDiaryTokens(rendered.diaryIndex)).toBeLessThanOrEqual(1_000);
+    expect(rendered.profile).toMatch(
+      new RegExp(`本节还有 \\d+ 行，完整见 ${paths.userProfile}`),
+    );
+    expect(rendered.experience).toMatch(
+      new RegExp(`本节还有 \\d+ 行，完整见 ${paths.experience}`),
+    );
+    expect(rendered.diaryIndex).toMatch(
+      new RegExp(`本节还有 \\d+ 行，完整见 ${paths.diaryIndex.replace("/", "\\/")}`),
+    );
+  });
+
+  test("sorts diary entries recent-first and has no archive input or output", () => {
+    const archiveSentinel = "ARCHIVE_MUST_NEVER_BE_INJECTED";
+    const rendered = renderSessionStartMemoryInjection({
+      userProfile: "# User Profile\n\n- current profile\n",
+      experience: "# Experience\n\n- current experience\n",
+      diaryIndex: [
+        "# Diary Index",
+        "",
+        "- 2026-07-08：older",
+        "- 2026-07-10：newest",
+        "- 2026-07-09：middle",
+      ].join("\n"),
+      paths: {
+        userProfile: "/data/memory/user-profile.md",
+        experience: "/data/memory/experience.md",
+        diaryIndex: "/data/diary/INDEX.md",
+      },
+      archive: archiveSentinel,
+    } as Parameters<typeof renderSessionStartMemoryInjection>[0] & {
+      archive: string;
+    });
+    const combined = Object.values(rendered).join("\n");
+
+    expect(rendered.diaryIndex.indexOf("2026-07-10")).toBeLessThan(
+      rendered.diaryIndex.indexOf("2026-07-09"),
+    );
+    expect(rendered.diaryIndex.indexOf("2026-07-09")).toBeLessThan(
+      rendered.diaryIndex.indexOf("2026-07-08"),
+    );
+    expect(combined).not.toContain(archiveSentinel);
+    expect(combined).not.toContain("archive.md");
   });
 });

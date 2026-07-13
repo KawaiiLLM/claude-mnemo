@@ -6,6 +6,8 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_CONFIG,
+  DEFAULT_DREAM_AGENT_MODEL,
+  DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   loadConfig,
   resolveConfigPath,
 } from "../../src/shared/config";
@@ -132,5 +134,84 @@ describe("shared config", () => {
     expect(config.maxMiniTurnChars).toBe(DEFAULT_CONFIG.maxMiniTurnChars);
     expect(config.maxFlushAttempts).toBe(DEFAULT_CONFIG.maxFlushAttempts);
     expect(Number.isFinite(config.compactContextRatio)).toBe(true);
+  });
+
+  test("loads a known dream agent model and warns while falling back for an invalid id", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    const warnings: string[] = [];
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentModel: "claude-sonnet-5" }),
+    );
+    expect(loadConfig(home, { warn: (message) => warnings.push(message) }).dreamAgentModel)
+      .toBe("claude-sonnet-5");
+    expect(warnings).toEqual([]);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentModel: "future-model-alias" }),
+    );
+    expect(loadConfig(home, { warn: (message) => warnings.push(message) }).dreamAgentModel)
+      .toBe(DEFAULT_DREAM_AGENT_MODEL);
+    expect(warnings).toEqual([
+      `[claude-mnemo] Invalid dreamAgentModel "future-model-alias"; using ${DEFAULT_DREAM_AGENT_MODEL}.`,
+    ]);
+  });
+
+  test("loads dream scheduling overrides and falls back with a warning for an invalid timezone", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    const warnings: string[] = [];
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({
+        dreamAgentHour: 6,
+        dreamAgentTimeZone: "America/New_York",
+        dreamAgentBacklogLimit: 3,
+      }),
+    );
+    expect(loadConfig(home, { warn: (message) => warnings.push(message) })).toMatchObject({
+      dreamAgentHour: 6,
+      dreamAgentTimeZone: "America/New_York",
+      dreamAgentBacklogLimit: 3,
+    });
+    expect(warnings).toEqual([]);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentTimeZone: "Mars/Olympus_Mons" }),
+    );
+    expect(
+      loadConfig(home, { warn: (message) => warnings.push(message) })
+        .dreamAgentTimeZone,
+    ).toBe("Asia/Shanghai");
+    expect(warnings).toEqual([
+      '[claude-mnemo] Invalid dreamAgentTimeZone "Mars/Olympus_Mons"; using Asia/Shanghai.',
+    ]);
+  });
+
+  test("dream scheduling defaults to 04:00 Asia/Shanghai with a seven-day cap", () => {
+    expect(DEFAULT_CONFIG).toMatchObject({
+      dreamAgentHour: 4,
+      dreamAgentTimeZone: "Asia/Shanghai",
+      dreamAgentBacklogLimit: 7,
+    });
+  });
+
+  test("dream agent timeout defaults to thirty minutes and accepts an override", () => {
+    expect(DEFAULT_DREAM_AGENT_TIMEOUT_MS).toBe(1_800_000);
+    expect(DEFAULT_CONFIG.dreamAgentTimeoutMs).toBe(1_800_000);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentTimeoutMs: 2_400_000 }),
+    );
+
+    expect(loadConfig(home).dreamAgentTimeoutMs).toBe(2_400_000);
   });
 });

@@ -4,14 +4,29 @@ import {
   parseMarkdownSections,
   type MarkdownSection,
 } from "../shared/markdown-sections";
+import { sortDiaryIndexRecentFirst } from "./diary-index";
 import { estimateDiaryTokens } from "./domain";
 
-export const PROFILE_PUBLISHED_TOKEN_BUDGET = 4_000;
-export const EXPERIENCE_PUBLISHED_TOKEN_BUDGET = 6_000;
-export const PROFILE_INJECTION_TOKEN_BUDGET = 1_000;
-export const EXPERIENCE_INJECTION_TOKEN_BUDGET = 1_500;
-export const PERSONA_INJECTION_TOKEN_BUDGET =
-  PROFILE_INJECTION_TOKEN_BUDGET + EXPERIENCE_INJECTION_TOKEN_BUDGET;
+export const PROFILE_INJECTION_TOKEN_BUDGET = 2_000;
+export const EXPERIENCE_INJECTION_TOKEN_BUDGET = 2_000;
+export const DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1_000;
+
+export interface SessionStartMemoryInjection {
+  profile: string;
+  experience: string;
+  diaryIndex: string;
+}
+
+export interface SessionStartMemoryInjectionInput {
+  userProfile: string;
+  experience: string;
+  diaryIndex: string;
+  paths: {
+    userProfile: string;
+    experience: string;
+    diaryIndex: string;
+  };
+}
 
 const sectionPointer = (remainingLines: number, displayPath: string) =>
   `（本节还有 ${remainingLines} 行，完整见 ${displayPath}）`;
@@ -100,22 +115,52 @@ export function renderPersonaDocumentInjection(
   return `（${basename(displayPath)} 过大，完整见 ${displayPath}）`;
 }
 
-export function renderPersonaProfile(userProfile: string): string {
-  return ["## Persona", "", userProfile.trim()].join("\n");
+function renderBoundedInjectionBlock(input: {
+  heading: string;
+  document: string;
+  displayPath: string;
+  tokenBudget: number;
+}): string {
+  for (
+    let documentBudget = input.tokenBudget;
+    documentBudget >= 0;
+    documentBudget -= 1
+  ) {
+    const documentView = renderPersonaDocumentInjection(
+      input.document,
+      documentBudget,
+      input.displayPath,
+    );
+    const block = [
+      input.heading,
+      ...(documentView ? ["", documentView] : []),
+    ].join("\n");
+    if (estimateDiaryTokens(block) <= input.tokenBudget) return block;
+  }
+
+  return input.heading;
 }
 
-export function renderPersonaExperienceBody(experience: string): string {
-  return experience.trim();
-}
-
-export function measurePublishedPersona(persona: {
-  userProfile: string;
-  experience: string;
-}): { profileTokens: number; experienceTokens: number } {
+export function renderSessionStartMemoryInjection(
+  input: SessionStartMemoryInjectionInput,
+): SessionStartMemoryInjection {
   return {
-    profileTokens: estimateDiaryTokens(renderPersonaProfile(persona.userProfile)),
-    experienceTokens: estimateDiaryTokens(
-      renderPersonaExperienceBody(persona.experience),
+    profile: renderBoundedInjectionBlock({
+      heading: "## Persona",
+      document: input.userProfile,
+      displayPath: input.paths.userProfile,
+      tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET,
+    }),
+    experience: renderBoundedInjectionBlock({
+      heading: "## Experience",
+      document: input.experience,
+      displayPath: input.paths.experience,
+      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
+    }),
+    diaryIndex: renderPersonaDocumentInjection(
+      sortDiaryIndexRecentFirst(input.diaryIndex),
+      DIARY_INDEX_INJECTION_TOKEN_BUDGET,
+      input.paths.diaryIndex,
     ),
   };
 }

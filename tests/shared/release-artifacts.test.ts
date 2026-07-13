@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.3.3", () => {
+  test("release metadata is consistently bumped to 0.4.0", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -40,11 +40,11 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.3.3");
-    expect(pluginManifest.version).toBe("0.3.3");
-    expect(marketplace.metadata?.version).toBe("0.3.3");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.3.3");
-    expect(diarySdkQuery).toContain('version: "0.3.3"');
+    expect(packageJson.version).toBe("0.4.0");
+    expect(pluginManifest.version).toBe("0.4.0");
+    expect(marketplace.metadata?.version).toBe("0.4.0");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.4.0");
+    expect(diarySdkQuery).toContain('version: "0.4.0"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
@@ -137,11 +137,10 @@ describe("release artifacts", () => {
       "OUTCOME_TAGS", // milestone marker logic
       "workerRecallInputShape", // uncapped worker recall schema
       "allowedDocumentSubtrees", // read_doc request scope
-      "session_manifest", // diary pull-material checklist
-      "\\u5EFA\\u8BAE\\u7EF4\\u5EA6\\uFF08\\u975E\\u5F3A\\u5236\\uFF0C\\u53EF\\u81EA\\u7531\\u589E\\u5220\\u6539\\u7EC4\\u7EC7\\uFF09", // free-form persona prompt (escaped bundle bytes)
-      "===DIARY_V2_BEGIN===", // canonical prompt wire format
-      "Persona CURRENT re-validation failed", // persona crash recovery
-      "stripIndexHookDatePrefix", // 0.3.1 index-hook date-prefix strip
+      "Dream agent attempted more than one commit", // single-commit dream contract
+      "memory/archive.md", // dream curation workspace
+      "last_successful_date", // durable dream completion marker
+      "recordDreamFailure", // retryable dream queue path
     ]) {
       expect(worker).toContain(marker);
     }
