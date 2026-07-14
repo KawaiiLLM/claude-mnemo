@@ -14,6 +14,7 @@ import type { Database } from "bun:sqlite";
 import { BUILD_ID } from "../shared/build-id";
 import { createDatabase } from "../db/database";
 import { createDiaryStateStore } from "../db/diary-state";
+import { calendarDateAt } from "../diary/calendar";
 import {
   getSession,
   updateCompactAnchor,
@@ -249,6 +250,7 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
     sessionId: number,
     transcriptPath?: string | null,
   ) => Promise<void>;
+  handleDreamImpl?: (date: unknown) => ManualDreamResult;
   recoverFromCrashImpl?: () => void;
   now?: () => number;
   pidPath?: string;
@@ -273,6 +275,14 @@ interface WorkerServerState {
   shuttingDown: boolean;
 }
 
+/**
+ * Result of a manual `POST /dream` trigger: either enqueued, or rejected with an
+ * HTTP status the fetch handler can echo verbatim.
+ */
+export type ManualDreamResult =
+  | { ok: true; date: string }
+  | { ok: false; status: number; message: string };
+
 export interface WorkerCore {
   sessions: Map<number, SessionState>;
   buffers: Map<number, BufferState>;
@@ -284,6 +294,7 @@ export interface WorkerCore {
   drainSessionCompletely(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
+  triggerManualDream(date: unknown): ManualDreamResult;
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
   runRetryTick(nowMs?: number): Promise<void>;
@@ -2052,6 +2063,36 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
+    triggerManualDream(date: unknown): ManualDreamResult {
+      if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return { ok: false, status: 400, message: "date must be YYYY-MM-DD" };
+      }
+      const parsed = new Date(`${date}T00:00:00Z`);
+      if (
+        Number.isNaN(parsed.getTime()) ||
+        parsed.toISOString().slice(0, 10) !== date
+      ) {
+        return { ok: false, status: 400, message: "date is not a real calendar day" };
+      }
+      // A dream runs for a completed day; today is not due yet.
+      const today = calendarDateAt(now(), config.dreamAgentTimeZone);
+      if (date >= today) {
+        return { ok: false, status: 400, message: "date must be a completed past day" };
+      }
+      const { cutoverDate } = diaryStateStore.initializeBootstrap(today);
+      if (date < cutoverDate) {
+        return {
+          ok: false,
+          status: 400,
+          message: `date is before the dream cutover ${cutoverDate}`,
+        };
+      }
+      // Reset to a clean, non-terminal, retryable state, requeue, and kick a
+      // continuation so the worker picks it up promptly.
+      diaryStateStore.markDayStaleAndEnqueue({ date, enqueuedAtEpoch: now() });
+      scheduleDiaryContinuation();
+      return { ok: true, date };
+    },
     sendWorkUnit,
     reopenQuerySessionFresh,
     async abortStalledSessions(nowMsOverride?: number): Promise<void> {
@@ -2248,6 +2289,10 @@ export function createWorkerFetchHandler(
     (async (sessionId: number) => {
       await scanAndDrainQueue(sessionId);
     });
+  const handleDreamImpl: (date: unknown) => ManualDreamResult =
+    deps.handleDreamImpl ??
+    runtime?.triggerManualDream ??
+    (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
 
   async function handleWake(): Promise<Response> {
     if (state.globalScanInFlight) {
@@ -2323,6 +2368,15 @@ export function createWorkerFetchHandler(
           });
         });
         return new Response(null, { status: 200 });
+      }
+
+      if (req.method === "POST" && url.pathname === "/dream") {
+        const payload = (await req.json()) as { date?: unknown };
+        const result = handleDreamImpl(payload.date);
+        if (!result.ok) {
+          return new Response(result.message, { status: result.status });
+        }
+        return Response.json({ enqueued: result.date });
       }
 
       return new Response("Not found", { status: 404 });

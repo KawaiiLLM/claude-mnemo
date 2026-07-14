@@ -84,7 +84,7 @@ export function createDreamQueueProcessor(
           date,
           queueSeq: item.seq,
           error: error instanceof Error ? error.message : String(error),
-          nextAttemptEpoch: failedAtEpoch + 60,
+          retryAtEpoch: failedAtEpoch + 60,
         });
         throw error;
       }
@@ -116,6 +116,7 @@ export function createDiaryRuntime(
   const agentRunner = createDiaryAgentRunner({
     runQuery,
     timeoutMs: config.dreamAgentTimeoutMs,
+    watchdogMs: config.dreamAgentIdleWatchdogMs,
   });
   const dreamStore = new DreamMemoryStore(options.dataRoot);
   const dreamJob = createDreamJobProcessor({

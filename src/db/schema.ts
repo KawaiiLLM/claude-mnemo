@@ -110,6 +110,7 @@ const SCHEMA_SQL = `
     needs_regen INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
+    terminal INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
   );
 
@@ -123,6 +124,7 @@ const SCHEMA_SQL = `
 
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
+  ensureDiaryDayStateTerminalColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -135,6 +137,16 @@ export function initializeSchema(db: Database): void {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+
+function ensureDiaryDayStateTerminalColumn(db: Database): void {
+  if (hasColumn(db, "diary_day_state", "terminal")) {
+    return;
+  }
+
+  db.exec(
+    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 function dropRetiredMaintenanceState(db: Database): void {

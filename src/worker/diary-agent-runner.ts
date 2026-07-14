@@ -1,6 +1,7 @@
 import type { DiaryAgentToolHandlers } from "./diary-agent-tools";
 import {
   DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   DEFAULT_DREAM_AGENT_MODEL,
   type DreamAgentModel,
 } from "../shared/config";
@@ -35,7 +36,7 @@ export function createDiaryAgentRunner(
   options: CreateDiaryAgentRunnerOptions,
 ): DiaryAgentRunner {
   const timeoutMs = options.timeoutMs ?? DEFAULT_DREAM_AGENT_TIMEOUT_MS;
-  const watchdogMs = options.watchdogMs ?? 120_000;
+  const watchdogMs = options.watchdogMs ?? DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS;
 
   return {
     async run(input) {

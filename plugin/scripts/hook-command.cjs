@@ -269,6 +269,7 @@ var KNOWN_DREAM_AGENT_MODELS = [
 var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -279,9 +280,10 @@ var DEFAULT_CONFIG = {
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   dreamAgentHour: 4,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-  dreamAgentBacklogLimit: 7
+  dreamAgentBacklogLimit: 1
 };
 var MIN_MINI_TURN_CHARS = 10240;
 var MIN_FLUSH_ATTEMPTS = 1;
@@ -355,6 +357,12 @@ function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, logger) 
       864e5,
       DEFAULT_CONFIG.dreamAgentTimeoutMs
     ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
     dreamAgentHour: clampInteger(
       config.dreamAgentHour,
       0,
@@ -398,6 +406,7 @@ function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: 
 }
 
 // src/db/diary-state.ts
+var DREAM_MAX_AUTO_ATTEMPTS = 2;
 var DIARY_QUEUE_SELECT = `
   SELECT
     q.seq,
@@ -453,6 +462,7 @@ function createDiaryStateStore(db) {
           `${DIARY_QUEUE_SELECT}
              WHERE q.kind = 'diary'
                AND q.claimed_at_epoch IS NULL
+               AND d.terminal = 0
                AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
              ORDER BY q.seq ASC
              LIMIT 1`
@@ -474,6 +484,7 @@ function createDiaryStateStore(db) {
         `${DIARY_QUEUE_SELECT}
            WHERE q.kind = 'diary'
              AND q.claimed_at_epoch IS NULL
+             AND d.terminal = 0
              AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
            LIMIT 1`
       ).get(nowEpoch) !== null;
@@ -487,11 +498,16 @@ function createDiaryStateStore(db) {
            needs_regen AS needsRegen,
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
+           terminal,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`
       ).get(date);
-      return row ? { ...row, needsRegen: row.needsRegen === 1 } : null;
+      return row ? {
+        ...row,
+        needsRegen: row.needsRegen === 1,
+        terminal: row.terminal === 1
+      } : null;
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
@@ -499,10 +515,19 @@ function createDiaryStateStore(db) {
           `UPDATE diary_day_state
            SET needs_regen = 1,
                attempt_count = attempt_count + 1,
-               next_attempt_epoch = ?,
-               last_error = ?
+               last_error = ?,
+               terminal = CASE
+                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+               next_attempt_epoch = CASE
+                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
            WHERE date = ?`
-        ).run(input.nextAttemptEpoch, input.error, input.date);
+        ).run(
+          input.error,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          input.retryAtEpoch,
+          input.date
+        );
         db.query(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
@@ -547,6 +572,7 @@ function createDiaryStateStore(db) {
          SET needs_regen = 1,
              attempt_count = 0,
              next_attempt_epoch = NULL,
+             terminal = 0,
              last_error = NULL
          WHERE date = ?`
       ).run(date);
@@ -589,11 +615,31 @@ function createDiaryStateStore(db) {
       )) {
         dates.add(row.date);
       }
-      const selected = Array.from(dates).sort().slice(0, input.maxDays);
-      for (const date of selected) {
-        this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
+      for (const row of db.query(
+        `SELECT date FROM diary_day_state
+         WHERE terminal = 1 AND date >= ? AND date < ?`
+      ).all(input.cutoverDate, input.today)) {
+        dates.delete(row.date);
       }
-      return selected;
+      const sorted = Array.from(dates).sort();
+      const keep = sorted.slice(-input.maxDays);
+      const terminalize = sorted.slice(0, sorted.length - keep.length);
+      return runWriteTransaction(db, () => {
+        for (const date of terminalize) {
+          db.query(
+            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
+             VALUES (?, 1, NULL)
+             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`
+          ).run(date);
+          db.query(
+            "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?"
+          ).run(Number(date.replaceAll("-", "")));
+        }
+        for (const date of keep) {
+          this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
+        }
+        return keep;
+      });
     },
     initializeBootstrap(today) {
       const defaultCutoverDate = addCalendarDays(today, -14);
@@ -837,6 +883,7 @@ var SCHEMA_SQL = `
     needs_regen INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
+    terminal INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
   );
 
@@ -849,6 +896,7 @@ var SCHEMA_SQL = `
 `;
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureDiaryDayStateTerminalColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -861,6 +909,14 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureDiaryDayStateTerminalColumn(db) {
+  if (hasColumn(db, "diary_day_state", "terminal")) {
+    return;
+  }
+  db.exec(
+    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
@@ -2119,7 +2175,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.4.0-mrjbsiap" : "dev";
+var BUILD_ID = true ? "0.4.1-mrka6txo" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;

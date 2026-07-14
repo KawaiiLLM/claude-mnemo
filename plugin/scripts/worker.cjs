@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path9 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.4.0-mrjbsiap" : "dev";
+var BUILD_ID = true ? "0.4.1-mrka6txo" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -238,6 +238,7 @@ var KNOWN_DREAM_AGENT_MODELS = [
 var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -248,9 +249,10 @@ var DEFAULT_CONFIG = {
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   dreamAgentHour: 4,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-  dreamAgentBacklogLimit: 7
+  dreamAgentBacklogLimit: 1
 };
 var MIN_MINI_TURN_CHARS = 10240;
 var MIN_FLUSH_ATTEMPTS = 1;
@@ -324,6 +326,12 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       864e5,
       DEFAULT_CONFIG.dreamAgentTimeoutMs
     ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config3.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
     dreamAgentHour: clampInteger(
       config3.dreamAgentHour,
       0,
@@ -367,6 +375,7 @@ function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: 
 }
 
 // src/db/diary-state.ts
+var DREAM_MAX_AUTO_ATTEMPTS = 2;
 var DIARY_QUEUE_SELECT = `
   SELECT
     q.seq,
@@ -422,6 +431,7 @@ function createDiaryStateStore(db) {
           `${DIARY_QUEUE_SELECT}
              WHERE q.kind = 'diary'
                AND q.claimed_at_epoch IS NULL
+               AND d.terminal = 0
                AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
              ORDER BY q.seq ASC
              LIMIT 1`
@@ -443,6 +453,7 @@ function createDiaryStateStore(db) {
         `${DIARY_QUEUE_SELECT}
            WHERE q.kind = 'diary'
              AND q.claimed_at_epoch IS NULL
+             AND d.terminal = 0
              AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
            LIMIT 1`
       ).get(nowEpoch) !== null;
@@ -456,11 +467,16 @@ function createDiaryStateStore(db) {
            needs_regen AS needsRegen,
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
+           terminal,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`
       ).get(date7);
-      return row ? { ...row, needsRegen: row.needsRegen === 1 } : null;
+      return row ? {
+        ...row,
+        needsRegen: row.needsRegen === 1,
+        terminal: row.terminal === 1
+      } : null;
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
@@ -468,10 +484,19 @@ function createDiaryStateStore(db) {
           `UPDATE diary_day_state
            SET needs_regen = 1,
                attempt_count = attempt_count + 1,
-               next_attempt_epoch = ?,
-               last_error = ?
+               last_error = ?,
+               terminal = CASE
+                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+               next_attempt_epoch = CASE
+                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
            WHERE date = ?`
-        ).run(input.nextAttemptEpoch, input.error, input.date);
+        ).run(
+          input.error,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          input.retryAtEpoch,
+          input.date
+        );
         db.query(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
@@ -516,6 +541,7 @@ function createDiaryStateStore(db) {
          SET needs_regen = 1,
              attempt_count = 0,
              next_attempt_epoch = NULL,
+             terminal = 0,
              last_error = NULL
          WHERE date = ?`
       ).run(date7);
@@ -558,11 +584,31 @@ function createDiaryStateStore(db) {
       )) {
         dates.add(row.date);
       }
-      const selected = Array.from(dates).sort().slice(0, input.maxDays);
-      for (const date7 of selected) {
-        this.enqueueDay({ date: date7, enqueuedAtEpoch: input.enqueuedAtEpoch });
+      for (const row of db.query(
+        `SELECT date FROM diary_day_state
+         WHERE terminal = 1 AND date >= ? AND date < ?`
+      ).all(input.cutoverDate, input.today)) {
+        dates.delete(row.date);
       }
-      return selected;
+      const sorted = Array.from(dates).sort();
+      const keep = sorted.slice(-input.maxDays);
+      const terminalize = sorted.slice(0, sorted.length - keep.length);
+      return runWriteTransaction(db, () => {
+        for (const date7 of terminalize) {
+          db.query(
+            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
+             VALUES (?, 1, NULL)
+             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`
+          ).run(date7);
+          db.query(
+            "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?"
+          ).run(Number(date7.replaceAll("-", "")));
+        }
+        for (const date7 of keep) {
+          this.enqueueDay({ date: date7, enqueuedAtEpoch: input.enqueuedAtEpoch });
+        }
+        return keep;
+      });
     },
     initializeBootstrap(today) {
       const defaultCutoverDate = addCalendarDays(today, -14);
@@ -2031,6 +2077,7 @@ var SCHEMA_SQL = `
     needs_regen INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
+    terminal INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
   );
 
@@ -2043,6 +2090,7 @@ var SCHEMA_SQL = `
 `;
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureDiaryDayStateTerminalColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -2055,6 +2103,14 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureDiaryDayStateTerminalColumn(db) {
+  if (hasColumn(db, "diary_day_state", "terminal")) {
+    return;
+  }
+  db.exec(
+    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
@@ -42693,7 +42749,7 @@ var DreamMemoryStore = class {
 // src/worker/diary-agent-runner.ts
 function createDiaryAgentRunner(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_DREAM_AGENT_TIMEOUT_MS;
-  const watchdogMs = options.watchdogMs ?? 12e4;
+  const watchdogMs = options.watchdogMs ?? DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS;
   return {
     async run(input) {
       const controller = new AbortController();
@@ -42829,7 +42885,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.4.0",
+        version: "0.4.1",
         tools: [
           toolImpl(
             "recall",
@@ -43451,7 +43507,7 @@ function createDreamQueueProcessor(options) {
           date: date7,
           queueSeq: item.seq,
           error: error49 instanceof Error ? error49.message : String(error49),
-          nextAttemptEpoch: failedAtEpoch + 60
+          retryAtEpoch: failedAtEpoch + 60
         });
         throw error49;
       }
@@ -43464,7 +43520,8 @@ function createDiaryRuntime(options) {
   const runQuery = options.runQuery ?? createDiarySdkQuery({ dataRoot: options.dataRoot }).runQuery;
   const agentRunner = createDiaryAgentRunner({
     runQuery,
-    timeoutMs: config3.dreamAgentTimeoutMs
+    timeoutMs: config3.dreamAgentTimeoutMs,
+    watchdogMs: config3.dreamAgentIdleWatchdogMs
   });
   const dreamStore = new DreamMemoryStore(options.dataRoot);
   const dreamJob = createDreamJobProcessor({
@@ -44894,6 +44951,30 @@ ${body}
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
+    triggerManualDream(date7) {
+      if (typeof date7 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date7)) {
+        return { ok: false, status: 400, message: "date must be YYYY-MM-DD" };
+      }
+      const parsed = /* @__PURE__ */ new Date(`${date7}T00:00:00Z`);
+      if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date7) {
+        return { ok: false, status: 400, message: "date is not a real calendar day" };
+      }
+      const today = calendarDateAt(now(), config3.dreamAgentTimeZone);
+      if (date7 >= today) {
+        return { ok: false, status: 400, message: "date must be a completed past day" };
+      }
+      const { cutoverDate } = diaryStateStore.initializeBootstrap(today);
+      if (date7 < cutoverDate) {
+        return {
+          ok: false,
+          status: 400,
+          message: `date is before the dream cutover ${cutoverDate}`
+        };
+      }
+      diaryStateStore.markDayStaleAndEnqueue({ date: date7, enqueuedAtEpoch: now() });
+      scheduleDiaryContinuation();
+      return { ok: true, date: date7 };
+    },
     sendWorkUnit,
     reopenQuerySessionFresh,
     async abortStalledSessions(nowMsOverride) {
@@ -45039,6 +45120,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
   const handleCompactImpl = deps.handleCompactImpl ?? runtime?.handleCompact ?? (async (sessionId) => {
     await scanAndDrainQueue(sessionId);
   });
+  const handleDreamImpl = deps.handleDreamImpl ?? runtime?.triggerManualDream ?? (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
   async function handleWake() {
     if (state.globalScanInFlight) {
       state.scanPending = true;
@@ -45096,6 +45178,14 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
           });
         });
         return new Response(null, { status: 200 });
+      }
+      if (req.method === "POST" && url2.pathname === "/dream") {
+        const payload = await req.json();
+        const result = handleDreamImpl(payload.date);
+        if (!result.ok) {
+          return new Response(result.message, { status: result.status });
+        }
+        return Response.json({ enqueued: result.date });
       }
       return new Response("Not found", { status: 404 });
     } finally {

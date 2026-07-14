@@ -8,6 +8,7 @@ import {
   DEFAULT_CONFIG,
   DEFAULT_DREAM_AGENT_MODEL,
   DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   loadConfig,
   resolveConfigPath,
 } from "../../src/shared/config";
@@ -193,11 +194,11 @@ describe("shared config", () => {
     ]);
   });
 
-  test("dream scheduling defaults to 04:00 Asia/Shanghai with a seven-day cap", () => {
+  test("dream scheduling defaults to 04:00 Asia/Shanghai and enqueues only the latest day", () => {
     expect(DEFAULT_CONFIG).toMatchObject({
       dreamAgentHour: 4,
       dreamAgentTimeZone: "Asia/Shanghai",
-      dreamAgentBacklogLimit: 7,
+      dreamAgentBacklogLimit: 1,
     });
   });
 
@@ -213,5 +214,32 @@ describe("shared config", () => {
     );
 
     expect(loadConfig(home).dreamAgentTimeoutMs).toBe(2_400_000);
+  });
+
+  test("dream idle watchdog defaults to ten minutes, accepts an override, and clamps", () => {
+    expect(DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS).toBe(600_000);
+    expect(DEFAULT_CONFIG.dreamAgentIdleWatchdogMs).toBe(600_000);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentIdleWatchdogMs: 900_000 }),
+    );
+    expect(loadConfig(home).dreamAgentIdleWatchdogMs).toBe(900_000);
+
+    // Below the 30s floor clamps up; above the 1h ceiling clamps down.
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentIdleWatchdogMs: 1_000 }),
+    );
+    expect(loadConfig(home).dreamAgentIdleWatchdogMs).toBe(30_000);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentIdleWatchdogMs: 999_999_999 }),
+    );
+    expect(loadConfig(home).dreamAgentIdleWatchdogMs).toBe(3_600_000);
   });
 });

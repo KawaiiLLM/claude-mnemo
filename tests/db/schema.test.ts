@@ -52,6 +52,7 @@ describe("initializeSchema", () => {
       "needs_regen",
       "attempt_count",
       "next_attempt_epoch",
+      "terminal",
       "last_error",
     ]);
   });

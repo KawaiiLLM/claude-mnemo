@@ -5,6 +5,13 @@ import { DEFAULT_DREAM_AGENT_TIME_ZONE } from "../shared/config";
 import { runWriteTransaction } from "./database";
 import type { PendingQueueItem } from "./pending-queue";
 
+/**
+ * A dream day gets one automatic retry after its first failure; the second
+ * failure trips `terminal = 1`, which excludes the day from every automatic
+ * path (claim, reconcile) until a manual trigger resets it.
+ */
+export const DREAM_MAX_AUTO_ATTEMPTS = 2;
+
 export interface EnqueueDiaryDayInput {
   date: string;
   enqueuedAtEpoch: number;
@@ -14,7 +21,8 @@ export interface RecordDreamFailureInput {
   date: string;
   queueSeq: number;
   error: string;
-  nextAttemptEpoch: number;
+  /** Epoch to schedule the single auto-retry at; ignored once the day trips terminal. */
+  retryAtEpoch: number;
 }
 
 export interface SettleDreamDayInput {
@@ -40,6 +48,7 @@ export interface DiaryDayState {
   needsRegen: boolean;
   attemptCount: number;
   nextAttemptEpoch: number | null;
+  terminal: boolean;
   lastError: string | null;
 }
 
@@ -78,6 +87,7 @@ interface DiaryDayStateRow {
   needsRegen: number;
   attemptCount: number;
   nextAttemptEpoch: number | null;
+  terminal: number;
   lastError: string | null;
 }
 
@@ -144,6 +154,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
             `${DIARY_QUEUE_SELECT}
              WHERE q.kind = 'diary'
                AND q.claimed_at_epoch IS NULL
+               AND d.terminal = 0
                AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
              ORDER BY q.seq ASC
              LIMIT 1`,
@@ -169,6 +180,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
           `${DIARY_QUEUE_SELECT}
            WHERE q.kind = 'diary'
              AND q.claimed_at_epoch IS NULL
+             AND d.terminal = 0
              AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
            LIMIT 1`,
         )
@@ -184,23 +196,43 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
            needs_regen AS needsRegen,
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
+           terminal,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`,
       ).get(date);
-      return row ? { ...row, needsRegen: row.needsRegen === 1 } : null;
+      return row
+        ? {
+            ...row,
+            needsRegen: row.needsRegen === 1,
+            terminal: row.terminal === 1,
+          }
+        : null;
     },
 
     recordDreamFailure(input): void {
       runWriteTransaction(db, () => {
-        db.query<unknown, [number, string, string]>(
+        // SQLite evaluates every SET expression against the pre-update row, so
+        // `attempt_count + 1` is the post-failure count throughout. On the
+        // capped attempt the day trips terminal and drops its retry schedule;
+        // an already-terminal day stays terminal (the CASE preserves it).
+        db.query<unknown, [string, number, number, number, string]>(
           `UPDATE diary_day_state
            SET needs_regen = 1,
                attempt_count = attempt_count + 1,
-               next_attempt_epoch = ?,
-               last_error = ?
+               last_error = ?,
+               terminal = CASE
+                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+               next_attempt_epoch = CASE
+                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
            WHERE date = ?`,
-        ).run(input.nextAttemptEpoch, input.error, input.date);
+        ).run(
+          input.error,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          DREAM_MAX_AUTO_ATTEMPTS,
+          input.retryAtEpoch,
+          input.date,
+        );
         db.query<unknown, [number]>(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
@@ -249,6 +281,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
          SET needs_regen = 1,
              attempt_count = 0,
              next_attempt_epoch = NULL,
+             terminal = 0,
              last_error = NULL
          WHERE date = ?`,
       ).run(date);
@@ -304,11 +337,37 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
         dates.add(row.date);
       }
 
-      const selected = Array.from(dates).sort().slice(0, input.maxDays);
-      for (const date of selected) {
-        this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
+      // A terminal (manual-only) day is never resurrected by reconcile.
+      for (const row of db.query<{ date: string }, [string, string]>(
+        `SELECT date FROM diary_day_state
+         WHERE terminal = 1 AND date >= ? AND date < ?`,
+      ).all(input.cutoverDate, input.today)) {
+        dates.delete(row.date);
       }
-      return selected;
+
+      const sorted = Array.from(dates).sort();
+      // Auto-enqueue only the most recent maxDays due days (default 1 = just
+      // the latest, usually yesterday); every older due day is treated as
+      // auto-retry-exhausted and demoted to terminal (manual-only) so the
+      // backlog neither piles up nor gets re-enqueued next reconcile.
+      const keep = sorted.slice(-input.maxDays);
+      const terminalize = sorted.slice(0, sorted.length - keep.length);
+      return runWriteTransaction(db, () => {
+        for (const date of terminalize) {
+          db.query<unknown, [string]>(
+            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
+             VALUES (?, 1, NULL)
+             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`,
+          ).run(date);
+          db.query<unknown, [number]>(
+            "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?",
+          ).run(Number(date.replaceAll("-", "")));
+        }
+        for (const date of keep) {
+          this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
+        }
+        return keep;
+      });
     },
 
     initializeBootstrap(today): DiaryBootstrapState {

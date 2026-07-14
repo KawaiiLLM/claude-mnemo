@@ -7591,6 +7591,7 @@ __export(schema_exports, {
 });
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
+  ensureDiaryDayStateTerminalColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -7603,6 +7604,14 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureDiaryDayStateTerminalColumn(db) {
+  if (hasColumn(db, "diary_day_state", "terminal")) {
+    return;
+  }
+  db.exec(
+    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
@@ -7910,6 +7919,7 @@ var init_schema = __esm({
     needs_regen INTEGER NOT NULL DEFAULT 0,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
+    terminal INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
   );
 
@@ -31499,6 +31509,7 @@ function calendarDateAt(epochSeconds, timeZone) {
 // src/shared/config.ts
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 
 // src/db/diary-state.ts
 init_database();
@@ -34976,7 +34987,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.4.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.4.1" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

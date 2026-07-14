@@ -521,6 +521,81 @@ describe("worker server", () => {
     resolveFlush?.();
   });
 
+  test("POST /dream routes to the dream trigger and echoes its result", async () => {
+    const handleDreamImpl = mock((date: unknown) => ({
+      ok: true as const,
+      date: date as string,
+    }));
+    const handler = createWorkerFetchHandler({
+      scanAndDrainQueue: async () => {},
+      handleDreamImpl,
+    });
+
+    const ok = await handler(
+      new Request("http://127.0.0.1:37778/dream", {
+        method: "POST",
+        body: JSON.stringify({ date: "2026-07-10" }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ enqueued: "2026-07-10" });
+    expect(handleDreamImpl).toHaveBeenCalledWith("2026-07-10");
+
+    const rejectHandler = createWorkerFetchHandler({
+      scanAndDrainQueue: async () => {},
+      handleDreamImpl: () => ({
+        ok: false as const,
+        status: 400,
+        message: "date must be a completed past day",
+      }),
+    });
+    const bad = await rejectHandler(
+      new Request("http://127.0.0.1:37778/dream", {
+        method: "POST",
+        body: JSON.stringify({ date: "2026-07-20" }),
+      }),
+    );
+    expect(bad.status).toBe(400);
+    expect(await bad.text()).toBe("date must be a completed past day");
+  });
+
+  test("triggerManualDream validates the date and resets a terminal day to clean queued state", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    // 2026-07-14T12:00Z is 2026-07-14 in Asia/Shanghai; cutover defaults to
+    // today - 14 = 2026-06-30.
+    const core = createWorkerCore({
+      db,
+      now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1000),
+    });
+    const store = createDiaryStateStore(db);
+
+    // Drive 2026-07-10 terminal via the one-retry cap.
+    store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
+    const first = store.claimNextDiaryItem(1)!;
+    store.recordDreamFailure({ date: "2026-07-10", queueSeq: first.seq, error: "x", retryAtEpoch: 2 });
+    const second = store.claimNextDiaryItem(2)!;
+    store.recordDreamFailure({ date: "2026-07-10", queueSeq: second.seq, error: "x", retryAtEpoch: 3 });
+    expect(store.getDayState("2026-07-10")?.terminal).toBe(true);
+
+    // Manual trigger resets it to a clean, non-terminal, retryable, queued state.
+    expect(core.triggerManualDream("2026-07-10")).toEqual({ ok: true, date: "2026-07-10" });
+    expect(store.getDayState("2026-07-10")).toMatchObject({
+      terminal: false,
+      attemptCount: 0,
+      needsRegen: true,
+    });
+    expect(store.hasQueuedDay("2026-07-10")).toBe(true);
+
+    // Rejections: malformed, today (not a completed day), and before cutover.
+    expect(core.triggerManualDream("not-a-date")).toMatchObject({ ok: false, status: 400 });
+    expect(core.triggerManualDream("2026-02-30")).toMatchObject({ ok: false, status: 400 });
+    expect(core.triggerManualDream("2026-07-14")).toMatchObject({ ok: false, status: 400 });
+    expect(core.triggerManualDream("2026-06-01")).toMatchObject({ ok: false, status: 400 });
+
+    db.close();
+  });
+
   test("createWorkerFetchHandler tracks HTTP activity timestamps for compact requests", async () => {
     const serverState = createWorkerServerState(100);
     const handler = createWorkerFetchHandler(
@@ -841,7 +916,7 @@ describe("worker server", () => {
             date: "2026-07-10",
             queueSeq: item.seq,
             error: "temporary failure",
-            nextAttemptEpoch: nowEpoch + 60,
+            retryAtEpoch: nowEpoch + 60,
           });
           throw new Error("temporary failure");
         }

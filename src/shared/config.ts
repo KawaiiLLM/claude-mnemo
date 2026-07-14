@@ -24,11 +24,16 @@ export interface MnemoConfig {
   dreamAgentModel: DreamAgentModel;
   /** Total wall-clock timeout for one merged nightly dream-agent request. */
   dreamAgentTimeoutMs: number;
+  /** Idle watchdog: abort a dream request after this long with no streamed activity. */
+  dreamAgentIdleWatchdogMs: number;
   /** Local wall-clock hour after which SessionStart may enqueue dream work. */
   dreamAgentHour: number;
   /** IANA timezone used for dream calendar dates and the trigger hour. */
   dreamAgentTimeZone: string;
-  /** Maximum dates enqueued by one SessionStart. */
+  /**
+   * How many of the most-recent due days one reconcile auto-enqueues; older due
+   * days are demoted to terminal (manual-only). Default 1 = just the latest.
+   */
   dreamAgentBacklogLimit: number;
 }
 
@@ -52,6 +57,10 @@ export const DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 // several recall/Grep pulls and committing all nightly documents. Thirty
 // minutes leaves 3x measured headroom while retaining a finite fail-safe.
 export const DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1_000;
+// opus produces long silent reasoning bursts between tool calls (a 286s gap was
+// observed), which the old hard-wired 120s idle watchdog killed before commit.
+// Ten minutes clears the observed gap while staying under the request timeout.
+export const DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1_000;
 
 export const DEFAULT_CONFIG: MnemoConfig = {
   mergeThresholdChars: 1000,
@@ -63,9 +72,10 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
   dreamAgentHour: 4,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-  dreamAgentBacklogLimit: 7,
+  dreamAgentBacklogLimit: 1,
 };
 
 // Floor for maxMiniTurnChars: guarantees a final slice's fixed overhead
@@ -188,6 +198,12 @@ function clampConfig(
       60_000,
       86_400_000,
       DEFAULT_CONFIG.dreamAgentTimeoutMs,
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config.dreamAgentIdleWatchdogMs,
+      30_000,
+      3_600_000,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs,
     ),
     dreamAgentHour: clampInteger(
       config.dreamAgentHour,

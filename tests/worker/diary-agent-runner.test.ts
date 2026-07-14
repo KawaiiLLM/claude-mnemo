@@ -9,7 +9,10 @@ import {
   createDiaryAgentRunner,
   type DiaryAgentQueryRequest,
 } from "../../src/worker/diary-agent-runner";
-import { DEFAULT_DREAM_AGENT_TIMEOUT_MS } from "../../src/shared/config";
+import {
+  DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+} from "../../src/shared/config";
 import { createDreamAgentToolHandlers } from "../../src/worker/diary-agent-tools";
 
 const roots: string[] = [];
@@ -62,7 +65,7 @@ describe("diary agent runner", () => {
         toolHandlers,
         model: "claude-opus-4-8",
         timeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-        watchdogMs: 120_000,
+        watchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
       });
     } finally {
       db.close();
