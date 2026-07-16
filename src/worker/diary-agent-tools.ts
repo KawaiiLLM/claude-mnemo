@@ -8,6 +8,7 @@ import {
   type ToolHandler,
 } from "../mcp/handlers";
 import { assertDreamCommitToolFields } from "./dream-agent-tools";
+import { assertStagingRootWithinDataRoot } from "./dream-staging";
 
 export const AGENT_READ_DOC_MAX_BYTES = 1_048_576;
 
@@ -17,6 +18,13 @@ export interface CreateDiaryAgentToolHandlersOptions {
   db: Database;
   dataRoot: string;
   allowedDocumentSubtrees: ReadonlySet<AgentDocumentSubtree>;
+  /**
+   * Absolute root of this run's staging workspace. When present the agent's
+   * Write/Edit tools are scoped to this subtree (and it is also readable so
+   * Edit's read-before-write precondition works); the live diary/memory
+   * subtrees stay read-only.
+   */
+  stagingRoot?: string;
   commit?: ToolHandler;
 }
 
@@ -39,6 +47,8 @@ const DREAM_AGENT_DOCUMENT_SUBTREES: ReadonlySet<AgentDocumentSubtree> =
 interface AssertWorkspacePathOptions {
   allowAbsolute: boolean;
   markdownOnly?: boolean;
+  /** Reject paths that resolve into a read-only subtree (Write/Edit only). */
+  requireWritable?: boolean;
 }
 
 interface AgentWorkspacePermissionGuard {
@@ -66,7 +76,7 @@ async function assertNotSymlink(path: string, label: string): Promise<void> {
 }
 
 function isExcludedArtifactPath(
-  subtree: AgentDocumentSubtree,
+  subtree: AgentDocumentSubtree | "staging",
   pathFromRoot: string,
 ): boolean {
   const normalized = pathFromRoot.replaceAll("\\", "/");
@@ -76,7 +86,7 @@ function isExcludedArtifactPath(
 }
 
 function assertNotExcludedArtifactPath(
-  subtree: AgentDocumentSubtree,
+  subtree: AgentDocumentSubtree | "staging",
   pathFromRoot: string,
   requestedPath: string,
 ): void {
@@ -98,14 +108,26 @@ function permissionDenied(error: unknown) {
 export function createAgentWorkspacePermissionGuard(
   options: Pick<
     CreateDiaryAgentToolHandlersOptions,
-    "dataRoot" | "allowedDocumentSubtrees"
+    "dataRoot" | "allowedDocumentSubtrees" | "stagingRoot"
   >,
 ): AgentWorkspacePermissionGuard {
   const allowedSubtrees = [...new Set(options.allowedDocumentSubtrees)];
-  const allowedRoots = allowedSubtrees.map((subtree) => ({
+  const allowedRoots: Array<{
+    subtree: AgentDocumentSubtree | "staging";
+    path: string;
+    writable: boolean;
+  }> = allowedSubtrees.map((subtree) => ({
     subtree,
     path: resolve(options.dataRoot, subtree),
+    writable: false,
   }));
+  if (options.stagingRoot) {
+    allowedRoots.push({
+      subtree: "staging",
+      path: resolve(options.stagingRoot),
+      writable: true,
+    });
+  }
 
   const assertWorkspacePath = async (
     requestedPath: string,
@@ -131,6 +153,9 @@ export function createAgentWorkspacePermissionGuard(
     if (!allowedRoot) {
       throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
     }
+    if (pathOptions.requireWritable && !allowedRoot.writable) {
+      throw new Error(`Document path is outside the writable staging scope: ${requestedPath}`);
+    }
     if (pathOptions.markdownOnly && !normalized.endsWith(".md")) {
       throw new Error(`Document must be a Markdown file: ${requestedPath}`);
     }
@@ -150,6 +175,13 @@ export function createAgentWorkspacePermissionGuard(
     ]);
     if (!isWithin(realRoot, realTarget)) {
       throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
+    }
+    if (allowedRoot.subtree === "staging") {
+      // The staging root itself must resolve back inside dataRoot: a
+      // `.dream-staging` symlink escaping dataRoot would otherwise let the
+      // agent's writes land outside the workspace even though the target is
+      // "within" the (escaped) root.
+      await assertStagingRootWithinDataRoot(options.dataRoot, allowedRoot.path);
     }
     assertNotExcludedArtifactPath(
       allowedRoot.subtree,
@@ -172,6 +204,15 @@ export function createAgentWorkspacePermissionGuard(
           throw new Error("Grep requires an explicit path inside an allowed workspace subtree.");
         }
         await assertWorkspacePath(input.path, { allowAbsolute: true });
+      } else if (toolName === "Write" || toolName === "Edit") {
+        if (typeof input.file_path !== "string") {
+          throw new Error(`${toolName} requires a file_path inside the staging workspace subtree.`);
+        }
+        await assertWorkspacePath(input.file_path, {
+          allowAbsolute: true,
+          markdownOnly: true,
+          requireWritable: true,
+        });
       } else if (toolName === "mcp__diary__read_doc") {
         if (typeof input.path !== "string") {
           throw new Error("read_doc requires a path inside an allowed workspace subtree.");

@@ -29,6 +29,7 @@ export interface CreateDreamQueueProcessorOptions {
   readLastSuccessfulDate(): Promise<string | null>;
   nowEpoch?: () => number;
   timeZone: string;
+  boundaryHour?: number;
 }
 
 function dreamDateFromQueueItem(item: PendingQueueItem): string {
@@ -47,7 +48,9 @@ export function createDreamQueueProcessor(
 ): { process(item: PendingQueueItem): Promise<void> } {
   const nowEpoch = options.nowEpoch ?? (() => Math.floor(Date.now() / 1_000));
   const watermarkFor = (date: string) =>
-    computeDiaryWatermark(loadDiaryMaterial(options.db, date, options.timeZone));
+    computeDiaryWatermark(
+      loadDiaryMaterial(options.db, date, options.timeZone, options.boundaryHour),
+    );
 
   return {
     async process(item) {
@@ -135,6 +138,7 @@ export function createDiaryRuntime(
     readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     nowEpoch: options.nowEpoch,
     timeZone: config.dreamAgentTimeZone,
+    boundaryHour: config.dreamAgentHour,
   });
 
   return {

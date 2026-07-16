@@ -405,6 +405,7 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
                 await dependencies.readLastSuccessfulDate?.() ?? null,
               maxDays: dependencies.dreamSchedule!.backlogLimit,
               timeZone: dependencies.dreamSchedule!.timeZone,
+              boundaryHour: dependencies.dreamSchedule!.hour,
               enqueuedAtEpoch: nowEpoch,
             })
           : [];

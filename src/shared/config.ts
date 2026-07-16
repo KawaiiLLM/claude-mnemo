@@ -61,6 +61,11 @@ export const DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1_000;
 // observed), which the old hard-wired 120s idle watchdog killed before commit.
 // Ten minutes clears the observed gap while staying under the request timeout.
 export const DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1_000;
+// Local wall-clock hour that serves as BOTH the dream trigger hour and the
+// content-day boundary: a turn before this hour belongs to the previous day's
+// diary (late-night work rolls back), and day D's dream fires at D+1 this hour.
+// One knob keeps "content day closes exactly when its dream triggers" true.
+export const DEFAULT_DREAM_AGENT_HOUR = 4;
 
 export const DEFAULT_CONFIG: MnemoConfig = {
   mergeThresholdChars: 1000,
@@ -73,7 +78,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-  dreamAgentHour: 4,
+  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
   dreamAgentBacklogLimit: 1,
 };

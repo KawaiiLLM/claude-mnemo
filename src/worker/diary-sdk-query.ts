@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 
 import { encodeSource } from "../diary/domain";
+import { buildIsolatedEnv } from "../mnemosyne/env";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   timelineInputShape,
@@ -89,7 +90,7 @@ export function createDiarySdkQuery(
 
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.4.1",
+        version: "0.4.2",
         tools: [
           toolImpl(
             "recall",
@@ -119,7 +120,7 @@ export function createDiarySdkQuery(
           ...(request.toolHandlers.commit ? [
             toolImpl(
               "commit",
-              "Atomically commit the complete dream result to the fixed diary and memory workspace documents. This tool does not accept filesystem paths.",
+              "Validate and atomically publish the staging workspace as tonight's diary and memory commit. Takes no arguments: the documents are read back from the staging files you edited.",
               dreamCommitInputShape,
               async (args) => request.toolHandlers.commit!(args),
             ),
@@ -137,7 +138,16 @@ export function createDiarySdkQuery(
             // resolution ("url must be of type string"); resolve explicitly,
             // matching query-session.
             pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
-            tools: ["Read", "Grep"],
+            // Force 5-minute prompt caching: the dream is a single short burst
+            // (all turns seconds apart, done within minutes) with no cross-run
+            // reuse, so the CC default 1h cache only pays the 2x write premium
+            // for nothing. Providing env replaces process.env entirely, so build
+            // from the isolated env. The summary agent keeps 1h via its own path.
+            env: { ...buildIsolatedEnv(), FORCE_PROMPT_CACHING_5M: "1" },
+            // Write/Edit let the agent revise the staging copies incrementally
+            // (only changed content becomes output tokens); canUseTool scopes
+            // them to the run's staging subtree.
+            tools: ["Read", "Grep", "Write", "Edit"],
             allowedTools: [
               ...DIARY_ALLOWED_TOOLS,
               ...(request.toolHandlers.commit ? ["mcp__diary__commit"] : []),

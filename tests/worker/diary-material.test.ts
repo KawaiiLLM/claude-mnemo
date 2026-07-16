@@ -49,10 +49,44 @@ describe("renderDiaryMaterial", () => {
         insert.run(sessionId, number, label, Date.parse(timestamp) / 1_000);
       }
 
+      // boundaryHour 0 pins the midnight-to-midnight day to isolate DST bounds.
       expect(
-        loadDiaryMaterial(db, "2026-11-01", "America/New_York")
+        loadDiaryMaterial(db, "2026-11-01", "America/New_York", 0)
           .map((row) => row.userPrompt),
       ).toEqual(["first repeated day material", "last repeated day material"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a 4am content boundary rolls pre-dawn material into the previous day", () => {
+    const db = new Database(":memory:");
+    initializeSchema(db);
+    try {
+      const sessionId = db.query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('boundary', '/project', 1) RETURNING id",
+      ).get()!.id;
+      const insert = db.query(
+        "INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch) VALUES (?, ?, 'skipped', ?, ?)",
+      );
+      // Asia/Shanghai (UTC+8, no DST). Day Jul 15 spans [Jul15 04:00, Jul16 04:00)
+      // local == [Jul14T20:00Z, Jul15T20:00Z).
+      for (const [number, label, timestamp] of [
+        [1, "belongs to Jul 14 (Jul 15 03:59 local, pre-dawn)", "2026-07-14T19:59:59Z"],
+        [2, "belongs to Jul 15 (04:00 local)", "2026-07-14T20:00:00Z"],
+        [3, "belongs to Jul 15 (Jul 16 03:59 local, late night)", "2026-07-15T19:59:59Z"],
+        [4, "belongs to Jul 16 (04:00 local)", "2026-07-15T20:00:00Z"],
+      ] as const) {
+        insert.run(sessionId, number, label, Date.parse(timestamp) / 1_000);
+      }
+
+      expect(
+        loadDiaryMaterial(db, "2026-07-15", "Asia/Shanghai", 4)
+          .map((row) => row.userPrompt),
+      ).toEqual([
+        "belongs to Jul 15 (04:00 local)",
+        "belongs to Jul 15 (Jul 16 03:59 local, late night)",
+      ]);
     } finally {
       db.close();
     }

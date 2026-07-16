@@ -234,6 +234,9 @@ function calendarDateAt(epochSeconds, timeZone) {
   const day = String(partNumber(parts, "day")).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
+function contentDateAt(epochSeconds, timeZone, boundaryHour) {
+  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
+}
 function addCalendarDays(date, days) {
   assertCalendarDate(date);
   const value = /* @__PURE__ */ new Date(`${date}T00:00:00Z`);
@@ -270,6 +273,7 @@ var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -281,7 +285,7 @@ var DEFAULT_CONFIG = {
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-  dreamAgentHour: 4,
+  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
   dreamAgentBacklogLimit: 1
 };
@@ -423,7 +427,12 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
   const timeZone = db.query(
     "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
   ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const date = calendarDateAt(createdAtEpoch, timeZone);
+  const boundaryHour = Number(
+    db.query(
+      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
+    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
+  );
+  const date = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query(
     `UPDATE diary_day_state
      SET needs_regen = 1,
@@ -591,6 +600,10 @@ function createDiaryStateStore(db) {
         `INSERT INTO diary_state (key, value) VALUES ('dream_timezone', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`
       ).run(input.timeZone);
+      db.query(
+        `INSERT INTO diary_state (key, value) VALUES ('dream_hour', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+      ).run(String(input.boundaryHour ?? DEFAULT_DREAM_AGENT_HOUR));
       const startDate = input.lastSuccessfulDate === null ? input.cutoverDate : addCalendarDays(input.lastSuccessfulDate, 1);
       const dates = /* @__PURE__ */ new Set();
       for (let date = startDate < input.cutoverDate ? input.cutoverDate : startDate; date < input.today; date = addCalendarDays(date, 1)) {
@@ -2175,7 +2188,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.4.1-mrka6txo" : "dev";
+var BUILD_ID = true ? "0.4.2-mrn3c70l" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -5544,6 +5557,7 @@ function createContextHandler(dependencies) {
           lastSuccessfulDate: await dependencies.readLastSuccessfulDate?.() ?? null,
           maxDays: dependencies.dreamSchedule.backlogLimit,
           timeZone: dependencies.dreamSchedule.timeZone,
+          boundaryHour: dependencies.dreamSchedule.hour,
           enqueuedAtEpoch: nowEpoch
         }) : [];
         if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {

@@ -4,6 +4,7 @@ import {
   addCalendarDays,
   calendarDateAt,
   calendarDayBounds,
+  contentDateAt,
   dreamTriggerWindow,
 } from "../../src/diary/calendar";
 
@@ -51,6 +52,30 @@ describe("dream calendar", () => {
       yesterday: "2026-10-31",
       hasPassedTrigger: true,
     });
+  });
+
+  test("content date uses a 4am boundary: pre-dawn rolls into the previous day", () => {
+    const tz = "Asia/Shanghai"; // UTC+8, no DST
+    // 19:59:59Z == Jul 16 03:59 local (pre-dawn) → rolls back to Jul 15.
+    expect(contentDateAt(Date.parse("2026-07-15T19:59:59Z") / 1_000, tz, 4)).toBe(
+      "2026-07-15",
+    );
+    // 20:00:00Z == Jul 16 04:00 local → the new content day Jul 16.
+    expect(contentDateAt(Date.parse("2026-07-15T20:00:00Z") / 1_000, tz, 4)).toBe(
+      "2026-07-16",
+    );
+    // Boundary 0 is plain midnight — Jul 16 03:59 local stays on Jul 16.
+    expect(contentDateAt(Date.parse("2026-07-15T19:59:59Z") / 1_000, tz, 0)).toBe(
+      "2026-07-16",
+    );
+  });
+
+  test("day bounds shift to the 4am content boundary", () => {
+    const tz = "Asia/Shanghai";
+    const midnight = calendarDayBounds("2026-07-15", tz);
+    const shifted = calendarDayBounds("2026-07-15", tz, 4);
+    expect(shifted.startEpoch - midnight.startEpoch).toBe(4 * 60 * 60);
+    expect(shifted.endEpoch - midnight.endEpoch).toBe(4 * 60 * 60);
   });
 
   test("adds calendar days without depending on UTC offsets", () => {

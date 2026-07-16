@@ -62,14 +62,7 @@ describe("shared SDK agent tools", () => {
       ["Grep", { pattern: "shared promotion fact", path: join(dataRoot, "diary") }],
       ["Grep", { pattern: "shared promotion fact", path: join(dataRoot, "memory", "archive.md") }],
       ["mcp__diary__read_doc", { path: "memory/archive.md" }],
-      ["mcp__diary__commit", {
-        date: "2026-07-10",
-        userProfile: "# Profile\n",
-        experience: "# Experience\n",
-        archive: "# Archive\n",
-        diary: "# Diary\n",
-        diaryIndex: "# Index\n",
-      }],
+      ["mcp__diary__commit", {}],
     ] as const;
 
     for (const [toolName, input] of cases) {
@@ -78,6 +71,93 @@ describe("shared SDK agent tools", () => {
         updatedInput: input,
       });
     }
+  });
+
+  test("allows Write/Edit inside the staging subtree and rejects them elsewhere", async () => {
+    const stagingRoot = join(dataRoot, ".dream-staging", "2026-07-10");
+    mkdirSync(join(stagingRoot, "memory"), { recursive: true });
+    mkdirSync(join(stagingRoot, "diary"), { recursive: true });
+    writeFileSync(join(stagingRoot, "memory", "user-profile.md"), "# User Profile\n");
+    writeFileSync(join(stagingRoot, "diary", "2026-07-10.md"), "# 2026-07-10\n");
+    const handlers = createDreamAgentToolHandlers({ db, dataRoot, stagingRoot });
+    const permissionOptions = {
+      signal: new AbortController().signal,
+      toolUseID: "tool-use",
+    };
+
+    for (const toolName of ["Write", "Edit"] as const) {
+      for (const file_path of [
+        join(stagingRoot, "memory", "user-profile.md"),
+        join(stagingRoot, "diary", "2026-07-10.md"),
+      ]) {
+        expect(
+          await handlers.canUseTool(toolName, { file_path }, permissionOptions),
+        ).toMatchObject({ behavior: "allow" });
+      }
+
+      // Live (read-only) subtrees and paths outside the data root are rejected.
+      for (const file_path of [
+        join(dataRoot, "memory", "archive.md"),
+        join(dataRoot, "diary", "2026-07-10.md"),
+        join(outsideRoot, "outside.md"),
+      ]) {
+        expect(
+          await handlers.canUseTool(toolName, { file_path }, permissionOptions),
+        ).toMatchObject({ behavior: "deny" });
+      }
+
+      // Missing file_path and non-Markdown staging paths are rejected too.
+      expect(
+        await handlers.canUseTool(toolName, {}, permissionOptions),
+      ).toMatchObject({ behavior: "deny" });
+    }
+  });
+
+  test("denies Write/Edit when the staging root escapes the data root via a symlink", async () => {
+    // `.dream-staging` is a symlink to an outside directory; the `<date>` subdir
+    // (a real directory beneath it) is not itself a symlink, so only the
+    // root-within-dataRoot containment check catches the escape.
+    const escapedStaging = join(outsideRoot, "escaped-staging");
+    mkdirSync(join(escapedStaging, "2026-07-10", "memory"), { recursive: true });
+    writeFileSync(
+      join(escapedStaging, "2026-07-10", "memory", "user-profile.md"),
+      "# User Profile\n",
+    );
+    symlinkSync(escapedStaging, join(dataRoot, ".dream-staging"));
+    const stagingRoot = join(dataRoot, ".dream-staging", "2026-07-10");
+    const handlers = createDreamAgentToolHandlers({ db, dataRoot, stagingRoot });
+    const permissionOptions = {
+      signal: new AbortController().signal,
+      toolUseID: "tool-use",
+    };
+
+    for (const toolName of ["Write", "Edit"] as const) {
+      expect(
+        await handlers.canUseTool(
+          toolName,
+          { file_path: join(stagingRoot, "memory", "user-profile.md") },
+          permissionOptions,
+        ),
+      ).toMatchObject({
+        behavior: "deny",
+        message: expect.stringContaining("escapes the data root"),
+      });
+    }
+  });
+
+  test("denies Write/Edit when no staging workspace is configured", async () => {
+    const handlers = createDreamAgentToolHandlers({ db, dataRoot });
+    const permissionOptions = {
+      signal: new AbortController().signal,
+      toolUseID: "tool-use",
+    };
+    expect(
+      await handlers.canUseTool(
+        "Write",
+        { file_path: join(dataRoot, "memory", "archive.md") },
+        permissionOptions,
+      ),
+    ).toMatchObject({ behavior: "deny" });
   });
 
   test("Grep returns promotion matches from archive and diary documents", async () => {

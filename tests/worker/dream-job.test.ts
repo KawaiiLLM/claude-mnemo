@@ -18,9 +18,24 @@ import type {
   DiaryAgentRunInput,
   DiaryAgentRunner,
 } from "../../src/worker/diary-agent-runner";
+import { dreamStagingPaths } from "../../src/worker/dream-staging";
+import type { CommitNightInput } from "../../src/diary/memory-store";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
 const roots: string[] = [];
+
+/**
+ * Mirrors what the real agent's Write/Edit tools do: lay the curated documents
+ * into the run's staging workspace so the payload-free commit reads them back.
+ */
+function writeStaging(dataRoot: string, night: CommitNightInput): void {
+  const paths = dreamStagingPaths(dataRoot, night.date);
+  writeFileSync(paths.userProfile, night.userProfile);
+  writeFileSync(paths.experience, night.experience);
+  writeFileSync(paths.archive, night.archive);
+  writeFileSync(paths.diary, night.diary);
+  writeFileSync(paths.diaryIndex, night.diaryIndex);
+}
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -88,8 +103,11 @@ describe("dream job processor", () => {
         expect(input.prompt).toContain(`"ref":"S${sessionId}/T1"`);
         expect(input.prompt).toContain(`${dataRoot}/memory/archive.md`);
         expect(input.prompt).toContain(`${dataRoot}/diary`);
+        expect(input.prompt).toContain(
+          `${dataRoot}/.dream-staging/2026-07-10/memory/user-profile.md`,
+        );
         expect(input.toolHandlers.commit).toBeDefined();
-        await input.toolHandlers.commit!({
+        writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n\n- values memorable outcomes [S1/T1]\n",
           experience: `# Experience\n\n- 2026-07-10: completed the arc [S${sessionId}/T1]\n`,
@@ -97,6 +115,7 @@ describe("dream job processor", () => {
           diary: `# 2026-07-10\n\n- engineering detail stays here [S${sessionId}/T1]\n`,
           diaryIndex: "# Diary Index\n\n- 2026-07-10：completed the arc\n- 2026-07-09：prior day\n",
         });
+        await input.toolHandlers.commit!({});
         return "dream committed";
       },
     };
@@ -117,6 +136,49 @@ describe("dream job processor", () => {
         .toContain("engineering detail stays here");
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toContain("2026-07-10：completed the arc");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("the single-commit guard blocks a second payload-free commit", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = tempRoot("claude-mnemo-dream-double-commit-");
+    const store = new DreamMemoryStore(dataRoot);
+    await seedCurrentMemory(store);
+    seedMaterial(db, "2026-07-10");
+
+    try {
+      await createDreamJobProcessor({
+        db,
+        dataRoot,
+        store,
+        agentRunner: {
+          async run(input) {
+            writeStaging(dataRoot, {
+              date: "2026-07-10",
+              userProfile: "# User Profile\n\n- once [S1/T1]\n",
+              experience: "# Experience\n\n- once [S1/T1]\n",
+              archive: "# Memory Archive\n",
+              diary: "# 2026-07-10\n\n- day\n",
+              diaryIndex: "# Diary Index\n\n- 2026-07-10：day\n",
+            });
+            await input.toolHandlers.commit!({});
+            await expect(input.toolHandlers.commit!({})).rejects.toThrow(
+              "attempted more than one commit",
+            );
+            return "committed";
+          },
+        },
+      }).process("2026-07-10");
+
+      // Exactly one publish for the date: the guard stopped the second commit
+      // before it could run a second commitNight transaction (one snapshot).
+      expect(await store.readLastSuccessfulDate()).toBe("2026-07-10");
+      expect(
+        (await store.listSnapshots()).filter((s) => s.date === "2026-07-10"),
+      ).toHaveLength(1);
     } finally {
       db.close();
     }
@@ -182,9 +244,10 @@ describe("dream job processor", () => {
             expect(input.prompt).toContain("# 首夜全量填充");
             expect(input.prompt).toContain("不要只根据当天材料填充");
             expect(input.prompt).toContain("当天没有材料");
+            expect(input.prompt).toContain("开头必须是沟通风格与为人");
             expect(await input.toolHandlers.readDoc("diary/2026-07-09.md"))
               .toContain("remembered history");
-            await input.toolHandlers.commit!({
+            writeStaging(dataRoot, {
               date: "2026-07-10",
               userProfile: "# User Profile\n\n- rebuilt from history [S1/T1]\n",
               experience: "# Experience\n\n- recovered history [S1/T1]\n",
@@ -192,6 +255,7 @@ describe("dream job processor", () => {
               diary: "# 2026-07-10\n\n安静的一天。\n",
               diaryIndex: "# Diary Index\n\n- 2026-07-10：安静的一天\n",
             });
+            await input.toolHandlers.commit!({});
             return "full fill committed";
           },
         },
@@ -223,7 +287,7 @@ describe("dream job processor", () => {
         store,
         agentRunner: {
           async run(input) {
-            await input.toolHandlers.commit!({
+            writeStaging(dataRoot, {
               date: "2026-07-10",
               userProfile: "# User Profile\n\n- curated replacement [S1/T1]\n",
               experience: "# Experience\n\n- curated replacement [S1/T1]\n",
@@ -231,6 +295,7 @@ describe("dream job processor", () => {
               diary: "# 2026-07-10\n\n- day\n",
               diaryIndex: "# Diary Index\n\n- 2026-07-10：day\n",
             });
+            await input.toolHandlers.commit!({});
             return "committed";
           },
         },
@@ -281,7 +346,7 @@ describe("dream job processor", () => {
               path: join(dataRoot, "diary"),
               pattern: ".",
             }, {} as never)).toMatchObject({ behavior: "allow" });
-            await input.toolHandlers.commit!({
+            writeStaging(dataRoot, {
               date: "2026-07-10",
               userProfile: "# User Profile\n",
               experience: "# Experience\n",
@@ -289,6 +354,7 @@ describe("dream job processor", () => {
               diary: "# 2026-07-10\n",
               diaryIndex: "# Diary Index\n",
             });
+            await input.toolHandlers.commit!({});
             return "committed";
           },
         },

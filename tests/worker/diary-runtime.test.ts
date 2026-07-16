@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { dreamStagingPaths } from "../../src/worker/dream-staging";
+import type { CommitNightInput } from "../../src/diary/memory-store";
 
 import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
@@ -24,6 +27,16 @@ afterEach(() => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** Simulates the agent's Write/Edit tools laying documents into staging. */
+function writeStaging(dataRoot: string, night: CommitNightInput): void {
+  const paths = dreamStagingPaths(dataRoot, night.date);
+  writeFileSync(paths.userProfile, night.userProfile);
+  writeFileSync(paths.experience, night.experience);
+  writeFileSync(paths.archive, night.archive);
+  writeFileSync(paths.diary, night.diary);
+  writeFileSync(paths.diaryIndex, night.diaryIndex);
+}
 describe("createDiaryRuntime", () => {
   test("processes queued dream dates independently when one date fails", async () => {
     const db = createDatabase(":memory:");
@@ -103,7 +116,7 @@ describe("createDiaryRuntime", () => {
       async runQuery(input) {
         dreamRuns += 1;
         const revision = dreamRuns === 1 ? "initial" : "late-finalized";
-        await input.toolHandlers.commit!({
+        writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
           experience: `# Experience\n\n- 2026-07-10: ${revision} contribution [S${session.id}/T1]\n`,
@@ -111,6 +124,7 @@ describe("createDiaryRuntime", () => {
           diary: `# 2026-07-10\n\n- ${revision} diary [S${session.id}/T1]\n`,
           diaryIndex: `# Diary Index\n\n- 2026-07-10：${revision}\n`,
         });
+        await input.toolHandlers.commit!({});
         return "committed";
       },
     });
@@ -189,7 +203,7 @@ describe("createDiaryRuntime", () => {
       dataRoot,
       async runQuery(request) {
         calls += 1;
-        await request.toolHandlers.commit!({
+        writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
           experience: "# Experience\n",
@@ -197,6 +211,7 @@ describe("createDiaryRuntime", () => {
           diary: "# 2026-07-10\n",
           diaryIndex: "# Diary Index\n",
         });
+        await request.toolHandlers.commit!({});
         return "committed";
       },
     });
@@ -248,7 +263,7 @@ describe("createDiaryRuntime", () => {
       nowEpoch: () => 500,
       async runQuery(request) {
         dreamRuns += 1;
-        await request.toolHandlers.commit!({
+        writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
           experience: "# Experience\n\n- committed once [S1/T1]\n",
@@ -256,6 +271,7 @@ describe("createDiaryRuntime", () => {
           diary: "# 2026-07-10\n\n- committed once [S1/T1]\n",
           diaryIndex: "# Diary Index\n\n- 2026-07-10：committed once\n",
         });
+        await request.toolHandlers.commit!({});
         throw new Error("Diary agent request timed out after 600000ms.");
       },
     });
@@ -327,7 +343,7 @@ describe("createDiaryRuntime", () => {
       async runQuery(request) {
         dreamRuns += 1;
         seenTimeouts.push(request.timeoutMs);
-        await request.toolHandlers.commit!({
+        writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
           experience: "# Experience\n\n- 2026-07-10: only contribution [S1/T1]\n",
@@ -335,6 +351,7 @@ describe("createDiaryRuntime", () => {
           diary: "# 2026-07-10\n\n- only contribution [S1/T1]\n",
           diaryIndex: "# Diary Index\n\n- 2026-07-10：only contribution\n",
         });
+        await request.toolHandlers.commit!({});
         return "committed";
       },
     });

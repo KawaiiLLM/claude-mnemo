@@ -263,6 +263,36 @@ describe("DiaryStateStore dream queue", () => {
     expect(store.getDayState("2026-11-01")?.needsRegen).toBe(true);
   });
 
+  test("a pre-dawn turn invalidates the previous day via the 4am boundary", () => {
+    const store = createDiaryStateStore(db);
+    store.initializeBootstrap("2026-07-16");
+    // Seeds dream_timezone + dream_hour (defaults to the 4am boundary).
+    store.reconcileBacklog({
+      today: "2026-07-16",
+      cutoverDate: "2026-07-01",
+      lastSuccessfulDate: "2026-07-15",
+      maxDays: 7,
+      timeZone: "Asia/Shanghai",
+      enqueuedAtEpoch: 100,
+    });
+    store.enqueueDay({ date: "2026-07-15", enqueuedAtEpoch: 100 });
+    const claimed = store.claimNextDiaryItem(100)!;
+    store.settleDreamDay({
+      date: "2026-07-15",
+      queueSeq: claimed.seq,
+      watermark: "settled",
+      settledAtEpoch: 200,
+    });
+
+    // 2026-07-16 02:00 Shanghai (UTC+8) == 2026-07-15T18:00:00Z. Pre-dawn, so it
+    // belongs to Jul 15 — not Jul 16 as a midnight boundary would bucket it.
+    markSettledDiaryDayStaleForTurn(
+      db,
+      Date.parse("2026-07-15T18:00:00Z") / 1_000,
+    );
+    expect(store.getDayState("2026-07-15")?.needsRegen).toBe(true);
+  });
+
   test("initializes the fourteen-day cutover once", () => {
     const store = createDiaryStateStore(db);
     expect(store.initializeBootstrap("2026-07-11")).toEqual({

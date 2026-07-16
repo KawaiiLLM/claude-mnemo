@@ -6,7 +6,10 @@ import {
   stripDiaryPrivateContent,
 } from "../diary/domain";
 import { calendarDayBounds } from "../diary/calendar";
-import { DEFAULT_DREAM_AGENT_TIME_ZONE } from "../shared/config";
+import {
+  DEFAULT_DREAM_AGENT_HOUR,
+  DEFAULT_DREAM_AGENT_TIME_ZONE,
+} from "../shared/config";
 
 export const DIARY_MATERIAL_FIELD_TOKEN_BUDGET = 200;
 const INTERNAL_TURN_ID_PATTERN = /\[T(\d+)\]/g;
@@ -37,8 +40,9 @@ export function loadDiaryMaterial(
   db: Database,
   date: string,
   timeZone = DEFAULT_DREAM_AGENT_TIME_ZONE,
+  boundaryHour = DEFAULT_DREAM_AGENT_HOUR,
 ): DiaryMaterialRow[] {
-  const { startEpoch, endEpoch } = calendarDayBounds(date, timeZone);
+  const { startEpoch, endEpoch } = calendarDayBounds(date, timeZone, boundaryHour);
 
   return db
     .query<DiaryMaterialRow, [number, number]>(

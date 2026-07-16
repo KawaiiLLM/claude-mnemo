@@ -14,7 +14,7 @@ import type { Database } from "bun:sqlite";
 import { BUILD_ID } from "../shared/build-id";
 import { createDatabase } from "../db/database";
 import { createDiaryStateStore } from "../db/diary-state";
-import { calendarDateAt } from "../diary/calendar";
+import { contentDateAt } from "../diary/calendar";
 import {
   getSession,
   updateCompactAnchor,
@@ -2074,8 +2074,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       ) {
         return { ok: false, status: 400, message: "date is not a real calendar day" };
       }
-      // A dream runs for a completed day; today is not due yet.
-      const today = calendarDateAt(now(), config.dreamAgentTimeZone);
+      // A dream runs for a completed day; today is not due yet. "today" is the
+      // in-progress content-day (4am boundary), so before 4am the just-ended
+      // calendar day is still open and correctly rejected.
+      const today = contentDateAt(
+        now(),
+        config.dreamAgentTimeZone,
+        config.dreamAgentHour,
+      );
       if (date >= today) {
         return { ok: false, status: 400, message: "date must be a completed past day" };
       }

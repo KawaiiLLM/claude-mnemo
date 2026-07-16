@@ -50,6 +50,21 @@ export function calendarDateAt(epochSeconds: number, timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * The content-day a moment belongs to, using a local day boundary of
+ * `boundaryHour` instead of midnight. Shifting the epoch back by the boundary
+ * makes any moment before that hour resolve to the previous calendar date, so
+ * late-night work rolls into the day it belongs to. Exact for non-DST zones
+ * (the default Asia/Shanghai); a DST transition can shift by an hour.
+ */
+export function contentDateAt(
+  epochSeconds: number,
+  timeZone: string,
+  boundaryHour: number,
+): string {
+  return calendarDateAt(epochSeconds - boundaryHour * 3_600, timeZone);
+}
+
 export function addCalendarDays(date: string, days: number): string {
   assertCalendarDate(date);
   const value = new Date(`${date}T00:00:00Z`);
@@ -81,10 +96,14 @@ function calendarDayStartEpoch(date: string, timeZone: string): number {
 export function calendarDayBounds(
   date: string,
   timeZone: string,
+  boundaryHour = 0,
 ): { startEpoch: number; endEpoch: number } {
+  // The content-day spans [date boundaryHour:00, date+1 boundaryHour:00). With
+  // the default boundaryHour of 0 this is the plain midnight-to-midnight day.
+  const shift = boundaryHour * 3_600;
   return {
-    startEpoch: calendarDayStartEpoch(date, timeZone),
-    endEpoch: calendarDayStartEpoch(addCalendarDays(date, 1), timeZone),
+    startEpoch: calendarDayStartEpoch(date, timeZone) + shift,
+    endEpoch: calendarDayStartEpoch(addCalendarDays(date, 1), timeZone) + shift,
   };
 }
 

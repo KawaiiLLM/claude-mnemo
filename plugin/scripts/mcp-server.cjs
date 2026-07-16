@@ -31505,11 +31505,15 @@ function calendarDateAt(epochSeconds, timeZone) {
   const day = String(partNumber(parts, "day")).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
+function contentDateAt(epochSeconds, timeZone, boundaryHour) {
+  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
+}
 
 // src/shared/config.ts
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_HOUR = 4;
 
 // src/db/diary-state.ts
 init_database();
@@ -31517,7 +31521,12 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
   const timeZone = db.query(
     "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
   ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const date5 = calendarDateAt(createdAtEpoch, timeZone);
+  const boundaryHour = Number(
+    db.query(
+      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
+    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
+  );
+  const date5 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query(
     `UPDATE diary_day_state
      SET needs_regen = 1,
@@ -34987,7 +34996,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.4.1" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.4.2" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

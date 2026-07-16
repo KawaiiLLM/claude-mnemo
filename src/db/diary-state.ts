@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 
-import { addCalendarDays, calendarDateAt } from "../diary/calendar";
-import { DEFAULT_DREAM_AGENT_TIME_ZONE } from "../shared/config";
+import { addCalendarDays, contentDateAt } from "../diary/calendar";
+import {
+  DEFAULT_DREAM_AGENT_HOUR,
+  DEFAULT_DREAM_AGENT_TIME_ZONE,
+} from "../shared/config";
 import { runWriteTransaction } from "./database";
 import type { PendingQueueItem } from "./pending-queue";
 
@@ -38,6 +41,8 @@ export interface ReconcileDreamBacklogInput {
   lastSuccessfulDate: string | null;
   maxDays: number;
   timeZone: string;
+  /** Content-day boundary hour, persisted so turn bucketing can honor it. */
+  boundaryHour?: number;
   enqueuedAtEpoch: number;
 }
 
@@ -112,7 +117,12 @@ export function markSettledDiaryDayStaleForTurn(
     db.query<{ value: string }, []>(
       "SELECT value FROM diary_state WHERE key = 'dream_timezone'",
     ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const date = calendarDateAt(createdAtEpoch, timeZone);
+  const boundaryHour = Number(
+    db.query<{ value: string }, []>(
+      "SELECT value FROM diary_state WHERE key = 'dream_hour'",
+    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR,
+  );
+  const date = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query<unknown, [string]>(
     `UPDATE diary_day_state
      SET needs_regen = 1,
@@ -302,6 +312,10 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
         `INSERT INTO diary_state (key, value) VALUES ('dream_timezone', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       ).run(input.timeZone);
+      db.query<unknown, [string]>(
+        `INSERT INTO diary_state (key, value) VALUES ('dream_hour', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ).run(String(input.boundaryHour ?? DEFAULT_DREAM_AGENT_HOUR));
 
       const startDate = input.lastSuccessfulDate === null
         ? input.cutoverDate
