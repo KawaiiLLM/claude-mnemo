@@ -7598,6 +7598,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -7658,6 +7659,16 @@ function ensureTurnInvalidationColumns(db) {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureTurnSignificanceGradeColumn(db) {
+  if (hasColumn(db, "turns", "significance_grade")) {
+    return;
+  }
+  db.exec(
+    `ALTER TABLE turns
+     ADD COLUMN significance_grade INTEGER
+     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
+  );
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -7861,6 +7872,9 @@ var init_schema = __esm({
     content TEXT,
     insight TEXT,
     type TEXT,
+    significance_grade INTEGER CHECK (
+      significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+    ),
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -31294,6 +31308,11 @@ var workerRecallInputShape = {
 };
 var rememberInputShape = {
   id: external_exports3.string().optional(),
+  grade: external_exports3.number().int().min(0).max(4).optional(),
+  regrade: external_exports3.object({
+    id: external_exports3.string(),
+    grade: external_exports3.number().int().min(0).max(4)
+  }).strict().optional(),
   type: external_exports3.string().optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
@@ -31568,6 +31587,7 @@ var TURN_SELECT = `
     content,
     insight,
     type,
+    significance_grade AS significanceGrade,
     tags,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -31646,6 +31666,7 @@ function updateTurnById(db, turnId, input) {
             content = ?,
             insight = ?,
             type = ?,
+            significance_grade = ?,
             transcript_line_start = ?,
             tags = ?,
             files_read = ?,
@@ -31668,6 +31689,7 @@ function updateTurnById(db, turnId, input) {
             content,
             insight,
             type,
+            significance_grade AS significanceGrade,
             transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
@@ -31685,6 +31707,7 @@ function updateTurnById(db, turnId, input) {
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
+      input.significanceGrade ?? existing.significanceGrade,
       input.transcriptLineStart ?? existing.transcriptLineStart,
       stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
@@ -33198,240 +33221,14 @@ function recallMemory(db, input) {
   );
 }
 
-// src/mcp/remember.ts
-var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
-var OBSERVATION_REMEMBER_STATUSES = [
-  "pending",
-  "extracted",
-  "skipped"
-];
-var SESSION_SUMMARY_KEYS = [
-  "title",
-  "content",
-  "decision",
-  "done",
-  "current",
-  "next_steps",
-  "reference"
-];
-var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
-function decodeHtmlEntities(value) {
-  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
-}
-function decodeRememberInput(input) {
-  const decoded = { ...input };
-  for (const key of [
-    "id",
-    "type",
-    "title",
-    "content",
-    "insight",
-    "next_steps",
-    "decision",
-    "done",
-    "current",
-    "reference"
-  ]) {
-    const value = decoded[key];
-    if (typeof value === "string") {
-      decoded[key] = decodeHtmlEntities(value);
-    }
+// src/diary/domain.ts
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
   }
-  if (decoded.tags) {
-    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
-  }
-  return decoded;
-}
-function textResult(text) {
-  return {
-    content: [{ type: "text", text }]
-  };
-}
-function parameterError(message) {
-  return textResult(`Parameter error: ${message}`);
-}
-function parseSessionId(value) {
-  const match = /^S(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseTurnId(value) {
-  const match = /^T(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseObservationId(value) {
-  const match = /^O(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function bracketBareTurnReferences(content, isValidPredecessor) {
-  if (!content) {
-    return content;
-  }
-  return content.replace(
-    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
-    (match, lead, digits) => {
-      const id = Number.parseInt(digits, 10);
-      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
-        return match;
-      }
-      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
-      const prefix = needsSpace ? `${lead} ` : lead;
-      return `${prefix}[T${id}]`;
-    }
-  );
-}
-function validateStatusForRoute(status, allowedStatuses, routeLabel) {
-  if (status === void 0) {
-    return null;
-  }
-  if (allowedStatuses === null) {
-    return `${routeLabel} does not accept a status field.`;
-  }
-  if (!allowedStatuses.includes(status)) {
-    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
-    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
-  }
-  return null;
-}
-function deriveTurnStatus(input) {
-  if (input.status === "undone") {
-    return "undone";
-  }
-  if (input.status === "skipped") {
-    return "skipped";
-  }
-  if (input.status === "active") {
-    return "active";
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveObservationStatus(input) {
-  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
-    return input.status;
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveTurnStatusForUpdate(current, input) {
-  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
-    return void 0;
-  }
-  return deriveTurnStatus(input);
-}
-function handleTurnRemember(db, turnId, input) {
-  const statusError = validateStatusForRoute(
-    input.status,
-    TURN_REMEMBER_STATUSES,
-    "turn remember"
-  );
-  if (statusError) {
-    return parameterError(statusError);
-  }
-  const current = getTurnById(db, turnId);
-  const isValidPredecessor = (candidateId) => {
-    if (!current || candidateId === turnId) {
-      return false;
-    }
-    const cited = getTurnById(db, candidateId);
-    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
-  };
-  const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatusForUpdate(current, input),
-    title: input.title ?? null,
-    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
-    insight: input.insight ?? null,
-    type: input.type ?? null,
-    tags: input.tags ?? [],
-    updatedAtEpoch: Math.floor(Date.now() / 1e3)
-  });
-  if (!turn) {
-    return textResult(`Turn T${turnId} not found.`);
-  }
-  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
-}
-function handleObservationRemember(db, observationId, input) {
-  const statusError = validateStatusForRoute(
-    input.status,
-    OBSERVATION_REMEMBER_STATUSES,
-    "observation remember"
-  );
-  if (statusError) {
-    return parameterError(statusError);
-  }
-  if (input.type !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
-    return parameterError(
-      "observation remember only accepts title, content, and status."
-    );
-  }
-  const observation = updateObservation(db, observationId, {
-    title: input.title,
-    content: input.content,
-    status: deriveObservationStatus(input)
-  });
-  if (!observation) {
-    return textResult(`Observation O${observationId} not found.`);
-  }
-  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
-}
-function handleSessionRemember(db, sessionId, input) {
-  const statusError = validateStatusForRoute(input.status, null, "session remember");
-  if (statusError) {
-    return parameterError(statusError);
-  }
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
-  if (missing.length > 0) {
-    return parameterError(
-      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
-        ", "
-      )}). Missing: ${missing.join(", ")}.`
-    );
-  }
-  const updated = updateSessionSummaryRewrite(
-    db,
-    sessionId,
-    {
-      title: input.title ?? "",
-      content: input.content ?? "",
-      decision: input.decision ?? "",
-      done: input.done ?? "",
-      current: input.current ?? "",
-      nextSteps: input.next_steps ?? "",
-      reference: input.reference ?? ""
-    },
-    Math.floor(Date.now() / 1e3)
-  );
-  if (!updated) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-  return textResult(`Updated session ${sessionId}.`);
-}
-function rememberTool(db, rawInput) {
-  const input = decodeRememberInput(rawInput);
-  if (!input.id) {
-    return parameterError(
-      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
-    );
-  }
-  const observationId = parseObservationId(input.id);
-  if (observationId !== null) {
-    return handleObservationRemember(db, observationId, input);
-  }
-  const turnId = parseTurnId(input.id);
-  if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input);
-  }
-  const sessionId = parseSessionId(input.id);
-  if (sessionId !== null) {
-    return handleSessionRemember(db, sessionId, input);
-  }
-  if (/^M\d+$/i.test(input.id)) {
-    return parameterError(
-      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
-    );
-  }
-  return textResult(`Unsupported id selector: ${input.id}`);
+  return Math.ceil(weightedCodePoints * 1.2);
 }
 
 // src/mcp/timeline.ts
@@ -33745,6 +33542,13 @@ var MILESTONE_BASE_SCORE = {
   change: 1,
   discovery: 1
 };
+var MILESTONE_GRADE_BASE_SCORE = {
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4
+};
 var MILESTONE_POOL_MIN_SCORE = 2;
 var MILESTONE_INSIGHT_WEIGHT = 2;
 var MILESTONE_PURE_SPEC_WEIGHT = 3;
@@ -33768,6 +33572,9 @@ var MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
 var MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
 var MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
 function milestoneBaseScore(turn) {
+  if (turn.significanceGrade !== null && turn.significanceGrade !== void 0) {
+    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+  }
   const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
   if ((turn.type === "feature" || turn.type === "refactor" || turn.type === "change") && turn.filesModified.length === 0) {
     return 0;
@@ -34912,6 +34719,381 @@ function timelineQuery(db, input) {
   }
 }
 
+// src/mcp/session-output.ts
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints(value, max) {
+  if (!value) {
+    return value;
+  }
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
+  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const lines = [
+    `[S${input.id}] ${title}`
+  ];
+  const pushField = (label, value, cap) => {
+    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    if (rendered) {
+      lines.push(`  ${label}: ${rendered}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  pushField("content", input.content, 400);
+  pushField("current", input.current, 400);
+  pushField("next", input.nextSteps, 200);
+  if (!includeHistoricalFields) {
+    return lines;
+  }
+  if (input.decision) {
+    pushBulletField("decision", input.decision);
+  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of input.legacyInsight ?? []) {
+      lines.push(`    - ${item}`);
+    }
+  }
+  pushBulletField("done", input.done);
+  pushBulletField("reference", input.reference);
+  return lines;
+}
+function renderSessionStateOutput(input) {
+  return buildSessionStateLines(input).join("\n");
+}
+function measureSessionStateTokens(input) {
+  const fieldTokens = (label, value, bullet = false) => {
+    if (!value) {
+      return 0;
+    }
+    const rendered = bullet ? [`  ${label}:`, ...splitBulletField(value).map((item) => `    - ${item}`)].join("\n") : `  ${label}: ${value}`;
+    return estimateDiaryTokens(rendered);
+  };
+  const full = renderSessionStateOutput(input);
+  return {
+    title: estimateDiaryTokens(
+      `[S${input.id}] ${input.title ?? "(untitled session)"}`
+    ),
+    content: fieldTokens("content", input.content),
+    current: fieldTokens("current", input.current),
+    nextSteps: fieldTokens("next", input.nextSteps),
+    decision: fieldTokens("decision", input.decision, true),
+    done: fieldTokens("done", input.done, true),
+    reference: fieldTokens("reference", input.reference, true),
+    total: estimateDiaryTokens(full)
+  };
+}
+
+// src/mcp/remember.ts
+var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
+var OBSERVATION_REMEMBER_STATUSES = [
+  "pending",
+  "extracted",
+  "skipped"
+];
+var SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference"
+];
+var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
+function decodeHtmlEntities(value) {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
+}
+function decodeRememberInput(input) {
+  const decoded = { ...input };
+  for (const key of [
+    "id",
+    "type",
+    "title",
+    "content",
+    "insight",
+    "next_steps",
+    "decision",
+    "done",
+    "current",
+    "reference"
+  ]) {
+    const value = decoded[key];
+    if (typeof value === "string") {
+      decoded[key] = decodeHtmlEntities(value);
+    }
+  }
+  if (decoded.tags) {
+    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
+  }
+  return decoded;
+}
+function textResult(text) {
+  return {
+    content: [{ type: "text", text }]
+  };
+}
+function parameterError(message) {
+  return textResult(`Parameter error: ${message}`);
+}
+function parseSessionId(value) {
+  const match = /^S(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseTurnId(value) {
+  const match = /^T(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseObservationId(value) {
+  const match = /^O(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function bracketBareTurnReferences(content, isValidPredecessor) {
+  if (!content) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match, lead, digits) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
+        return match;
+      }
+      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    }
+  );
+}
+function validateStatusForRoute(status, allowedStatuses, routeLabel) {
+  if (status === void 0) {
+    return null;
+  }
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
+  }
+  return null;
+}
+function validateGrade(value, label) {
+  if (value === void 0) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 4) {
+    return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+function deriveTurnStatus(input) {
+  if (input.status === "undone") {
+    return "undone";
+  }
+  if (input.status === "skipped") {
+    return "skipped";
+  }
+  if (input.status === "active") {
+    return "active";
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveObservationStatus(input) {
+  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
+    return input.status;
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveTurnStatusForUpdate(current, input) {
+  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
+    return void 0;
+  }
+  return deriveTurnStatus(input);
+}
+function handleTurnRemember(db, turnId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+  const gradeError = validateGrade(input.grade, "grade");
+  if (gradeError) {
+    return parameterError(gradeError);
+  }
+  if ((current.status === "active" || current.status === "provisional") && input.grade === void 0) {
+    return parameterError(
+      "grade is required when extracting a new turn (integer 0 through 4)."
+    );
+  }
+  let regradeTarget = null;
+  if (input.regrade !== void 0) {
+    const regradeError = validateGrade(input.regrade.grade, "regrade.grade");
+    if (regradeError) {
+      return parameterError(regradeError);
+    }
+    const regradeId = parseTurnId(input.regrade.id);
+    if (regradeId === null) {
+      return parameterError("regrade.id must be a T<n> turn reference.");
+    }
+    regradeTarget = getTurnById(db, regradeId);
+    if (!regradeTarget || regradeTarget.sessionId !== current.sessionId || regradeTarget.promptNumber >= current.promptNumber) {
+      return parameterError(
+        "regrade must target an earlier turn in the same session."
+      );
+    }
+  }
+  const isValidPredecessor = (candidateId) => {
+    if (candidateId === turnId) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
+  };
+  const turn = updateTurnById(db, turnId, {
+    status: deriveTurnStatusForUpdate(current, input),
+    title: input.title ?? null,
+    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
+    insight: input.insight ?? null,
+    type: input.type ?? null,
+    significanceGrade: input.grade,
+    tags: input.tags ?? [],
+    updatedAtEpoch: Math.floor(Date.now() / 1e3)
+  });
+  if (!turn) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+  if (regradeTarget && input.regrade) {
+    updateTurnById(db, regradeTarget.id, {
+      significanceGrade: input.regrade.grade
+    });
+    return textResult(
+      `Updated turn T${turnId} with status ${turn.status}. Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`
+    );
+  }
+  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
+}
+function handleObservationRemember(db, observationId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    OBSERVATION_REMEMBER_STATUSES,
+    "observation remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
+    return parameterError(
+      "observation remember only accepts title, content, and status."
+    );
+  }
+  const observation = updateObservation(db, observationId, {
+    title: input.title,
+    content: input.content,
+    status: deriveObservationStatus(input)
+  });
+  if (!observation) {
+    return textResult(`Observation O${observationId} not found.`);
+  }
+  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
+}
+function handleSessionRemember(db, sessionId, input) {
+  const statusError = validateStatusForRoute(input.status, null, "session remember");
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  if (input.grade !== void 0 || input.regrade !== void 0) {
+    return parameterError("session remember does not accept grade or regrade.");
+  }
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  if (missing.length > 0) {
+    return parameterError(
+      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", "
+      )}). Missing: ${missing.join(", ")}.`
+    );
+  }
+  const tokenReport = measureSessionStateTokens({
+    id: session.id,
+    title: input.title ?? "",
+    content: input.content ?? "",
+    decision: input.decision ?? "",
+    done: input.done ?? "",
+    current: input.current ?? "",
+    nextSteps: input.next_steps ?? "",
+    reference: input.reference ?? ""
+  });
+  if (tokenReport.total > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return parameterError(
+      `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; title=${tokenReport.title}, content=${tokenReport.content}, current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, decision=${tokenReport.decision}, done=${tokenReport.done}, reference=${tokenReport.reference}, total=${tokenReport.total}. Trim fields and retry.`
+    );
+  }
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? ""
+    },
+    Math.floor(Date.now() / 1e3)
+  );
+  if (!updated) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+  return textResult(`Updated session ${sessionId}.`);
+}
+function rememberTool(db, rawInput) {
+  const input = decodeRememberInput(rawInput);
+  if (!input.id) {
+    return parameterError(
+      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
+    );
+  }
+  const observationId = parseObservationId(input.id);
+  if (observationId !== null) {
+    return handleObservationRemember(db, observationId, input);
+  }
+  const turnId = parseTurnId(input.id);
+  if (turnId !== null) {
+    return handleTurnRemember(db, turnId, input);
+  }
+  const sessionId = parseSessionId(input.id);
+  if (sessionId !== null) {
+    return handleSessionRemember(db, sessionId, input);
+  }
+  if (/^M\d+$/i.test(input.id)) {
+    return parameterError(
+      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
+    );
+  }
+  return textResult(`Unsupported id selector: ${input.id}`);
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -35003,7 +35185,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.5.0" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.6.0" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

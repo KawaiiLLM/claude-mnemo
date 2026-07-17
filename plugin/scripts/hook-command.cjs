@@ -36,6 +36,7 @@ __export(hook_command_exports, {
 });
 module.exports = __toCommonJS(hook_command_exports);
 var import_node_fs6 = require("node:fs");
+var import_bun_sqlite2 = require("bun:sqlite");
 
 // src/shared/hook-constants.ts
 var HOOK_HEALTH_TIMEOUT_MS = 3e3;
@@ -854,6 +855,9 @@ var SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     type TEXT,
+    significance_grade INTEGER CHECK (
+      significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+    ),
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -939,6 +943,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -999,6 +1004,16 @@ function ensureTurnInvalidationColumns(db) {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureTurnSignificanceGradeColumn(db) {
+  if (hasColumn(db, "turns", "significance_grade")) {
+    return;
+  }
+  db.exec(
+    `ALTER TABLE turns
+     ADD COLUMN significance_grade INTEGER
+     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
+  );
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -1388,7 +1403,7 @@ function estimateDiaryTokens(text) {
 }
 
 // src/diary/memory-store.ts
-var MEMORY_DOCUMENT_TOKEN_LIMIT = 5e3;
+var MEMORY_DOCUMENT_TOKEN_LIMIT = 2e3;
 var DEFAULT_MEMORY_HISTORY_RETENTION = {
   newest: 30,
   monthly: true
@@ -1551,12 +1566,10 @@ var DreamMemoryStore = class {
     return this.readCurrentMemoryWithoutRecovery();
   }
   async readInjectionDocuments() {
-    await this.recoverIncompleteTransactions();
-    await this.assertWorkspaceRootsAreSafe();
-    const defaults = defaultCurrentMemory();
+    await this.assertWorkspaceRootsAreSafe({ createDataRoot: false });
     const [userProfile, experience] = await Promise.all([
-      this.readMemoryDocument("user-profile.md", defaults.userProfile),
-      this.readMemoryDocument("experience.md", defaults.experience)
+      this.readMemoryDocument("user-profile.md", ""),
+      this.readMemoryDocument("experience.md", "")
     ]);
     return { userProfile, experience };
   }
@@ -1659,8 +1672,10 @@ var DreamMemoryStore = class {
   migrationStatePath() {
     return (0, import_node_path6.join)(this.memoryRoot(), "migration-state.json");
   }
-  async assertWorkspaceRootsAreSafe() {
-    await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+  async assertWorkspaceRootsAreSafe(options = {}) {
+    if (options.createDataRoot !== false) {
+      await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+    }
     for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path6.join)(this.dataRoot, "diary")]) {
       try {
         const metadata = await (0, import_promises2.lstat)(root);
@@ -2412,7 +2427,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.5.0-mroqh76w" : "dev";
+var BUILD_ID = true ? "0.6.0-mrp4p398" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -3317,6 +3332,7 @@ var TURN_SELECT = `
     content,
     insight,
     type,
+    significance_grade AS significanceGrade,
     tags,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -3388,6 +3404,7 @@ function updateTurnById(db, turnId, input) {
             content = ?,
             insight = ?,
             type = ?,
+            significance_grade = ?,
             transcript_line_start = ?,
             tags = ?,
             files_read = ?,
@@ -3410,6 +3427,7 @@ function updateTurnById(db, turnId, input) {
             content,
             insight,
             type,
+            significance_grade AS significanceGrade,
             transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
@@ -3427,6 +3445,7 @@ function updateTurnById(db, turnId, input) {
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
+      input.significanceGrade ?? existing.significanceGrade,
       input.transcriptLineStart ?? existing.transcriptLineStart,
       stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
@@ -3878,6 +3897,13 @@ var MILESTONE_BASE_SCORE = {
   change: 1,
   discovery: 1
 };
+var MILESTONE_GRADE_BASE_SCORE = {
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4
+};
 var MILESTONE_POOL_MIN_SCORE = 2;
 var MILESTONE_INSIGHT_WEIGHT = 2;
 var MILESTONE_PURE_SPEC_WEIGHT = 3;
@@ -3901,6 +3927,9 @@ var MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
 var MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
 var MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
 function milestoneBaseScore(turn) {
+  if (turn.significanceGrade !== null && turn.significanceGrade !== void 0) {
+    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+  }
   const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
   if ((turn.type === "feature" || turn.type === "refactor" || turn.type === "change") && turn.filesModified.length === 0) {
     return 0;
@@ -4646,44 +4675,6 @@ function buildTimelineView(db, input, preloadedTurns) {
     breadcrumb
   };
 }
-function buildContextTimelineView(db, sessionId, view = "turns") {
-  const session = getSession(db, sessionId);
-  if (!session) {
-    throw new Error(`timeline: session S${sessionId} not found`);
-  }
-  const sortedTurns = getTurnsForSession(db, sessionId).sort((a, b) => {
-    if (a.promptNumber !== b.promptNumber) {
-      return a.promptNumber - b.promptNumber;
-    }
-    if (a.createdAtEpoch !== b.createdAtEpoch) {
-      return a.createdAtEpoch - b.createdAtEpoch;
-    }
-    return a.id - b.id;
-  });
-  if (sortedTurns.length === 0) {
-    return buildTimelineView(db, { id: `S${sessionId}` });
-  }
-  if (view === "milestones") {
-    return buildTimelineView(db, {
-      id: `S${sessionId}`,
-      view: "milestones",
-      pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
-      milestoneTail: true
-    }, sortedTurns);
-  }
-  const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
-  const firstPromptNumber = windowTurns[0].promptNumber;
-  const lastPromptNumber = windowTurns[windowTurns.length - 1].promptNumber;
-  const timelineView = buildTimelineView(db, {
-    id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
-    pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
-    view
-  }, sortedTurns);
-  return {
-    ...timelineView,
-    hasEarlier: firstPromptNumber !== sortedTurns[0].promptNumber
-  };
-}
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
   if (pagedMilestones.length === 0) return [];
   const dayKey = (m) => formatLocalDate(m.turn.createdAtEpoch);
@@ -5076,21 +5067,23 @@ function renderTimeline(view, options = {}) {
 }
 
 // src/mcp/session-output.ts
-var buildContextTimelineViewWithMode = buildContextTimelineView;
-var defaultTimelineRenderer = {
-  buildContextTimelineView: buildContextTimelineViewWithMode,
-  renderTimeline
-};
-function renderCurrentSessionOutput(db, session, sessionRecord, timelineRenderer = defaultTimelineRenderer) {
-  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const pushField = (label, value) => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  const pushBulletLines = (items) => {
-    for (const item of items) {
-      lines.push(`    - ${item}`);
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints(value, max) {
+  if (!value) {
+    return value;
+  }
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
+  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const lines = [
+    `[S${input.id}] ${title}`
+  ];
+  const pushField = (label, value, cap) => {
+    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    if (rendered) {
+      lines.push(`  ${label}: ${rendered}`);
     }
   };
   const pushBulletField = (label, value) => {
@@ -5099,38 +5092,72 @@ function renderCurrentSessionOutput(db, session, sessionRecord, timelineRenderer
       return;
     }
     lines.push(`  ${label}:`);
-    pushBulletLines(items);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
   };
-  pushField("content", session.content);
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else {
-    const insightLines = session.insight ?? [];
-    if (insightLines.length > 0) {
-      lines.push("  insight:");
-      pushBulletLines(insightLines);
+  pushField("content", input.content, 400);
+  pushField("current", input.current, 400);
+  pushField("next", input.nextSteps, 200);
+  if (!includeHistoricalFields) {
+    return lines;
+  }
+  if (input.decision) {
+    pushBulletField("decision", input.decision);
+  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of input.legacyInsight ?? []) {
+      lines.push(`    - ${item}`);
     }
   }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-  try {
-    const timelineView = timelineRenderer.buildContextTimelineView(
-      db,
-      sessionRecord.id,
-      "milestones"
-    );
-    lines.push("");
-    lines.push(
-      timelineRenderer.renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true
-      })
-    );
-  } catch {
+  pushBulletField("done", input.done);
+  pushBulletField("reference", input.reference);
+  return lines;
+}
+function renderSessionStateOutput(input) {
+  return buildSessionStateLines(input).join("\n");
+}
+function renderBoundedSessionStateOutput(input) {
+  const full = renderSessionStateOutput(input);
+  if (estimateDiaryTokens(full) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return full;
   }
-  return lines.join("\n");
+  const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
+  const uncappedStateLines = buildSessionStateLines(input, false, false);
+  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= CURRENT_SESSION_STATE_TOKEN_BUDGET;
+  const lines = buildSessionStateLines(input, !stateFitsUncapped);
+  const included = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const candidate = [
+      ...included,
+      lines[index],
+      pointer
+    ].join("\n");
+    if (estimateDiaryTokens(candidate) > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+      break;
+    }
+    included.push(lines[index]);
+  }
+  const withPointer = [...included, pointer].join("\n");
+  if (estimateDiaryTokens(withPointer) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return withPointer;
+  }
+  return included.join("\n");
+}
+function renderCurrentSessionStateOutput(session, sessionRecord) {
+  return renderBoundedSessionStateOutput({
+    id: sessionRecord.id,
+    title: session.title ?? null,
+    content: session.content ?? null,
+    // context.ts currently resolves pointers on FormattedSession. Read raw
+    // storage here so state injection keeps compact [T<n>] coordinates.
+    decision: sessionRecord.decision ?? session.decision ?? null,
+    done: sessionRecord.done ?? session.done ?? null,
+    current: session.current ?? null,
+    nextSteps: session.nextSteps ?? null,
+    reference: session.reference ?? null,
+    legacyInsight: session.insight
+  });
 }
 
 // src/db/pending-queue.ts
@@ -5205,27 +5232,62 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
 // src/diary/persona-render.ts
 var import_node_path9 = require("node:path");
 var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
-var EXPERIENCE_INJECTION_TOKEN_BUDGET = 2e3;
 var DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1e3;
+var SESSION_INJECTION_TOKEN_BUDGET = 2e3;
 var sectionPointer = (remainingLines, displayPath) => `\uFF08\u672C\u8282\u8FD8\u6709 ${remainingLines} \u884C\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+var documentPointer = (remainingLines, displayPath) => `\uFF08\u5176\u4F59 ${remainingLines} \u884C\u7701\u7565\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
 function headingLine(section) {
   return section.level === 0 ? null : `${"#".repeat(section.level)} ${section.title}`;
 }
-function renderSections(sections, includedLineCounts, displayPath, reserveEveryPointer = false) {
+function renderSections(sections, includedLineCounts, displayPath, options, reserveEveryPointer = false) {
   const lines = [];
+  let documentRemainingLines = 0;
   sections.forEach((section, index) => {
     const heading = headingLine(section);
     if (heading !== null) lines.push(heading);
     const included = includedLineCounts[index] ?? 0;
     lines.push(...section.bodyLines.slice(0, included));
     const remaining = section.bodyLines.length - included;
-    if (remaining > 0 || reserveEveryPointer) {
-      lines.push(sectionPointer(Math.max(remaining, 0), displayPath));
+    if (remaining <= 0 && !reserveEveryPointer) {
+      return;
     }
+    const pointerTarget = options.sectionDisplayPaths?.[index] ?? displayPath;
+    if (pointerTarget !== displayPath) {
+      if (remaining > 0) {
+        lines.push(sectionPointer(remaining, pointerTarget));
+      }
+      return;
+    }
+    documentRemainingLines += Math.max(remaining, 0);
   });
+  if (documentRemainingLines > 0) {
+    lines.push(documentPointer(documentRemainingLines, displayPath));
+  }
   return lines.join("\n");
 }
-function renderPersonaDocumentInjection(document, injectionTokenBudget, displayPath) {
+function fallbackPointerLines(sections, displayPath, options) {
+  const remainingByTarget = /* @__PURE__ */ new Map();
+  sections.forEach((section, index) => {
+    if (section.bodyLines.length === 0) {
+      return;
+    }
+    const target = options.sectionDisplayPaths?.[index] ?? displayPath;
+    remainingByTarget.set(
+      target,
+      (remainingByTarget.get(target) ?? 0) + section.bodyLines.length
+    );
+  });
+  const hasDistinctTarget = [...remainingByTarget.keys()].some(
+    (target) => target !== displayPath
+  );
+  if (!hasDistinctTarget) {
+    return [`\uFF08\u5185\u5BB9\u7701\u7565\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`];
+  }
+  return [...remainingByTarget].map(
+    ([target, remainingLines]) => documentPointer(remainingLines, target)
+  );
+}
+function renderPersonaDocumentInjection(document, injectionTokenBudget, displayPath, options = {}) {
   const sections = parseMarkdownSections(document);
   if (sections.length === 0) return "";
   const includedLineCounts = sections.map(() => 0);
@@ -5233,6 +5295,7 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
     sections,
     includedLineCounts,
     displayPath,
+    options,
     true
   );
   if (estimateDiaryTokens(skeleton) <= injectionTokenBudget) {
@@ -5243,7 +5306,8 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
         const candidate = renderSections(
           sections,
           includedLineCounts,
-          displayPath
+          displayPath,
+          options
         );
         if (estimateDiaryTokens(candidate) > injectionTokenBudget) {
           includedLineCounts[sectionIndex] = lineIndex;
@@ -5251,15 +5315,25 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
         }
       }
     }
-    return renderSections(sections, includedLineCounts, displayPath);
+    return renderSections(sections, includedLineCounts, displayPath, options);
   }
   const topLevelHeadings = sections.filter((section) => section.level === 1).map((section) => headingLine(section));
-  const documentPointer = `\uFF08\u5185\u5BB9\u7701\u7565\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
-  const headingFallback = [...topLevelHeadings, documentPointer].join("\n");
+  const fallbackPointers = fallbackPointerLines(
+    sections,
+    displayPath,
+    options
+  );
+  const headingFallback = [...topLevelHeadings, ...fallbackPointers].join("\n");
   if (estimateDiaryTokens(headingFallback) <= injectionTokenBudget) {
     return headingFallback;
   }
-  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}\uFF09`;
+  const distinctTargets = [
+    ...new Set(
+      (options.sectionDisplayPaths ?? []).filter((target) => Boolean(target)).filter((target) => target !== displayPath)
+    )
+  ];
+  const alternateTargets = distinctTargets.length > 0 ? `\uFF1B\u53E6\u89C1 ${distinctTargets.join("\u3001")}` : "";
+  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
 }
 function renderBoundedInjectionBlock(input) {
   for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
@@ -5276,26 +5350,46 @@ function renderBoundedInjectionBlock(input) {
   }
   return input.heading;
 }
-function renderSessionStartMemoryInjection(input) {
-  return {
-    profile: renderBoundedInjectionBlock({
-      heading: "## Persona",
-      document: input.userProfile,
-      displayPath: input.paths.userProfile,
-      tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
-    }),
-    experience: renderBoundedInjectionBlock({
-      heading: "## Experience",
-      document: input.experience,
-      displayPath: input.paths.experience,
-      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET
-    }),
-    diaryIndex: renderPersonaDocumentInjection(
-      sortDiaryIndexRecentFirst(input.diaryIndex),
-      DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-      input.paths.diaryIndex
-    )
-  };
+function renderSessionStartPersonaInjection(input) {
+  return renderBoundedInjectionBlock({
+    heading: "## Persona",
+    document: input.userProfile,
+    displayPath: input.path,
+    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET
+  });
+}
+function renderSessionStartDiaryIndex(input) {
+  return renderPersonaDocumentInjection(
+    sortDiaryIndexRecentFirst(input.diaryIndex),
+    DIARY_INDEX_INJECTION_TOKEN_BUDGET,
+    input.path
+  );
+}
+function renderSessionStartRecentSessionsInjection(input) {
+  const diaryIndex = renderSessionStartDiaryIndex({
+    diaryIndex: input.diaryIndex,
+    path: input.paths.diaryIndex
+  });
+  const separator = input.recentSessions.trim().length > 0 && diaryIndex ? "\n\n" : "";
+  const diaryTokens = estimateDiaryTokens(`${separator}${diaryIndex}`);
+  let recentBudget = Math.max(
+    0,
+    SESSION_INJECTION_TOKEN_BUDGET - diaryTokens
+  );
+  while (recentBudget >= 0) {
+    const recentSessions = input.recentSessions.trim().length > 0 ? renderBoundedInjectionBlock({
+      heading: "## Recent Sessions",
+      document: input.recentSessions,
+      displayPath: input.paths.recentSessions,
+      tokenBudget: recentBudget
+    }) : "";
+    const combined = `${recentSessions}${separator}${diaryIndex}`;
+    if (estimateDiaryTokens(combined) <= SESSION_INJECTION_TOKEN_BUDGET) {
+      return combined;
+    }
+    recentBudget -= 1;
+  }
+  return diaryIndex;
 }
 
 // src/db/session-run.ts
@@ -5325,34 +5419,23 @@ function hasNewTurnSinceSessionRunStart(db, sessionDbId) {
 
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
-async function appendDreamMemoryContext(hookSpecificOutput, memoryStore, fileStore) {
+function hasDocumentBody(document) {
+  return parseMarkdownSections(document).some(
+    (section) => section.bodyLines.some((line) => line.trim().length > 0)
+  );
+}
+async function readPersonaContext(memoryStore) {
   try {
-    const [memory, indexBytes] = await Promise.all([
-      memoryStore.readInjectionDocuments(),
-      fileStore.readIndex()
-    ]);
-    const diaryIndex = new TextDecoder("utf-8", { fatal: true }).decode(indexBytes);
-    const paths = {
-      userProfile: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "user-profile.md"),
-      experience: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "experience.md"),
-      diaryIndex: (0, import_node_path10.join)(memoryStore.dataRoot, "diary", "INDEX.md")
-    };
-    const rendered = renderSessionStartMemoryInjection({
-      ...memory,
-      diaryIndex,
-      paths
+    const memory = await memoryStore.readInjectionDocuments();
+    if (!hasDocumentBody(memory.userProfile)) {
+      return void 0;
+    }
+    return renderSessionStartPersonaInjection({
+      userProfile: memory.userProfile,
+      path: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "user-profile.md")
     });
-    return [
-      hookSpecificOutput,
-      "",
-      rendered.profile,
-      "",
-      rendered.experience,
-      "",
-      rendered.diaryIndex
-    ].join("\n");
   } catch {
-    return hookSpecificOutput;
+    return void 0;
   }
 }
 function splitInsight(insight) {
@@ -5368,6 +5451,11 @@ function buildHeader(db, primarySessionId) {
     `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
     "Axes: recall (content) \xB7 timeline (temporal) \xB7 mnemo-replay (raw)"
   ].join("\n");
+}
+function hasSessionRunStart(db, sessionId) {
+  return db.query(
+    "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?"
+  ).get(sessionId) !== null;
 }
 function resolvePrimarySessionRecord(db, input, recentSessions) {
   const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
@@ -5448,8 +5536,8 @@ function isHuskSession(session, sessionMetrics) {
   const turnCount = sessionMetrics.get(session.id)?.turnCount ?? 0;
   return untitled && turnCount === 0;
 }
-function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, primarySessionId) {
-  const others = recentSessions.filter((session) => session.id !== primarySessionId).filter((session) => !isHuskSession(session, sessionMetrics)).slice(0, 10);
+function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, currentSessionId) {
+  const others = recentSessions.filter((session) => session.id !== currentSessionId).filter((session) => !isHuskSession(session, sessionMetrics)).slice(0, 10);
   if (others.length === 0) {
     return [];
   }
@@ -5471,7 +5559,46 @@ function buildRecentSessionsOutput(db, recentSessions, sessionMetrics, primarySe
   }
   return lines;
 }
-function buildContextOutput(db, input, timelineRenderer) {
+async function readRecentContext(db, fileStore, input) {
+  try {
+    const recentSessions = getRecentSessions(db, {
+      project: input.cwd ?? void 0,
+      limit: 20
+    });
+    const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
+    const sessionMetrics = buildSessionMetricMap(
+      db,
+      recentSessions.map((session) => session.id)
+    );
+    const recentSessionDocument = buildRecentSessionsOutput(
+      db,
+      recentSessions,
+      sessionMetrics,
+      currentSession?.id
+    ).join("\n");
+    let diaryIndex = "";
+    if (fileStore) {
+      try {
+        diaryIndex = new TextDecoder("utf-8", { fatal: true }).decode(await fileStore.readIndex());
+      } catch {
+      }
+    }
+    if (recentSessionDocument.trim() === "" && !hasDocumentBody(diaryIndex)) {
+      return void 0;
+    }
+    return renderSessionStartRecentSessionsInjection({
+      recentSessions: recentSessionDocument,
+      diaryIndex,
+      paths: {
+        recentSessions: "recall()",
+        diaryIndex: fileStore?.dataRoot ? (0, import_node_path10.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
+      }
+    });
+  } catch {
+    return void 0;
+  }
+}
+function buildContextOutput(db, input) {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
       contentSessionId: input.sessionId,
@@ -5483,6 +5610,17 @@ function buildContextOutput(db, input, timelineRenderer) {
       updatedAtEpoch: null,
       completedAtEpoch: null
     });
+  }
+  const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
+  if (currentSession) {
+    recoverStrandedTurns(
+      db,
+      currentSession.id,
+      Math.floor(Date.now() / 1e3)
+    );
+  }
+  if (input.source !== "resume" && input.source !== "compact") {
+    return void 0;
   }
   const recentSessions = getRecentSessions(db, {
     project: input.cwd ?? void 0,
@@ -5496,13 +5634,6 @@ function buildContextOutput(db, input, timelineRenderer) {
   if (!primarySessionRecord) {
     return EMPTY_CONTEXT_FALLBACK;
   }
-  if (input.source === "resume" || input.source === "compact") {
-    recoverStrandedTurns(
-      db,
-      primarySessionRecord.id,
-      Math.floor(Date.now() / 1e3)
-    );
-  }
   const sessionIds = Array.from(
     /* @__PURE__ */ new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id])
   );
@@ -5512,43 +5643,61 @@ function buildContextOutput(db, input, timelineRenderer) {
     primarySessionRecord,
     sessionMetrics.get(primarySessionRecord.id)
   );
-  const recentSessionOutputs = buildRecentSessionsOutput(
-    db,
-    recentSessions,
-    sessionMetrics,
-    primarySessionRecord.id
-  );
   const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
-  const includeCurrentSession = input.source !== "startup" && primaryTurnCount > 0;
-  return [
-    buildHeader(db, input.sessionId ? primarySessionRecord.id : void 0),
-    "",
+  const includeCurrentSession = primaryTurnCount > 0;
+  const header = buildHeader(
+    db,
+    input.sessionId ? primarySessionRecord.id : void 0
+  );
+  const sessionDocument = [
     ...includeCurrentSession ? [
       "## Current Session",
       "",
-      renderCurrentSessionOutput(
-        db,
+      renderCurrentSessionStateOutput(
         primarySession,
-        primarySessionRecord,
-        timelineRenderer
+        primarySessionRecord
       ),
       ""
-    ] : [],
-    "## Recent Sessions",
-    "",
-    ...recentSessionOutputs
+    ] : []
   ].join("\n");
+  const boundedSessionDocument = sessionDocument ? renderPersonaDocumentInjection(
+    sessionDocument,
+    SESSION_INJECTION_TOKEN_BUDGET,
+    `recall(id="S${primarySessionRecord.id}")`
+  ) : "";
+  return boundedSessionDocument ? [header, "", boundedSessionDocument].join("\n") : header;
 }
-function createContextHandler(dependencies) {
-  return async function handleContextHook(input) {
-    let hookSpecificOutput = buildContextOutput(
+function createReadOnlyContextHandler(dependencies, section) {
+  return async function handleReadOnlyContextHook(_input) {
+    if (section === "persona") {
+      if (!dependencies.memoryStore) {
+        return { continue: true };
+      }
+      const hookSpecificOutput2 = await readPersonaContext(
+        dependencies.memoryStore
+      );
+      return hookSpecificOutput2 ? { continue: true, hookSpecificOutput: hookSpecificOutput2 } : { continue: true };
+    }
+    if (!dependencies.db) {
+      return { continue: true };
+    }
+    const hookSpecificOutput = await readRecentContext(
       dependencies.db,
-      input,
-      dependencies.timelineRenderer
+      dependencies.fileStore,
+      _input
     );
-    if (input.sessionId && input.source !== "compact") {
+    return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
+  };
+}
+function createContextHandler(dependencies, section = "sessions") {
+  if (section !== "sessions") {
+    return createReadOnlyContextHandler(dependencies, section);
+  }
+  return async function handleContextHook(input) {
+    const hookSpecificOutput = buildContextOutput(dependencies.db, input);
+    if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
-      if (session) {
+      if (session && (input.source !== "compact" || !hasSessionRunStart(dependencies.db, session.id))) {
         markSessionRunStart(dependencies.db, session.id);
       }
     }
@@ -5576,17 +5725,7 @@ function createContextHandler(dependencies) {
       }
     } catch {
     }
-    if (dependencies.fileStore && dependencies.memoryStore) {
-      hookSpecificOutput = await appendDreamMemoryContext(
-        hookSpecificOutput,
-        dependencies.memoryStore,
-        dependencies.fileStore
-      );
-    }
-    return {
-      continue: true,
-      hookSpecificOutput
-    };
+    return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
   };
 }
 
@@ -6125,8 +6264,238 @@ function createPostToolUseHandler(dependencies) {
   };
 }
 
+// src/hooks/milestone-injection.ts
+var MILESTONE_INJECTION_TOKEN_BUDGET = 2e3;
+var FULL_PROMPT_CAP = 80;
+var REDUCED_PROMPT_CAP = 50;
+var defaultRenderer = {
+  renderTimeline
+};
+function overflowPointer(sessionId) {
+  return `\uFF08\u66F4\u591A\u91CC\u7A0B\u7891\u89C1 timeline(id="S${sessionId}")\uFF09`;
+}
+function stripShapeSignals(output) {
+  const lines = output.split("\n");
+  const kept = [];
+  let insideShapeSignals = false;
+  for (const line of lines) {
+    if (line.startsWith("  shape signals (")) {
+      if (kept.at(-1) === "") {
+        kept.pop();
+      }
+      insideShapeSignals = true;
+      continue;
+    }
+    if (insideShapeSignals && line.startsWith("    - ")) {
+      continue;
+    }
+    if (insideShapeSignals) {
+      insideShapeSignals = false;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").trimEnd();
+}
+function stripCasualtyRows(output) {
+  return output.split("\n").filter((line) => !/^\s*↳\s/.test(line)).join("\n").trimEnd();
+}
+function truncateMilestoneLabels(output, promptCap) {
+  return output.split("\n").map((line) => {
+    const match = line.match(
+      /^(\s+(?:(?:🚫|↩️|🏁)\s+)?T\d+\s+\S+\s+)(.+)$/
+    );
+    if (!match) {
+      return line;
+    }
+    return `${match[1]}${truncateText2(match[2], promptCap)}`;
+  }).join("\n");
+}
+function appendOverflowPointer(output, sessionId) {
+  const core = output.trimEnd();
+  const pointer = overflowPointer(sessionId);
+  return core ? `${core}
+
+${pointer}` : pointer;
+}
+function evenlySpacedMilestones(milestones, count) {
+  if (count <= 0 || milestones.length === 0) {
+    return [];
+  }
+  if (count >= milestones.length) {
+    return [...milestones];
+  }
+  if (count === 1) {
+    return [milestones[0]];
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const sourceIndex = Math.round(
+      index * (milestones.length - 1) / (count - 1)
+    );
+    return milestones[sourceIndex];
+  });
+}
+function withMilestoneCount(view, count) {
+  const pagedMilestones = evenlySpacedMilestones(
+    view.pagedMilestones,
+    count
+  );
+  const retained = new Set(pagedMilestones);
+  const milestoneDayGroups = view.milestoneDayGroups.map((group) => {
+    const rows = group.rows.filter((milestone) => retained.has(milestone));
+    const prompts = rows.map((milestone) => milestone.turn.promptNumber);
+    return {
+      ...group,
+      rows,
+      keptCount: rows.length,
+      promptLo: Math.min(...prompts),
+      promptHi: Math.max(...prompts)
+    };
+  }).filter((group) => group.rows.length > 0);
+  return {
+    ...view,
+    pagedMilestones,
+    milestoneDayGroups
+  };
+}
+function renderCandidate(view, renderer, options) {
+  let output = renderer.renderTimeline(view, {
+    promptCap: options.promptCap,
+    showEarlierHint: false
+  });
+  output = truncateMilestoneLabels(output, options.promptCap);
+  if (!options.includeShapeSignals) {
+    output = stripShapeSignals(output);
+  }
+  if (!options.includeCasualtyRows) {
+    output = stripCasualtyRows(output);
+  }
+  return options.includeOverflowPointer ? appendOverflowPointer(output, view.session.id) : output;
+}
+function renderMilestoneInjection(view, options = {}) {
+  const renderer = options.renderer ?? defaultRenderer;
+  const tokenBudget = options.tokenBudget ?? MILESTONE_INJECTION_TOKEN_BUDGET;
+  const stages = [
+    {
+      promptCap: FULL_PROMPT_CAP,
+      includeShapeSignals: true,
+      includeCasualtyRows: true,
+      includeOverflowPointer: false
+    },
+    {
+      promptCap: FULL_PROMPT_CAP,
+      includeShapeSignals: false,
+      includeCasualtyRows: true,
+      includeOverflowPointer: true
+    },
+    {
+      promptCap: FULL_PROMPT_CAP,
+      includeShapeSignals: false,
+      includeCasualtyRows: false,
+      includeOverflowPointer: true
+    },
+    {
+      promptCap: REDUCED_PROMPT_CAP,
+      includeShapeSignals: false,
+      includeCasualtyRows: false,
+      includeOverflowPointer: true
+    }
+  ];
+  for (const stage of stages) {
+    const candidate = renderCandidate(view, renderer, stage);
+    if (estimateDiaryTokens(candidate) <= tokenBudget) {
+      return candidate;
+    }
+  }
+  for (let count = view.pagedMilestones.length - 1; count >= 0; count -= 1) {
+    const candidate = renderCandidate(
+      withMilestoneCount(view, count),
+      renderer,
+      stages[3]
+    );
+    if (estimateDiaryTokens(candidate) <= tokenBudget) {
+      return candidate;
+    }
+  }
+  const pointer = overflowPointer(view.session.id);
+  return estimateDiaryTokens(pointer) <= tokenBudget ? pointer : "";
+}
+function renderSessionMilestoneInjection(db, sessionId, options = {}) {
+  const view = buildTimelineView(db, {
+    id: `S${sessionId}`,
+    view: "milestones",
+    pageSize: Number.MAX_SAFE_INTEGER
+  });
+  return renderMilestoneInjection(view, options);
+}
+
+// src/hooks/handlers/context-milestones.ts
+function sessionHasTurns(db, sessionId) {
+  return db.query(
+    "SELECT 1 AS present FROM turns WHERE session_id = ? LIMIT 1"
+  ).get(sessionId) !== null;
+}
+function createMilestoneContextHandler(dependencies) {
+  return async function handleMilestoneContextHook(input) {
+    if (!input.sessionId || input.source !== "resume" && input.source !== "compact") {
+      return { continue: true };
+    }
+    try {
+      const session = getSessionByContentId(dependencies.db, input.sessionId);
+      if (!session || !sessionHasTurns(dependencies.db, session.id)) {
+        return { continue: true };
+      }
+      const hookSpecificOutput = (dependencies.renderMilestoneInjection ?? renderSessionMilestoneInjection)(dependencies.db, session.id);
+      return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
+    } catch {
+      return { continue: true };
+    }
+  };
+}
+
+// src/db/orphan-turns.ts
+function getOrphanTurns(db, sessionDbId, beforeTurnId) {
+  return db.query(
+    `
+        SELECT
+          t.id,
+          t.prompt_number AS promptNumber
+        FROM turns t
+        WHERE t.session_id = ?
+          AND t.status = 'active'
+          AND t.id < ?
+          AND t.assistant_response IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM pending_queue q
+            WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+          )
+        ORDER BY t.prompt_number ASC
+      `
+  ).all(sessionDbId, beforeTurnId ?? Number.MAX_SAFE_INTEGER);
+}
+function enqueueOrphanTurnStops(db, sessionDbId, nowEpoch, orphans) {
+  for (const orphan of orphans) {
+    db.query(
+      `
+        UPDATE turns
+        SET updated_at_epoch = ?
+        WHERE id = ?
+      `
+    ).run(nowEpoch, orphan.id);
+    enqueueQueueItem(db, {
+      kind: "turn-stop",
+      targetId: orphan.id,
+      sessionDbId,
+      enqueuedAtEpoch: nowEpoch
+    });
+  }
+  return orphans.length;
+}
+
 // src/hooks/handlers/session-end.ts
 function createSessionEndHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   return async function handleSessionEndHook(input) {
     if (!input.sessionId) {
       return { continue: true };
@@ -6137,6 +6506,17 @@ function createSessionEndHandler(dependencies) {
     }
     if (!hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
       return { continue: true };
+    }
+    const orphanTurns = getOrphanTurns(dependencies.db, session.id);
+    if (orphanTurns.length > 0) {
+      writeTransaction(dependencies.db, () => {
+        enqueueOrphanTurnStops(
+          dependencies.db,
+          session.id,
+          now(),
+          orphanTurns
+        );
+      });
     }
     return {
       continue: true,
@@ -6779,27 +7159,6 @@ function getLatestTurn(db, sessionDbId) {
   ).get(sessionDbId);
   return row ?? null;
 }
-function getOrphanTurns(db, sessionDbId, currentTurnId) {
-  return db.query(
-    `
-        SELECT
-          t.id,
-          t.prompt_number AS promptNumber,
-          t.user_prompt AS userPrompt
-        FROM turns t
-        WHERE t.session_id = ?
-          AND t.status = 'active'
-          AND t.id < ?
-          AND t.assistant_response IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM pending_queue q
-            WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-          )
-        ORDER BY t.prompt_number ASC
-      `
-  ).all(sessionDbId, currentTurnId);
-}
 function hasTurnStopTask(db, turnId) {
   return db.query(
     `
@@ -6865,21 +7224,7 @@ function createStopHandler(dependencies) {
         epoch
       );
       recoverStrandedAncestors(dependencies.db, session.id, epoch);
-      for (const orphanTurn of orphanTurns) {
-        dependencies.db.query(
-          `
-              UPDATE turns
-              SET updated_at_epoch = ?
-              WHERE id = ?
-            `
-        ).run(epoch, orphanTurn.id);
-        enqueueQueueItem(dependencies.db, {
-          kind: "turn-stop",
-          targetId: orphanTurn.id,
-          sessionDbId: session.id,
-          enqueuedAtEpoch: epoch
-        });
-      }
+      enqueueOrphanTurnStops(dependencies.db, session.id, epoch, orphanTurns);
       dependencies.db.query(
         `
             UPDATE turns
@@ -6937,7 +7282,24 @@ function createStopHandler(dependencies) {
 
 // src/hooks/hook-command.ts
 var defaultHandlers;
+var defaultReadOnlyContextHandlers;
+var defaultRecentContextHandler;
+var defaultMilestoneContextHandler;
 var HOOK_DB_BUSY_TIMEOUT_MS = 800;
+function createDefaultReadOnlyContextHandlers({
+  dataRoot = DATA_DIR
+} = {}) {
+  const memoryStore = new DreamMemoryStore(dataRoot);
+  const readOnlyDependencies = {
+    memoryStore
+  };
+  return {
+    "SessionStart:persona": createReadOnlyContextHandler(
+      readOnlyDependencies,
+      "persona"
+    )
+  };
+}
 function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
@@ -6947,20 +7309,25 @@ function createDefaultHookHandlers({
   const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
   const dreamStore = new DreamMemoryStore(dataRoot);
+  const contextDependencies = {
+    db,
+    diaryStateStore,
+    nowEpoch,
+    dreamSchedule: {
+      hour: config.dreamAgentHour,
+      timeZone: config.dreamAgentTimeZone,
+      backlogLimit: config.dreamAgentBacklogLimit
+    },
+    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate()
+  };
   return {
-    SessionStart: createContextHandler({
-      db,
-      diaryStateStore,
-      fileStore,
-      memoryStore: dreamStore,
-      nowEpoch,
-      dreamSchedule: {
-        hour: config.dreamAgentHour,
-        timeZone: config.dreamAgentTimeZone,
-        backlogLimit: config.dreamAgentBacklogLimit
-      },
-      readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate()
-    }),
+    ...createDefaultReadOnlyContextHandlers({ dataRoot }),
+    "SessionStart:recent": createReadOnlyContextHandler(
+      { db, fileStore },
+      "recent"
+    ),
+    "SessionStart:milestones": createMilestoneContextHandler({ db }),
+    SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
     PostCompact: createPostCompactHandler({ db }),
@@ -6977,6 +7344,59 @@ function getDefaultHandlers() {
   initializeDatabase(db);
   defaultHandlers = createDefaultHookHandlers({ db });
   return defaultHandlers;
+}
+function getDefaultReadOnlyContextHandlers() {
+  if (!defaultReadOnlyContextHandlers) {
+    defaultReadOnlyContextHandlers = createDefaultReadOnlyContextHandlers();
+  }
+  return defaultReadOnlyContextHandlers;
+}
+function getDefaultRecentContextHandler() {
+  if (defaultRecentContextHandler) {
+    return defaultRecentContextHandler;
+  }
+  const databasePath = resolveDatabasePath();
+  if (!(0, import_node_fs6.existsSync)(databasePath)) {
+    defaultRecentContextHandler = async () => ({ continue: true });
+    return defaultRecentContextHandler;
+  }
+  const db = new import_bun_sqlite2.Database(databasePath, {
+    readonly: true,
+    create: false
+  });
+  defaultRecentContextHandler = createReadOnlyContextHandler(
+    { db, fileStore: new DiaryFileStore(DATA_DIR) },
+    "recent"
+  );
+  return defaultRecentContextHandler;
+}
+function getDefaultMilestoneContextHandler() {
+  if (defaultMilestoneContextHandler) {
+    return defaultMilestoneContextHandler;
+  }
+  const databasePath = resolveDatabasePath();
+  if (!(0, import_node_fs6.existsSync)(databasePath)) {
+    defaultMilestoneContextHandler = async () => ({ continue: true });
+    return defaultMilestoneContextHandler;
+  }
+  const db = new import_bun_sqlite2.Database(databasePath, {
+    readonly: true,
+    create: false
+  });
+  defaultMilestoneContextHandler = createMilestoneContextHandler({ db });
+  return defaultMilestoneContextHandler;
+}
+function getDefaultHandler(handlerKey) {
+  if (handlerKey === "SessionStart:recent") {
+    return getDefaultRecentContextHandler();
+  }
+  if (handlerKey === "SessionStart:milestones") {
+    return getDefaultMilestoneContextHandler();
+  }
+  if (handlerKey === "SessionStart:persona") {
+    return getDefaultReadOnlyContextHandlers()[handlerKey];
+  }
+  return getDefaultHandlers()[handlerKey];
 }
 function readJsonFromStdin() {
   const input = (0, import_node_fs6.readFileSync)(0, "utf8").trim();
@@ -7004,6 +7424,12 @@ function eventNameFromCommandArgument(arg) {
     default:
       return void 0;
   }
+}
+function contextSectionFromCommandArguments(command, section) {
+  if (command !== "context") {
+    return "sessions";
+  }
+  return section === "persona" || section === "recent" || section === "milestones" ? section : "sessions";
 }
 function writeHookResult(result, stdout = process.stdout) {
   const output = {
@@ -7039,7 +7465,9 @@ async function runHookCommand(dependencies = {}) {
       rawInput.event_name = eventNameOverride;
     }
     const normalizedInput = normalizeInput(rawInput);
-    const handler = (dependencies.handlers ?? getDefaultHandlers())[normalizedInput.eventName];
+    const contextSection = contextSectionFromCommandArguments(argv[2], argv[3]);
+    const handlerKey = normalizedInput.eventName === "SessionStart" && contextSection !== "sessions" ? `SessionStart:${contextSection}` : normalizedInput.eventName;
+    const handler = dependencies.handlers ? dependencies.handlers[handlerKey] : getDefaultHandler(handlerKey);
     if (!handler) {
       return HOOK_SUCCESS_EXIT_CODE;
     }

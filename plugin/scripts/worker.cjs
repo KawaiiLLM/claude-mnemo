@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.5.0-mroqh76w" : "dev";
+var BUILD_ID = true ? "0.6.0-mrp4p398" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1470,6 +1470,7 @@ var TURN_SELECT = `
     content,
     insight,
     type,
+    significance_grade AS significanceGrade,
     tags,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -1548,6 +1549,7 @@ function updateTurnById(db, turnId, input) {
             content = ?,
             insight = ?,
             type = ?,
+            significance_grade = ?,
             transcript_line_start = ?,
             tags = ?,
             files_read = ?,
@@ -1570,6 +1572,7 @@ function updateTurnById(db, turnId, input) {
             content,
             insight,
             type,
+            significance_grade AS significanceGrade,
             transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
@@ -1587,6 +1590,7 @@ function updateTurnById(db, turnId, input) {
       input.content ?? existing.content,
       input.insight ?? existing.insight,
       input.type ?? existing.type,
+      input.significanceGrade ?? existing.significanceGrade,
       input.transcriptLineStart ?? existing.transcriptLineStart,
       stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
@@ -2057,6 +2061,9 @@ var SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     type TEXT,
+    significance_grade INTEGER CHECK (
+      significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+    ),
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -2142,6 +2149,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -2202,6 +2210,16 @@ function ensureTurnInvalidationColumns(db) {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureTurnSignificanceGradeColumn(db) {
+  if (hasColumn(db, "turns", "significance_grade")) {
+    return;
+  }
+  db.exec(
+    `ALTER TABLE turns
+     ADD COLUMN significance_grade INTEGER
+     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
+  );
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -3146,6 +3164,37 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
 </obs>`;
 }
 var STALE_TURN_THRESHOLD = 10;
+function buildTurnSignificanceCalibration(db, sessionId, promptNumber) {
+  if (promptNumber <= 0 || promptNumber % 10 !== 0) {
+    return "";
+  }
+  const rows = db.query(
+    `SELECT significance_grade AS grade, COUNT(*) AS count
+       FROM (
+         SELECT significance_grade
+         FROM turns
+         WHERE session_id = ? AND prompt_number < ?
+         ORDER BY prompt_number DESC
+         LIMIT 100
+       )
+       GROUP BY significance_grade`
+  ).all(sessionId, promptNumber);
+  const counts = [0, 0, 0, 0, 0];
+  let ungraded = 0;
+  for (const row of rows) {
+    if (row.grade === null) {
+      ungraded += row.count;
+    } else if (row.grade >= 0 && row.grade <= 4) {
+      counts[row.grade] = row.count;
+    }
+  }
+  const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
+  return `<significance-calibration window="previous 100 turns">
+Recent distribution (${total} turns): grade 4=${counts[4]}, grade 3=${counts[3]}, grade 2=${counts[2]}, grade 1=${counts[1]}, grade 0=${counts[0]}, ungraded=${ungraded}.
+Reference baseline (calibration only, not a quota): grade 4 <2%, grade 3 \u22488%, grade 2 \u224825%, grade 1 \u224845%, grade 0 \u224820%.
+Session distributions vary. Use this only to notice drift; never change a grade to match the baseline.
+</significance-calibration>`;
+}
 function buildBatchPrompt(args) {
   const isStale = (args.staleTurns ?? 0) >= STALE_TURN_THRESHOLD;
   const staleAttr = isStale ? ` stale_turns="${args.staleTurns}"` : "";
@@ -3165,6 +3214,9 @@ Session summary was refreshed since your last message.
 ${renderPriorSession(prior)}
 </prior_session>
 ` : "";
+  const significanceCalibrationBlock = args.significanceCalibration ? `
+${args.significanceCalibration}
+` : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
   const titleLine = args.sessionTitle ? `
   title: ${args.sessionTitle}` : "";
@@ -3174,7 +3226,7 @@ ${wrapSourcePrompt(truncateMiddle(args.currentPrompt, 200)).split("\n").map((l) 
   return `<session id="S${args.sessionId}"${staleAttr}>
   project: ${args.project}${titleLine}${promptLine}
 </session>
-${noticeBlock}${priorSessionBlock}
+${noticeBlock}${priorSessionBlock}${significanceCalibrationBlock}
 <batch>
 ${body}
 </batch>`;
@@ -3283,14 +3335,16 @@ remember({ id: "S${sessionId}", title, content, decision, done, current, next_st
 
 Fields:
 - title: 20-50 chars, one line
-- content: 100-300 chars, what the session is about (browsing synopsis)
-- decision: a markdown bullet list \u2014 one "- " item per line, each a key decision and WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. \u22646 bullets. On refresh, append a new bullet (or tighten an existing one); keep prior bullets and their [T<n>] markers.
-- done: a markdown bullet list \u2014 one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
+- content: 100-300 chars, a one-sentence arc overview of what the session is doing
+- decision: a markdown bullet list \u2014 one "- " item per line, only decisions that still govern current or next work, with WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. \u22646 bullets. Tighten, replace, or remove obsolete decisions on refresh.
+- done: a markdown bullet list \u2014 one "- " item per line, only recent fine-grained completions useful to next work. Cite the completion turn inline as [T<n>]. \u22646 bullets. Remove historical achievements and finished bookkeeping.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
 - reference: a markdown bullet list \u2014 one "- " item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md \u2014 indexed by MEMORY.md). \u22648 bullets; evict the least-durable / already-superseded first. Empty string if none.
 
 decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference \u2014 those belong in turn records \u2014 and reference follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do NOT record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+
+Safe to prune: the milestone timeline is independent and owns historical achievements and completed decisions. Removing them from this state summary does not delete turn records or milestone candidates, so do not preserve history here out of caution.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;
@@ -38081,6 +38135,11 @@ var workerRecallInputShape = {
 };
 var rememberInputShape = {
   id: external_exports.string().optional(),
+  grade: external_exports.number().int().min(0).max(4).optional(),
+  regrade: external_exports.object({
+    id: external_exports.string(),
+    grade: external_exports.number().int().min(0).max(4)
+  }).strict().optional(),
   type: external_exports.string().optional(),
   title: external_exports.string().optional(),
   content: external_exports.string().optional(),
@@ -39458,244 +39517,49 @@ function recallMemory(db, input) {
   );
 }
 
-// src/mcp/remember.ts
-var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
-var OBSERVATION_REMEMBER_STATUSES = [
-  "pending",
-  "extracted",
-  "skipped"
-];
-var SESSION_SUMMARY_KEYS = [
-  "title",
-  "content",
-  "decision",
-  "done",
-  "current",
-  "next_steps",
-  "reference"
-];
-var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
-function decodeHtmlEntities(value) {
-  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
+// src/diary/domain.ts
+var import_node_crypto = require("node:crypto");
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+function encodeSource(value) {
+  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
 }
-function decodeRememberInput(input) {
-  const decoded = { ...input };
-  for (const key of [
-    "id",
-    "type",
-    "title",
-    "content",
-    "insight",
-    "next_steps",
-    "decision",
-    "done",
-    "current",
-    "reference"
-  ]) {
-    const value = decoded[key];
-    if (typeof value === "string") {
-      decoded[key] = decodeHtmlEntities(value);
-    }
-  }
-  if (decoded.tags) {
-    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
-  }
-  return decoded;
+function truncateDiaryResponse(value) {
+  return Array.from(value).slice(0, 2e3).join("");
 }
-function textResult(text) {
-  return {
-    content: [{ type: "text", text }]
-  };
-}
-function parameterError(message) {
-  return textResult(`Parameter error: ${message}`);
-}
-function isRememberSuccess(result) {
-  const text = result.content?.[0]?.text ?? "";
-  return text.startsWith("Updated ");
-}
-function parseSessionId(value) {
-  const match = /^S(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseTurnId(value) {
-  const match = /^T(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseObservationId(value) {
-  const match = /^O(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function bracketBareTurnReferences(content, isValidPredecessor) {
-  if (!content) {
-    return content;
-  }
-  return content.replace(
-    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
-    (match, lead, digits) => {
-      const id = Number.parseInt(digits, 10);
-      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
-        return match;
-      }
-      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
-      const prefix = needsSpace ? `${lead} ` : lead;
-      return `${prefix}[T${id}]`;
-    }
+function computeDiaryWatermark(material) {
+  if (material.length === 0) return "empty";
+  const turnHashes = [...material].sort((left, right) => left.turnId - right.turnId).map(
+    (turn) => (0, import_node_crypto.createHash)("sha256").update(
+      [
+        turn.userPrompt ?? "",
+        truncateDiaryResponse(turn.assistantResponse ?? ""),
+        turn.title ?? "",
+        turn.content ?? "",
+        turn.insight ?? "",
+        turn.status
+      ].join("\0")
+    ).digest("hex")
   );
+  return (0, import_node_crypto.createHash)("sha256").update(turnHashes.join("\0")).digest("hex").slice(0, 16);
 }
-function validateStatusForRoute(status, allowedStatuses, routeLabel) {
-  if (status === void 0) {
-    return null;
-  }
-  if (allowedStatuses === null) {
-    return `${routeLabel} does not accept a status field.`;
-  }
-  if (!allowedStatuses.includes(status)) {
-    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
-    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
-  }
-  return null;
-}
-function deriveTurnStatus(input) {
-  if (input.status === "undone") {
-    return "undone";
-  }
-  if (input.status === "skipped") {
-    return "skipped";
-  }
-  if (input.status === "active") {
-    return "active";
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveObservationStatus(input) {
-  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
-    return input.status;
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveTurnStatusForUpdate(current, input) {
-  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
-    return void 0;
-  }
-  return deriveTurnStatus(input);
-}
-function handleTurnRemember(db, turnId, input) {
-  const statusError = validateStatusForRoute(
-    input.status,
-    TURN_REMEMBER_STATUSES,
-    "turn remember"
-  );
-  if (statusError) {
-    return parameterError(statusError);
-  }
-  const current = getTurnById(db, turnId);
-  const isValidPredecessor = (candidateId) => {
-    if (!current || candidateId === turnId) {
-      return false;
-    }
-    const cited = getTurnById(db, candidateId);
-    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
-  };
-  const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatusForUpdate(current, input),
-    title: input.title ?? null,
-    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
-    insight: input.insight ?? null,
-    type: input.type ?? null,
-    tags: input.tags ?? [],
-    updatedAtEpoch: Math.floor(Date.now() / 1e3)
+var MALFORMED_PRIVATE_CONTENT = "[redacted: malformed private content]";
+function stripDiaryPrivateContent(text) {
+  let privateBlockCount = 0;
+  const stripped = text.replace(/<private>[\s\S]*?<\/private>/g, () => {
+    privateBlockCount += 1;
+    return "";
   });
-  if (!turn) {
-    return textResult(`Turn T${turnId} not found.`);
+  if (privateBlockCount > 100 || stripped.includes("<private>") || stripped.includes("</private>")) {
+    return MALFORMED_PRIVATE_CONTENT;
   }
-  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
+  return stripped;
 }
-function handleObservationRemember(db, observationId, input) {
-  const statusError = validateStatusForRoute(
-    input.status,
-    OBSERVATION_REMEMBER_STATUSES,
-    "observation remember"
-  );
-  if (statusError) {
-    return parameterError(statusError);
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
   }
-  if (input.type !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
-    return parameterError(
-      "observation remember only accepts title, content, and status."
-    );
-  }
-  const observation = updateObservation(db, observationId, {
-    title: input.title,
-    content: input.content,
-    status: deriveObservationStatus(input)
-  });
-  if (!observation) {
-    return textResult(`Observation O${observationId} not found.`);
-  }
-  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
-}
-function handleSessionRemember(db, sessionId, input) {
-  const statusError = validateStatusForRoute(input.status, null, "session remember");
-  if (statusError) {
-    return parameterError(statusError);
-  }
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
-  if (missing.length > 0) {
-    return parameterError(
-      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
-        ", "
-      )}). Missing: ${missing.join(", ")}.`
-    );
-  }
-  const updated = updateSessionSummaryRewrite(
-    db,
-    sessionId,
-    {
-      title: input.title ?? "",
-      content: input.content ?? "",
-      decision: input.decision ?? "",
-      done: input.done ?? "",
-      current: input.current ?? "",
-      nextSteps: input.next_steps ?? "",
-      reference: input.reference ?? ""
-    },
-    Math.floor(Date.now() / 1e3)
-  );
-  if (!updated) {
-    return textResult(`Session ${sessionId} not found.`);
-  }
-  return textResult(`Updated session ${sessionId}.`);
-}
-function rememberTool(db, rawInput) {
-  const input = decodeRememberInput(rawInput);
-  if (!input.id) {
-    return parameterError(
-      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
-    );
-  }
-  const observationId = parseObservationId(input.id);
-  if (observationId !== null) {
-    return handleObservationRemember(db, observationId, input);
-  }
-  const turnId = parseTurnId(input.id);
-  if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input);
-  }
-  const sessionId = parseSessionId(input.id);
-  if (sessionId !== null) {
-    return handleSessionRemember(db, sessionId, input);
-  }
-  if (/^M\d+$/i.test(input.id)) {
-    return parameterError(
-      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
-    );
-  }
-  return textResult(`Unsupported id selector: ${input.id}`);
+  return Math.ceil(weightedCodePoints * 1.2);
 }
 
 // src/mcp/timeline.ts
@@ -40008,6 +39872,13 @@ var MILESTONE_BASE_SCORE = {
   change: 1,
   discovery: 1
 };
+var MILESTONE_GRADE_BASE_SCORE = {
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4
+};
 var MILESTONE_POOL_MIN_SCORE = 2;
 var MILESTONE_INSIGHT_WEIGHT = 2;
 var MILESTONE_PURE_SPEC_WEIGHT = 3;
@@ -40031,6 +39902,9 @@ var MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
 var MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
 var MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
 function milestoneBaseScore(turn) {
+  if (turn.significanceGrade !== null && turn.significanceGrade !== void 0) {
+    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+  }
   const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
   if ((turn.type === "feature" || turn.type === "refactor" || turn.type === "change") && turn.filesModified.length === 0) {
     return 0;
@@ -41213,6 +41087,438 @@ function timelineQuery(db, input) {
   }
 }
 
+// src/mcp/session-output.ts
+var defaultTimelineRenderer = {
+  buildContextTimelineView,
+  renderTimeline
+};
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints(value, max) {
+  if (!value) {
+    return value;
+  }
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
+  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const lines = [
+    `[S${input.id}] ${title}`
+  ];
+  const pushField = (label, value, cap) => {
+    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    if (rendered) {
+      lines.push(`  ${label}: ${rendered}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  pushField("content", input.content, 400);
+  pushField("current", input.current, 400);
+  pushField("next", input.nextSteps, 200);
+  if (!includeHistoricalFields) {
+    return lines;
+  }
+  if (input.decision) {
+    pushBulletField("decision", input.decision);
+  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of input.legacyInsight ?? []) {
+      lines.push(`    - ${item}`);
+    }
+  }
+  pushBulletField("done", input.done);
+  pushBulletField("reference", input.reference);
+  return lines;
+}
+function renderSessionStateOutput(input) {
+  return buildSessionStateLines(input).join("\n");
+}
+function measureSessionStateTokens(input) {
+  const fieldTokens = (label, value, bullet = false) => {
+    if (!value) {
+      return 0;
+    }
+    const rendered = bullet ? [`  ${label}:`, ...splitBulletField(value).map((item) => `    - ${item}`)].join("\n") : `  ${label}: ${value}`;
+    return estimateDiaryTokens(rendered);
+  };
+  const full = renderSessionStateOutput(input);
+  return {
+    title: estimateDiaryTokens(
+      `[S${input.id}] ${input.title ?? "(untitled session)"}`
+    ),
+    content: fieldTokens("content", input.content),
+    current: fieldTokens("current", input.current),
+    nextSteps: fieldTokens("next", input.nextSteps),
+    decision: fieldTokens("decision", input.decision, true),
+    done: fieldTokens("done", input.done, true),
+    reference: fieldTokens("reference", input.reference, true),
+    total: estimateDiaryTokens(full)
+  };
+}
+function renderCurrentSessionOutput(db, session, sessionRecord, timelineRenderer = defaultTimelineRenderer) {
+  const lines = [
+    `[S${session.id}] ${session.title ?? "(untitled session)"}`
+  ];
+  const pushField = (label, value) => {
+    if (value) {
+      lines.push(`  ${label}: ${value}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  pushField("content", session.content);
+  if (session.decision) {
+    pushBulletField("decision", session.decision);
+  } else if ((session.insight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of session.insight ?? []) {
+      lines.push(`    - ${item}`);
+    }
+  }
+  pushBulletField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushBulletField("reference", session.reference);
+  try {
+    const timelineView = timelineRenderer.buildContextTimelineView(
+      db,
+      sessionRecord.id,
+      "milestones"
+    );
+    lines.push("");
+    lines.push(
+      timelineRenderer.renderTimeline(timelineView, {
+        promptCap: 80,
+        showEarlierHint: true
+      })
+    );
+  } catch {
+  }
+  return lines.join("\n");
+}
+
+// src/mcp/remember.ts
+var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
+var OBSERVATION_REMEMBER_STATUSES = [
+  "pending",
+  "extracted",
+  "skipped"
+];
+var SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference"
+];
+var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
+function decodeHtmlEntities(value) {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
+}
+function decodeRememberInput(input) {
+  const decoded = { ...input };
+  for (const key of [
+    "id",
+    "type",
+    "title",
+    "content",
+    "insight",
+    "next_steps",
+    "decision",
+    "done",
+    "current",
+    "reference"
+  ]) {
+    const value = decoded[key];
+    if (typeof value === "string") {
+      decoded[key] = decodeHtmlEntities(value);
+    }
+  }
+  if (decoded.tags) {
+    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
+  }
+  return decoded;
+}
+function textResult(text) {
+  return {
+    content: [{ type: "text", text }]
+  };
+}
+function parameterError(message) {
+  return textResult(`Parameter error: ${message}`);
+}
+function isRememberSuccess(result) {
+  const text = result.content?.[0]?.text ?? "";
+  return text.startsWith("Updated ");
+}
+function parseSessionId(value) {
+  const match = /^S(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseTurnId(value) {
+  const match = /^T(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseObservationId(value) {
+  const match = /^O(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function bracketBareTurnReferences(content, isValidPredecessor) {
+  if (!content) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match, lead, digits) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
+        return match;
+      }
+      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    }
+  );
+}
+function validateStatusForRoute(status, allowedStatuses, routeLabel) {
+  if (status === void 0) {
+    return null;
+  }
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
+  }
+  return null;
+}
+function validateGrade(value, label) {
+  if (value === void 0) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 4) {
+    return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+function deriveTurnStatus(input) {
+  if (input.status === "undone") {
+    return "undone";
+  }
+  if (input.status === "skipped") {
+    return "skipped";
+  }
+  if (input.status === "active") {
+    return "active";
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveObservationStatus(input) {
+  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
+    return input.status;
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveTurnStatusForUpdate(current, input) {
+  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
+    return void 0;
+  }
+  return deriveTurnStatus(input);
+}
+function handleTurnRemember(db, turnId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+  const gradeError = validateGrade(input.grade, "grade");
+  if (gradeError) {
+    return parameterError(gradeError);
+  }
+  if ((current.status === "active" || current.status === "provisional") && input.grade === void 0) {
+    return parameterError(
+      "grade is required when extracting a new turn (integer 0 through 4)."
+    );
+  }
+  let regradeTarget = null;
+  if (input.regrade !== void 0) {
+    const regradeError = validateGrade(input.regrade.grade, "regrade.grade");
+    if (regradeError) {
+      return parameterError(regradeError);
+    }
+    const regradeId = parseTurnId(input.regrade.id);
+    if (regradeId === null) {
+      return parameterError("regrade.id must be a T<n> turn reference.");
+    }
+    regradeTarget = getTurnById(db, regradeId);
+    if (!regradeTarget || regradeTarget.sessionId !== current.sessionId || regradeTarget.promptNumber >= current.promptNumber) {
+      return parameterError(
+        "regrade must target an earlier turn in the same session."
+      );
+    }
+  }
+  const isValidPredecessor = (candidateId) => {
+    if (candidateId === turnId) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
+  };
+  const turn = updateTurnById(db, turnId, {
+    status: deriveTurnStatusForUpdate(current, input),
+    title: input.title ?? null,
+    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
+    insight: input.insight ?? null,
+    type: input.type ?? null,
+    significanceGrade: input.grade,
+    tags: input.tags ?? [],
+    updatedAtEpoch: Math.floor(Date.now() / 1e3)
+  });
+  if (!turn) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+  if (regradeTarget && input.regrade) {
+    updateTurnById(db, regradeTarget.id, {
+      significanceGrade: input.regrade.grade
+    });
+    return textResult(
+      `Updated turn T${turnId} with status ${turn.status}. Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`
+    );
+  }
+  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
+}
+function handleObservationRemember(db, observationId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    OBSERVATION_REMEMBER_STATUSES,
+    "observation remember"
+  );
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
+    return parameterError(
+      "observation remember only accepts title, content, and status."
+    );
+  }
+  const observation = updateObservation(db, observationId, {
+    title: input.title,
+    content: input.content,
+    status: deriveObservationStatus(input)
+  });
+  if (!observation) {
+    return textResult(`Observation O${observationId} not found.`);
+  }
+  return textResult(`Updated observation O${observationId} with status ${observation.status}.`);
+}
+function handleSessionRemember(db, sessionId, input) {
+  const statusError = validateStatusForRoute(input.status, null, "session remember");
+  if (statusError) {
+    return parameterError(statusError);
+  }
+  if (input.grade !== void 0 || input.regrade !== void 0) {
+    return parameterError("session remember does not accept grade or regrade.");
+  }
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  if (missing.length > 0) {
+    return parameterError(
+      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", "
+      )}). Missing: ${missing.join(", ")}.`
+    );
+  }
+  const tokenReport = measureSessionStateTokens({
+    id: session.id,
+    title: input.title ?? "",
+    content: input.content ?? "",
+    decision: input.decision ?? "",
+    done: input.done ?? "",
+    current: input.current ?? "",
+    nextSteps: input.next_steps ?? "",
+    reference: input.reference ?? ""
+  });
+  if (tokenReport.total > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return parameterError(
+      `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; title=${tokenReport.title}, content=${tokenReport.content}, current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, decision=${tokenReport.decision}, done=${tokenReport.done}, reference=${tokenReport.reference}, total=${tokenReport.total}. Trim fields and retry.`
+    );
+  }
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? ""
+    },
+    Math.floor(Date.now() / 1e3)
+  );
+  if (!updated) {
+    return textResult(`Session ${sessionId} not found.`);
+  }
+  return textResult(`Updated session ${sessionId}.`);
+}
+function rememberTool(db, rawInput) {
+  const input = decodeRememberInput(rawInput);
+  if (!input.id) {
+    return parameterError(
+      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
+    );
+  }
+  const observationId = parseObservationId(input.id);
+  if (observationId !== null) {
+    return handleObservationRemember(db, observationId, input);
+  }
+  const turnId = parseTurnId(input.id);
+  if (turnId !== null) {
+    return handleTurnRemember(db, turnId, input);
+  }
+  const sessionId = parseSessionId(input.id);
+  if (sessionId !== null) {
+    return handleSessionRemember(db, sessionId, input);
+  }
+  if (/^M\d+$/i.test(input.id)) {
+    return parameterError(
+      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
+    );
+  }
+  return textResult(`Unsupported id selector: ${input.id}`);
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -41538,16 +41844,22 @@ For each \`<turn>\` block:
 
 - If the opening tag includes \`invalidated="interrupt"\`, \`invalidated="rollback"\`, or \`invalidated="interrupt+rollback"\`, treat the turn as invalidated on first extraction. This is the delivery path for turns that were still active when the invalidation was detected.
 
-1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
+1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags, grade })\`
    - title: 5-15 words summarizing the turn's outcome
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
+   - grade: REQUIRED integer 0-4 measuring this turn's narrative significance:
+     - Grade 4 \u2014 top-level arc flag bearer: one turn that can represent why the next dozens of turns exist; at most one per arc. Example: locking the event-driven worker lifecycle.
+     - Grade 3 \u2014 milestone that changes the premise of later work: release validation, locked decision, route reversal, or major root cause. Examples: T925 (0.5.0 release), T909 (design converged to five tickets), T908 (withdrawn objection accepted shutdown), T850 (watchdog killed the retry loop).
+     - Grade 2 \u2014 significant arc node worth its own line in a session review: a verified ticket completion, measured correction, evidence-backed rejection, or real gap. Examples: T917-T922 (ticket verification), T896 ($6.38\u2192$1.43 correction), T928 (orphan gap from an interrupted turn).
+     - Grade 1 \u2014 routine process progress: intermediate verification, scheduling chores, or explanatory Q&A that nobody will cite a week later. Examples: T861-T864 (routine deployment confirmations), T942 (explanation).
+     - Grade 0 \u2014 narrative noise: compact commands, shell-only commands, empty shells, or abandoned interruptions. Example: T941 (/compact).
    - tags: lowercase-hyphenated tags in TWO namespaces \u2014 BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix \u2014 never a bare tag.
      - ROLE (bare, \u22642, usually none): the turn's role in the session arc. Seed examples \u2014 \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) \u2014 richer role vocabulary is welcome. Keep the name the BARE role, short and general \u2014 \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
      - TOPIC (\`topic:\` prefix, 0-3): what the turn is about \u2014 feature area, file, library, or action (e.g. \`topic:milestone-scoring\`, \`topic:recall-faceting\`). For faceted recall only; topic tags NEVER affect milestones. Topics are exact-match classification keys, so consistency beats precision: when a turn continues a theme from recent turns, REUSE their exact spelling \u2014 a multi-turn arc carries ONE stable topic on every turn of the arc, never per-turn variants (\`topic:verifier\` throughout, not \`verifier-rubric\`/\`verifier-design\`/\`verifier-training\` drift). Mint a new topic only on a genuine theme shift. A turn spanning several themes carries one tag per theme (\u22643). Tag the theme even when the title already conveys it \u2014 recall's \`tag:\` filter matches tags, not titles.
    - tag style: a turn that merely performs a revert/restore is NOT \`rolled-back\` (that action, if tagged at all, is \`topic:revert\`). The literal \`rolled-back\` marks a turn that was itself overturned \u2014 when this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets \`rolled-back\`.
-   - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
+   - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped", grade: 0 })\` instead.
 
 2. Optionally refresh the session summary \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) \u2014 omitting any is rejected \u2014 editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
@@ -41562,6 +41874,13 @@ You may reopen an earlier turn ONLY to correct a dead end or clear mislabeling m
 Negate-on-cite rule: when THIS turn overturns a causally-significant earlier turn that it cites as \`[T<n>]\`, update the cited casualty, not the surviving/reverting turn. Use the literal tag \`rolled-back\`; synonyms like \`rejected\` or \`superseded\` are metadata only and do not drive the milestone marker. This applies only to the "overturns" case, never when this turn merely builds on or verifies an earlier turn, and only to the cited ids (at most ~2).
 
 Visibility rule: if the cited casualty is already extracted, \`remember({ id: "T<n>", tags: ["rolled-back"] })\` is enough; tags append and the extracted status is preserved. If the casualty is skipped or otherwise lacks usable extraction, promote it by supplying \`title\`, \`content\`, \`type\`, and \`tags: ["rolled-back"]\` so it can appear in milestones; a skipped row with only a tag stays filtered out.
+
+Grade correction has two narrowly-scoped duties:
+
+- Misleading-turn downgrade: only with witnessed disproof or rollback evidence in the current turn, lower the casualty's grade and give the correcting turn the appropriate grade. Never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a \u21B3 row.
+- Grade-4 uniqueness: when a better flag bearer appears in the same arc, lower the old Grade 4 to Grade 3. A later top-level decision that overturns a Grade 4 uses the same witnessed-evidence rule.
+
+Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.
 
 ## Streamed turns (mini-turns)
 
@@ -41602,9 +41921,9 @@ If a message also includes \`<subagent_invalidated>\`, those turns came from a T
 A session summary has seven fields, rewritten WHOLE on every refresh (never merged \u2014 omitting a field is rejected). Always edit on top of the \`prior_*\` values (echo-and-edit); never regenerate from scratch.
 
 - title: 20-50 chars, one line
-- content: 100-300 chars, browsing synopsis of what the session is about
-- decision: a markdown bullet list \u2014 one \`- \` item per line, each a key decision and WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. \u22646 bullets. Append a bullet (or tighten one) on refresh; keep prior bullets and \`[T<n>]\` markers.
-- done: a markdown bullet list \u2014 one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. \u22646 bullets. Append/tighten like decision; keep prior bullets and markers.
+- content: 100-300 chars, a one-sentence arc overview of what the session is doing
+- decision: a markdown bullet list \u2014 one \`- \` item per line, only decisions that still govern current or next work, with WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. \u22646 bullets. Tighten, replace, or remove obsolete decisions on refresh.
+- done: a markdown bullet list \u2014 one \`- \` item per line, only recent fine-grained completions useful to next work; cite the completion turn inline as \`[T<n>]\`. \u22646 bullets. Remove historical achievements and finished bookkeeping.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
 - reference: a markdown bullet list \u2014 one \`- \` item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md \u2014 indexed by MEMORY.md). \u22648 bullets; evict the least-durable / already-superseded first. Empty string if none.
@@ -41612,6 +41931,8 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
 Do not put file paths, tool counts, or code-level details in any field except \`reference\` \u2014 those belong in turn records \u2014 and \`reference\` follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do not record durable cross-project lessons here \u2014 keep summaries scoped to this session's work.
+
+Safe to prune: the milestone timeline is independent and owns historical achievements and completed decisions. Removing them from this state summary does not delete turn records or milestone candidates, so do not preserve history here out of caution.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh \u2014 follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message \u2014 the \`prior_*\` fields are the only state to base the refresh decision on.
 
@@ -41931,53 +42252,8 @@ function sortDiaryIndexRecentFirst(document) {
   return `${sorted.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
 }
 
-// src/diary/domain.ts
-var import_node_crypto = require("node:crypto");
-var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-function encodeSource(value) {
-  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
-}
-function truncateDiaryResponse(value) {
-  return Array.from(value).slice(0, 2e3).join("");
-}
-function computeDiaryWatermark(material) {
-  if (material.length === 0) return "empty";
-  const turnHashes = [...material].sort((left, right) => left.turnId - right.turnId).map(
-    (turn) => (0, import_node_crypto.createHash)("sha256").update(
-      [
-        turn.userPrompt ?? "",
-        truncateDiaryResponse(turn.assistantResponse ?? ""),
-        turn.title ?? "",
-        turn.content ?? "",
-        turn.insight ?? "",
-        turn.status
-      ].join("\0")
-    ).digest("hex")
-  );
-  return (0, import_node_crypto.createHash)("sha256").update(turnHashes.join("\0")).digest("hex").slice(0, 16);
-}
-var MALFORMED_PRIVATE_CONTENT = "[redacted: malformed private content]";
-function stripDiaryPrivateContent(text) {
-  let privateBlockCount = 0;
-  const stripped = text.replace(/<private>[\s\S]*?<\/private>/g, () => {
-    privateBlockCount += 1;
-    return "";
-  });
-  if (privateBlockCount > 100 || stripped.includes("<private>") || stripped.includes("</private>")) {
-    return MALFORMED_PRIVATE_CONTENT;
-  }
-  return stripped;
-}
-function estimateDiaryTokens(text) {
-  let weightedCodePoints = 0;
-  for (const codePoint of text) {
-    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
-  }
-  return Math.ceil(weightedCodePoints * 1.2);
-}
-
 // src/diary/memory-store.ts
-var MEMORY_DOCUMENT_TOKEN_LIMIT = 5e3;
+var MEMORY_DOCUMENT_TOKEN_LIMIT = 2e3;
 var DEFAULT_MEMORY_HISTORY_RETENTION = {
   newest: 30,
   monthly: true
@@ -42140,12 +42416,10 @@ var DreamMemoryStore = class {
     return this.readCurrentMemoryWithoutRecovery();
   }
   async readInjectionDocuments() {
-    await this.recoverIncompleteTransactions();
-    await this.assertWorkspaceRootsAreSafe();
-    const defaults = defaultCurrentMemory();
+    await this.assertWorkspaceRootsAreSafe({ createDataRoot: false });
     const [userProfile, experience] = await Promise.all([
-      this.readMemoryDocument("user-profile.md", defaults.userProfile),
-      this.readMemoryDocument("experience.md", defaults.experience)
+      this.readMemoryDocument("user-profile.md", ""),
+      this.readMemoryDocument("experience.md", "")
     ]);
     return { userProfile, experience };
   }
@@ -42248,8 +42522,10 @@ var DreamMemoryStore = class {
   migrationStatePath() {
     return (0, import_node_path6.join)(this.memoryRoot(), "migration-state.json");
   }
-  async assertWorkspaceRootsAreSafe() {
-    await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+  async assertWorkspaceRootsAreSafe(options = {}) {
+    if (options.createDataRoot !== false) {
+      await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
+    }
     for (const root2 of [this.dataRoot, this.memoryRoot(), (0, import_node_path6.join)(this.dataRoot, "diary")]) {
       try {
         const metadata = await (0, import_promises2.lstat)(root2);
@@ -42971,6 +43247,36 @@ function assertDreamCommitToolFields(args) {
     );
   }
 }
+var dreamCheckBudgetInputShape = {};
+function createDreamCheckBudgetToolHandler(readStagedNight) {
+  return async (args) => {
+    const unsupported = Object.keys(args);
+    if (unsupported.length > 0) {
+      throw new Error(
+        `check_budget does not accept arguments: ${unsupported.join(", ")}`
+      );
+    }
+    const staged = await readStagedNight();
+    const report = Object.fromEntries(
+      [
+        ["user-profile.md", staged.userProfile],
+        ["experience.md", staged.experience]
+      ].map(([filename, document]) => {
+        const tokens = estimateDiaryTokens(document);
+        return [
+          filename,
+          {
+            estimated_tokens: tokens,
+            limit: MEMORY_DOCUMENT_TOKEN_LIMIT,
+            ok: tokens <= MEMORY_DOCUMENT_TOKEN_LIMIT,
+            over_by: Math.max(0, tokens - MEMORY_DOCUMENT_TOKEN_LIMIT)
+          }
+        ];
+      })
+    );
+    return textResult2(JSON.stringify(report));
+  };
+}
 function createDreamCommitToolHandler(store, readStagedNight) {
   return async (args) => {
     assertDreamCommitToolFields(args);
@@ -43030,7 +43336,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.5.0",
+        version: "0.6.0",
         tools: [
           toolImpl(
             "recall",
@@ -43063,6 +43369,14 @@ function createDiarySdkQuery(options) {
               dreamCommitInputShape,
               async (args) => request.toolHandlers.commit(args)
             )
+          ] : [],
+          ...request.toolHandlers.checkBudget ? [
+            toolImpl(
+              "check_budget",
+              "Report the staged user-profile and experience documents' estimated token counts against the hot-memory limit that commit enforces. Takes no arguments. Run it after editing those documents and prune until both report ok before committing.",
+              dreamCheckBudgetInputShape,
+              async (args) => request.toolHandlers.checkBudget(args)
+            )
           ] : []
         ]
       });
@@ -43088,7 +43402,8 @@ function createDiarySdkQuery(options) {
             tools: ["Read", "Grep", "Write", "Edit"],
             allowedTools: [
               ...DIARY_ALLOWED_TOOLS,
-              ...request.toolHandlers.commit ? ["mcp__diary__commit"] : []
+              ...request.toolHandlers.commit ? ["mcp__diary__commit"] : [],
+              ...request.toolHandlers.checkBudget ? ["mcp__diary__check_budget"] : []
             ],
             canUseTool: request.toolHandlers.canUseTool,
             mcpServers: { diary: diaryServer },
@@ -43549,6 +43864,7 @@ function createDiaryAgentToolHandlers(options) {
     timeline,
     canUseTool: permissionGuard.canUseTool,
     ...options.commit ? { commit: options.commit } : {},
+    ...options.checkBudget ? { checkBudget: options.checkBudget } : {},
     async readDoc(requestedPath) {
       const realTarget = await permissionGuard.assertWorkspacePath(requestedPath, {
         allowAbsolute: false,
@@ -43602,7 +43918,7 @@ curate \u7684\u6700\u7EC8\u76EE\u7684\u662F\u957F\u671F\u8BB0\u5FC6\u6536\u76CA\
 - experience.md \u56DE\u7B54\u300C\u53D1\u751F\u4E86\u4EC0\u4E48\u300D\uFF1A\u6309\u9879\u76EE\u6216\u65F6\u95F4\u5199\u8FDB\u5EA6\u3001\u7ED3\u679C\u3001\u8F6C\u6298\u548C\u5370\u8C61\u6DF1\u523B\u7684\u77AC\u95F4\uFF0C\u5E76\u5E26\u65E5\u671F\u3002\u9879\u76EE\u8109\u7EDC\u53EA\u653E\u8FD9\u91CC\u3002
 - \u6BCF\u6B21\u8FD0\u884C\u90FD\u91CD\u6574\u6574\u4EFD\u753B\u50CF\u4E0E\u7ECF\u5386\uFF0C\u4E0D\u53EA\u662F\u8FFD\u52A0\uFF1A\u73B0\u6709\u5185\u5BB9\u82E5\u8FDD\u53CD\u4E0A\u8FF0\u5206\u5DE5\uFF0C\u4E00\u5E76\u7EA0\u6B63\u2014\u2014\u5C24\u5176\u753B\u50CF\u91CC\u6B8B\u7559\u7684\u9879\u76EE\u6E05\u5355\uFF0F\u72B6\u6001\uFF0F\u8FDB\u5EA6\uFF0C\u79FB\u8FDB\u7ECF\u5386\u6216\u76F4\u63A5\u5220\u9664\u3002\u7EE7\u627F\u7684\u5185\u5BB9\u4E0D\u56E0\u300C\u662F\u65E7\u7684\u3001\u4E0D\u662F\u6211\u5199\u7684\u300D\u800C\u8C41\u514D\uFF1B\u9996\u6B21\u5728\u8FC1\u79FB\u57FA\u7EBF\u4E0A\u8FD0\u884C\u65F6\uFF0C\u52A1\u5FC5\u6309\u4EBA\u5473\u5224\u636E\u628A\u504F\u5DE5\u7A0B\u5316\u7684\u65E7\u5185\u5BB9\u6E05\u7406\u6389\u6216\u964D\u7EA7\u8FDB archive\uFF0C\u800C\u4E0D\u662F\u539F\u6837\u5806\u7740\uFF08\u4E00\u4EFD\u521A\u8FC1\u79FB\u8FDB\u6765\u3001\u5F00\u5934\u5C31\u662F\u9879\u76EE\u6E05\u5355\u7684\u753B\u50CF\uFF0C\u6B63\u662F\u8BE5\u6E05\u7406\u7684\u5BF9\u8C61\uFF09\u3002
 - \u81EA\u7531\u7EC4\u7EC7 Markdown\uFF0C\u4E0D\u5957\u56FA\u5B9A schema\uFF1B\u81F3\u5C11\u4FDD\u7559\u4E00\u4E2A ATX \u6807\u9898\u3002\u5177\u4F53\u4E8B\u4EF6\u6216\u539F\u8BDD\u5728\u524D\uFF0C\u610F\u4E49\u5728\u540E\u3002\u98CE\u683C\u76EE\u6807\u662F\u8BA9\u672A\u6765\u7684 agent \u771F\u6B63\u8BB0\u5F97\u4E00\u4E2A\u4EBA\uFF0C\u800C\u4E0D\u662F\u751F\u6210\u5DE5\u7A0B\u5468\u62A5\u3002
-- user-profile.md \u4E0E experience.md \u5404\u81EA\u4EE5\u4E0D\u8D85\u8FC7\u7EA6 3000 \u4E2A\u4E2D\u6587\u5B57\u4E3A\u8F6F\u76EE\u6807\uFF1B\u63A5\u8FD1\u4E0A\u9650\u65F6\u4F18\u5148\u964D\u7EA7\u6700\u4E0D\u503C\u5F97\u8BB0\u7684\u5185\u5BB9\u3002commit \u53E6\u6709 5000-token \u786C\u4E0A\u9650\u3002
+- user-profile.md \u4E0E experience.md \u5404\u81EA\u4E0D\u8D85\u8FC7 2000 token\uFF08\u7EA6 1500 \u4E2A\u4E2D\u6587\u5B57\uFF09\uFF0Ccommit \u4F1A\u6309\u540C\u4E00\u4E0A\u9650\u786C\u6821\u9A8C\u3002\u6BCF\u6B21\u6539\u5B8C\u8FD9\u4E24\u4EFD\u6587\u6863\u540E\u8C03\u7528\u65E0\u53C2\u6570 check_budget \u81EA\u68C0\uFF1B\u8D85\u9650\u65F6\u5BF9\u4E0D\u91CD\u8981\u7684\u7EC6\u8282\u4E3B\u52A8\u526A\u679D\u2014\u2014\u5408\u5E76\u540C\u7C7B\u6761\u76EE\u3001\u5220\u53BB\u4FEE\u9970\u6027\u63CF\u8FF0\u3001\u628A\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive\u2014\u2014\u76F4\u5230\u4E24\u4EFD\u90FD ok \u518D commit\u3002
 
 ## \u5206\u5C42\u9057\u5FD8\u3001\u63D0\u56DE\u4E0E\u67E5\u91CD
 
@@ -43614,7 +43930,7 @@ curate \u7684\u6700\u7EC8\u76EE\u7684\u662F\u957F\u671F\u8BB0\u5FC6\u6536\u76CA\
 ## \u63D0\u4EA4\u5408\u540C
 
 - staging \u5DE5\u4F5C\u533A\u5DF2\u6309\u5F53\u524D\u6709\u6548\u8BB0\u5FC6\u64AD\u79CD\u597D\u753B\u50CF\u3001\u7ECF\u5386\u3001archive\u3001\u5F53\u5929\u65E5\u8BB0\u8349\u7A3F\u4E0E INDEX\uFF1B\u76F4\u63A5\u5728\u8FD9\u4E9B\u6587\u4EF6\u4E0A\u6539\uFF0C\u4E0D\u5FC5\u81EA\u5DF1\u91CD\u5EFA\u7A7A\u6587\u6863\u3002\u7F16\u8F91\u524D\u5148\u7528 Read \u6253\u5F00\u5BF9\u5E94 staging \u6587\u4EF6\uFF0C\u518D\u7528 Edit \u589E\u91CF\u4FEE\u6539\u753B\u50CF/\u7ECF\u5386/archive\u3001\u7528 Write \u8986\u76D6\u5F53\u5929\u65E5\u8BB0\u4E0E INDEX\uFF08INDEX \u4FDD\u6301 recent-first\uFF0C\u5BF9\u5F53\u5929\u505A\u5E42\u7B49 upsert\uFF1B\u53D1\u5E03\u4FA7\u4E5F\u4F1A\u518D\u515C\u5E95\u5F52\u4E00\uFF09\u3002
-- \u6539\u5B8C\u8C03\u7528\u65E0\u53C2\u6570 commit\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5B57\u6BB5\uFF09\u89E6\u53D1\u6821\u9A8C\u4E0E\u539F\u5B50\u53D1\u5E03\uFF0C\u672C\u591C\u65E5\u671F\u5DF2\u56FA\u5B9A\u3001\u65E0\u9700\u81EA\u62A5\u3002\u76EE\u6807\u662F\u4E00\u6B21\u6210\u529F\u63D0\u4EA4\uFF1B\u82E5 commit \u56E0 5000-token/\u6587\u6863\u786C\u4E0A\u9650\u62D2\u7EDD\uFF0C\u6309\u9519\u8BEF\u63D0\u793A\u5728 staging \u91CC\u628A\u6700\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive \u540E\u91CD\u8BD5\u3002\u6210\u529F\u540E\u4E0D\u5F97\u518D\u6B21 commit\u3002\u53EA\u80FD\u7528 Read/Grep \u8BFB\u5386\u53F2\u3001\u7528 Write/Edit \u6539 staging\uFF0C\u4E0D\u5F97\u5199 staging \u4E4B\u5916\u7684\u4EFB\u4F55\u8DEF\u5F84\u3002
+- \u6539\u5B8C\u8C03\u7528\u65E0\u53C2\u6570 commit\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5B57\u6BB5\uFF09\u89E6\u53D1\u6821\u9A8C\u4E0E\u539F\u5B50\u53D1\u5E03\uFF0C\u672C\u591C\u65E5\u671F\u5DF2\u56FA\u5B9A\u3001\u65E0\u9700\u81EA\u62A5\u3002\u76EE\u6807\u662F\u4E00\u6B21\u6210\u529F\u63D0\u4EA4\uFF1B\u63D0\u4EA4\u524D\u5148\u7528 check_budget \u786E\u8BA4\u753B\u50CF\u4E0E\u7ECF\u5386\u90FD\u5728 2000-token \u4E0A\u9650\u5185\uFF0C\u82E5 commit \u4ECD\u56E0\u786C\u4E0A\u9650\u62D2\u7EDD\uFF0C\u6309\u9519\u8BEF\u63D0\u793A\u5728 staging \u91CC\u628A\u6700\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive \u540E\u91CD\u8BD5\u3002\u6210\u529F\u540E\u4E0D\u5F97\u518D\u6B21 commit\u3002\u53EA\u80FD\u7528 Read/Grep \u8BFB\u5386\u53F2\u3001\u7528 Write/Edit \u6539 staging\uFF0C\u4E0D\u5F97\u5199 staging \u4E4B\u5916\u7684\u4EFB\u4F55\u8DEF\u5F84\u3002
 - commit \u6210\u529F\u540E\u53EA\u9700\u7B80\u77ED\u786E\u8BA4\uFF0C\u4E0D\u8981\u5728\u6700\u7EC8\u6587\u672C\u91CC\u91CD\u590D\u6587\u6863\u5168\u6587\u3002`;
 function assertDate(date7) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date7)) {
@@ -43729,16 +44045,14 @@ function createDreamJobProcessor(options) {
         date: date7,
         store
       });
-      const nightCommit = createNightCommit(
-        date7,
-        store,
-        () => readDreamStaging({ dataRoot: options.dataRoot, date: date7 })
-      );
+      const readStagedNight = () => readDreamStaging({ dataRoot: options.dataRoot, date: date7 });
+      const nightCommit = createNightCommit(date7, store, readStagedNight);
       const toolHandlers = createDreamAgentToolHandlers({
         db: options.db,
         dataRoot: options.dataRoot,
         stagingRoot: stagingPaths.root,
-        commit: nightCommit.handlers.commit
+        commit: nightCommit.handlers.commit,
+        checkBudget: createDreamCheckBudgetToolHandler(readStagedNight)
       });
       try {
         await options.agentRunner.run({
@@ -43889,64 +44203,6 @@ function createDiaryRuntime(options) {
       });
     }
   };
-}
-
-// src/mcp/session-output.ts
-var buildContextTimelineViewWithMode = buildContextTimelineView;
-var defaultTimelineRenderer = {
-  buildContextTimelineView: buildContextTimelineViewWithMode,
-  renderTimeline
-};
-function renderCurrentSessionOutput(db, session, sessionRecord, timelineRenderer = defaultTimelineRenderer) {
-  const lines = [`[S${session.id}] ${session.title ?? "(untitled session)"}`];
-  const pushField = (label, value) => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  const pushBulletLines = (items) => {
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    pushBulletLines(items);
-  };
-  pushField("content", session.content);
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else {
-    const insightLines = session.insight ?? [];
-    if (insightLines.length > 0) {
-      lines.push("  insight:");
-      pushBulletLines(insightLines);
-    }
-  }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-  try {
-    const timelineView = timelineRenderer.buildContextTimelineView(
-      db,
-      sessionRecord.id,
-      "milestones"
-    );
-    lines.push("");
-    lines.push(
-      timelineRenderer.renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true
-      })
-    );
-  } catch {
-  }
-  return lines.join("\n");
 }
 
 // src/worker/server.ts
@@ -44741,6 +44997,11 @@ ${body}
       } : null,
       sessionUpdated,
       staleTurns,
+      significanceCalibration: buildTurnSignificanceCalibration(
+        deps.db,
+        session.id,
+        latestPromptNumber
+      ),
       completedTurnBlocks: blocks
     });
     const shape = batchWorkUnitShape(batch);
