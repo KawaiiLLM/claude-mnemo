@@ -4,6 +4,10 @@ import { runHookWriteTransaction } from "../../db/database";
 import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
+import {
+  enqueueOrphanTurnStops,
+  getOrphanTurns,
+} from "../../db/orphan-turns";
 import { relinkSessionLineageFromEntries } from "../../db/lineage";
 import { recoverStrandedAncestors } from "../../db/recover-stranded";
 import { getTurnsForSession } from "../../db/turns";
@@ -64,37 +68,6 @@ function getLatestTurn(
     .get(sessionDbId);
 
   return row ?? null;
-}
-
-function getOrphanTurns(
-  db: Database,
-  sessionDbId: number,
-  currentTurnId: number,
-): Array<{ id: number; promptNumber: number; userPrompt: string | null }> {
-  return db
-    .query<
-      { id: number; promptNumber: number; userPrompt: string | null },
-      [number, number]
-    >(
-      `
-        SELECT
-          t.id,
-          t.prompt_number AS promptNumber,
-          t.user_prompt AS userPrompt
-        FROM turns t
-        WHERE t.session_id = ?
-          AND t.status = 'active'
-          AND t.id < ?
-          AND t.assistant_response IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM pending_queue q
-            WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-          )
-        ORDER BY t.prompt_number ASC
-      `,
-    )
-    .all(sessionDbId, currentTurnId);
 }
 
 function hasTurnStopTask(db: Database, turnId: number): boolean {
@@ -193,24 +166,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       );
       recoverStrandedAncestors(dependencies.db, session.id, epoch);
 
-      for (const orphanTurn of orphanTurns) {
-        dependencies.db
-          .query<unknown, [number, number]>(
-            `
-              UPDATE turns
-              SET updated_at_epoch = ?
-              WHERE id = ?
-            `,
-          )
-          .run(epoch, orphanTurn.id);
-
-        enqueueQueueItem(dependencies.db, {
-          kind: "turn-stop",
-          targetId: orphanTurn.id,
-          sessionDbId: session.id,
-          enqueuedAtEpoch: epoch,
-        });
-      }
+      enqueueOrphanTurnStops(dependencies.db, session.id, epoch, orphanTurns);
 
       dependencies.db
         .query<unknown, [string | null, number, number]>(
