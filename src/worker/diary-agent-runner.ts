@@ -5,6 +5,7 @@ import {
   DEFAULT_DREAM_AGENT_MODEL,
   type DreamAgentModel,
 } from "../shared/config";
+import { createWorkerAbortError } from "./error-classifier";
 
 export interface DiaryAgentRunInput {
   date: string;
@@ -75,7 +76,8 @@ export function createDiaryAgentRunner(
         });
       } catch (error) {
         if (abortReason === "watchdog") {
-          throw new Error(
+          throw createWorkerAbortError(
+            "stall-watchdog",
             `Diary agent request watchdog timed out after ${watchdogMs}ms.`,
           );
         }

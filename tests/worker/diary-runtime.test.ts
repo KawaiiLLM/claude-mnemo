@@ -38,6 +38,69 @@ function writeStaging(dataRoot: string, night: CommitNightInput): void {
   writeFileSync(paths.diaryIndex, night.diaryIndex);
 }
 describe("createDiaryRuntime", () => {
+  test("two connection failures do not consume attempts and the day later settles automatically", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    let nowEpoch = 100;
+    let runs = 0;
+    const processor = createDreamQueueProcessor({
+      db,
+      stateStore,
+      readLastSuccessfulDate: async () => null,
+      nowEpoch: () => nowEpoch,
+      timeZone: "Asia/Shanghai",
+      async processDreamDate() {
+        runs += 1;
+        if (runs <= 2) {
+          throw Object.assign(new Error("socket reset"), {
+            code: "ECONNRESET",
+          });
+        }
+      },
+    });
+
+    try {
+      await expect(
+        processor.process(stateStore.claimNextDiaryItem(nowEpoch)!),
+      ).rejects.toThrow("socket reset");
+      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+        attemptCount: 0,
+        nextAttemptEpoch: 1000,
+        terminal: false,
+        lastError: null,
+      });
+
+      nowEpoch = 1000;
+      await expect(
+        processor.process(stateStore.claimNextDiaryItem(nowEpoch)!),
+      ).rejects.toThrow("socket reset");
+      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+        attemptCount: 0,
+        nextAttemptEpoch: 1900,
+        terminal: false,
+        lastError: null,
+      });
+
+      nowEpoch = 1900;
+      await processor.process(stateStore.claimNextDiaryItem(nowEpoch)!);
+
+      expect(runs).toBe(3);
+      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+        settledAtEpoch: 1900,
+        needsRegen: false,
+        attemptCount: 0,
+        nextAttemptEpoch: null,
+        terminal: false,
+        lastError: null,
+      });
+      expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
   test("processes queued dream dates independently when one date fails", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);

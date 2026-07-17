@@ -15,6 +15,7 @@ import {
   createDreamJobProcessor,
   type DreamJobProcessOptions,
 } from "./dream-job";
+import { classifyWorkerError } from "./error-classifier";
 
 export interface CreateDreamQueueProcessorOptions {
   db: Database;
@@ -83,11 +84,20 @@ export function createDreamQueueProcessor(
         }
       } catch (error) {
         const failedAtEpoch = nowEpoch();
+        const classification = classifyWorkerError(error);
+        // Connection failures never consume the retry budget, so their retry
+        // rate is the only bound on cost: a dream attempt that burns tokens
+        // before an idle-watchdog kill must not respin on the 60s cadence
+        // (the 0.4.0 burn pattern). Fast-fail outages lose nothing from the
+        // longer wait — a dream is never urgent.
+        const retryDelaySeconds =
+          classification === "connection" ? 15 * 60 : 60;
         options.stateStore.recordDreamFailure({
           date,
           queueSeq: item.seq,
           error: error instanceof Error ? error.message : String(error),
-          retryAtEpoch: failedAtEpoch + 60,
+          retryAtEpoch: failedAtEpoch + retryDelaySeconds,
+          countAttempt: classification === "deterministic",
         });
         throw error;
       }

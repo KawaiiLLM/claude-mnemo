@@ -14,6 +14,7 @@ import {
   DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
 } from "../../src/shared/config";
 import { createDreamAgentToolHandlers } from "../../src/worker/diary-agent-tools";
+import { classifyWorkerError } from "../../src/worker/error-classifier";
 
 const roots: string[] = [];
 
@@ -126,13 +127,18 @@ describe("diary agent runner", () => {
     });
 
     try {
-      await expect(
-        runner.run({
+      const error = await runner
+        .run({
           date: "2026-07-10",
           prompt: "This request has no activity.",
           toolHandlers,
-        }),
-      ).rejects.toThrow("Diary agent request watchdog timed out after 1ms.");
+        })
+        .catch((caught) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe(
+        "Diary agent request watchdog timed out after 1ms.",
+      );
+      expect(classifyWorkerError(error)).toBe("connection");
       expect(typeof seenRequest?.reportActivity).toBe("function");
     } finally {
       db.close();

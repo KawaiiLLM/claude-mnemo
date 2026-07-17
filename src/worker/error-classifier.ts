@@ -17,8 +17,8 @@ const CONNECTION_ERROR_NAMES = new Set([
 export class WorkerAbortError extends Error {
   readonly workerAbortReason: WorkerAbortReason;
 
-  constructor(reason: WorkerAbortReason) {
-    super(`Worker request aborted: ${reason}`);
+  constructor(reason: WorkerAbortReason, message?: string) {
+    super(message ?? `Worker request aborted: ${reason}`);
     this.name = "WorkerAbortError";
     this.workerAbortReason = reason;
   }
@@ -26,8 +26,9 @@ export class WorkerAbortError extends Error {
 
 export function createWorkerAbortError(
   reason: WorkerAbortReason,
+  message?: string,
 ): WorkerAbortError {
-  return new WorkerAbortError(reason);
+  return new WorkerAbortError(reason, message);
 }
 
 function isObject(value: unknown): value is Record<PropertyKey, unknown> {

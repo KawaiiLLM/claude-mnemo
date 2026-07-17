@@ -26,6 +26,8 @@ export interface RecordDreamFailureInput {
   error: string;
   /** Epoch to schedule the single auto-retry at; ignored once the day trips terminal. */
   retryAtEpoch: number;
+  /** False for connection failures, which delay work without consuming retry budget. */
+  countAttempt?: boolean;
 }
 
 export interface SettleDreamDayInput {
@@ -222,27 +224,39 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
 
     recordDreamFailure(input): void {
       runWriteTransaction(db, () => {
-        // SQLite evaluates every SET expression against the pre-update row, so
-        // `attempt_count + 1` is the post-failure count throughout. On the
-        // capped attempt the day trips terminal and drops its retry schedule;
-        // an already-terminal day stays terminal (the CASE preserves it).
-        db.query<unknown, [string, number, number, number, string]>(
-          `UPDATE diary_day_state
-           SET needs_regen = 1,
-               attempt_count = attempt_count + 1,
-               last_error = ?,
-               terminal = CASE
-                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
-               next_attempt_epoch = CASE
-                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
-           WHERE date = ?`,
-        ).run(
-          input.error,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          input.retryAtEpoch,
-          input.date,
-        );
+        if (input.countAttempt === false) {
+          // Connection failures are suspension, not a failed attempt. Preserve
+          // the attempt/terminal/error record and only make the queued day
+          // claimable again after its lightweight delay.
+          db.query<unknown, [number, string]>(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 next_attempt_epoch = ?
+             WHERE date = ?`,
+          ).run(input.retryAtEpoch, input.date);
+        } else {
+          // SQLite evaluates every SET expression against the pre-update row,
+          // so `attempt_count + 1` is the post-failure count throughout. On the
+          // capped attempt the day trips terminal and drops its retry schedule;
+          // an already-terminal day stays terminal (the CASE preserves it).
+          db.query<unknown, [string, number, number, number, string]>(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 attempt_count = attempt_count + 1,
+                 last_error = ?,
+                 terminal = CASE
+                   WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+                 next_attempt_epoch = CASE
+                   WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
+             WHERE date = ?`,
+          ).run(
+            input.error,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            input.retryAtEpoch,
+            input.date,
+          );
+        }
         db.query<unknown, [number]>(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
