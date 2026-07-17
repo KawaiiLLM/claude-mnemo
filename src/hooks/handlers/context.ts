@@ -27,6 +27,7 @@ import {
   renderSessionStartMemoryInjection,
 } from "../../diary/persona-render";
 import { dreamTriggerWindow } from "../../diary/calendar";
+import { markSessionRunStart } from "../../db/session-run";
 
 export interface ContextHandlerDependencies {
   db: Database;
@@ -37,7 +38,6 @@ export interface ContextHandlerDependencies {
     | "reconcileBacklog"
   >;
   nowEpoch?: () => number;
-  kickWorkerFast?: () => Promise<void>;
   dreamSchedule?: {
     hour: number;
     timeZone: string;
@@ -55,26 +55,6 @@ export interface ContextHandlerDependencies {
 }
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
-const FAST_WORKER_KICK_BUDGET_MS = 500;
-
-async function kickWorkerWithinBudget(
-  kickWorkerFast: () => Promise<void>,
-): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-
-  try {
-    await Promise.race([
-      kickWorkerFast(),
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, FAST_WORKER_KICK_BUDGET_MS);
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) {
-      clearTimeout(timeout);
-    }
-  }
-}
 
 async function appendDreamMemoryContext(
   hookSpecificOutput: string,
@@ -383,6 +363,12 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
       input,
       dependencies.timelineRenderer,
     );
+    if (input.sessionId && input.source !== "compact") {
+      const session = getSessionByContentId(dependencies.db, input.sessionId);
+      if (session) {
+        markSessionRunStart(dependencies.db, session.id);
+      }
+    }
     const nowEpoch =
       dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1_000);
     const triggerWindow = dependencies.dreamSchedule
@@ -397,21 +383,17 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
     try {
       if (dependencies.diaryStateStore) {
         const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        const reconciledDates = triggerWindow?.hasPassedTrigger
-          ? dependencies.diaryStateStore.reconcileBacklog({
-              today,
-              cutoverDate: bootstrap.cutoverDate,
-              lastSuccessfulDate:
-                await dependencies.readLastSuccessfulDate?.() ?? null,
-              maxDays: dependencies.dreamSchedule!.backlogLimit,
-              timeZone: dependencies.dreamSchedule!.timeZone,
-              boundaryHour: dependencies.dreamSchedule!.hour,
-              enqueuedAtEpoch: nowEpoch,
-            })
-          : [];
-
-        if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
-          await kickWorkerWithinBudget(dependencies.kickWorkerFast);
+        if (triggerWindow?.hasPassedTrigger) {
+          dependencies.diaryStateStore.reconcileBacklog({
+            today,
+            cutoverDate: bootstrap.cutoverDate,
+            lastSuccessfulDate:
+              await dependencies.readLastSuccessfulDate?.() ?? null,
+            maxDays: dependencies.dreamSchedule!.backlogLimit,
+            timeZone: dependencies.dreamSchedule!.timeZone,
+            boundaryHour: dependencies.dreamSchedule!.hour,
+            enqueuedAtEpoch: nowEpoch,
+          });
         }
       }
     } catch {

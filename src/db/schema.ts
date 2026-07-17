@@ -61,6 +61,12 @@ const SCHEMA_SQL = `
     UNIQUE(session_id, prompt_number)
   );
 
+  CREATE TABLE IF NOT EXISTS session_run_state (
+    session_db_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    start_turn_id INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
@@ -407,6 +413,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
+  db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
   db.exec("DROP TABLE IF EXISTS memory_fts");
 }

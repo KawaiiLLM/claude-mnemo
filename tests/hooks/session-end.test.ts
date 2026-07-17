@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { createContextHandler } from "../../src/hooks/handlers/context";
 import { createSessionEndHandler } from "../../src/hooks/handlers/session-end";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { BUILD_ID } from "../../src/shared/build-id";
@@ -46,6 +47,26 @@ describe("handleSessionEndHook", () => {
   });
 
   test("returns asyncWork and defers worker flush for the resolved session", async () => {
+    await createContextHandler({
+      db,
+      nowEpoch: () => 200,
+    })(
+      createInput({
+        eventName: "SessionStart",
+        source: "resume",
+      }),
+    );
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, created_at_epoch
+       ) VALUES (?, 1, 'active', 'new prompt', 201)`,
+    ).run(sessionId);
+    await createContextHandler({ db })(
+      createInput({
+        eventName: "SessionStart",
+        source: "compact",
+      }),
+    );
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
         return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
@@ -74,6 +95,42 @@ describe("handleSessionEndHook", () => {
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
       session_id: sessionId,
     });
+  });
+
+  test("a resume glance with no new turn does not contact or spawn the worker", async () => {
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt,
+         assistant_response, created_at_epoch
+       ) VALUES (?, 1, 'extracted', 'prior prompt', 'prior response', 90)`,
+    ).run(sessionId);
+    await createContextHandler({
+      db,
+      nowEpoch: () => 200,
+    })(
+      createInput({
+        eventName: "SessionStart",
+        source: "resume",
+      }),
+    );
+    const fetchImpl = mock(async () => {
+      throw new Error("worker is down");
+    });
+    const spawnImpl = mock(() => ({ unref() {} }));
+    const handler = createSessionEndHandler({
+      db,
+      workerClientDeps: {
+        fetchImpl,
+        spawnImpl: spawnImpl as never,
+        existsSyncImpl: () => true,
+      },
+    });
+
+    const result = await handler(createInput());
+
+    expect(result).toEqual({ continue: true });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(spawnImpl).not.toHaveBeenCalled();
   });
 
   test("does nothing when the content session is unknown", async () => {

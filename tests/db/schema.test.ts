@@ -34,6 +34,7 @@ describe("initializeSchema", () => {
 
     expect(tableNames).toContain("sessions");
     expect(tableNames).toContain("turns");
+    expect(tableNames).toContain("session_run_state");
     expect(tableNames).toContain("observations");
     expect(tableNames).toContain("pending_queue");
     expect(tableNames).toContain("memory_fts");

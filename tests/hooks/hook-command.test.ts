@@ -72,7 +72,7 @@ function createRunner(handler: HookHandler) {
 }
 
 describe("runHookCommand", () => {
-  test("production SessionStart wiring queues diary backlog, injects persona/index, and kicks the worker", async () => {
+  test("production SessionStart wiring queues diary backlog and injects context without worker work", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-default-hooks-"));
@@ -128,14 +128,10 @@ describe("runHookCommand", () => {
         settledAtEpoch: nowEpoch,
       });
       diaryStateStore.markDayStale("2026-07-10");
-      let kickCalls = 0;
       const handlers = createDefaultHookHandlers({
         db,
         dataRoot,
         nowEpoch: () => nowEpoch,
-        kickWorkerFast: async () => {
-          kickCalls += 1;
-        },
       });
 
       const result = await handlers.SessionStart!({
@@ -158,7 +154,6 @@ describe("runHookCommand", () => {
         "- 2026-07-10：生产 wiring 日记索引",
       );
       expect(result.hookSpecificOutput).not.toContain("不应注入的归档内容");
-      expect(kickCalls).toBe(1);
       expect(result.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
@@ -188,7 +183,6 @@ describe("runHookCommand", () => {
         db,
         dataRoot,
         nowEpoch: () => Date.parse("2026-07-11T12:00:00+08:00") / 1_000,
-        kickWorkerFast: async () => {},
       });
 
       const result = await handlers.SessionStart!({

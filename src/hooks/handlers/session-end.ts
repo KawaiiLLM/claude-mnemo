@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
+import { hasNewTurnSinceSessionRunStart } from "../../db/session-run";
 import { notifyWorkerFlush, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -22,6 +23,9 @@ export function createSessionEndHandler(
 
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
+      return { continue: true };
+    }
+    if (!hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
       return { continue: true };
     }
 

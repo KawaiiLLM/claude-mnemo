@@ -2618,15 +2618,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   const startupFlushSessionId = getStartupFlushSessionId(env);
   if (startupFlushSessionId !== null) {
-    void (async () => {
-      try {
-        await core.flushSession(startupFlushSessionId);
-      } finally {
-        await core.scanAndDrainQueue();
-      }
-    })();
-  } else {
-    void core.scanAndDrainQueue();
+    void core.flushSession(startupFlushSessionId);
   }
   setInterval(() => {
     ensureWorkerPidFile(deps);

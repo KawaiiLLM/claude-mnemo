@@ -55,10 +55,9 @@ describe("SessionStart dream scheduling and injection", () => {
     };
   }
 
-  test("queues every missed date after the configured hour and kicks once", async () => {
+  test("queues every missed date after the configured hour without waking the worker", async () => {
     const stateStore = createDiaryStateStore(db);
     const nowEpoch = Date.parse("2026-07-11T05:00:00+08:00") / 1_000;
-    let kicks = 0;
     await createContextHandler({
       db,
       diaryStateStore: stateStore,
@@ -69,14 +68,12 @@ describe("SessionStart dream scheduling and injection", () => {
         backlogLimit: 7,
       },
       readLastSuccessfulDate: async () => "2026-07-07",
-      kickWorkerFast: async () => { kicks += 1; },
     })(session("dream-schedule", nowEpoch));
 
     expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260708);
     expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260709);
     expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260710);
     expect(stateStore.claimNextDiaryItem(nowEpoch)).toBeNull();
-    expect(kicks).toBe(1);
   });
 
   test("does not queue before the configured hour", async () => {

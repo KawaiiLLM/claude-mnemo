@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
+import { DEFAULT_CONFIG } from "../../src/shared/config";
 import {
   getSession,
   updateLastAgentSessionId,
@@ -113,6 +114,18 @@ function healthyQueryImpl(
       async close() {},
     } satisfies WorkerQuerySession;
   }) as typeof import("../../src/worker/query-session").createWorkerQuerySession;
+}
+
+async function waitUntil(
+  predicate: () => boolean,
+  attempts = 100,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
 }
 
 function queueObs(
@@ -2701,6 +2714,87 @@ describe("worker server", () => {
     }
   });
 
+  test("main waits for an explicit wake before globally draining legacy turns", async () => {
+    const runtimeDb = createDatabase(":memory:");
+    initializeSchema(runtimeDb);
+
+    const legacySessionId = upsertSession(runtimeDb, {
+      contentSessionId: "worker-boot-legacy",
+      project: "/tmp/project-boot-legacy",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const wakingSessionId = upsertSession(runtimeDb, {
+      contentSessionId: "worker-boot-waking",
+      project: "/tmp/project-boot-waking",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 2,
+      updatedAtEpoch: 2,
+      completedAtEpoch: null,
+    }).id;
+    const legacyTurnId = createTurn(runtimeDb, legacySessionId, 1, "Legacy turn");
+    const wakingTurnId = createTurn(runtimeDb, wakingSessionId, 1, "Waking turn");
+    queueTurnStop(runtimeDb, legacySessionId, legacyTurnId, 101);
+    queueTurnStop(runtimeDb, wakingSessionId, wakingTurnId, 102);
+
+    let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
+    const sentPrompts: string[] = [];
+    const originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+
+    try {
+      await main({
+        db: runtimeDb,
+        env: {},
+        config: {
+          ...DEFAULT_CONFIG,
+          mergeThresholdChars: 1,
+          maxQueuedBatches: 0,
+        },
+        logger: { warn() {}, error() {} },
+        BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop() {} };
+        }) as typeof Bun.serve),
+        createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
+        isProcessAliveImpl: () => false,
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+        processImpl: {
+          pid: process.pid,
+          on: (() => process) as typeof process.on,
+          exit: (() => undefined as never) as typeof process.exit,
+        },
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sentPrompts).toEqual([]);
+      expect(fetchHandler).not.toBeNull();
+
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/wake", { method: "POST" }),
+      );
+      expect(response.status).toBe(200);
+
+      await waitUntil(() => sentPrompts.length === 2);
+      expect(sentPrompts).toHaveLength(2);
+      expect(sentPrompts.join("\n")).toContain(`id="T${legacyTurnId}"`);
+      expect(sentPrompts.join("\n")).toContain(`id="T${wakingTurnId}"`);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      runtimeDb.close();
+    }
+  });
+
   test("main wires /flush to core.flushSession so SessionEnd flushes buffered observations", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
@@ -2733,16 +2827,7 @@ describe("worker server", () => {
           fetchHandler = options.fetch;
           return { stop() {} };
         }) as typeof Bun.serve),
-        createWorkerQuerySessionImpl: ((_input) =>
-          ({
-            sessionId: "worker-query",
-            queryPid: 1234,
-            async sendPrompt(prompt: string) {
-              sentPrompts.push(prompt);
-              return { session_id: "worker-query" };
-            },
-            async close() {},
-          }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
         isProcessAliveImpl: () => false,
         existsSyncImpl: () => false,
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
@@ -2761,8 +2846,7 @@ describe("worker server", () => {
 
       expect(response.status).toBe(200);
 
-      await Promise.resolve();
-      await Promise.resolve();
+      await waitUntil(() => sentPrompts.length === 1);
 
       // /flush -> core.flushSession drains + renders the buffered turn as one push.
       expect(sentPrompts).toHaveLength(1);

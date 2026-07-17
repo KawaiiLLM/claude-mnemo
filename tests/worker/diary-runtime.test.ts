@@ -440,7 +440,7 @@ describe("createDiaryRuntime", () => {
     }
   });
 
-  test("production main routes every date through the sole dream runtime", async () => {
+  test("production main routes every explicitly woken date through the sole dream runtime", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-main-runtime-"));
@@ -450,6 +450,7 @@ describe("createDiaryRuntime", () => {
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const processedTargets: number[] = [];
     let factoryCalls = 0;
+    let fetchHandler: ((request: Request) => Promise<Response>) | null = null;
     const originalSetInterval = globalThis.setInterval;
     globalThis.setInterval = mock(
       () => 0 as unknown as NodeJS.Timeout,
@@ -458,6 +459,7 @@ describe("createDiaryRuntime", () => {
     try {
       await main({
         db,
+        env: {},
         dataRoot,
         config: DEFAULT_CONFIG,
         logger: { warn() {}, error() {} },
@@ -473,7 +475,10 @@ describe("createDiaryRuntime", () => {
             async processDreamDate() {},
           };
         },
-        BunServeImpl: mock(() => ({ stop() {} })) as typeof Bun.serve,
+        BunServeImpl: mock(((options: { fetch: (request: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop() {} };
+        }) as typeof Bun.serve),
         pidPath: join(dataRoot, "worker.pid"),
         startingPath: join(dataRoot, "worker.starting"),
         existsSyncImpl: () => false,
@@ -486,6 +491,12 @@ describe("createDiaryRuntime", () => {
           exit: (() => undefined as never) as NodeJS.Process["exit"],
         },
       });
+
+      expect(fetchHandler).not.toBeNull();
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/wake", { method: "POST" }),
+      );
+      expect(response.status).toBe(200);
 
       for (let i = 0; i < 10 && processedTargets.length === 0; i += 1) {
         await Promise.resolve();

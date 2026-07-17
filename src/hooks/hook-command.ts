@@ -11,7 +11,6 @@ import { DiaryFileStore } from "../diary/file-store";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { DATA_DIR } from "../shared/paths";
 import { loadConfig, type MnemoConfig } from "../shared/config";
-import { kickWorkerFast as kickDefaultWorkerFast } from "../worker/client";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import { createContextHandler } from "./handlers/context";
@@ -38,7 +37,6 @@ const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 export interface DefaultHookHandlersDependencies {
   db: ReturnType<typeof createDatabase>;
   dataRoot?: string;
-  kickWorkerFast?: () => Promise<void>;
   nowEpoch?: () => number;
   config?: MnemoConfig;
 }
@@ -46,7 +44,6 @@ export interface DefaultHookHandlersDependencies {
 export function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
-  kickWorkerFast = kickDefaultWorkerFast,
   nowEpoch,
   config = loadConfig(),
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
@@ -60,7 +57,6 @@ export function createDefaultHookHandlers({
       diaryStateStore,
       fileStore,
       memoryStore: dreamStore,
-      kickWorkerFast,
       nowEpoch,
       dreamSchedule: {
         hour: config.dreamAgentHour,
