@@ -274,6 +274,7 @@ var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
+var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -281,6 +282,7 @@ var DEFAULT_CONFIG = {
   cacheMode: "auto",
   maxMiniTurnChars: 24e3,
   maxFlushAttempts: 3,
+  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -347,6 +349,12 @@ function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, logger) 
       MIN_FLUSH_ATTEMPTS,
       Number.MAX_SAFE_INTEGER,
       DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    sessionEndTailTimeoutMs: clampInteger(
+      config.sessionEndTailTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.sessionEndTailTimeoutMs
     ),
     compactContextRatio: clampNumber(
       config.compactContextRatio,
@@ -520,23 +528,32 @@ function createDiaryStateStore(db) {
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
-        db.query(
-          `UPDATE diary_day_state
-           SET needs_regen = 1,
-               attempt_count = attempt_count + 1,
-               last_error = ?,
-               terminal = CASE
-                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
-               next_attempt_epoch = CASE
-                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
-           WHERE date = ?`
-        ).run(
-          input.error,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          input.retryAtEpoch,
-          input.date
-        );
+        if (input.countAttempt === false) {
+          db.query(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 next_attempt_epoch = ?
+             WHERE date = ?`
+          ).run(input.retryAtEpoch, input.date);
+        } else {
+          db.query(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 attempt_count = attempt_count + 1,
+                 last_error = ?,
+                 terminal = CASE
+                   WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+                 next_attempt_epoch = CASE
+                   WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
+             WHERE date = ?`
+          ).run(
+            input.error,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            input.retryAtEpoch,
+            input.date
+          );
+        }
         db.query(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
@@ -847,6 +864,12 @@ var SCHEMA_SQL = `
     UNIQUE(session_id, prompt_number)
   );
 
+  CREATE TABLE IF NOT EXISTS session_run_state (
+    session_db_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    start_turn_id INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
@@ -1121,6 +1144,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
+  db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
   db.exec("DROP TABLE IF EXISTS memory_fts");
 }
@@ -2182,276 +2206,6 @@ var DreamMemoryStore = class {
   }
 };
 
-// src/worker/client.ts
-var import_node_child_process = require("node:child_process");
-var import_node_fs4 = require("node:fs");
-var import_node_path7 = require("node:path");
-
-// src/shared/build-id.ts
-var BUILD_ID = true ? "0.4.2-mrn3c70l" : "dev";
-
-// src/worker/client.ts
-var WORKER_PORT = 37778;
-var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
-var WAKE_TIMEOUT_MS = 500;
-var FLUSH_TIMEOUT_MS = 500;
-var COMPACT_TIMEOUT_MS = 5e3;
-function createAbortSignal(timeoutMs) {
-  return AbortSignal.timeout(timeoutMs);
-}
-function sleep(ms, setTimeoutImpl = setTimeout) {
-  return new Promise((resolvePromise) => {
-    setTimeoutImpl(resolvePromise, ms);
-  });
-}
-function resolvePluginRoot(env = process.env) {
-  if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
-    return env.CLAUDE_PLUGIN_ROOT;
-  }
-  const currentDir = (0, import_node_path7.dirname)(__filename);
-  if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
-    return (0, import_node_path7.resolve)(currentDir, "..");
-  }
-  return (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
-}
-function resolveWorkerScriptPaths(env = process.env) {
-  const pluginRoot = resolvePluginRoot(env);
-  return {
-    bunRunnerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "bun-runner.js"),
-    workerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "worker.cjs")
-  };
-}
-async function readWorkerHealth(fetchImpl, timeoutMs) {
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
-      method: "GET",
-      signal: createAbortSignal(timeoutMs)
-    });
-    if (!response.ok) {
-      return { status: "down" };
-    }
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      return { status: "compatible" };
-    }
-    if (body.buildId && body.buildId !== BUILD_ID) {
-      return {
-        status: "stale",
-        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
-      };
-    }
-    return {
-      status: "compatible",
-      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
-    };
-  } catch {
-    return { status: "down" };
-  }
-}
-function readWorkerPidFallback(deps = {}) {
-  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
-  if (!existsSyncImpl(pidPath)) {
-    return null;
-  }
-  try {
-    const pid = Number((0, import_node_fs4.readFileSync)(pidPath, "utf8").trim());
-    if (Number.isInteger(pid) && pid > 0) {
-      return pid;
-    }
-  } catch {
-  }
-  return null;
-}
-function killWorkerPid(pid, killImpl = process.kill) {
-  try {
-    killImpl(pid, "SIGTERM");
-  } catch {
-  }
-}
-function logUnrecoverableStaleWorker() {
-  console.error("stale worker detected but no pid handle is available");
-}
-function resolveStaleWorkerPid(health, deps = {}) {
-  if (health.status !== "stale") {
-    return null;
-  }
-  if (typeof health.pid === "number") {
-    return health.pid;
-  }
-  return readWorkerPidFallback(deps);
-}
-function spawnWorkerProcess(deps = {}, env = process.env) {
-  const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
-  const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
-  if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
-    return;
-  }
-  const child = spawnImpl("node", [bunRunnerPath, workerPath], {
-    detached: true,
-    stdio: "ignore",
-    env
-  });
-  child.unref();
-}
-async function waitForWorkerDown(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (health.status === "down") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-  return false;
-}
-async function waitForCompatibleWorker(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
-  const nowMs = deps.nowMsImpl ?? Date.now;
-  const startedAt = nowMs();
-  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
-    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-    if (health.status === "compatible") {
-      return true;
-    }
-    await sleep(100, setTimeoutImpl);
-  }
-  return false;
-}
-async function ensureCompatibleWorker(deps = {}) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-  if (health.status === "compatible") {
-    return "compatible";
-  }
-  if (health.status === "down") {
-    return "down";
-  }
-  const pid = resolveStaleWorkerPid(health, deps);
-  if (!pid) {
-    return "unrecoverable-stale";
-  }
-  killWorkerPid(pid);
-  if (!await waitForWorkerDown(deps)) {
-    return "unrecoverable-stale";
-  }
-  return "down";
-}
-async function kickWorkerFast(deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
-  if (health.status === "down") {
-    spawnWorkerProcess(deps, env);
-    return;
-  }
-  if (health.status === "stale") {
-    const pid = resolveStaleWorkerPid(health, deps);
-    if (!pid) {
-      return;
-    }
-    killWorkerPid(pid, deps.killImpl);
-    spawnWorkerProcess(deps, env);
-    return;
-  }
-  if (health.status !== "compatible") {
-    return;
-  }
-  try {
-    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-      method: "POST",
-      body: "{}",
-      signal: createAbortSignal(WAKE_TIMEOUT_MS)
-    });
-  } catch {
-  }
-}
-async function notifyWorkerWake(deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, env);
-    if (!await waitForCompatibleWorker(deps)) {
-      return;
-    }
-  }
-  try {
-    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-      method: "POST",
-      body: "{}",
-      signal: createAbortSignal(WAKE_TIMEOUT_MS)
-    });
-  } catch {
-    spawnWorkerProcess(deps, env);
-  }
-}
-async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const flushEnv = {
-    ...env,
-    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
-  };
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, flushEnv);
-    return;
-  }
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionDbId
-      }),
-      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
-    });
-    if (response.ok) {
-      return;
-    }
-  } catch {
-  }
-  spawnWorkerProcess(deps, flushEnv);
-}
-async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    throw new Error("Stale worker detected but no pid handle is available for restart.");
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, env);
-    const ready = await waitForCompatibleWorker(deps);
-    if (!ready) {
-      throw new Error("Worker did not become ready before compact request.");
-    }
-  }
-  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: sessionDbId,
-      transcript_path: transcriptPath ?? null
-    }),
-    signal: createAbortSignal(COMPACT_TIMEOUT_MS)
-  });
-  if (!response.ok) {
-    throw new Error(`Worker compact request failed with status ${response.status}.`);
-  }
-}
-
 // src/hooks/adapters/claude-code.ts
 function getString(raw, candidates) {
   for (const candidate of candidates) {
@@ -2650,6 +2404,248 @@ function setSessionLineageStatus(db, sessionId, status) {
   db.query(
     `UPDATE sessions SET lineage_status = ? WHERE id = ?`
   ).run(status, sessionId);
+}
+
+// src/worker/client.ts
+var import_node_child_process = require("node:child_process");
+var import_node_fs4 = require("node:fs");
+var import_node_path7 = require("node:path");
+
+// src/shared/build-id.ts
+var BUILD_ID = true ? "0.5.0-mroqh76w" : "dev";
+
+// src/worker/client.ts
+var WORKER_PORT = 37778;
+var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
+var WAKE_TIMEOUT_MS = 500;
+var FLUSH_TIMEOUT_MS = 500;
+var COMPACT_TIMEOUT_MS = 5e3;
+function createAbortSignal(timeoutMs) {
+  return AbortSignal.timeout(timeoutMs);
+}
+function sleep(ms, setTimeoutImpl = setTimeout) {
+  return new Promise((resolvePromise) => {
+    setTimeoutImpl(resolvePromise, ms);
+  });
+}
+function resolvePluginRoot(env = process.env) {
+  if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
+    return env.CLAUDE_PLUGIN_ROOT;
+  }
+  const currentDir = (0, import_node_path7.dirname)(__filename);
+  if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
+    return (0, import_node_path7.resolve)(currentDir, "..");
+  }
+  return (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
+}
+function resolveWorkerScriptPaths(env = process.env) {
+  const pluginRoot = resolvePluginRoot(env);
+  return {
+    bunRunnerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "bun-runner.js"),
+    workerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "worker.cjs")
+  };
+}
+async function readWorkerHealth(fetchImpl, timeoutMs) {
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/health`, {
+      method: "GET",
+      signal: createAbortSignal(timeoutMs)
+    });
+    if (!response.ok) {
+      return { status: "down" };
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return { status: "compatible" };
+    }
+    if (body.buildId && body.buildId !== BUILD_ID) {
+      return {
+        status: "stale",
+        pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+      };
+    }
+    return {
+      status: "compatible",
+      pid: typeof body.pid === "number" && body.pid > 0 ? body.pid : void 0
+    };
+  } catch {
+    return { status: "down" };
+  }
+}
+function readWorkerPidFallback(deps = {}) {
+  const pidPath = deps.pidPath ?? WORKER_PID_PATH;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
+  if (!existsSyncImpl(pidPath)) {
+    return null;
+  }
+  try {
+    const pid = Number((0, import_node_fs4.readFileSync)(pidPath, "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) {
+      return pid;
+    }
+  } catch {
+  }
+  return null;
+}
+function killWorkerPid(pid, killImpl = process.kill) {
+  try {
+    killImpl(pid, "SIGTERM");
+  } catch {
+  }
+}
+function logUnrecoverableStaleWorker() {
+  console.error("stale worker detected but no pid handle is available");
+}
+function resolveStaleWorkerPid(health, deps = {}) {
+  if (health.status !== "stale") {
+    return null;
+  }
+  if (typeof health.pid === "number") {
+    return health.pid;
+  }
+  return readWorkerPidFallback(deps);
+}
+function spawnWorkerProcess(deps = {}, env = process.env) {
+  const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
+  const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
+  if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
+    return;
+  }
+  const child = spawnImpl("node", [bunRunnerPath, workerPath], {
+    detached: true,
+    stdio: "ignore",
+    env
+  });
+  child.unref();
+}
+async function waitForWorkerDown(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "down") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function waitForCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const setTimeoutImpl = deps.setTimeoutImpl ?? setTimeout;
+  const nowMs = deps.nowMsImpl ?? Date.now;
+  const startedAt = nowMs();
+  while (nowMs() - startedAt < HOOK_READINESS_TIMEOUT_MS) {
+    const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+    if (health.status === "compatible") {
+      return true;
+    }
+    await sleep(100, setTimeoutImpl);
+  }
+  return false;
+}
+async function ensureCompatibleWorker(deps = {}) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const health = await readWorkerHealth(fetchImpl, HOOK_HEALTH_TIMEOUT_MS);
+  if (health.status === "compatible") {
+    return "compatible";
+  }
+  if (health.status === "down") {
+    return "down";
+  }
+  const pid = resolveStaleWorkerPid(health, deps);
+  if (!pid) {
+    return "unrecoverable-stale";
+  }
+  killWorkerPid(pid);
+  if (!await waitForWorkerDown(deps)) {
+    return "unrecoverable-stale";
+  }
+  return "down";
+}
+async function notifyWorkerWake(deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    if (!await waitForCompatibleWorker(deps)) {
+      return;
+    }
+  }
+  try {
+    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
+      method: "POST",
+      body: "{}",
+      signal: createAbortSignal(WAKE_TIMEOUT_MS)
+    });
+  } catch {
+    spawnWorkerProcess(deps, env);
+  }
+}
+async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const flushEnv = {
+    ...env,
+    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
+  };
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    return;
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, flushEnv);
+    return;
+  }
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionDbId
+      }),
+      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
+    });
+    if (response.ok) {
+      return;
+    }
+  } catch {
+  }
+  spawnWorkerProcess(deps, flushEnv);
+}
+async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const status = await ensureCompatibleWorker(deps);
+  if (status === "unrecoverable-stale") {
+    logUnrecoverableStaleWorker();
+    throw new Error("Stale worker detected but no pid handle is available for restart.");
+  }
+  if (status === "down") {
+    spawnWorkerProcess(deps, env);
+    const ready = await waitForCompatibleWorker(deps);
+    if (!ready) {
+      throw new Error("Worker did not become ready before compact request.");
+    }
+  }
+  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: sessionDbId,
+      transcript_path: transcriptPath ?? null
+    }),
+    signal: createAbortSignal(COMPACT_TIMEOUT_MS)
+  });
+  if (!response.ok) {
+    throw new Error(`Worker compact request failed with status ${response.status}.`);
+  }
 }
 
 // src/hooks/handlers/compact.ts
@@ -5302,24 +5298,33 @@ function renderSessionStartMemoryInjection(input) {
   };
 }
 
+// src/db/session-run.ts
+function markSessionRunStart(db, sessionDbId) {
+  db.query(
+    `INSERT INTO session_run_state (session_db_id, start_turn_id)
+     VALUES (
+       ?,
+       COALESCE((SELECT MAX(id) FROM turns WHERE session_id = ?), 0)
+     )
+     ON CONFLICT(session_db_id) DO UPDATE SET
+       start_turn_id = excluded.start_turn_id`
+  ).run(sessionDbId, sessionDbId);
+}
+function hasNewTurnSinceSessionRunStart(db, sessionDbId) {
+  return db.query(
+    `SELECT EXISTS(
+           SELECT 1
+           FROM session_run_state r
+           JOIN turns t
+             ON t.session_id = r.session_db_id
+            AND t.id > r.start_turn_id
+           WHERE r.session_db_id = ?
+         ) AS hasNewTurn`
+  ).get(sessionDbId)?.hasNewTurn === 1;
+}
+
 // src/hooks/handlers/context.ts
 var EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
-var FAST_WORKER_KICK_BUDGET_MS = 500;
-async function kickWorkerWithinBudget(kickWorkerFast2) {
-  let timeout;
-  try {
-    await Promise.race([
-      kickWorkerFast2(),
-      new Promise((resolve3) => {
-        timeout = setTimeout(resolve3, FAST_WORKER_KICK_BUDGET_MS);
-      })
-    ]);
-  } finally {
-    if (timeout !== void 0) {
-      clearTimeout(timeout);
-    }
-  }
-}
 async function appendDreamMemoryContext(hookSpecificOutput, memoryStore, fileStore) {
   try {
     const [memory, indexBytes] = await Promise.all([
@@ -5541,6 +5546,12 @@ function createContextHandler(dependencies) {
       input,
       dependencies.timelineRenderer
     );
+    if (input.sessionId && input.source !== "compact") {
+      const session = getSessionByContentId(dependencies.db, input.sessionId);
+      if (session) {
+        markSessionRunStart(dependencies.db, session.id);
+      }
+    }
     const nowEpoch = dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1e3);
     const triggerWindow = dependencies.dreamSchedule ? dreamTriggerWindow({
       nowEpoch,
@@ -5551,17 +5562,16 @@ function createContextHandler(dependencies) {
     try {
       if (dependencies.diaryStateStore) {
         const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        const reconciledDates = triggerWindow?.hasPassedTrigger ? dependencies.diaryStateStore.reconcileBacklog({
-          today,
-          cutoverDate: bootstrap.cutoverDate,
-          lastSuccessfulDate: await dependencies.readLastSuccessfulDate?.() ?? null,
-          maxDays: dependencies.dreamSchedule.backlogLimit,
-          timeZone: dependencies.dreamSchedule.timeZone,
-          boundaryHour: dependencies.dreamSchedule.hour,
-          enqueuedAtEpoch: nowEpoch
-        }) : [];
-        if (reconciledDates.length > 0 && dependencies.kickWorkerFast) {
-          await kickWorkerWithinBudget(dependencies.kickWorkerFast);
+        if (triggerWindow?.hasPassedTrigger) {
+          dependencies.diaryStateStore.reconcileBacklog({
+            today,
+            cutoverDate: bootstrap.cutoverDate,
+            lastSuccessfulDate: await dependencies.readLastSuccessfulDate?.() ?? null,
+            maxDays: dependencies.dreamSchedule.backlogLimit,
+            timeZone: dependencies.dreamSchedule.timeZone,
+            boundaryHour: dependencies.dreamSchedule.hour,
+            enqueuedAtEpoch: nowEpoch
+          });
         }
       }
     } catch {
@@ -6123,6 +6133,9 @@ function createSessionEndHandler(dependencies) {
     }
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
+      return { continue: true };
+    }
+    if (!hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
       return { continue: true };
     }
     return {
@@ -6928,7 +6941,6 @@ var HOOK_DB_BUSY_TIMEOUT_MS = 800;
 function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
-  kickWorkerFast: kickWorkerFast2 = kickWorkerFast,
   nowEpoch,
   config = loadConfig()
 }) {
@@ -6941,7 +6953,6 @@ function createDefaultHookHandlers({
       diaryStateStore,
       fileStore,
       memoryStore: dreamStore,
-      kickWorkerFast: kickWorkerFast2,
       nowEpoch,
       dreamSchedule: {
         hour: config.dreamAgentHour,

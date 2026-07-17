@@ -7794,6 +7794,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
+  db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
   db.exec("DROP TABLE IF EXISTS memory_fts");
 }
@@ -7868,6 +7869,12 @@ var init_schema = __esm({
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
+  );
+
+  CREATE TABLE IF NOT EXISTS session_run_state (
+    session_db_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    start_turn_id INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS observations (
@@ -34996,7 +35003,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.4.2" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.5.0" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

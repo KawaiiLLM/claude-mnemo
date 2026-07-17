@@ -35,6 +35,7 @@ __export(server_exports, {
   acquireWorkerSingleton: () => acquireWorkerSingleton,
   buildReminderEnvelope: () => buildReminderEnvelope,
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
+  checkForLastAgentShutdown: () => checkForLastAgentShutdown,
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
   createWorkerServerState: () => createWorkerServerState,
@@ -50,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.4.2-mrn3c70l" : "dev";
+var BUILD_ID = true ? "0.5.0-mroqh76w" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -244,6 +245,7 @@ var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
+var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -251,6 +253,7 @@ var DEFAULT_CONFIG = {
   cacheMode: "auto",
   maxMiniTurnChars: 24e3,
   maxFlushAttempts: 3,
+  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -317,6 +320,12 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       MIN_FLUSH_ATTEMPTS,
       Number.MAX_SAFE_INTEGER,
       DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    sessionEndTailTimeoutMs: clampInteger(
+      config3.sessionEndTailTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.sessionEndTailTimeoutMs
     ),
     compactContextRatio: clampNumber(
       config3.compactContextRatio,
@@ -490,23 +499,32 @@ function createDiaryStateStore(db) {
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
-        db.query(
-          `UPDATE diary_day_state
-           SET needs_regen = 1,
-               attempt_count = attempt_count + 1,
-               last_error = ?,
-               terminal = CASE
-                 WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
-               next_attempt_epoch = CASE
-                 WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
-           WHERE date = ?`
-        ).run(
-          input.error,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          DREAM_MAX_AUTO_ATTEMPTS,
-          input.retryAtEpoch,
-          input.date
-        );
+        if (input.countAttempt === false) {
+          db.query(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 next_attempt_epoch = ?
+             WHERE date = ?`
+          ).run(input.retryAtEpoch, input.date);
+        } else {
+          db.query(
+            `UPDATE diary_day_state
+             SET needs_regen = 1,
+                 attempt_count = attempt_count + 1,
+                 last_error = ?,
+                 terminal = CASE
+                   WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
+                 next_attempt_epoch = CASE
+                   WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
+             WHERE date = ?`
+          ).run(
+            input.error,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            DREAM_MAX_AUTO_ATTEMPTS,
+            input.retryAtEpoch,
+            input.date
+          );
+        }
         db.query(
           `UPDATE pending_queue
            SET claimed_at_epoch = NULL
@@ -1966,6 +1984,13 @@ function resetClaimedQueueItems(db) {
     "UPDATE pending_queue SET claimed_at_epoch = NULL WHERE claimed_at_epoch IS NOT NULL"
   ).run();
 }
+function resetClaimedQueueItemsForSession(db, sessionDbId) {
+  db.query(
+    `UPDATE pending_queue
+     SET claimed_at_epoch = NULL
+     WHERE session_db_id = ? AND claimed_at_epoch IS NOT NULL`
+  ).run(sessionDbId);
+}
 function deleteQueueItem(db, seq) {
   db.query("DELETE FROM pending_queue WHERE seq = ?").run(seq);
 }
@@ -2040,6 +2065,12 @@ var SCHEMA_SQL = `
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
+  );
+
+  CREATE TABLE IF NOT EXISTS session_run_state (
+    session_db_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    start_turn_id INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS observations (
@@ -2316,6 +2347,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turns");
+  db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
   db.exec("DROP TABLE IF EXISTS memory_fts");
 }
@@ -27241,13 +27273,13 @@ var $ZodObject2 = /* @__PURE__ */ $constructor2("$ZodObject", (inst, def) => {
     }
     return propValues;
   });
-  const isObject4 = isObject3;
+  const isObject5 = isObject3;
   const catchall = def.catchall;
   let value;
   inst._zod.parse = (payload, ctx) => {
     value ?? (value = _normalized.value);
     const input = payload.value;
-    if (!isObject4(input)) {
+    if (!isObject5(input)) {
       payload.issues.push({
         expected: "object",
         code: "invalid_type",
@@ -27345,7 +27377,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor2("$ZodObjectJIT", (inst, def) =
     return (payload, ctx) => fn(shape, payload, ctx);
   };
   let fastpass;
-  const isObject4 = isObject3;
+  const isObject5 = isObject3;
   const jit = !globalConfig2.jitless;
   const allowsEval3 = allowsEval2;
   const fastEnabled = jit && allowsEval3.value;
@@ -27354,7 +27386,7 @@ var $ZodObjectJIT = /* @__PURE__ */ $constructor2("$ZodObjectJIT", (inst, def) =
   inst._zod.parse = (payload, ctx) => {
     value ?? (value = _normalized.value);
     const input = payload.value;
-    if (!isObject4(input)) {
+    if (!isObject5(input)) {
       payload.issues.push({
         expected: "object",
         code: "invalid_type",
@@ -41458,6 +41490,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   let queryPid;
   let closed = false;
   let closePromise = null;
+  let closeError = null;
   function resolvePendingCompact() {
     const currentCompact = pendingCompact;
     if (!currentCompact) {
@@ -41632,18 +41665,19 @@ this overrides the normal "extract once, never revisit" rule for that block.
         }
       }
     } catch (error49) {
-      rejectPendingCompact(error49);
+      const rejection = closeError ?? error49;
+      rejectPendingCompact(rejection);
       while (pendingResults.length > 0) {
-        pendingResults.shift()?.reject(error49);
+        pendingResults.shift()?.reject(rejection);
       }
       throw error49;
     } finally {
       rejectPendingCompact(
-        new Error("Worker query session closed before compact completed.")
+        closeError ?? new Error("Worker query session closed before compact completed.")
       );
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(
-          new Error("Worker query session closed before returning a result.")
+          closeError ?? new Error("Worker query session closed before returning a result.")
         );
       }
     }
@@ -41694,10 +41728,11 @@ this overrides the normal "extract once, never revisit" rule for that block.
         clearTimeout(timeoutId);
       }
     },
-    async close() {
+    async close(abortError) {
       if (closePromise) {
         return closePromise;
       }
+      closeError = abortError ?? null;
       closed = true;
       promptStream.close();
       abortController.abort();
@@ -42760,21 +42795,105 @@ var DreamMemoryStore = class {
   }
 };
 
+// src/worker/error-classifier.ts
+var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set([
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "EAI_AGAIN"
+]);
+var CONNECTION_ERROR_NAMES = /* @__PURE__ */ new Set([
+  "APIConnectionError",
+  "APIConnectionTimeoutError"
+]);
+var WorkerAbortError = class extends Error {
+  workerAbortReason;
+  constructor(reason, message) {
+    super(message ?? `Worker request aborted: ${reason}`);
+    this.name = "WorkerAbortError";
+    this.workerAbortReason = reason;
+  }
+};
+function createWorkerAbortError(reason, message) {
+  return new WorkerAbortError(reason, message);
+}
+function isObject4(value) {
+  return typeof value === "object" && value !== null;
+}
+function classifyOne(error49) {
+  if (typeof error49.status === "number") {
+    return "deterministic";
+  }
+  if (error49.workerAbortReason === "stall-watchdog" || error49.workerAbortReason === "shutdown") {
+    return "connection";
+  }
+  if (typeof error49.code === "string" && CONNECTION_ERROR_CODES.has(error49.code)) {
+    return "connection";
+  }
+  const errorName = typeof error49.name === "string" ? error49.name : null;
+  const constructorName = typeof error49.constructor === "function" ? error49.constructor.name : null;
+  if (errorName !== null && CONNECTION_ERROR_NAMES.has(errorName) || constructorName !== null && CONNECTION_ERROR_NAMES.has(constructorName)) {
+    return "connection";
+  }
+  if (typeof error49.message === "string" && /\bfetch failed\b/i.test(error49.message)) {
+    return "connection";
+  }
+  return null;
+}
+function classifyWorkerError(error49) {
+  const seen = /* @__PURE__ */ new Set();
+  let current = error49;
+  while (isObject4(current) && !seen.has(current)) {
+    seen.add(current);
+    const classification = classifyOne(current);
+    if (classification !== null) {
+      return classification;
+    }
+    current = current.cause;
+  }
+  return "deterministic";
+}
+
 // src/worker/diary-agent-runner.ts
 function createDiaryAgentRunner(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_DREAM_AGENT_TIMEOUT_MS;
   const watchdogMs = options.watchdogMs ?? DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS;
+  let pendingAbortReason = null;
+  let active = null;
   return {
-    async run(input) {
+    run(input) {
+      if (active) {
+        return Promise.reject(new Error("Diary agent request is already running."));
+      }
+      if (pendingAbortReason) {
+        const reason = pendingAbortReason;
+        pendingAbortReason = null;
+        return Promise.reject(
+          createWorkerAbortError(
+            reason,
+            reason === "shutdown" ? "Diary agent request aborted for worker shutdown." : void 0
+          )
+        );
+      }
       const controller = new AbortController();
-      let abortReason = null;
       let finished = false;
       let watchdog;
+      let finish;
+      const completion = new Promise((resolve4) => {
+        finish = resolve4;
+      });
+      const current = {
+        controller,
+        reason: null,
+        completion,
+        finish
+      };
+      active = current;
       const abort = (reason) => {
         if (controller.signal.aborted) {
           return;
         }
-        abortReason = reason;
+        current.reason = reason;
         controller.abort();
       };
       const armWatchdog = () => {
@@ -42782,34 +42901,62 @@ function createDiaryAgentRunner(options) {
           return;
         }
         clearTimeout(watchdog);
-        watchdog = setTimeout(() => abort("watchdog"), watchdogMs);
+        watchdog = setTimeout(() => abort("stall-watchdog"), watchdogMs);
       };
       const timeout = setTimeout(() => abort("timeout"), timeoutMs);
       armWatchdog();
-      try {
-        return await options.runQuery({
-          ...input,
-          model: input.model ?? DEFAULT_DREAM_AGENT_MODEL,
-          timeoutMs,
-          watchdogMs,
-          signal: controller.signal,
-          reportActivity: armWatchdog
-        });
-      } catch (error49) {
-        if (abortReason === "watchdog") {
-          throw new Error(
-            `Diary agent request watchdog timed out after ${watchdogMs}ms.`
-          );
+      return (async () => {
+        try {
+          return await options.runQuery({
+            ...input,
+            model: input.model ?? DEFAULT_DREAM_AGENT_MODEL,
+            timeoutMs,
+            watchdogMs,
+            signal: controller.signal,
+            reportActivity: armWatchdog
+          });
+        } catch (error49) {
+          if (current.reason === "stall-watchdog") {
+            throw createWorkerAbortError(
+              "stall-watchdog",
+              `Diary agent request watchdog timed out after ${watchdogMs}ms.`
+            );
+          }
+          if (current.reason === "shutdown") {
+            throw createWorkerAbortError(
+              "shutdown",
+              "Diary agent request aborted for worker shutdown."
+            );
+          }
+          if (current.reason === "timeout") {
+            throw new Error(`Diary agent request timed out after ${timeoutMs}ms.`);
+          }
+          throw error49;
+        } finally {
+          finished = true;
+          clearTimeout(timeout);
+          clearTimeout(watchdog);
+          if (active === current) {
+            active = null;
+          }
+          current.finish();
         }
-        if (abortReason === "timeout") {
-          throw new Error(`Diary agent request timed out after ${timeoutMs}ms.`);
-        }
-        throw error49;
-      } finally {
-        finished = true;
-        clearTimeout(timeout);
-        clearTimeout(watchdog);
+      })();
+    },
+    isRunning() {
+      return active !== null;
+    },
+    async abort(reason) {
+      const current = active;
+      if (!current) {
+        pendingAbortReason = reason;
+        return;
       }
+      current.reason = reason;
+      if (!current.controller.signal.aborted) {
+        current.controller.abort();
+      }
+      await current.completion;
     }
   };
 }
@@ -42883,7 +43030,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.4.2",
+        version: "0.5.0",
         tools: [
           toolImpl(
             "recall",
@@ -43670,11 +43817,15 @@ function createDreamQueueProcessor(options) {
         }
       } catch (error49) {
         const failedAtEpoch = nowEpoch();
+        const classification = classifyWorkerError(error49);
+        const isShutdownAbort = typeof error49 === "object" && error49 !== null && "workerAbortReason" in error49 && error49.workerAbortReason === "shutdown";
+        const retryDelaySeconds = isShutdownAbort ? 0 : classification === "connection" ? 15 * 60 : 60;
         options.stateStore.recordDreamFailure({
           date: date7,
           queueSeq: item.seq,
           error: error49 instanceof Error ? error49.message : String(error49),
-          retryAtEpoch: failedAtEpoch + 60
+          retryAtEpoch: failedAtEpoch + retryDelaySeconds,
+          countAttempt: classification === "deterministic"
         });
         throw error49;
       }
@@ -43698,19 +43849,45 @@ function createDiaryRuntime(options) {
     agentRunner,
     config: config3
   });
-  const processDreamDate = (date7, processOptions) => dreamJob.process(date7, processOptions);
+  const processDreamDateRaw = (date7, processOptions) => dreamJob.process(date7, processOptions);
   const dreamQueue = createDreamQueueProcessor({
     db: options.db,
     stateStore,
-    processDreamDate,
+    processDreamDate: processDreamDateRaw,
     readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     nowEpoch: options.nowEpoch,
     timeZone: config3.dreamAgentTimeZone,
     boundaryHour: config3.dreamAgentHour
   });
+  let activeDream = null;
+  function trackDream(work) {
+    if (activeDream) {
+      return Promise.reject(new Error("Dream processing is already running."));
+    }
+    const operation = work();
+    const tracked = operation.finally(() => {
+      if (activeDream === tracked) {
+        activeDream = null;
+      }
+    });
+    activeDream = tracked;
+    tracked.catch(() => {
+    });
+    return tracked;
+  }
   return {
-    processDreamDate,
-    processDreamItem: (item) => dreamQueue.process(item)
+    processDreamDate: (date7) => trackDream(() => processDreamDateRaw(date7)),
+    processDreamItem: (item) => trackDream(() => dreamQueue.process(item)),
+    isDreamRunning: () => activeDream !== null,
+    async abortDream(reason) {
+      const dream = activeDream;
+      if (!dream) {
+        return;
+      }
+      await agentRunner.abort(reason);
+      await dream.catch(() => {
+      });
+    }
   };
 }
 
@@ -43777,6 +43954,7 @@ var WORKER_PORT = 37778;
 var STARTING_STALE_MS = 1e4;
 var WATCHDOG_INTERVAL_MS = 1e4;
 var STALLED_QUERY_MS = 3e4;
+var CONNECTION_RETRY_BACKOFF_MS = 1e4;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
@@ -43928,6 +44106,7 @@ function createWorkerCore(deps) {
   const sessions = /* @__PURE__ */ new Map();
   const buffers = /* @__PURE__ */ new Map();
   const compactingSessions = /* @__PURE__ */ new Set();
+  const suspendedUntilBySession = /* @__PURE__ */ new Map();
   const diaryStateStore = createDiaryStateStore(deps.db);
   let persistentRetryTimer = null;
   let diaryContinuationTimer = null;
@@ -44422,7 +44601,7 @@ ${body}
       }
     }
   }
-  async function closeSessionQuery(sessionDbId) {
+  async function closeSessionQuery(sessionDbId, abortError) {
     const state = sessions.get(sessionDbId);
     if (!state) {
       return;
@@ -44433,7 +44612,7 @@ ${body}
     state.closing = (async () => {
       try {
         await Promise.race([
-          state.querySession?.close() ?? Promise.resolve(),
+          state.querySession?.close(abortError) ?? Promise.resolve(),
           new Promise((resolve4) => {
             setTimeout(resolve4, 5e3);
           })
@@ -44450,6 +44629,33 @@ ${body}
       }
     })();
     return state.closing;
+  }
+  async function suspendSessionAfterConnectionError(sessionDbId, error49) {
+    suspendedUntilBySession.set(
+      sessionDbId,
+      nowMs() + CONNECTION_RETRY_BACKOFF_MS
+    );
+    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
+    buffers.delete(sessionDbId);
+    const state = sessions.get(sessionDbId);
+    if (state) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
+    logger.warn?.("mini-turn flush suspended after connection failure", {
+      sessionDbId,
+      retryAfterMs: CONNECTION_RETRY_BACKOFF_MS,
+      error: error49
+    });
+    await closeSessionQuery(
+      sessionDbId,
+      error49 instanceof Error ? error49 : void 0
+    ).catch((closeError) => {
+      logger.error?.("connection suspension failed to close query session", {
+        sessionDbId,
+        error: closeError
+      });
+    });
   }
   async function withSessionProcessingLock(sessionDbId, work) {
     const state = getOrCreateSessionState(sessionDbId);
@@ -44556,6 +44762,11 @@ ${body}
     state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
   }
   async function flushOneBatchLocked(state) {
+    if (suspendedUntilBySession.has(state.sessionDbId)) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+      return "suspended";
+    }
     pruneBatchQueueLocked(state);
     const batch = state.batchQueue[0];
     if (!batch) {
@@ -44564,6 +44775,10 @@ ${body}
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error49) {
+      if (classifyWorkerError(error49) === "connection") {
+        await suspendSessionAfterConnectionError(state.sessionDbId, error49);
+        return "suspended";
+      }
       batch.attempts += 1;
       if (batch.attempts < config3.maxFlushAttempts) {
         logger.warn?.("mini-turn flush failed, will retry", {
@@ -44604,9 +44819,43 @@ ${body}
         return;
       }
       const outcome = await flushOneBatchLocked(state);
-      if (outcome === "retryLater" || outcome === "empty") {
+      if (outcome === "retryLater" || outcome === "suspended" || outcome === "empty") {
         return;
       }
+    }
+  }
+  function batchQueueNeedsDrainTailFlush(state) {
+    const head = state.batchQueue[0];
+    const hasClosedNonTail = state.batchQueue.length > 1;
+    const hasFullTail = state.batchQueue.length === 1 && head !== void 0 && head.size >= config3.mergeThresholdChars;
+    const exceedsOverflowCap = state.batchQueue.length > config3.maxQueuedBatches;
+    return hasClosedNonTail || hasFullTail || exceedsOverflowCap;
+  }
+  async function flushClosedBatchesLocked(state) {
+    while (true) {
+      pruneBatchQueueLocked(state);
+      if (!batchQueueNeedsDrainTailFlush(state)) {
+        return;
+      }
+      const outcome = await flushOneBatchLocked(state);
+      if (outcome === "retryLater" || outcome === "suspended" || outcome === "empty") {
+        return;
+      }
+    }
+  }
+  async function flushDrainTail(sessionFilter) {
+    const sessionIds = sessionFilter === void 0 ? [...sessions.keys()] : sessions.has(sessionFilter) ? [sessionFilter] : [];
+    for (const sessionDbId of sessionIds) {
+      if (suspendedUntilBySession.has(sessionDbId) || compactingSessions.has(sessionDbId)) {
+        continue;
+      }
+      const state = sessions.get(sessionDbId);
+      if (!state || !batchQueueNeedsDrainTailFlush(state)) {
+        continue;
+      }
+      await withSessionProcessingLock(sessionDbId, async (state2) => {
+        await flushClosedBatchesLocked(state2);
+      });
     }
   }
   function enqueueSliceLocked(state, miniTurn, oldestTurnEpoch) {
@@ -44742,12 +44991,6 @@ ${body}
       } else {
         enqueueMergedTurnLocked(state, miniTurn);
       }
-      while (state.batchQueue.length > config3.maxQueuedBatches) {
-        const outcome = await flushOneBatchLocked(state);
-        if (outcome === "retryLater" || outcome === "empty") {
-          break;
-        }
-      }
     } catch (error49) {
       for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
@@ -44825,15 +45068,32 @@ ${body}
     diaryContinuationTimer = handle;
   }
   async function drainQueue(sessionFilter) {
+    const currentMs = nowMs();
+    for (const [sessionDbId, retryAtMs] of suspendedUntilBySession) {
+      if (retryAtMs <= currentMs) {
+        suspendedUntilBySession.delete(sessionDbId);
+      }
+    }
+    if (sessionFilter !== void 0 && suspendedUntilBySession.has(sessionFilter)) {
+      return;
+    }
     const skippedSeqs = /* @__PURE__ */ new Set();
     let diaryProcessed = false;
     while (true) {
+      if (sessionFilter !== void 0 && suspendedUntilBySession.has(sessionFilter)) {
+        return;
+      }
+      const excludedSessions = sessionFilter === void 0 ? /* @__PURE__ */ new Set([
+        ...compactingSessions,
+        ...suspendedUntilBySession.keys()
+      ]) : void 0;
       const item = claimNextItem(deps.db, now(), {
         sessionFilter,
         skippedSeqs,
-        excludeSessions: sessionFilter === void 0 ? compactingSessions : void 0
+        excludeSessions: excludedSessions
       });
       if (!item) {
+        await flushDrainTail(sessionFilter);
         if (sessionFilter === void 0 && deps.processDiaryItem && !diaryProcessed) {
           const diaryItem = diaryStateStore.claimNextDiaryItem(now());
           if (diaryItem) {
@@ -44965,6 +45225,42 @@ ${body}
     await withSessionProcessingLock(sessionDbId, async (state) => {
       await flushAllBatchesLocked(state);
     });
+  }
+  async function finishSession(sessionDbId) {
+    const drainPromise = drainSessionCompletely(sessionDbId);
+    let timeoutHandle;
+    let outcome;
+    try {
+      outcome = await Promise.race([
+        drainPromise.then(() => "drained"),
+        new Promise((resolve4) => {
+          timeoutHandle = setTimeoutImpl(
+            () => resolve4("timeout"),
+            config3.sessionEndTailTimeoutMs
+          );
+        })
+      ]);
+    } finally {
+      if (timeoutHandle !== void 0) {
+        clearTimeoutImpl(timeoutHandle);
+      }
+    }
+    if (outcome === "timeout") {
+      const abortError = createWorkerAbortError(
+        "shutdown",
+        `SessionEnd tail timed out after ${config3.sessionEndTailTimeoutMs}ms`
+      );
+      await suspendSessionAfterConnectionError(sessionDbId, abortError);
+      await drainPromise.catch(() => {
+      });
+      await closeSessionQuery(sessionDbId, abortError);
+      return;
+    }
+    if (suspendedUntilBySession.has(sessionDbId)) {
+      await closeSessionQuery(sessionDbId);
+      return;
+    }
+    await closeSessionQuery(sessionDbId);
   }
   async function tickKeepaliveSessionLocked(state, currentMs) {
     pruneBatchQueueLocked(state);
@@ -45116,6 +45412,7 @@ ${body}
     scanAndDrainQueue,
     processClaimedItem,
     flushSession,
+    finishSession,
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
@@ -45149,6 +45446,14 @@ ${body}
     },
     sendWorkUnit,
     reopenQuerySessionFresh,
+    hasLiveQuerySessions() {
+      return Array.from(sessions.values()).some(
+        (state) => state.querySession !== null
+      );
+    },
+    getGlobalScanInFlight() {
+      return globalScanInFlight;
+    },
     async abortStalledSessions(nowMsOverride) {
       const currentMs = nowMsOverride ?? nowMs();
       await Promise.all(
@@ -45167,7 +45472,10 @@ ${body}
               lastMessageAt: state.lastMessageAt,
               queryPid: state.queryPid
             });
-            await closeSessionQuery(state.sessionDbId).catch((error49) => {
+            await closeSessionQuery(
+              state.sessionDbId,
+              createWorkerAbortError("stall-watchdog")
+            ).catch((error49) => {
               logger.error?.("watchdog closeSessionQuery failed", {
                 sessionDbId: state.sessionDbId,
                 error: error49
@@ -45286,26 +45594,49 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     isProcessAliveImpl: deps.isProcessAliveImpl
   });
   const scanAndDrainQueue = deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
-  const handleFlushImpl = deps.handleFlushImpl ?? runtime?.flushSession ?? (async (sessionId) => {
+  const handleFlushImpl = deps.handleFlushImpl ?? runtime?.finishSession ?? (async (sessionId) => {
     await scanAndDrainQueue(sessionId);
   });
   const handleCompactImpl = deps.handleCompactImpl ?? runtime?.handleCompact ?? (async (sessionId) => {
     await scanAndDrainQueue(sessionId);
   });
   const handleDreamImpl = deps.handleDreamImpl ?? runtime?.triggerManualDream ?? (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  let wakeScanInFlight = null;
+  let activeGlobalWork = 0;
+  let resolveGlobalWork = null;
+  function trackGlobalWork(work) {
+    if (activeGlobalWork === 0) {
+      state.globalScanInFlight = new Promise((resolve4) => {
+        resolveGlobalWork = resolve4;
+      });
+    }
+    activeGlobalWork += 1;
+    const settle = () => {
+      activeGlobalWork = Math.max(0, activeGlobalWork - 1);
+      if (activeGlobalWork === 0) {
+        const finishGlobalWork = resolveGlobalWork;
+        resolveGlobalWork = null;
+        state.globalScanInFlight = null;
+        finishGlobalWork?.();
+      }
+    };
+    void work.then(settle, settle);
+  }
   async function handleWake() {
-    if (state.globalScanInFlight) {
+    if (wakeScanInFlight) {
       state.scanPending = true;
       return new Response(null, { status: 200 });
     }
-    state.globalScanInFlight = (async () => {
+    const scan = (async () => {
       do {
         state.scanPending = false;
         await scanAndDrainQueue();
       } while (state.scanPending);
     })().finally(() => {
-      state.globalScanInFlight = null;
+      wakeScanInFlight = null;
     });
+    wakeScanInFlight = scan;
+    trackGlobalWork(scan);
     return new Response(null, { status: 200 });
   }
   return async (req) => {
@@ -45330,12 +45661,13 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         if (typeof payload.session_id !== "number") {
           return new Response("session_id is required", { status: 400 });
         }
-        void handleCompactImpl(payload.session_id, payload.transcript_path).catch((error49) => {
+        const compact = handleCompactImpl(payload.session_id, payload.transcript_path).catch((error49) => {
           deps.logger?.error?.("compact request failed", {
             sessionId: payload.session_id,
             error: error49
           });
         });
+        trackGlobalWork(compact);
         return new Response(null, { status: 200 });
       }
       if (req.method === "POST" && url2.pathname === "/flush") {
@@ -45343,12 +45675,13 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         if (typeof payload.session_id !== "number") {
           return new Response("session_id is required", { status: 400 });
         }
-        void handleFlushImpl(payload.session_id).catch((error49) => {
+        const flush = handleFlushImpl(payload.session_id).catch((error49) => {
           deps.logger?.error?.("flush request failed", {
             sessionId: payload.session_id,
             error: error49
           });
         });
+        trackGlobalWork(flush);
         return new Response(null, { status: 200 });
       }
       if (req.method === "POST" && url2.pathname === "/dream") {
@@ -45401,6 +45734,43 @@ async function checkForIdleWorkerShutdown(state, deps = {}) {
     throw error49;
   }
 }
+async function checkForLastAgentShutdown(state, deps = {}) {
+  const hasLiveQuerySessions = deps.hasLiveQuerySessionsImpl ?? (() => false);
+  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
+  if (state.shuttingDown || state.activeRequests > 0 || hasLiveQuerySessions()) {
+    return false;
+  }
+  const dreamWasRunning = isDreamRunning();
+  const serverWork = state.globalScanInFlight;
+  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
+  if (!dreamWasRunning && (serverWork || coreWork)) {
+    return false;
+  }
+  if (dreamWasRunning && !deps.abortDreamImpl) {
+    return false;
+  }
+  state.shuttingDown = true;
+  try {
+    if (dreamWasRunning) {
+      await deps.abortDreamImpl?.();
+      await Promise.all([
+        serverWork?.catch(() => {
+        }),
+        coreWork?.catch(() => {
+        })
+      ]);
+    }
+    if (state.activeRequests > 0 || hasLiveQuerySessions() || state.globalScanInFlight !== null || (deps.getGlobalScanInFlightImpl?.() ?? null) !== null || isDreamRunning()) {
+      state.shuttingDown = false;
+      return false;
+    }
+    await createShutdownCleanup(deps)();
+    return true;
+  } catch (error49) {
+    state.shuttingDown = false;
+    throw error49;
+  }
+}
 function registerShutdownCleanup(deps = {}) {
   const processImpl = deps.processImpl ?? process;
   const cleanup = createShutdownCleanup(deps);
@@ -45441,21 +45811,22 @@ async function main(deps = {}) {
     logger: deps.logger ?? createLogger("MNEMOSYNE")
   });
   core.recoverFromCrash();
+  const fetchHandler = createWorkerFetchHandler(
+    {
+      ...deps,
+      db,
+      config: config3,
+      scanAndDrainQueue: core.scanAndDrainQueue,
+      handleFlushImpl: core.finishSession,
+      handleCompactImpl: core.handleCompact
+    },
+    serverState
+  );
   let server;
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
-      fetch: createWorkerFetchHandler(
-        {
-          ...deps,
-          db,
-          config: config3,
-          scanAndDrainQueue: core.scanAndDrainQueue,
-          handleFlushImpl: core.flushSession,
-          handleCompactImpl: core.handleCompact
-        },
-        serverState
-      )
+      fetch: fetchHandler
     });
   } catch (error49) {
     try {
@@ -45485,15 +45856,12 @@ async function main(deps = {}) {
   }
   const startupFlushSessionId = getStartupFlushSessionId(env);
   if (startupFlushSessionId !== null) {
-    void (async () => {
-      try {
-        await core.flushSession(startupFlushSessionId);
-      } finally {
-        await core.scanAndDrainQueue();
-      }
-    })();
-  } else {
-    void core.scanAndDrainQueue();
+    void fetchHandler(
+      new Request(`http://127.0.0.1:${WORKER_PORT}/flush`, {
+        method: "POST",
+        body: JSON.stringify({ session_id: startupFlushSessionId })
+      })
+    );
   }
   setInterval(() => {
     ensureWorkerPidFile(deps);
@@ -45502,13 +45870,28 @@ async function main(deps = {}) {
     void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
-    void checkForIdleWorkerShutdown(serverState, {
+    const lifecycleDeps = {
       ...deps,
+      hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
+      getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
+      isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+      abortDreamImpl: async () => {
+        await diaryRuntime?.abortDream?.("shutdown");
+      },
       shutdownGracefullyImpl: async () => {
         await deps.shutdownGracefullyImpl?.();
         server.stop(true);
       }
-    });
+    };
+    void (async () => {
+      const didShutdown = await checkForLastAgentShutdown(
+        serverState,
+        lifecycleDeps
+      );
+      if (!didShutdown) {
+        await checkForIdleWorkerShutdown(serverState, lifecycleDeps);
+      }
+    })();
   }, WATCHDOG_INTERVAL_MS);
   registerShutdownCleanup({
     ...deps,
@@ -45531,6 +45914,7 @@ if (isDirectExecution()) {
   acquireWorkerSingleton,
   buildReminderEnvelope,
   checkForIdleWorkerShutdown,
+  checkForLastAgentShutdown,
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,
