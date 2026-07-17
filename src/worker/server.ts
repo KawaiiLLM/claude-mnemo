@@ -1476,6 +1476,66 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
+  // End-of-drain policy: every non-tail batch is closed because only the last
+  // merged batch can accept another short turn. Keep one sub-threshold tail
+  // open for the next turn; full-tail and overflow cases are added by the same
+  // policy below rather than synchronously in the per-turn enqueue path.
+  function batchQueueNeedsDrainTailFlush(state: SessionState): boolean {
+    const head = state.batchQueue[0];
+    const hasClosedNonTail = state.batchQueue.length > 1;
+    const hasFullTail =
+      state.batchQueue.length === 1 &&
+      head !== undefined &&
+      head.size >= config.mergeThresholdChars;
+    const exceedsOverflowCap =
+      state.batchQueue.length > config.maxQueuedBatches;
+    return hasClosedNonTail || hasFullTail || exceedsOverflowCap;
+  }
+
+  async function flushClosedBatchesLocked(state: SessionState): Promise<void> {
+    while (true) {
+      pruneBatchQueueLocked(state);
+      if (!batchQueueNeedsDrainTailFlush(state)) {
+        return;
+      }
+
+      const outcome = await flushOneBatchLocked(state);
+      if (
+        outcome === "retryLater" ||
+        outcome === "suspended" ||
+        outcome === "empty"
+      ) {
+        return;
+      }
+    }
+  }
+
+  async function flushDrainTail(sessionFilter?: number): Promise<void> {
+    const sessionIds =
+      sessionFilter === undefined
+        ? [...sessions.keys()]
+        : sessions.has(sessionFilter)
+          ? [sessionFilter]
+          : [];
+    for (const sessionDbId of sessionIds) {
+      if (
+        suspendedUntilBySession.has(sessionDbId) ||
+        compactingSessions.has(sessionDbId)
+      ) {
+        continue;
+      }
+      const state = sessions.get(sessionDbId);
+      // An open tail must not queue behind an unrelated slow inference merely
+      // to discover under the lock that there is nothing to flush.
+      if (!state || !batchQueueNeedsDrainTailFlush(state)) {
+        continue;
+      }
+      await withSessionProcessingLock(sessionDbId, async (state) => {
+        await flushClosedBatchesLocked(state);
+      });
+    }
+  }
+
   function enqueueSliceLocked(
     state: SessionState,
     miniTurn: MiniTurnPayload,
@@ -1675,13 +1735,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       } else {
         enqueueMergedTurnLocked(state, miniTurn);
       }
-
-      while (state.batchQueue.length > config.maxQueuedBatches) {
-        const outcome = await flushOneBatchLocked(state);
-        if (outcome === "retryLater" || outcome === "empty") {
-          break;
-        }
-      }
     } catch (error) {
       for (const item of obsItems) {
         releaseQueueClaim(deps.db, item.seq);
@@ -1807,6 +1860,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       });
 
       if (!item) {
+        await flushDrainTail(sessionFilter);
         if (
           sessionFilter === undefined &&
           deps.processDiaryItem &&

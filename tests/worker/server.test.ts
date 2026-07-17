@@ -1067,7 +1067,7 @@ describe("worker server", () => {
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
   });
 
-  test("scanAndDrainQueue flushes the oldest completed batch when queue overflow exceeds the cap", async () => {
+  test("scanAndDrainQueue eagerly flushes every closed batch and full tail", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-batch",
       project: "/tmp/project-batch",
@@ -1108,18 +1108,19 @@ describe("worker server", () => {
 
     await core.scanAndDrainQueue();
 
-    // mergeThresholdChars=1 => each short turn its own merged batch; overflow
-    // beyond maxQueuedBatches=3 flushes the oldest (turn 1) as one message.
-    expect(sentPrompts).toHaveLength(1);
-    expect(sentPrompts[0]).toContain("<batch>");
-    expect(sentPrompts[0]).toContain(`<obs id="O${observationIds[0]}"`);
+    // mergeThresholdChars=1 => every short turn is a full standalone batch;
+    // drain completion consumes all four in FIFO order.
+    expect(sentPrompts).toHaveLength(4);
+    observationIds.forEach((observationId, index) => {
+      expect(sentPrompts[index]).toContain(`<obs id="O${observationId}"`);
+    });
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(6);
+    ).toBe(0);
     expect(
       core.sessions.get(sessionId)?.batchQueue.map(batchTurnIds),
-    ).toEqual([[turnIds[1]!], [turnIds[2]!], [turnIds[3]!]]);
+    ).toEqual([]);
     expect(core.buffers.get(sessionId)?.items ?? []).toEqual([]);
   });
 
@@ -1209,7 +1210,7 @@ describe("worker server", () => {
     ).toEqual([]);
   });
 
-  test("runKeepaliveTick sends one reserve turn after four minutes in warm state", async () => {
+  test("runKeepaliveTick sends the open merged tail after four minutes in warm state", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-keepalive-reserve",
       project: "/tmp/project-keepalive-reserve",
@@ -1235,7 +1236,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       config: {
-        mergeThresholdChars: 1,
+        mergeThresholdChars: 100_000,
         maxQueuedBatches: 5,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
@@ -1253,16 +1254,19 @@ describe("worker server", () => {
 
     await core.runKeepaliveTick(1_240_000);
 
-    // One reserve push flushes the oldest batch (turn 1) to keep cache warm.
+    // Drain completion keeps the one open merged tail; keepalive later sends it
+    // as one message to keep the cache warm.
     expect(sentPrompts).toHaveLength(1);
-    expect(sentPrompts[0]).toContain(`<obs id="O${observationIds[0]}"`);
+    for (const observationId of observationIds) {
+      expect(sentPrompts[0]).toContain(`<obs id="O${observationId}"`);
+    }
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(4);
+    ).toBe(0);
     expect(
       core.sessions.get(sessionId)?.batchQueue.map(batchTurnIds),
-    ).toEqual([[turnIds[1]!], [turnIds[2]!]]);
+    ).toEqual([]);
   });
 
   test("runKeepaliveTick does not push standalone in-progress observations", async () => {
@@ -1380,7 +1384,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       config: {
-        mergeThresholdChars: 1,
+        mergeThresholdChars: 100_000,
         maxQueuedBatches: 5,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
@@ -1428,8 +1432,8 @@ describe("worker server", () => {
     expect(
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM pending_queue").get()
         ?.count,
-    ).toBe(5);
-    expect(core.sessions.get(sessionId)?.batchQueue).toHaveLength(2);
+    ).toBe(1);
+    expect(core.sessions.get(sessionId)?.batchQueue).toHaveLength(0);
   });
 
   test("handleCompact drains the session, pushes summary, compacts the query, and resets it to cold without closing", async () => {
@@ -1555,7 +1559,7 @@ describe("worker server", () => {
       db,
       now: () => 123,
       config: {
-        mergeThresholdChars: 1,
+        mergeThresholdChars: 100_000,
         maxQueuedBatches: 3,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
@@ -1603,7 +1607,7 @@ describe("worker server", () => {
       db,
       now: () => 123,
       config: {
-        mergeThresholdChars: 1,
+        mergeThresholdChars: 100_000,
         maxQueuedBatches: 3,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
@@ -1733,7 +1737,7 @@ describe("worker server", () => {
       db,
       now: () => 123,
       config: {
-        mergeThresholdChars: 1,
+        mergeThresholdChars: 100_000,
         maxQueuedBatches: 3,
         keepaliveLeadMs: 60_000,
         cacheMode: "auto",
@@ -2704,7 +2708,7 @@ describe("worker server", () => {
     expect(closed).toEqual([10]);
   });
 
-  test("processClaimedItem keeps same-session work serialized while a prior turn-stop is in flight", async () => {
+  test("processClaimedItem enqueues same-session turns without starting inference", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-timeout",
       project: "/tmp/project-timeout",
@@ -2718,10 +2722,6 @@ describe("worker server", () => {
     const firstTurnId = createTurn(db, sessionId, 1);
     const secondTurnId = createTurn(db, sessionId, 2);
 
-    let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
     const started: string[] = [];
     const core = createWorkerCore({
       db,
@@ -2740,9 +2740,6 @@ describe("worker server", () => {
           async sendPrompt(prompt: string) {
             const tag = prompt.includes('id="T1"') ? "T1" : "T2";
             started.push(tag);
-            if (tag === "T1") {
-              await firstGate;
-            }
             for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
               deps?.onRemember?.(`T${match[1]}`);
             }
@@ -2762,9 +2759,6 @@ describe("worker server", () => {
       enqueuedAtEpoch: 1,
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
-
     const second = core.processClaimedItem({
       seq: 2,
       kind: "turn-stop",
@@ -2774,13 +2768,12 @@ describe("worker server", () => {
       enqueuedAtEpoch: 2,
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(started).toEqual(["T1"]);
-
-    releaseFirst();
     await Promise.all([first, second]);
+
+    // Individual turn-stop processing only enqueues. The explicit drain/flush
+    // boundary performs the slow pushes later, preserving FIFO order.
+    expect(started).toEqual([]);
+    await core.flushSession(sessionId);
     expect(started).toEqual(["T1", "T2"]);
   });
 
