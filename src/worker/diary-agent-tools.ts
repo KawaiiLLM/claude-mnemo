@@ -26,6 +26,7 @@ export interface CreateDiaryAgentToolHandlersOptions {
    */
   stagingRoot?: string;
   commit?: ToolHandler;
+  checkBudget?: ToolHandler;
 }
 
 export interface DiaryAgentToolHandlers {
@@ -34,6 +35,7 @@ export interface DiaryAgentToolHandlers {
   readDoc(path: string): Promise<string>;
   canUseTool: CanUseTool;
   commit?: ToolHandler;
+  checkBudget?: ToolHandler;
 }
 
 export type CreateDreamAgentToolHandlersOptions = Omit<
@@ -254,6 +256,7 @@ export function createDiaryAgentToolHandlers(
     timeline,
     canUseTool: permissionGuard.canUseTool,
     ...(options.commit ? { commit: options.commit } : {}),
+    ...(options.checkBudget ? { checkBudget: options.checkBudget } : {}),
     async readDoc(requestedPath) {
       const realTarget = await permissionGuard.assertWorkspacePath(requestedPath, {
         allowAbsolute: false,

@@ -154,7 +154,7 @@ describe("DreamMemoryStore", () => {
         ...night("2026-07-11", "too large"),
         userProfile: oversized,
       }),
-    ).rejects.toThrow(/userProfile.*5000.*demote/i);
+    ).rejects.toThrow(/userProfile.*2000.*demote/i);
 
     expect(await store.readCurrentMemory()).toEqual({
       userProfile: prior.userProfile,

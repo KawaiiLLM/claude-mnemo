@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -105,13 +105,31 @@ describe("SessionStart dream scheduling and injection", () => {
       ),
       "",
     ].join("\n");
-    await memoryStore.commitNight({
-      date: "2026-07-10",
-      userProfile: longDocument("User Profile", "profile"),
-      experience: longDocument("Experience", "experience"),
-      archive: "# Memory Archive\n\n- ARCHIVE_MUST_NEVER_BE_INJECTED\n",
-      diary: "# 2026-07-10\n\n- current day\n",
-      diaryIndex: [
+    // Seed oversized documents by writing the live files directly: commitNight
+    // now hard-caps hot memory at MEMORY_DOCUMENT_TOKEN_LIMIT, but pre-cap
+    // installs can still carry larger docs on disk, and the injection renderer
+    // must stay bounded for them regardless.
+    mkdirSync(join(dataRoot, "memory"), { recursive: true });
+    mkdirSync(join(dataRoot, "diary"), { recursive: true });
+    writeFileSync(
+      join(dataRoot, "memory", "user-profile.md"),
+      longDocument("User Profile", "profile"),
+    );
+    writeFileSync(
+      join(dataRoot, "memory", "experience.md"),
+      longDocument("Experience", "experience"),
+    );
+    writeFileSync(
+      join(dataRoot, "memory", "archive.md"),
+      "# Memory Archive\n\n- ARCHIVE_MUST_NEVER_BE_INJECTED\n",
+    );
+    writeFileSync(
+      join(dataRoot, "diary", "2026-07-10.md"),
+      "# 2026-07-10\n\n- current day\n",
+    );
+    writeFileSync(
+      join(dataRoot, "diary", "INDEX.md"),
+      [
         "# Diary Index",
         "",
         "- 2026-07-08：older",
@@ -119,7 +137,7 @@ describe("SessionStart dream scheduling and injection", () => {
         "- 2026-07-09：middle",
         "",
       ].join("\n"),
-    });
+    );
     const nowEpoch = Date.parse("2026-07-11T12:00:00+08:00") / 1_000;
     const result = await createContextHandler({
       db,

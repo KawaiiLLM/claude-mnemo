@@ -16,7 +16,7 @@ import { createLogger } from "../shared/logger";
 import { sortDiaryIndexRecentFirst } from "./diary-index";
 import { estimateDiaryTokens } from "./domain";
 
-export const MEMORY_DOCUMENT_TOKEN_LIMIT = 5_000;
+export const MEMORY_DOCUMENT_TOKEN_LIMIT = 2_000;
 export const DEFAULT_MEMORY_HISTORY_RETENTION: MemoryHistoryRetention = {
   newest: 30,
   monthly: true,

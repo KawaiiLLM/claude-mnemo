@@ -1,6 +1,8 @@
 import type { ToolHandler } from "../mcp/handlers";
 import { textResult } from "../mcp/handlers";
 import type { CommitNightInput, DreamMemoryStore } from "../diary/memory-store";
+import { MEMORY_DOCUMENT_TOKEN_LIMIT } from "../diary/memory-store";
+import { estimateDiaryTokens } from "../diary/domain";
 
 /**
  * The commit tool is payload-free: the day's documents live in the staging
@@ -18,6 +20,50 @@ export function assertDreamCommitToolFields(
       `Dream commit does not accept arguments: ${unsupported.join(", ")}`,
     );
   }
+}
+
+export const dreamCheckBudgetInputShape: Record<string, never> = {};
+
+/**
+ * Payload-free self-check for the hot-memory token caps. Reads the staged
+ * user-profile and experience back from the workspace and reports each
+ * document's estimated tokens against the commit-enforced limit, so the agent
+ * can prune BEFORE burning a failed commit attempt. Uses the same estimator
+ * and constant as commitNight — the check can never disagree with the gate.
+ */
+export function createDreamCheckBudgetToolHandler(
+  readStagedNight: () => Promise<CommitNightInput>,
+): ToolHandler {
+  return async (args) => {
+    const unsupported = Object.keys(args);
+    if (unsupported.length > 0) {
+      throw new Error(
+        `check_budget does not accept arguments: ${unsupported.join(", ")}`,
+      );
+    }
+
+    const staged = await readStagedNight();
+    const report = Object.fromEntries(
+      (
+        [
+          ["user-profile.md", staged.userProfile],
+          ["experience.md", staged.experience],
+        ] as const
+      ).map(([filename, document]) => {
+        const tokens = estimateDiaryTokens(document);
+        return [
+          filename,
+          {
+            estimated_tokens: tokens,
+            limit: MEMORY_DOCUMENT_TOKEN_LIMIT,
+            ok: tokens <= MEMORY_DOCUMENT_TOKEN_LIMIT,
+            over_by: Math.max(0, tokens - MEMORY_DOCUMENT_TOKEN_LIMIT),
+          },
+        ];
+      }),
+    );
+    return textResult(JSON.stringify(report));
+  };
 }
 
 /**

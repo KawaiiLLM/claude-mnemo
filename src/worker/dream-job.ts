@@ -17,7 +17,10 @@ import {
   type DiaryMaterialRow,
   type DiaryTurnReferences,
 } from "./diary-material";
-import { createDreamCommitToolHandler } from "./dream-agent-tools";
+import {
+  createDreamCheckBudgetToolHandler,
+  createDreamCommitToolHandler,
+} from "./dream-agent-tools";
 import {
   cleanupDreamStaging,
   readDreamStaging,
@@ -83,7 +86,7 @@ curate 的最终目的是长期记忆收益：怎样最有利于未来的 agent 
 - experience.md 回答「发生了什么」：按项目或时间写进度、结果、转折和印象深刻的瞬间，并带日期。项目脉络只放这里。
 - 每次运行都重整整份画像与经历，不只是追加：现有内容若违反上述分工，一并纠正——尤其画像里残留的项目清单／状态／进度，移进经历或直接删除。继承的内容不因「是旧的、不是我写的」而豁免；首次在迁移基线上运行时，务必按人味判据把偏工程化的旧内容清理掉或降级进 archive，而不是原样堆着（一份刚迁移进来、开头就是项目清单的画像，正是该清理的对象）。
 - 自由组织 Markdown，不套固定 schema；至少保留一个 ATX 标题。具体事件或原话在前，意义在后。风格目标是让未来的 agent 真正记得一个人，而不是生成工程周报。
-- user-profile.md 与 experience.md 各自以不超过约 3000 个中文字为软目标；接近上限时优先降级最不值得记的内容。commit 另有 5000-token 硬上限。
+- user-profile.md 与 experience.md 各自不超过 2000 token（约 1500 个中文字），commit 会按同一上限硬校验。每次改完这两份文档后调用无参数 check_budget 自检；超限时对不重要的细节主动剪枝——合并同类条目、删去修饰性描述、把低价值内容降级进 archive——直到两份都 ok 再 commit。
 
 ## 分层遗忘、提回与查重
 
@@ -95,7 +98,7 @@ curate 的最终目的是长期记忆收益：怎样最有利于未来的 agent 
 ## 提交合同
 
 - staging 工作区已按当前有效记忆播种好画像、经历、archive、当天日记草稿与 INDEX；直接在这些文件上改，不必自己重建空文档。编辑前先用 Read 打开对应 staging 文件，再用 Edit 增量修改画像/经历/archive、用 Write 覆盖当天日记与 INDEX（INDEX 保持 recent-first，对当天做幂等 upsert；发布侧也会再兜底归一）。
-- 改完调用无参数 commit（不传任何字段）触发校验与原子发布，本夜日期已固定、无需自报。目标是一次成功提交；若 commit 因 5000-token/文档硬上限拒绝，按错误提示在 staging 里把最低价值内容降级进 archive 后重试。成功后不得再次 commit。只能用 Read/Grep 读历史、用 Write/Edit 改 staging，不得写 staging 之外的任何路径。
+- 改完调用无参数 commit（不传任何字段）触发校验与原子发布，本夜日期已固定、无需自报。目标是一次成功提交；提交前先用 check_budget 确认画像与经历都在 2000-token 上限内，若 commit 仍因硬上限拒绝，按错误提示在 staging 里把最低价值内容降级进 archive 后重试。成功后不得再次 commit。只能用 Read/Grep 读历史、用 Write/Edit 改 staging，不得写 staging 之外的任何路径。
 - commit 成功后只需简短确认，不要在最终文本里重复文档全文。`;
 
 function assertDate(date: string): void {
@@ -240,14 +243,15 @@ export function createDreamJobProcessor(
         date,
         store,
       });
-      const nightCommit = createNightCommit(date, store, () =>
-        readDreamStaging({ dataRoot: options.dataRoot, date }),
-      );
+      const readStagedNight = () =>
+        readDreamStaging({ dataRoot: options.dataRoot, date });
+      const nightCommit = createNightCommit(date, store, readStagedNight);
       const toolHandlers = createDreamAgentToolHandlers({
         db: options.db,
         dataRoot: options.dataRoot,
         stagingRoot: stagingPaths.root,
         commit: nightCommit.handlers.commit,
+        checkBudget: createDreamCheckBudgetToolHandler(readStagedNight),
       });
       try {
         await options.agentRunner.run({

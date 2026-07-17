@@ -19,7 +19,10 @@ import {
 } from "../mcp/handlers";
 import { resolveClaudeCodeExecutablePath } from "./agent-session";
 import type { DiaryAgentQueryRequest } from "./diary-agent-runner";
-import { dreamCommitInputShape } from "./dream-agent-tools";
+import {
+  dreamCheckBudgetInputShape,
+  dreamCommitInputShape,
+} from "./dream-agent-tools";
 
 const DIARY_ALLOWED_TOOLS = [
   "mcp__diary__recall",
@@ -125,6 +128,14 @@ export function createDiarySdkQuery(
               async (args) => request.toolHandlers.commit!(args),
             ),
           ] : []),
+          ...(request.toolHandlers.checkBudget ? [
+            toolImpl(
+              "check_budget",
+              "Report the staged user-profile and experience documents' estimated token counts against the hot-memory limit that commit enforces. Takes no arguments. Run it after editing those documents and prune until both report ok before committing.",
+              dreamCheckBudgetInputShape,
+              async (args) => request.toolHandlers.checkBudget!(args),
+            ),
+          ] : []),
         ],
       });
 
@@ -151,6 +162,9 @@ export function createDiarySdkQuery(
             allowedTools: [
               ...DIARY_ALLOWED_TOOLS,
               ...(request.toolHandlers.commit ? ["mcp__diary__commit"] : []),
+              ...(request.toolHandlers.checkBudget
+                ? ["mcp__diary__check_budget"]
+                : []),
             ],
             canUseTool: request.toolHandlers.canUseTool,
             mcpServers: { diary: diaryServer },

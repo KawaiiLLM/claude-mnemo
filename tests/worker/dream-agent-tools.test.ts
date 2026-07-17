@@ -3,8 +3,15 @@ import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DreamMemoryStore, type CommitNightInput } from "../../src/diary/memory-store";
-import { createDreamCommitToolHandler } from "../../src/worker/dream-agent-tools";
+import {
+  DreamMemoryStore,
+  MEMORY_DOCUMENT_TOKEN_LIMIT,
+  type CommitNightInput,
+} from "../../src/diary/memory-store";
+import {
+  createDreamCheckBudgetToolHandler,
+  createDreamCommitToolHandler,
+} from "../../src/worker/dream-agent-tools";
 import { seedDreamStaging, readDreamStaging } from "../../src/worker/dream-staging";
 
 const roots: string[] = [];
@@ -76,6 +83,32 @@ describe("dream commit tool", () => {
       "does not accept arguments",
     );
     await expect(commit({ diary: "# hijacked\n" })).rejects.toThrow(
+      "does not accept arguments",
+    );
+  });
+
+  test("check_budget reports staged hot-memory token usage against the commit limit", async () => {
+    const oversizedProfile = `# Profile\n\n${"汉".repeat(4_000)}\n`;
+    const checkBudget = createDreamCheckBudgetToolHandler(async () =>
+      stagedNight({ userProfile: oversizedProfile }),
+    );
+
+    const report = JSON.parse((await checkBudget({})).content[0]!.text);
+
+    expect(report["user-profile.md"]).toMatchObject({
+      limit: MEMORY_DOCUMENT_TOKEN_LIMIT,
+      ok: false,
+    });
+    expect(report["user-profile.md"].over_by).toBeGreaterThan(0);
+    expect(report["experience.md"]).toMatchObject({ ok: true, over_by: 0 });
+  });
+
+  test("check_budget rejects any tool argument (payload-free)", async () => {
+    const checkBudget = createDreamCheckBudgetToolHandler(async () =>
+      stagedNight(),
+    );
+
+    await expect(checkBudget({ path: "x" })).rejects.toThrow(
       "does not accept arguments",
     );
   });
