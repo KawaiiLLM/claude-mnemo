@@ -79,7 +79,11 @@ import {
   deriveRequiredTargetIds,
   type WorkUnitShape,
 } from "./derailment";
-import { createDiaryRuntime } from "./diary-runtime";
+import {
+  createDiaryRuntime,
+  type CreateDiaryRuntimeOptions,
+  type DiaryRuntime,
+} from "./diary-runtime";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
 import { buildSessionSummary, recallMemory } from "../mcp/recall";
 import {
@@ -253,7 +257,9 @@ export interface WorkerCoreDeps {
 
 export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   dataRoot?: string;
-  createDiaryRuntimeImpl?: typeof createDiaryRuntime;
+  createDiaryRuntimeImpl?: (
+    options: CreateDiaryRuntimeOptions,
+  ) => DiaryRuntime;
   BunServeImpl?: typeof Bun.serve;
   scanAndDrainQueue?: QueueDrain;
   handleFlushImpl?: (sessionId: number) => Promise<void>;
@@ -274,6 +280,10 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   mkdirSyncImpl?: typeof mkdirSync;
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
+  hasLiveQuerySessionsImpl?: () => boolean;
+  getGlobalScanInFlightImpl?: () => Promise<void> | null;
+  isDreamRunningImpl?: () => boolean;
+  abortDreamImpl?: () => Promise<void>;
   processImpl?: Pick<NodeJS.Process, "pid" | "on" | "exit">;
   env?: NodeJS.ProcessEnv;
 }
@@ -310,6 +320,8 @@ export interface WorkerCore {
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
   runRetryTick(nowMs?: number): Promise<void>;
+  hasLiveQuerySessions(): boolean;
+  getGlobalScanInFlight(): Promise<void> | null;
   // D1/T2/T3 derailment state machine. Task 10 wires the flush callers to it;
   // exposed here so it can be unit-tested in isolation.
   sendWorkUnit(
@@ -2235,6 +2247,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     },
     sendWorkUnit,
     reopenQuerySessionFresh,
+    hasLiveQuerySessions() {
+      return Array.from(sessions.values()).some(
+        (state) => state.querySession !== null,
+      );
+    },
+    getGlobalScanInFlight() {
+      return globalScanInFlight;
+    },
     async abortStalledSessions(nowMsOverride?: number): Promise<void> {
       const currentMs = nowMsOverride ?? nowMs();
       await Promise.all(
@@ -2436,21 +2456,45 @@ export function createWorkerFetchHandler(
     deps.handleDreamImpl ??
     runtime?.triggerManualDream ??
     (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  let wakeScanInFlight: Promise<void> | null = null;
+  let activeGlobalWork = 0;
+  let resolveGlobalWork: (() => void) | null = null;
+
+  function trackGlobalWork(work: Promise<void>): void {
+    if (activeGlobalWork === 0) {
+      state.globalScanInFlight = new Promise<void>((resolve) => {
+        resolveGlobalWork = resolve;
+      });
+    }
+    activeGlobalWork += 1;
+    const settle = (): void => {
+      activeGlobalWork = Math.max(0, activeGlobalWork - 1);
+      if (activeGlobalWork === 0) {
+        const finishGlobalWork = resolveGlobalWork;
+        resolveGlobalWork = null;
+        state.globalScanInFlight = null;
+        finishGlobalWork?.();
+      }
+    };
+    void work.then(settle, settle);
+  }
 
   async function handleWake(): Promise<Response> {
-    if (state.globalScanInFlight) {
+    if (wakeScanInFlight) {
       state.scanPending = true;
       return new Response(null, { status: 200 });
     }
 
-    state.globalScanInFlight = (async () => {
+    const scan = (async () => {
       do {
         state.scanPending = false;
         await scanAndDrainQueue();
       } while (state.scanPending);
     })().finally(() => {
-      state.globalScanInFlight = null;
+      wakeScanInFlight = null;
     });
+    wakeScanInFlight = scan;
+    trackGlobalWork(scan);
 
     return new Response(null, { status: 200 });
   }
@@ -2486,12 +2530,13 @@ export function createWorkerFetchHandler(
           return new Response("session_id is required", { status: 400 });
         }
 
-        void handleCompactImpl(payload.session_id, payload.transcript_path).catch((error) => {
+        const compact = handleCompactImpl(payload.session_id, payload.transcript_path).catch((error) => {
           deps.logger?.error?.("compact request failed", {
             sessionId: payload.session_id,
             error,
           });
         });
+        trackGlobalWork(compact);
         return new Response(null, { status: 200 });
       }
 
@@ -2504,12 +2549,13 @@ export function createWorkerFetchHandler(
           return new Response("session_id is required", { status: 400 });
         }
 
-        void handleFlushImpl(payload.session_id).catch((error) => {
+        const flush = handleFlushImpl(payload.session_id).catch((error) => {
           deps.logger?.error?.("flush request failed", {
             sessionId: payload.session_id,
             error,
           });
         });
+        trackGlobalWork(flush);
         return new Response(null, { status: 200 });
       }
 
@@ -2575,6 +2621,72 @@ export async function checkForIdleWorkerShutdown(
   }
 }
 
+/**
+ * Exit as soon as the final memory agent is gone. Unlike the 30-minute idle
+ * fallback, this path coordinates every fire-and-forget queue operation and a
+ * running dream before invoking the existing pid-cleaning graceful shutdown.
+ */
+export async function checkForLastAgentShutdown(
+  state: WorkerServerState,
+  deps: WorkerServerDeps = {},
+): Promise<boolean> {
+  const hasLiveQuerySessions = deps.hasLiveQuerySessionsImpl ?? (() => false);
+  const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
+
+  if (
+    state.shuttingDown ||
+    state.activeRequests > 0 ||
+    hasLiveQuerySessions()
+  ) {
+    return false;
+  }
+
+  const dreamWasRunning = isDreamRunning();
+  const serverWork = state.globalScanInFlight;
+  const coreWork = deps.getGlobalScanInFlightImpl?.() ?? null;
+
+  // Ordinary queue work is a hard guard: let it finish and re-evaluate on the
+  // next watchdog beat. A dream is the sole exception because shutdown must
+  // abort its query to make that global drain settle.
+  if (!dreamWasRunning && (serverWork || coreWork)) {
+    return false;
+  }
+  if (dreamWasRunning && !deps.abortDreamImpl) {
+    return false;
+  }
+
+  state.shuttingDown = true;
+  try {
+    if (dreamWasRunning) {
+      await deps.abortDreamImpl?.();
+      await Promise.all([
+        serverWork?.catch(() => {}),
+        coreWork?.catch(() => {}),
+      ]);
+    }
+
+    // Work or a new agent may have appeared while the dream/global drain was
+    // unwinding. Graceful exit is allowed only when all four guards hold at
+    // this final decision point.
+    if (
+      state.activeRequests > 0 ||
+      hasLiveQuerySessions() ||
+      state.globalScanInFlight !== null ||
+      (deps.getGlobalScanInFlightImpl?.() ?? null) !== null ||
+      isDreamRunning()
+    ) {
+      state.shuttingDown = false;
+      return false;
+    }
+
+    await createShutdownCleanup(deps)();
+    return true;
+  } catch (error) {
+    state.shuttingDown = false;
+    throw error;
+  }
+}
+
 export function registerShutdownCleanup(deps: WorkerServerDeps = {}): void {
   const processImpl = deps.processImpl ?? process;
   const cleanup = createShutdownCleanup(deps);
@@ -2628,21 +2740,22 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   core.recoverFromCrash();
 
+  const fetchHandler = createWorkerFetchHandler(
+    {
+      ...deps,
+      db,
+      config,
+      scanAndDrainQueue: core.scanAndDrainQueue,
+      handleFlushImpl: core.finishSession,
+      handleCompactImpl: core.handleCompact,
+    },
+    serverState,
+  );
   let server: { stop(force?: boolean): void };
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
-      fetch: createWorkerFetchHandler(
-        {
-          ...deps,
-          db,
-          config,
-          scanAndDrainQueue: core.scanAndDrainQueue,
-          handleFlushImpl: core.finishSession,
-          handleCompactImpl: core.handleCompact,
-        },
-        serverState,
-      ),
+      fetch: fetchHandler,
     });
   } catch (error) {
     try {
@@ -2677,7 +2790,15 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   const startupFlushSessionId = getStartupFlushSessionId(env);
   if (startupFlushSessionId !== null) {
-    void core.finishSession(startupFlushSessionId);
+    // Route the startup hint through the same fire-and-forget tracking barrier
+    // as HTTP /flush. Otherwise the first lifecycle tick could observe zero
+    // HTTP requests while this bounded tail is still between query sessions.
+    void fetchHandler(
+      new Request(`http://127.0.0.1:${WORKER_PORT}/flush`, {
+        method: "POST",
+        body: JSON.stringify({ session_id: startupFlushSessionId }),
+      }),
+    );
   }
   setInterval(() => {
     ensureWorkerPidFile(deps);
@@ -2686,13 +2807,28 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
-    void checkForIdleWorkerShutdown(serverState, {
+    const lifecycleDeps: WorkerServerDeps = {
       ...deps,
+      hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
+      getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
+      isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+      abortDreamImpl: async () => {
+        await diaryRuntime?.abortDream?.("shutdown");
+      },
       shutdownGracefullyImpl: async () => {
         await deps.shutdownGracefullyImpl?.();
         server.stop(true);
       },
-    });
+    };
+    void (async () => {
+      const didShutdown = await checkForLastAgentShutdown(
+        serverState,
+        lifecycleDeps,
+      );
+      if (!didShutdown) {
+        await checkForIdleWorkerShutdown(serverState, lifecycleDeps);
+      }
+    })();
   }, WATCHDOG_INTERVAL_MS);
 
   registerShutdownCleanup({

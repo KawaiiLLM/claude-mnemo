@@ -21,6 +21,7 @@ import { createWorkerProcessors } from "../../src/worker/processors";
 import { classifyWorkerError } from "../../src/worker/error-classifier";
 import {
   checkForIdleWorkerShutdown,
+  checkForLastAgentShutdown,
   acquireWorkerSingleton,
   createWorkerCore,
   createWorkerFetchHandler,
@@ -633,6 +634,114 @@ describe("worker server", () => {
     expect(serverState.lastHttpRequestAt).toBe(100);
     expect(response.status).toBe(200);
     expect(serverState.activeRequests).toBe(0);
+  });
+
+  test("createWorkerFetchHandler keeps fire-and-forget flush work behind the global-work guard", async () => {
+    let finishFlush!: () => void;
+    const flushFinished = new Promise<void>((resolve) => {
+      finishFlush = resolve;
+    });
+    const serverState = createWorkerServerState(100);
+    const handler = createWorkerFetchHandler(
+      {
+        nowMs: () => 100,
+        handleFlushImpl: async () => flushFinished,
+      },
+      serverState,
+    );
+
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/flush", {
+        method: "POST",
+        body: JSON.stringify({ session_id: 7 }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(serverState.activeRequests).toBe(0);
+    expect(serverState.globalScanInFlight).not.toBeNull();
+
+    const globalWork = serverState.globalScanInFlight!;
+    finishFlush();
+    await globalWork;
+    expect(serverState.globalScanInFlight).toBeNull();
+  });
+
+  test("checkForLastAgentShutdown requires no live query, global work, or HTTP request", async () => {
+    const shutdown = mock(async () => {});
+    const processExit = mock((_code?: number) => undefined as never);
+    const baseDeps = {
+      shutdownGracefullyImpl: shutdown,
+      processImpl: {
+        pid: process.pid,
+        on: mock(() => process as never),
+        exit: processExit,
+      },
+      isDreamRunningImpl: () => false,
+    };
+
+    const liveQueryState = createWorkerServerState(0);
+    expect(
+      await checkForLastAgentShutdown(liveQueryState, {
+        ...baseDeps,
+        hasLiveQuerySessionsImpl: () => true,
+      }),
+    ).toBe(false);
+
+    const globalWorkState = createWorkerServerState(0);
+    globalWorkState.globalScanInFlight = new Promise<void>(() => {});
+    expect(
+      await checkForLastAgentShutdown(globalWorkState, {
+        ...baseDeps,
+        hasLiveQuerySessionsImpl: () => false,
+      }),
+    ).toBe(false);
+
+    const activeHttpState = createWorkerServerState(0);
+    activeHttpState.activeRequests = 1;
+    expect(
+      await checkForLastAgentShutdown(activeHttpState, {
+        ...baseDeps,
+        hasLiveQuerySessionsImpl: () => false,
+      }),
+    ).toBe(false);
+
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(processExit).not.toHaveBeenCalled();
+  });
+
+  test("checkForLastAgentShutdown aborts a running dream, waits for its drain, then exits", async () => {
+    let finishDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      finishDrain = resolve;
+    });
+    let dreamRunning = true;
+    const serverState = createWorkerServerState(0);
+    serverState.globalScanInFlight = drain;
+    const abortDream = mock(async () => {
+      dreamRunning = false;
+      finishDrain();
+      await drain;
+      serverState.globalScanInFlight = null;
+    });
+    const shutdown = mock(async () => {});
+    const processExit = mock((_code?: number) => undefined as never);
+    const didShutdown = await checkForLastAgentShutdown(serverState, {
+      hasLiveQuerySessionsImpl: () => false,
+      isDreamRunningImpl: () => dreamRunning,
+      abortDreamImpl: abortDream,
+      shutdownGracefullyImpl: shutdown,
+      processImpl: {
+        pid: process.pid,
+        on: mock(() => process as never),
+        exit: processExit,
+      },
+    });
+
+    expect(didShutdown).toBe(true);
+    expect(abortDream).toHaveBeenCalledTimes(1);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(processExit).toHaveBeenCalledWith(0);
   });
 
   test("checkForIdleWorkerShutdown shuts down after 30 minutes without HTTP traffic", async () => {
@@ -2819,9 +2928,15 @@ describe("worker server", () => {
     let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
     const sentPrompts: string[] = [];
     let closes = 0;
+    const intervalCallbacks: Array<() => void> = [];
+    const stop = mock((_force?: boolean) => {});
+    const processExit = mock((_code?: number) => undefined as never);
     const originalSetInterval = globalThis.setInterval;
 
-    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+    globalThis.setInterval = mock(((callback: () => void) => {
+      intervalCallbacks.push(callback);
+      return 0 as unknown as NodeJS.Timeout;
+    }) as typeof setInterval);
 
     try {
       await main({
@@ -2830,7 +2945,7 @@ describe("worker server", () => {
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
           fetchHandler = options.fetch;
-          return { stop() {} };
+          return { stop };
         }) as typeof Bun.serve),
         createWorkerQuerySessionImpl: healthyQueryImpl(
           sentPrompts,
@@ -2842,6 +2957,11 @@ describe("worker server", () => {
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
         writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
         unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+        processImpl: {
+          pid: process.pid,
+          on: (() => process) as typeof process.on,
+          exit: processExit,
+        },
       });
 
       expect(fetchHandler).not.toBeNull();
@@ -2861,6 +2981,15 @@ describe("worker server", () => {
       expect(sentPrompts).toHaveLength(1);
       expect(sentPrompts[0]).toContain(`<obs id="O`);
       expect(closes).toBe(1);
+
+      // The second 10-second interval is the lifecycle decision tick. Once the
+      // bounded tail has removed the final query session and its tracked flush
+      // work has settled, the existing graceful shutdown runs immediately.
+      expect(intervalCallbacks).toHaveLength(2);
+      intervalCallbacks[1]!();
+      await waitUntil(() => processExit.mock.calls.length === 1);
+      expect(stop).toHaveBeenCalledWith(true);
+      expect(processExit).toHaveBeenCalledWith(0);
     } finally {
       globalThis.setInterval = originalSetInterval;
     }

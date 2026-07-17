@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,7 +22,7 @@ import {
   createDiaryRuntime,
   createDreamQueueProcessor,
 } from "../../src/worker/diary-runtime";
-import { main } from "../../src/worker/server";
+import { createWorkerCore, main } from "../../src/worker/server";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
@@ -38,6 +44,117 @@ function writeStaging(dataRoot: string, night: CommitNightInput): void {
   writeFileSync(paths.diaryIndex, night.diaryIndex);
 }
 describe("createDiaryRuntime", () => {
+  test("shutdown interruption preserves dream attempts, removes staging, and retries on the next global drain", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-dream-shutdown-"));
+    roots.push(dataRoot);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const session = upsertSession(db, {
+      contentSessionId: "dream-shutdown",
+      project: "/projects/dream",
+      title: "Dream shutdown",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    saveTurnFixture(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "Interrupt this dream before commit.",
+      assistantResponse: "The next global drain will retry it.",
+      title: "Shutdown-safe dream",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
+      updatedAtEpoch: 100,
+      observations: [],
+    });
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    let runs = 0;
+    const runtime = createDiaryRuntime({
+      db,
+      dataRoot,
+      config: DEFAULT_CONFIG,
+      nowEpoch: () => 200,
+      async runQuery(request) {
+        runs += 1;
+        if (runs === 1) {
+          requestStarted();
+          return new Promise((_resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => reject(new Error("query aborted by signal")),
+              { once: true },
+            );
+          });
+        }
+
+        writeStaging(dataRoot, {
+          date: "2026-07-10",
+          userProfile: "# User Profile\n",
+          experience: "# Experience\n",
+          archive: "# Memory Archive\n",
+          diary: "# 2026-07-10\n\n- retried after shutdown\n",
+          diaryIndex: "# Diary Index\n\n- 2026-07-10：retried\n",
+        });
+        await request.toolHandlers.commit!({});
+        return "committed";
+      },
+    });
+
+    try {
+      const firstItem = stateStore.claimNextDiaryItem(200)!;
+      const firstRun = runtime.processDreamItem(firstItem);
+      await started;
+      expect(runtime.isDreamRunning()).toBe(true);
+      expect(existsSync(dreamStagingPaths(dataRoot, "2026-07-10").root)).toBe(true);
+
+      await runtime.abortDream("shutdown");
+      await expect(firstRun).rejects.toMatchObject({
+        workerAbortReason: "shutdown",
+      });
+
+      expect(runtime.isDreamRunning()).toBe(false);
+      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+        attemptCount: 0,
+        nextAttemptEpoch: 200,
+        terminal: false,
+        lastError: null,
+      });
+      expect(existsSync(dreamStagingPaths(dataRoot, "2026-07-10").root)).toBe(false);
+      expect(await new DreamMemoryStore(dataRoot).readLastSuccessfulDate()).toBeNull();
+
+      const core = createWorkerCore({
+        db,
+        now: () => 200,
+        processDiaryItem: runtime.processDreamItem,
+        logger: { warn() {}, error() {} },
+      });
+      await core.scanAndDrainQueue();
+
+      expect(runs).toBe(2);
+      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+        settledAtEpoch: 200,
+        attemptCount: 0,
+        nextAttemptEpoch: null,
+        terminal: false,
+      });
+      expect(await new DreamMemoryStore(dataRoot).readLastSuccessfulDate()).toBe(
+        "2026-07-10",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
   test("two connection failures do not consume attempts and the day later settles automatically", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);

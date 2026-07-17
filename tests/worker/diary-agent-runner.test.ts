@@ -144,4 +144,47 @@ describe("diary agent runner", () => {
       db.close();
     }
   });
+
+  test("shutdown aborts the active diary request with a connection-class marker", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-diary-shutdown-"));
+    roots.push(dataRoot);
+    const toolHandlers = createDreamAgentToolHandlers({ db, dataRoot });
+    let requestStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const runner = createDiaryAgentRunner({
+      runQuery: (request) => {
+        requestStarted();
+        return new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("query aborted by signal")),
+            { once: true },
+          );
+        });
+      },
+    });
+
+    try {
+      const run = runner.run({
+        date: "2026-07-10",
+        prompt: "This request should stop with the worker.",
+        toolHandlers,
+      });
+      await started;
+      expect(runner.isRunning()).toBe(true);
+
+      await runner.abort("shutdown");
+      const error = await run.catch((caught) => caught);
+
+      expect(runner.isRunning()).toBe(false);
+      expect(error).toMatchObject({ workerAbortReason: "shutdown" });
+      expect(classifyWorkerError(error)).toBe("connection");
+    } finally {
+      db.close();
+    }
+  });
 });

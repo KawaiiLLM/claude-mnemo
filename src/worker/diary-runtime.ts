@@ -15,7 +15,10 @@ import {
   createDreamJobProcessor,
   type DreamJobProcessOptions,
 } from "./dream-job";
-import { classifyWorkerError } from "./error-classifier";
+import {
+  classifyWorkerError,
+  type WorkerAbortReason,
+} from "./error-classifier";
 
 export interface CreateDreamQueueProcessorOptions {
   db: Database;
@@ -85,13 +88,21 @@ export function createDreamQueueProcessor(
       } catch (error) {
         const failedAtEpoch = nowEpoch();
         const classification = classifyWorkerError(error);
+        const isShutdownAbort =
+          typeof error === "object" &&
+          error !== null &&
+          "workerAbortReason" in error &&
+          error.workerAbortReason === "shutdown";
         // Connection failures never consume the retry budget, so their retry
         // rate is the only bound on cost: a dream attempt that burns tokens
         // before an idle-watchdog kill must not respin on the 60s cadence
         // (the 0.4.0 burn pattern). Fast-fail outages lose nothing from the
         // longer wait — a dream is never urgent.
-        const retryDelaySeconds =
-          classification === "connection" ? 15 * 60 : 60;
+        const retryDelaySeconds = isShutdownAbort
+          ? 0
+          : classification === "connection"
+            ? 15 * 60
+            : 60;
         options.stateStore.recordDreamFailure({
           date,
           queueSeq: item.seq,
@@ -116,11 +127,18 @@ export interface CreateDiaryRuntimeOptions {
 export interface DiaryRuntime {
   processDreamDate(date: string): Promise<void>;
   processDreamItem(item: PendingQueueItem): Promise<void>;
+  isDreamRunning?(): boolean;
+  abortDream?(reason: WorkerAbortReason): Promise<void>;
+}
+
+export interface ManagedDiaryRuntime extends DiaryRuntime {
+  isDreamRunning(): boolean;
+  abortDream(reason: WorkerAbortReason): Promise<void>;
 }
 
 export function createDiaryRuntime(
   options: CreateDiaryRuntimeOptions,
-): DiaryRuntime {
+): ManagedDiaryRuntime {
   const stateStore = createDiaryStateStore(options.db);
   const config = options.config ?? loadConfig();
   const runQuery =
@@ -139,20 +157,50 @@ export function createDiaryRuntime(
     agentRunner,
     config,
   });
-  const processDreamDate = (date: string, processOptions?: DreamJobProcessOptions) =>
+  const processDreamDateRaw = (date: string, processOptions?: DreamJobProcessOptions) =>
     dreamJob.process(date, processOptions);
   const dreamQueue = createDreamQueueProcessor({
     db: options.db,
     stateStore,
-    processDreamDate,
+    processDreamDate: processDreamDateRaw,
     readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     nowEpoch: options.nowEpoch,
     timeZone: config.dreamAgentTimeZone,
     boundaryHour: config.dreamAgentHour,
   });
 
+  let activeDream: Promise<void> | null = null;
+
+  function trackDream(work: () => Promise<void>): Promise<void> {
+    if (activeDream) {
+      return Promise.reject(new Error("Dream processing is already running."));
+    }
+
+    const operation = work();
+    const tracked = operation.finally(() => {
+      if (activeDream === tracked) {
+        activeDream = null;
+      }
+    });
+    activeDream = tracked;
+    // Lifecycle abort waits on this same operation; pre-handle the rejection so
+    // shutdown cannot create an unhandled-rejection window before the queue
+    // drain observes the original error.
+    tracked.catch(() => {});
+    return tracked;
+  }
+
   return {
-    processDreamDate,
-    processDreamItem: (item) => dreamQueue.process(item),
+    processDreamDate: (date) => trackDream(() => processDreamDateRaw(date)),
+    processDreamItem: (item) => trackDream(() => dreamQueue.process(item)),
+    isDreamRunning: () => activeDream !== null,
+    async abortDream(reason) {
+      const dream = activeDream;
+      if (!dream) {
+        return;
+      }
+      await agentRunner.abort(reason);
+      await dream.catch(() => {});
+    },
   };
 }
