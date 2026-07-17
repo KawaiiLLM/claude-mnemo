@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.0-mrp4p398" : "dev";
+var BUILD_ID = true ? "0.6.1-mrp4z7se" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -43336,7 +43336,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.6.0",
+        version: "0.6.1",
         tools: [
           toolImpl(
             "recall",
@@ -46079,7 +46079,10 @@ async function main(deps = {}) {
       config: config3,
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
-      handleCompactImpl: core.handleCompact
+      handleCompactImpl: core.handleCompact,
+      // Injecting core pieces above leaves the fetch factory's internal
+      // runtime unset, so /dream must be wired explicitly or it 503s.
+      handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream
     },
     serverState
   );

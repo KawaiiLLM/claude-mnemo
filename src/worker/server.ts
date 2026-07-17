@@ -2808,6 +2808,9 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
+      // Injecting core pieces above leaves the fetch factory's internal
+      // runtime unset, so /dream must be wired explicitly or it 503s.
+      handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
     },
     serverState,
   );

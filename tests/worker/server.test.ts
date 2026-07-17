@@ -2988,6 +2988,55 @@ describe("worker server", () => {
     }
   });
 
+  test("production assembly wires POST /dream to the core trigger, not the 503 fallback", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
+    const stop = mock((_force?: boolean) => {});
+    const originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = mock(((_callback: () => void) =>
+      0 as unknown as NodeJS.Timeout) as typeof setInterval);
+
+    try {
+      await main({
+        db,
+        env: {},
+        logger: { warn() {}, error() {} },
+        BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop };
+        }) as typeof Bun.serve),
+        isProcessAliveImpl: () => false,
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+        processImpl: {
+          pid: process.pid,
+          on: (() => process) as typeof process.on,
+          exit: mock((_code?: number) => undefined as never),
+        },
+      });
+
+      expect(fetchHandler).not.toBeNull();
+
+      // An invalid date must reach the core validator (400), proving the
+      // production deps pass handleDreamImpl instead of the 503 fallback.
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/dream", {
+          method: "POST",
+          body: JSON.stringify({ date: "not-a-date" }),
+        }),
+      );
+
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("date must be YYYY-MM-DD");
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+    }
+  });
+
   // --- Task 9: sendWorkUnit derailment state machine (T2/T3) ---
 
   // A fake query whose sendPrompt drives the wired onMessage/onRemember to
