@@ -134,27 +134,36 @@ describe("runHookCommand", () => {
         nowEpoch: () => nowEpoch,
       });
 
-      const result = await handlers.SessionStart!({
+      const input = {
         eventName: "SessionStart",
         source: "startup",
         sessionId: "default-hook-wiring",
         cwd: "/projects/default-hook-wiring",
         stopHookActive: false,
         raw: {},
-      });
+      } as const;
+      const sessionsResult = await handlers.SessionStart!(input);
+      const personaResult = await handlers["SessionStart:persona"]!(input);
+      const experienceResult = await handlers["SessionStart:experience"]!(input);
 
       expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(true);
-      expect(result.hookSpecificOutput).toContain("## Persona");
-      expect(result.hookSpecificOutput).toContain(
+      expect(sessionsResult.hookSpecificOutput).toContain("claude-mnemo:");
+      expect(sessionsResult.hookSpecificOutput).not.toContain("## Persona");
+      expect(personaResult.hookSpecificOutput).toContain("## Persona");
+      expect(personaResult.hookSpecificOutput).toContain(
         "- 生产 wiring 中的用户画像 [S1/T1]",
       );
-      expect(result.hookSpecificOutput).toContain("## Experience");
-      expect(result.hookSpecificOutput).toContain("# Diary Index");
-      expect(result.hookSpecificOutput).toContain(
+      expect(personaResult.hookSpecificOutput).not.toContain("## Experience");
+      expect(experienceResult.hookSpecificOutput).toContain("## Experience");
+      expect(experienceResult.hookSpecificOutput).toContain("# Diary Index");
+      expect(experienceResult.hookSpecificOutput).toContain(
         "- 2026-07-10：生产 wiring 日记索引",
       );
-      expect(result.hookSpecificOutput).not.toContain("不应注入的归档内容");
-      expect(result.asyncWork).toBeUndefined();
+      expect(personaResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
+      expect(experienceResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
+      expect(sessionsResult.asyncWork).toBeUndefined();
+      expect(personaResult.asyncWork).toBeUndefined();
+      expect(experienceResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
     } finally {
@@ -261,6 +270,46 @@ describe("runHookCommand", () => {
     expect(exitCode).toBe(0);
     expect(normalized).toHaveBeenCalled();
     expect(handler).toHaveBeenCalled();
+  });
+
+  test("routes context section arguments to their dedicated SessionStart handlers", async () => {
+    const sessionsHandler = mock(async () => ({ continue: true }));
+    const personaHandler = mock(async () => ({ continue: true }));
+    const experienceHandler = mock(async () => ({ continue: true }));
+    const run = runHookCommand as unknown as (
+      dependencies?: TestHookCommandDependencies,
+    ) => Promise<number>;
+    const handlers = {
+      SessionStart: sessionsHandler,
+      "SessionStart:persona": personaHandler,
+      "SessionStart:experience": experienceHandler,
+    };
+
+    for (const [section, expectedHandler] of [
+      [undefined, sessionsHandler],
+      ["persona", personaHandler],
+      ["experience", experienceHandler],
+    ] as const) {
+      await run({
+        env: {},
+        argv: [
+          "bun",
+          "hook-command.ts",
+          "context",
+          ...(section ? [section] : []),
+        ],
+        stdout: { write: mock(() => true) },
+        stderr: { write: mock(() => true) },
+        readJsonFromStdin: () => ({}),
+        normalizeHookInputImpl: () => ({
+          ...createNormalizedInput(),
+          eventName: "SessionStart",
+        }),
+        handlers,
+      });
+
+      expect(expectedHandler).toHaveBeenCalledTimes(1);
+    }
   });
 
   test("writes only the async sentinel to stdout and awaits async work", async () => {

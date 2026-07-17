@@ -321,12 +321,13 @@ export class DreamMemoryStore {
   }
 
   async readInjectionDocuments(): Promise<CurrentMemoryInjectionDocuments> {
-    await this.recoverIncompleteTransactions();
-    await this.assertWorkspaceRootsAreSafe();
-    const defaults = defaultCurrentMemory();
+    // SessionStart persona/experience hooks are read-only by contract. In
+    // particular, do not create roots or recover transactions here: those
+    // operations may mutate files and belong to writer-owned flows.
+    await this.assertWorkspaceRootsAreSafe({ createDataRoot: false });
     const [userProfile, experience] = await Promise.all([
-      this.readMemoryDocument("user-profile.md", defaults.userProfile),
-      this.readMemoryDocument("experience.md", defaults.experience),
+      this.readMemoryDocument("user-profile.md", ""),
+      this.readMemoryDocument("experience.md", ""),
     ]);
     return { userProfile, experience };
   }
@@ -451,8 +452,12 @@ export class DreamMemoryStore {
     return join(this.memoryRoot(), "migration-state.json");
   }
 
-  private async assertWorkspaceRootsAreSafe(): Promise<void> {
-    await mkdir(this.dataRoot, { recursive: true });
+  private async assertWorkspaceRootsAreSafe(
+    options: { createDataRoot?: boolean } = {},
+  ): Promise<void> {
+    if (options.createDataRoot !== false) {
+      await mkdir(this.dataRoot, { recursive: true });
+    }
     for (const root of [this.dataRoot, this.memoryRoot(), join(this.dataRoot, "diary")]) {
       try {
         const metadata = await lstat(root);

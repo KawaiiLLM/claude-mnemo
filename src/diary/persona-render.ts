@@ -10,6 +10,7 @@ import { estimateDiaryTokens } from "./domain";
 export const PROFILE_INJECTION_TOKEN_BUDGET = 2_000;
 export const EXPERIENCE_INJECTION_TOKEN_BUDGET = 2_000;
 export const DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1_000;
+export const SESSION_INJECTION_TOKEN_BUDGET = 2_000;
 
 export interface SessionStartMemoryInjection {
   profile: string;
@@ -141,26 +142,94 @@ function renderBoundedInjectionBlock(input: {
   return input.heading;
 }
 
+export function renderSessionStartPersonaInjection(input: {
+  userProfile: string;
+  path: string;
+}): string {
+  return renderBoundedInjectionBlock({
+    heading: "## Persona",
+    document: input.userProfile,
+    displayPath: input.path,
+    tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET,
+  });
+}
+
+function renderSessionStartExperienceBlock(input: {
+  experience: string;
+  path: string;
+  tokenBudget: number;
+}): string {
+  return renderBoundedInjectionBlock({
+    heading: "## Experience",
+    document: input.experience,
+    displayPath: input.path,
+    tokenBudget: input.tokenBudget,
+  });
+}
+
+function renderSessionStartDiaryIndex(input: {
+  diaryIndex: string;
+  path: string;
+}): string {
+  return renderPersonaDocumentInjection(
+    sortDiaryIndexRecentFirst(input.diaryIndex),
+    DIARY_INDEX_INJECTION_TOKEN_BUDGET,
+    input.path,
+  );
+}
+
+export function renderSessionStartExperienceInjection(input: {
+  experience: string;
+  diaryIndex: string;
+  paths: {
+    experience: string;
+    diaryIndex: string;
+  };
+}): string {
+  const diaryIndex = renderSessionStartDiaryIndex({
+    diaryIndex: input.diaryIndex,
+    path: input.paths.diaryIndex,
+  });
+  const separator = diaryIndex ? "\n\n" : "";
+  const diaryTokens = estimateDiaryTokens(`${separator}${diaryIndex}`);
+  const experienceBudget = Math.max(
+    0,
+    EXPERIENCE_INJECTION_TOKEN_BUDGET - diaryTokens,
+  );
+  const experience = renderSessionStartExperienceBlock({
+    experience: input.experience,
+    path: input.paths.experience,
+    tokenBudget: experienceBudget,
+  });
+  const combined = `${experience}${separator}${diaryIndex}`;
+
+  if (estimateDiaryTokens(combined) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) {
+    return combined;
+  }
+
+  return renderSessionStartExperienceBlock({
+    experience: input.experience,
+    path: input.paths.experience,
+    tokenBudget: Math.max(0, experienceBudget - 1),
+  }) + separator + diaryIndex;
+}
+
 export function renderSessionStartMemoryInjection(
   input: SessionStartMemoryInjectionInput,
 ): SessionStartMemoryInjection {
   return {
-    profile: renderBoundedInjectionBlock({
-      heading: "## Persona",
-      document: input.userProfile,
-      displayPath: input.paths.userProfile,
-      tokenBudget: PROFILE_INJECTION_TOKEN_BUDGET,
+    profile: renderSessionStartPersonaInjection({
+      userProfile: input.userProfile,
+      path: input.paths.userProfile,
     }),
-    experience: renderBoundedInjectionBlock({
-      heading: "## Experience",
-      document: input.experience,
-      displayPath: input.paths.experience,
+    experience: renderSessionStartExperienceBlock({
+      experience: input.experience,
+      path: input.paths.experience,
       tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
     }),
-    diaryIndex: renderPersonaDocumentInjection(
-      sortDiaryIndexRecentFirst(input.diaryIndex),
-      DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-      input.paths.diaryIndex,
-    ),
+    diaryIndex: renderSessionStartDiaryIndex({
+      diaryIndex: input.diaryIndex,
+      path: input.paths.diaryIndex,
+    }),
   };
 }

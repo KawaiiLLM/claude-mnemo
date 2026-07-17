@@ -17,6 +17,7 @@ import {
   renderCurrentSessionOutput,
   type CurrentSessionTimelineRenderer,
 } from "../../mcp/session-output";
+import { parseMarkdownSections } from "../../shared/markdown-sections";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
@@ -24,12 +25,27 @@ import { diaryDayOf } from "../../diary/domain";
 import type { DiaryFileStore } from "../../diary/file-store";
 import type { DreamMemoryStore } from "../../diary/memory-store";
 import {
-  renderSessionStartMemoryInjection,
+  renderPersonaDocumentInjection,
+  renderSessionStartExperienceInjection,
+  renderSessionStartPersonaInjection,
+  SESSION_INJECTION_TOKEN_BUDGET,
 } from "../../diary/persona-render";
 import { dreamTriggerWindow } from "../../diary/calendar";
 import { markSessionRunStart } from "../../db/session-run";
 
-export interface ContextHandlerDependencies {
+export interface ReadOnlyContextHandlerDependencies {
+  fileStore?: Pick<
+    DiaryFileStore,
+    "readIndex"
+  >;
+  memoryStore?: Pick<
+    DreamMemoryStore,
+    "dataRoot" | "readInjectionDocuments"
+  >;
+}
+
+export interface ContextHandlerDependencies
+  extends ReadOnlyContextHandlerDependencies {
   db: Database;
   timelineRenderer?: CurrentSessionTimelineRenderer;
   diaryStateStore?: Pick<
@@ -44,23 +60,40 @@ export interface ContextHandlerDependencies {
     backlogLimit: number;
   };
   readLastSuccessfulDate?: () => Promise<string | null>;
-  fileStore?: Pick<
-    DiaryFileStore,
-    "readIndex"
-  >;
-  memoryStore?: Pick<
-    DreamMemoryStore,
-    "dataRoot" | "readInjectionDocuments"
-  >;
 }
+
+export type ContextSection = "sessions" | "persona" | "experience";
+export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
 
-async function appendDreamMemoryContext(
-  hookSpecificOutput: string,
+function hasDocumentBody(document: string): boolean {
+  return parseMarkdownSections(document).some((section) =>
+    section.bodyLines.some((line) => line.trim().length > 0)
+  );
+}
+
+async function readPersonaContext(
+  memoryStore: Pick<DreamMemoryStore, "dataRoot" | "readInjectionDocuments">,
+): Promise<string | undefined> {
+  try {
+    const memory = await memoryStore.readInjectionDocuments();
+    if (!hasDocumentBody(memory.userProfile)) {
+      return undefined;
+    }
+    return renderSessionStartPersonaInjection({
+      userProfile: memory.userProfile,
+      path: join(memoryStore.dataRoot, "memory", "user-profile.md"),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function readExperienceContext(
   memoryStore: Pick<DreamMemoryStore, "dataRoot" | "readInjectionDocuments">,
   fileStore: Pick<DiaryFileStore, "readIndex">,
-): Promise<string> {
+): Promise<string | undefined> {
   try {
     const [memory, indexBytes] = await Promise.all([
       memoryStore.readInjectionDocuments(),
@@ -68,27 +101,19 @@ async function appendDreamMemoryContext(
     ]);
     const diaryIndex = new TextDecoder("utf-8", { fatal: true })
       .decode(indexBytes);
-    const paths = {
-      userProfile: join(memoryStore.dataRoot, "memory", "user-profile.md"),
-      experience: join(memoryStore.dataRoot, "memory", "experience.md"),
-      diaryIndex: join(memoryStore.dataRoot, "diary", "INDEX.md"),
-    };
-    const rendered = renderSessionStartMemoryInjection({
-      ...memory,
+    if (!hasDocumentBody(memory.experience)) {
+      return undefined;
+    }
+    return renderSessionStartExperienceInjection({
+      experience: memory.experience,
       diaryIndex,
-      paths,
+      paths: {
+        experience: join(memoryStore.dataRoot, "memory", "experience.md"),
+        diaryIndex: join(memoryStore.dataRoot, "diary", "INDEX.md"),
+      },
     });
-    return [
-      hookSpecificOutput,
-      "",
-      rendered.profile,
-      "",
-      rendered.experience,
-      "",
-      rendered.diaryIndex,
-    ].join("\n");
   } catch {
-    return hookSpecificOutput;
+    return undefined;
   }
 }
 
@@ -332,9 +357,11 @@ function buildContextOutput(
   const includeCurrentSession =
     input.source !== "startup" && primaryTurnCount > 0;
 
-  return [
-    buildHeader(db, input.sessionId ? primarySessionRecord.id : undefined),
-    "",
+  const header = buildHeader(
+    db,
+    input.sessionId ? primarySessionRecord.id : undefined,
+  );
+  const sessionDocument = [
     ...(includeCurrentSession
       ? [
           "## Current Session",
@@ -352,13 +379,59 @@ function buildContextOutput(
     "",
     ...recentSessionOutputs,
   ].join("\n");
+  const boundedSessionDocument = renderPersonaDocumentInjection(
+    sessionDocument,
+    SESSION_INJECTION_TOKEN_BUDGET,
+    `recall(id="S${primarySessionRecord.id}")`,
+  );
+
+  return [header, "", boundedSessionDocument].join("\n");
 }
 
-export function createContextHandler(dependencies: ContextHandlerDependencies) {
+export function createReadOnlyContextHandler(
+  dependencies: ReadOnlyContextHandlerDependencies,
+  section: ReadOnlyContextSection,
+) {
+  return async function handleReadOnlyContextHook(
+    _input: NormalizedHookInput,
+  ): Promise<HookResult> {
+    if (section === "persona") {
+      if (!dependencies.memoryStore) {
+        return { continue: true };
+      }
+      const hookSpecificOutput = await readPersonaContext(
+        dependencies.memoryStore,
+      );
+      return hookSpecificOutput
+        ? { continue: true, hookSpecificOutput }
+        : { continue: true };
+    }
+
+    if (!dependencies.memoryStore || !dependencies.fileStore) {
+      return { continue: true };
+    }
+    const hookSpecificOutput = await readExperienceContext(
+      dependencies.memoryStore,
+      dependencies.fileStore,
+    );
+    return hookSpecificOutput
+      ? { continue: true, hookSpecificOutput }
+      : { continue: true };
+  };
+}
+
+export function createContextHandler(
+  dependencies: ContextHandlerDependencies,
+  section: ContextSection = "sessions",
+) {
+  if (section !== "sessions") {
+    return createReadOnlyContextHandler(dependencies, section);
+  }
+
   return async function handleContextHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
-    let hookSpecificOutput = buildContextOutput(
+    const hookSpecificOutput = buildContextOutput(
       dependencies.db,
       input,
       dependencies.timelineRenderer,
@@ -398,14 +471,6 @@ export function createContextHandler(dependencies: ContextHandlerDependencies) {
       }
     } catch {
       // Diary backfill is best-effort: SessionStart context must still be returned.
-    }
-
-    if (dependencies.fileStore && dependencies.memoryStore) {
-      hookSpecificOutput = await appendDreamMemoryContext(
-        hookSpecificOutput,
-        dependencies.memoryStore,
-        dependencies.fileStore,
-      );
     }
 
     return {

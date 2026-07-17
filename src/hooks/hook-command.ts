@@ -13,7 +13,12 @@ import { DATA_DIR } from "../shared/paths";
 import { loadConfig, type MnemoConfig } from "../shared/config";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
-import { createContextHandler } from "./handlers/context";
+import {
+  createContextHandler,
+  createReadOnlyContextHandler,
+  type ContextHandlerDependencies,
+  type ContextSection,
+} from "./handlers/context";
 import { createPostCompactHandler } from "./handlers/post-compact";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createSessionEndHandler } from "./handlers/session-end";
@@ -32,6 +37,7 @@ export interface HookCommandDependencies {
 }
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
+let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
 export interface DefaultHookHandlersDependencies {
@@ -41,6 +47,32 @@ export interface DefaultHookHandlersDependencies {
   config?: MnemoConfig;
 }
 
+interface DefaultReadOnlyContextHandlersDependencies {
+  dataRoot?: string;
+}
+
+function createDefaultReadOnlyContextHandlers({
+  dataRoot = DATA_DIR,
+}: DefaultReadOnlyContextHandlersDependencies = {}): Record<string, HookHandler> {
+  const fileStore = new DiaryFileStore(dataRoot);
+  const memoryStore = new DreamMemoryStore(dataRoot);
+  const readOnlyDependencies = {
+    fileStore,
+    memoryStore,
+  };
+
+  return {
+    "SessionStart:persona": createReadOnlyContextHandler(
+      readOnlyDependencies,
+      "persona",
+    ),
+    "SessionStart:experience": createReadOnlyContextHandler(
+      readOnlyDependencies,
+      "experience",
+    ),
+  };
+}
+
 export function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
@@ -48,23 +80,22 @@ export function createDefaultHookHandlers({
   config = loadConfig(),
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
   const diaryStateStore = createDiaryStateStore(db);
-  const fileStore = new DiaryFileStore(dataRoot);
   const dreamStore = new DreamMemoryStore(dataRoot);
+  const contextDependencies: ContextHandlerDependencies = {
+    db,
+    diaryStateStore,
+    nowEpoch,
+    dreamSchedule: {
+      hour: config.dreamAgentHour,
+      timeZone: config.dreamAgentTimeZone,
+      backlogLimit: config.dreamAgentBacklogLimit,
+    },
+    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
+  };
 
   return {
-    SessionStart: createContextHandler({
-      db,
-      diaryStateStore,
-      fileStore,
-      memoryStore: dreamStore,
-      nowEpoch,
-      dreamSchedule: {
-        hour: config.dreamAgentHour,
-        timeZone: config.dreamAgentTimeZone,
-        backlogLimit: config.dreamAgentBacklogLimit,
-      },
-      readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
-    }),
+    ...createDefaultReadOnlyContextHandlers({ dataRoot }),
+    SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
     PostCompact: createPostCompactHandler({ db }),
@@ -85,6 +116,23 @@ function getDefaultHandlers(): Record<string, HookHandler> {
   defaultHandlers = createDefaultHookHandlers({ db });
 
   return defaultHandlers;
+}
+
+function getDefaultReadOnlyContextHandlers(): Record<string, HookHandler> {
+  if (!defaultReadOnlyContextHandlers) {
+    defaultReadOnlyContextHandlers = createDefaultReadOnlyContextHandlers();
+  }
+  return defaultReadOnlyContextHandlers;
+}
+
+function getDefaultHandler(handlerKey: string): HookHandler | undefined {
+  if (
+    handlerKey === "SessionStart:persona" ||
+    handlerKey === "SessionStart:experience"
+  ) {
+    return getDefaultReadOnlyContextHandlers()[handlerKey];
+  }
+  return getDefaultHandlers()[handlerKey];
 }
 
 function readJsonFromStdin(): Record<string, unknown> {
@@ -116,6 +164,18 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+function contextSectionFromCommandArguments(
+  command?: string,
+  section?: string,
+): ContextSection {
+  if (command !== "context") {
+    return "sessions";
+  }
+  return section === "persona" || section === "experience"
+    ? section
+    : "sessions";
 }
 
 function writeHookResult(
@@ -166,7 +226,14 @@ export async function runHookCommand(
     }
 
     const normalizedInput = normalizeInput(rawInput);
-    const handler = (dependencies.handlers ?? getDefaultHandlers())[normalizedInput.eventName];
+    const contextSection = contextSectionFromCommandArguments(argv[2], argv[3]);
+    const handlerKey =
+      normalizedInput.eventName === "SessionStart" && contextSection !== "sessions"
+        ? `SessionStart:${contextSection}`
+        : normalizedInput.eventName;
+    const handler = dependencies.handlers
+      ? dependencies.handlers[handlerKey]
+      : getDefaultHandler(handlerKey);
 
     if (!handler) {
       return HOOK_SUCCESS_EXIT_CODE;

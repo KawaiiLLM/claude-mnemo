@@ -10,6 +10,8 @@ import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
+import { estimateDiaryTokens } from "../../src/diary/domain";
+import { SESSION_INJECTION_TOKEN_BUDGET } from "../../src/diary/persona-render";
 
 function createInput(
   overrides: Partial<NormalizedHookInput> = {},
@@ -250,6 +252,47 @@ describe("handleContextHook", () => {
     getRecentSessionsSpy.mockRestore();
     renderNodeSpy.mockRestore();
     singleSessionDb.close();
+  });
+
+  test("bounds the session document after the exempt header and points overflow to recall", async () => {
+    insertTurn(db, {
+      sessionId: currentSessionId,
+      promptNumber: 1,
+      title: "Oversized session",
+      content: "Create an oversized current-session view.",
+      userPrompt: "Render the session context.",
+      assistantResponse: "Rendered.",
+      toolCallCount: 1,
+      createdAtEpoch: 310,
+    });
+    db.query("UPDATE sessions SET content = ? WHERE id = ?").run(
+      `Oversized summary ${"中文会话记忆".repeat(3_000)}`,
+      currentSessionId,
+    );
+
+    const result = await createContextHandler({ db })(
+      createInput({ source: "resume", sessionId: "session-context" }),
+    );
+    const output = result.hookSpecificOutput ?? "";
+    const [header, axes, blank, ...sessionLines] = output.split("\n");
+    const sessionDocument = sessionLines.join("\n");
+
+    expect(header).toBe(
+      `claude-mnemo: 5 sessions, 0 observations | current: S${currentSessionId}`,
+    );
+    expect(axes).toBe(
+      "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
+    );
+    expect(blank).toBe("");
+    expect(estimateDiaryTokens(sessionDocument)).toBeLessThanOrEqual(
+      SESSION_INJECTION_TOKEN_BUDGET,
+    );
+    expect(sessionDocument).toMatch(
+      new RegExp(
+        `本节还有 \\d+ 行，完整见 recall\\(id="S${currentSessionId}"\\)`,
+      ),
+    );
+    expect(sessionDocument).not.toContain("/Users/");
   });
 
   test("compact injects current-session timeline and keeps recent sessions collapsed", async () => {
