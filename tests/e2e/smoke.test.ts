@@ -183,6 +183,7 @@ describe("claude-mnemo smoke test", () => {
       content: "Captured the race condition in auth refresh",
       insight: "- refresh races under parallel load",
       type: "discovery",
+      grade: 2,
       tags: ["gotcha"],
     });
     rememberTool(db, {
@@ -197,6 +198,7 @@ describe("claude-mnemo smoke test", () => {
       content: "Implemented mutex and regression coverage",
       insight: "- mutex stabilizes refresh flow",
       type: "bugfix",
+      grade: 2,
       tags: ["problem-solution"],
     });
     rememberTool(db, {

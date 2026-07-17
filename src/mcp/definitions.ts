@@ -27,6 +27,14 @@ export const workerRecallInputShape = {
 
 export const rememberInputShape = {
   id: z.string().optional(),
+  grade: z.number().int().min(0).max(4).optional(),
+  regrade: z
+    .object({
+      id: z.string(),
+      grade: z.number().int().min(0).max(4),
+    })
+    .strict()
+    .optional(),
   type: z.string().optional(),
   title: z.string().optional(),
   content: z.string().optional(),

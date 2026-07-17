@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
 
 import {
   HOOK_NON_BLOCKING_EXIT_CODE,
@@ -9,7 +10,7 @@ import { createDiaryStateStore } from "../db/diary-state";
 import { initializeDatabase } from "../db/schema";
 import { DiaryFileStore } from "../diary/file-store";
 import { DreamMemoryStore } from "../diary/memory-store";
-import { DATA_DIR } from "../shared/paths";
+import { DATA_DIR, resolveDatabasePath } from "../shared/paths";
 import { loadConfig, type MnemoConfig } from "../shared/config";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
@@ -17,10 +18,10 @@ import {
   createContextHandler,
   createReadOnlyContextHandler,
   type ContextHandlerDependencies,
-  type ContextSection,
 } from "./handlers/context";
 import { createPostCompactHandler } from "./handlers/post-compact";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
+import { createMilestoneContextHandler } from "./handlers/context-milestones";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
@@ -38,6 +39,8 @@ export interface HookCommandDependencies {
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
+let defaultRecentContextHandler: HookHandler | undefined;
+let defaultMilestoneContextHandler: HookHandler | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
 export interface DefaultHookHandlersDependencies {
@@ -54,10 +57,8 @@ interface DefaultReadOnlyContextHandlersDependencies {
 function createDefaultReadOnlyContextHandlers({
   dataRoot = DATA_DIR,
 }: DefaultReadOnlyContextHandlersDependencies = {}): Record<string, HookHandler> {
-  const fileStore = new DiaryFileStore(dataRoot);
   const memoryStore = new DreamMemoryStore(dataRoot);
   const readOnlyDependencies = {
-    fileStore,
     memoryStore,
   };
 
@@ -65,10 +66,6 @@ function createDefaultReadOnlyContextHandlers({
     "SessionStart:persona": createReadOnlyContextHandler(
       readOnlyDependencies,
       "persona",
-    ),
-    "SessionStart:experience": createReadOnlyContextHandler(
-      readOnlyDependencies,
-      "experience",
     ),
   };
 }
@@ -80,6 +77,7 @@ export function createDefaultHookHandlers({
   config = loadConfig(),
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
   const diaryStateStore = createDiaryStateStore(db);
+  const fileStore = new DiaryFileStore(dataRoot);
   const dreamStore = new DreamMemoryStore(dataRoot);
   const contextDependencies: ContextHandlerDependencies = {
     db,
@@ -95,6 +93,11 @@ export function createDefaultHookHandlers({
 
   return {
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
+    "SessionStart:recent": createReadOnlyContextHandler(
+      { db, fileStore },
+      "recent",
+    ),
+    "SessionStart:milestones": createMilestoneContextHandler({ db }),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db }),
     PostToolUse: createPostToolUseHandler({ db }),
@@ -125,11 +128,55 @@ function getDefaultReadOnlyContextHandlers(): Record<string, HookHandler> {
   return defaultReadOnlyContextHandlers;
 }
 
+function getDefaultRecentContextHandler(): HookHandler {
+  if (defaultRecentContextHandler) {
+    return defaultRecentContextHandler;
+  }
+
+  const databasePath = resolveDatabasePath();
+  if (!existsSync(databasePath)) {
+    defaultRecentContextHandler = async () => ({ continue: true });
+    return defaultRecentContextHandler;
+  }
+
+  const db = new Database(databasePath, {
+    readonly: true,
+    create: false,
+  });
+  defaultRecentContextHandler = createReadOnlyContextHandler(
+    { db, fileStore: new DiaryFileStore(DATA_DIR) },
+    "recent",
+  );
+  return defaultRecentContextHandler;
+}
+
+function getDefaultMilestoneContextHandler(): HookHandler {
+  if (defaultMilestoneContextHandler) {
+    return defaultMilestoneContextHandler;
+  }
+
+  const databasePath = resolveDatabasePath();
+  if (!existsSync(databasePath)) {
+    defaultMilestoneContextHandler = async () => ({ continue: true });
+    return defaultMilestoneContextHandler;
+  }
+
+  const db = new Database(databasePath, {
+    readonly: true,
+    create: false,
+  });
+  defaultMilestoneContextHandler = createMilestoneContextHandler({ db });
+  return defaultMilestoneContextHandler;
+}
+
 function getDefaultHandler(handlerKey: string): HookHandler | undefined {
-  if (
-    handlerKey === "SessionStart:persona" ||
-    handlerKey === "SessionStart:experience"
-  ) {
+  if (handlerKey === "SessionStart:recent") {
+    return getDefaultRecentContextHandler();
+  }
+  if (handlerKey === "SessionStart:milestones") {
+    return getDefaultMilestoneContextHandler();
+  }
+  if (handlerKey === "SessionStart:persona") {
     return getDefaultReadOnlyContextHandlers()[handlerKey];
   }
   return getDefaultHandlers()[handlerKey];
@@ -169,11 +216,13 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): ContextSection {
+): "sessions" | "persona" | "recent" | "milestones" {
   if (command !== "context") {
     return "sessions";
   }
-  return section === "persona" || section === "experience"
+  return section === "persona" ||
+    section === "recent" ||
+    section === "milestones"
     ? section
     : "sessions";
 }

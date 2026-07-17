@@ -19,7 +19,6 @@ import { DiaryFileStore } from "../../src/diary/file-store";
 import { DreamMemoryStore } from "../../src/diary/memory-store";
 import {
   DIARY_INDEX_INJECTION_TOKEN_BUDGET,
-  EXPERIENCE_INJECTION_TOKEN_BUDGET,
   PROFILE_INJECTION_TOKEN_BUDGET,
   SESSION_INJECTION_TOKEN_BUDGET,
 } from "../../src/diary/persona-render";
@@ -100,7 +99,7 @@ describe("SessionStart dream scheduling and injection", () => {
     expect(stateStore.claimNextDiaryItem(nowEpoch)).toBeNull();
   });
 
-  test("splits bounded sessions, persona, and experience output while startup side effects run once", async () => {
+  test("splits bounded state, persona, and recent/diary output while sessions side effects run once", async () => {
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-context-dream-"));
     roots.push(dataRoot);
     const memoryStore = new DreamMemoryStore(dataRoot);
@@ -178,18 +177,18 @@ describe("SessionStart dream scheduling and injection", () => {
       ) VALUES (?, 1, 'active', 'stranded after sessions hook', 'answer', ?)`,
     ).run(sessionDbId, nowEpoch + 1);
     const personaResult = await createContextHandler(dependencies, "persona")(input);
-    const experienceResult = await createContextHandler(
+    const recentResult = await createContextHandler(
       dependencies,
-      "experience",
+      "recent",
     )(input);
     const sessions = sessionsResult.hookSpecificOutput ?? "";
     const persona = personaResult.hookSpecificOutput ?? "";
-    const experience = experienceResult.hookSpecificOutput ?? "";
-    const indexStart = experience.indexOf("# Diary Index");
-    const index = experience.slice(indexStart).trim();
+    const recent = recentResult.hookSpecificOutput ?? "";
+    const indexStart = recent.indexOf("# Diary Index");
+    const index = recent.slice(indexStart).trim();
 
     expect(sessions).toContain("claude-mnemo:");
-    expect(sessions).toContain("## Recent Sessions");
+    expect(sessions).not.toContain("## Recent Sessions");
     expect(sessions).not.toContain("## Persona");
     expect(sessions).not.toContain("## Experience");
     expect(estimateDiaryTokens(sessions.split("\n").slice(3).join("\n")))
@@ -200,19 +199,20 @@ describe("SessionStart dream scheduling and injection", () => {
     expect(estimateDiaryTokens(persona)).toBeLessThanOrEqual(
       PROFILE_INJECTION_TOKEN_BUDGET,
     );
-    expect(estimateDiaryTokens(experience)).toBeLessThanOrEqual(
-      EXPERIENCE_INJECTION_TOKEN_BUDGET,
+    expect(estimateDiaryTokens(recent)).toBeLessThanOrEqual(
+      SESSION_INJECTION_TOKEN_BUDGET,
     );
     expect(estimateDiaryTokens(index)).toBeLessThanOrEqual(
       DIARY_INDEX_INJECTION_TOKEN_BUDGET,
     );
-    expect(experience).toContain("## Experience");
-    expect(experience).toContain("# Diary Index");
-    expect(experience).not.toContain("## Persona");
+    expect(recent).toContain("# Diary Index");
+    expect(recent).not.toContain("## Experience");
+    expect(recent).not.toContain("## Persona");
     expect(persona).not.toContain("ARCHIVE_MUST_NEVER_BE_INJECTED");
-    expect(experience).not.toContain("ARCHIVE_MUST_NEVER_BE_INJECTED");
+    expect(recent).not.toContain("ARCHIVE_MUST_NEVER_BE_INJECTED");
+    expect(recent).not.toContain("experience 0");
     expect(persona).not.toContain("memory/archive.md");
-    expect(experience).not.toContain("memory/archive.md");
+    expect(recent).not.toContain("memory/archive.md");
     expect(index.indexOf("2026-07-10")).toBeLessThan(index.indexOf("2026-07-09"));
     expect(index.indexOf("2026-07-09")).toBeLessThan(index.indexOf("2026-07-08"));
     expect(stateStore.initializeBootstrap).toHaveBeenCalledTimes(1);
@@ -227,10 +227,10 @@ describe("SessionStart dream scheduling and injection", () => {
     ).get()?.count).toBe(0);
   });
 
-  test("persona and experience reads are silent when their stores are unavailable or fail", async () => {
+  test("persona and recent reads are silent when their stores are unavailable or fail", async () => {
     const input = session("dream-empty-injection", 100);
     const missingPersona = await createContextHandler({ db }, "persona")(input);
-    const missingExperience = await createContextHandler({ db }, "experience")(
+    const missingRecent = await createContextHandler({ db }, "recent")(
       input,
     );
     const failedPersona = await createContextHandler({
@@ -244,11 +244,11 @@ describe("SessionStart dream scheduling and injection", () => {
     }, "persona")(input);
 
     expect(missingPersona).toEqual({ continue: true });
-    expect(missingExperience).toEqual({ continue: true });
+    expect(missingRecent).toEqual({ continue: true });
     expect(failedPersona).toEqual({ continue: true });
   });
 
-  test("persona and experience do not create missing roots or emit heading-only documents", async () => {
+  test("persona and recent do not create missing roots; diary-only content still emits", async () => {
     const parent = mkdtempSync(join(tmpdir(), "claude-mnemo-read-only-context-"));
     roots.push(parent);
     const missingDataRoot = join(parent, "missing");
@@ -259,11 +259,10 @@ describe("SessionStart dream scheduling and injection", () => {
       db,
       memoryStore: missingMemoryStore,
     }, "persona")(input);
-    const missingExperience = await createContextHandler({
+    const missingRecent = await createContextHandler({
       db,
-      memoryStore: missingMemoryStore,
       fileStore: new DiaryFileStore(missingDataRoot),
-    }, "experience")(input);
+    }, "recent")(input);
     const headingOnlyMemoryStore = {
       dataRoot: parent,
       readInjectionDocuments: async () => ({
@@ -275,19 +274,19 @@ describe("SessionStart dream scheduling and injection", () => {
       db,
       memoryStore: headingOnlyMemoryStore,
     }, "persona")(input);
-    const headingOnlyExperience = await createContextHandler({
+    const diaryOnlyRecent = await createContextHandler({
       db,
-      memoryStore: headingOnlyMemoryStore,
       fileStore: {
         readIndex: async () =>
           new TextEncoder().encode("# Diary Index\n\n- 2026-07-10：entry\n"),
       },
-    }, "experience")(input);
+    }, "recent")(input);
 
     expect(missingPersona).toEqual({ continue: true });
-    expect(missingExperience).toEqual({ continue: true });
+    expect(missingRecent).toEqual({ continue: true });
     expect(headingOnlyPersona).toEqual({ continue: true });
-    expect(headingOnlyExperience).toEqual({ continue: true });
+    expect(diaryOnlyRecent.hookSpecificOutput).toContain("# Diary Index");
+    expect(diaryOnlyRecent.hookSpecificOutput).not.toContain("## Experience");
     expect(existsSync(missingDataRoot)).toBe(false);
   });
 });

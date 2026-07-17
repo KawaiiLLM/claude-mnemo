@@ -62,6 +62,7 @@ import {
 import { detectCacheTtl } from "./cache-ttl";
 import {
   buildBatchPrompt,
+  buildTurnSignificanceCalibration,
   createWorkerProcessors,
   FINAL_SLICE_OVERHEAD,
   renderMiniTurn,
@@ -1372,6 +1373,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         : null,
       sessionUpdated,
       staleTurns,
+      significanceCalibration: buildTurnSignificanceCalibration(
+        deps.db,
+        session.id,
+        latestPromptNumber,
+      ),
       completedTurnBlocks: blocks,
     });
     // Route through the D1/T2/T3 derailment state machine. A DerailmentFloorError

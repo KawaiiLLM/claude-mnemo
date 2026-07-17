@@ -8,29 +8,18 @@ import { sortDiaryIndexRecentFirst } from "./diary-index";
 import { estimateDiaryTokens } from "./domain";
 
 export const PROFILE_INJECTION_TOKEN_BUDGET = 2_000;
-export const EXPERIENCE_INJECTION_TOKEN_BUDGET = 2_000;
 export const DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1_000;
 export const SESSION_INJECTION_TOKEN_BUDGET = 2_000;
 
-export interface SessionStartMemoryInjection {
-  profile: string;
-  experience: string;
-  diaryIndex: string;
-}
-
-export interface SessionStartMemoryInjectionInput {
-  userProfile: string;
-  experience: string;
-  diaryIndex: string;
-  paths: {
-    userProfile: string;
-    experience: string;
-    diaryIndex: string;
-  };
-}
-
 const sectionPointer = (remainingLines: number, displayPath: string) =>
   `（本节还有 ${remainingLines} 行，完整见 ${displayPath}）`;
+
+const documentPointer = (remainingLines: number, displayPath: string) =>
+  `（其余 ${remainingLines} 行省略，完整见 ${displayPath}）`;
+
+export interface RenderPersonaDocumentOptions {
+  sectionDisplayPaths?: readonly (string | null | undefined)[];
+}
 
 function headingLine(section: MarkdownSection): string | null {
   return section.level === 0
@@ -42,20 +31,65 @@ function renderSections(
   sections: readonly MarkdownSection[],
   includedLineCounts: readonly number[],
   displayPath: string,
+  options: RenderPersonaDocumentOptions,
   reserveEveryPointer = false,
 ): string {
   const lines: string[] = [];
+  let documentRemainingLines = 0;
   sections.forEach((section, index) => {
     const heading = headingLine(section);
     if (heading !== null) lines.push(heading);
     const included = includedLineCounts[index] ?? 0;
     lines.push(...section.bodyLines.slice(0, included));
     const remaining = section.bodyLines.length - included;
-    if (remaining > 0 || reserveEveryPointer) {
-      lines.push(sectionPointer(Math.max(remaining, 0), displayPath));
+    if (remaining <= 0 && !reserveEveryPointer) {
+      return;
     }
+
+    const pointerTarget =
+      options.sectionDisplayPaths?.[index] ?? displayPath;
+    if (pointerTarget !== displayPath) {
+      if (remaining > 0) {
+        lines.push(sectionPointer(remaining, pointerTarget));
+      }
+      return;
+    }
+
+    documentRemainingLines += Math.max(remaining, 0);
   });
+  if (documentRemainingLines > 0) {
+    lines.push(documentPointer(documentRemainingLines, displayPath));
+  }
   return lines.join("\n");
+}
+
+function fallbackPointerLines(
+  sections: readonly MarkdownSection[],
+  displayPath: string,
+  options: RenderPersonaDocumentOptions,
+): string[] {
+  const remainingByTarget = new Map<string, number>();
+  sections.forEach((section, index) => {
+    if (section.bodyLines.length === 0) {
+      return;
+    }
+    const target = options.sectionDisplayPaths?.[index] ?? displayPath;
+    remainingByTarget.set(
+      target,
+      (remainingByTarget.get(target) ?? 0) + section.bodyLines.length,
+    );
+  });
+
+  const hasDistinctTarget = [...remainingByTarget.keys()].some(
+    (target) => target !== displayPath,
+  );
+  if (!hasDistinctTarget) {
+    return [`（内容省略，完整见 ${displayPath}）`];
+  }
+
+  return [...remainingByTarget].map(([target, remainingLines]) =>
+    documentPointer(remainingLines, target)
+  );
 }
 
 /**
@@ -66,6 +100,7 @@ export function renderPersonaDocumentInjection(
   document: string,
   injectionTokenBudget: number,
   displayPath: string,
+  options: RenderPersonaDocumentOptions = {},
 ): string {
   const sections = parseMarkdownSections(document);
   if (sections.length === 0) return "";
@@ -75,6 +110,7 @@ export function renderPersonaDocumentInjection(
     sections,
     includedLineCounts,
     displayPath,
+    options,
     true,
   );
   if (estimateDiaryTokens(skeleton) <= injectionTokenBudget) {
@@ -94,6 +130,7 @@ export function renderPersonaDocumentInjection(
           sections,
           includedLineCounts,
           displayPath,
+          options,
         );
         if (estimateDiaryTokens(candidate) > injectionTokenBudget) {
           includedLineCounts[sectionIndex] = lineIndex;
@@ -101,19 +138,32 @@ export function renderPersonaDocumentInjection(
         }
       }
     }
-    return renderSections(sections, includedLineCounts, displayPath);
+    return renderSections(sections, includedLineCounts, displayPath, options);
   }
 
   const topLevelHeadings = sections
     .filter((section) => section.level === 1)
     .map((section) => headingLine(section)!);
-  const documentPointer = `（内容省略，完整见 ${displayPath}）`;
-  const headingFallback = [...topLevelHeadings, documentPointer].join("\n");
+  const fallbackPointers = fallbackPointerLines(
+    sections,
+    displayPath,
+    options,
+  );
+  const headingFallback = [...topLevelHeadings, ...fallbackPointers].join("\n");
   if (estimateDiaryTokens(headingFallback) <= injectionTokenBudget) {
     return headingFallback;
   }
 
-  return `（${basename(displayPath)} 过大，完整见 ${displayPath}）`;
+  const distinctTargets = [
+    ...new Set(
+      (options.sectionDisplayPaths ?? [])
+        .filter((target): target is string => Boolean(target))
+        .filter((target) => target !== displayPath),
+    ),
+  ];
+  const alternateTargets =
+    distinctTargets.length > 0 ? `；另见 ${distinctTargets.join("、")}` : "";
+  return `（${basename(displayPath)} 过大，完整见 ${displayPath}${alternateTargets}）`;
 }
 
 function renderBoundedInjectionBlock(input: {
@@ -154,19 +204,6 @@ export function renderSessionStartPersonaInjection(input: {
   });
 }
 
-function renderSessionStartExperienceBlock(input: {
-  experience: string;
-  path: string;
-  tokenBudget: number;
-}): string {
-  return renderBoundedInjectionBlock({
-    heading: "## Experience",
-    document: input.experience,
-    displayPath: input.path,
-    tokenBudget: input.tokenBudget,
-  });
-}
-
 function renderSessionStartDiaryIndex(input: {
   diaryIndex: string;
   path: string;
@@ -178,11 +215,11 @@ function renderSessionStartDiaryIndex(input: {
   );
 }
 
-export function renderSessionStartExperienceInjection(input: {
-  experience: string;
+export function renderSessionStartRecentSessionsInjection(input: {
+  recentSessions: string;
   diaryIndex: string;
   paths: {
-    experience: string;
+    recentSessions: string;
     diaryIndex: string;
   };
 }): string {
@@ -190,46 +227,29 @@ export function renderSessionStartExperienceInjection(input: {
     diaryIndex: input.diaryIndex,
     path: input.paths.diaryIndex,
   });
-  const separator = diaryIndex ? "\n\n" : "";
+  const separator =
+    input.recentSessions.trim().length > 0 && diaryIndex ? "\n\n" : "";
   const diaryTokens = estimateDiaryTokens(`${separator}${diaryIndex}`);
-  const experienceBudget = Math.max(
+  let recentBudget = Math.max(
     0,
-    EXPERIENCE_INJECTION_TOKEN_BUDGET - diaryTokens,
+    SESSION_INJECTION_TOKEN_BUDGET - diaryTokens,
   );
-  const experience = renderSessionStartExperienceBlock({
-    experience: input.experience,
-    path: input.paths.experience,
-    tokenBudget: experienceBudget,
-  });
-  const combined = `${experience}${separator}${diaryIndex}`;
 
-  if (estimateDiaryTokens(combined) <= EXPERIENCE_INJECTION_TOKEN_BUDGET) {
-    return combined;
+  while (recentBudget >= 0) {
+    const recentSessions = input.recentSessions.trim().length > 0
+      ? renderBoundedInjectionBlock({
+          heading: "## Recent Sessions",
+          document: input.recentSessions,
+          displayPath: input.paths.recentSessions,
+          tokenBudget: recentBudget,
+        })
+      : "";
+    const combined = `${recentSessions}${separator}${diaryIndex}`;
+    if (estimateDiaryTokens(combined) <= SESSION_INJECTION_TOKEN_BUDGET) {
+      return combined;
+    }
+    recentBudget -= 1;
   }
 
-  return renderSessionStartExperienceBlock({
-    experience: input.experience,
-    path: input.paths.experience,
-    tokenBudget: Math.max(0, experienceBudget - 1),
-  }) + separator + diaryIndex;
-}
-
-export function renderSessionStartMemoryInjection(
-  input: SessionStartMemoryInjectionInput,
-): SessionStartMemoryInjection {
-  return {
-    profile: renderSessionStartPersonaInjection({
-      userProfile: input.userProfile,
-      path: input.paths.userProfile,
-    }),
-    experience: renderSessionStartExperienceBlock({
-      experience: input.experience,
-      path: input.paths.experience,
-      tokenBudget: EXPERIENCE_INJECTION_TOKEN_BUDGET,
-    }),
-    diaryIndex: renderSessionStartDiaryIndex({
-      diaryIndex: input.diaryIndex,
-      path: input.paths.diaryIndex,
-    }),
-  };
+  return diaryIndex;
 }

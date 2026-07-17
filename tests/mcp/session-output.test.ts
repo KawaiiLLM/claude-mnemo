@@ -3,11 +3,15 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession, type SessionRecord } from "../../src/db/sessions";
-import { renderCurrentSessionOutput } from "../../src/mcp/session-output";
+import { getSession, upsertSession, type SessionRecord } from "../../src/db/sessions";
+import { estimateDiaryTokens } from "../../src/diary/domain";
+import {
+  renderCurrentSessionOutput,
+  renderCurrentSessionStateOutput,
+} from "../../src/mcp/session-output";
 import type { FormattedSession } from "../../src/mcp/format";
 
-describe("renderCurrentSessionOutput", () => {
+describe("renderCurrentSessionStateOutput", () => {
   let db: Database;
   let sessionRecord: SessionRecord;
 
@@ -49,7 +53,7 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
 
     expect(output).toContain(`[S${sessionRecord.id}]`);
     expect(output).toContain("Test session title");
@@ -73,7 +77,7 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
 
     expect(output).toContain("  content: Test session content description.");
   });
@@ -95,7 +99,7 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
 
     expect(output).toContain("  insight:");
     expect(output).toContain("    - Key insight one");
@@ -120,7 +124,7 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
 
     expect(output).toContain("  decision:");
     expect(output).toContain("    - Decision line one");
@@ -146,13 +150,13 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, sessionRecord);
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
 
     expect(output).toContain("  next: Implement the fix before next session.");
     expect(output).not.toContain("next_steps:");
   });
 
-  test("builds a milestone context timeline and leaves view out of render options", () => {
+  test("renders only state without an embedded milestone timeline", () => {
     const session: FormattedSession = {
       id: sessionRecord.id,
       title: sessionRecord.title,
@@ -168,14 +172,30 @@ describe("renderCurrentSessionOutput", () => {
       turnCount: 1,
       observationCount: 0,
     };
-    const timelineView = { sessionId: sessionRecord.id };
-    const buildContextTimelineView = mock(
-      (_db: Database, _sessionId: number, _view: "milestones") => timelineView as never,
-    );
-    const renderTimeline = mock(
-      (_view: never, _options: { promptCap?: number; showEarlierHint?: boolean }) =>
-        "rendered milestone timeline",
-    );
+    const output = renderCurrentSessionStateOutput(session, sessionRecord);
+
+    expect(output).not.toContain("shape signals");
+    expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2}/);
+  });
+
+  test("keeps the worker re-prime renderer's existing milestone timeline", () => {
+    const session: FormattedSession = {
+      id: sessionRecord.id,
+      title: sessionRecord.title,
+      project: sessionRecord.project,
+      createdAtEpoch: sessionRecord.createdAtEpoch,
+      content: "Some content.",
+      insight: [],
+      nextSteps: null,
+      decision: null,
+      done: null,
+      current: null,
+      reference: null,
+      turnCount: 1,
+      observationCount: 0,
+    };
+    const buildContextTimelineView = mock(() => ({}) as never);
+    const renderTimeline = mock(() => "rendered milestone timeline");
 
     const output = renderCurrentSessionOutput(db, session, sessionRecord, {
       buildContextTimelineView,
@@ -187,13 +207,147 @@ describe("renderCurrentSessionOutput", () => {
       sessionRecord.id,
       "milestones",
     );
-    expect(renderTimeline).toHaveBeenCalledWith(timelineView, {
-      promptCap: 80,
-      showEarlierHint: true,
-    });
-    expect(renderTimeline.mock.calls[0]?.[1]).not.toHaveProperty("milestones");
-    expect(renderTimeline.mock.calls[0]?.[1]).not.toHaveProperty("phases");
+    expect(renderTimeline).toHaveBeenCalledTimes(1);
     expect(output).toContain("rendered milestone timeline");
+  });
+
+  test("uses raw [T<n>] coordinates and renders fields in state-first order", () => {
+    db.query(
+      `UPDATE sessions
+       SET content = ?,
+           current = ?,
+           next_steps = ?,
+           decision = ?,
+           done = ?,
+           reference = ?
+       WHERE id = ?`,
+    ).run(
+      "One-sentence arc overview.",
+      "Current work is ticket 02.",
+      "Implement the bounded state renderer.",
+      "- Active decision [T1]",
+      "- Recent useful completion [T1]",
+      "- /tmp/spec.md",
+      sessionRecord.id,
+    );
+    const raw = getSession(db, sessionRecord.id)!;
+    const formatted: FormattedSession = {
+      id: raw.id,
+      title: raw.title,
+      project: raw.project,
+      createdAtEpoch: raw.createdAtEpoch,
+      content: raw.content,
+      insight: [],
+      nextSteps: raw.nextSteps,
+      // Simulate context.ts's expanded value; injection must use raw storage.
+      decision: '- Active decision [S1/T1] "expanded title"',
+      done: '- Recent useful completion [S1/T1] "expanded title"',
+      current: raw.current,
+      reference: raw.reference,
+      turnCount: 1,
+      observationCount: 0,
+    };
+
+    const output = renderCurrentSessionStateOutput(formatted, raw);
+    expect(output).toContain("[T1]");
+    expect(output).not.toContain("[S1/T1]");
+    const orderedLabels = [
+      "  content:",
+      "  current:",
+      "  next:",
+      "  decision:",
+      "  done:",
+      "  reference:",
+    ];
+    const positions = orderedLabels.map((label) => output.indexOf(label));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  });
+
+  test("bounds an oversized legacy state to 2000 tokens while retaining current and next", () => {
+    db.query(
+      `UPDATE sessions
+       SET content = ?,
+           current = ?,
+           next_steps = ?,
+           decision = ?,
+           done = ?,
+           reference = ?
+       WHERE id = ?`,
+    ).run(
+      "Legacy arc overview.",
+      "Current state must survive.",
+      "Next action must survive.",
+      `- ${"old decision ".repeat(2_000)}`,
+      `- ${"old completion ".repeat(2_000)}`,
+      `- ${"/very/old/path ".repeat(2_000)}`,
+      sessionRecord.id,
+    );
+    const raw = getSession(db, sessionRecord.id)!;
+    const formatted: FormattedSession = {
+      id: raw.id,
+      title: raw.title,
+      project: raw.project,
+      createdAtEpoch: raw.createdAtEpoch,
+      content: raw.content,
+      insight: [],
+      nextSteps: raw.nextSteps,
+      decision: raw.decision,
+      done: raw.done,
+      current: raw.current,
+      reference: raw.reference,
+      turnCount: 1,
+      observationCount: 0,
+    };
+
+    const output = renderCurrentSessionStateOutput(formatted, raw);
+    expect(estimateDiaryTokens(output)).toBeLessThanOrEqual(2_000);
+    expect(output).toContain("Current state must survive.");
+    expect(output).toContain("Next action must survive.");
+  });
+
+  test("drops oversized historical fields before truncating current state", () => {
+    const content = "arc state ".repeat(80);
+    const current = "current state ".repeat(60);
+    const nextSteps = "next action ".repeat(40);
+    db.query(
+      `UPDATE sessions
+       SET content = ?,
+           current = ?,
+           next_steps = ?,
+           decision = ?
+       WHERE id = ?`,
+    ).run(
+      content,
+      current,
+      nextSteps,
+      `- ${"historical decision ".repeat(2_000)}`,
+      sessionRecord.id,
+    );
+    const raw = getSession(db, sessionRecord.id)!;
+    const formatted: FormattedSession = {
+      id: raw.id,
+      title: raw.title,
+      project: raw.project,
+      createdAtEpoch: raw.createdAtEpoch,
+      content: raw.content,
+      insight: [],
+      nextSteps: raw.nextSteps,
+      decision: raw.decision,
+      done: raw.done,
+      current: raw.current,
+      reference: raw.reference,
+      turnCount: 1,
+      observationCount: 0,
+    };
+
+    const output = renderCurrentSessionStateOutput(formatted, raw);
+
+    expect(output).toContain(`  content: ${content}`);
+    expect(output).toContain(`  current: ${current}`);
+    expect(output).toContain(`  next: ${nextSteps}`);
+    expect(output).toContain("state truncated; full summary");
+    expect(estimateDiaryTokens(output)).toBeLessThanOrEqual(2_000);
   });
 
   test("renders untitled session when title is null", () => {
@@ -224,14 +378,46 @@ describe("renderCurrentSessionOutput", () => {
       observationCount: 0,
     };
 
-    const output = renderCurrentSessionOutput(db, session, noTitleRecord);
+    const output = renderCurrentSessionStateOutput(session, noTitleRecord);
 
     expect(output).toContain(`[S${noTitleRecord.id}] (untitled session)`);
   });
 
-  test("is resilient when timeline rendering throws", () => {
-    // Pass an invalid session record id so buildContextTimelineView might
-    // throw or return empty; either way the function must not propagate.
+  test("keeps the untitled fallback when an oversized legacy state is bounded", () => {
+    const noTitleRecord = upsertSession(db, {
+      contentSessionId: "oversized-no-title-session",
+      project: "/test/project",
+      title: null,
+      content: "x".repeat(20_000),
+      insight: null,
+      createdAtEpoch: 2000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    const session: FormattedSession = {
+      id: noTitleRecord.id,
+      title: null,
+      project: noTitleRecord.project,
+      createdAtEpoch: noTitleRecord.createdAtEpoch,
+      content: noTitleRecord.content,
+      insight: [],
+      nextSteps: null,
+      decision: null,
+      done: null,
+      current: null,
+      reference: null,
+      turnCount: 0,
+      observationCount: 0,
+    };
+
+    const output = renderCurrentSessionStateOutput(session, noTitleRecord);
+
+    expect(output).toContain(`[S${noTitleRecord.id}] (untitled session)`);
+    expect(output).not.toContain(`[S${noTitleRecord.id}] null`);
+    expect(estimateDiaryTokens(output)).toBeLessThanOrEqual(2_000);
+  });
+
+  test("renders state without looking up the session in the database", () => {
     const session: FormattedSession = {
       id: 99999,
       title: "Ghost session",
@@ -268,9 +454,7 @@ describe("renderCurrentSessionOutput", () => {
       completedAtEpoch: null,
     };
 
-    // Should not throw; content lines still present
-    expect(() => renderCurrentSessionOutput(db, session, fakeRecord)).not.toThrow();
-    const output = renderCurrentSessionOutput(db, session, fakeRecord);
+    const output = renderCurrentSessionStateOutput(session, fakeRecord);
     expect(output).toContain("[S99999] Ghost session");
     expect(output).toContain("  content: Content.");
   });

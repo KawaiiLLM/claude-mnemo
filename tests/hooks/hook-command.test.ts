@@ -144,26 +144,29 @@ describe("runHookCommand", () => {
       } as const;
       const sessionsResult = await handlers.SessionStart!(input);
       const personaResult = await handlers["SessionStart:persona"]!(input);
-      const experienceResult = await handlers["SessionStart:experience"]!(input);
+      const recentResult = await handlers["SessionStart:recent"]!(input);
+      const milestonesResult = await handlers["SessionStart:milestones"]!(input);
 
       expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(true);
-      expect(sessionsResult.hookSpecificOutput).toContain("claude-mnemo:");
-      expect(sessionsResult.hookSpecificOutput).not.toContain("## Persona");
+      expect(sessionsResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).toContain("## Persona");
       expect(personaResult.hookSpecificOutput).toContain(
         "- 生产 wiring 中的用户画像 [S1/T1]",
       );
       expect(personaResult.hookSpecificOutput).not.toContain("## Experience");
-      expect(experienceResult.hookSpecificOutput).toContain("## Experience");
-      expect(experienceResult.hookSpecificOutput).toContain("# Diary Index");
-      expect(experienceResult.hookSpecificOutput).toContain(
+      expect(recentResult.hookSpecificOutput).toContain("# Diary Index");
+      expect(recentResult.hookSpecificOutput).not.toContain("## Experience");
+      expect(recentResult.hookSpecificOutput).toContain(
         "- 2026-07-10：生产 wiring 日记索引",
       );
+      expect(milestonesResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
-      expect(experienceResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
+      expect(recentResult.hookSpecificOutput).not.toContain("生产 wiring 中的协作经历");
+      expect(recentResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
       expect(sessionsResult.asyncWork).toBeUndefined();
       expect(personaResult.asyncWork).toBeUndefined();
-      expect(experienceResult.asyncWork).toBeUndefined();
+      expect(recentResult.asyncWork).toBeUndefined();
+      expect(milestonesResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
     } finally {
@@ -172,7 +175,7 @@ describe("runHookCommand", () => {
     }
   });
 
-  test("production SessionStart wiring preserves base context before diary artifacts exist", async () => {
+  test("production startup stays silent before persona and diary artifacts exist", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-empty-default-hooks-"));
@@ -194,18 +197,19 @@ describe("runHookCommand", () => {
         nowEpoch: () => Date.parse("2026-07-11T12:00:00+08:00") / 1_000,
       });
 
-      const result = await handlers.SessionStart!({
+      const input = {
         eventName: "SessionStart",
         source: "startup",
         sessionId: "default-hook-before-artifacts",
         cwd: "/projects/default-hook-before-artifacts",
         stopHookActive: false,
         raw: {},
-      });
+      } as const;
+      const sessionsResult = await handlers.SessionStart!(input);
+      const recentResult = await handlers["SessionStart:recent"]!(input);
 
-      expect(result.hookSpecificOutput).toContain("claude-mnemo: 1 sessions");
-      expect(result.hookSpecificOutput).toContain("## Recent Sessions");
-      expect(result.asyncWork).toBeUndefined();
+      expect(sessionsResult).toEqual({ continue: true });
+      expect(recentResult).toEqual({ continue: true });
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });
@@ -275,20 +279,23 @@ describe("runHookCommand", () => {
   test("routes context section arguments to their dedicated SessionStart handlers", async () => {
     const sessionsHandler = mock(async () => ({ continue: true }));
     const personaHandler = mock(async () => ({ continue: true }));
-    const experienceHandler = mock(async () => ({ continue: true }));
+    const recentHandler = mock(async () => ({ continue: true }));
+    const milestonesHandler = mock(async () => ({ continue: true }));
     const run = runHookCommand as unknown as (
       dependencies?: TestHookCommandDependencies,
     ) => Promise<number>;
     const handlers = {
       SessionStart: sessionsHandler,
       "SessionStart:persona": personaHandler,
-      "SessionStart:experience": experienceHandler,
+      "SessionStart:recent": recentHandler,
+      "SessionStart:milestones": milestonesHandler,
     };
 
     for (const [section, expectedHandler] of [
       [undefined, sessionsHandler],
       ["persona", personaHandler],
-      ["experience", experienceHandler],
+      ["recent", recentHandler],
+      ["milestones", milestonesHandler],
     ] as const) {
       await run({
         env: {},

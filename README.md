@@ -8,7 +8,7 @@ Claude-Mnemo hooks into five points of the Claude Code lifecycle:
 
 | Hook | Trigger | What it does |
 |------|---------|--------------|
-| **SessionStart** | Session begins / resumes / clears / post-compact | Injects the current session's structured summary and milestone timeline, plus recent session summaries, into context |
+| **SessionStart** | Session begins / resumes / clears / post-compact | Injects persona plus recent sessions/diary index; resume and post-compact also receive current state and session milestones |
 | **UserPromptSubmit** | Every user message | Creates (or resumes) the session + a new turn row in SQLite |
 | **PostToolUse** | Every tool call | Writes a raw observation (tool_name + input + result), enqueues it for extraction, wakes the worker |
 | **Stop** | Agent finishes a turn | Backfills the assistant response + tool counts, enqueues a turn-stop job |
@@ -117,12 +117,19 @@ sqlite3 ~/.claude-mnemo/claude-mnemo.db ".schema turns"                    # rea
 
 ### SessionStart Context Injection
 
-On every session start, `SessionStart` injects:
+`SessionStart` uses a source-aware injection matrix:
 
-- A header with session and observation counts plus the type legend
-- The current session's structured summary — `content`, `decision`, `done`, `current`, `next`, `reference`
-- A milestone timeline of the current session — `timeline(..., view="milestones")`
-- Recent sessions, collapsed, with drill-down hints pointing to `recall(id="Sx/Ty", depth="expanded")`
+| Source | Current state | Session milestones | Persona | Recent sessions + diary index |
+|--------|---------------|--------------------|---------|-------------------------------|
+| `startup` / `clear` | — | — | ✓ | ✓ |
+| `resume` / `compact` | ✓ | ✓ | ✓ | ✓ |
+
+The current-state hook emits a compact header plus the structured session
+summary (`content`, `current`, `next`, `decision`, `done`, `reference`). Recent
+sessions are collapsed in their own hook and overflow to `recall()`; the diary
+index remains recent-first. Each hook is independently bounded, and the
+sessions hook still performs its startup/recovery bookkeeping for every source
+even when its context output is suppressed.
 
 ## Project Structure
 

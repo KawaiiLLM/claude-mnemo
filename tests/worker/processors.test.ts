@@ -9,6 +9,7 @@ import { getTurnById } from "../../src/db/turns";
 import { renderFileTree as renderSharedFileTree } from "../../src/shared/file-tree";
 import {
   buildBatchPrompt,
+  buildTurnSignificanceCalibration,
   cleanInput,
   cleanOutput,
   createWorkerProcessors,
@@ -515,6 +516,34 @@ describe("worker processors", () => {
     expect(prompt).not.toContain("current_prompt: Diagnose auth race");
   });
 
+  test("buildTurnSignificanceCalibration appears only every 10 prompts and reports the prior 100 turns", () => {
+    const insert = db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, significance_grade, created_at_epoch
+       ) VALUES (?, ?, 'extracted', ?, ?)`,
+    );
+    for (let promptNumber = 2; promptNumber <= 110; promptNumber += 1) {
+      insert.run(
+        sessionId,
+        promptNumber,
+        promptNumber <= 10 ? 4 : promptNumber % 5,
+        120 + promptNumber,
+      );
+    }
+
+    expect(buildTurnSignificanceCalibration(db, sessionId, 109)).toBe("");
+    const calibration = buildTurnSignificanceCalibration(db, sessionId, 110);
+
+    expect(calibration).toContain("previous 100 turns");
+    expect(calibration).toContain("grade 4=");
+    expect(calibration).toContain("Reference baseline");
+    expect(calibration).toContain("4 <2%");
+    expect(calibration).toContain("calibration only, not a quota");
+    expect(calibration).toContain("never change a grade to match");
+    // T1 is ungraded and T2-T9 are old grade-4 rows outside T10-T109.
+    expect(calibration).toContain("grade 4=21");
+  });
+
   test("renderMiniTurn wraps turn prompt in <source_prompt> data envelope (D2)", () => {
     const { renderMiniTurn: renderFn } = require("../../src/worker/processors");
     // Build a minimal payload directly matching MiniTurnPayload shape
@@ -576,6 +605,11 @@ describe("worker processors", () => {
       `remember({ id: "S${sessionId}", title, content, decision, done, current, next_steps, reference })`,
     );
     expect(prompt).toContain("material change");
+    expect(prompt).toContain("one-sentence arc overview");
+    expect(prompt).toContain("only decisions that still govern current or next work");
+    expect(prompt).toContain("only recent fine-grained completions useful to next work");
+    expect(prompt).toContain("Safe to prune");
+    expect(prompt).toContain("milestone timeline is independent");
     expect(prompt).toContain("no tool calls");
     expect(prompt).not.toContain("You are Mnemosyne");
   });

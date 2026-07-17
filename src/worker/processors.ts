@@ -226,6 +226,49 @@ export function buildObsBlock(
 // stale, and the next injected batch nudges a full refresh.
 export const STALE_TURN_THRESHOLD = 10;
 
+export function buildTurnSignificanceCalibration(
+  db: Database,
+  sessionId: number,
+  promptNumber: number,
+): string {
+  if (promptNumber <= 0 || promptNumber % 10 !== 0) {
+    return "";
+  }
+
+  const rows = db
+    .query<
+      { grade: number | null; count: number },
+      [number, number]
+    >(
+      `SELECT significance_grade AS grade, COUNT(*) AS count
+       FROM (
+         SELECT significance_grade
+         FROM turns
+         WHERE session_id = ? AND prompt_number < ?
+         ORDER BY prompt_number DESC
+         LIMIT 100
+       )
+       GROUP BY significance_grade`,
+    )
+    .all(sessionId, promptNumber);
+  const counts = [0, 0, 0, 0, 0];
+  let ungraded = 0;
+  for (const row of rows) {
+    if (row.grade === null) {
+      ungraded += row.count;
+    } else if (row.grade >= 0 && row.grade <= 4) {
+      counts[row.grade] = row.count;
+    }
+  }
+  const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
+
+  return `<significance-calibration window="previous 100 turns">
+Recent distribution (${total} turns): grade 4=${counts[4]}, grade 3=${counts[3]}, grade 2=${counts[2]}, grade 1=${counts[1]}, grade 0=${counts[0]}, ungraded=${ungraded}.
+Reference baseline (calibration only, not a quota): grade 4 <2%, grade 3 ≈8%, grade 2 ≈25%, grade 1 ≈45%, grade 0 ≈20%.
+Session distributions vary. Use this only to notice drift; never change a grade to match the baseline.
+</significance-calibration>`;
+}
+
 export function buildBatchPrompt(args: {
   sessionId: number;
   project: string;
@@ -234,6 +277,7 @@ export function buildBatchPrompt(args: {
   prior: PriorSessionSummary | null;
   sessionUpdated?: boolean;
   staleTurns?: number;
+  significanceCalibration?: string;
   completedTurnBlocks: string[];
 }): string {
   const isStale = (args.staleTurns ?? 0) >= STALE_TURN_THRESHOLD;
@@ -265,6 +309,9 @@ ${renderPriorSession(prior!)}
 </prior_session>
 `
     : "";
+  const significanceCalibrationBlock = args.significanceCalibration
+    ? `\n${args.significanceCalibration}\n`
+    : "";
   const body = args.completedTurnBlocks.filter(Boolean).join("\n");
   const titleLine = args.sessionTitle
     ? `\n  title: ${args.sessionTitle}`
@@ -279,7 +326,7 @@ ${renderPriorSession(prior!)}
   return `<session id="S${args.sessionId}"${staleAttr}>
   project: ${args.project}${titleLine}${promptLine}
 </session>
-${noticeBlock}${priorSessionBlock}
+${noticeBlock}${priorSessionBlock}${significanceCalibrationBlock}
 <batch>
 ${body}
 </batch>`;
@@ -441,14 +488,16 @@ remember({ id: "S${sessionId}", title, content, decision, done, current, next_st
 
 Fields:
 - title: 20-50 chars, one line
-- content: 100-300 chars, what the session is about (browsing synopsis)
-- decision: a markdown bullet list — one "- " item per line, each a key decision and WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. ≤6 bullets. On refresh, append a new bullet (or tighten an existing one); keep prior bullets and their [T<n>] markers.
-- done: a markdown bullet list — one "- " item per line of completed work. Cite the milestone turn inline as [T<n>]. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
+- content: 100-300 chars, a one-sentence arc overview of what the session is doing
+- decision: a markdown bullet list — one "- " item per line, only decisions that still govern current or next work, with WHY. Cite the pivotal turn inline as [T<n>] using the id from its <turn id="T..."> block. ≤6 bullets. Tighten, replace, or remove obsolete decisions on refresh.
+- done: a markdown bullet list — one "- " item per line, only recent fine-grained completions useful to next work. Cite the completion turn inline as [T<n>]. ≤6 bullets. Remove historical achievements and finished bookkeeping.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
 - reference: a markdown bullet list — one "- " item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md — indexed by MEMORY.md). ≤8 bullets; evict the least-durable / already-superseded first. Empty string if none.
 
 decision/done/reference are bullet lists (newline-separated "- " items); title/content/current/next_steps are single lines. Do NOT put file paths, tool counts, or code-level details in any field except reference — those belong in turn records — and reference follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do NOT record durable cross-project lessons here — keep summaries scoped to this session's work.
+
+Safe to prune: the milestone timeline is independent and owns historical achievements and completed decisions. Removing them from this state summary does not delete turn records or milestone candidates, so do not preserve history here out of caution.
 
 If no material change, respond with no tool calls. An empty response is the "leave alone" signal.
 </instruction>`;

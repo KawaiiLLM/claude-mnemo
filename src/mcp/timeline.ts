@@ -617,6 +617,14 @@ const MILESTONE_BASE_SCORE: Record<string, number> = {
   discovery: 1,
 };
 
+export const MILESTONE_GRADE_BASE_SCORE: Readonly<Record<number, number>> = {
+  0: 0,
+  1: 1,
+  2: 2,
+  3: 3,
+  4: 4,
+};
+
 const MILESTONE_POOL_MIN_SCORE = 2;
 const MILESTONE_INSIGHT_WEIGHT = 2;
 const MILESTONE_PURE_SPEC_WEIGHT = 3;
@@ -650,6 +658,10 @@ interface MilestoneDayCandidates {
 }
 
 export function milestoneBaseScore(turn: TurnRecord): number {
+  if (turn.significanceGrade !== null && turn.significanceGrade !== undefined) {
+    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+  }
+
   const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
   if (
     (turn.type === "feature" || turn.type === "refactor" || turn.type === "change") &&

@@ -90,7 +90,7 @@ describe("createMnemoSdkServer onRemember", () => {
     const seen: string[] = [];
     const rememberHandler = wireRememberHandler(db, seen);
     const id = seedTurn(db);
-    const result = await rememberHandler({ id, status: "skipped" });
+    const result = await rememberHandler({ id, status: "skipped", grade: 0 });
     expect(result.content[0].text).toStartWith("Updated turn ");
     expect(seen).toEqual([id]);
     db.close();

@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { searchMemory } from "../../src/db/search";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
+import { estimateDiaryTokens } from "../../src/diary/domain";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
 import { bracketBareTurnReferences, rememberTool } from "../../src/mcp/remember";
@@ -71,6 +72,33 @@ describe("remember tool routing and validation", () => {
     ).toThrow();
   });
 
+  test("public schema accepts grades 0-4 and rejects out-of-range grades", () => {
+    expect(
+      rememberInputSchema.parse({
+        id: `T${turnId}`,
+        grade: 4,
+        regrade: { id: `T${turnId}`, grade: 0 },
+      }),
+    ).toEqual({
+      id: `T${turnId}`,
+      grade: 4,
+      regrade: { id: `T${turnId}`, grade: 0 },
+    });
+    expect(() =>
+      rememberInputSchema.parse({ id: `T${turnId}`, grade: -1 }),
+    ).toThrow();
+    expect(() =>
+      rememberInputSchema.parse({ id: `T${turnId}`, grade: 5 }),
+    ).toThrow();
+    expect(() =>
+      rememberInputSchema.parse({
+        id: `T${turnId}`,
+        grade: 2,
+        regrade: { id: `T${turnId}`, grade: 1.5 },
+      }),
+    ).toThrow();
+  });
+
   test("updates an existing turn by T{id}", () => {
     const result = rememberTool(db, {
       id: `T${turnId}`,
@@ -79,6 +107,7 @@ describe("remember tool routing and validation", () => {
       insight: "- mutex added",
       type: "bugfix",
       tags: ["auth", "concurrency"],
+      grade: 2,
     });
 
     const turn = getTurn(db, sessionId, 1)!;
@@ -89,12 +118,53 @@ describe("remember tool routing and validation", () => {
     expect(turn.content).toBe(
       "Persists the extracted turn through its stable DB id.",
     );
+    expect(turn.significanceGrade).toBe(2);
+  });
+
+  test("regrades an earlier turn without changing its other fields", () => {
+    rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Earlier estimate",
+      content: "Recorded the initial estimate.",
+      insight: "- initial",
+      type: "discovery",
+      tags: ["topic:estimate"],
+      grade: 2,
+    });
+    const currentTurnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, 2, 'active', 'Correct the estimate', 140)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    const before = getTurn(db, sessionId, 1)!;
+
+    const result = rememberTool(db, {
+      id: `T${currentTurnId}`,
+      title: "Corrected estimate",
+      content: `Evidence disproved [T${turnId}].`,
+      type: "discovery",
+      tags: ["correction", "topic:estimate"],
+      grade: 2,
+      regrade: { id: `T${turnId}`, grade: 1 },
+    });
+
+    const after = getTurn(db, sessionId, 1)!;
+    expect(result.content[0]?.text).toContain(`Regraded turn T${turnId} to 1`);
+    expect(after).toEqual({
+      ...before,
+      significanceGrade: 1,
+    });
+    expect(getTurn(db, sessionId, 2)?.significanceGrade).toBe(2);
   });
 
   test("supports explicit skipped and undone turn statuses by id", () => {
     const skipped = rememberTool(db, {
       id: `T${turnId}`,
       status: "skipped",
+      grade: 0,
     });
 
     expect(skipped.content[0]?.text).toContain("status skipped");
@@ -171,6 +241,7 @@ describe("remember tool routing and validation", () => {
       insight: "- mutex added",
       type: "bugfix",
       tags: ["auth", "concurrency"],
+      grade: 2,
     });
     rememberTool(db, {
       id: `O${observationId}`,
@@ -242,6 +313,64 @@ describe("remember tool routing and validation", () => {
     // Empty fields persist as NULL so read-side legacy fallback stays uniform.
     expect(session.reference).toBeNull();
     expect(session.summaryUpdatedAtEpoch).toBeGreaterThanOrEqual(110);
+  });
+
+  test("rejects an over-budget rendered state with per-field token details, then accepts a trimmed rewrite", () => {
+    const before = getSession(db, sessionId)!;
+    const oversizedDecision = `- ${"历史决策".repeat(900)}`;
+    const rejected = rememberTool(db, {
+      id: `S${sessionId}`,
+      title: "Oversized state",
+      content: "One-sentence arc overview.",
+      decision: oversizedDecision,
+      done: `- ${"历史完成".repeat(900)}`,
+      current: "Implementation is in progress.",
+      next_steps: "Trim historical fields and retry.",
+      reference: "- /tmp/spec.md",
+    });
+
+    const error = rejected.content[0]?.text ?? "";
+    expect(error).toContain("Parameter error:");
+    expect(error).toContain("rendered state exceeds 2000 tokens");
+    for (const field of [
+      "title=",
+      "content=",
+      "current=",
+      "next_steps=",
+      "decision=",
+      "done=",
+      "reference=",
+      "total=",
+    ]) {
+      expect(error).toContain(field);
+    }
+    expect(getSession(db, sessionId)).toEqual(before);
+
+    const accepted = rememberTool(db, {
+      id: `S${sessionId}`,
+      title: "Trimmed state",
+      content: "One-sentence arc overview.",
+      decision: "- Active decision [T1]",
+      done: "- Recent useful completion [T1]",
+      current: "Implementation is in progress.",
+      next_steps: "Run the next ticket.",
+      reference: "- /tmp/spec.md",
+    });
+    expect(accepted.content[0]?.text).toContain(`Updated session ${sessionId}`);
+    const updated = getSession(db, sessionId)!;
+    expect(
+      estimateDiaryTokens(
+        [
+          `[S${updated.id}] ${updated.title}`,
+          `  content: ${updated.content}`,
+          `  current: ${updated.current}`,
+          `  next: ${updated.nextSteps}`,
+          `  decision:\n    ${updated.decision}`,
+          `  done:\n    ${updated.done}`,
+          `  reference:\n    ${updated.reference}`,
+        ].join("\n"),
+      ),
+    ).toBeLessThanOrEqual(2_000);
   });
 
   test("rejects a partial session summary and leaves the row untouched (all-or-nothing)", () => {
@@ -385,6 +514,7 @@ describe("remember tool routing and validation", () => {
       title: "Revert the inversion",
       content: `Reverted the fg inversion from T&lt;${turnId}&gt; and bare T${turnId} due to arrow contamination.`,
       type: "bugfix",
+      grade: 2,
     });
 
     // The entity-wrapped form decodes to a bracket-shaped string that never
@@ -402,6 +532,7 @@ describe("remember tool routing and validation", () => {
       content: "Persists the extracted turn.",
       type: "bugfix",
       tags: ["topic:a&amp;b", "rolled-back"],
+      grade: 2,
     });
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
@@ -448,6 +579,7 @@ describe("remember tool routing and validation", () => {
       id: `T${turnId}`,
       type: "bugfix",
       tags: ["auth"],
+      grade: 0,
     });
 
     const turn = getTurn(db, sessionId, 1)!;
@@ -460,6 +592,7 @@ describe("remember tool routing and validation", () => {
       title: "Fix auth race",
       content: "Initial extracted content.",
       type: "bugfix",
+      grade: 2,
     });
 
     rememberTool(db, {
@@ -479,6 +612,7 @@ describe("remember tool routing and validation", () => {
       id: `T${turnId}`,
       title: "Fix auth race",
       type: "bugfix",
+      grade: 2,
     });
 
     const turn = getTurn(db, sessionId, 1)!;
@@ -502,6 +636,7 @@ describe("remember tool routing and validation", () => {
       title: "Revert the inversion",
       content: `Reverted the fg inversion from T${turnId} due to arrow contamination.`,
       type: "bugfix",
+      grade: 2,
     });
 
     expect(getTurn(db, sessionId, 2)?.content).toBe(
@@ -546,6 +681,7 @@ describe("remember tool routing and validation", () => {
       title: "Unrelated work",
       content: `Incidental mention of T${otherTurnId} and a forward T999999 ref.`,
       type: "change",
+      grade: 1,
     });
 
     // Cross-session id and non-existent forward id both stay bare.

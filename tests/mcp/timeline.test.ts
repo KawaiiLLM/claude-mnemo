@@ -22,6 +22,7 @@ import {
   getSystemTimezone,
   extractSourceTags,
   isVersionBumpTurn,
+  MILESTONE_GRADE_BASE_SCORE,
   milestoneBaseScore,
   milestoneMarker,
   OUTCOME_TAGS,
@@ -52,6 +53,7 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     content: null,
     insight: null,
     type: null,
+    significanceGrade: null,
     tags: [],
     filesRead: [],
     filesModified: [],
@@ -1085,6 +1087,61 @@ describe("milestoneBaseScore", () => {
     expect(milestoneBaseScore(turn({ type: "bugfix" }))).toBe(2);
     expect(milestoneBaseScore(turn({ type: "discovery" }))).toBe(1);
   });
+
+  it("maps a present significance grade directly onto the existing score scale", () => {
+    expect(MILESTONE_GRADE_BASE_SCORE).toEqual({
+      0: 0,
+      1: 1,
+      2: 2,
+      3: 3,
+      4: 4,
+    });
+    expect(
+      milestoneBaseScore(
+        turn({
+          type: "discovery",
+          significanceGrade: 4,
+        }),
+      ),
+    ).toBe(4);
+    expect(
+      milestoneBaseScore(
+        turn({
+          type: "decision",
+          significanceGrade: 1,
+        }),
+      ),
+    ).toBe(1);
+  });
+
+  it("keeps the pre-grade type fallback byte-for-byte for NULL grades", () => {
+    expect(
+      milestoneBaseScore(
+        turn({
+          type: "feature",
+          significanceGrade: null,
+          filesModified: [],
+        }),
+      ),
+    ).toBe(0);
+    expect(
+      milestoneBaseScore(
+        turn({
+          type: "feature",
+          significanceGrade: null,
+          filesModified: ["a.ts"],
+        }),
+      ),
+    ).toBe(2);
+    expect(
+      milestoneBaseScore(
+        turn({
+          type: "decision",
+          significanceGrade: null,
+        }),
+      ),
+    ).toBe(4);
+  });
 });
 
 describe("foldMilestoneRuns", () => {
@@ -1313,6 +1370,48 @@ describe("selectMilestoneTurns (narrative digest)", () => {
       compactBoundaries: [],
     });
   const kept = (s: MilestoneSelection) => s.kept.map((k) => k.turn.promptNumber).sort((a, b) => a - b);
+
+  it("lets a high-grade low-type turn beat a low-grade high-type turn", () => {
+    const base = 1_779_782_400;
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        title: "start",
+        significanceGrade: 1,
+        createdAtEpoch: base,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        title: "routine decision",
+        significanceGrade: 1,
+        createdAtEpoch: base + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        title: "major root cause",
+        significanceGrade: 4,
+        createdAtEpoch: base + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "feature",
+        title: "end",
+        significanceGrade: 1,
+        filesModified: ["a.ts"],
+        createdAtEpoch: base + 180,
+      }),
+    ];
+
+    const result = select(rows);
+    expect(kept(result)).toContain(3);
+    expect(kept(result)).not.toContain(2);
+    expect(
+      result.kept.find((milestone) => milestone.turn.promptNumber === 3)?.score,
+    ).toBe(4);
+  });
 
   it("folds a long decision run to its first+last (run interior dropped)", () => {
     const base = 1_779_782_400;

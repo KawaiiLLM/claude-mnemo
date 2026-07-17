@@ -179,6 +179,63 @@ describe("initializeSchema", () => {
     expect(columns).toContain("was_rolled_back");
   });
 
+  test("creates a nullable, range-constrained significance grade on turns", () => {
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("significance_grade");
+
+    const sessionId = db
+      .query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('grade-schema', 'claude-mnemo', 1) RETURNING id",
+      )
+      .get()!.id;
+    expect(() =>
+      db.query(
+        "INSERT INTO turns (session_id, prompt_number, significance_grade, created_at_epoch) VALUES (?, 1, NULL, 2)",
+      ).run(sessionId),
+    ).not.toThrow();
+    expect(() =>
+      db.query(
+        "INSERT INTO turns (session_id, prompt_number, significance_grade, created_at_epoch) VALUES (?, 2, 5, 3)",
+      ).run(sessionId),
+    ).toThrow();
+  });
+
+  test("adds significance_grade to an existing turns table without backfilling old rows", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      );
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at_epoch INTEGER NOT NULL
+      );
+      INSERT INTO sessions (content_session_id, project, created_at_epoch)
+      VALUES ('grade-migration', 'claude-mnemo', 1);
+      INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+      VALUES (1, 1, 'extracted', 2);
+    `);
+
+    initializeSchema(db);
+
+    const row = db
+      .query<{ grade: number | null }, []>(
+        "SELECT significance_grade AS grade FROM turns WHERE id = 1",
+      )
+      .get();
+    expect(row?.grade).toBeNull();
+  });
+
   test("allows worker-style observations with only tool payload and pending status", () => {
     initializeDatabase(db);
 

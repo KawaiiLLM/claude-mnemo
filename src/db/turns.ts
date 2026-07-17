@@ -28,6 +28,7 @@ export interface TurnRecord {
   content: string | null;
   insight: string | null;
   type: string | null;
+  significanceGrade: number | null;
   tags: string[];
   filesRead: string[];
   filesModified: string[];
@@ -53,6 +54,7 @@ interface TurnRow {
   content: string | null;
   insight: string | null;
   type: string | null;
+  significanceGrade: number | null;
   tags: string | null;
   filesRead: string | null;
   filesModified: string | null;
@@ -79,6 +81,7 @@ const TURN_SELECT = `
     content,
     insight,
     type,
+    significance_grade AS significanceGrade,
     tags,
     files_read AS filesRead,
     files_modified AS filesModified,
@@ -165,6 +168,7 @@ export interface UpdateTurnByIdInput {
   content?: string | null;
   insight?: string | null;
   type?: string | null;
+  significanceGrade?: number;
   transcriptLineStart?: number | null;
   tags?: string[];
   replaceTags?: string[];
@@ -208,6 +212,7 @@ export function updateTurnById(
           string | null,
           string | null,
           number | null,
+          number | null,
           string,
           string,
           string,
@@ -226,6 +231,7 @@ export function updateTurnById(
             content = ?,
             insight = ?,
             type = ?,
+            significance_grade = ?,
             transcript_line_start = ?,
             tags = ?,
             files_read = ?,
@@ -248,6 +254,7 @@ export function updateTurnById(
             content,
             insight,
             type,
+            significance_grade AS significanceGrade,
             transcript_line_start AS transcriptLineStart,
             tags,
             files_read AS filesRead,
@@ -266,6 +273,7 @@ export function updateTurnById(
         input.content ?? existing.content,
         input.insight ?? existing.insight,
         input.type ?? existing.type,
+        input.significanceGrade ?? existing.significanceGrade,
         input.transcriptLineStart ?? existing.transcriptLineStart,
         stringifyArray(nextTags),
         stringifyArray(input.filesRead ?? existing.filesRead),

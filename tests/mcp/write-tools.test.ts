@@ -65,6 +65,7 @@ describe("MCP write tools", () => {
       content: "Persists the extracted turn",
       insight: "- regression covered",
       type: "bugfix",
+      grade: 2,
       tags: ["auth", "concurrency"],
     });
 
@@ -116,6 +117,7 @@ describe("MCP write tools", () => {
       id: `T${turnId}`,
       title: "Updated title",
       content: "Updated through routed turn id.",
+      grade: 1,
     });
 
     const turnByPromptNumber = getTurn(db, sessionId, 1)!;

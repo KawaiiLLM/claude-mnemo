@@ -589,6 +589,15 @@ describe("worker query session", () => {
     expect(prompt).toContain(
       "bugfix | feature | refactor | change | discovery | decision",
     );
+    expect(prompt).toContain("grade: REQUIRED integer 0-4");
+    expect(prompt).toContain("Grade 4 — top-level arc flag bearer");
+    expect(prompt).toContain("T925 (0.5.0 release)");
+    expect(prompt).toContain("T896 ($6.38→$1.43 correction)");
+    expect(prompt).toContain("T941 (/compact)");
+    expect(prompt).toContain("Misleading-turn downgrade");
+    expect(prompt).toContain("only with witnessed disproof or rollback evidence");
+    expect(prompt).toContain("Grade-4 uniqueness");
+    expect(prompt).toContain('regrade: { id: "T<n>", grade: 0|1|2|3|4 }');
 
     expect(capturedAllowedTools).toEqual([
       "mcp__mnemo__remember",
@@ -631,6 +640,11 @@ describe("worker query session", () => {
     expect(prompt).toContain(
       "Never call `recall()` from a session-summary message",
     );
+    expect(prompt).toContain("one-sentence arc overview");
+    expect(prompt).toContain("only decisions that still govern current or next work");
+    expect(prompt).toContain("only recent fine-grained completions useful to next work");
+    expect(prompt).toContain("Safe to prune");
+    expect(prompt).toContain("milestone timeline is independent");
     expect(prompt).toContain(
       "Turn messages are the ONLY context where `recall()` is permitted as a fallback",
     );

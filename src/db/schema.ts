@@ -51,6 +51,9 @@ const SCHEMA_SQL = `
     content TEXT,
     insight TEXT,
     type TEXT,
+    significance_grade INTEGER CHECK (
+      significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
+    ),
     tags TEXT,
     files_read TEXT,
     files_modified TEXT,
@@ -137,6 +140,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -221,6 +225,18 @@ function ensureTurnInvalidationColumns(db: Database): void {
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
     );
   }
+}
+
+function ensureTurnSignificanceGradeColumn(db: Database): void {
+  if (hasColumn(db, "turns", "significance_grade")) {
+    return;
+  }
+
+  db.exec(
+    `ALTER TABLE turns
+     ADD COLUMN significance_grade INTEGER
+     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`,
+  );
 }
 
 function ensureForkLineageColumns(db: Database): void {

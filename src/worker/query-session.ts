@@ -277,16 +277,22 @@ For each \`<turn>\` block:
 
 - If the opening tag includes \`invalidated="interrupt"\`, \`invalidated="rollback"\`, or \`invalidated="interrupt+rollback"\`, treat the turn as invalidated on first extraction. This is the delivery path for turns that were still active when the invalidation was detected.
 
-1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags })\`
+1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags, grade })\`
    - title: 5-15 words summarizing the turn's outcome
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets — write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` — even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (≤50 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
+   - grade: REQUIRED integer 0-4 measuring this turn's narrative significance:
+     - Grade 4 — top-level arc flag bearer: one turn that can represent why the next dozens of turns exist; at most one per arc. Example: locking the event-driven worker lifecycle.
+     - Grade 3 — milestone that changes the premise of later work: release validation, locked decision, route reversal, or major root cause. Examples: T925 (0.5.0 release), T909 (design converged to five tickets), T908 (withdrawn objection accepted shutdown), T850 (watchdog killed the retry loop).
+     - Grade 2 — significant arc node worth its own line in a session review: a verified ticket completion, measured correction, evidence-backed rejection, or real gap. Examples: T917-T922 (ticket verification), T896 ($6.38→$1.43 correction), T928 (orphan gap from an interrupted turn).
+     - Grade 1 — routine process progress: intermediate verification, scheduling chores, or explanatory Q&A that nobody will cite a week later. Examples: T861-T864 (routine deployment confirmations), T942 (explanation).
+     - Grade 0 — narrative noise: compact commands, shell-only commands, empty shells, or abandoned interruptions. Example: T941 (/compact).
    - tags: lowercase-hyphenated tags in TWO namespaces — BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix — never a bare tag.
      - ROLE (bare, ≤2, usually none): the turn's role in the session arc. Seed examples — \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) — richer role vocabulary is welcome. Keep the name the BARE role, short and general — \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
      - TOPIC (\`topic:\` prefix, 0-3): what the turn is about — feature area, file, library, or action (e.g. \`topic:milestone-scoring\`, \`topic:recall-faceting\`). For faceted recall only; topic tags NEVER affect milestones. Topics are exact-match classification keys, so consistency beats precision: when a turn continues a theme from recent turns, REUSE their exact spelling — a multi-turn arc carries ONE stable topic on every turn of the arc, never per-turn variants (\`topic:verifier\` throughout, not \`verifier-rubric\`/\`verifier-design\`/\`verifier-training\` drift). Mint a new topic only on a genuine theme shift. A turn spanning several themes carries one tag per theme (≤3). Tag the theme even when the title already conveys it — recall's \`tag:\` filter matches tags, not titles.
    - tag style: a turn that merely performs a revert/restore is NOT \`rolled-back\` (that action, if tagged at all, is \`topic:revert\`). The literal \`rolled-back\` marks a turn that was itself overturned — when this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets \`rolled-back\`.
-   - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped" })\` instead.
+   - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped", grade: 0 })\` instead.
 
 2. Optionally refresh the session summary — ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) — omitting any is rejected — editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
@@ -301,6 +307,13 @@ You may reopen an earlier turn ONLY to correct a dead end or clear mislabeling m
 Negate-on-cite rule: when THIS turn overturns a causally-significant earlier turn that it cites as \`[T<n>]\`, update the cited casualty, not the surviving/reverting turn. Use the literal tag \`rolled-back\`; synonyms like \`rejected\` or \`superseded\` are metadata only and do not drive the milestone marker. This applies only to the "overturns" case, never when this turn merely builds on or verifies an earlier turn, and only to the cited ids (at most ~2).
 
 Visibility rule: if the cited casualty is already extracted, \`remember({ id: "T<n>", tags: ["rolled-back"] })\` is enough; tags append and the extracted status is preserved. If the casualty is skipped or otherwise lacks usable extraction, promote it by supplying \`title\`, \`content\`, \`type\`, and \`tags: ["rolled-back"]\` so it can appear in milestones; a skipped row with only a tag stays filtered out.
+
+Grade correction has two narrowly-scoped duties:
+
+- Misleading-turn downgrade: only with witnessed disproof or rollback evidence in the current turn, lower the casualty's grade and give the correcting turn the appropriate grade. Never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a ↳ row.
+- Grade-4 uniqueness: when a better flag bearer appears in the same arc, lower the old Grade 4 to Grade 3. A later top-level decision that overturns a Grade 4 uses the same witnessed-evidence rule.
+
+Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.
 
 ## Streamed turns (mini-turns)
 
@@ -341,9 +354,9 @@ If a message also includes \`<subagent_invalidated>\`, those turns came from a T
 A session summary has seven fields, rewritten WHOLE on every refresh (never merged — omitting a field is rejected). Always edit on top of the \`prior_*\` values (echo-and-edit); never regenerate from scratch.
 
 - title: 20-50 chars, one line
-- content: 100-300 chars, browsing synopsis of what the session is about
-- decision: a markdown bullet list — one \`- \` item per line, each a key decision and WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. ≤6 bullets. Append a bullet (or tighten one) on refresh; keep prior bullets and \`[T<n>]\` markers.
-- done: a markdown bullet list — one \`- \` item per line of completed work; cite the milestone turn inline as \`[T<n>]\`. ≤6 bullets. Append/tighten like decision; keep prior bullets and markers.
+- content: 100-300 chars, a one-sentence arc overview of what the session is doing
+- decision: a markdown bullet list — one \`- \` item per line, only decisions that still govern current or next work, with WHY; cite the pivotal turn inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block. ≤6 bullets. Tighten, replace, or remove obsolete decisions on refresh.
+- done: a markdown bullet list — one \`- \` item per line, only recent fine-grained completions useful to next work; cite the completion turn inline as \`[T<n>]\`. ≤6 bullets. Remove historical achievements and finished bookkeeping.
 - current: where things stand right now (one line)
 - next_steps: 50-150 chars, what is pending / the next step (one line)
 - reference: a markdown bullet list — one \`- \` item per line of durable pointers useful as the project evolves. Decide by current role, not filename: a stable artifact (a spec, a canonical process/method doc, an external repo, a canonical URL, a PR, a source-code checkout used for verification) gets its full path/URL; a churning working-doc collection (e.g. a plans/ or drafts/ directory whose files get superseded) gets only its containing directory, never each file. Omit lone non-canonical working docs and auto-memory files (memory/*.md — indexed by MEMORY.md). ≤8 bullets; evict the least-durable / already-superseded first. Empty string if none.
@@ -351,6 +364,8 @@ A session summary has seven fields, rewritten WHOLE on every refresh (never merg
 \`decision\` / \`done\` / \`reference\` are bullet lists (newline-separated \`- \` items); \`title\` / \`content\` / \`current\` / \`next_steps\` are single lines.
 
 Do not put file paths, tool counts, or code-level details in any field except \`reference\` — those belong in turn records — and \`reference\` follows the granularity rule above: full path/URL for a stable artifact, the containing directory for a churning working-doc collection. Do not record durable cross-project lessons here — keep summaries scoped to this session's work.
+
+Safe to prune: the milestone timeline is independent and owns historical achievements and completed decisions. Removing them from this state summary does not delete turn records or milestone candidates, so do not preserve history here out of caution.
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh — follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message — the \`prior_*\` fields are the only state to base the refresh decision on.
 

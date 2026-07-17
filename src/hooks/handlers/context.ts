@@ -13,10 +13,7 @@ import { resolveTurnPointers } from "../../mcp/turn-pointers";
 import type {
   FormattedSession,
 } from "../../mcp/format";
-import {
-  renderCurrentSessionOutput,
-  type CurrentSessionTimelineRenderer,
-} from "../../mcp/session-output";
+import { renderCurrentSessionStateOutput } from "../../mcp/session-output";
 import { parseMarkdownSections } from "../../shared/markdown-sections";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -26,18 +23,17 @@ import type { DiaryFileStore } from "../../diary/file-store";
 import type { DreamMemoryStore } from "../../diary/memory-store";
 import {
   renderPersonaDocumentInjection,
-  renderSessionStartExperienceInjection,
   renderSessionStartPersonaInjection,
+  renderSessionStartRecentSessionsInjection,
   SESSION_INJECTION_TOKEN_BUDGET,
 } from "../../diary/persona-render";
 import { dreamTriggerWindow } from "../../diary/calendar";
 import { markSessionRunStart } from "../../db/session-run";
 
 export interface ReadOnlyContextHandlerDependencies {
-  fileStore?: Pick<
-    DiaryFileStore,
-    "readIndex"
-  >;
+  db?: Database;
+  fileStore?: Pick<DiaryFileStore, "readIndex"> &
+    Partial<Pick<DiaryFileStore, "dataRoot">>;
   memoryStore?: Pick<
     DreamMemoryStore,
     "dataRoot" | "readInjectionDocuments"
@@ -47,7 +43,6 @@ export interface ReadOnlyContextHandlerDependencies {
 export interface ContextHandlerDependencies
   extends ReadOnlyContextHandlerDependencies {
   db: Database;
-  timelineRenderer?: CurrentSessionTimelineRenderer;
   diaryStateStore?: Pick<
     DiaryStateStore,
     | "initializeBootstrap"
@@ -62,7 +57,7 @@ export interface ContextHandlerDependencies
   readLastSuccessfulDate?: () => Promise<string | null>;
 }
 
-export type ContextSection = "sessions" | "persona" | "experience";
+export type ContextSection = "sessions" | "persona" | "recent";
 export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
@@ -84,33 +79,6 @@ async function readPersonaContext(
     return renderSessionStartPersonaInjection({
       userProfile: memory.userProfile,
       path: join(memoryStore.dataRoot, "memory", "user-profile.md"),
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-async function readExperienceContext(
-  memoryStore: Pick<DreamMemoryStore, "dataRoot" | "readInjectionDocuments">,
-  fileStore: Pick<DiaryFileStore, "readIndex">,
-): Promise<string | undefined> {
-  try {
-    const [memory, indexBytes] = await Promise.all([
-      memoryStore.readInjectionDocuments(),
-      fileStore.readIndex(),
-    ]);
-    const diaryIndex = new TextDecoder("utf-8", { fatal: true })
-      .decode(indexBytes);
-    if (!hasDocumentBody(memory.experience)) {
-      return undefined;
-    }
-    return renderSessionStartExperienceInjection({
-      experience: memory.experience,
-      diaryIndex,
-      paths: {
-        experience: join(memoryStore.dataRoot, "memory", "experience.md"),
-        diaryIndex: join(memoryStore.dataRoot, "diary", "INDEX.md"),
-      },
     });
   } catch {
     return undefined;
@@ -141,6 +109,12 @@ function buildHeader(db: Database, primarySessionId?: number): string {
     `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
     "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
   ].join("\n");
+}
+
+function hasSessionRunStart(db: Database, sessionId: number): boolean {
+  return db.query<{ present: number }, [number]>(
+    "SELECT 1 AS present FROM session_run_state WHERE session_db_id = ?",
+  ).get(sessionId) !== null;
 }
 
 function resolvePrimarySessionRecord(
@@ -263,10 +237,10 @@ function buildRecentSessionsOutput(
   db: Database,
   recentSessions: SessionRecord[],
   sessionMetrics: Map<number, { turnCount: number; observationCount: number }>,
-  primarySessionId: number,
+  currentSessionId?: number,
 ): string[] {
   const others = recentSessions
-    .filter((session) => session.id !== primarySessionId)
+    .filter((session) => session.id !== currentSessionId)
     .filter((session) => !isHuskSession(session, sessionMetrics))
     .slice(0, 10);
 
@@ -296,11 +270,63 @@ function buildRecentSessionsOutput(
   return lines;
 }
 
+async function readRecentContext(
+  db: Database,
+  fileStore: ReadOnlyContextHandlerDependencies["fileStore"],
+  input: NormalizedHookInput,
+): Promise<string | undefined> {
+  try {
+    const recentSessions = getRecentSessions(db, {
+      project: input.cwd ?? undefined,
+      limit: 20,
+    });
+    const currentSession = input.sessionId
+      ? getSessionByContentId(db, input.sessionId)
+      : null;
+    const sessionMetrics = buildSessionMetricMap(
+      db,
+      recentSessions.map((session) => session.id),
+    );
+    const recentSessionDocument = buildRecentSessionsOutput(
+      db,
+      recentSessions,
+      sessionMetrics,
+      currentSession?.id,
+    ).join("\n");
+
+    let diaryIndex = "";
+    if (fileStore) {
+      try {
+        diaryIndex = new TextDecoder("utf-8", { fatal: true })
+          .decode(await fileStore.readIndex());
+      } catch {
+        // Recent sessions remain useful before the first diary index exists.
+      }
+    }
+
+    if (recentSessionDocument.trim() === "" && !hasDocumentBody(diaryIndex)) {
+      return undefined;
+    }
+
+    return renderSessionStartRecentSessionsInjection({
+      recentSessions: recentSessionDocument,
+      diaryIndex,
+      paths: {
+        recentSessions: "recall()",
+        diaryIndex: fileStore?.dataRoot
+          ? join(fileStore.dataRoot, "diary", "INDEX.md")
+          : "diary/INDEX.md",
+      },
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function buildContextOutput(
   db: Database,
   input: NormalizedHookInput,
-  timelineRenderer?: CurrentSessionTimelineRenderer,
-): string {
+): string | undefined {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
       contentSessionId: input.sessionId,
@@ -312,6 +338,21 @@ function buildContextOutput(
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
+  }
+
+  const currentSession = input.sessionId
+    ? getSessionByContentId(db, input.sessionId)
+    : null;
+  if (currentSession) {
+    recoverStrandedTurns(
+      db,
+      currentSession.id,
+      Math.floor(Date.now() / 1000),
+    );
+  }
+
+  if (input.source !== "resume" && input.source !== "compact") {
+    return undefined;
   }
 
   const recentSessions = getRecentSessions(db, {
@@ -328,14 +369,6 @@ function buildContextOutput(
     return EMPTY_CONTEXT_FALLBACK;
   }
 
-  if (input.source === "resume" || input.source === "compact") {
-    recoverStrandedTurns(
-      db,
-      primarySessionRecord.id,
-      Math.floor(Date.now() / 1000),
-    );
-  }
-
   const sessionIds = Array.from(
     new Set([...recentSessions.map((session) => session.id), primarySessionRecord.id]),
   );
@@ -346,16 +379,8 @@ function buildContextOutput(
     sessionMetrics.get(primarySessionRecord.id),
   );
 
-  const recentSessionOutputs = buildRecentSessionsOutput(
-    db,
-    recentSessions,
-    sessionMetrics,
-    primarySessionRecord.id,
-  );
-
   const primaryTurnCount = sessionMetrics.get(primarySessionRecord.id)?.turnCount ?? 0;
-  const includeCurrentSession =
-    input.source !== "startup" && primaryTurnCount > 0;
+  const includeCurrentSession = primaryTurnCount > 0;
 
   const header = buildHeader(
     db,
@@ -366,26 +391,25 @@ function buildContextOutput(
       ? [
           "## Current Session",
           "",
-          renderCurrentSessionOutput(
-            db,
+          renderCurrentSessionStateOutput(
             primarySession,
             primarySessionRecord,
-            timelineRenderer,
           ),
           "",
         ]
       : []),
-    "## Recent Sessions",
-    "",
-    ...recentSessionOutputs,
   ].join("\n");
-  const boundedSessionDocument = renderPersonaDocumentInjection(
-    sessionDocument,
-    SESSION_INJECTION_TOKEN_BUDGET,
-    `recall(id="S${primarySessionRecord.id}")`,
-  );
+  const boundedSessionDocument = sessionDocument
+    ? renderPersonaDocumentInjection(
+        sessionDocument,
+        SESSION_INJECTION_TOKEN_BUDGET,
+        `recall(id="S${primarySessionRecord.id}")`,
+      )
+    : "";
 
-  return [header, "", boundedSessionDocument].join("\n");
+  return boundedSessionDocument
+    ? [header, "", boundedSessionDocument].join("\n")
+    : header;
 }
 
 export function createReadOnlyContextHandler(
@@ -407,12 +431,13 @@ export function createReadOnlyContextHandler(
         : { continue: true };
     }
 
-    if (!dependencies.memoryStore || !dependencies.fileStore) {
+    if (!dependencies.db) {
       return { continue: true };
     }
-    const hookSpecificOutput = await readExperienceContext(
-      dependencies.memoryStore,
+    const hookSpecificOutput = await readRecentContext(
+      dependencies.db,
       dependencies.fileStore,
+      _input,
     );
     return hookSpecificOutput
       ? { continue: true, hookSpecificOutput }
@@ -431,14 +456,18 @@ export function createContextHandler(
   return async function handleContextHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
-    const hookSpecificOutput = buildContextOutput(
-      dependencies.db,
-      input,
-      dependencies.timelineRenderer,
-    );
-    if (input.sessionId && input.source !== "compact") {
+    const hookSpecificOutput = buildContextOutput(dependencies.db, input);
+    if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
-      if (session) {
+      // compact belongs to the current Claude run. Ensure a missing marker,
+      // but never move an existing run boundary past turns created in that run.
+      if (
+        session &&
+        (
+          input.source !== "compact" ||
+          !hasSessionRunStart(dependencies.db, session.id)
+        )
+      ) {
         markSessionRunStart(dependencies.db, session.id);
       }
     }
@@ -473,9 +502,8 @@ export function createContextHandler(
       // Diary backfill is best-effort: SessionStart context must still be returned.
     }
 
-    return {
-      continue: true,
-      hookSpecificOutput,
-    };
+    return hookSpecificOutput
+      ? { continue: true, hookSpecificOutput }
+      : { continue: true };
   };
 }

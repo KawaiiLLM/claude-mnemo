@@ -3,6 +3,10 @@ import type { Database } from "bun:sqlite";
 import { updateObservation } from "../db/observations";
 import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
 import { getTurnById, updateTurnById, type TurnStatus } from "../db/turns";
+import {
+  CURRENT_SESSION_STATE_TOKEN_BUDGET,
+  measureSessionStateTokens,
+} from "./session-output";
 
 type ToolTextResult = {
   content: Array<{
@@ -29,6 +33,11 @@ const OBSERVATION_REMEMBER_STATUSES = [
 
 export interface RememberToolInput {
   id?: string;
+  grade?: number;
+  regrade?: {
+    id: string;
+    grade: number;
+  };
   type?: string;
   title?: string;
   content?: string;
@@ -191,6 +200,16 @@ function validateStatusForRoute(
   return null;
 }
 
+function validateGrade(value: number | undefined, label: string): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 4) {
+    return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+
 function deriveTurnStatus(input: RememberToolInput): TurnStatus {
   if (input.status === "undone") {
     return "undone";
@@ -252,8 +271,47 @@ function handleTurnRemember(
   // prompt_number. `current` is null only when the turn itself is missing, in
   // which case updateTurnById below returns null → "not found".
   const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+
+  const gradeError = validateGrade(input.grade, "grade");
+  if (gradeError) {
+    return parameterError(gradeError);
+  }
+  if (
+    (current.status === "active" || current.status === "provisional") &&
+    input.grade === undefined
+  ) {
+    return parameterError(
+      "grade is required when extracting a new turn (integer 0 through 4).",
+    );
+  }
+
+  let regradeTarget: ReturnType<typeof getTurnById> = null;
+  if (input.regrade !== undefined) {
+    const regradeError = validateGrade(input.regrade.grade, "regrade.grade");
+    if (regradeError) {
+      return parameterError(regradeError);
+    }
+    const regradeId = parseTurnId(input.regrade.id);
+    if (regradeId === null) {
+      return parameterError("regrade.id must be a T<n> turn reference.");
+    }
+    regradeTarget = getTurnById(db, regradeId);
+    if (
+      !regradeTarget ||
+      regradeTarget.sessionId !== current.sessionId ||
+      regradeTarget.promptNumber >= current.promptNumber
+    ) {
+      return parameterError(
+        "regrade must target an earlier turn in the same session.",
+      );
+    }
+  }
+
   const isValidPredecessor = (candidateId: number): boolean => {
-    if (!current || candidateId === turnId) {
+    if (candidateId === turnId) {
       return false;
     }
     const cited = getTurnById(db, candidateId);
@@ -273,12 +331,22 @@ function handleTurnRemember(
         : null,
     insight: input.insight ?? null,
     type: input.type ?? null,
+    significanceGrade: input.grade,
     tags: input.tags ?? [],
     updatedAtEpoch: Math.floor(Date.now() / 1000),
   });
 
   if (!turn) {
     return textResult(`Turn T${turnId} not found.`);
+  }
+
+  if (regradeTarget && input.regrade) {
+    updateTurnById(db, regradeTarget.id, {
+      significanceGrade: input.regrade.grade,
+    });
+    return textResult(
+      `Updated turn T${turnId} with status ${turn.status}. Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`,
+    );
   }
 
   return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
@@ -301,6 +369,8 @@ function handleObservationRemember(
 
   if (
     input.type !== undefined ||
+    input.grade !== undefined ||
+    input.regrade !== undefined ||
     input.insight !== undefined ||
     input.tags !== undefined ||
     input.next_steps !== undefined ||
@@ -337,6 +407,9 @@ function handleSessionRemember(
   if (statusError) {
     return parameterError(statusError);
   }
+  if (input.grade !== undefined || input.regrade !== undefined) {
+    return parameterError("session remember does not accept grade or regrade.");
+  }
 
   const session = getSession(db, sessionId);
 
@@ -354,6 +427,27 @@ function handleSessionRemember(
       `session remember rewrites the whole summary — supply all fields (${SESSION_SUMMARY_KEYS.join(
         ", ",
       )}). Missing: ${missing.join(", ")}.`,
+    );
+  }
+
+  const tokenReport = measureSessionStateTokens({
+    id: session.id,
+    title: input.title ?? "",
+    content: input.content ?? "",
+    decision: input.decision ?? "",
+    done: input.done ?? "",
+    current: input.current ?? "",
+    nextSteps: input.next_steps ?? "",
+    reference: input.reference ?? "",
+  });
+  if (tokenReport.total > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return parameterError(
+      `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; ` +
+        `title=${tokenReport.title}, content=${tokenReport.content}, ` +
+        `current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, ` +
+        `decision=${tokenReport.decision}, done=${tokenReport.done}, ` +
+        `reference=${tokenReport.reference}, total=${tokenReport.total}. ` +
+        "Trim fields and retry.",
     );
   }
 

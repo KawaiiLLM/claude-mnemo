@@ -196,20 +196,19 @@ describe("handleContextHook", () => {
       createInput({ sessionId: "missing-session", source: "startup" }),
     );
 
-    expect(result.hookSpecificOutput).toContain(
-      "claude-mnemo: 1 sessions, 0 observations | current: S1",
-    );
-    expect(result.hookSpecificOutput).toContain("## Recent Sessions");
-    expect(result.hookSpecificOutput).not.toContain("## Current Session");
+    expect(result).toEqual({ continue: true });
+    expect(emptyDb.query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM sessions",
+    ).get()?.count).toBe(1);
 
     emptyDb.close();
   });
 
-  test("startup skips Current Session and adds compact header axes", async () => {
+  test("startup is silent and does not query or render the state document", async () => {
     const singleSessionDb = createDatabase(":memory:");
     initializeSchema(singleSessionDb);
 
-    const singleSession = upsertSession(singleSessionDb, {
+    upsertSession(singleSessionDb, {
       contentSessionId: "single-session",
       project: "/Users/zhaoqixuan/Projects/claude-mnemo",
       title: "Single session",
@@ -226,28 +225,16 @@ describe("handleContextHook", () => {
       db: singleSessionDb,
     });
 
-    await handler(
+    const result = await handler(
       createInput({
         sessionId: "single-session",
         source: "startup",
       }),
     );
 
-    expect(getRecentSessionsSpy).toHaveBeenCalledTimes(1);
+    expect(getRecentSessionsSpy).toHaveBeenCalledTimes(0);
     expect(renderNodeSpy).toHaveBeenCalledTimes(0);
-
-    const output = (await handler(
-      createInput({
-        sessionId: "single-session",
-        source: "startup",
-      }),
-    )).hookSpecificOutput ?? "";
-    expect(output).toContain(`claude-mnemo: 1 sessions, 0 observations | current: S${singleSession.id}`);
-    expect(output).toContain(
-      "Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)",
-    );
-    expect(output).not.toContain("## Current Session");
-    expect(output).toContain("## Recent Sessions");
+    expect(result).toEqual({ continue: true });
 
     getRecentSessionsSpy.mockRestore();
     renderNodeSpy.mockRestore();
@@ -287,15 +274,12 @@ describe("handleContextHook", () => {
     expect(estimateDiaryTokens(sessionDocument)).toBeLessThanOrEqual(
       SESSION_INJECTION_TOKEN_BUDGET,
     );
-    expect(sessionDocument).toMatch(
-      new RegExp(
-        `本节还有 \\d+ 行，完整见 recall\\(id="S${currentSessionId}"\\)`,
-      ),
+    expect(sessionDocument).toContain(
+      `state truncated; full summary: recall(id="S${currentSessionId}")`,
     );
-    expect(sessionDocument).not.toContain("/Users/");
   });
 
-  test("compact injects current-session timeline and keeps recent sessions collapsed", async () => {
+  test("compact keeps state isolated while the recent hook stays collapsed", async () => {
     insertTurn(db, {
       sessionId: currentSessionId,
       promptNumber: 1,
@@ -485,14 +469,15 @@ describe("handleContextHook", () => {
     });
     const renderNodeSpy = spyOn(formatModule, "renderNode");
 
-    const result = await handler(
-      createInput({
-        sessionId: "session-context",
-        source: "compact",
-      }),
-    );
+    const input = createInput({
+      sessionId: "session-context",
+      source: "compact",
+    });
+    const result = await handler(input);
+    const recentResult = await createContextHandler({ db }, "recent")(input);
 
     const output = result.hookSpecificOutput ?? "";
+    const recentOutput = recentResult.hookSpecificOutput ?? "";
 
     expect(output).toContain(`claude-mnemo: 5 sessions, 5 observations | current: S${currentSessionId}`);
     expect(output).toContain(
@@ -501,23 +486,20 @@ describe("handleContextHook", () => {
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");
     expect(output).toContain("## Current Session");
-    expect(output).toContain("## Recent Sessions");
+    expect(output).not.toContain("## Recent Sessions");
     expect(output).toContain(`[S${currentSessionId}] Anchored session`);
-    expect(output).toContain(
-      `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-context")}`,
-    );
     // D4: the current-session block injects every summary field. With no
     // `decision`, the legacy `insight` bullets render as the fallback (bullets
     // indented 4 spaces to match recall/worker).
     expect(output).toContain("  insight:");
     expect(output).toContain("    - Primary insight bullet for the current session");
-    // The current-session block renders the day-grouped milestone digest
-    // (session-output.ts injects the "milestones" view), not the turn table.
-    expect(output).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
+    // The independent milestones hook owns the timeline; this state document
+    // contains no embedded milestone digest or expanded turn titles.
+    expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
     expect(output).not.toContain("showing:");
     expect(output).not.toContain("phases (");
     expect(output).not.toContain("⏭");
-    expect(output).toContain("shape signals (window T1-T6");
+    expect(output).not.toContain("shape signals (window T1-T6");
     // next_steps renders under its display label "next".
     expect(output).not.toContain("next_steps:");
     expect(output).toContain(
@@ -527,49 +509,47 @@ describe("handleContextHook", () => {
       "  content: Current session description that is intentionally verbose so truncation can be verified in the primary context block.",
     );
 
-    expect(output).toContain(
+    expect(recentOutput).toContain("## Recent Sessions");
+    expect(recentOutput).toContain(
       `- [S1] Most recent session | 💬6 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
-    expect(output).not.toContain(
+    expect(recentOutput).not.toContain(
       `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-newest")}`,
     );
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long...",
     );
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       "[use mnemo-replay skill → read S1 for full content]",
     );
-    expect(output).not.toContain("Recent turn 1");
-    expect(output).not.toContain("Recent turn 2");
-    expect(output).not.toContain("Recent turn 6");
-    expect(output).not.toContain("Recent turn 1");
+    expect(recentOutput).not.toContain("Recent turn 1");
+    expect(recentOutput).not.toContain("Recent turn 2");
+    expect(recentOutput).not.toContain("Recent turn 6");
 
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       `- [S2] Secondary session | 💬2 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible bu...",
     );
 
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       `- [S4] Older session | 💬1 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       "  - desc: Older session description that should be visible only as a collapsed header with truncation applied.",
     );
-    expect(output).not.toContain("Older turn 1");
+    expect(recentOutput).not.toContain("Older turn 1");
 
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       `- [S5] Oldest session | 💬1 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
-    expect(output).toContain(
+    expect(recentOutput).toContain(
       "  - desc: Oldest session description that is intentionally long so the collapsed-only header uses the truncated form.",
     );
-    expect(output).not.toContain("Oldest turn 1");
+    expect(recentOutput).not.toContain("Oldest turn 1");
 
-    expect(output.indexOf(`[S${currentSessionId}] Anchored session`)).toBeLessThan(
-      output.indexOf("- [S1] Most recent session"),
-    );
+    expect(recentOutput).not.toContain(`[S${currentSessionId}] Anchored session`);
     expect(renderNodeSpy).toHaveBeenCalledWith(
       { type: "session", value: expect.objectContaining({ id: 1 }) },
       { depth: "collapsed", truncate: 120, mode: "unified" },
@@ -577,7 +557,7 @@ describe("handleContextHook", () => {
     renderNodeSpy.mockRestore();
   });
 
-  test("current-session block renders decision/done/reference as 4-space bullets with resolved [T<n>]", async () => {
+  test("current-session block renders decision/done/reference as 4-space bullets with raw [T<n>] coordinates", async () => {
     const turnId = insertTurn(db, {
       sessionId: currentSessionId,
       promptNumber: 1,
@@ -603,23 +583,24 @@ describe("handleContextHook", () => {
     );
     const output = result.hookSpecificOutput ?? "";
 
-    // Bullet blocks at 4-space, with [T<n>] resolved to S/T + current title.
+    // Bullet blocks use 4-space indentation and keep compact raw coordinates.
     expect(output).toContain("  decision:");
     expect(output).toContain(
-      `    - Chose a mutex over a queue [S${currentSessionId}/T1] "Pick mutex"`,
+      `    - Chose a mutex over a queue [T${turnId}]`,
     );
     expect(output).toContain("    - Serialized the refresh path");
     expect(output).toContain("  done:");
     expect(output).toContain(
-      `    - Shipped the auth fix [S${currentSessionId}/T1] "Pick mutex"`,
+      `    - Shipped the auth fix [T${turnId}]`,
     );
+    expect(output).not.toContain(`"Pick mutex"`);
     expect(output).toContain("  reference:");
     expect(output).toContain("    - docs/plans/redesign.md");
     // decision present → legacy insight fallback is NOT used.
     expect(output).not.toContain("Primary insight bullet");
   });
 
-  test("startup shows current session id but skips Current Session timeline when there are no turns", async () => {
+  test("startup suppresses the sessions output even when the current session exists", async () => {
     const handler = createContextHandler({ db });
 
     const result = await handler(
@@ -629,14 +610,10 @@ describe("handleContextHook", () => {
       }),
     );
 
-    const output = result.hookSpecificOutput ?? "";
-    expect(output).toContain(`current: S${currentSessionId}`);
-    expect(output).toContain("Axes: recall (content) · timeline (temporal) · mnemo-replay (raw)");
-    expect(output).not.toContain("## Current Session");
-    expect(output).not.toContain("T#");
+    expect(result).toEqual({ continue: true });
   });
 
-  test("compact injects a last-page timeline instead of collapsed turns", async () => {
+  test("compact state injection does not embed the milestone timeline", async () => {
     for (let promptNumber = 1; promptNumber <= 40; promptNumber += 1) {
       insertTurn(db, {
         sessionId: currentSessionId,
@@ -661,18 +638,11 @@ describe("handleContextHook", () => {
     const output = result.hookSpecificOutput ?? "";
     expect(output).toContain(`claude-mnemo: 5 sessions, 0 observations | current: S${currentSessionId}`);
     expect(output).toContain("## Current Session");
-    // The current-session block renders the day-grouped milestone digest
-    // (session-output.ts injects the "milestones" view), not the turn table.
-    expect(output).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
+    expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
     expect(output).not.toContain("showing:");
     expect(output).not.toContain("phases (");
-    // Full-session milestone selection (not the old last-30-turns window): the
-    // window is the whole session and the digest keeps the real first endpoint T1.
-    expect(output).toContain("shape signals (window T1-T40 = full session):");
-    expect(output).toMatch(/── .+ · T1–T40 · 2 kept ──/);
-    expect(output).toMatch(/^\s+T1 .+ Turn 1$/m);
-    expect(output).not.toContain("window T11-T40");
-    // All kept milestones fit the tail, so no earlier hint.
+    expect(output).not.toContain("shape signals");
+    expect(output).not.toMatch(/^\s+T1 .+ Turn 1$/m);
     expect(output).not.toContain("earlier:");
     expect(output).not.toContain("Format:");
     expect(output).not.toContain("Stats:");
@@ -745,7 +715,7 @@ describe("handleContextHook", () => {
       completedAtEpoch: null,
     });
 
-    const handler = createContextHandler({ db: groupDb });
+    const handler = createContextHandler({ db: groupDb }, "recent");
     const result = await handler(
       createInput({ sessionId: "current-s", cwd: "/test/project", source: "startup" }),
     );
@@ -818,7 +788,7 @@ describe("handleContextHook", () => {
       });
     }
 
-    const handler = createContextHandler({ db: capDb });
+    const handler = createContextHandler({ db: capDb }, "recent");
     const result = await handler(
       createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
     );
@@ -907,7 +877,7 @@ describe("handleContextHook", () => {
       )
       .run(untitledWithTurn, 701);
 
-    const handler = createContextHandler({ db: huskDb });
+    const handler = createContextHandler({ db: huskDb }, "recent");
     const result = await handler(
       createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
     );
@@ -970,7 +940,7 @@ describe("handleContextHook", () => {
       completedAtEpoch: null,
     });
 
-    const handler = createContextHandler({ db: capDb });
+    const handler = createContextHandler({ db: capDb }, "recent");
     const result = await handler(
       createInput({ sessionId: "primary", cwd: "/test/project", source: "startup" }),
     );
@@ -981,7 +951,7 @@ describe("handleContextHook", () => {
     capDb.close();
   });
 
-  test("compact falls back to session summary when timeline rendering throws", async () => {
+  test("compact renders the state summary without an embedded timeline dependency", async () => {
     const turnId = insertTurn(db, {
       sessionId: currentSessionId,
       promptNumber: 1,
@@ -999,17 +969,7 @@ describe("handleContextHook", () => {
       createdAtEpoch: 302,
     });
 
-    const handler = createContextHandler({
-      db,
-      timelineRenderer: {
-        buildContextTimelineView: () => {
-          throw new Error("timeline exploded");
-        },
-        renderTimeline: () => {
-          throw new Error("render should not run after build failure");
-        },
-      },
-    });
+    const handler = createContextHandler({ db });
     const result = await handler(
       createInput({
         source: "compact",
@@ -1023,7 +983,7 @@ describe("handleContextHook", () => {
     expect(output).toContain("  insight:");
     expect(output).not.toContain("T#");
     expect(output).not.toContain("showing:");
-    expect(output).toContain("## Recent Sessions");
+    expect(output).not.toContain("## Recent Sessions");
   });
 
   test("resume source with a stranded active turn enqueues turn-stop and still returns hookSpecificOutput without asyncWork", async () => {
@@ -1054,7 +1014,7 @@ describe("handleContextHook", () => {
     expect(items.some((item) => item.kind === "turn-stop")).toBe(true);
   });
 
-  test("startup source with a stranded active turn does NOT enqueue turn-stop", async () => {
+  test("startup source still recovers a stranded active turn while suppressing output", async () => {
     // Same stranded turn seed
     db.query(`
       INSERT INTO turns (
@@ -1067,12 +1027,12 @@ describe("handleContextHook", () => {
     `).run(currentSessionId);
 
     const handler = createContextHandler({ db });
-    await handler(
+    const result = await handler(
       createInput({ source: "startup", sessionId: "session-context" }),
     );
 
-    // No turn-stop must have been enqueued
+    expect(result).toEqual({ continue: true });
     const items = listPendingQueueItems(db, currentSessionId);
-    expect(items.filter((item) => item.kind === "turn-stop").length).toBe(0);
+    expect(items.filter((item) => item.kind === "turn-stop").length).toBe(1);
   });
 });
