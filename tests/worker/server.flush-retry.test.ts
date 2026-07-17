@@ -191,6 +191,76 @@ describe("flush retry / drop (D8)", () => {
     expect(attempts.n).toBe(1);
   });
 
+  test("connection failure suspends the session and a later global drain resumes every turn", async () => {
+    let currentMs = 1_000;
+    let pushes = 0;
+    let closes = 0;
+    const core = createWorkerCore({
+      db,
+      config: { ...RETRY_CONFIG, maxQueuedBatches: 0 },
+      now: () => 123,
+      nowMs: () => currentMs,
+      logger: { warn: () => {}, error: () => {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = (args.length === 2 ? args[1] : args[3]) as
+          | { onRemember?: (id: string) => void }
+          | undefined;
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            pushes += 1;
+            if (pushes === 1) {
+              throw Object.assign(new Error("socket reset"), {
+                code: "ECONNRESET",
+              });
+            }
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
+            return { session_id: "worker-query" };
+          },
+          async close() {
+            closes += 1;
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.scanAndDrainQueue();
+
+    expect(pushes).toBe(1);
+    expect(closes).toBe(1);
+    expect(core.sessions.has(sessionId)).toBe(false);
+    expect(getPendingQueueCount(db)).toBe(2);
+    expect(getObservation(db, observationId)?.status).toBe("pending");
+    expect(getTurnById(db, turnId)?.tags ?? []).not.toContain(
+      DELIVERY_DROPPED_PENDING_TAG,
+    );
+    const releasedClaims = db
+      .query<{ claimedAtEpoch: number | null }, []>(
+        "SELECT claimed_at_epoch AS claimedAtEpoch FROM pending_queue",
+      )
+      .all();
+    expect(releasedClaims.every((row) => row.claimedAtEpoch === null)).toBe(true);
+
+    // A wake inside the lightweight backoff does not reconnect this session.
+    await core.scanAndDrainQueue();
+    expect(pushes).toBe(1);
+
+    // Any later global turn-stop wake can reclaim and finish the suspended work.
+    currentMs += 60_000;
+    await core.scanAndDrainQueue();
+
+    expect(pushes).toBe(2);
+    expect(getPendingQueueCount(db)).toBe(0);
+    expect(getObservation(db, observationId)?.status).toBe("skipped");
+    expect(getTurnById(db, turnId)?.tags ?? []).not.toContain(
+      DELIVERY_DROPPED_PENDING_TAG,
+    );
+  });
+
   test("recoverFromCrash resets claims and in-memory streaming state", async () => {
     const attempts = { n: 0 };
     const core = failingCore(Infinity, attempts);

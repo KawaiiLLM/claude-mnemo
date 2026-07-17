@@ -165,6 +165,17 @@ export function resetClaimedQueueItems(db: Database): void {
   ).run();
 }
 
+export function resetClaimedQueueItemsForSession(
+  db: Database,
+  sessionDbId: number,
+): void {
+  db.query<unknown, [number]>(
+    `UPDATE pending_queue
+     SET claimed_at_epoch = NULL
+     WHERE session_db_id = ? AND claimed_at_epoch IS NOT NULL`,
+  ).run(sessionDbId);
+}
+
 export function deleteQueueItem(db: Database, seq: number): void {
   db.query<unknown, [number]>("DELETE FROM pending_queue WHERE seq = ?").run(seq);
 }

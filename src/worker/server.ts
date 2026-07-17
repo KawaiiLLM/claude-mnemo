@@ -35,6 +35,7 @@ import {
   deleteQueueItem,
   releaseQueueClaim,
   resetClaimedQueueItems,
+  resetClaimedQueueItemsForSession,
   type PendingQueueItem,
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
@@ -81,11 +82,16 @@ import {
 import { createDiaryRuntime } from "./diary-runtime";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
 import { buildSessionSummary, recallMemory } from "../mcp/recall";
+import {
+  classifyWorkerError,
+  createWorkerAbortError,
+} from "./error-classifier";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 10_000;
 const STALLED_QUERY_MS = 30_000;
+const CONNECTION_RETRY_BACKOFF_MS = 10_000;
 const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
@@ -155,7 +161,12 @@ function batchIsCompletionPoint(batch: BatchEntry): boolean {
 }
 
 // Result state machine (D8) — flushOneBatchLocked never throws for control flow.
-type FlushOutcome = "flushed" | "retryLater" | "dropped" | "empty";
+type FlushOutcome =
+  | "flushed"
+  | "retryLater"
+  | "suspended"
+  | "dropped"
+  | "empty";
 
 // Thrown by sendWorkUnit when a completion-point unit still fails to extract
 // after K corrective resends AND a fresh-session cold-start retry (the
@@ -481,6 +492,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const sessions = new Map<number, SessionState>();
   const buffers = new Map<number, BufferState>();
   const compactingSessions = new Set<number>();
+  const suspendedUntilBySession = new Map<number, number>();
   const diaryStateStore = createDiaryStateStore(deps.db);
   let persistentRetryTimer: { handle: unknown; dueEpoch: number } | null = null;
   let diaryContinuationTimer: unknown | null = null;
@@ -1162,7 +1174,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  async function closeSessionQuery(sessionDbId: number): Promise<void> {
+  async function closeSessionQuery(
+    sessionDbId: number,
+    abortError?: Error,
+  ): Promise<void> {
     const state = sessions.get(sessionDbId);
     if (!state) {
       return;
@@ -1175,7 +1190,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state.closing = (async () => {
       try {
         await Promise.race([
-          state.querySession?.close() ?? Promise.resolve(),
+          state.querySession?.close(abortError) ?? Promise.resolve(),
           new Promise<void>((resolve) => {
             setTimeout(resolve, 5_000);
           }),
@@ -1194,6 +1209,37 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     })();
 
     return state.closing;
+  }
+
+  async function suspendSessionAfterConnectionError(
+    state: SessionState,
+    error: unknown,
+  ): Promise<void> {
+    const sessionDbId = state.sessionDbId;
+    suspendedUntilBySession.set(
+      sessionDbId,
+      nowMs() + CONNECTION_RETRY_BACKOFF_MS,
+    );
+
+    // Per-session crash recovery: every claimed row becomes eligible for a
+    // clean rebuild, and no in-memory slice/batch survives the interrupted
+    // request. The durable turn/observation rows remain untouched.
+    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
+    buffers.delete(sessionDbId);
+    state.batchQueue = [];
+    state.streamedParts.clear();
+
+    logger.warn?.("mini-turn flush suspended after connection failure", {
+      sessionDbId,
+      retryAfterMs: CONNECTION_RETRY_BACKOFF_MS,
+      error,
+    });
+    await closeSessionQuery(sessionDbId).catch((closeError) => {
+      logger.error?.("connection suspension failed to close query session", {
+        sessionDbId,
+        error: closeError,
+      });
+    });
   }
 
   async function withSessionProcessingLock<T>(
@@ -1344,6 +1390,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error) {
+      if (classifyWorkerError(error) === "connection") {
+        await suspendSessionAfterConnectionError(state, error);
+        return "suspended";
+      }
+
       batch.attempts += 1;
       if (batch.attempts < config.maxFlushAttempts) {
         // Keep the batch at the head with its claims; retry tick re-flushes.
@@ -1389,9 +1440,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
       const outcome = await flushOneBatchLocked(state);
-      // retryLater leaves the blocking batch at the head (FIFO order holds);
-      // stop draining now so we don't burn attempts in a hot loop (D8).
-      if (outcome === "retryLater" || outcome === "empty") {
+      // retryLater leaves the blocking batch at the head (FIFO order holds).
+      // suspended has already released the session's claims and state. Either
+      // outcome stops this drain so it cannot burn attempts in a hot loop.
+      if (
+        outcome === "retryLater" ||
+        outcome === "suspended" ||
+        outcome === "empty"
+      ) {
         return;
       }
     }
@@ -1691,15 +1747,34 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function drainQueue(sessionFilter?: number): Promise<void> {
+    const currentMs = nowMs();
+    for (const [sessionDbId, retryAtMs] of suspendedUntilBySession) {
+      if (retryAtMs <= currentMs) {
+        suspendedUntilBySession.delete(sessionDbId);
+      }
+    }
+    if (
+      sessionFilter !== undefined &&
+      suspendedUntilBySession.has(sessionFilter)
+    ) {
+      return;
+    }
+
     const skippedSeqs = new Set<number>();
     let diaryProcessed = false;
 
     while (true) {
+      const excludedSessions =
+        sessionFilter === undefined
+          ? new Set([
+              ...compactingSessions,
+              ...suspendedUntilBySession.keys(),
+            ])
+          : undefined;
       const item = claimNextItem(deps.db, now(), {
         sessionFilter,
         skippedSeqs,
-        excludeSessions:
-          sessionFilter === undefined ? compactingSessions : undefined,
+        excludeSessions: excludedSessions,
       });
 
       if (!item) {
@@ -2125,7 +2200,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
               lastMessageAt: state.lastMessageAt,
               queryPid: state.queryPid,
             });
-            await closeSessionQuery(state.sessionDbId).catch((error) => {
+            await closeSessionQuery(
+              state.sessionDbId,
+              createWorkerAbortError("stall-watchdog"),
+            ).catch((error) => {
               logger.error?.("watchdog closeSessionQuery failed", {
                 sessionDbId: state.sessionDbId,
                 error,

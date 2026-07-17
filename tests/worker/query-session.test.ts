@@ -6,6 +6,10 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { DATA_DIR, resolveTranscriptPath } from "../../src/shared/paths";
 import { resolveClaudeCodeExecutablePath } from "../../src/worker/agent-session";
+import {
+  classifyWorkerError,
+  createWorkerAbortError,
+} from "../../src/worker/error-classifier";
 import { createWorkerQuerySession } from "../../src/worker/query-session";
 
 describe("worker query session", () => {
@@ -206,6 +210,57 @@ describe("worker query session", () => {
       "Worker query session is closed.",
     );
     expect(closeSignalCount).toBe(1);
+  });
+
+  test("a marked watchdog close rejects the in-flight prompt as a connection error", async () => {
+    let promptStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const queryImpl = mock(
+      ({
+        prompt,
+        options,
+      }: {
+        prompt: AsyncIterable<unknown>;
+        options?: { abortController?: AbortController };
+      }) =>
+        (async function* () {
+          for await (const _message of prompt) {
+            promptStarted();
+            await new Promise<void>((resolve) => {
+              options?.abortController?.signal.addEventListener(
+                "abort",
+                () => resolve(),
+                { once: true },
+              );
+            });
+            return;
+          }
+        })(),
+    );
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+        isProcessAliveImpl: () => false,
+      },
+    );
+
+    const pendingPrompt = session.sendPrompt("will stall");
+    await started;
+    await session.close(createWorkerAbortError("stall-watchdog"));
+
+    const classification = await pendingPrompt.catch((error) =>
+      classifyWorkerError(error),
+    );
+    expect(classification).toBe("connection");
   });
 
   test("uses worker agent-session helpers from the worker module path", () => {

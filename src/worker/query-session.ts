@@ -68,7 +68,7 @@ export interface WorkerQuerySession {
   readonly queryPid: number | undefined;
   sendPrompt(promptText: string): Promise<SDKResultMessage>;
   compact?(): Promise<void>;
-  close(): Promise<void>;
+  close(abortError?: Error): Promise<void>;
 }
 
 const QUERY_COMPACT_TIMEOUT_MS = 120_000;
@@ -223,6 +223,7 @@ export function createWorkerQuerySession(
   let queryPid: number | undefined;
   let closed = false;
   let closePromise: Promise<void> | null = null;
+  let closeError: Error | null = null;
 
   function resolvePendingCompact(): void {
     const currentCompact = pendingCompact;
@@ -423,18 +424,21 @@ this overrides the normal "extract once, never revisit" rule for that block.
         }
       }
     } catch (error) {
-      rejectPendingCompact(error);
+      const rejection = closeError ?? error;
+      rejectPendingCompact(rejection);
       while (pendingResults.length > 0) {
-        pendingResults.shift()?.reject(error);
+        pendingResults.shift()?.reject(rejection);
       }
       throw error;
     } finally {
       rejectPendingCompact(
-        new Error("Worker query session closed before compact completed."),
+        closeError ??
+          new Error("Worker query session closed before compact completed."),
       );
       while (pendingResults.length > 0) {
         pendingResults.shift()?.reject(
-          new Error("Worker query session closed before returning a result."),
+          closeError ??
+            new Error("Worker query session closed before returning a result."),
         );
       }
     }
@@ -495,11 +499,12 @@ this overrides the normal "extract once, never revisit" rule for that block.
       }
     },
 
-    async close(): Promise<void> {
+    async close(abortError?: Error): Promise<void> {
       if (closePromise) {
         return closePromise;
       }
 
+      closeError = abortError ?? null;
       closed = true;
       promptStream.close();
       abortController.abort();

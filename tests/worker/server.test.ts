@@ -17,6 +17,7 @@ import {
   updateTurnById,
 } from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
+import { classifyWorkerError } from "../../src/worker/error-classifier";
 import {
   checkForIdleWorkerShutdown,
   acquireWorkerSingleton,
@@ -2429,6 +2430,7 @@ describe("worker server", () => {
 
   test("abortStalledSessions closes only sessions with an overdue in-flight request", async () => {
     const closed: number[] = [];
+    const abortClassifications: string[] = [];
     const stateCore = createWorkerCore({
       db,
       nowMs: () => 40_000,
@@ -2459,7 +2461,11 @@ describe("worker server", () => {
             session_id: "one",
           };
         },
-        async close() {},
+        async close(abortError?: Error) {
+          if (abortError) {
+            abortClassifications.push(classifyWorkerError(abortError));
+          }
+        },
       },
       contentSessionId: null,
       project: null,
@@ -2493,6 +2499,7 @@ describe("worker server", () => {
     await stateCore.abortStalledSessions(40_000);
 
     expect(closed).toEqual([1]);
+    expect(abortClassifications).toEqual(["connection"]);
   });
 
   test("abortStalledSessions also closes idle sessions without in-flight work", async () => {
