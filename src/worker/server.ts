@@ -302,6 +302,7 @@ export interface WorkerCore {
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
   processClaimedItem(item: PendingQueueItem): Promise<void>;
   flushSession(sessionDbId: number): Promise<void>;
+  finishSession(sessionDbId: number): Promise<void>;
   drainSessionCompletely(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
@@ -1212,10 +1213,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function suspendSessionAfterConnectionError(
-    state: SessionState,
+    sessionDbId: number,
     error: unknown,
   ): Promise<void> {
-    const sessionDbId = state.sessionDbId;
     suspendedUntilBySession.set(
       sessionDbId,
       nowMs() + CONNECTION_RETRY_BACKOFF_MS,
@@ -1226,15 +1226,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // request. The durable turn/observation rows remain untouched.
     resetClaimedQueueItemsForSession(deps.db, sessionDbId);
     buffers.delete(sessionDbId);
-    state.batchQueue = [];
-    state.streamedParts.clear();
+    const state = sessions.get(sessionDbId);
+    if (state) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
 
     logger.warn?.("mini-turn flush suspended after connection failure", {
       sessionDbId,
       retryAfterMs: CONNECTION_RETRY_BACKOFF_MS,
       error,
     });
-    await closeSessionQuery(sessionDbId).catch((closeError) => {
+    await closeSessionQuery(
+      sessionDbId,
+      error instanceof Error ? error : undefined,
+    ).catch((closeError) => {
       logger.error?.("connection suspension failed to close query session", {
         sessionDbId,
         error: closeError,
@@ -1381,6 +1387,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
+    if (suspendedUntilBySession.has(state.sessionDbId)) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+      return "suspended";
+    }
     pruneBatchQueueLocked(state);
     const batch = state.batchQueue[0];
     if (!batch) {
@@ -1391,7 +1402,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await pushMiniTurnBatch(state, batch);
     } catch (error) {
       if (classifyWorkerError(error) === "connection") {
-        await suspendSessionAfterConnectionError(state, error);
+        await suspendSessionAfterConnectionError(state.sessionDbId, error);
         return "suspended";
       }
 
@@ -1764,6 +1775,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     let diaryProcessed = false;
 
     while (true) {
+      if (
+        sessionFilter !== undefined &&
+        suspendedUntilBySession.has(sessionFilter)
+      ) {
+        return;
+      }
       const excludedSessions =
         sessionFilter === undefined
           ? new Set([
@@ -1935,6 +1952,47 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await withSessionProcessingLock(sessionDbId, async (state) => {
       await flushAllBatchesLocked(state);
     });
+  }
+
+  async function finishSession(sessionDbId: number): Promise<void> {
+    const drainPromise = drainSessionCompletely(sessionDbId);
+    let timeoutHandle: unknown;
+    let outcome: "drained" | "timeout";
+    try {
+      outcome = await Promise.race([
+        drainPromise.then(() => "drained" as const),
+        new Promise<"timeout">((resolve) => {
+          timeoutHandle = setTimeoutImpl(
+            () => resolve("timeout"),
+            config.sessionEndTailTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeoutImpl(timeoutHandle);
+      }
+    }
+
+    if (outcome === "timeout") {
+      const abortError = createWorkerAbortError(
+        "shutdown",
+        `SessionEnd tail timed out after ${config.sessionEndTailTimeoutMs}ms`,
+      );
+      await suspendSessionAfterConnectionError(sessionDbId, abortError);
+      await drainPromise.catch(() => {});
+      // The interrupted drain may have recreated an empty lock state while
+      // unwinding. Remove that tail-only state as part of the same close.
+      await closeSessionQuery(sessionDbId, abortError);
+      return;
+    }
+
+    if (suspendedUntilBySession.has(sessionDbId)) {
+      await closeSessionQuery(sessionDbId);
+      return;
+    }
+
+    await closeSessionQuery(sessionDbId);
   }
 
   async function tickKeepaliveSessionLocked(
@@ -2135,6 +2193,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     scanAndDrainQueue,
     processClaimedItem,
     flushSession,
+    finishSession,
     drainSessionCompletely,
     closeSessionQuery,
     handleCompact,
@@ -2363,7 +2422,7 @@ export function createWorkerFetchHandler(
     deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
   const handleFlushImpl =
     deps.handleFlushImpl ??
-    runtime?.flushSession ??
+    runtime?.finishSession ??
     (async (sessionId: number) => {
       await scanAndDrainQueue(sessionId);
     });
@@ -2579,7 +2638,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           db,
           config,
           scanAndDrainQueue: core.scanAndDrainQueue,
-          handleFlushImpl: core.flushSession,
+          handleFlushImpl: core.finishSession,
           handleCompactImpl: core.handleCompact,
         },
         serverState,
@@ -2618,7 +2677,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   const startupFlushSessionId = getStartupFlushSessionId(env);
   if (startupFlushSessionId !== null) {
-    void core.flushSession(startupFlushSessionId);
+    void core.finishSession(startupFlushSessionId);
   }
   setInterval(() => {
     ensureWorkerPidFile(deps);

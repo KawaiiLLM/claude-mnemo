@@ -97,6 +97,7 @@ function fakeQueryDeps(args: unknown[]): FakeQueryDeps | undefined {
 function healthyQueryImpl(
   sentPrompts: string[],
   agentSessionId = "worker-query",
+  onClose?: () => void,
 ): typeof import("../../src/worker/query-session").createWorkerQuerySession {
   return ((...args: unknown[]) => {
     const deps = fakeQueryDeps(args);
@@ -111,7 +112,9 @@ function healthyQueryImpl(
         }
         return { session_id: agentSessionId };
       },
-      async close() {},
+      async close() {
+        onClose?.();
+      },
     } satisfies WorkerQuerySession;
   }) as typeof import("../../src/worker/query-session").createWorkerQuerySession;
 }
@@ -2795,7 +2798,7 @@ describe("worker server", () => {
     }
   });
 
-  test("main wires /flush to core.flushSession so SessionEnd flushes buffered observations", async () => {
+  test("main wires /flush to the bounded SessionEnd tail and closes its agent", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
 
@@ -2815,6 +2818,7 @@ describe("worker server", () => {
 
     let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
     const sentPrompts: string[] = [];
+    let closes = 0;
     const originalSetInterval = globalThis.setInterval;
 
     globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
@@ -2822,12 +2826,17 @@ describe("worker server", () => {
     try {
       await main({
         db,
+        env: {},
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
           fetchHandler = options.fetch;
           return { stop() {} };
         }) as typeof Bun.serve),
-        createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
+        createWorkerQuerySessionImpl: healthyQueryImpl(
+          sentPrompts,
+          "worker-query",
+          () => { closes += 1; },
+        ),
         isProcessAliveImpl: () => false,
         existsSyncImpl: () => false,
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
@@ -2846,11 +2855,12 @@ describe("worker server", () => {
 
       expect(response.status).toBe(200);
 
-      await waitUntil(() => sentPrompts.length === 1);
+      await waitUntil(() => sentPrompts.length === 1 && closes === 1);
 
-      // /flush -> core.flushSession drains + renders the buffered turn as one push.
+      // /flush drains + renders the buffered turn, then closes its query session.
       expect(sentPrompts).toHaveLength(1);
       expect(sentPrompts[0]).toContain(`<obs id="O`);
+      expect(closes).toBe(1);
     } finally {
       globalThis.setInterval = originalSetInterval;
     }

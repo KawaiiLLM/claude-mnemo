@@ -88,6 +88,19 @@ describe("shared config", () => {
     expect(loadConfig("/definitely-missing").compactContextRatio).toBe(0.5);
   });
 
+  test("SessionEnd tail defaults to sixty seconds and accepts an override", () => {
+    expect(DEFAULT_CONFIG.sessionEndTailTimeoutMs).toBe(60_000);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ sessionEndTailTimeoutMs: 90_000 }),
+    );
+
+    expect(loadConfig(home).sessionEndTailTimeoutMs).toBe(90_000);
+  });
+
   test("loadConfig clamps compactContextRatio into [0.1, 0.95]", () => {
     const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });

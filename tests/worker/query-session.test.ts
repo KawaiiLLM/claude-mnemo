@@ -263,6 +263,66 @@ describe("worker query session", () => {
     expect(classification).toBe("connection");
   });
 
+  test("a SessionEnd shutdown abort kills the in-flight query child", async () => {
+    let promptStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const killImpl = mock(() => true);
+    const queryImpl = mock(
+      ({
+        prompt,
+        options,
+      }: {
+        prompt: AsyncIterable<unknown>;
+        options?: {
+          abortController?: AbortController;
+          spawnClaudeCodeProcess?: (options: {
+            command: string;
+            args: string[];
+          }) => { pid?: number };
+        };
+      }) =>
+        (async function* () {
+          options?.spawnClaudeCodeProcess?.({ command: "claude", args: [] });
+          for await (const _message of prompt) {
+            promptStarted();
+            await new Promise<void>((resolve) => {
+              options?.abortController?.signal.addEventListener(
+                "abort",
+                () => resolve(),
+                { once: true },
+              );
+            });
+            return;
+          }
+        })(),
+    );
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        spawnImpl:
+          (mock(() => ({ pid: 4321 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
+        killImpl: killImpl as typeof process.kill,
+        isProcessAliveImpl: () => true,
+      },
+    );
+
+    const pendingPrompt = session.sendPrompt("will be interrupted");
+    await started;
+    await session.close(createWorkerAbortError("shutdown"));
+
+    expect(await pendingPrompt.catch(classifyWorkerError)).toBe("connection");
+    expect(killImpl).toHaveBeenCalledWith(4321, "SIGKILL");
+  });
+
   test("uses worker agent-session helpers from the worker module path", () => {
     expect(typeof resolveClaudeCodeExecutablePath).toBe("function");
   });
