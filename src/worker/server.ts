@@ -218,6 +218,7 @@ export interface SessionState {
     rememberedSessionIds: Set<number>;
     hadSubstantiveText: boolean;
     hadIllegalTool: boolean;
+    connectionError: Error | null;
   };
 }
 
@@ -228,6 +229,7 @@ function resetUnitSignals(state: SessionState): void {
   state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
+  state.unitSignals.connectionError = null;
 }
 
 export interface WorkerCoreDeps {
@@ -506,7 +508,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const sessions = new Map<number, SessionState>();
   const buffers = new Map<number, BufferState>();
   const compactingSessions = new Set<number>();
-  const suspendedUntilBySession = new Map<number, number>();
+  const suspendedUntilBySession = new Map<
+    number,
+    { retryAtMs: number; latestTurnStopSeq: number }
+  >();
   const diaryStateStore = createDiaryStateStore(deps.db);
   let persistentRetryTimer: { handle: unknown; dueEpoch: number } | null = null;
   let diaryContinuationTimer: unknown | null = null;
@@ -561,6 +566,19 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       .get(sessionId, sessionId);
 
     return row?.n ?? 0;
+  }
+
+  function latestTurnStopSeqForSession(sessionDbId: number): number {
+    return (
+      deps.db
+        .query<{ seq: number | null }, [number]>(
+          `SELECT MAX(seq) AS seq
+           FROM pending_queue
+           WHERE session_db_id = ?
+             AND kind = 'turn-stop'`,
+        )
+        .get(sessionDbId)?.seq ?? 0
+    );
   }
 
   function getOrCreateBuffer(sessionDbId: number): BufferState {
@@ -811,6 +829,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         rememberedSessionIds: new Set<number>(),
         hadSubstantiveText: false,
         hadIllegalTool: false,
+        connectionError: null,
       },
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
@@ -927,8 +946,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       },
       {
         onMessage: (message) => {
-          state!.lastMessageAt = nowMs();
-          state!.lastActivity = nowMs();
+          const isConnectionSignal =
+            classifyWorkerError(message) === "connection";
+          if (isConnectionSignal) {
+            state!.unitSignals.connectionError = new Error(
+              "Agent stream reported a connection failure.",
+              { cause: message },
+            );
+          }
           if (
             "session_id" in message &&
             typeof message.session_id === "string" &&
@@ -957,6 +982,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           // work unit. thinking blocks are ignored; substantive text and any
           // non-mnemo tool_use are strikes.
           if (
+            !isConnectionSignal &&
             message.type === "assistant" &&
             Array.isArray((message as { message?: { content?: unknown } }).message?.content)
           ) {
@@ -970,10 +996,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
                 block.text.trim().length > 0
               ) {
                 state!.unitSignals.hadSubstantiveText = true;
+                state!.lastMessageAt = nowMs();
+                state!.lastActivity = nowMs();
+              } else if (
+                block.type === "tool_use" &&
+                block.name === "mcp__mnemo__remember"
+              ) {
+                state!.lastMessageAt = nowMs();
+                state!.lastActivity = nowMs();
               } else if (
                 block.type === "tool_use" &&
                 typeof block.name === "string" &&
-                block.name !== "mcp__mnemo__remember" &&
                 block.name !== "mcp__mnemo__recall"
               ) {
                 state!.unitSignals.hadIllegalTool = true;
@@ -991,6 +1024,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           state!.needsReprime = true;
         },
         onRemember: (id: string) => {
+          state!.lastMessageAt = nowMs();
+          state!.lastActivity = nowMs();
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
             state!.unitSignals.rememberedIds.add(Number(t[1]));
@@ -1056,6 +1091,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await runtime.sendPrompt(
         `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${body}\n</context>`,
       );
+      if (state.unitSignals.connectionError) {
+        throw state.unitSignals.connectionError;
+      }
     }
     resetUnitSignals(state); // re-prime response is exempt from detection
   }
@@ -1107,6 +1145,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     resetUnitSignals(state);
     await state.pushMessage(message);
+    if (state.unitSignals.connectionError) {
+      throw state.unitSignals.connectionError;
+    }
     if (evaluate() === "resolved") {
       return;
     }
@@ -1114,6 +1155,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     for (let i = 0; i < MAX_REMINDERS; i++) {
       resetUnitSignals(state);
       await state.pushMessage(buildCorrectiveResend(message, resendKind));
+      if (state.unitSignals.connectionError) {
+        throw state.unitSignals.connectionError;
+      }
       if (evaluate() === "resolved") {
         return;
       }
@@ -1133,6 +1177,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await reopenQuerySessionFresh(state);
     resetUnitSignals(state);
     await state.pushMessage(buildCorrectiveResend(message, resendKind));
+    if (state.unitSignals.connectionError) {
+      throw state.unitSignals.connectionError;
+    }
     if (evaluate() === "resolved") {
       return;
     }
@@ -1229,10 +1276,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     sessionDbId: number,
     error: unknown,
   ): Promise<void> {
-    suspendedUntilBySession.set(
-      sessionDbId,
-      nowMs() + CONNECTION_RETRY_BACKOFF_MS,
-    );
+    suspendedUntilBySession.set(sessionDbId, {
+      retryAtMs: nowMs() + CONNECTION_RETRY_BACKOFF_MS,
+      latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId),
+    });
 
     // Per-session crash recovery: every claimed row becomes eligible for a
     // clean rebuild, and no in-memory slice/batch survives the interrupted
@@ -1322,6 +1369,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await sendSessionReprime(state);
         state.needsReprime = false;
       } catch (error) {
+        if (classifyWorkerError(error) === "connection") {
+          throw error;
+        }
         logger.error?.("session re-prime failed; will retry next batch", {
           sessionDbId: state.sessionDbId,
           error,
@@ -1830,8 +1880,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   async function drainQueue(sessionFilter?: number): Promise<void> {
     const currentMs = nowMs();
-    for (const [sessionDbId, retryAtMs] of suspendedUntilBySession) {
-      if (retryAtMs <= currentMs) {
+    for (const [sessionDbId, suspension] of suspendedUntilBySession) {
+      if (
+        suspension.retryAtMs <= currentMs ||
+        latestTurnStopSeqForSession(sessionDbId) >
+          suspension.latestTurnStopSeq
+      ) {
         suspendedUntilBySession.delete(sessionDbId);
       }
     }

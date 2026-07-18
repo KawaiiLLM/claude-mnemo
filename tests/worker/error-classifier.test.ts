@@ -37,6 +37,23 @@ describe("classifyWorkerError", () => {
     );
   });
 
+  test("classifies agent stream api_error and server_error signals as connection errors", () => {
+    expect(
+      classifyWorkerError({
+        type: "system",
+        subtype: "api_error",
+        error: new Error("Connection error."),
+      }),
+    ).toBe("connection");
+    expect(
+      classifyWorkerError({
+        type: "assistant",
+        error: "server_error",
+        message: { content: [] },
+      }),
+    ).toBe("connection");
+  });
+
   test("conservatively classifies status, derailment, abort, and unknown errors as deterministic", () => {
     const statusError = Object.assign(new Error("API status 503"), {
       name: "APIError",
@@ -55,6 +72,13 @@ describe("classifyWorkerError", () => {
     expect(classifyWorkerError(new Error("something unexpected"))).toBe(
       "deterministic",
     );
+    expect(
+      classifyWorkerError({
+        type: "assistant",
+        error: "unknown",
+        message: { content: [] },
+      }),
+    ).toBe("deterministic");
     expect(classifyWorkerError("not even an Error")).toBe("deterministic");
   });
 });

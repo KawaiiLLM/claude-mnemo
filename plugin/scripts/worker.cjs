@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.1-mrp4z7se" : "dev";
+var BUILD_ID = true ? "0.6.1-mrqaaeaa" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -43097,6 +43097,9 @@ function isObject4(value) {
   return typeof value === "object" && value !== null;
 }
 function classifyOne(error49) {
+  if (error49.type === "system" && error49.subtype === "api_error" || error49.type === "assistant" && error49.error === "server_error") {
+    return "connection";
+  }
   if (typeof error49.status === "number") {
     return "deterministic";
   }
@@ -44244,6 +44247,7 @@ function resetUnitSignals(state) {
   state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
+  state.unitSignals.connectionError = null;
 }
 function defaultNoopDrain() {
   return Promise.resolve();
@@ -44394,6 +44398,14 @@ function createWorkerCore(deps) {
            )`
     ).get(sessionId, sessionId);
     return row?.n ?? 0;
+  }
+  function latestTurnStopSeqForSession(sessionDbId) {
+    return deps.db.query(
+      `SELECT MAX(seq) AS seq
+           FROM pending_queue
+           WHERE session_db_id = ?
+             AND kind = 'turn-stop'`
+    ).get(sessionDbId)?.seq ?? 0;
   }
   function getOrCreateBuffer(sessionDbId) {
     let buffer = buffers.get(sessionDbId);
@@ -44583,7 +44595,8 @@ function createWorkerCore(deps) {
         rememberedIds: /* @__PURE__ */ new Set(),
         rememberedSessionIds: /* @__PURE__ */ new Set(),
         hadSubstantiveText: false,
-        hadIllegalTool: false
+        hadIllegalTool: false,
+        connectionError: null
       },
       async pushMessage(prompt) {
         const runtime = ensureQuerySession(state);
@@ -44683,8 +44696,13 @@ ${prompt}` : prompt;
       },
       {
         onMessage: (message) => {
-          state.lastMessageAt = nowMs();
-          state.lastActivity = nowMs();
+          const isConnectionSignal = classifyWorkerError(message) === "connection";
+          if (isConnectionSignal) {
+            state.unitSignals.connectionError = new Error(
+              "Agent stream reported a connection failure.",
+              { cause: message }
+            );
+          }
           if ("session_id" in message && typeof message.session_id === "string" && message.session_id !== "") {
             const newAgentSessionId = message.session_id;
             const isFirstObservation = state.agentSessionId !== newAgentSessionId;
@@ -44704,12 +44722,17 @@ ${prompt}` : prompt;
               }
             }
           }
-          if (message.type === "assistant" && Array.isArray(message.message?.content)) {
+          if (!isConnectionSignal && message.type === "assistant" && Array.isArray(message.message?.content)) {
             const content = message.message.content;
             for (const block of content) {
               if (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) {
                 state.unitSignals.hadSubstantiveText = true;
-              } else if (block.type === "tool_use" && typeof block.name === "string" && block.name !== "mcp__mnemo__remember" && block.name !== "mcp__mnemo__recall") {
+                state.lastMessageAt = nowMs();
+                state.lastActivity = nowMs();
+              } else if (block.type === "tool_use" && block.name === "mcp__mnemo__remember") {
+                state.lastMessageAt = nowMs();
+                state.lastActivity = nowMs();
+              } else if (block.type === "tool_use" && typeof block.name === "string" && block.name !== "mcp__mnemo__recall") {
                 state.unitSignals.hadIllegalTool = true;
               }
             }
@@ -44725,6 +44748,8 @@ ${prompt}` : prompt;
           state.needsReprime = true;
         },
         onRemember: (id) => {
+          state.lastMessageAt = nowMs();
+          state.lastActivity = nowMs();
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
             state.unitSignals.rememberedIds.add(Number(t[1]));
@@ -44777,6 +44802,9 @@ ${recentIndex}` : coldStart;
 ${body}
 </context>`
       );
+      if (state.unitSignals.connectionError) {
+        throw state.unitSignals.connectionError;
+      }
     }
     resetUnitSignals(state);
   }
@@ -44803,12 +44831,18 @@ ${body}
     const resendKind = requiredIds.size === 0 ? "session-summary" : "turn";
     resetUnitSignals(state);
     await state.pushMessage(message);
+    if (state.unitSignals.connectionError) {
+      throw state.unitSignals.connectionError;
+    }
     if (evaluate() === "resolved") {
       return;
     }
     for (let i = 0; i < MAX_REMINDERS; i++) {
       resetUnitSignals(state);
       await state.pushMessage(buildCorrectiveResend(message, resendKind));
+      if (state.unitSignals.connectionError) {
+        throw state.unitSignals.connectionError;
+      }
       if (evaluate() === "resolved") {
         return;
       }
@@ -44823,6 +44857,9 @@ ${body}
     await reopenQuerySessionFresh(state);
     resetUnitSignals(state);
     await state.pushMessage(buildCorrectiveResend(message, resendKind));
+    if (state.unitSignals.connectionError) {
+      throw state.unitSignals.connectionError;
+    }
     if (evaluate() === "resolved") {
       return;
     }
@@ -44887,10 +44924,10 @@ ${body}
     return state.closing;
   }
   async function suspendSessionAfterConnectionError(sessionDbId, error49) {
-    suspendedUntilBySession.set(
-      sessionDbId,
-      nowMs() + CONNECTION_RETRY_BACKOFF_MS
-    );
+    suspendedUntilBySession.set(sessionDbId, {
+      retryAtMs: nowMs() + CONNECTION_RETRY_BACKOFF_MS,
+      latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId)
+    });
     resetClaimedQueueItemsForSession(deps.db, sessionDbId);
     buffers.delete(sessionDbId);
     const state = sessions.get(sessionDbId);
@@ -44952,6 +44989,9 @@ ${body}
         await sendSessionReprime(state);
         state.needsReprime = false;
       } catch (error49) {
+        if (classifyWorkerError(error49) === "connection") {
+          throw error49;
+        }
         logger.error?.("session re-prime failed; will retry next batch", {
           sessionDbId: state.sessionDbId,
           error: error49
@@ -45330,8 +45370,8 @@ ${body}
   }
   async function drainQueue(sessionFilter) {
     const currentMs = nowMs();
-    for (const [sessionDbId, retryAtMs] of suspendedUntilBySession) {
-      if (retryAtMs <= currentMs) {
+    for (const [sessionDbId, suspension] of suspendedUntilBySession) {
+      if (suspension.retryAtMs <= currentMs || latestTurnStopSeqForSession(sessionDbId) > suspension.latestTurnStopSeq) {
         suspendedUntilBySession.delete(sessionDbId);
       }
     }

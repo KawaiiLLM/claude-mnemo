@@ -9,6 +9,7 @@ import {
   enqueueQueueItem,
   listPendingQueueItems,
   queueItemExistsForTurn,
+  resetClaimedQueueItemsForSession,
 } from "../../src/db/pending-queue";
 import {
   recoverStrandedAncestors,
@@ -72,6 +73,66 @@ test("resets + enqueues stranded turns in prompt_number order, deduped", () => {
     .filter((i) => i.kind === "turn-stop")
     .map((i) => i.targetId);
   expect(queued).toEqual([p4id, p1id, p2id]); // p4 pre-existing first, then p1, p2 by prompt_number
+});
+
+test("connection-released work stays recoverable while terminal turns stay excluded", () => {
+  const insert = db.query<
+    { id: number },
+    [number, number, string, string | null, string | null]
+  >(
+    `INSERT INTO turns (
+       session_id, prompt_number, status, assistant_response,
+       title, content, created_at_epoch
+     )
+     VALUES (?, ?, ?, 'reply', ?, ?, 1000)
+     RETURNING id`,
+  );
+  const releasedTurnId = insert.get(
+    sessionId,
+    1,
+    "active",
+    null,
+    null,
+  )!.id;
+  const extractedTurnId = insert.get(
+    sessionId,
+    2,
+    "extracted",
+    "done",
+    "content",
+  )!.id;
+  const failedTurnId = insert.get(
+    sessionId,
+    3,
+    "failed",
+    null,
+    null,
+  )!.id;
+
+  db.query(
+    `INSERT INTO pending_queue (
+       kind, target_id, session_db_id, claimed_at_epoch, enqueued_at_epoch
+     )
+     VALUES ('turn-stop', ?, ?, 1234, 1000)`,
+  ).run(releasedTurnId, sessionId);
+
+  // Exact durable shape left by suspendSessionAfterConnectionError: the
+  // non-terminal turn and queue row remain, while the session claim is reset.
+  resetClaimedQueueItemsForSession(db, sessionId);
+  const recovered = recoverStrandedTurns(db, sessionId, 5000);
+
+  expect(recovered).toBe(0); // already queued: recovery is idempotent
+  expect(getTurnById(db, releasedTurnId)?.status).toBe("active");
+  const queued = listPendingQueueItems(db, sessionId);
+  expect(
+    queued.filter(
+      (item) =>
+        item.kind === "turn-stop" && item.targetId === releasedTurnId,
+    ),
+  ).toHaveLength(1);
+  expect(queued[0]?.claimedAtEpoch).toBeNull();
+  expect(queueItemExistsForTurn(db, "turn-stop", extractedTurnId)).toBe(false);
+  expect(queueItemExistsForTurn(db, "turn-stop", failedTurnId)).toBe(false);
 });
 
 // ===========================================================================

@@ -38,6 +38,16 @@ function isObject(value: unknown): value is Record<PropertyKey, unknown> {
 function classifyOne(
   error: Record<PropertyKey, unknown>,
 ): WorkerErrorClassification | null {
+  // Claude Code can surface a retried transport failure as a stream message
+  // even when the query promise itself eventually resolves. These signals
+  // must cross the same connection boundary as a thrown SDK network error.
+  if (
+    (error.type === "system" && error.subtype === "api_error") ||
+    (error.type === "assistant" && error.error === "server_error")
+  ) {
+    return "connection";
+  }
+
   // A concrete HTTP status means the API was reached and answered. Even when
   // the SDK attaches a lower-level cause, the status failure is deterministic
   // for the worker retry budget.

@@ -227,6 +227,7 @@ function primeSessionState(
       rememberedSessionIds: new Set<number>(),
       hadSubstantiveText: false,
       hadIllegalTool: false,
+      connectionError: null,
     },
   });
 }
@@ -1759,6 +1760,88 @@ describe("worker server", () => {
     expect(sentPrompts.some((p) => p.includes(`<turn id="T${turn2}"`))).toBe(true);
   });
 
+  test("SDK-auto re-prime connection signal suspends instead of running the batch", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-reprime-connection",
+      project: "/tmp/project-reprime-connection",
+      title: "Reprime connection session",
+      content: "Some content",
+      insight: "- prior insight",
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+
+    createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    const turn2 = createTurn(db, sessionId, 2, "Turn 2", "Reply 2");
+    queueObs(db, sessionId, turn2, 101, "reprime-connection");
+    queueTurnStop(db, sessionId, turn2, 201);
+
+    let batchSent = false;
+    let closes = 0;
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      config: {
+        mergeThresholdChars: 100_000,
+        maxQueuedBatches: 3,
+        keepaliveLeadMs: 60_000,
+        cacheMode: "auto",
+        ...QUIET_STREAMING,
+      },
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args) as
+          | {
+              onMessage?: (message: Record<string, unknown>) => void;
+              onRemember?: (id: string) => void;
+            }
+          | undefined;
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            if (prompt.includes("CONTEXT ONLY")) {
+              deps?.onMessage?.({
+                type: "system",
+                subtype: "api_error",
+                error: new Error("socket reset"),
+              });
+              return { session_id: "worker-query" };
+            }
+            batchSent = true;
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              deps?.onRemember?.(`T${match[1]}`);
+            }
+            return { session_id: "worker-query" };
+          },
+          async close() {
+            closes += 1;
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.scanAndDrainQueue(sessionId);
+    core.sessions.get(sessionId)!.needsReprime = true;
+    await core.flushSession(sessionId);
+
+    expect(batchSent).toBe(false);
+    expect(closes).toBe(1);
+    expect(core.sessions.has(sessionId)).toBe(false);
+    expect(getTurnById(db, turn2)?.status).toBe("active");
+    const queueRows = db
+      .query<{ claimedAtEpoch: number | null }, [number]>(
+        `SELECT claimed_at_epoch AS claimedAtEpoch
+         FROM pending_queue
+         WHERE session_db_id = ?`,
+      )
+      .all(sessionId);
+    expect(queueRows).toHaveLength(2);
+    expect(queueRows.every((row) => row.claimedAtEpoch === null)).toBe(true);
+  });
+
   test("worker-driven compact: a failed re-prime sets needsReprime so the next work unit retries", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-reprime-retry",
@@ -2629,6 +2712,156 @@ describe("worker server", () => {
 
     expect(closed).toEqual([1]);
     expect(abortClassifications).toEqual(["connection"]);
+  });
+
+  test("api_error traffic does not feed the watchdog and the abort releases the turn", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-watchdog-api-error",
+      project: "/tmp/project-watchdog",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, turnId, 101, "api-error");
+    queueTurnStop(db, sessionId, turnId, 201);
+
+    let currentMs = 1_000;
+    let promptStarted = false;
+    let rejectPrompt: ((error: unknown) => void) | null = null;
+    let closeClassification: string | null = null;
+    const core = createWorkerCore({
+      db,
+      config: { ...DEFAULT_CONFIG, maxQueuedBatches: 0 },
+      now: () => 123,
+      nowMs: () => currentMs,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = fakeQueryDeps(args) as
+          | {
+              onMessage?: (message: Record<string, unknown>) => void;
+            }
+          | undefined;
+        return {
+          sessionId: "worker-query",
+          queryPid: 1111,
+          async sendPrompt() {
+            promptStarted = true;
+            deps?.onMessage?.({
+              type: "system",
+              subtype: "api_error",
+              error: new Error("socket reset"),
+            });
+            return new Promise<never>((_resolve, reject) => {
+              rejectPrompt = reject;
+            });
+          },
+          async close(abortError?: Error) {
+            if (abortError) {
+              closeClassification = classifyWorkerError(abortError);
+              rejectPrompt?.(abortError);
+            }
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const drain = core.scanAndDrainQueue();
+    await waitUntil(() => promptStarted);
+    expect(core.sessions.get(sessionId)?.lastMessageAt).toBe(0);
+
+    currentMs = 31_001;
+    await core.abortStalledSessions(currentMs);
+    await drain;
+
+    expect(closeClassification).toBe("connection");
+    expect(getTurnById(db, turnId)?.status).toBe("active");
+    const queueRows = db
+      .query<{ claimedAtEpoch: number | null }, [number]>(
+        `SELECT claimed_at_epoch AS claimedAtEpoch
+         FROM pending_queue
+         WHERE session_db_id = ?`,
+      )
+      .all(sessionId);
+    expect(queueRows).toHaveLength(2);
+    expect(queueRows.every((row) => row.claimedAtEpoch === null)).toBe(true);
+  });
+
+  test("assistant and remember progress keep an in-flight agent alive", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-watchdog-progress",
+      project: "/tmp/project-watchdog",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, turnId, 101, "progress");
+    queueTurnStop(db, sessionId, turnId, 201);
+
+    let currentMs = 1_000;
+    let promptStarted = false;
+    let closeCount = 0;
+    let resolvePrompt:
+      | ((result: { session_id: string }) => void)
+      | null = null;
+    let queryDeps:
+      | {
+          onMessage?: (message: Record<string, unknown>) => void;
+          onRemember?: (id: string) => void;
+        }
+      | undefined;
+    const core = createWorkerCore({
+      db,
+      config: { ...DEFAULT_CONFIG, maxQueuedBatches: 0 },
+      now: () => 123,
+      nowMs: () => currentMs,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        queryDeps = fakeQueryDeps(args) as typeof queryDeps;
+        return {
+          sessionId: "worker-query",
+          queryPid: 2222,
+          async sendPrompt() {
+            promptStarted = true;
+            return new Promise<{ session_id: string }>((resolve) => {
+              resolvePrompt = resolve;
+            });
+          },
+          async close() {
+            closeCount += 1;
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const drain = core.scanAndDrainQueue();
+    await waitUntil(() => promptStarted);
+
+    currentMs = 25_000;
+    queryDeps?.onMessage?.({
+      type: "assistant",
+      session_id: "worker-query",
+      message: {
+        content: [{ type: "text", text: "Working on extraction." }],
+      },
+    });
+    queryDeps?.onRemember?.(`T${turnId}`);
+
+    currentMs = 40_000;
+    await core.abortStalledSessions(currentMs);
+    expect(closeCount).toBe(0);
+
+    resolvePrompt?.({ session_id: "worker-query" });
+    await drain;
   });
 
   test("abortStalledSessions also closes idle sessions without in-flight work", async () => {
