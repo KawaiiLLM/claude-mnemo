@@ -2427,7 +2427,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.1-mrqaaeaa" : "dev";
+var BUILD_ID = true ? "0.6.2-mrqafnjr" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
