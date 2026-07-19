@@ -37,6 +37,7 @@ describe("worker query session", () => {
 
   test("sendPrompt uses the content session id until the agent session is known", async () => {
     const seenInputSessionIds: string[] = [];
+    let queryModel: string | undefined;
     let queryOptionsEnv: Record<string, string | undefined> | undefined;
     let spawnedEnv: NodeJS.ProcessEnv | undefined;
     const queryImpl = mock(
@@ -49,6 +50,7 @@ describe("worker query session", () => {
           message: { content: Array<{ text: string }> };
         }>;
         options?: {
+          model?: string;
           env?: Record<string, string | undefined>;
           spawnClaudeCodeProcess?: (options: {
             command: string;
@@ -60,6 +62,7 @@ describe("worker query session", () => {
         };
       }) =>
         (async function* () {
+          queryModel = options?.model;
           queryOptionsEnv = options?.env;
           options?.spawnClaudeCodeProcess?.({
             command: "claude",
@@ -134,6 +137,7 @@ describe("worker query session", () => {
     expect(seenInputSessionIds).toEqual(["content-session-1", "agent-session-1"]);
     expect(session.queryPid).toBe(4321);
     expect(onPid).toHaveBeenCalledWith(4321);
+    expect(queryModel).toBe("sonnet");
     expect(queryOptionsEnv).toEqual({
       HOME: "/Users/session-a",
       ANTHROPIC_AUTH_TOKEN: "session-a-token",

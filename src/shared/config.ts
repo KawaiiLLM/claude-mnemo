@@ -40,6 +40,9 @@ export interface MnemoConfig {
 }
 
 export const KNOWN_DREAM_AGENT_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
   "claude-opus-4-8",
   "claude-opus-4-6",
   "claude-opus-4-5",
@@ -51,9 +54,7 @@ export const KNOWN_DREAM_AGENT_MODELS = [
 
 export type DreamAgentModel = (typeof KNOWN_DREAM_AGENT_MODELS)[number];
 
-// Deliberately concrete: upgrading the default is a reviewed product change,
-// not an alias that can silently drift underneath irreversible curation.
-export const DEFAULT_DREAM_AGENT_MODEL: DreamAgentModel = "claude-opus-4-8";
+export const DEFAULT_DREAM_AGENT_MODEL: DreamAgentModel = "opus";
 export const DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 // A real Sonnet 5 dream run exceeded the old ten-minute ceiling after doing
 // several recall/Grep pulls and committing all nightly documents. Thirty

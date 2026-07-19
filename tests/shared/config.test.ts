@@ -150,10 +150,19 @@ describe("shared config", () => {
     expect(Number.isFinite(config.compactContextRatio)).toBe(true);
   });
 
-  test("loads a known dream agent model and warns while falling back for an invalid id", () => {
+  test("loads tier aliases and a literal dream-agent model pin", () => {
     const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
     const warnings: string[] = [];
+
+    for (const model of ["opus", "sonnet", "haiku"]) {
+      writeFileSync(
+        `${home}/.claude-mnemo/config.json`,
+        JSON.stringify({ dreamAgentModel: model }),
+      );
+      expect(loadConfig(home, { warn: (message) => warnings.push(message) }).dreamAgentModel)
+        .toBe(model);
+    }
 
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
@@ -162,6 +171,14 @@ describe("shared config", () => {
     expect(loadConfig(home, { warn: (message) => warnings.push(message) }).dreamAgentModel)
       .toBe("claude-sonnet-5");
     expect(warnings).toEqual([]);
+  });
+
+  test("defaults to opus and warns while falling back for an invalid model", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    const warnings: string[] = [];
+
+    expect(DEFAULT_DREAM_AGENT_MODEL).toBe("opus");
 
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,

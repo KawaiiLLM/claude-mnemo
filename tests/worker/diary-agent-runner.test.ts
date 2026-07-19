@@ -64,7 +64,7 @@ describe("diary agent runner", () => {
         date: "2026-07-10",
         prompt: "Write the diary for 2026-07-10.",
         toolHandlers,
-        model: "claude-opus-4-8",
+        model: "opus",
         timeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
         watchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
       });

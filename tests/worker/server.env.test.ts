@@ -8,7 +8,10 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
 import { createWorkerCore } from "../../src/worker/server";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
+import {
+  createWorkerQuerySession,
+  type WorkerQuerySession,
+} from "../../src/worker/query-session";
 
 function addQueuedTurn(
   db: Database,
@@ -164,6 +167,96 @@ describe("worker per-session env registry", () => {
     expect(listPendingQueueItems(db, sessionA.id)).toHaveLength(1);
   });
 
+  test("an inherited ANTHROPIC_MODEL cannot override extraction's explicit sonnet alias", async () => {
+    const session = upsertSession(db, {
+      contentSessionId: "explicit-sonnet-alias",
+      project: "/project/alias",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    });
+    const turnId = addQueuedTurn(db, session.id, 1);
+    let queryOptions:
+      | {
+          model?: string;
+          env?: NodeJS.ProcessEnv;
+        }
+      | undefined;
+
+    const core = createWorkerCore({
+      db,
+      workerEnv: {
+        HOME: "/Users/worker",
+        PATH: "/usr/bin",
+        ANTHROPIC_MODEL: "worker-inherited-model",
+      },
+      config: {
+        ...DEFAULT_CONFIG,
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+      },
+      createWorkerQuerySessionImpl: ((input, deps) =>
+        createWorkerQuerySession(input, {
+          ...deps,
+          mkdirSyncImpl: mock(() => undefined),
+          isProcessAliveImpl: () => false,
+          queryImpl: (({
+            prompt,
+            options,
+          }: {
+            prompt: AsyncIterable<unknown>;
+            options?: {
+              model?: string;
+              env?: NodeJS.ProcessEnv;
+            };
+          }) => {
+            queryOptions = options;
+            return (async function* () {
+              for await (const _message of prompt) {
+                deps?.onRemember?.(`T${turnId}`);
+                yield {
+                  type: "result",
+                  subtype: "success",
+                  duration_ms: 1,
+                  duration_api_ms: 1,
+                  is_error: false,
+                  num_turns: 1,
+                  result: "",
+                  total_cost_usd: 0,
+                  usage: {},
+                  modelUsage: {},
+                  permission_denials: [],
+                  uuid: "result-explicit-sonnet-alias",
+                  session_id: "agent-explicit-sonnet-alias",
+                };
+              }
+            })();
+          }) as never,
+        })) as typeof createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+      logger: { warn() {}, error() {} },
+    });
+
+    await core.registerSessionEnv("explicit-sonnet-alias", session.id, {
+      ANTHROPIC_AUTH_TOKEN: "session-auth",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "gpt-5.6-sol",
+      ANTHROPIC_MODEL: "must-not-override-sonnet",
+    });
+    await core.scanAndDrainQueue(session.id);
+
+    expect(queryOptions?.model).toBe("sonnet");
+    expect(queryOptions?.env).toMatchObject({
+      ANTHROPIC_AUTH_TOKEN: "session-auth",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "gpt-5.6-sol",
+    });
+    expect(queryOptions?.env).not.toHaveProperty("ANTHROPIC_MODEL");
+
+    await core.closeSessionQuery(session.id);
+  });
+
   test("a dream fired by session A's turn-stop spawns with A's safe env snapshot", async () => {
     const sessionA = upsertSession(db, {
       contentSessionId: "dream-env-a",
@@ -214,6 +307,8 @@ describe("worker per-session env registry", () => {
 
     await core.registerSessionEnv("dream-env-a", sessionA.id, {
       ANTHROPIC_AUTH_TOKEN: "auth-a",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "gpt-5.6-sol",
+      ANTHROPIC_MODEL: "must-not-override-opus",
       HTTP_PROXY: "http://proxy-a",
     });
     await core.scanAndDrainQueue(sessionA.id);
@@ -223,6 +318,7 @@ describe("worker per-session env registry", () => {
         HOME: "/Users/worker",
         PATH: "/usr/bin",
         ANTHROPIC_AUTH_TOKEN: "auth-a",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "gpt-5.6-sol",
         HTTP_PROXY: "http://proxy-a",
         CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
       },

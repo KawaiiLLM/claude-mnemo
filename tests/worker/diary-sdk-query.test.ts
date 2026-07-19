@@ -108,12 +108,13 @@ describe("shared SDK agent query", () => {
     }).runQuery({
       date: "2026-07-10",
       prompt: "write",
-      model: "claude-sonnet-5",
+      model: "opus",
       timeoutMs: 600_000,
       watchdogMs: 120_000,
       agentEnv: {
         HOME: "/Users/worker",
         ANTHROPIC_AUTH_TOKEN: "dream-session-auth",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "gpt-5.6-sol",
         CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
       },
       signal: new AbortController().signal,
@@ -128,6 +129,7 @@ describe("shared SDK agent query", () => {
     });
 
     expect(envelope).toBe("done");
+    expect(seenCalls[0]?.options.model).toBe("opus");
     expect(seenCalls[0]?.options.tools).toEqual(["Read", "Grep", "Write", "Edit"]);
     expect(seenCalls[0]?.options.allowedTools).toEqual([
       "mcp__diary__recall",
@@ -142,6 +144,7 @@ describe("shared SDK agent query", () => {
     expect(seenCalls[0]?.options.env).toEqual({
       HOME: "/Users/worker",
       ANTHROPIC_AUTH_TOKEN: "dream-session-auth",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "gpt-5.6-sol",
       CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
       FORCE_PROMPT_CACHING_5M: "1",
     });
