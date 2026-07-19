@@ -14,6 +14,7 @@ import type { CommitNightInput } from "../../src/diary/memory-store";
 
 import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
+import { enqueueQueueItem } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { updateTurnById } from "../../src/db/turns";
@@ -44,7 +45,7 @@ function writeStaging(dataRoot: string, night: CommitNightInput): void {
   writeFileSync(paths.diaryIndex, night.diaryIndex);
 }
 describe("createDiaryRuntime", () => {
-  test("shutdown interruption preserves dream attempts, removes staging, and retries on the next global drain", async () => {
+  test("shutdown interruption preserves dream attempts, removes staging, and retries on the next turn-stop", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-dream-shutdown-"));
@@ -61,7 +62,7 @@ describe("createDiaryRuntime", () => {
       updatedAtEpoch: null,
       completedAtEpoch: null,
     });
-    saveTurnFixture(db, {
+    const retryTurn = saveTurnFixture(db, {
       sessionId: session.id,
       promptNumber: 1,
       userPrompt: "Interrupt this dream before commit.",
@@ -137,6 +138,13 @@ describe("createDiaryRuntime", () => {
         now: () => 200,
         processDiaryItem: runtime.processDreamItem,
         logger: { warn() {}, error() {} },
+      });
+      updateTurnById(db, retryTurn.id, { status: "active" });
+      enqueueQueueItem(db, {
+        kind: "turn-stop",
+        targetId: retryTurn.id,
+        sessionDbId: session.id,
+        enqueuedAtEpoch: 200,
       });
       await core.scanAndDrainQueue();
 
@@ -557,7 +565,7 @@ describe("createDiaryRuntime", () => {
     }
   });
 
-  test("production main routes every explicitly woken date through the sole dream runtime", async () => {
+  test("production main routes a turn-stop-driven date through the sole dream runtime", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-main-runtime-"));
@@ -565,6 +573,36 @@ describe("createDiaryRuntime", () => {
     const stateStore = createDiaryStateStore(db);
     stateStore.initializeBootstrap("2026-07-11");
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const session = upsertSession(db, {
+      contentSessionId: "dream-main-turn-stop",
+      project: "/projects/dream-main",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    });
+    const turn = saveTurnFixture(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "Run the due dream after this turn.",
+      assistantResponse: "Turn complete.",
+      title: null,
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: 101,
+      updatedAtEpoch: 101,
+      observations: [],
+    });
+    updateTurnById(db, turn.id, { status: "active" });
+    enqueueQueueItem(db, {
+      kind: "turn-stop",
+      targetId: turn.id,
+      sessionDbId: session.id,
+      enqueuedAtEpoch: 101,
+    });
     const processedTargets: number[] = [];
     let factoryCalls = 0;
     let fetchHandler: ((request: Request) => Promise<Response>) | null = null;

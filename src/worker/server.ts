@@ -513,8 +513,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     { retryAtMs: number; latestTurnStopSeq: number }
   >();
   const diaryStateStore = createDiaryStateStore(deps.db);
-  let persistentRetryTimer: { handle: unknown; dueEpoch: number } | null = null;
   let diaryContinuationTimer: unknown | null = null;
+  let diaryDrainRequested = false;
   let globalScanInFlight: Promise<void> | null = null;
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
@@ -1803,54 +1803,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  function schedulePersistentRetry(): void {
-    if (!deps.processDiaryItem) {
-      return;
-    }
-
-    const dueEpoch = deps.db
-      .query<{ nextAttemptEpoch: number | null }, []>(
-        `SELECT MIN(d.next_attempt_epoch) AS nextAttemptEpoch
-         FROM diary_day_state d
-         WHERE d.next_attempt_epoch IS NOT NULL
-           AND EXISTS (
-             SELECT 1
-             FROM pending_queue q
-             WHERE q.kind = 'diary'
-               AND q.claimed_at_epoch IS NULL
-               AND q.target_id = CAST(REPLACE(d.date, '-', '') AS INTEGER)
-           )`,
-      )
-      .get()?.nextAttemptEpoch ?? null;
-
-    if (dueEpoch === null) {
-      if (persistentRetryTimer) {
-        clearTimeoutImpl(persistentRetryTimer.handle);
-        persistentRetryTimer = null;
-      }
-      return;
-    }
-
-    if (persistentRetryTimer?.dueEpoch === dueEpoch) {
-      return;
-    }
-    if (persistentRetryTimer) {
-      clearTimeoutImpl(persistentRetryTimer.handle);
-    }
-
-    const handle = setTimeoutImpl(
-      async () => {
-        if (persistentRetryTimer?.dueEpoch !== dueEpoch) {
-          return;
-        }
-        persistentRetryTimer = null;
-        await scanAndDrainQueue();
-      },
-      Math.max(0, dueEpoch - now()) * 1_000,
-    );
-    persistentRetryTimer = { handle, dueEpoch };
-  }
-
   function scheduleDiaryContinuation(): void {
     if (!deps.processDiaryItem) {
       return;
@@ -1868,17 +1820,19 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
 
     let handle: unknown;
+    // This zero-delay continuation is reserved for the explicit manual
+    // trigger. Automatic retries and remaining backlog wait for a turn-stop.
     handle = setTimeoutImpl(async () => {
       if (diaryContinuationTimer !== handle) {
         return;
       }
       diaryContinuationTimer = null;
-      await scanAndDrainQueue();
+      await scanAndDrainGlobalQueue(true);
     }, 0);
     diaryContinuationTimer = handle;
   }
 
-  async function drainQueue(sessionFilter?: number): Promise<void> {
+  async function drainQueue(sessionFilter?: number): Promise<boolean> {
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
       if (
@@ -1893,18 +1847,18 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       sessionFilter !== undefined &&
       suspendedUntilBySession.has(sessionFilter)
     ) {
-      return;
+      return false;
     }
 
     const skippedSeqs = new Set<number>();
-    let diaryProcessed = false;
+    let turnStopProcessed = false;
 
     while (true) {
       if (
         sessionFilter !== undefined &&
         suspendedUntilBySession.has(sessionFilter)
       ) {
-        return;
+        return turnStopProcessed;
       }
       const excludedSessions =
         sessionFilter === undefined
@@ -1921,31 +1875,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       if (!item) {
         await flushDrainTail(sessionFilter);
-        if (
-          sessionFilter === undefined &&
-          deps.processDiaryItem &&
-          !diaryProcessed
-        ) {
-          const diaryItem = diaryStateStore.claimNextDiaryItem(now());
-          if (diaryItem) {
-            diaryProcessed = true;
-            try {
-              await deps.processDiaryItem(diaryItem);
-            } catch (error) {
-              logger.error?.("diary queue item failed", {
-                seq: diaryItem.seq,
-                targetId: diaryItem.targetId,
-                error,
-              });
-            }
-            continue;
-          }
-        }
-        if (sessionFilter === undefined) {
-          schedulePersistentRetry();
-          scheduleDiaryContinuation();
-        }
-        return;
+        return turnStopProcessed;
       }
 
       if (item.kind === "obs") {
@@ -1985,6 +1915,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await withSessionProcessingLock(item.sessionDbId, async (state) => {
           await processTurnStopLocked(state, item);
         });
+        turnStopProcessed = true;
       } catch (error) {
         for (const seq of bufferedSeqs) {
           skippedSeqs.add(seq);
@@ -1999,22 +1930,68 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
-    if (sessionFilter !== undefined) {
-      return drainQueue(sessionFilter);
+  async function drainOneDiaryItem(): Promise<void> {
+    if (!deps.processDiaryItem) {
+      return;
+    }
+
+    const diaryItem = diaryStateStore.claimNextDiaryItem(now());
+    if (!diaryItem) {
+      return;
+    }
+
+    try {
+      await deps.processDiaryItem(diaryItem);
+    } catch (error) {
+      logger.error?.("diary queue item failed", {
+        seq: diaryItem.seq,
+        targetId: diaryItem.targetId,
+        error,
+      });
+    }
+  }
+
+  function scanAndDrainGlobalQueue(requestDiary: boolean): Promise<void> {
+    // Pure liveness scans only recover session work. A processed turn-stop (or
+    // the explicit manual trigger) earns one diary claim after that work.
+    if (requestDiary) {
+      diaryDrainRequested = true;
     }
     if (globalScanInFlight) {
       return globalScanInFlight;
     }
 
-    const scan = drainQueue();
-    const tracked = scan.finally(() => {
-      if (globalScanInFlight === tracked) {
-        globalScanInFlight = null;
+    let tracked!: Promise<void>;
+    tracked = (async () => {
+      try {
+        do {
+          const requestedForThisDrain = diaryDrainRequested;
+          diaryDrainRequested = false;
+          const turnStopProcessed = await drainQueue();
+          if (requestedForThisDrain || turnStopProcessed) {
+            await drainOneDiaryItem();
+          }
+        } while (diaryDrainRequested);
+      } finally {
+        if (globalScanInFlight === tracked) {
+          globalScanInFlight = null;
+        }
       }
-    });
+    })();
     globalScanInFlight = tracked;
     return tracked;
+  }
+
+  function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
+    if (sessionFilter !== undefined) {
+      return (async () => {
+        const turnStopProcessed = await drainQueue(sessionFilter);
+        if (turnStopProcessed) {
+          await scanAndDrainGlobalQueue(true);
+        }
+      })();
+    }
+    return scanAndDrainGlobalQueue(false);
   }
 
   async function drainSessionCompletely(sessionDbId: number): Promise<void> {

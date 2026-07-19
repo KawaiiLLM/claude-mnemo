@@ -876,38 +876,26 @@ describe("worker server", () => {
     ).toHaveLength(2);
   });
 
-  test("scanAndDrainQueue dispatches diary work before touching session state", async () => {
+  test("global worker-liveness drains do not dispatch due diary work without a turn-stop", async () => {
     const stateStore = createDiaryStateStore(db);
-    stateStore.enqueueDay({
-      date: "2026-07-10",
-      enqueuedAtEpoch: 100,
-    });
-    const processed: Array<{ targetId: number; claimedAtEpoch: number | null }> = [];
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const processDiaryItem = mock(async () => {});
     const core = createWorkerCore({
       db,
       now: () => 123,
-      processDiaryItem: async (item) => {
-        processed.push({
-          targetId: item.targetId,
-          claimedAtEpoch: item.claimedAtEpoch,
-        });
-        stateStore.acknowledgeDiaryItem(item.seq);
-      },
+      processDiaryItem,
     });
 
     await core.scanAndDrainQueue();
 
-    expect(processed).toEqual([
-      { targetId: 20260710, claimedAtEpoch: 123 },
-    ]);
-    expect(core.sessions.size).toBe(0);
-    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+    expect(processDiaryItem).not.toHaveBeenCalled();
+    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(true);
   });
 
-  test("global drain buffers session work before processing at most one diary", async () => {
+  test("a live session turn-stop dispatches exactly one due diary item", async () => {
     const sessionId = upsertSession(db, {
-      contentSessionId: "worker-session-diary-fairness",
-      project: "/tmp/project-diary-fairness",
+      contentSessionId: "worker-session-turn-driven-diary",
+      project: "/tmp/project-turn-driven-diary",
       title: null,
       content: null,
       insight: null,
@@ -916,34 +904,88 @@ describe("worker server", () => {
       completedAtEpoch: null,
     }).id;
     const turnId = createTurn(db, sessionId, 1);
-    const observationId = queueObs(db, sessionId, turnId, 100, "diary-fairness");
+    queueTurnStop(db, sessionId, turnId, 101);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const sentPrompts: string[] = [];
+    const processDiaryItem = mock(async (item) => {
+      stateStore.acknowledgeDiaryItem(item.seq);
+    });
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      config: {
+        ...DEFAULT_CONFIG,
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+      },
+      createWorkerQuerySessionImpl: healthyQueryImpl(sentPrompts),
+      processDiaryItem,
+    });
+
+    await core.scanAndDrainQueue(sessionId);
+
+    expect(sentPrompts).toHaveLength(1);
+    expect(processDiaryItem).toHaveBeenCalledTimes(1);
+    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+  });
+
+  test("global drain buffers session work before processing at most one diary", async () => {
+    const triggerSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-diary-trigger",
+      project: "/tmp/project-diary-trigger",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const triggerTurnId = createTurn(db, triggerSessionId, 1);
+    queueTurnStop(db, triggerSessionId, triggerTurnId, 103);
+    const bufferedSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-diary-buffered",
+      project: "/tmp/project-diary-buffered",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const bufferedTurnId = createTurn(db, bufferedSessionId, 1);
+    const observationId = queueObs(
+      db,
+      bufferedSessionId,
+      bufferedTurnId,
+      100,
+      "diary-fairness",
+    );
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 101 });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 102 });
-    const sawBufferedObservation: boolean[] = [];
-    let core!: ReturnType<typeof createWorkerCore>;
-    core = createWorkerCore({
+    const sessionWorkBufferedBeforeDiary: boolean[] = [];
+    const core = createWorkerCore({
       db,
       now: () => 123,
-      setTimeoutImpl: (() => 0 as unknown as NodeJS.Timeout) as typeof setTimeout,
       processDiaryItem: async (item) => {
-        sawBufferedObservation.push(
+        sessionWorkBufferedBeforeDiary.push(
           core.buffers
-            .get(sessionId)
+            .get(bufferedSessionId)
             ?.items.some((buffered) => buffered.targetId === observationId) ?? false,
         );
         stateStore.acknowledgeDiaryItem(item.seq);
       },
     });
 
-    await core.scanAndDrainQueue();
+    await core.scanAndDrainQueue(triggerSessionId);
 
-    expect(sawBufferedObservation).toEqual([true]);
+    expect(sessionWorkBufferedBeforeDiary).toEqual([true]);
     expect(stateStore.hasQueuedDay("2026-07-09")).toBe(false);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(true);
   });
 
-  test("global drain continues a multi-day diary backlog without another hook while rechecking session work between days", async () => {
+  test("each turn-stop drain processes at most one diary without self-continuing the backlog", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-diary-continuation",
       project: "/tmp/project-diary-continuation",
@@ -954,10 +996,8 @@ describe("worker server", () => {
       updatedAtEpoch: 1,
       completedAtEpoch: null,
     }).id;
-    const turnId = createTurn(db, sessionId, 1);
-    const observationIds = [
-      queueObs(db, sessionId, turnId, 100, "diary-continuation-1"),
-    ];
+    const firstTurnId = createTurn(db, sessionId, 1);
+    queueTurnStop(db, sessionId, firstTurnId, 100);
     const stateStore = createDiaryStateStore(db);
     for (const [offset, date] of [
       "2026-07-08",
@@ -967,74 +1007,59 @@ describe("worker server", () => {
       stateStore.enqueueDay({ date, enqueuedAtEpoch: 101 + offset });
     }
 
-    const scheduled: Array<{
-      callback: () => void | Promise<void>;
-      delayMs: number;
-    }> = [];
-    const bufferedCounts: number[] = [];
-    let core!: ReturnType<typeof createWorkerCore>;
-    core = createWorkerCore({
+    const processedDates: number[] = [];
+    const core = createWorkerCore({
       db,
       now: () => 123,
-      setTimeoutImpl(callback, delayMs) {
-        scheduled.push({ callback, delayMs });
-        return Symbol("diary-continuation");
-      },
-      clearTimeoutImpl: () => {},
       async processDiaryItem(item) {
-        bufferedCounts.push(core.buffers.get(sessionId)?.items.length ?? 0);
+        processedDates.push(item.targetId);
         stateStore.acknowledgeDiaryItem(item.seq);
-        if (bufferedCounts.length < 3) {
-          observationIds.push(
-            queueObs(
-              db,
-              sessionId,
-              turnId,
-              100 + bufferedCounts.length,
-              `diary-continuation-${bufferedCounts.length + 1}`,
-            ),
-          );
-        }
       },
     });
 
-    await core.scanAndDrainQueue();
-    expect(bufferedCounts).toEqual([1]);
-    expect(scheduled.map((entry) => entry.delayMs)).toEqual([0]);
+    await core.scanAndDrainQueue(sessionId);
+    expect(processedDates).toEqual([20260708]);
 
-    await scheduled.shift()!.callback();
-    expect(bufferedCounts).toEqual([1, 2]);
-    expect(scheduled.map((entry) => entry.delayMs)).toEqual([0]);
+    await Promise.resolve();
+    expect(processedDates).toEqual([20260708]);
 
-    await scheduled.shift()!.callback();
-    expect(bufferedCounts).toEqual([1, 2, 3]);
-    expect(scheduled).toEqual([]);
-    expect(observationIds).toHaveLength(3);
+    const secondTurnId = createTurn(db, sessionId, 2);
+    queueTurnStop(db, sessionId, secondTurnId, 200);
+    await core.scanAndDrainQueue(sessionId);
+    expect(processedDates).toEqual([20260708, 20260709]);
     expect(stateStore.hasQueuedDay("2026-07-08")).toBe(false);
     expect(stateStore.hasQueuedDay("2026-07-09")).toBe(false);
-    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(true);
   });
 
-  test("a persisted diary backoff schedules one global retry at its due time", async () => {
+  test("a failed dream does not self-refire at its retry epoch and succeeds on the next turn-stop", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-diary-event-retry",
+      project: "/tmp/project-diary-event-retry",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const firstTurnId = createTurn(db, sessionId, 1);
+    queueTurnStop(db, sessionId, firstTurnId, 100);
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     let nowEpoch = 100;
     let attempts = 0;
-    let scheduled:
-      | { callback: () => void | Promise<void>; delayMs: number }
-      | null = null;
-    const setTimeoutImpl = mock(
-      (callback: () => void | Promise<void>, delayMs: number): unknown => {
-        scheduled = { callback, delayMs };
-        return Symbol("diary-retry");
-      },
-    );
-    const clearTimeoutImpl = mock((_handle: unknown): void => {});
+    const scheduled: Array<{
+      callback: () => void | Promise<void>;
+      dueEpoch: number;
+    }> = [];
     const core = createWorkerCore({
       db,
       now: () => nowEpoch,
-      setTimeoutImpl,
-      clearTimeoutImpl,
+      setTimeoutImpl(callback, delayMs) {
+        scheduled.push({ callback, dueEpoch: nowEpoch + delayMs / 1_000 });
+        return Symbol("clock-callback");
+      },
       logger: { warn: () => {}, error: () => {} },
       processDiaryItem: async (item) => {
         attempts += 1;
@@ -1047,25 +1072,140 @@ describe("worker server", () => {
           });
           throw new Error("temporary failure");
         }
-        stateStore.acknowledgeDiaryItem(item.seq);
+        stateStore.settleDreamDay({
+          date: "2026-07-10",
+          queueSeq: item.seq,
+          watermark: "settled-on-next-turn",
+          settledAtEpoch: nowEpoch,
+        });
       },
     });
 
-    await core.scanAndDrainQueue();
+    await core.scanAndDrainQueue(sessionId);
 
     expect(attempts).toBe(1);
-    expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
-    expect(scheduled?.delayMs).toBe(60_000);
-
-    nowEpoch = 159;
-    await core.scanAndDrainQueue();
-    expect(attempts).toBe(1);
-    expect(setTimeoutImpl).toHaveBeenCalledTimes(1);
-
     nowEpoch = 160;
-    await scheduled!.callback();
+    for (const timer of scheduled.filter((entry) => entry.dueEpoch <= nowEpoch)) {
+      await timer.callback();
+    }
+    expect(attempts).toBe(1);
+
+    const secondTurnId = createTurn(db, sessionId, 2);
+    queueTurnStop(db, sessionId, secondTurnId, 160);
+    await core.scanAndDrainQueue(sessionId);
+
     expect(attempts).toBe(2);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+    expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+      needsRegen: false,
+      settledAtEpoch: 160,
+    });
+  });
+
+  test("turn-stop retries respect next_attempt_epoch as a floor", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-diary-retry-floor",
+      project: "/tmp/project-diary-retry-floor",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const failedItem = stateStore.claimNextDiaryItem(100)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: failedItem.seq,
+      error: "wait for floor",
+      retryAtEpoch: 200,
+    });
+    let nowEpoch = 150;
+    const processDiaryItem = mock(async (item) => {
+      stateStore.settleDreamDay({
+        date: "2026-07-10",
+        queueSeq: item.seq,
+        watermark: "after-floor",
+        settledAtEpoch: nowEpoch,
+      });
+    });
+    const core = createWorkerCore({
+      db,
+      now: () => nowEpoch,
+      processDiaryItem,
+    });
+
+    const earlyTurnId = createTurn(db, sessionId, 1);
+    queueTurnStop(db, sessionId, earlyTurnId, 150);
+    await core.scanAndDrainQueue(sessionId);
+    expect(processDiaryItem).not.toHaveBeenCalled();
+
+    nowEpoch = 200;
+    const dueTurnId = createTurn(db, sessionId, 2);
+    queueTurnStop(db, sessionId, dueTurnId, 200);
+    await core.scanAndDrainQueue(sessionId);
+
+    expect(processDiaryItem).toHaveBeenCalledTimes(1);
+    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+  });
+
+  test("turn activity does not re-run settled or terminal diary days", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-diary-idempotency",
+      project: "/tmp/project-diary-idempotency",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const stateStore = createDiaryStateStore(db);
+
+    stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 90 });
+    const firstTerminalAttempt = stateStore.claimNextDiaryItem(90)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-09",
+      queueSeq: firstTerminalAttempt.seq,
+      error: "first failure",
+      retryAtEpoch: 91,
+    });
+    const secondTerminalAttempt = stateStore.claimNextDiaryItem(91)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-09",
+      queueSeq: secondTerminalAttempt.seq,
+      error: "second failure",
+      retryAtEpoch: 92,
+    });
+
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const settledItem = stateStore.claimNextDiaryItem(100)!;
+    stateStore.settleDreamDay({
+      date: "2026-07-10",
+      queueSeq: settledItem.seq,
+      watermark: "already-committed",
+      settledAtEpoch: 100,
+    });
+
+    const processDiaryItem = mock(async () => {});
+    const core = createWorkerCore({
+      db,
+      now: () => 123,
+      processDiaryItem,
+    });
+    const turnId = createTurn(db, sessionId, 1);
+    queueTurnStop(db, sessionId, turnId, 123);
+
+    await core.scanAndDrainQueue(sessionId);
+
+    expect(processDiaryItem).not.toHaveBeenCalled();
+    expect(stateStore.getDayState("2026-07-09")?.terminal).toBe(true);
+    expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+      needsRegen: false,
+      settledAtEpoch: 100,
+    });
   });
 
   test("scanAndDrainQueue eagerly flushes every closed batch and full tail", async () => {
@@ -3049,6 +3189,137 @@ describe("worker server", () => {
     } finally {
       (process as typeof process & { exit: typeof process.exit }).exit = originalExit;
       globalThis.setInterval = originalSetInterval;
+    }
+  });
+
+  test("main worker-start and POST /wake do not dispatch a due diary without a new turn-stop", async () => {
+    const runtimeDb = createDatabase(":memory:");
+    initializeSchema(runtimeDb);
+    const stateStore = createDiaryStateStore(runtimeDb);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const processDiaryItem = mock(async () => {});
+    let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
+    const originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+
+    try {
+      await main({
+        db: runtimeDb,
+        env: {},
+        now: () => 123,
+        processDiaryItem,
+        logger: { warn() {}, error() {} },
+        BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop() {} };
+        }) as typeof Bun.serve),
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+        processImpl: {
+          pid: process.pid,
+          on: (() => process) as typeof process.on,
+          exit: (() => undefined as never) as typeof process.exit,
+        },
+      });
+
+      expect(processDiaryItem).not.toHaveBeenCalled();
+      expect(fetchHandler).not.toBeNull();
+
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/wake", { method: "POST" }),
+      );
+      expect(response.status).toBe(200);
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+
+      expect(processDiaryItem).not.toHaveBeenCalled();
+      expect(stateStore.hasQueuedDay("2026-07-10")).toBe(true);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      runtimeDb.close();
+    }
+  });
+
+  test("main POST /dream resets, enqueues, and promptly drains the requested day", async () => {
+    const runtimeDb = createDatabase(":memory:");
+    initializeSchema(runtimeDb);
+    const stateStore = createDiaryStateStore(runtimeDb);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
+    const first = stateStore.claimNextDiaryItem(1)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: first.seq,
+      error: "first failure",
+      retryAtEpoch: 2,
+    });
+    const second = stateStore.claimNextDiaryItem(2)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: second.seq,
+      error: "second failure",
+      retryAtEpoch: 3,
+    });
+    expect(stateStore.getDayState("2026-07-10")?.terminal).toBe(true);
+
+    const statesAtDispatch: Array<{
+      terminal: boolean;
+      attemptCount: number;
+      needsRegen: boolean;
+    }> = [];
+    const processDiaryItem = mock(async (item) => {
+      const dayState = stateStore.getDayState("2026-07-10")!;
+      statesAtDispatch.push({
+        terminal: dayState.terminal,
+        attemptCount: dayState.attemptCount,
+        needsRegen: dayState.needsRegen,
+      });
+      stateStore.acknowledgeDiaryItem(item.seq);
+    });
+    let fetchHandler: ((req: Request) => Promise<Response>) | null = null;
+    const originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
+
+    try {
+      await main({
+        db: runtimeDb,
+        env: {},
+        now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1_000),
+        processDiaryItem,
+        logger: { warn() {}, error() {} },
+        BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
+          fetchHandler = options.fetch;
+          return { stop() {} };
+        }) as typeof Bun.serve),
+        existsSyncImpl: () => false,
+        mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
+        writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
+        unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+        processImpl: {
+          pid: process.pid,
+          on: (() => process) as typeof process.on,
+          exit: (() => undefined as never) as typeof process.exit,
+        },
+      });
+
+      const response = await fetchHandler!(
+        new Request("http://127.0.0.1:37778/dream", {
+          method: "POST",
+          body: JSON.stringify({ date: "2026-07-10" }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ enqueued: "2026-07-10" });
+
+      await waitUntil(() => processDiaryItem.mock.calls.length === 1);
+      expect(processDiaryItem).toHaveBeenCalledTimes(1);
+      expect(statesAtDispatch).toEqual([
+        { terminal: false, attemptCount: 0, needsRegen: true },
+      ]);
+      expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+      runtimeDb.close();
     }
   });
 
