@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -182,6 +182,27 @@ describe("handleContextHook", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  test("SessionStart captures by content id before a numeric DB row exists", async () => {
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const handler = createContextHandler({
+      db,
+      workerClientDeps: { fetchImpl },
+      workerEnv: { ANTHROPIC_API_KEY: "new-session-key", AWS_PROFILE: "excluded" },
+      enableSessionEnvCapture: true,
+    });
+
+    const result = await handler(createInput({ sessionId: "brand-new-session" }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(result.continue).toBe(true);
+    expect(result.asyncWork).toBeUndefined();
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      action: "capture",
+      content_session_id: "brand-new-session",
+      env: { ANTHROPIC_API_KEY: "new-session-key" },
+    });
   });
 
   test("startup upserts a minimal current session even when memory rows do not exist", async () => {

@@ -842,8 +842,20 @@ describe("createDiaryRuntime", () => {
       });
 
       expect(fetchHandler).not.toBeNull();
+      // A turn-stop is only processed once its session's env is registered
+      // (presence gate), so announce the session's env via the real capture
+      // route (/trigger) — this both registers the env and wakes the worker,
+      // exactly as a production turn-stop flush does.
       const response = await fetchHandler!(
-        new Request("http://127.0.0.1:37778/wake", { method: "POST" }),
+        new Request("http://127.0.0.1:37778/trigger", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "wake",
+            content_session_id: "dream-main-turn-stop",
+            session_id: session.id,
+            env: { ANTHROPIC_AUTH_TOKEN: "dream-main-token" },
+          }),
+        }),
       );
       expect(response.status).toBe(200);
 

@@ -16,7 +16,7 @@ import {
   readAllTranscriptEntries,
 } from "../../shared/transcript-parser";
 import { stripPrivateTags } from "../../shared/tag-stripping";
-import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
+import { notifyWorkerTrigger, type WorkerClientDeps } from "../../worker/client";
 import {
   applyInvalidationSets,
   computeInvalidationSets,
@@ -224,7 +224,12 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       continue: true,
       exitCode: HOOK_SUCCESS_EXIT_CODE,
       asyncWork: async () => {
-        await notifyWorkerWake(
+        await notifyWorkerTrigger(
+          {
+            action: "wake",
+            contentSessionId: session.contentSessionId,
+            sessionDbId: session.id,
+          },
           dependencies.workerClientDeps,
           dependencies.workerEnv,
         );

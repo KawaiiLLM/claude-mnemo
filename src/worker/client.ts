@@ -8,12 +8,50 @@ import {
   HOOK_READINESS_TIMEOUT_MS,
 } from "../shared/hook-constants";
 import { WORKER_PID_PATH } from "../shared/paths";
+import {
+  captureSessionEnv,
+  type CapturedSessionEnv,
+} from "../mnemosyne/env";
 
 const WORKER_PORT = 37778;
 const WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 const WAKE_TIMEOUT_MS = 500;
 const FLUSH_TIMEOUT_MS = 500;
 const COMPACT_TIMEOUT_MS = 5_000;
+
+export type WorkerTriggerAction = "capture" | "wake" | "compact" | "finish";
+
+export interface WorkerTriggerInput {
+  action: WorkerTriggerAction;
+  contentSessionId: string;
+  sessionDbId?: number;
+  transcriptPath?: string;
+}
+
+export interface WorkerTriggerPayload {
+  action: WorkerTriggerAction;
+  content_session_id: string;
+  session_id?: number;
+  transcript_path?: string;
+  env: CapturedSessionEnv;
+}
+
+export function buildWorkerTriggerPayload(
+  input: WorkerTriggerInput,
+  env: NodeJS.ProcessEnv = process.env,
+): WorkerTriggerPayload {
+  return {
+    action: input.action,
+    content_session_id: input.contentSessionId,
+    ...(input.sessionDbId === undefined
+      ? {}
+      : { session_id: input.sessionDbId }),
+    ...(input.transcriptPath === undefined
+      ? {}
+      : { transcript_path: input.transcriptPath }),
+    env: captureSessionEnv(env),
+  };
+}
 
 export interface WorkerClientDeps {
   fetchImpl?: typeof fetch;
@@ -316,78 +354,80 @@ export async function notifyWorkerWake(
 
 export async function notifyWorkerFlush(
   sessionDbId: number,
+  contentSessionId: string,
   deps: WorkerClientDeps = {},
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const flushEnv = {
-    ...env,
-    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId),
-  } satisfies NodeJS.ProcessEnv;
-
-  const status = await ensureCompatibleWorker(deps);
-
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-
-  if (status === "down") {
-    spawnWorkerProcess(deps, flushEnv);
-    return;
-  }
-
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionDbId,
-      }),
-      signal: createAbortSignal(FLUSH_TIMEOUT_MS),
-    });
-
-    if (response.ok) {
-      return;
-    }
-  } catch {
-    // Fall through to a startup-flush worker spawn.
-  }
-
-  spawnWorkerProcess(deps, flushEnv);
+  await notifyWorkerTrigger(
+    { action: "finish", contentSessionId, sessionDbId },
+    deps,
+    env,
+    FLUSH_TIMEOUT_MS,
+  );
 }
 
 export async function notifyWorkerCompact(
   sessionDbId: number,
+  contentSessionId: string,
   transcriptPath: string | undefined,
   deps: WorkerClientDeps = {},
   env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  await notifyWorkerTrigger(
+    {
+      action: "compact",
+      contentSessionId,
+      sessionDbId,
+      transcriptPath,
+    },
+    deps,
+    env,
+    COMPACT_TIMEOUT_MS,
+    true,
+  );
+}
+
+export async function notifyWorkerTrigger(
+  input: WorkerTriggerInput,
+  deps: WorkerClientDeps = {},
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs = WAKE_TIMEOUT_MS,
+  throwOnFailure = false,
 ): Promise<void> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const status = await ensureCompatibleWorker(deps);
 
   if (status === "unrecoverable-stale") {
     logUnrecoverableStaleWorker();
-    throw new Error("Stale worker detected but no pid handle is available for restart.");
+    if (throwOnFailure) {
+      throw new Error("Stale worker detected but no pid handle is available for restart.");
+    }
+    return;
   }
 
   if (status === "down") {
     spawnWorkerProcess(deps, env);
     const ready = await waitForCompatibleWorker(deps);
     if (!ready) {
-      throw new Error("Worker did not become ready before compact request.");
+      if (throwOnFailure) {
+        throw new Error("Worker did not become ready before trigger request.");
+      }
+      return;
     }
   }
 
-  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: sessionDbId,
-      transcript_path: transcriptPath ?? null,
-    }),
-    signal: createAbortSignal(COMPACT_TIMEOUT_MS),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Worker compact request failed with status ${response.status}.`);
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/trigger`, {
+      method: "POST",
+      body: JSON.stringify(buildWorkerTriggerPayload(input, env)),
+      signal: createAbortSignal(timeoutMs),
+    });
+    if (!response.ok && throwOnFailure) {
+      throw new Error(`Worker trigger request failed with status ${response.status}.`);
+    }
+  } catch (error) {
+    if (throwOnFailure) {
+      throw error;
+    }
   }
 }

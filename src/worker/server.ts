@@ -17,6 +17,7 @@ import { createDiaryStateStore } from "../db/diary-state";
 import { contentDateAt } from "../diary/calendar";
 import {
   getSession,
+  getSessionByContentId,
   updateCompactAnchor,
   updateLastAgentSessionId,
 } from "../db/sessions";
@@ -92,6 +93,11 @@ import {
   createWorkerAbortError,
   resolveWorkerRetryDelayMs,
 } from "./error-classifier";
+import {
+  buildIsolatedEnv,
+  captureSessionEnv,
+  type CapturedSessionEnv,
+} from "../mnemosyne/env";
 
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
@@ -236,6 +242,8 @@ function resetUnitSignals(state: SessionState): void {
 
 export interface WorkerCoreDeps {
   db: Database;
+  workerEnv?: NodeJS.ProcessEnv;
+  sessionEnvRegistry?: Map<string, CapturedSessionEnv>;
   now?: () => number;
   nowMs?: () => number;
   processDiaryItem?: (item: PendingQueueItem) => Promise<void>;
@@ -273,6 +281,15 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
     transcriptPath?: string | null,
   ) => Promise<void>;
   handleDreamImpl?: (date: unknown) => ManualDreamResult;
+  registerSessionEnvImpl?: (
+    contentSessionId: string,
+    sessionDbId: number | undefined,
+    env: NodeJS.ProcessEnv,
+  ) => Promise<number | null>;
+  clearSessionEnvImpl?: (
+    contentSessionId: string,
+    sessionDbId?: number,
+  ) => void;
   recoverFromCrashImpl?: () => void;
   now?: () => number;
   pidPath?: string;
@@ -327,6 +344,12 @@ export interface WorkerCore {
   runRetryTick(nowMs?: number): Promise<void>;
   /** Ticket 02 calls this when a fresh session env capture is registered. */
   clearBlockedSession(sessionDbId: number): void;
+  registerSessionEnv(
+    contentSessionId: string,
+    sessionDbId: number | undefined,
+    env: NodeJS.ProcessEnv,
+  ): Promise<number | null>;
+  clearSessionEnv(contentSessionId: string, sessionDbId?: number): void;
   hasLiveQuerySessions(): boolean;
   getGlobalScanInFlight(): Promise<void> | null;
   // D1/T2/T3 derailment state machine. Task 10 wires the flush callers to it;
@@ -342,22 +365,6 @@ export interface WorkerCore {
 
 function defaultNoopDrain(): Promise<void> {
   return Promise.resolve();
-}
-
-function getStartupFlushSessionId(
-  env: NodeJS.ProcessEnv = process.env,
-): number | null {
-  const raw = env.CLAUDE_MNEMO_FLUSH_SESSION_ID;
-  if (!raw) {
-    return null;
-  }
-
-  const sessionId = Number(raw);
-  if (!Number.isInteger(sessionId) || sessionId <= 0) {
-    return null;
-  }
-
-  return sessionId;
 }
 
 export function createWorkerServerState(nowMs = Date.now()): WorkerServerState {
@@ -496,6 +503,23 @@ function pruneBufferedUndoneItems(
   return { activeItems, prunedSeqs };
 }
 
+function capturedEnvsEqual(
+  left: CapturedSessionEnv | undefined,
+  right: CapturedSessionEnv,
+): boolean {
+  if (!left) {
+    return false;
+  }
+
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return rightEntries.every(([key, value]) => left[key as keyof CapturedSessionEnv] === value);
+}
+
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1000));
   const nowMs = deps.nowMs ?? Date.now;
@@ -517,6 +541,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     { retryAtMs: number; latestTurnStopSeq: number }
   >();
   const blockedUntilBySession = new Map<number, number>();
+  const sessionEnvRegistry = deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
+  const enforceSessionEnvPresence = deps.sessionEnvRegistry !== undefined;
+  const contentSessionIdByDbId = new Map<number, string>();
   const isSessionRetryGated = (sessionDbId: number): boolean =>
     suspendedUntilBySession.has(sessionDbId) ||
     blockedUntilBySession.has(sessionDbId);
@@ -811,6 +838,26 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return selected;
   }
 
+  function getRegisteredSessionEnv(
+    sessionDbId: number,
+  ): CapturedSessionEnv | undefined {
+    const knownContentSessionId = contentSessionIdByDbId.get(sessionDbId);
+    if (knownContentSessionId) {
+      return sessionEnvRegistry.get(knownContentSessionId);
+    }
+
+    const session = getSession(deps.db, sessionDbId);
+    if (!session) {
+      return undefined;
+    }
+
+    const captured = sessionEnvRegistry.get(session.contentSessionId);
+    if (captured) {
+      contentSessionIdByDbId.set(sessionDbId, session.contentSessionId);
+    }
+    return captured;
+  }
+
   function getOrCreateSessionState(sessionDbId: number): SessionState {
     let state = sessions.get(sessionDbId);
 
@@ -941,12 +988,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
+    const capturedSessionEnv = getRegisteredSessionEnv(state.sessionDbId);
+    if (enforceSessionEnvPresence && !capturedSessionEnv) {
+      throw new Error(`Missing captured env for worker session ${state.sessionDbId}.`);
+    }
     state.querySession = createWorkerQuerySessionImpl(
       {
         db: deps.db,
         sessionDbId: state.sessionDbId,
         contentSessionId: session.contentSessionId,
         project: session.project,
+        agentEnv: capturedSessionEnv
+          ? buildIsolatedEnv(
+              deps.workerEnv ?? process.env,
+              capturedSessionEnv,
+            )
+          : buildIsolatedEnv(deps.workerEnv ?? process.env),
         config,
         resumeAgentSessionId: options.forceFresh
           ? null
@@ -1282,6 +1339,75 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     })();
 
     return state.closing;
+  }
+
+  async function recycleSessionQueryLocked(state: SessionState): Promise<void> {
+    if (!state.querySession) {
+      return;
+    }
+
+    const runtime = state.querySession;
+    const queryPid = state.queryPid;
+    await Promise.race([
+      runtime.close(),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 5_000);
+      }),
+    ]);
+    if (queryPid && isProcessAliveImpl(queryPid)) {
+      try {
+        process.kill(queryPid, "SIGKILL");
+      } catch {}
+    }
+    state.querySession = null;
+    state.queryPid = undefined;
+    state.lastPushAt = 0;
+    state.lastMessageAt = 0;
+  }
+
+  async function registerSessionEnv(
+    contentSessionId: string,
+    sessionDbId: number | undefined,
+    rawEnv: NodeJS.ProcessEnv,
+  ): Promise<number | null> {
+    const captured = captureSessionEnv(rawEnv);
+    const previous = sessionEnvRegistry.get(contentSessionId);
+    const changed = !capturedEnvsEqual(previous, captured);
+    sessionEnvRegistry.set(contentSessionId, captured);
+
+    const suppliedSession = sessionDbId === undefined
+      ? null
+      : getSession(deps.db, sessionDbId);
+    const dbSession = suppliedSession?.contentSessionId === contentSessionId
+      ? suppliedSession
+      : getSessionByContentId(deps.db, contentSessionId);
+    if (!dbSession) {
+      return null;
+    }
+
+    contentSessionIdByDbId.set(dbSession.id, contentSessionId);
+    blockedUntilBySession.delete(dbSession.id);
+    if (changed && sessions.get(dbSession.id)?.querySession) {
+      await withSessionProcessingLock(dbSession.id, async (state) => {
+        await recycleSessionQueryLocked(state);
+      });
+    }
+    return dbSession.id;
+  }
+
+  function clearSessionEnv(
+    contentSessionId: string,
+    sessionDbId?: number,
+  ): void {
+    sessionEnvRegistry.delete(contentSessionId);
+    if (sessionDbId !== undefined) {
+      contentSessionIdByDbId.delete(sessionDbId);
+    }
+    for (const [dbId, knownContentSessionId] of contentSessionIdByDbId) {
+      if (knownContentSessionId === contentSessionId) {
+        contentSessionIdByDbId.delete(dbId);
+      }
+    }
   }
 
   async function suspendSessionAfterRetryableError(
@@ -1885,6 +2011,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       }
     }
     if (
+      enforceSessionEnvPresence &&
+      sessionFilter !== undefined &&
+      !getRegisteredSessionEnv(sessionFilter)
+    ) {
+      return false;
+    }
+    if (
       sessionFilter !== undefined &&
       isSessionRetryGated(sessionFilter)
     ) {
@@ -1918,6 +2051,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       if (!item) {
         await flushDrainTail(sessionFilter);
         return turnStopProcessed;
+      }
+
+      if (
+        enforceSessionEnvPresence &&
+        !getRegisteredSessionEnv(item.sessionDbId)
+      ) {
+        releaseQueueClaim(deps.db, item.seq);
+        skippedSeqs.add(item.seq);
+        continue;
       }
 
       if (item.kind === "obs") {
@@ -2380,6 +2522,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     },
     sendWorkUnit,
     reopenQuerySessionFresh,
+    registerSessionEnv,
+    clearSessionEnv,
     clearBlockedSession(sessionDbId) {
       blockedUntilBySession.delete(sessionDbId);
     },
@@ -2548,6 +2692,8 @@ export function createWorkerFetchHandler(
   state: WorkerServerState = createWorkerServerState(deps.nowMs?.() ?? Date.now()),
 ): (req: Request) => Promise<Response> {
   const runtimeDb = deps.db ?? createDatabase();
+  const sessionEnvRegistry =
+    deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
   const runtimeProcessors =
     deps.scanAndDrainQueue ||
     deps.handleFlushImpl ||
@@ -2563,6 +2709,8 @@ export function createWorkerFetchHandler(
       ? undefined
       : createWorkerCore({
           db: runtimeDb,
+          workerEnv: deps.workerEnv ?? deps.env,
+          sessionEnvRegistry,
           now: deps.now,
           nowMs: deps.nowMs,
           config: deps.config,
@@ -2592,6 +2740,10 @@ export function createWorkerFetchHandler(
     deps.handleDreamImpl ??
     runtime?.triggerManualDream ??
     (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  const registerSessionEnvImpl =
+    deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
+  const clearSessionEnvImpl =
+    deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
   let wakeScanInFlight: Promise<void> | null = null;
   let activeGlobalWork = 0;
   let resolveGlobalWork: (() => void) | null = null;
@@ -2653,6 +2805,82 @@ export function createWorkerFetchHandler(
       }
 
       if (req.method === "POST" && url.pathname === "/wake") {
+        return handleWake();
+      }
+
+      if (req.method === "POST" && url.pathname === "/trigger") {
+        const payload = (await req.json()) as {
+          action?: "capture" | "wake" | "compact" | "finish";
+          content_session_id?: string;
+          session_id?: number;
+          transcript_path?: string | null;
+          env?: Record<string, unknown>;
+        };
+        if (
+          !payload.action ||
+          typeof payload.content_session_id !== "string" ||
+          payload.content_session_id === "" ||
+          !payload.env ||
+          typeof payload.env !== "object" ||
+          Array.isArray(payload.env)
+        ) {
+          return new Response("valid trigger identity and env are required", {
+            status: 400,
+          });
+        }
+
+        const capturedEnv = Object.fromEntries(
+          Object.entries(payload.env).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        );
+        const associatedSessionId = registerSessionEnvImpl
+          ? await registerSessionEnvImpl(
+              payload.content_session_id,
+              payload.session_id,
+              capturedEnv,
+            )
+          : payload.session_id ?? null;
+
+        if (payload.action === "finish") {
+          if (associatedSessionId === null) {
+            clearSessionEnvImpl?.(payload.content_session_id, payload.session_id);
+            return new Response(null, { status: 200 });
+          }
+          const finish = handleFlushImpl(associatedSessionId)
+            .catch((error) => {
+              deps.logger?.error?.("session finish request failed", {
+                sessionId: associatedSessionId,
+                error,
+              });
+            })
+            .finally(() => {
+              clearSessionEnvImpl?.(
+                payload.content_session_id!,
+                associatedSessionId,
+              );
+            });
+          trackGlobalWork(finish);
+          return new Response(null, { status: 200 });
+        }
+
+        if (payload.action === "compact") {
+          if (associatedSessionId === null) {
+            return new Response("session_id is required", { status: 400 });
+          }
+          const compact = handleCompactImpl(
+            associatedSessionId,
+            payload.transcript_path,
+          ).catch((error) => {
+            deps.logger?.error?.("compact request failed", {
+              sessionId: associatedSessionId,
+              error,
+            });
+          });
+          trackGlobalWork(compact);
+          return new Response(null, { status: 200 });
+        }
+
         return handleWake();
       }
 
@@ -2845,6 +3073,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config = deps.config ?? loadConfig();
+  const sessionEnvRegistry = new Map<string, CapturedSessionEnv>();
 
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
@@ -2860,6 +3089,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   const core = createWorkerCore({
     db,
+    workerEnv: env,
+    sessionEnvRegistry,
     now: deps.now,
     nowMs: deps.nowMs,
     config,
@@ -2884,6 +3115,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
+      registerSessionEnvImpl: core.registerSessionEnv,
+      clearSessionEnvImpl: core.clearSessionEnv,
       // Injecting core pieces above leaves the fetch factory's internal
       // runtime unset, so /dream must be wired explicitly or it 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
@@ -2894,6 +3127,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
+      hostname: "127.0.0.1",
       fetch: fetchHandler,
     });
   } catch (error) {
@@ -2927,18 +3161,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     });
   }
 
-  const startupFlushSessionId = getStartupFlushSessionId(env);
-  if (startupFlushSessionId !== null) {
-    // Route the startup hint through the same fire-and-forget tracking barrier
-    // as HTTP /flush. Otherwise the first lifecycle tick could observe zero
-    // HTTP requests while this bounded tail is still between query sessions.
-    void fetchHandler(
-      new Request(`http://127.0.0.1:${WORKER_PORT}/flush`, {
-        method: "POST",
-        body: JSON.stringify({ session_id: startupFlushSessionId }),
-      }),
-    );
-  }
   setInterval(() => {
     ensureWorkerPidFile(deps);
     void core.abortStalledSessions();

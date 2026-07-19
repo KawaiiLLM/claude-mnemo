@@ -91,9 +91,12 @@ describe("handleSessionEndHook", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/flush");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      action: "finish",
+      content_session_id: "session-end-1",
       session_id: sessionId,
+      env: {},
     });
   });
 
@@ -128,7 +131,8 @@ describe("handleSessionEndHook", () => {
 
     const result = await handler(createInput());
 
-    expect(result).toEqual({ continue: true });
+    expect(result.continue).toBe(true);
+    expect(typeof result.asyncWork).toBe("function");
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(spawnImpl).not.toHaveBeenCalled();
   });
@@ -180,7 +184,7 @@ describe("handleSessionEndHook", () => {
     expect(queued).toEqual([
       { kind: "turn-stop", targetId: turnId, enqueuedAtEpoch: 300 },
     ]);
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/flush");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
   });
 
   test("does not duplicate a turn-stop that the Stop hook already queued", async () => {
@@ -259,7 +263,8 @@ describe("handleSessionEndHook", () => {
 
     const result = await handler(createInput());
 
-    expect(result).toEqual({ continue: true });
+    expect(result.continue).toBe(true);
+    expect(typeof result.asyncWork).toBe("function");
     expect(fetchImpl).not.toHaveBeenCalled();
     const count = db
       .query<{ n: number }, []>(
@@ -282,7 +287,8 @@ describe("handleSessionEndHook", () => {
       }),
     );
 
-    expect(result).toEqual({ continue: true });
+    expect(result.continue).toBe(true);
+    expect(typeof result.asyncWork).toBe("function");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

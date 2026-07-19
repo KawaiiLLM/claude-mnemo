@@ -37,6 +37,8 @@ describe("worker query session", () => {
 
   test("sendPrompt uses the content session id until the agent session is known", async () => {
     const seenInputSessionIds: string[] = [];
+    let queryOptionsEnv: Record<string, string | undefined> | undefined;
+    let spawnedEnv: NodeJS.ProcessEnv | undefined;
     const queryImpl = mock(
       ({
         prompt,
@@ -47,6 +49,7 @@ describe("worker query session", () => {
           message: { content: Array<{ text: string }> };
         }>;
         options?: {
+          env?: Record<string, string | undefined>;
           spawnClaudeCodeProcess?: (options: {
             command: string;
             args: string[];
@@ -57,11 +60,12 @@ describe("worker query session", () => {
         };
       }) =>
         (async function* () {
+          queryOptionsEnv = options?.env;
           options?.spawnClaudeCodeProcess?.({
             command: "claude",
             args: [],
             cwd: "/tmp/project",
-            env: {},
+            env: options.env,
             signal: undefined,
           });
 
@@ -104,12 +108,20 @@ describe("worker query session", () => {
         sessionDbId,
         contentSessionId: "content-session-1",
         project: "/tmp/project",
+        agentEnv: {
+          HOME: "/Users/session-a",
+          ANTHROPIC_AUTH_TOKEN: "session-a-token",
+          CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+        },
       },
       {
         queryImpl: queryImpl as never,
         onPid,
         spawnImpl:
-          (mock(() => ({ pid: 4321 })) as unknown) as typeof import("node:child_process").spawn,
+          (mock((_command, _args, options) => {
+            spawnedEnv = options?.env;
+            return { pid: 4321 };
+          }) as unknown) as typeof import("node:child_process").spawn,
         mkdirSyncImpl: mock(() => undefined),
       },
     );
@@ -122,6 +134,13 @@ describe("worker query session", () => {
     expect(seenInputSessionIds).toEqual(["content-session-1", "agent-session-1"]);
     expect(session.queryPid).toBe(4321);
     expect(onPid).toHaveBeenCalledWith(4321);
+    expect(queryOptionsEnv).toEqual({
+      HOME: "/Users/session-a",
+      ANTHROPIC_AUTH_TOKEN: "session-a-token",
+      CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+      ENABLE_TOOL_SEARCH: "false",
+    });
+    expect(spawnedEnv).toEqual(queryOptionsEnv);
 
     await session.close();
   });

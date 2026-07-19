@@ -48,6 +48,9 @@ export interface DefaultHookHandlersDependencies {
   dataRoot?: string;
   nowEpoch?: () => number;
   config?: MnemoConfig;
+  workerClientDeps?: import("../worker/client").WorkerClientDeps;
+  workerEnv?: NodeJS.ProcessEnv;
+  enableSessionEnvCapture?: boolean;
 }
 
 interface DefaultReadOnlyContextHandlersDependencies {
@@ -75,6 +78,9 @@ export function createDefaultHookHandlers({
   dataRoot = DATA_DIR,
   nowEpoch,
   config = loadConfig(),
+  workerClientDeps,
+  workerEnv,
+  enableSessionEnvCapture = false,
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
   const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
@@ -89,6 +95,9 @@ export function createDefaultHookHandlers({
       backlogLimit: config.dreamAgentBacklogLimit,
     },
     readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
+    workerClientDeps,
+    workerEnv,
+    enableSessionEnvCapture,
   };
 
   return {
@@ -99,12 +108,12 @@ export function createDefaultHookHandlers({
     ),
     "SessionStart:milestones": createMilestoneContextHandler({ db }),
     SessionStart: createContextHandler(contextDependencies),
-    SessionEnd: createSessionEndHandler({ db }),
-    PostToolUse: createPostToolUseHandler({ db }),
+    SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
+    PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
     PostCompact: createPostCompactHandler({ db }),
-    PreCompact: createCompactHandler({ db }),
+    PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
-    Stop: createStopHandler({ db }),
+    Stop: createStopHandler({ db, workerClientDeps, workerEnv }),
   };
 }
 
@@ -116,7 +125,11 @@ function getDefaultHandlers(): Record<string, HookHandler> {
   const db = createDatabase(undefined, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
 
-  defaultHandlers = createDefaultHookHandlers({ db });
+  defaultHandlers = createDefaultHookHandlers({
+    db,
+    workerEnv: process.env,
+    enableSessionEnvCapture: true,
+  });
 
   return defaultHandlers;
 }

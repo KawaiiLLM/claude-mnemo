@@ -72,7 +72,7 @@ function createRunner(handler: HookHandler) {
 }
 
 describe("runHookCommand", () => {
-  test("production SessionStart wiring queues diary backlog and injects context without worker work", async () => {
+  test("production SessionStart wiring captures env once while preserving all context outputs", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-default-hooks-"));
@@ -128,10 +128,20 @@ describe("runHookCommand", () => {
         settledAtEpoch: nowEpoch,
       });
       diaryStateStore.markDayStale("2026-07-10");
+      const fetchImpl = mock(async () => new Response(null, { status: 200 }));
       const handlers = createDefaultHookHandlers({
         db,
         dataRoot,
         nowEpoch: () => nowEpoch,
+        workerClientDeps: { fetchImpl },
+        workerEnv: {
+          ANTHROPIC_AUTH_TOKEN: "session-auth",
+          ANTHROPIC_API_KEY: "session-api-key",
+          HTTP_PROXY: "http://session-proxy",
+          ANTHROPIC_MODEL: "excluded-model",
+          GITHUB_TOKEN: "excluded-github-token",
+        },
+        enableSessionEnvCapture: true,
       });
 
       const input = {
@@ -146,6 +156,8 @@ describe("runHookCommand", () => {
       const personaResult = await handlers["SessionStart:persona"]!(input);
       const recentResult = await handlers["SessionStart:recent"]!(input);
       const milestonesResult = await handlers["SessionStart:milestones"]!(input);
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(true);
       expect(sessionsResult).toEqual({ continue: true });
@@ -169,6 +181,18 @@ describe("runHookCommand", () => {
       expect(milestonesResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
+      expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+        action: "capture",
+        content_session_id: "default-hook-wiring",
+        session_id: session.id,
+        env: {
+          ANTHROPIC_AUTH_TOKEN: "session-auth",
+          ANTHROPIC_API_KEY: "session-api-key",
+          HTTP_PROXY: "http://session-proxy",
+        },
+      });
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });

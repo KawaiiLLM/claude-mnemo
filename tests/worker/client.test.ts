@@ -516,6 +516,7 @@ describe("worker client", () => {
     try {
       await notifyWorkerCompact(
         42,
+        "content-session-42",
         "/tmp/session.jsonl",
         {
           fetchImpl,
@@ -555,6 +556,7 @@ describe("worker client", () => {
 
     await notifyWorkerCompact(
       42,
+      "content-session-42",
       "/tmp/session.jsonl",
       {
         fetchImpl,
@@ -592,6 +594,7 @@ describe("worker client", () => {
 
       await notifyWorkerCompact(
         42,
+        "content-session-42",
         "/tmp/session.jsonl",
         { fetchImpl, existsSyncImpl: () => true },
         { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
@@ -605,13 +608,13 @@ describe("worker client", () => {
     }
   });
 
-  test("notifyWorkerFlush sends /flush when worker is compatible", async () => {
+  test("notifyWorkerFlush sends the env-bearing finish trigger when compatible", async () => {
     let flushCallCount = 0;
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
         return healthResponse();
       }
-      if (String(input).endsWith("/flush")) {
+      if (String(input).endsWith("/trigger")) {
         flushCallCount += 1;
         return new Response(null, { status: 200 });
       }
@@ -620,14 +623,18 @@ describe("worker client", () => {
 
     await notifyWorkerFlush(
       42,
+      "content-session-42",
       { fetchImpl, existsSyncImpl: () => true },
       { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
     );
 
     expect(flushCallCount).toBe(1);
-    const flushCall = fetchImpl.mock.calls.find((call) => String(call[0]).endsWith("/flush"));
+    const flushCall = fetchImpl.mock.calls.find((call) => String(call[0]).endsWith("/trigger"));
     expect(JSON.parse(String(flushCall?.[1]?.body))).toEqual({
+      action: "finish",
+      content_session_id: "content-session-42",
       session_id: 42,
+      env: {},
     });
   });
 
@@ -657,7 +664,7 @@ describe("worker client", () => {
         }
         return healthResponse();
       }
-      if (url.endsWith("/flush")) {
+      if (url.endsWith("/trigger")) {
         flushCallCount += 1;
         return new Response(null, { status: 200 });
       }
@@ -671,6 +678,7 @@ describe("worker client", () => {
     try {
       await notifyWorkerFlush(
         42,
+        "content-session-42",
       {
         fetchImpl,
         spawnImpl,
@@ -690,27 +698,50 @@ describe("worker client", () => {
     expect(killCalls).toEqual([stalePid]);
     expect(spawnImpl).toHaveBeenCalledTimes(1);
     expect(spawnHealthCallIndex).toBeGreaterThan(1);
-    expect(flushCallCount).toBe(0);
+    expect(flushCallCount).toBe(1);
   });
 
-  test("notifyWorkerFlush spawns a worker with a startup flush hint when down", async () => {
+  test("notifyWorkerFlush starts a down worker then hands over env before finish", async () => {
+    let healthCalls = 0;
+    let triggerBody: Record<string, unknown> | null = null;
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
-        throw new Error("connection refused");
+        healthCalls += 1;
+        if (healthCalls === 1) {
+          throw new Error("connection refused");
+        }
+        return healthResponse();
       }
-      return new Response(null, { status: 404 });
+      return new Response(null, { status: 200 });
     });
     const spawnImpl = mock(() => ({ unref: mock(() => {}) })) as unknown as typeof import("node:child_process").spawn;
 
     await notifyWorkerFlush(
       42,
-      { fetchImpl, spawnImpl, existsSyncImpl: () => true },
-      { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
+      "content-session-42",
+      {
+        fetchImpl,
+        spawnImpl,
+        existsSyncImpl: () => true,
+        setTimeoutImpl: ((handler: TimerHandler) => {
+          if (typeof handler === "function") handler();
+          return 0 as unknown as NodeJS.Timeout;
+        }) as typeof setTimeout,
+      },
+      {
+        CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root",
+        ANTHROPIC_API_KEY: "session-key",
+      } as NodeJS.ProcessEnv,
     );
 
     expect(spawnImpl).toHaveBeenCalledTimes(1);
-    expect(spawnImpl.mock.calls[0]?.[2]?.env).toMatchObject({
-      CLAUDE_MNEMO_FLUSH_SESSION_ID: "42",
+    const triggerCall = fetchImpl.mock.calls.find((call) => String(call[0]).endsWith("/trigger"));
+    triggerBody = JSON.parse(String(triggerCall?.[1]?.body));
+    expect(triggerBody).toEqual({
+      action: "finish",
+      content_session_id: "content-session-42",
+      session_id: 42,
+      env: { ANTHROPIC_API_KEY: "session-key" },
     });
   });
 
@@ -728,6 +759,7 @@ describe("worker client", () => {
 
     await notifyWorkerFlush(
       42,
+      "content-session-42",
       {
         fetchImpl,
         spawnImpl,
@@ -737,14 +769,17 @@ describe("worker client", () => {
     );
 
     expect(spawnImpl).not.toHaveBeenCalled();
-    expect(fetchImpl.mock.calls.some((call) => String(call[0]).endsWith("/flush"))).toBe(
+    expect(fetchImpl.mock.calls.some((call) => String(call[0]).endsWith("/trigger"))).toBe(
       false,
     );
   });
 
-  test("notifyWorkerFlush replaces a worker that answers /flush with non-OK", async () => {
+  test("notifyWorkerFlush does not persist a startup hint when trigger is non-OK", async () => {
     const fetchImpl = mock(async (input: string | URL) => {
-      if (String(input).endsWith("/flush")) {
+      if (String(input).endsWith("/health")) {
+        return healthResponse();
+      }
+      if (String(input).endsWith("/trigger")) {
         return new Response("missing endpoint", { status: 404 });
       }
       return new Response(null, { status: 404 });
@@ -753,14 +788,12 @@ describe("worker client", () => {
 
     await notifyWorkerFlush(
       42,
+      "content-session-42",
       { fetchImpl, spawnImpl, existsSyncImpl: () => true },
       { CLAUDE_PLUGIN_ROOT: "/tmp/plugin-root" } as NodeJS.ProcessEnv,
     );
 
-    expect(spawnImpl).toHaveBeenCalledTimes(1);
-    expect(spawnImpl.mock.calls[0]?.[2]?.env).toMatchObject({
-      CLAUDE_MNEMO_FLUSH_SESSION_ID: "42",
-    });
+    expect(spawnImpl).not.toHaveBeenCalled();
   });
 
   test("notifyWorkerCompact throws a diagnostic error when stale has no pid handle", async () => {
@@ -775,6 +808,7 @@ describe("worker client", () => {
     await expect(
       notifyWorkerCompact(
         42,
+        "content-session-42",
         "/tmp/session.jsonl",
         {
           fetchImpl,

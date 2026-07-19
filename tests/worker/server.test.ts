@@ -3156,6 +3156,7 @@ describe("worker server", () => {
     const originalExit = process.exit;
     const originalSetInterval = globalThis.setInterval;
     const exitMock = mock((_code?: number) => undefined as never);
+    let serveHostname: string | undefined;
 
     (process as typeof process & { exit: typeof process.exit }).exit = exitMock;
     globalThis.setInterval = mock(() => 0 as unknown as NodeJS.Timeout) as typeof setInterval;
@@ -3164,7 +3165,8 @@ describe("worker server", () => {
       await main({
         db: createDatabase(":memory:"),
         logger: { warn() {}, error() {} },
-        BunServeImpl: mock(() => {
+        BunServeImpl: mock((options: { hostname?: string }) => {
+          serveHostname = options.hostname;
           const error = new Error("bind failed") as NodeJS.ErrnoException;
           error.code = "EADDRINUSE";
           throw error;
@@ -3183,6 +3185,7 @@ describe("worker server", () => {
       });
 
       expect(exitMock).toHaveBeenCalledWith(0);
+      expect(serveHostname).toBe("127.0.0.1");
       expect(writes).toEqual([{ path: "/tmp/worker.starting", value: String(process.pid) }]);
       expect(unlinks).toContain("/tmp/worker.starting");
       expect(unlinks).not.toContain("/tmp/worker.pid");
@@ -3323,7 +3326,7 @@ describe("worker server", () => {
     }
   });
 
-  test("main waits for an explicit wake before globally draining legacy turns", async () => {
+  test("main drains only sessions whose trigger re-announces an env", async () => {
     const runtimeDb = createDatabase(":memory:");
     initializeSchema(runtimeDb);
 
@@ -3390,13 +3393,21 @@ describe("worker server", () => {
       expect(fetchHandler).not.toBeNull();
 
       const response = await fetchHandler!(
-        new Request("http://127.0.0.1:37778/wake", { method: "POST" }),
+        new Request("http://127.0.0.1:37778/trigger", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "wake",
+            content_session_id: "worker-boot-waking",
+            session_id: wakingSessionId,
+            env: {},
+          }),
+        }),
       );
       expect(response.status).toBe(200);
 
-      await waitUntil(() => sentPrompts.length === 2);
-      expect(sentPrompts).toHaveLength(2);
-      expect(sentPrompts.join("\n")).toContain(`id="T${legacyTurnId}"`);
+      await waitUntil(() => sentPrompts.length === 1);
+      expect(sentPrompts).toHaveLength(1);
+      expect(sentPrompts.join("\n")).not.toContain(`id="T${legacyTurnId}"`);
       expect(sentPrompts.join("\n")).toContain(`id="T${wakingTurnId}"`);
     } finally {
       globalThis.setInterval = originalSetInterval;
@@ -3404,7 +3415,7 @@ describe("worker server", () => {
     }
   });
 
-  test("main wires /flush to the bounded SessionEnd tail and closes its agent", async () => {
+  test("main wires the finish trigger to the bounded SessionEnd tail and clears its agent", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
 
@@ -3464,9 +3475,14 @@ describe("worker server", () => {
       expect(fetchHandler).not.toBeNull();
 
       const response = await fetchHandler!(
-        new Request("http://127.0.0.1:37778/flush", {
+        new Request("http://127.0.0.1:37778/trigger", {
           method: "POST",
-          body: JSON.stringify({ session_id: sessionId }),
+          body: JSON.stringify({
+            action: "finish",
+            content_session_id: "worker-session-flush",
+            session_id: sessionId,
+            env: {},
+          }),
         }),
       );
 
@@ -3474,7 +3490,7 @@ describe("worker server", () => {
 
       await waitUntil(() => sentPrompts.length === 1 && closes === 1);
 
-      // /flush drains + renders the buffered turn, then closes its query session.
+      // finish drains + renders the buffered turn, then closes its query session.
       expect(sentPrompts).toHaveLength(1);
       expect(sentPrompts[0]).toContain(`<obs id="O`);
       expect(closes).toBe(1);

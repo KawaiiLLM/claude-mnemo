@@ -49,6 +49,7 @@ describe("handleCompactHook", () => {
     const handler = createCompactHandler({
       db,
       workerClientDeps: { fetchImpl },
+      workerEnv: {},
     });
 
     const result = await handler(
@@ -60,10 +61,13 @@ describe("handleCompactHook", () => {
     expect(result).toEqual({ continue: true });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/compact");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      action: "compact",
+      content_session_id: "session-compact",
       session_id: sessionId,
       transcript_path: "/tmp/session.jsonl",
+      env: {},
     });
   });
 

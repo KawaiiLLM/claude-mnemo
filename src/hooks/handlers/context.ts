@@ -29,6 +29,10 @@ import {
 } from "../../diary/persona-render";
 import { dreamTriggerWindow } from "../../diary/calendar";
 import { markSessionRunStart } from "../../db/session-run";
+import {
+  notifyWorkerTrigger,
+  type WorkerClientDeps,
+} from "../../worker/client";
 
 export interface ReadOnlyContextHandlerDependencies {
   db?: Database;
@@ -55,6 +59,9 @@ export interface ContextHandlerDependencies
     backlogLimit: number;
   };
   readLastSuccessfulDate?: () => Promise<string | null>;
+  workerClientDeps?: WorkerClientDeps;
+  workerEnv?: NodeJS.ProcessEnv;
+  enableSessionEnvCapture?: boolean;
 }
 
 export type ContextSection = "sessions" | "persona" | "recent";
@@ -456,6 +463,17 @@ export function createContextHandler(
   return async function handleContextHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
+    if (dependencies.enableSessionEnvCapture && input.sessionId) {
+      void notifyWorkerTrigger(
+        {
+          action: "capture",
+          contentSessionId: input.sessionId,
+          sessionDbId: getSessionByContentId(dependencies.db, input.sessionId)?.id,
+        },
+        dependencies.workerClientDeps,
+        dependencies.workerEnv,
+      );
+    }
     const hookSpecificOutput = buildContextOutput(dependencies.db, input);
     if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);

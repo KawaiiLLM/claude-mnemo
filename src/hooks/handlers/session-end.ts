@@ -7,7 +7,11 @@ import {
   enqueueOrphanTurnStops,
   getOrphanTurns,
 } from "../../db/orphan-turns";
-import { notifyWorkerFlush, type WorkerClientDeps } from "../../worker/client";
+import {
+  notifyWorkerFlush,
+  notifyWorkerTrigger,
+  type WorkerClientDeps,
+} from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface SessionEndHandlerDependencies {
@@ -34,10 +38,19 @@ export function createSessionEndHandler(
 
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
-      return { continue: true };
-    }
-    if (!hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
-      return { continue: true };
+      return {
+        continue: true,
+        asyncWork: async () => {
+          await notifyWorkerTrigger(
+            {
+              action: "finish",
+              contentSessionId: input.sessionId!,
+            },
+            dependencies.workerClientDeps,
+            dependencies.workerEnv,
+          );
+        },
+      };
     }
 
     // A turn interrupted mid-response never fires the Stop hook, so its
@@ -45,16 +58,18 @@ export function createSessionEndHandler(
     // which never comes if the user closes right after interrupting. Enqueue
     // those orphans here so the session-end tail drain consumes them within
     // the same bounded budget.
-    const orphanTurns = getOrphanTurns(dependencies.db, session.id);
-    if (orphanTurns.length > 0) {
-      writeTransaction(dependencies.db, () => {
-        enqueueOrphanTurnStops(
-          dependencies.db,
-          session.id,
-          now(),
-          orphanTurns,
-        );
-      });
+    if (hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
+      const orphanTurns = getOrphanTurns(dependencies.db, session.id);
+      if (orphanTurns.length > 0) {
+        writeTransaction(dependencies.db, () => {
+          enqueueOrphanTurnStops(
+            dependencies.db,
+            session.id,
+            now(),
+            orphanTurns,
+          );
+        });
+      }
     }
 
     return {
@@ -62,6 +77,7 @@ export function createSessionEndHandler(
       asyncWork: async () => {
         await notifyWorkerFlush(
           session.id,
+          session.contentSessionId,
           dependencies.workerClientDeps,
           dependencies.workerEnv,
         );

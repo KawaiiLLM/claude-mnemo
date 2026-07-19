@@ -39,6 +39,7 @@ export interface WorkerQuerySessionInput {
   sessionDbId: number;
   contentSessionId: string;
   project: string;
+  agentEnv?: NodeJS.ProcessEnv;
   config?: MnemoConfig;
   resumeAgentSessionId?: string | null;
   systemPrompt?: string;
@@ -383,7 +384,7 @@ this overrides the normal "extract once, never revisit" rule for that block.
 - Always call \`remember()\` with an \`id\` (T<n> for a turn, S<n> for a session); the no-id route is rejected.
 - Never update any record not named in the current message's block headers.`,
       env: {
-        ...buildIsolatedEnv(),
+        ...(input.agentEnv ?? buildIsolatedEnv()),
         ...(input.config?.cacheMode === "5m"
           ? { FORCE_PROMPT_CACHING_5M: "1" }
           : {}),

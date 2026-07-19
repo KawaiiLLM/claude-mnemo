@@ -107,6 +107,7 @@ describe("handleStopHook", () => {
       db,
       now: () => 500,
       workerClientDeps: { fetchImpl },
+      workerEnv: {},
     });
 
     const result = await handler(
@@ -140,7 +141,13 @@ describe("handleStopHook", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/wake");
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      action: "wake",
+      content_session_id: "session-stop",
+      session_id: sessionId,
+      env: {},
+    });
   });
 
   test("marks a settled diary day stale only when Stop changes the assistant response", async () => {

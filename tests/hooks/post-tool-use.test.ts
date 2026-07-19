@@ -93,6 +93,7 @@ describe("handlePostToolUseHook", () => {
       db,
       now: () => 500,
       workerClientDeps: { fetchImpl },
+      workerEnv: {},
     });
 
     const result = await handler(createInput());
@@ -144,7 +145,13 @@ describe("handlePostToolUseHook", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://127.0.0.1:37778/health");
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/wake");
+    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/trigger");
+    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
+      action: "wake",
+      content_session_id: "session-tool",
+      session_id: sessionId,
+      env: {},
+    });
   });
 
   test("runs foreground writes through the bounded hook transaction runner", async () => {

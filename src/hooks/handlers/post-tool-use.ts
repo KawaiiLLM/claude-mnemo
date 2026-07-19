@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId } from "../../db/sessions";
 import { stripPrivateTags } from "../../shared/tag-stripping";
-import { notifyWorkerWake, type WorkerClientDeps } from "../../worker/client";
+import { notifyWorkerTrigger, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface PostToolUseHandlerDependencies {
@@ -114,7 +114,12 @@ export function createPostToolUseHandler(
     return {
       continue: true,
       asyncWork: async () => {
-        await notifyWorkerWake(
+        await notifyWorkerTrigger(
+          {
+            action: "wake",
+            contentSessionId: session.contentSessionId,
+            sessionDbId: session.id,
+          },
           dependencies.workerClientDeps,
           dependencies.workerEnv,
         );

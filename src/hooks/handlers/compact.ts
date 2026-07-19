@@ -25,6 +25,7 @@ export function createCompactHandler(dependencies: CompactHandlerDependencies) {
 
     await notifyWorkerCompact(
       session.id,
+      session.contentSessionId,
       input.transcriptPath,
       dependencies.workerClientDeps,
       dependencies.workerEnv,
