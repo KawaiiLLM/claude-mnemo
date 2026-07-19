@@ -1,6 +1,63 @@
 import { describe, expect, mock, test } from "bun:test";
 
-import { createDiarySdkQuery } from "../../src/worker/diary-sdk-query";
+import {
+  createDiarySdkQuery,
+  DiarySdkError,
+} from "../../src/worker/diary-sdk-query";
+import {
+  classifyWorkerError,
+  resolveWorkerRetryDelayMs,
+} from "../../src/worker/error-classifier";
+
+function sdkRequest() {
+  return {
+    date: "2026-07-10",
+    prompt: "write",
+    model: "claude-sonnet-5",
+    timeoutMs: 600_000,
+    watchdogMs: 120_000,
+    signal: new AbortController().signal,
+    reportActivity() {},
+    toolHandlers: {
+      recall: async () => ({ content: [{ type: "text" as const, text: "" }] }),
+      timeline: async () => ({ content: [{ type: "text" as const, text: "" }] }),
+      readDoc: async () => "",
+      canUseTool: async () => ({
+        behavior: "allow" as const,
+        updatedInput: {},
+      }),
+    },
+  };
+}
+
+async function streamedFailure(messages: unknown[]): Promise<DiarySdkError> {
+  const queryImpl = () =>
+    (async function* () {
+      for (const message of messages) {
+        yield message;
+      }
+      yield {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["remote request failed"],
+      };
+    })();
+
+  try {
+    await createDiarySdkQuery({
+      dataRoot: "/tmp/claude-mnemo-diary-sdk",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: (() => ({ type: "sdk", name: "diary" })) as never,
+      toolImpl: ((name: string) => ({ name })) as never,
+    }).runQuery(sdkRequest());
+  } catch (error) {
+    expect(error).toBeInstanceOf(DiarySdkError);
+    return error as DiarySdkError;
+  }
+
+  throw new Error("Expected the streamed SDK query to fail.");
+}
 
 describe("shared SDK agent query", () => {
   test("exposes scoped Read/Grep plus MCP tools and wraps MCP results as escaped data", async () => {
@@ -90,5 +147,144 @@ describe("shared SDK agent query", () => {
       "read_doc",
       "commit",
     ]);
+  });
+
+  test.each([
+    ["408", { type: "system", subtype: "api_error", error: { status: 408 } }, "connection"],
+    ["409", { type: "system", subtype: "api_error", error: { status: 409 } }, "connection"],
+    ["429", { type: "system", subtype: "api_error", error: { status: 429 } }, "connection"],
+    ["529", { type: "system", subtype: "api_error", error: { status: 529 } }, "connection"],
+    ["retryable 503", { type: "system", subtype: "api_error", error: { status: 503 } }, "connection"],
+    ["assistant rate_limit", { type: "assistant", error: "rate_limit", message: { content: [] } }, "connection"],
+    ["assistant server_error", { type: "assistant", error: "server_error", message: { content: [] } }, "connection"],
+    [
+      "nested rate_limit_error",
+      { type: "system", subtype: "api_error", error: { error: { type: "rate_limit_error" } } },
+      "connection",
+    ],
+    [
+      "body overloaded_error",
+      { type: "system", subtype: "api_error", error: { body: '{"error":{"type":"overloaded_error"}}' } },
+      "connection",
+    ],
+    ["400", { type: "assistant", error: "invalid_request", status: 400, message: { content: [] } }, "deterministic"],
+    ["401", { type: "system", subtype: "api_error", error: { status: 401, cause: { code: "ECONNRESET" } } }, "deterministic"],
+    ["403", { type: "system", subtype: "api_error", error: { status: 403 } }, "deterministic"],
+    [
+      "403 with contradictory billing body",
+      {
+        type: "system",
+        subtype: "api_error",
+        error: { status: 403, body: '{"error":{"type":"billing_error"}}' },
+      },
+      "deterministic",
+    ],
+    ["404", { type: "system", subtype: "api_error", error: { status: 404 } }, "deterministic"],
+    ["413", { type: "system", subtype: "api_error", error: { status: 413 } }, "deterministic"],
+    [
+      "business 409",
+      { type: "system", subtype: "api_error", error: { status: 409, type: "conflict_error" } },
+      "deterministic",
+    ],
+    ["billing", { type: "assistant", error: "billing_error", message: { content: [] } }, "blocked"],
+    [
+      "credit exhausted body",
+      { type: "system", subtype: "api_error", error: { body: '{"error":{"message":"credit exhausted"}}' } },
+      "blocked",
+    ],
+    [
+      "header-only rate limit",
+      {
+        type: "stream_event",
+        event: {
+          type: "error",
+          headers: {
+            "x-status-code": "429",
+            "x-error-type": "rate_limit_error",
+          },
+        },
+      },
+      "connection",
+    ],
+  ] as const)(
+    "preserves streamed %s evidence for %s classification",
+    async (_label, streamMessage, expected) => {
+      const error = await streamedFailure([streamMessage]);
+      expect(classifyWorkerError(error)).toBe(expected);
+    },
+  );
+
+  test("keeps the highest-priority streamed error instead of the generic result failure", async () => {
+    const error = await streamedFailure([
+      {
+        type: "assistant",
+        error: "invalid_request",
+        status: 400,
+        message: { content: [] },
+      },
+      {
+        type: "assistant",
+        error: "billing_error",
+        status: 402,
+        request_id: "req_blocked",
+        message: { content: [] },
+      },
+    ]);
+
+    expect(error).toMatchObject({
+      type: "billing_error",
+      status: 402,
+      requestId: "req_blocked",
+    });
+    expect(error.message).not.toContain("remote request failed");
+  });
+
+  test("retryInMs beats Retry-After, which beats the default", async () => {
+    const direct = await streamedFailure([
+      {
+        type: "system",
+        subtype: "api_error",
+        error: {
+          status: 429,
+          retryInMs: 1_234,
+          headers: { "retry-after": "99" },
+        },
+      },
+    ]);
+    const seconds = await streamedFailure([
+      {
+        type: "system",
+        subtype: "api_error",
+        error: { status: 429, headers: { "Retry-After": "7" } },
+      },
+    ]);
+    const date = await streamedFailure([
+      {
+        type: "system",
+        subtype: "api_error",
+        error: {
+          status: 529,
+          headers: { "retry-after": "Thu, 01 Jan 2026 00:00:09 GMT" },
+        },
+      },
+    ]);
+    const fallback = await streamedFailure([
+      {
+        type: "assistant",
+        error: "rate_limit",
+        message: { content: [] },
+      },
+    ]);
+
+    expect(resolveWorkerRetryDelayMs(direct, 10_000, 0)).toBe(1_234);
+    expect(resolveWorkerRetryDelayMs(seconds, 10_000, 0)).toBe(7_000);
+    expect(
+      resolveWorkerRetryDelayMs(
+        date,
+        10_000,
+        Date.parse("2026-01-01T00:00:00Z"),
+      ),
+    ).toBe(9_000);
+    expect(resolveWorkerRetryDelayMs(fallback, 10_000, 0)).toBe(10_000);
   });
 });

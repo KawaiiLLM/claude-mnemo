@@ -90,6 +90,7 @@ import { buildSessionSummary, recallMemory } from "../mcp/recall";
 import {
   classifyWorkerError,
   createWorkerAbortError,
+  resolveWorkerRetryDelayMs,
 } from "./error-classifier";
 
 const WORKER_PORT = 37778;
@@ -97,6 +98,7 @@ const STARTING_STALE_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 10_000;
 const STALLED_QUERY_MS = 30_000;
 const CONNECTION_RETRY_BACKOFF_MS = 10_000;
+const BILLING_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1_000;
 const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
 const OBS_TIMEOUT_MS = 15_000;
@@ -218,7 +220,7 @@ export interface SessionState {
     rememberedSessionIds: Set<number>;
     hadSubstantiveText: boolean;
     hadIllegalTool: boolean;
-    connectionError: Error | null;
+    retryableError: Error | null;
   };
 }
 
@@ -229,7 +231,7 @@ function resetUnitSignals(state: SessionState): void {
   state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
-  state.unitSignals.connectionError = null;
+  state.unitSignals.retryableError = null;
 }
 
 export interface WorkerCoreDeps {
@@ -323,6 +325,8 @@ export interface WorkerCore {
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
   runRetryTick(nowMs?: number): Promise<void>;
+  /** Ticket 02 calls this when a fresh session env capture is registered. */
+  clearBlockedSession(sessionDbId: number): void;
   hasLiveQuerySessions(): boolean;
   getGlobalScanInFlight(): Promise<void> | null;
   // D1/T2/T3 derailment state machine. Task 10 wires the flush callers to it;
@@ -512,6 +516,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     number,
     { retryAtMs: number; latestTurnStopSeq: number }
   >();
+  const blockedUntilBySession = new Map<number, number>();
+  const isSessionRetryGated = (sessionDbId: number): boolean =>
+    suspendedUntilBySession.has(sessionDbId) ||
+    blockedUntilBySession.has(sessionDbId);
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer: unknown | null = null;
   let diaryDrainRequested = false;
@@ -829,7 +837,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         rememberedSessionIds: new Set<number>(),
         hadSubstantiveText: false,
         hadIllegalTool: false,
-        connectionError: null,
+        retryableError: null,
       },
       async pushMessage(prompt: string): Promise<void> {
         const runtime = ensureQuerySession(state!);
@@ -946,11 +954,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       },
       {
         onMessage: (message) => {
-          const isConnectionSignal =
-            classifyWorkerError(message) === "connection";
-          if (isConnectionSignal) {
-            state!.unitSignals.connectionError = new Error(
-              "Agent stream reported a connection failure.",
+          const messageClassification = classifyWorkerError(message);
+          const isRetryableSignal =
+            messageClassification === "connection" ||
+            messageClassification === "blocked";
+          if (isRetryableSignal) {
+            state!.unitSignals.retryableError = new Error(
+              messageClassification === "blocked"
+                ? "Agent stream reported a blocked account."
+                : "Agent stream reported a transient connection failure.",
               { cause: message },
             );
           }
@@ -982,7 +994,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           // work unit. thinking blocks are ignored; substantive text and any
           // non-mnemo tool_use are strikes.
           if (
-            !isConnectionSignal &&
+            !isRetryableSignal &&
             message.type === "assistant" &&
             Array.isArray((message as { message?: { content?: unknown } }).message?.content)
           ) {
@@ -1091,8 +1103,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await runtime.sendPrompt(
         `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${body}\n</context>`,
       );
-      if (state.unitSignals.connectionError) {
-        throw state.unitSignals.connectionError;
+      if (state.unitSignals.retryableError) {
+        throw state.unitSignals.retryableError;
       }
     }
     resetUnitSignals(state); // re-prime response is exempt from detection
@@ -1145,8 +1157,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     resetUnitSignals(state);
     await state.pushMessage(message);
-    if (state.unitSignals.connectionError) {
-      throw state.unitSignals.connectionError;
+    if (state.unitSignals.retryableError) {
+      throw state.unitSignals.retryableError;
     }
     if (evaluate() === "resolved") {
       return;
@@ -1155,8 +1167,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     for (let i = 0; i < MAX_REMINDERS; i++) {
       resetUnitSignals(state);
       await state.pushMessage(buildCorrectiveResend(message, resendKind));
-      if (state.unitSignals.connectionError) {
-        throw state.unitSignals.connectionError;
+      if (state.unitSignals.retryableError) {
+        throw state.unitSignals.retryableError;
       }
       if (evaluate() === "resolved") {
         return;
@@ -1177,8 +1189,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await reopenQuerySessionFresh(state);
     resetUnitSignals(state);
     await state.pushMessage(buildCorrectiveResend(message, resendKind));
-    if (state.unitSignals.connectionError) {
-      throw state.unitSignals.connectionError;
+    if (state.unitSignals.retryableError) {
+      throw state.unitSignals.retryableError;
     }
     if (evaluate() === "resolved") {
       return;
@@ -1272,14 +1284,37 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return state.closing;
   }
 
-  async function suspendSessionAfterConnectionError(
+  async function suspendSessionAfterRetryableError(
     sessionDbId: number,
     error: unknown,
   ): Promise<void> {
-    suspendedUntilBySession.set(sessionDbId, {
-      retryAtMs: nowMs() + CONNECTION_RETRY_BACKOFF_MS,
-      latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId),
-    });
+    const classification = classifyWorkerError(error);
+    const currentMs = nowMs();
+    const retryAfterMs =
+      classification === "blocked"
+        ? Math.max(
+            BILLING_BLOCKED_RETRY_FLOOR_MS,
+            resolveWorkerRetryDelayMs(
+              error,
+              BILLING_BLOCKED_RETRY_FLOOR_MS,
+              currentMs,
+            ),
+          )
+        : resolveWorkerRetryDelayMs(
+            error,
+            CONNECTION_RETRY_BACKOFF_MS,
+            currentMs,
+          );
+    if (classification === "blocked") {
+      suspendedUntilBySession.delete(sessionDbId);
+      blockedUntilBySession.set(sessionDbId, currentMs + retryAfterMs);
+    } else {
+      blockedUntilBySession.delete(sessionDbId);
+      suspendedUntilBySession.set(sessionDbId, {
+        retryAtMs: currentMs + retryAfterMs,
+        latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId),
+      });
+    }
 
     // Per-session crash recovery: every claimed row becomes eligible for a
     // clean rebuild, and no in-memory slice/batch survives the interrupted
@@ -1292,9 +1327,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       state.streamedParts.clear();
     }
 
-    logger.warn?.("mini-turn flush suspended after connection failure", {
+    logger.warn?.("mini-turn flush suspended after retryable failure", {
       sessionDbId,
-      retryAfterMs: CONNECTION_RETRY_BACKOFF_MS,
+      classification,
+      retryAfterMs,
       error,
     });
     await closeSessionQuery(
@@ -1369,7 +1405,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await sendSessionReprime(state);
         state.needsReprime = false;
       } catch (error) {
-        if (classifyWorkerError(error) === "connection") {
+        if (classifyWorkerError(error) !== "deterministic") {
           throw error;
         }
         logger.error?.("session re-prime failed; will retry next batch", {
@@ -1455,7 +1491,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
-    if (suspendedUntilBySession.has(state.sessionDbId)) {
+    if (isSessionRetryGated(state.sessionDbId)) {
       state.batchQueue = [];
       state.streamedParts.clear();
       return "suspended";
@@ -1469,8 +1505,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error) {
-      if (classifyWorkerError(error) === "connection") {
-        await suspendSessionAfterConnectionError(state.sessionDbId, error);
+      if (classifyWorkerError(error) !== "deterministic") {
+        await suspendSessionAfterRetryableError(state.sessionDbId, error);
         return "suspended";
       }
 
@@ -1575,7 +1611,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           : [];
     for (const sessionDbId of sessionIds) {
       if (
-        suspendedUntilBySession.has(sessionDbId) ||
+        isSessionRetryGated(sessionDbId) ||
         compactingSessions.has(sessionDbId)
       ) {
         continue;
@@ -1843,9 +1879,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         suspendedUntilBySession.delete(sessionDbId);
       }
     }
+    for (const [sessionDbId, blockedUntilMs] of blockedUntilBySession) {
+      if (blockedUntilMs <= currentMs) {
+        blockedUntilBySession.delete(sessionDbId);
+      }
+    }
     if (
       sessionFilter !== undefined &&
-      suspendedUntilBySession.has(sessionFilter)
+      isSessionRetryGated(sessionFilter)
     ) {
       return false;
     }
@@ -1856,7 +1897,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     while (true) {
       if (
         sessionFilter !== undefined &&
-        suspendedUntilBySession.has(sessionFilter)
+        isSessionRetryGated(sessionFilter)
       ) {
         return turnStopProcessed;
       }
@@ -1865,6 +1906,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           ? new Set([
               ...compactingSessions,
               ...suspendedUntilBySession.keys(),
+              ...blockedUntilBySession.keys(),
             ])
           : undefined;
       const item = claimNextItem(deps.db, now(), {
@@ -2082,7 +2124,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         "shutdown",
         `SessionEnd tail timed out after ${config.sessionEndTailTimeoutMs}ms`,
       );
-      await suspendSessionAfterConnectionError(sessionDbId, abortError);
+      await suspendSessionAfterRetryableError(sessionDbId, abortError);
       await drainPromise.catch(() => {});
       // The interrupted drain may have recreated an empty lock state while
       // unwinding. Remove that tail-only state as part of the same close.
@@ -2090,7 +2132,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return;
     }
 
-    if (suspendedUntilBySession.has(sessionDbId)) {
+    if (isSessionRetryGated(sessionDbId)) {
       await closeSessionQuery(sessionDbId);
       return;
     }
@@ -2338,6 +2380,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     },
     sendWorkUnit,
     reopenQuerySessionFresh,
+    clearBlockedSession(sessionDbId) {
+      blockedUntilBySession.delete(sessionDbId);
+    },
     hasLiveQuerySessions() {
       return Array.from(sessions.values()).some(
         (state) => state.querySession !== null,

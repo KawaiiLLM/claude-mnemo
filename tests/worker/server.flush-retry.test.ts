@@ -376,6 +376,60 @@ describe("flush retry / drop (D8)", () => {
     expect(pushes).toBe(2);
   });
 
+  test("a streamed billing_error stays blocked across turn-stops until a fresh capture clears it", async () => {
+    let pushes = 0;
+    const core = createWorkerCore({
+      db,
+      config: { ...RETRY_CONFIG, maxQueuedBatches: 0 },
+      now: () => 123,
+      nowMs: () => 1_000,
+      logger: { warn: () => {}, error: () => {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const deps = (args.length === 2 ? args[1] : args[3]) as
+          | {
+              onMessage?: (message: Record<string, unknown>) => void;
+              onRemember?: (id: string) => void;
+            }
+          | undefined;
+        return {
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            pushes += 1;
+            if (pushes === 1) {
+              deps?.onMessage?.({
+                type: "assistant",
+                error: "billing_error",
+                message: { content: [] },
+              });
+            } else {
+              for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+                deps?.onRemember?.(`T${match[1]}`);
+              }
+            }
+            return { session_id: "worker-query" };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.scanAndDrainQueue();
+    expect(pushes).toBe(1);
+
+    seedQueuedTurn(2, "billing-trigger-one");
+    await core.scanAndDrainQueue();
+    seedQueuedTurn(3, "billing-trigger-two");
+    await core.scanAndDrainQueue();
+    expect(pushes).toBe(1);
+
+    core.clearBlockedSession(sessionId);
+    await core.scanAndDrainQueue();
+    expect(pushes).toBe(3);
+    expect(getPendingQueueCount(db)).toBe(0);
+  });
+
   test.each([
     [
       "api_error",

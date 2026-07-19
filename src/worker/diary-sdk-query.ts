@@ -23,6 +23,10 @@ import {
   dreamCheckBudgetInputShape,
   dreamCommitInputShape,
 } from "./dream-agent-tools";
+import {
+  inspectWorkerError,
+  type WorkerErrorClassification,
+} from "./error-classifier";
 
 const DIARY_ALLOWED_TOOLS = [
   "mcp__diary__recall",
@@ -39,6 +43,100 @@ export interface CreateDiarySdkQueryOptions {
 
 export interface DiarySdkQuery {
   runQuery(request: DiaryAgentQueryRequest): Promise<string>;
+}
+
+export class DiarySdkError extends Error {
+  readonly status: number | null;
+  readonly type: string | null;
+  readonly requestId: string | null;
+  readonly retryInMs: number | null;
+  readonly retryAfter: string | null;
+  readonly classification: WorkerErrorClassification;
+
+  constructor(source: unknown, fallback: string) {
+    const details = inspectWorkerError(source);
+    const stableFields = [
+      details.type ? `type=${details.type}` : null,
+      details.status !== null ? `status=${details.status}` : null,
+      details.requestId ? `request-id=${details.requestId}` : null,
+    ].filter((field): field is string => field !== null);
+    super(
+      stableFields.length > 0
+        ? `Diary SDK query failed (${stableFields.join(" ")})`
+        : fallback,
+    );
+    this.name = "DiarySdkError";
+    this.status = details.status;
+    this.type =
+      details.type ??
+      (details.classification === "blocked"
+        ? "billing_error"
+        : details.classification === "connection"
+          ? "api_error"
+          : null);
+    this.requestId = details.requestId;
+    this.retryInMs = details.retryInMs;
+    this.retryAfter = details.retryAfter;
+    this.classification = details.classification;
+  }
+}
+
+function isStreamErrorMessage(message: SDKMessage): boolean {
+  const candidate = message as unknown as Record<string, unknown>;
+  if (
+    candidate.type === "assistant" &&
+    typeof candidate.error === "string"
+  ) {
+    return true;
+  }
+  if (candidate.type === "system" && candidate.subtype === "api_error") {
+    return true;
+  }
+  if (candidate.type === "stream_event") {
+    const event = candidate.event;
+    return (
+      typeof event === "object" &&
+      event !== null &&
+      ((event as { type?: unknown }).type === "error" ||
+        "error" in event)
+    );
+  }
+  return false;
+}
+
+const ERROR_CLASSIFICATION_PRIORITY: Record<
+  WorkerErrorClassification,
+  number
+> = {
+  deterministic: 1,
+  connection: 2,
+  blocked: 3,
+};
+
+function isHigherPriorityError(
+  candidate: DiarySdkError,
+  current: DiarySdkError,
+): boolean {
+  const candidatePriority = [
+    ERROR_CLASSIFICATION_PRIORITY[candidate.classification],
+    candidate.retryInMs === null ? 0 : 1,
+    candidate.retryAfter === null ? 0 : 1,
+    candidate.requestId === null ? 0 : 1,
+    candidate.status === null ? 0 : 1,
+  ];
+  const currentPriority = [
+    ERROR_CLASSIFICATION_PRIORITY[current.classification],
+    current.retryInMs === null ? 0 : 1,
+    current.retryAfter === null ? 0 : 1,
+    current.requestId === null ? 0 : 1,
+    current.status === null ? 0 : 1,
+  ];
+  for (let index = 0; index < candidatePriority.length; index += 1) {
+    if (candidatePriority[index] !== currentPriority[index]) {
+      return candidatePriority[index]! > currentPriority[index]!;
+    }
+  }
+  return false;
 }
 
 function textResult(text: string) {
@@ -174,23 +272,44 @@ export function createDiarySdkQuery(
           },
         });
         let envelope: string | null = null;
+        let highestPriorityError: DiarySdkError | null = null;
 
         for await (const message of execution as AsyncIterable<SDKMessage>) {
           request.reportActivity();
 
           if (message.type !== "result") {
+            if (isStreamErrorMessage(message)) {
+              const candidate = new DiarySdkError(
+                message,
+                "Diary SDK query failed from a streamed error.",
+              );
+              if (
+                highestPriorityError === null ||
+                isHigherPriorityError(candidate, highestPriorityError)
+              ) {
+                highestPriorityError = candidate;
+              }
+            }
             continue;
           }
 
           if (message.subtype !== "success") {
-            throw new Error(
-              `Diary SDK query failed (${message.subtype}): ${message.errors.join("; ")}`,
+            throw (
+              highestPriorityError ??
+              new DiarySdkError(
+                message.errors,
+                `Diary SDK query failed (${message.subtype}).`,
+              )
             );
           }
 
           if (message.is_error) {
-            throw new Error(
-              `Diary SDK query returned an error result: ${message.result}`,
+            throw (
+              highestPriorityError ??
+              new DiarySdkError(
+                message,
+                "Diary SDK query returned an error result.",
+              )
             );
           }
 
@@ -198,6 +317,9 @@ export function createDiarySdkQuery(
         }
 
         if (envelope === null) {
+          if (highestPriorityError !== null) {
+            throw highestPriorityError;
+          }
           throw new Error("Diary SDK query completed without a result envelope.");
         }
 

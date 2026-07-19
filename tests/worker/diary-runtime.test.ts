@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   existsSync,
   mkdtempSync,
@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,8 +24,10 @@ import {
   createDiaryRuntime,
   createDreamQueueProcessor,
 } from "../../src/worker/diary-runtime";
+import { createDiarySdkQuery } from "../../src/worker/diary-sdk-query";
 import { createWorkerCore, main } from "../../src/worker/server";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
+import { createLogger } from "../../src/shared/logger";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
 const roots: string[] = [];
@@ -264,6 +267,197 @@ describe("createDiaryRuntime", () => {
       db.close();
     }
   });
+
+  test("persists only stable streamed error metadata and never remote secrets", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const token = "sk-ant-sqlite-secret";
+    const proxyPassword = "sqlite-proxy-password";
+    const remoteBody =
+      `authorization: Bearer ${token}\n` +
+      `proxy=http://proxy-user:${proxyPassword}@proxy.example:8080`;
+    const runQuery = createDiarySdkQuery({
+      dataRoot: "/tmp/claude-mnemo-diary-sdk",
+      queryImpl: (() =>
+        (async function* () {
+          yield {
+            type: "system",
+            subtype: "api_error",
+            error: {
+              status: 400,
+              type: "invalid_request_error",
+              request_id: "req_sanitized",
+              body: remoteBody,
+            },
+          };
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            errors: [remoteBody],
+          };
+        })()) as never,
+      createSdkMcpServerImpl: (() => ({ type: "sdk", name: "diary" })) as never,
+      toolImpl: ((name: string) => ({ name })) as never,
+    }).runQuery;
+    const processor = createDreamQueueProcessor({
+      db,
+      stateStore,
+      readLastSuccessfulDate: async () => null,
+      nowEpoch: () => 100,
+      timeZone: "Asia/Shanghai",
+      sensitiveEnv: {
+        ANTHROPIC_AUTH_TOKEN: token,
+        HTTPS_PROXY: `http://proxy-user:${proxyPassword}@proxy.example:8080`,
+      },
+      async processDreamDate() {
+        await runQuery({
+          date: "2026-07-10",
+          prompt: "write",
+          model: "claude-sonnet-5",
+          timeoutMs: 600_000,
+          watchdogMs: 120_000,
+          signal: new AbortController().signal,
+          reportActivity() {},
+          toolHandlers: {
+            recall: async () => ({ content: [{ type: "text", text: "" }] }),
+            timeline: async () => ({ content: [{ type: "text", text: "" }] }),
+            readDoc: async () => "",
+            canUseTool: async () => ({
+              behavior: "allow",
+              updatedInput: {},
+            }),
+          },
+        });
+      },
+    });
+
+    const appendSpy = spyOn(nodeFs, "appendFileSync").mockImplementation(
+      () => {},
+    );
+    const mkdirSpy = spyOn(nodeFs, "mkdirSync").mockImplementation(
+      () => undefined as any,
+    );
+    try {
+      let streamedError: unknown;
+      try {
+        await processor.process(stateStore.claimNextDiaryItem(100)!);
+      } catch (error) {
+        streamedError = error;
+      }
+      expect(streamedError).toBeInstanceOf(Error);
+      createLogger("MNEMOSYNE", {
+        sensitiveEnv: {
+          ANTHROPIC_AUTH_TOKEN: token,
+          HTTPS_PROXY: `http://proxy-user:${proxyPassword}@proxy.example:8080`,
+        },
+      }).error("streamed dream failure", { error: streamedError });
+
+      const persisted = stateStore.getDayState("2026-07-10")?.lastError ?? "";
+      const logged = String(appendSpy.mock.calls.at(-1)?.[1] ?? "");
+      expect(persisted).toContain("type=invalid_request_error");
+      expect(persisted).toContain("status=400");
+      expect(persisted).toContain("request-id=req_sanitized");
+      expect(persisted).not.toContain(token);
+      expect(persisted).not.toContain(proxyPassword);
+      expect(persisted).not.toContain("authorization");
+      expect(logged).toContain("streamed dream failure");
+      expect(logged).not.toContain(token);
+      expect(logged).not.toContain(proxyPassword);
+      expect(logged).not.toContain("authorization");
+    } finally {
+      appendSpy.mockRestore();
+      mkdirSpy.mockRestore();
+      db.close();
+    }
+  });
+
+  test.each([
+    [
+      "rate limit",
+      {
+        type: "system",
+        subtype: "api_error",
+        error: { status: 429, retryInMs: 5_000 },
+      },
+      105,
+    ],
+    [
+      "billing",
+      {
+        type: "assistant",
+        error: "billing_error",
+        message: { content: [] },
+      },
+      86_500,
+    ],
+  ] as const)(
+    "routes a streamed dream %s through date-keyed non-attempt retry state",
+    async (_label, streamMessage, expectedRetryEpoch) => {
+      const db = createDatabase(":memory:");
+      initializeSchema(db);
+      const stateStore = createDiaryStateStore(db);
+      stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+      const runQuery = createDiarySdkQuery({
+        dataRoot: "/tmp/claude-mnemo-diary-sdk",
+        queryImpl: (() =>
+          (async function* () {
+            yield streamMessage;
+            yield {
+              type: "result",
+              subtype: "error_during_execution",
+              is_error: true,
+              errors: ["remote request failed"],
+            };
+          })()) as never,
+        createSdkMcpServerImpl: (() => ({ type: "sdk", name: "diary" })) as never,
+        toolImpl: ((name: string) => ({ name })) as never,
+      }).runQuery;
+      const processor = createDreamQueueProcessor({
+        db,
+        stateStore,
+        readLastSuccessfulDate: async () => null,
+        nowEpoch: () => 100,
+        timeZone: "Asia/Shanghai",
+        async processDreamDate() {
+          await runQuery({
+            date: "2026-07-10",
+            prompt: "write",
+            model: "claude-sonnet-5",
+            timeoutMs: 600_000,
+            watchdogMs: 120_000,
+            signal: new AbortController().signal,
+            reportActivity() {},
+            toolHandlers: {
+              recall: async () => ({ content: [{ type: "text", text: "" }] }),
+              timeline: async () => ({ content: [{ type: "text", text: "" }] }),
+              readDoc: async () => "",
+              canUseTool: async () => ({
+                behavior: "allow",
+                updatedInput: {},
+              }),
+            },
+          });
+        },
+      });
+
+      try {
+        await expect(
+          processor.process(stateStore.claimNextDiaryItem(100)!),
+        ).rejects.toThrow();
+        expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+          attemptCount: 0,
+          nextAttemptEpoch: expectedRetryEpoch,
+          terminal: false,
+          lastError: null,
+        });
+      } finally {
+        db.close();
+      }
+    },
+  );
 
   test("re-enqueues a late-finalized turn and idempotently replaces that day's outputs", async () => {
     const db = createDatabase(":memory:");

@@ -2,6 +2,11 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { DATA_DIR } from "./paths";
+import {
+  sanitizeLogValue,
+  sanitizeSecretString,
+  type SensitiveEnv,
+} from "./error-sanitizer";
 
 type LoggerComponent = "HOOK" | "MCP" | "DB" | "MNEMOSYNE";
 type LoggerLevel = "debug" | "info" | "warn" | "error";
@@ -22,13 +27,14 @@ function writeLog(
   component: LoggerComponent,
   message: string,
   context?: Record<string, unknown>,
+  sensitiveEnv: SensitiveEnv = process.env,
 ): void {
   const line = JSON.stringify({
     timestamp: new Date().toISOString(),
     level,
     component,
-    message,
-    context: context ?? null,
+    message: sanitizeSecretString(message, sensitiveEnv),
+    context: context ? sanitizeLogValue(context, sensitiveEnv) : null,
   });
 
   try {
@@ -40,19 +46,27 @@ function writeLog(
   }
 }
 
-export function createLogger(component: LoggerComponent) {
+export interface CreateLoggerOptions {
+  sensitiveEnv?: SensitiveEnv;
+}
+
+export function createLogger(
+  component: LoggerComponent,
+  options: CreateLoggerOptions = {},
+) {
+  const sensitiveEnv = options.sensitiveEnv ?? process.env;
   return {
     debug(message: string, context?: Record<string, unknown>) {
-      writeLog("debug", component, message, context);
+      writeLog("debug", component, message, context, sensitiveEnv);
     },
     info(message: string, context?: Record<string, unknown>) {
-      writeLog("info", component, message, context);
+      writeLog("info", component, message, context, sensitiveEnv);
     },
     warn(message: string, context?: Record<string, unknown>) {
-      writeLog("warn", component, message, context);
+      writeLog("warn", component, message, context, sensitiveEnv);
     },
     error(message: string, context?: Record<string, unknown>) {
-      writeLog("error", component, message, context);
+      writeLog("error", component, message, context, sensitiveEnv);
     },
   };
 }

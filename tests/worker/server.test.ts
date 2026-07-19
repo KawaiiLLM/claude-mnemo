@@ -227,7 +227,7 @@ function primeSessionState(
       rememberedSessionIds: new Set<number>(),
       hadSubstantiveText: false,
       hadIllegalTool: false,
-      connectionError: null,
+      retryableError: null,
     },
   });
 }

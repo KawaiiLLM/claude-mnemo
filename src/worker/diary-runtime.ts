@@ -6,6 +6,10 @@ import { DreamMemoryStore } from "../diary/memory-store";
 import { computeDiaryWatermark } from "../diary/domain";
 import { loadConfig, type MnemoConfig } from "../shared/config";
 import {
+  formatErrorForPersistence,
+  type SensitiveEnv,
+} from "../shared/error-sanitizer";
+import {
   createDiaryAgentRunner,
   type DiaryAgentQueryRequest,
 } from "./diary-agent-runner";
@@ -17,8 +21,12 @@ import {
 } from "./dream-job";
 import {
   classifyWorkerError,
+  resolveWorkerRetryDelayMs,
   type WorkerAbortReason,
 } from "./error-classifier";
+
+const DREAM_CONNECTION_RETRY_MS = 15 * 60 * 1_000;
+const DREAM_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1_000;
 
 export interface CreateDreamQueueProcessorOptions {
   db: Database;
@@ -34,6 +42,7 @@ export interface CreateDreamQueueProcessorOptions {
   nowEpoch?: () => number;
   timeZone: string;
   boundaryHour?: number;
+  sensitiveEnv?: SensitiveEnv;
 }
 
 function dreamDateFromQueueItem(item: PendingQueueItem): string {
@@ -98,16 +107,29 @@ export function createDreamQueueProcessor(
         // before an idle-watchdog kill must not respin on the 60s cadence
         // (the 0.4.0 burn pattern). Fast-fail outages lose nothing from the
         // longer wait — a dream is never urgent.
-        const retryDelaySeconds = isShutdownAbort
+        const retryDelayMs = isShutdownAbort
           ? 0
-          : classification === "connection"
-            ? 15 * 60
-            : 60;
+          : classification === "blocked"
+            ? Math.max(
+                DREAM_BLOCKED_RETRY_FLOOR_MS,
+                resolveWorkerRetryDelayMs(
+                  error,
+                  DREAM_BLOCKED_RETRY_FLOOR_MS,
+                  failedAtEpoch * 1_000,
+                ),
+              )
+            : classification === "connection"
+              ? resolveWorkerRetryDelayMs(
+                  error,
+                  DREAM_CONNECTION_RETRY_MS,
+                  failedAtEpoch * 1_000,
+                )
+              : 60 * 1_000;
         options.stateStore.recordDreamFailure({
           date,
           queueSeq: item.seq,
-          error: error instanceof Error ? error.message : String(error),
-          retryAtEpoch: failedAtEpoch + retryDelaySeconds,
+          error: formatErrorForPersistence(error, options.sensitiveEnv),
+          retryAtEpoch: failedAtEpoch + Math.ceil(retryDelayMs / 1_000),
           countAttempt: classification === "deterministic",
         });
         throw error;
@@ -122,6 +144,7 @@ export interface CreateDiaryRuntimeOptions {
   runQuery?: (request: DiaryAgentQueryRequest) => Promise<string>;
   nowEpoch?: () => number;
   config?: MnemoConfig;
+  sensitiveEnv?: SensitiveEnv;
 }
 
 export interface DiaryRuntime {
@@ -167,6 +190,7 @@ export function createDiaryRuntime(
     nowEpoch: options.nowEpoch,
     timeZone: config.dreamAgentTimeZone,
     boundaryHour: config.dreamAgentHour,
+    sensitiveEnv: options.sensitiveEnv,
   });
 
   let activeDream: Promise<void> | null = null;

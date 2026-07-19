@@ -54,13 +54,16 @@ describe("classifyWorkerError", () => {
     ).toBe("connection");
   });
 
-  test("conservatively classifies status, derailment, abort, and unknown errors as deterministic", () => {
+  test("classifies retryable status before the deterministic status fallthrough", () => {
     const statusError = Object.assign(new Error("API status 503"), {
       name: "APIError",
       status: 503,
     });
 
-    expect(classifyWorkerError(statusError)).toBe("deterministic");
+    expect(classifyWorkerError(statusError)).toBe("connection");
+  });
+
+  test("conservatively classifies derailment, abort, and unknown errors as deterministic", () => {
     expect(classifyWorkerError(new Error("derailment floor"))).toBe(
       "deterministic",
     );
