@@ -4,6 +4,7 @@ import { createDiaryStateStore } from "../db/diary-state";
 import type { PendingQueueItem } from "../db/pending-queue";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { computeDiaryWatermark } from "../diary/domain";
+import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadConfig, type MnemoConfig } from "../shared/config";
 import {
   formatErrorForPersistence,
@@ -145,11 +146,15 @@ export interface CreateDiaryRuntimeOptions {
   nowEpoch?: () => number;
   config?: MnemoConfig;
   sensitiveEnv?: SensitiveEnv;
+  workerEnv?: NodeJS.ProcessEnv;
 }
 
 export interface DiaryRuntime {
   processDreamDate(date: string): Promise<void>;
-  processDreamItem(item: PendingQueueItem): Promise<void>;
+  processDreamItem(
+    item: PendingQueueItem,
+    agentEnv?: NodeJS.ProcessEnv,
+  ): Promise<void>;
   isDreamRunning?(): boolean;
   abortDream?(reason: WorkerAbortReason): Promise<void>;
 }
@@ -167,8 +172,14 @@ export function createDiaryRuntime(
   const runQuery =
     options.runQuery ??
     createDiarySdkQuery({ dataRoot: options.dataRoot }).runQuery;
+  const operationalBaseline = buildIsolatedEnv(
+    options.workerEnv ?? process.env,
+    {},
+  );
+  let activeAgentEnv = operationalBaseline;
   const agentRunner = createDiaryAgentRunner({
-    runQuery,
+    runQuery: (request) =>
+      runQuery({ ...request, agentEnv: activeAgentEnv }),
     timeoutMs: config.dreamAgentTimeoutMs,
     watchdogMs: config.dreamAgentIdleWatchdogMs,
   });
@@ -195,16 +206,27 @@ export function createDiaryRuntime(
 
   let activeDream: Promise<void> | null = null;
 
-  function trackDream(work: () => Promise<void>): Promise<void> {
+  function trackDream(
+    work: () => Promise<void>,
+    agentEnv: NodeJS.ProcessEnv = operationalBaseline,
+  ): Promise<void> {
     if (activeDream) {
       return Promise.reject(new Error("Dream processing is already running."));
     }
 
-    const operation = work();
+    activeAgentEnv = { ...agentEnv };
+    let operation: Promise<void>;
+    try {
+      operation = work();
+    } catch (error) {
+      activeAgentEnv = operationalBaseline;
+      throw error;
+    }
     const tracked = operation.finally(() => {
       if (activeDream === tracked) {
         activeDream = null;
       }
+      activeAgentEnv = operationalBaseline;
     });
     activeDream = tracked;
     // Lifecycle abort waits on this same operation; pre-handle the rejection so
@@ -216,7 +238,8 @@ export function createDiaryRuntime(
 
   return {
     processDreamDate: (date) => trackDream(() => processDreamDateRaw(date)),
-    processDreamItem: (item) => trackDream(() => dreamQueue.process(item)),
+    processDreamItem: (item, agentEnv) =>
+      trackDream(() => dreamQueue.process(item), agentEnv),
     isDreamRunning: () => activeDream !== null,
     async abortDream(reason) {
       const dream = activeDream;

@@ -74,8 +74,9 @@ export function buildIsolatedEnv(
   workerEnv?: NodeJS.ProcessEnv,
   capturedSessionEnv?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  // The diary agent is migrated separately. Preserve its existing one-source
-  // behavior until that ticket supplies a triggering session snapshot.
+  // Undefined preserves the legacy behavior for callers that have not opted
+  // into per-session isolation. The dream path now always supplies either its
+  // triggering session snapshot or an empty snapshot for the safe baseline.
   if (capturedSessionEnv === undefined) {
     const sourceEnv = workerEnv ?? process.env;
     const legacyEnv: NodeJS.ProcessEnv = {};

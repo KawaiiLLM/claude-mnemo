@@ -22,6 +22,8 @@ export interface DiaryAgentQueryRequest extends DiaryAgentRunInput {
   model: DreamAgentModel;
   timeoutMs: number;
   watchdogMs: number;
+  /** Fully resolved subprocess env for this dream attempt. */
+  agentEnv?: NodeJS.ProcessEnv;
   signal: AbortSignal;
   reportActivity(): void;
 }

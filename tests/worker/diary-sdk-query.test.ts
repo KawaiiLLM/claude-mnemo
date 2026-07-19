@@ -111,6 +111,11 @@ describe("shared SDK agent query", () => {
       model: "claude-sonnet-5",
       timeoutMs: 600_000,
       watchdogMs: 120_000,
+      agentEnv: {
+        HOME: "/Users/worker",
+        ANTHROPIC_AUTH_TOKEN: "dream-session-auth",
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+      },
       signal: new AbortController().signal,
       reportActivity() {},
       toolHandlers: {
@@ -134,7 +139,10 @@ describe("shared SDK agent query", () => {
     expect(seenCalls[0]?.options.mcpServers).toEqual({ diary: server });
     // Dream forces 5-minute prompt caching (single-burst run, no cross-run reuse);
     // the summary agent keeps 1h via its own env path.
-    expect(seenCalls[0]?.options.env).toMatchObject({
+    expect(seenCalls[0]?.options.env).toEqual({
+      HOME: "/Users/worker",
+      ANTHROPIC_AUTH_TOKEN: "dream-session-auth",
+      CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
       FORCE_PROMPT_CACHING_5M: "1",
     });
     expect(seenCalls[0]?.options.systemPrompt).toContain(

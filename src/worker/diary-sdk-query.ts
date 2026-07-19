@@ -250,9 +250,13 @@ export function createDiarySdkQuery(
             // Force 5-minute prompt caching: the dream is a single short burst
             // (all turns seconds apart, done within minutes) with no cross-run
             // reuse, so the CC default 1h cache only pays the 2x write premium
-            // for nothing. Providing env replaces process.env entirely, so build
-            // from the isolated env. The summary agent keeps 1h via its own path.
-            env: { ...buildIsolatedEnv(), FORCE_PROMPT_CACHING_5M: "1" },
+            // for nothing. Providing env replaces process.env entirely. The
+            // runtime supplies the triggering session's safe snapshot; direct
+            // callers receive the sanitized operational baseline.
+            env: {
+              ...(request.agentEnv ?? buildIsolatedEnv(process.env, {})),
+              FORCE_PROMPT_CACHING_5M: "1",
+            },
             // Write/Edit let the agent revise the staging copies incrementally
             // (only changed content becomes output tokens); canUseTool scopes
             // them to the run's staging subtree.

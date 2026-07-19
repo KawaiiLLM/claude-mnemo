@@ -48,6 +48,73 @@ function writeStaging(dataRoot: string, night: CommitNightInput): void {
   writeFileSync(paths.diaryIndex, night.diaryIndex);
 }
 describe("createDiaryRuntime", () => {
+  test("passes the triggering session's resolved env to the dream query spawn", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-dream-env-"));
+    roots.push(dataRoot);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+    const session = upsertSession(db, {
+      contentSessionId: "dream-env-runtime",
+      project: "/projects/dream",
+      title: "Dream env runtime",
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    saveTurnFixture(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "Spawn the dream with this session's env.",
+      assistantResponse: "The env is threaded without changing the dream job.",
+      title: null,
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: Date.parse("2026-07-10T04:00:00+08:00") / 1_000,
+      updatedAtEpoch: null,
+      observations: [],
+    });
+    const agentEnv = {
+      HOME: "/Users/worker",
+      ANTHROPIC_AUTH_TOKEN: "auth-a",
+      CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+    };
+    let seenAgentEnv: NodeJS.ProcessEnv | undefined;
+    const runtime = createDiaryRuntime({
+      db,
+      dataRoot,
+      async runQuery(request) {
+        seenAgentEnv = (
+          request as typeof request & { agentEnv?: NodeJS.ProcessEnv }
+        ).agentEnv;
+        writeStaging(dataRoot, {
+          date: "2026-07-10",
+          userProfile: "# User Profile\n",
+          experience: "# Experience\n",
+          archive: "# Memory Archive\n",
+          diary: "# 2026-07-10\n",
+          diaryIndex: "# Diary Index\n",
+        });
+        await request.toolHandlers.commit!({});
+        return "committed";
+      },
+    });
+
+    try {
+      await runtime.processDreamItem(
+        stateStore.claimNextDiaryItem(100)!,
+        agentEnv,
+      );
+      expect(seenAgentEnv).toEqual(agentEnv);
+    } finally {
+      db.close();
+    }
+  });
+
   test("shutdown interruption preserves dream attempts, removes staging, and retries on the next turn-stop", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createDiaryStateStore } from "../../src/db/diary-state";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -161,5 +162,148 @@ describe("worker per-session env registry", () => {
     await core.scanAndDrainQueue(sessionA.id);
     expect(spawned).toHaveLength(3);
     expect(listPendingQueueItems(db, sessionA.id)).toHaveLength(1);
+  });
+
+  test("a dream fired by session A's turn-stop spawns with A's safe env snapshot", async () => {
+    const sessionA = upsertSession(db, {
+      contentSessionId: "dream-env-a",
+      project: "/project/a",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    });
+    addQueuedTurn(db, sessionA.id, 1);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+
+    const dreamSpawnEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+    const sessionEnvRegistry = new Map();
+    const core = createWorkerCore({
+      db,
+      workerEnv: {
+        HOME: "/Users/worker",
+        PATH: "/usr/bin",
+        GITHUB_TOKEN: "worker-github",
+        AWS_SECRET_ACCESS_KEY: "worker-aws",
+        ANTHROPIC_AUTH_TOKEN: "worker-auth",
+      },
+      sessionEnvRegistry,
+      config: {
+        ...DEFAULT_CONFIG,
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+      },
+      createWorkerQuerySessionImpl: mock((() => ({
+        sessionId: "agent-dream-env-a",
+        queryPid: undefined,
+        async sendPrompt() {
+          return { session_id: "agent-dream-env-a" };
+        },
+        async close() {},
+      })) as typeof import("../../src/worker/query-session").createWorkerQuerySession),
+      async processDiaryItem(item, agentEnv) {
+        dreamSpawnEnvs.push(agentEnv);
+        stateStore.acknowledgeDiaryItem(item.seq);
+      },
+      isProcessAliveImpl: () => false,
+      logger: { warn() {}, error() {} },
+    });
+
+    await core.registerSessionEnv("dream-env-a", sessionA.id, {
+      ANTHROPIC_AUTH_TOKEN: "auth-a",
+      HTTP_PROXY: "http://proxy-a",
+    });
+    await core.scanAndDrainQueue(sessionA.id);
+
+    expect(dreamSpawnEnvs).toEqual([
+      {
+        HOME: "/Users/worker",
+        PATH: "/usr/bin",
+        ANTHROPIC_AUTH_TOKEN: "auth-a",
+        HTTP_PROXY: "http://proxy-a",
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+      },
+    ]);
+  });
+
+  test("a dream falls back to the operational baseline when A's env clears before spawn", async () => {
+    const sessionA = upsertSession(db, {
+      contentSessionId: "dream-env-cleared",
+      project: "/project/a",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    });
+    addQueuedTurn(db, sessionA.id, 1);
+    const stateStore = createDiaryStateStore(db);
+    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+
+    const dreamSpawnEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+    const warnings: Array<{ message: string; context: unknown }> = [];
+    const sessionEnvRegistry = new Map();
+    const core = createWorkerCore({
+      db,
+      workerEnv: {
+        HOME: "/Users/worker",
+        PATH: "/usr/bin",
+        GITHUB_TOKEN: "worker-github",
+        AWS_SECRET_ACCESS_KEY: "worker-aws",
+        ANTHROPIC_AUTH_TOKEN: "worker-auth",
+      },
+      sessionEnvRegistry,
+      config: {
+        ...DEFAULT_CONFIG,
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+      },
+      createWorkerQuerySessionImpl: mock(((_input, deps) => ({
+        sessionId: "agent-dream-env-cleared",
+        queryPid: undefined,
+        async sendPrompt(prompt: string) {
+          for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+            deps?.onRemember?.(`T${match[1]}`);
+          }
+          sessionEnvRegistry.delete("dream-env-cleared");
+          return { session_id: "agent-dream-env-cleared" };
+        },
+        async close() {},
+      })) as typeof import("../../src/worker/query-session").createWorkerQuerySession),
+      async processDiaryItem(item, agentEnv) {
+        dreamSpawnEnvs.push(agentEnv);
+        stateStore.acknowledgeDiaryItem(item.seq);
+      },
+      isProcessAliveImpl: () => false,
+      logger: {
+        warn(message, context) {
+          warnings.push({ message, context });
+        },
+        error() {},
+      },
+    });
+
+    await core.registerSessionEnv("dream-env-cleared", sessionA.id, {
+      ANTHROPIC_AUTH_TOKEN: "auth-a",
+      HTTPS_PROXY: "http://proxy-a",
+    });
+    await core.scanAndDrainQueue(sessionA.id);
+
+    expect(dreamSpawnEnvs).toEqual([
+      {
+        HOME: "/Users/worker",
+        PATH: "/usr/bin",
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+      },
+    ]);
+    expect(warnings).toContainEqual({
+      message:
+        "dream triggering session env unavailable; using operational baseline",
+      context: { triggeringSessionDbId: sessionA.id },
+    });
   });
 });

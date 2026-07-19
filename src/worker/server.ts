@@ -246,7 +246,10 @@ export interface WorkerCoreDeps {
   sessionEnvRegistry?: Map<string, CapturedSessionEnv>;
   now?: () => number;
   nowMs?: () => number;
-  processDiaryItem?: (item: PendingQueueItem) => Promise<void>;
+  processDiaryItem?: (
+    item: PendingQueueItem,
+    agentEnv: NodeJS.ProcessEnv,
+  ) => Promise<void>;
   setTimeoutImpl?: (
     callback: () => void | Promise<void>,
     delayMs: number,
@@ -549,7 +552,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     blockedUntilBySession.has(sessionDbId);
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer: unknown | null = null;
-  let diaryDrainRequested = false;
+  let pendingDiaryTriggerSessionDbId: number | null | undefined;
   let globalScanInFlight: Promise<void> | null = null;
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
@@ -1989,12 +1992,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         return;
       }
       diaryContinuationTimer = null;
-      await scanAndDrainGlobalQueue(true);
+      await scanAndDrainGlobalQueue(null);
     }, 0);
     diaryContinuationTimer = handle;
   }
 
-  async function drainQueue(sessionFilter?: number): Promise<boolean> {
+  async function drainQueue(sessionFilter?: number): Promise<number | null> {
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
       if (
@@ -2015,24 +2018,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       sessionFilter !== undefined &&
       !getRegisteredSessionEnv(sessionFilter)
     ) {
-      return false;
+      return null;
     }
     if (
       sessionFilter !== undefined &&
       isSessionRetryGated(sessionFilter)
     ) {
-      return false;
+      return null;
     }
 
     const skippedSeqs = new Set<number>();
-    let turnStopProcessed = false;
+    let triggeringSessionDbId: number | null = null;
 
     while (true) {
       if (
         sessionFilter !== undefined &&
         isSessionRetryGated(sessionFilter)
       ) {
-        return turnStopProcessed;
+        return triggeringSessionDbId;
       }
       const excludedSessions =
         sessionFilter === undefined
@@ -2050,7 +2053,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       if (!item) {
         await flushDrainTail(sessionFilter);
-        return turnStopProcessed;
+        return triggeringSessionDbId;
       }
 
       if (
@@ -2099,7 +2102,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await withSessionProcessingLock(item.sessionDbId, async (state) => {
           await processTurnStopLocked(state, item);
         });
-        turnStopProcessed = true;
+        triggeringSessionDbId ??= item.sessionDbId;
       } catch (error) {
         for (const seq of bufferedSeqs) {
           skippedSeqs.add(seq);
@@ -2114,7 +2117,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  async function drainOneDiaryItem(): Promise<void> {
+  async function drainOneDiaryItem(
+    triggeringSessionDbId: number | null,
+  ): Promise<void> {
     if (!deps.processDiaryItem) {
       return;
     }
@@ -2124,8 +2129,23 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return;
     }
 
+    const capturedSessionEnv =
+      triggeringSessionDbId === null
+        ? undefined
+        : getRegisteredSessionEnv(triggeringSessionDbId);
+    if (!capturedSessionEnv) {
+      logger.warn?.(
+        "dream triggering session env unavailable; using operational baseline",
+        { triggeringSessionDbId },
+      );
+    }
+    const agentEnv = buildIsolatedEnv(
+      deps.workerEnv ?? process.env,
+      capturedSessionEnv ?? {},
+    );
+
     try {
-      await deps.processDiaryItem(diaryItem);
+      await deps.processDiaryItem(diaryItem, agentEnv);
     } catch (error) {
       logger.error?.("diary queue item failed", {
         seq: diaryItem.seq,
@@ -2135,11 +2155,16 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  function scanAndDrainGlobalQueue(requestDiary: boolean): Promise<void> {
+  function scanAndDrainGlobalQueue(
+    requestedTriggerSessionDbId?: number | null,
+  ): Promise<void> {
     // Pure liveness scans only recover session work. A processed turn-stop (or
     // the explicit manual trigger) earns one diary claim after that work.
-    if (requestDiary) {
-      diaryDrainRequested = true;
+    if (
+      requestedTriggerSessionDbId !== undefined &&
+      pendingDiaryTriggerSessionDbId === undefined
+    ) {
+      pendingDiaryTriggerSessionDbId = requestedTriggerSessionDbId;
     }
     if (globalScanInFlight) {
       return globalScanInFlight;
@@ -2149,13 +2174,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     tracked = (async () => {
       try {
         do {
-          const requestedForThisDrain = diaryDrainRequested;
-          diaryDrainRequested = false;
-          const turnStopProcessed = await drainQueue();
-          if (requestedForThisDrain || turnStopProcessed) {
-            await drainOneDiaryItem();
+          const requestedTriggerForThisDrain =
+            pendingDiaryTriggerSessionDbId;
+          pendingDiaryTriggerSessionDbId = undefined;
+          const globallyProcessedTriggerSessionDbId = await drainQueue();
+          if (
+            requestedTriggerForThisDrain !== undefined ||
+            globallyProcessedTriggerSessionDbId !== null
+          ) {
+            await drainOneDiaryItem(
+              requestedTriggerForThisDrain !== undefined
+                ? requestedTriggerForThisDrain
+                : globallyProcessedTriggerSessionDbId,
+            );
           }
-        } while (diaryDrainRequested);
+        } while (pendingDiaryTriggerSessionDbId !== undefined);
       } finally {
         if (globalScanInFlight === tracked) {
           globalScanInFlight = null;
@@ -2169,13 +2202,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
     if (sessionFilter !== undefined) {
       return (async () => {
-        const turnStopProcessed = await drainQueue(sessionFilter);
-        if (turnStopProcessed) {
-          await scanAndDrainGlobalQueue(true);
+        const triggeringSessionDbId = await drainQueue(sessionFilter);
+        if (triggeringSessionDbId !== null) {
+          await scanAndDrainGlobalQueue(triggeringSessionDbId);
         }
       })();
     }
-    return scanAndDrainGlobalQueue(false);
+    return scanAndDrainGlobalQueue();
   }
 
   async function drainSessionCompletely(sessionDbId: number): Promise<void> {
@@ -3085,6 +3118,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           dataRoot: deps.dataRoot ?? DATA_DIR,
           nowEpoch: deps.now,
           config,
+          workerEnv: env,
         });
 
   const core = createWorkerCore({
