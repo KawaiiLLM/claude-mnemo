@@ -43,6 +43,15 @@ const SCHEMA_SQL = `
     content_prompt_id TEXT,
     was_interrupted INTEGER NOT NULL DEFAULT 0,
     was_rolled_back INTEGER NOT NULL DEFAULT 0,
+    extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (
+      extraction_stall_attempts >= 0
+    ),
+    extraction_stall_retry_at_ms INTEGER,
+    extraction_stall_retry_after_seq INTEGER,
+    extraction_stall_retry_mode TEXT CHECK (
+      extraction_stall_retry_mode IS NULL OR
+      extraction_stall_retry_mode IN ('resume', 'forceFresh')
+    ),
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -140,6 +149,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
@@ -223,6 +233,34 @@ function ensureTurnInvalidationColumns(db: Database): void {
   if (!hasColumn(db, "turns", "was_rolled_back")) {
     db.exec(
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+}
+
+function ensureTurnExtractionStallRetryColumns(db: Database): void {
+  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
+       CHECK (extraction_stall_attempts >= 0)`,
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
+    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER",
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_retry_mode TEXT
+       CHECK (
+         extraction_stall_retry_mode IS NULL OR
+         extraction_stall_retry_mode IN ('resume', 'forceFresh')
+       )`,
     );
   }
 }

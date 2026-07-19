@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.4-mrs12v0e" : "dev";
+var BUILD_ID = true ? "0.6.4-mrs26zjw" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1478,6 +1478,10 @@ var TURN_SELECT = `
     transcript_line_start AS transcriptLineStart,
     was_interrupted AS wasInterrupted,
     was_rolled_back AS wasRolledBack,
+    extraction_stall_attempts AS extractionStallAttempts,
+    extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+    extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+    extraction_stall_retry_mode AS extractionStallRetryMode,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -1543,6 +1547,72 @@ function getTurnById(db, turnId) {
     db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
   );
 }
+function recordExtractionStalls(db, turnIds, retryAtMs, retryAfterSeq) {
+  const uniqueTurnIds = [...new Set(turnIds)];
+  return runWriteTransaction(db, () => {
+    const attemptsByTurnId = /* @__PURE__ */ new Map();
+    const statement = db.query(
+      `UPDATE turns
+       SET extraction_stall_attempts = extraction_stall_attempts + 1,
+           extraction_stall_retry_at_ms = CASE
+             WHEN extraction_stall_attempts + 1 < 3 THEN ? ELSE NULL END,
+           extraction_stall_retry_after_seq = CASE
+             WHEN extraction_stall_attempts + 1 < 3 THEN ? ELSE NULL END,
+           extraction_stall_retry_mode = CASE extraction_stall_attempts + 1
+             WHEN 1 THEN 'resume'
+             WHEN 2 THEN 'forceFresh'
+             ELSE NULL
+           END
+       WHERE id = ?
+       RETURNING
+         extraction_stall_attempts AS attempts,
+         extraction_stall_retry_mode AS nextMode`
+    );
+    for (const turnId of uniqueTurnIds) {
+      const updated = statement.get(retryAtMs, retryAfterSeq, turnId);
+      if (updated) {
+        attemptsByTurnId.set(turnId, updated);
+      }
+    }
+    return attemptsByTurnId;
+  });
+}
+function clearExtractionStallRetries(db, turnIds) {
+  const uniqueTurnIds = [...new Set(turnIds)];
+  if (uniqueTurnIds.length === 0) {
+    return;
+  }
+  const placeholders = uniqueTurnIds.map(() => "?").join(", ");
+  db.query(
+    `UPDATE turns
+     SET extraction_stall_retry_at_ms = NULL,
+         extraction_stall_retry_after_seq = NULL,
+         extraction_stall_retry_mode = NULL
+     WHERE id IN (${placeholders})`
+  ).run(...uniqueTurnIds);
+}
+function listExtractionStallRetries(db) {
+  const columns = new Set(
+    db.query("SELECT name FROM pragma_table_info('turns')").all().map((row) => row.name)
+  );
+  if (!columns.has("extraction_stall_attempts") || !columns.has("extraction_stall_retry_at_ms") || !columns.has("extraction_stall_retry_after_seq") || !columns.has("extraction_stall_retry_mode")) {
+    return [];
+  }
+  return db.query(
+    `SELECT
+         id AS turnId,
+         session_id AS sessionDbId,
+         extraction_stall_attempts AS attempts,
+         extraction_stall_retry_at_ms AS retryAtMs,
+         extraction_stall_retry_after_seq AS retryAfterSeq,
+         extraction_stall_retry_mode AS nextMode
+       FROM turns
+       WHERE extraction_stall_retry_at_ms IS NOT NULL
+         AND extraction_stall_retry_after_seq IS NOT NULL
+         AND extraction_stall_retry_mode IS NOT NULL
+       ORDER BY session_id ASC, id ASC`
+  ).all();
+}
 function updateTurnById(db, turnId, input) {
   const existing = getTurnById(db, turnId);
   if (!existing) {
@@ -1580,6 +1650,10 @@ function updateTurnById(db, turnId, input) {
             content_prompt_id AS contentPromptId,
             was_interrupted AS wasInterrupted,
             was_rolled_back AS wasRolledBack,
+            extraction_stall_attempts AS extractionStallAttempts,
+            extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+            extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+            extraction_stall_retry_mode AS extractionStallRetryMode,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -2069,6 +2143,15 @@ var SCHEMA_SQL = `
     content_prompt_id TEXT,
     was_interrupted INTEGER NOT NULL DEFAULT 0,
     was_rolled_back INTEGER NOT NULL DEFAULT 0,
+    extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (
+      extraction_stall_attempts >= 0
+    ),
+    extraction_stall_retry_at_ms INTEGER,
+    extraction_stall_retry_after_seq INTEGER,
+    extraction_stall_retry_mode TEXT CHECK (
+      extraction_stall_retry_mode IS NULL OR
+      extraction_stall_retry_mode IN ('resume', 'forceFresh')
+    ),
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -2165,6 +2248,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
@@ -2224,6 +2308,33 @@ function ensureTurnInvalidationColumns(db) {
   if (!hasColumn(db, "turns", "was_rolled_back")) {
     db.exec(
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+}
+function ensureTurnExtractionStallRetryColumns(db) {
+  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
+       CHECK (extraction_stall_attempts >= 0)`
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
+    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER"
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_retry_mode TEXT
+       CHECK (
+         extraction_stall_retry_mode IS NULL OR
+         extraction_stall_retry_mode IN ('resume', 'forceFresh')
+       )`
     );
   }
 }
@@ -43489,7 +43600,8 @@ function collectSignals(error49) {
     retryInMs: [],
     retryAfter: [],
     requestIds: [],
-    hasConnectionSignal: false
+    hasConnectionSignal: false,
+    hasExtractionStallSignal: false
   };
   const seen = /* @__PURE__ */ new Set();
   const queue = [error49];
@@ -43565,7 +43677,9 @@ function collectSignals(error49) {
     if (current.type === "system" && current.subtype === "api_error" || current.type === "assistant" && (current.error === "rate_limit" || current.error === "server_error")) {
       signals.hasConnectionSignal = true;
     }
-    if (current.workerAbortReason === "stall-watchdog" || current.workerAbortReason === "shutdown") {
+    if (current.workerAbortReason === "extraction-stall-watchdog") {
+      signals.hasExtractionStallSignal = true;
+    } else if (current.workerAbortReason === "stall-watchdog" || current.workerAbortReason === "shutdown") {
       signals.hasConnectionSignal = true;
     }
     if (typeof current.code === "string" && CONNECTION_ERROR_CODES.has(current.code)) {
@@ -43604,6 +43718,9 @@ function collectSignals(error49) {
 }
 function classifySignals(signals) {
   const hasType = (types) => signals.types.some((type) => types.has(type));
+  if (signals.hasExtractionStallSignal) {
+    return "extraction-stall";
+  }
   if (signals.statuses.some((status) => DETERMINISTIC_STATUSES.has(status))) {
     return "deterministic";
   }
@@ -43879,6 +43996,7 @@ function isStreamErrorMessage(message) {
 }
 var ERROR_CLASSIFICATION_PRIORITY = {
   deterministic: 1,
+  "extraction-stall": 1,
   connection: 2,
   blocked: 3
 };
@@ -44870,8 +44988,17 @@ var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
 var AGENT_CONTEXT_WINDOW_TOKENS = 1e6;
 var AGENT_COMPACT_MAX_TOKENS = 1e5;
+function compareStallRetryPlans(left, right) {
+  if (left.nextMode === right.nextMode) {
+    return 0;
+  }
+  return left.nextMode === "resume" ? -1 : 1;
+}
 function batchMiniTurns(batch) {
   return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
+}
+function batchTurnIds(batch) {
+  return [...new Set(batchMiniTurns(batch).map((item) => item.turnId))];
 }
 function batchWorkUnitShape(batch) {
   if (batch.kind === "merged") {
@@ -45018,7 +45145,39 @@ function createWorkerCore(deps) {
   const buffers = /* @__PURE__ */ new Map();
   const compactingSessions = /* @__PURE__ */ new Set();
   const suspendedUntilBySession = /* @__PURE__ */ new Map();
+  const pendingStallRetryBySession = /* @__PURE__ */ new Map();
   const blockedUntilBySession = /* @__PURE__ */ new Map();
+  for (const retry of listExtractionStallRetries(deps.db)) {
+    let suspension = suspendedUntilBySession.get(retry.sessionDbId);
+    if (!suspension) {
+      suspension = {
+        retryAtMs: retry.retryAtMs,
+        latestTurnStopSeq: retry.retryAfterSeq,
+        releasePolicy: "event-and-backoff",
+        retryPlans: []
+      };
+      suspendedUntilBySession.set(retry.sessionDbId, suspension);
+    }
+    suspension.retryAtMs = Math.max(suspension.retryAtMs, retry.retryAtMs);
+    suspension.latestTurnStopSeq = Math.max(
+      suspension.latestTurnStopSeq,
+      retry.retryAfterSeq
+    );
+    let plan = suspension.retryPlans.find(
+      (candidate) => candidate.nextMode === retry.nextMode && candidate.retryAtMs === retry.retryAtMs && candidate.latestTurnStopSeq === retry.retryAfterSeq
+    );
+    if (!plan) {
+      plan = {
+        nextMode: retry.nextMode,
+        turnIds: [],
+        retryAtMs: retry.retryAtMs,
+        latestTurnStopSeq: retry.retryAfterSeq
+      };
+      suspension.retryPlans.push(plan);
+      suspension.retryPlans.sort(compareStallRetryPlans);
+    }
+    plan.turnIds.push(retry.turnId);
+  }
   const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
   const enforceSessionEnvPresence = deps.sessionEnvRegistry !== void 0;
   const contentSessionIdByDbId = /* @__PURE__ */ new Map();
@@ -45062,6 +45221,51 @@ function createWorkerCore(deps) {
            WHERE session_db_id = ?
              AND kind = 'turn-stop'`
     ).get(sessionDbId)?.seq ?? 0;
+  }
+  function removeTurnFromBuffer(sessionDbId, turnId) {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    buffer.items = buffer.items.filter((item) => {
+      if (item.kind === "turn-stop") {
+        return item.targetId !== turnId;
+      }
+      return getObservation(deps.db, item.targetId)?.turnId !== turnId;
+    });
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+  function resetInterruptedSessionWork(sessionDbId, state = sessions.get(sessionDbId)) {
+    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
+    buffers.delete(sessionDbId);
+    if (state) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
+  }
+  function markExtractionFailedAndSkip(sessionDbId, turnId) {
+    const turn = getTurnById(deps.db, turnId);
+    if (!turn) {
+      return;
+    }
+    if (turn.status !== "undone") {
+      updateTurnById(deps.db, turnId, { status: "failed" });
+    }
+    deps.db.query(
+      `UPDATE observations
+         SET status = 'skipped'
+         WHERE turn_id = ? AND status = 'pending'`
+    ).run(turnId);
+    deps.db.query(
+      `DELETE FROM pending_queue
+         WHERE (kind = 'turn-stop' AND target_id = ?)
+            OR (kind = 'obs' AND target_id IN (
+              SELECT id FROM observations WHERE turn_id = ?
+            ))`
+    ).run(turnId, turnId);
+    removeTurnFromBuffer(sessionDbId, turnId);
   }
   function getOrCreateBuffer(sessionDbId) {
     let buffer = buffers.get(sessionDbId);
@@ -45146,6 +45350,7 @@ function createWorkerCore(deps) {
     return false;
   }
   function clearStreamedPartsForBatch(state, batch) {
+    clearExtractionStallRetries(deps.db, batchTurnIds(batch));
     for (const miniTurn of batchMiniTurns(batch)) {
       if (miniTurn.isFinal) {
         state.streamedParts.delete(miniTurn.turnId);
@@ -45675,10 +45880,11 @@ ${body}
       }
     }
   }
-  async function suspendSessionAfterRetryableError(sessionDbId, error49) {
+  async function suspendSessionAfterRetryableError(sessionDbId, error49, retryPlans = []) {
     const classification = classifyWorkerError(error49);
+    const isExtractionStall = classification === "extraction-stall";
     const currentMs = nowMs();
-    const retryAfterMs = classification === "blocked" ? Math.max(
+    const retryAfterMs = isExtractionStall && retryPlans[0] ? Math.max(0, retryPlans[0].retryAtMs - currentMs) : classification === "blocked" ? Math.max(
       BILLING_BLOCKED_RETRY_FLOOR_MS,
       resolveWorkerRetryDelayMs(
         error49,
@@ -45692,25 +45898,25 @@ ${body}
     );
     if (classification === "blocked") {
       suspendedUntilBySession.delete(sessionDbId);
+      pendingStallRetryBySession.delete(sessionDbId);
       blockedUntilBySession.set(sessionDbId, currentMs + retryAfterMs);
     } else {
       blockedUntilBySession.delete(sessionDbId);
+      pendingStallRetryBySession.delete(sessionDbId);
       suspendedUntilBySession.set(sessionDbId, {
-        retryAtMs: currentMs + retryAfterMs,
-        latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId)
+        retryAtMs: retryPlans[0]?.retryAtMs ?? currentMs + retryAfterMs,
+        latestTurnStopSeq: retryPlans[0]?.latestTurnStopSeq ?? latestTurnStopSeqForSession(sessionDbId),
+        releasePolicy: isExtractionStall ? "event-and-backoff" : "event-or-backoff",
+        retryPlans
       });
     }
-    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
-    buffers.delete(sessionDbId);
-    const state = sessions.get(sessionDbId);
-    if (state) {
-      state.batchQueue = [];
-      state.streamedParts.clear();
-    }
+    resetInterruptedSessionWork(sessionDbId);
     logger.warn?.("mini-turn flush suspended after retryable failure", {
       sessionDbId,
       classification,
       retryAfterMs,
+      nextRetryModes: retryPlans.map((plan) => plan.nextMode),
+      retryTurnIds: retryPlans.flatMap((plan) => plan.turnIds),
       error: error49
     });
     await closeSessionQuery(
@@ -45757,6 +45963,7 @@ ${body}
     if (!session) {
       return;
     }
+    await prepareStallRetryForBatch(state, batch);
     if (state.needsReprime) {
       try {
         await sendSessionReprime(state);
@@ -45835,6 +46042,132 @@ ${body}
     const freshSession = getSession(deps.db, session.id);
     state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
   }
+  async function prepareStallRetryForBatch(state, batch) {
+    const carriedTurnIds = batchTurnIds(batch);
+    const retryPlans = pendingStallRetryBySession.get(state.sessionDbId);
+    if (!retryPlans || retryPlans.length === 0) {
+      return;
+    }
+    const planIndex = retryPlans.findIndex(
+      (candidate) => candidate.turnIds.some((turnId) => carriedTurnIds.includes(turnId))
+    );
+    if (planIndex < 0) {
+      return;
+    }
+    const retryPlan = retryPlans[planIndex];
+    const remainingTurnIds = retryPlan.turnIds.filter(
+      (turnId) => !carriedTurnIds.includes(turnId)
+    );
+    if (remainingTurnIds.length === 0) {
+      retryPlans.splice(planIndex, 1);
+    } else {
+      retryPlans[planIndex] = {
+        ...retryPlan,
+        // One fresh construction satisfies the whole work group, including
+        // later batches split only for size.
+        nextMode: "resume",
+        turnIds: remainingTurnIds
+      };
+    }
+    if (retryPlans.length === 0) {
+      pendingStallRetryBySession.delete(state.sessionDbId);
+    }
+    if (retryPlan.nextMode === "forceFresh") {
+      await reopenQuerySessionFresh(state);
+    }
+  }
+  function resolvedTurnIdsInStalledBatch(batch, state) {
+    return new Set(
+      batchMiniTurns(batch).flatMap((miniTurn) => {
+        if (state.unitSignals.rememberedIds.has(miniTurn.turnId)) {
+          return [miniTurn.turnId];
+        }
+        if (miniTurn.role !== "short") {
+          return [];
+        }
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (turn?.status === "extracted" && (turn.title !== null || turn.content !== null)) {
+          return [miniTurn.turnId];
+        }
+        return [];
+      })
+    );
+  }
+  async function handleExtractionStall(state, batch, error49) {
+    const resolvedTurnIds = resolvedTurnIdsInStalledBatch(batch, state);
+    for (const miniTurn of batchMiniTurns(batch)) {
+      if (resolvedTurnIds.has(miniTurn.turnId)) {
+        processors.applyMiniTurnSideEffects(miniTurn);
+      }
+    }
+    clearExtractionStallRetries(deps.db, resolvedTurnIds);
+    const turnIds = batchTurnIds(batch).filter(
+      (turnId) => !resolvedTurnIds.has(turnId)
+    );
+    const retryAtMs = nowMs() + CONNECTION_RETRY_BACKOFF_MS;
+    const retryAfterSeq = latestTurnStopSeqForSession(state.sessionDbId);
+    const attemptsByTurnId = recordExtractionStalls(
+      deps.db,
+      turnIds,
+      retryAtMs,
+      retryAfterSeq
+    );
+    const retryPlansByMode = /* @__PURE__ */ new Map();
+    for (const turnId of turnIds) {
+      const result = attemptsByTurnId.get(turnId);
+      if (!result) {
+        continue;
+      }
+      if (result.attempts >= 3) {
+        markExtractionFailedAndSkip(state.sessionDbId, turnId);
+        logger.error?.("extraction stall limit reached; turn failed and skipped", {
+          sessionDbId: state.sessionDbId,
+          turnId,
+          stallAttempts: result.attempts,
+          escalation: "skip"
+        });
+        continue;
+      }
+      if (!result.nextMode) {
+        continue;
+      }
+      let plan = retryPlansByMode.get(result.nextMode);
+      if (!plan) {
+        plan = {
+          nextMode: result.nextMode,
+          turnIds: [],
+          retryAtMs,
+          latestTurnStopSeq: retryAfterSeq
+        };
+        retryPlansByMode.set(result.nextMode, plan);
+      }
+      plan.turnIds.push(turnId);
+      logger.warn?.("extraction stalled; scheduling bounded retry", {
+        sessionDbId: state.sessionDbId,
+        turnId,
+        stallAttempts: result.attempts,
+        escalation: result.nextMode
+      });
+    }
+    const retryPlans = [...retryPlansByMode.values()].sort(
+      compareStallRetryPlans
+    );
+    if (retryPlans.length > 0) {
+      await suspendSessionAfterRetryableError(
+        state.sessionDbId,
+        error49,
+        retryPlans
+      );
+      return;
+    }
+    suspendedUntilBySession.delete(state.sessionDbId);
+    pendingStallRetryBySession.delete(state.sessionDbId);
+    resetInterruptedSessionWork(state.sessionDbId, state);
+    await closeSessionQuery(
+      state.sessionDbId,
+      error49 instanceof Error ? error49 : void 0
+    );
+  }
   async function flushOneBatchLocked(state) {
     if (isSessionRetryGated(state.sessionDbId)) {
       state.batchQueue = [];
@@ -45849,7 +46182,12 @@ ${body}
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error49) {
-      if (classifyWorkerError(error49) !== "deterministic") {
+      const classification = classifyWorkerError(error49);
+      if (classification === "extraction-stall") {
+        await handleExtractionStall(state, batch, error49);
+        return "suspended";
+      }
+      if (classification !== "deterministic") {
         await suspendSessionAfterRetryableError(state.sessionDbId, error49);
         return "suspended";
       }
@@ -46005,6 +46343,11 @@ ${body}
     return processors.peelMiniTurnObs(turnObs, threshold).rest.length > 0;
   }
   async function maybeStreamInProgressTurnLocked(state, turnId) {
+    const turn = getTurnById(deps.db, turnId);
+    if (turn && turn.extractionStallAttempts >= 3) {
+      markExtractionFailedAndSkip(state.sessionDbId, turnId);
+      return;
+    }
     pruneInProgressBuffer(state.sessionDbId);
     const buffer = buffers.get(state.sessionDbId);
     if (!buffer) {
@@ -46032,6 +46375,10 @@ ${body}
     const turn = getTurnById(deps.db, turnStopItem.targetId);
     if (!turn || turn.status === "undone") {
       deleteQueueItem(deps.db, turnStopItem.seq);
+      return;
+    }
+    if (turn.extractionStallAttempts >= 3) {
+      markExtractionFailedAndSkip(state.sessionDbId, turn.id);
       return;
     }
     let obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
@@ -46103,8 +46450,17 @@ ${body}
   async function drainQueue(sessionFilter) {
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
-      if (suspension.retryAtMs <= currentMs || latestTurnStopSeqForSession(sessionDbId) > suspension.latestTurnStopSeq) {
+      const backoffElapsed = suspension.retryAtMs <= currentMs;
+      const hasNewTurnStop = latestTurnStopSeqForSession(sessionDbId) > suspension.latestTurnStopSeq;
+      const canRetry = suspension.releasePolicy === "event-and-backoff" ? backoffElapsed && hasNewTurnStop : backoffElapsed || hasNewTurnStop;
+      if (canRetry) {
         suspendedUntilBySession.delete(sessionDbId);
+        if (suspension.retryPlans.length > 0) {
+          pendingStallRetryBySession.set(
+            sessionDbId,
+            suspension.retryPlans
+          );
+        }
       }
     }
     for (const [sessionDbId, blockedUntilMs] of blockedUntilBySession) {
@@ -46137,6 +46493,13 @@ ${body}
       if (!item) {
         await flushDrainTail(sessionFilter);
         return triggeringSessionDbId;
+      }
+      const activeRetryPlan = pendingStallRetryBySession.get(item.sessionDbId)?.[0];
+      const itemTurnId = item.kind === "turn-stop" ? item.targetId : getObservation(deps.db, item.targetId)?.turnId ?? null;
+      if (activeRetryPlan && (itemTurnId === null || !activeRetryPlan.turnIds.includes(itemTurnId))) {
+        releaseQueueClaim(deps.db, item.seq);
+        skippedSeqs.add(item.seq);
+        continue;
       }
       if (enforceSessionEnvPresence && !getRegisteredSessionEnv(item.sessionDbId)) {
         releaseQueueClaim(deps.db, item.seq);
@@ -46562,7 +46925,7 @@ ${body}
             });
             await closeSessionQuery(
               state.sessionDbId,
-              createWorkerAbortError("stall-watchdog")
+              createWorkerAbortError("extraction-stall-watchdog")
             ).catch((error49) => {
               logger.error?.("watchdog closeSessionQuery failed", {
                 sessionDbId: state.sessionDbId,

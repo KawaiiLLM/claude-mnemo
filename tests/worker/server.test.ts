@@ -2863,7 +2863,7 @@ describe("worker server", () => {
     await stateCore.abortStalledSessions(100_000);
 
     expect(closed).toEqual([1]);
-    expect(abortClassifications).toEqual(["connection"]);
+    expect(abortClassifications).toEqual(["extraction-stall"]);
   });
 
   test("api_error traffic does not feed the watchdog and the abort releases the turn", async () => {
@@ -2934,7 +2934,8 @@ describe("worker server", () => {
     await core.abortStalledSessions(currentMs);
     await drain;
 
-    expect(closeClassification).toBe("connection");
+    expect(closeClassification).toBe("extraction-stall");
+    expect(getTurnById(db, turnId)?.extractionStallAttempts).toBe(1);
     expect(getTurnById(db, turnId)?.status).toBe("active");
     const queueRows = db
       .query<{ claimedAtEpoch: number | null }, [number]>(
@@ -3112,7 +3113,7 @@ describe("worker server", () => {
     await core.abortStalledSessions(currentMs);
     await drain;
 
-    expect(closeClassification).toBe("connection");
+    expect(closeClassification).toBe("extraction-stall");
   });
 
   test("assistant and remember progress keep an in-flight agent alive", async () => {

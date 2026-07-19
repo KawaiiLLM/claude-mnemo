@@ -1,9 +1,13 @@
 export type WorkerErrorClassification =
   | "connection"
   | "deterministic"
-  | "blocked";
+  | "blocked"
+  | "extraction-stall";
 
-export type WorkerAbortReason = "stall-watchdog" | "shutdown";
+export type WorkerAbortReason =
+  | "stall-watchdog"
+  | "extraction-stall-watchdog"
+  | "shutdown";
 
 export const MAX_WORKER_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
 
@@ -71,6 +75,7 @@ interface CollectedSignals {
   retryAfter: string[];
   requestIds: string[];
   hasConnectionSignal: boolean;
+  hasExtractionStallSignal: boolean;
 }
 
 export class WorkerAbortError extends Error {
@@ -186,6 +191,7 @@ function collectSignals(error: unknown): CollectedSignals {
     retryAfter: [],
     requestIds: [],
     hasConnectionSignal: false,
+    hasExtractionStallSignal: false,
   };
   const seen = new Set<object>();
   const queue: unknown[] = [error];
@@ -294,7 +300,9 @@ function collectSignals(error: unknown): CollectedSignals {
     ) {
       signals.hasConnectionSignal = true;
     }
-    if (
+    if (current.workerAbortReason === "extraction-stall-watchdog") {
+      signals.hasExtractionStallSignal = true;
+    } else if (
       current.workerAbortReason === "stall-watchdog" ||
       current.workerAbortReason === "shutdown"
     ) {
@@ -356,6 +364,10 @@ function collectSignals(error: unknown): CollectedSignals {
 function classifySignals(signals: CollectedSignals): WorkerErrorClassification {
   const hasType = (types: Set<string>) =>
     signals.types.some((type) => types.has(type));
+
+  if (signals.hasExtractionStallSignal) {
+    return "extraction-stall";
+  }
 
   // These statuses must win even when the SDK attaches a lower-level network
   // cause. In particular, bad credentials must never enter a permanent retry

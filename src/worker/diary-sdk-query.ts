@@ -109,6 +109,7 @@ const ERROR_CLASSIFICATION_PRIORITY: Record<
   number
 > = {
   deterministic: 1,
+  "extraction-stall": 1,
   connection: 2,
   blocked: 3,
 };

@@ -14,6 +14,7 @@ import {
 import { buildReminderEnvelope, createWorkerCore } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 import { MIN_MINI_TURN_CHARS, type MnemoConfig } from "../../src/shared/config";
+import { createWorkerAbortError } from "../../src/worker/error-classifier";
 
 // maxMiniTurnChars at the production floor (MIN_MINI_TURN_CHARS, what
 // loadConfig clamps to), so retry/drop coverage matches the tightest config.
@@ -209,6 +210,45 @@ describe("flush retry / drop (D8)", () => {
     expect(attempts.n).toBe(2);
     expect(core.sessions.get(sessionId)?.batchQueue ?? []).toHaveLength(0);
     expect(getPendingQueueCount(db)).toBe(0);
+  });
+
+  test("deterministic delivery attempts do not consume the durable stall budget", async () => {
+    let sends = 0;
+    const core = createWorkerCore({
+      db,
+      config: {
+        ...RETRY_CONFIG,
+        maxFlushAttempts: 4,
+      },
+      now: () => 123,
+      nowMs: () => 1_000,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: (() =>
+        ({
+          sessionId: "worker-query",
+          queryPid: 1234,
+          async sendPrompt() {
+            sends += 1;
+            if (sends <= 2) {
+              throw new Error("deterministic delivery failure");
+            }
+            throw createWorkerAbortError("extraction-stall-watchdog");
+          },
+          async close() {},
+        }) satisfies WorkerQuerySession) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    await core.flushSession(sessionId);
+    await core.runRetryTick();
+    expect(core.sessions.get(sessionId)?.batchQueue[0]?.attempts).toBe(2);
+
+    await core.runRetryTick();
+
+    expect(sends).toBe(3);
+    expect(getTurnById(db, turnId)?.extractionStallAttempts).toBe(1);
+    expect(getTurnById(db, turnId)?.status).toBe("active");
+    expect(getPendingQueueCount(db)).toBe(2);
   });
 
   test("retry tick skips compacting sessions", async () => {

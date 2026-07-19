@@ -179,6 +179,81 @@ describe("initializeSchema", () => {
     expect(columns).toContain("was_rolled_back");
   });
 
+  test("creates a non-negative durable extraction stall counter on turns", () => {
+    initializeSchema(db);
+
+    const sessionId = db
+      .query<{ id: number }, []>(
+        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('stall-schema', 'claude-mnemo', 1) RETURNING id",
+      )
+      .get()!.id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        "INSERT INTO turns (session_id, prompt_number, created_at_epoch) VALUES (?, 1, 2) RETURNING id",
+      )
+      .get(sessionId)!.id;
+
+    expect(getTurnById(db, turnId)?.extractionStallAttempts).toBe(0);
+    expect(() =>
+      db.query(
+        "UPDATE turns SET extraction_stall_attempts = -1 WHERE id = ?",
+      ).run(turnId),
+    ).toThrow();
+  });
+
+  test("adds extraction_stall_attempts to an existing turns table without resetting rows", () => {
+    db.exec(`
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content_session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL
+      );
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at_epoch INTEGER NOT NULL
+      );
+      INSERT INTO sessions (content_session_id, project, created_at_epoch)
+      VALUES ('stall-migration', 'claude-mnemo', 1);
+      INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+      VALUES (1, 1, 'active', 2);
+    `);
+
+    initializeSchema(db);
+    initializeSchema(db);
+
+    const row = db
+      .query<
+        {
+          attempts: number;
+          retryAtMs: number | null;
+          retryAfterSeq: number | null;
+          retryMode: string | null;
+          status: string;
+        },
+        []
+      >(
+        `SELECT
+           extraction_stall_attempts AS attempts,
+           extraction_stall_retry_at_ms AS retryAtMs,
+           extraction_stall_retry_after_seq AS retryAfterSeq,
+           extraction_stall_retry_mode AS retryMode,
+           status
+         FROM turns WHERE id = 1`,
+      )
+      .get();
+    expect(row).toEqual({
+      attempts: 0,
+      retryAtMs: null,
+      retryAfterSeq: null,
+      retryMode: null,
+      status: "active",
+    });
+  });
+
   test("creates a nullable, range-constrained significance grade on turns", () => {
     initializeSchema(db);
 

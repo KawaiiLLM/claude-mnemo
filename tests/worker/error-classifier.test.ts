@@ -28,13 +28,21 @@ describe("classifyWorkerError", () => {
     }
   });
 
-  test("classifies marked stall and shutdown aborts as connection errors", () => {
+  test("keeps diary stall and shutdown aborts connection-class", () => {
     expect(classifyWorkerError(createWorkerAbortError("stall-watchdog"))).toBe(
       "connection",
     );
     expect(classifyWorkerError(createWorkerAbortError("shutdown"))).toBe(
       "connection",
     );
+  });
+
+  test("classifies only the extraction watchdog marker as extraction-stall", () => {
+    expect(
+      classifyWorkerError(
+        createWorkerAbortError("extraction-stall-watchdog"),
+      ),
+    ).toBe("extraction-stall");
   });
 
   test("classifies agent stream api_error and server_error signals as connection errors", () => {

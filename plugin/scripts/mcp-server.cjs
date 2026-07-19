@@ -7598,6 +7598,7 @@ function initializeSchema(db) {
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
+  ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
@@ -7657,6 +7658,33 @@ function ensureTurnInvalidationColumns(db) {
   if (!hasColumn(db, "turns", "was_rolled_back")) {
     db.exec(
       "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+}
+function ensureTurnExtractionStallRetryColumns(db) {
+  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
+       CHECK (extraction_stall_attempts >= 0)`
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
+    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER"
+    );
+  }
+  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
+    db.exec(
+      `ALTER TABLE turns
+       ADD COLUMN extraction_stall_retry_mode TEXT
+       CHECK (
+         extraction_stall_retry_mode IS NULL OR
+         extraction_stall_retry_mode IN ('resume', 'forceFresh')
+       )`
     );
   }
 }
@@ -7864,6 +7892,15 @@ var init_schema = __esm({
     content_prompt_id TEXT,
     was_interrupted INTEGER NOT NULL DEFAULT 0,
     was_rolled_back INTEGER NOT NULL DEFAULT 0,
+    extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (
+      extraction_stall_attempts >= 0
+    ),
+    extraction_stall_retry_at_ms INTEGER,
+    extraction_stall_retry_after_seq INTEGER,
+    extraction_stall_retry_mode TEXT CHECK (
+      extraction_stall_retry_mode IS NULL OR
+      extraction_stall_retry_mode IN ('resume', 'forceFresh')
+    ),
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -31504,6 +31541,9 @@ function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
 
+// src/db/turns.ts
+init_database();
+
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
 function dateFormatter(timeZone) {
@@ -31579,6 +31619,10 @@ var TURN_SELECT = `
     transcript_line_start AS transcriptLineStart,
     was_interrupted AS wasInterrupted,
     was_rolled_back AS wasRolledBack,
+    extraction_stall_attempts AS extractionStallAttempts,
+    extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+    extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+    extraction_stall_retry_mode AS extractionStallRetryMode,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -31681,6 +31725,10 @@ function updateTurnById(db, turnId, input) {
             content_prompt_id AS contentPromptId,
             was_interrupted AS wasInterrupted,
             was_rolled_back AS wasRolledBack,
+            extraction_stall_attempts AS extractionStallAttempts,
+            extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+            extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+            extraction_stall_retry_mode AS extractionStallRetryMode,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,

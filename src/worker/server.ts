@@ -25,7 +25,15 @@ import {
   getObservation,
   hasSkippedObservationsForTurn,
 } from "../db/observations";
-import { getMaxPromptNumber, getTurnById, updateTurnById } from "../db/turns";
+import {
+  clearExtractionStallRetries,
+  getMaxPromptNumber,
+  getTurnById,
+  listExtractionStallRetries,
+  recordExtractionStalls,
+  type ExtractionStallRetryMode,
+  updateTurnById,
+} from "../db/turns";
 import {
   parseReplayTranscript,
   readLatestContextTokens,
@@ -149,8 +157,36 @@ type BatchEntry =
       oldestTurnEpoch: number;
     };
 
+interface StallRetryPlan {
+  nextMode: ExtractionStallRetryMode;
+  turnIds: number[];
+  retryAtMs: number;
+  latestTurnStopSeq: number;
+}
+
+function compareStallRetryPlans(
+  left: StallRetryPlan,
+  right: StallRetryPlan,
+): number {
+  if (left.nextMode === right.nextMode) {
+    return 0;
+  }
+  return left.nextMode === "resume" ? -1 : 1;
+}
+
+interface SessionSuspension {
+  retryAtMs: number;
+  latestTurnStopSeq: number;
+  releasePolicy: "event-or-backoff" | "event-and-backoff";
+  retryPlans: StallRetryPlan[];
+}
+
 function batchMiniTurns(batch: BatchEntry): MiniTurnPayload[] {
   return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
+}
+
+function batchTurnIds(batch: BatchEntry): number[] {
+  return [...new Set(batchMiniTurns(batch).map((item) => item.turnId))];
 }
 
 // The minimal {turnId}-only shape the derailment module needs for one flush
@@ -543,9 +579,44 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const compactingSessions = new Set<number>();
   const suspendedUntilBySession = new Map<
     number,
-    { retryAtMs: number; latestTurnStopSeq: number }
+    SessionSuspension
   >();
+  const pendingStallRetryBySession = new Map<number, StallRetryPlan[]>();
   const blockedUntilBySession = new Map<number, number>();
+  for (const retry of listExtractionStallRetries(deps.db)) {
+    let suspension = suspendedUntilBySession.get(retry.sessionDbId);
+    if (!suspension) {
+      suspension = {
+        retryAtMs: retry.retryAtMs,
+        latestTurnStopSeq: retry.retryAfterSeq,
+        releasePolicy: "event-and-backoff",
+        retryPlans: [],
+      };
+      suspendedUntilBySession.set(retry.sessionDbId, suspension);
+    }
+    suspension.retryAtMs = Math.max(suspension.retryAtMs, retry.retryAtMs);
+    suspension.latestTurnStopSeq = Math.max(
+      suspension.latestTurnStopSeq,
+      retry.retryAfterSeq,
+    );
+    let plan = suspension.retryPlans.find(
+      (candidate) =>
+        candidate.nextMode === retry.nextMode &&
+        candidate.retryAtMs === retry.retryAtMs &&
+        candidate.latestTurnStopSeq === retry.retryAfterSeq,
+    );
+    if (!plan) {
+      plan = {
+        nextMode: retry.nextMode,
+        turnIds: [],
+        retryAtMs: retry.retryAtMs,
+        latestTurnStopSeq: retry.retryAfterSeq,
+      };
+      suspension.retryPlans.push(plan);
+      suspension.retryPlans.sort(compareStallRetryPlans);
+    }
+    plan.turnIds.push(retry.turnId);
+  }
   const sessionEnvRegistry = deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
   const enforceSessionEnvPresence = deps.sessionEnvRegistry !== undefined;
   const contentSessionIdByDbId = new Map<number, string>();
@@ -619,6 +690,64 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         )
         .get(sessionDbId)?.seq ?? 0
     );
+  }
+
+  function removeTurnFromBuffer(sessionDbId: number, turnId: number): void {
+    const buffer = buffers.get(sessionDbId);
+    if (!buffer) {
+      return;
+    }
+    buffer.items = buffer.items.filter((item) => {
+      if (item.kind === "turn-stop") {
+        return item.targetId !== turnId;
+      }
+      return getObservation(deps.db, item.targetId)?.turnId !== turnId;
+    });
+    if (buffer.items.length === 0) {
+      buffers.delete(sessionDbId);
+    }
+  }
+
+  function resetInterruptedSessionWork(
+    sessionDbId: number,
+    state = sessions.get(sessionDbId),
+  ): void {
+    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
+    buffers.delete(sessionDbId);
+    if (state) {
+      state.batchQueue = [];
+      state.streamedParts.clear();
+    }
+  }
+
+  function markExtractionFailedAndSkip(
+    sessionDbId: number,
+    turnId: number,
+  ): void {
+    const turn = getTurnById(deps.db, turnId);
+    if (!turn) {
+      return;
+    }
+    if (turn.status !== "undone") {
+      updateTurnById(deps.db, turnId, { status: "failed" });
+    }
+    deps.db
+      .query<unknown, [number]>(
+        `UPDATE observations
+         SET status = 'skipped'
+         WHERE turn_id = ? AND status = 'pending'`,
+      )
+      .run(turnId);
+    deps.db
+      .query<unknown, [number, number]>(
+        `DELETE FROM pending_queue
+         WHERE (kind = 'turn-stop' AND target_id = ?)
+            OR (kind = 'obs' AND target_id IN (
+              SELECT id FROM observations WHERE turn_id = ?
+            ))`,
+      )
+      .run(turnId, turnId);
+    removeTurnFromBuffer(sessionDbId, turnId);
   }
 
   function getOrCreateBuffer(sessionDbId: number): BufferState {
@@ -740,6 +869,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state: SessionState,
     batch: BatchEntry,
   ): void {
+    clearExtractionStallRetries(deps.db, batchTurnIds(batch));
     for (const miniTurn of batchMiniTurns(batch)) {
       if (miniTurn.isFinal) {
         state.streamedParts.delete(miniTurn.turnId);
@@ -1441,11 +1571,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   async function suspendSessionAfterRetryableError(
     sessionDbId: number,
     error: unknown,
+    retryPlans: StallRetryPlan[] = [],
   ): Promise<void> {
     const classification = classifyWorkerError(error);
+    const isExtractionStall = classification === "extraction-stall";
     const currentMs = nowMs();
-    const retryAfterMs =
-      classification === "blocked"
+    const retryAfterMs = isExtractionStall && retryPlans[0]
+      ? Math.max(0, retryPlans[0].retryAtMs - currentMs)
+      : classification === "blocked"
         ? Math.max(
             BILLING_BLOCKED_RETRY_FLOOR_MS,
             resolveWorkerRetryDelayMs(
@@ -1461,30 +1594,34 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           );
     if (classification === "blocked") {
       suspendedUntilBySession.delete(sessionDbId);
+      pendingStallRetryBySession.delete(sessionDbId);
       blockedUntilBySession.set(sessionDbId, currentMs + retryAfterMs);
     } else {
       blockedUntilBySession.delete(sessionDbId);
+      pendingStallRetryBySession.delete(sessionDbId);
       suspendedUntilBySession.set(sessionDbId, {
-        retryAtMs: currentMs + retryAfterMs,
-        latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId),
+        retryAtMs: retryPlans[0]?.retryAtMs ?? currentMs + retryAfterMs,
+        latestTurnStopSeq:
+          retryPlans[0]?.latestTurnStopSeq ??
+          latestTurnStopSeqForSession(sessionDbId),
+        releasePolicy: isExtractionStall
+          ? "event-and-backoff"
+          : "event-or-backoff",
+        retryPlans,
       });
     }
 
     // Per-session crash recovery: every claimed row becomes eligible for a
     // clean rebuild, and no in-memory slice/batch survives the interrupted
     // request. The durable turn/observation rows remain untouched.
-    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
-    buffers.delete(sessionDbId);
-    const state = sessions.get(sessionDbId);
-    if (state) {
-      state.batchQueue = [];
-      state.streamedParts.clear();
-    }
+    resetInterruptedSessionWork(sessionDbId);
 
     logger.warn?.("mini-turn flush suspended after retryable failure", {
       sessionDbId,
       classification,
       retryAfterMs,
+      nextRetryModes: retryPlans.map((plan) => plan.nextMode),
+      retryTurnIds: retryPlans.flatMap((plan) => plan.turnIds),
       error,
     });
     await closeSessionQuery(
@@ -1547,6 +1684,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     if (!session) {
       return;
     }
+
+    await prepareStallRetryForBatch(state, batch);
 
     // SDK-auto re-prime boundary: an unsolicited compact wiped the agent's
     // history since the last work unit. Re-prime now — before this turn batch —
@@ -1644,6 +1783,161 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
   }
 
+  async function prepareStallRetryForBatch(
+    state: SessionState,
+    batch: BatchEntry,
+  ): Promise<void> {
+    const carriedTurnIds = batchTurnIds(batch);
+    const retryPlans = pendingStallRetryBySession.get(state.sessionDbId);
+    if (!retryPlans || retryPlans.length === 0) {
+      return;
+    }
+    const planIndex = retryPlans.findIndex((candidate) =>
+      candidate.turnIds.some((turnId) => carriedTurnIds.includes(turnId)),
+    );
+    if (planIndex < 0) {
+      return;
+    }
+    const retryPlan = retryPlans[planIndex]!;
+    const remainingTurnIds = retryPlan.turnIds.filter(
+      (turnId) => !carriedTurnIds.includes(turnId),
+    );
+    if (remainingTurnIds.length === 0) {
+      retryPlans.splice(planIndex, 1);
+    } else {
+      retryPlans[planIndex] = {
+        ...retryPlan,
+        // One fresh construction satisfies the whole work group, including
+        // later batches split only for size.
+        nextMode: "resume",
+        turnIds: remainingTurnIds,
+      };
+    }
+    if (retryPlans.length === 0) {
+      pendingStallRetryBySession.delete(state.sessionDbId);
+    }
+
+    if (retryPlan.nextMode === "forceFresh") {
+      await reopenQuerySessionFresh(state);
+    }
+  }
+
+  function resolvedTurnIdsInStalledBatch(
+    batch: BatchEntry,
+    state: SessionState,
+  ): Set<number> {
+    return new Set(
+      batchMiniTurns(batch).flatMap((miniTurn) => {
+        if (state.unitSignals.rememberedIds.has(miniTurn.turnId)) {
+          return [miniTurn.turnId];
+        }
+        // A short merged turn can have resolved on an earlier corrective send
+        // before the next send stalled. Final slices, however, are already
+        // partial by construction and require a remember in this send.
+        if (miniTurn.role !== "short") {
+          return [];
+        }
+        const turn = getTurnById(deps.db, miniTurn.turnId);
+        if (
+          turn?.status === "extracted" &&
+          (turn.title !== null || turn.content !== null)
+        ) {
+          return [miniTurn.turnId];
+        }
+        return [];
+      }),
+    );
+  }
+
+  async function handleExtractionStall(
+    state: SessionState,
+    batch: BatchEntry,
+    error: unknown,
+  ): Promise<void> {
+    // Ownership is the exact unresolved set carried by the stalled flush.
+    // Successfully remembered merged siblings are finalized normally and do
+    // not consume a stall attempt or risk being downgraded.
+    const resolvedTurnIds = resolvedTurnIdsInStalledBatch(batch, state);
+    for (const miniTurn of batchMiniTurns(batch)) {
+      if (resolvedTurnIds.has(miniTurn.turnId)) {
+        processors.applyMiniTurnSideEffects(miniTurn);
+      }
+    }
+    clearExtractionStallRetries(deps.db, resolvedTurnIds);
+
+    const turnIds = batchTurnIds(batch).filter(
+      (turnId) => !resolvedTurnIds.has(turnId),
+    );
+    const retryAtMs = nowMs() + CONNECTION_RETRY_BACKOFF_MS;
+    const retryAfterSeq = latestTurnStopSeqForSession(state.sessionDbId);
+    const attemptsByTurnId = recordExtractionStalls(
+      deps.db,
+      turnIds,
+      retryAtMs,
+      retryAfterSeq,
+    );
+    const retryPlansByMode = new Map<ExtractionStallRetryMode, StallRetryPlan>();
+
+    for (const turnId of turnIds) {
+      const result = attemptsByTurnId.get(turnId);
+      if (!result) {
+        continue;
+      }
+      if (result.attempts >= 3) {
+        markExtractionFailedAndSkip(state.sessionDbId, turnId);
+        logger.error?.("extraction stall limit reached; turn failed and skipped", {
+          sessionDbId: state.sessionDbId,
+          turnId,
+          stallAttempts: result.attempts,
+          escalation: "skip",
+        });
+        continue;
+      }
+      if (!result.nextMode) {
+        continue;
+      }
+      let plan = retryPlansByMode.get(result.nextMode);
+      if (!plan) {
+        plan = {
+          nextMode: result.nextMode,
+          turnIds: [],
+          retryAtMs,
+          latestTurnStopSeq: retryAfterSeq,
+        };
+        retryPlansByMode.set(result.nextMode, plan);
+      }
+      plan.turnIds.push(turnId);
+      logger.warn?.("extraction stalled; scheduling bounded retry", {
+        sessionDbId: state.sessionDbId,
+        turnId,
+        stallAttempts: result.attempts,
+        escalation: result.nextMode,
+      });
+    }
+
+    const retryPlans = [...retryPlansByMode.values()].sort(
+      compareStallRetryPlans,
+    );
+    if (retryPlans.length > 0) {
+      await suspendSessionAfterRetryableError(
+        state.sessionDbId,
+        error,
+        retryPlans,
+      );
+      return;
+    }
+
+    // Every unresolved turn reached the terminal bound (or every carried turn
+    // had already resolved). Release other claimed work without a fourth gate.
+    suspendedUntilBySession.delete(state.sessionDbId);
+    pendingStallRetryBySession.delete(state.sessionDbId);
+    resetInterruptedSessionWork(state.sessionDbId, state);
+    await closeSessionQuery(
+      state.sessionDbId,
+      error instanceof Error ? error : undefined,
+    );
+  }
+
   async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
     if (isSessionRetryGated(state.sessionDbId)) {
       state.batchQueue = [];
@@ -1659,7 +1953,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error) {
-      if (classifyWorkerError(error) !== "deterministic") {
+      const classification = classifyWorkerError(error);
+      if (classification === "extraction-stall") {
+        await handleExtractionStall(state, batch, error);
+        return "suspended";
+      }
+      if (classification !== "deterministic") {
         await suspendSessionAfterRetryableError(state.sessionDbId, error);
         return "suspended";
       }
@@ -1901,6 +2200,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state: SessionState,
     turnId: number,
   ): Promise<void> {
+    const turn = getTurnById(deps.db, turnId);
+    if (turn && turn.extractionStallAttempts >= 3) {
+      markExtractionFailedAndSkip(state.sessionDbId, turnId);
+      return;
+    }
     pruneInProgressBuffer(state.sessionDbId);
     const buffer = buffers.get(state.sessionDbId);
     if (!buffer) {
@@ -1933,6 +2237,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const turn = getTurnById(deps.db, turnStopItem.targetId);
     if (!turn || turn.status === "undone") {
       deleteQueueItem(deps.db, turnStopItem.seq);
+      return;
+    }
+    if (turn.extractionStallAttempts >= 3) {
+      markExtractionFailedAndSkip(state.sessionDbId, turn.id);
       return;
     }
 
@@ -2025,12 +2333,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   async function drainQueue(sessionFilter?: number): Promise<number | null> {
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
-      if (
-        suspension.retryAtMs <= currentMs ||
+      const backoffElapsed = suspension.retryAtMs <= currentMs;
+      const hasNewTurnStop =
         latestTurnStopSeqForSession(sessionDbId) >
-          suspension.latestTurnStopSeq
-      ) {
+        suspension.latestTurnStopSeq;
+      const canRetry =
+        suspension.releasePolicy === "event-and-backoff"
+          ? backoffElapsed && hasNewTurnStop
+          : backoffElapsed || hasNewTurnStop;
+      if (canRetry) {
         suspendedUntilBySession.delete(sessionDbId);
+        if (suspension.retryPlans.length > 0) {
+          pendingStallRetryBySession.set(
+            sessionDbId,
+            suspension.retryPlans,
+          );
+        }
       }
     }
     for (const [sessionDbId, blockedUntilMs] of blockedUntilBySession) {
@@ -2079,6 +2397,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       if (!item) {
         await flushDrainTail(sessionFilter);
         return triggeringSessionDbId;
+      }
+
+      // The newer turn-stop is only the retry signal. Keep its work out of the
+      // stalled batch so every turn retains its own resume/fresh attempt mode.
+      const activeRetryPlan = pendingStallRetryBySession.get(item.sessionDbId)?.[0];
+      const itemTurnId =
+        item.kind === "turn-stop"
+          ? item.targetId
+          : getObservation(deps.db, item.targetId)?.turnId ?? null;
+      if (
+        activeRetryPlan &&
+        (itemTurnId === null || !activeRetryPlan.turnIds.includes(itemTurnId))
+      ) {
+        releaseQueueClaim(deps.db, item.seq);
+        skippedSeqs.add(item.seq);
+        continue;
       }
 
       if (
@@ -2621,7 +2955,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             });
             await closeSessionQuery(
               state.sessionDbId,
-              createWorkerAbortError("stall-watchdog"),
+              createWorkerAbortError("extraction-stall-watchdog"),
             ).catch((error) => {
               logger.error?.("watchdog closeSessionQuery failed", {
                 sessionDbId: state.sessionDbId,

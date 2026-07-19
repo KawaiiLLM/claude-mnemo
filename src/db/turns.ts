@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { runWriteTransaction } from "./database";
 import { markSettledDiaryDayStaleForTurn } from "./diary-state";
 
 import { indexTurnToFTS } from "./search";
@@ -20,6 +21,10 @@ export interface TurnRecord {
   transcriptLineStart: number | null;
   wasInterrupted: boolean;
   wasRolledBack: boolean;
+  extractionStallAttempts: number;
+  extractionStallRetryAtMs: number | null;
+  extractionStallRetryAfterSeq: number | null;
+  extractionStallRetryMode: ExtractionStallRetryMode | null;
   status: TurnStatus;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -46,6 +51,10 @@ interface TurnRow {
   transcriptLineStart: number | null;
   wasInterrupted: number;
   wasRolledBack: number;
+  extractionStallAttempts: number;
+  extractionStallRetryAtMs: number | null;
+  extractionStallRetryAfterSeq: number | null;
+  extractionStallRetryMode: ExtractionStallRetryMode | null;
   status: TurnStatus;
   userPrompt: string | null;
   assistantResponse: string | null;
@@ -73,6 +82,10 @@ const TURN_SELECT = `
     transcript_line_start AS transcriptLineStart,
     was_interrupted AS wasInterrupted,
     was_rolled_back AS wasRolledBack,
+    extraction_stall_attempts AS extractionStallAttempts,
+    extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+    extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+    extraction_stall_retry_mode AS extractionStallRetryMode,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -158,6 +171,113 @@ export function getTurnById(
   return mapTurnRow(
     db.query<TurnRow, [number]>(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null,
   );
+}
+
+export type ExtractionStallRetryMode = "resume" | "forceFresh";
+
+export interface ExtractionStallRetryRecord {
+  turnId: number;
+  sessionDbId: number;
+  attempts: number;
+  retryAtMs: number;
+  retryAfterSeq: number;
+  nextMode: ExtractionStallRetryMode;
+}
+
+/** Atomically consume a stall attempt and persist its next retry gate/mode. */
+export function recordExtractionStalls(
+  db: Database,
+  turnIds: Iterable<number>,
+  retryAtMs: number,
+  retryAfterSeq: number,
+): Map<number, { attempts: number; nextMode: ExtractionStallRetryMode | null }> {
+  const uniqueTurnIds = [...new Set(turnIds)];
+  return runWriteTransaction(db, () => {
+    const attemptsByTurnId = new Map<
+      number,
+      { attempts: number; nextMode: ExtractionStallRetryMode | null }
+    >();
+    const statement = db.query<
+      { attempts: number; nextMode: ExtractionStallRetryMode | null },
+      [number, number, number]
+    >(
+      `UPDATE turns
+       SET extraction_stall_attempts = extraction_stall_attempts + 1,
+           extraction_stall_retry_at_ms = CASE
+             WHEN extraction_stall_attempts + 1 < 3 THEN ? ELSE NULL END,
+           extraction_stall_retry_after_seq = CASE
+             WHEN extraction_stall_attempts + 1 < 3 THEN ? ELSE NULL END,
+           extraction_stall_retry_mode = CASE extraction_stall_attempts + 1
+             WHEN 1 THEN 'resume'
+             WHEN 2 THEN 'forceFresh'
+             ELSE NULL
+           END
+       WHERE id = ?
+       RETURNING
+         extraction_stall_attempts AS attempts,
+         extraction_stall_retry_mode AS nextMode`,
+    );
+    for (const turnId of uniqueTurnIds) {
+      const updated = statement.get(retryAtMs, retryAfterSeq, turnId);
+      if (updated) {
+        attemptsByTurnId.set(turnId, updated);
+      }
+    }
+    return attemptsByTurnId;
+  });
+}
+
+export function clearExtractionStallRetries(
+  db: Database,
+  turnIds: Iterable<number>,
+): void {
+  const uniqueTurnIds = [...new Set(turnIds)];
+  if (uniqueTurnIds.length === 0) {
+    return;
+  }
+  const placeholders = uniqueTurnIds.map(() => "?").join(", ");
+  db.query<unknown, number[]>(
+    `UPDATE turns
+     SET extraction_stall_retry_at_ms = NULL,
+         extraction_stall_retry_after_seq = NULL,
+         extraction_stall_retry_mode = NULL
+     WHERE id IN (${placeholders})`,
+  ).run(...uniqueTurnIds);
+}
+
+export function listExtractionStallRetries(
+  db: Database,
+): ExtractionStallRetryRecord[] {
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("SELECT name FROM pragma_table_info('turns')")
+      .all()
+      .map((row) => row.name),
+  );
+  if (
+    !columns.has("extraction_stall_attempts") ||
+    !columns.has("extraction_stall_retry_at_ms") ||
+    !columns.has("extraction_stall_retry_after_seq") ||
+    !columns.has("extraction_stall_retry_mode")
+  ) {
+    return [];
+  }
+  return db
+    .query<ExtractionStallRetryRecord, []>(
+      `SELECT
+         id AS turnId,
+         session_id AS sessionDbId,
+         extraction_stall_attempts AS attempts,
+         extraction_stall_retry_at_ms AS retryAtMs,
+         extraction_stall_retry_after_seq AS retryAfterSeq,
+         extraction_stall_retry_mode AS nextMode
+       FROM turns
+       WHERE extraction_stall_retry_at_ms IS NOT NULL
+         AND extraction_stall_retry_after_seq IS NOT NULL
+         AND extraction_stall_retry_mode IS NOT NULL
+       ORDER BY session_id ASC, id ASC`,
+    )
+    .all();
 }
 
 export interface UpdateTurnByIdInput {
@@ -246,6 +366,10 @@ export function updateTurnById(
             content_prompt_id AS contentPromptId,
             was_interrupted AS wasInterrupted,
             was_rolled_back AS wasRolledBack,
+            extraction_stall_attempts AS extractionStallAttempts,
+            extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
+            extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
+            extraction_stall_retry_mode AS extractionStallRetryMode,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
