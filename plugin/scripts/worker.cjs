@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.4-mrrwn342" : "dev";
+var BUILD_ID = true ? "0.6.4-mrs12v0e" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -249,6 +249,7 @@ var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
+var DEFAULT_STALL_THRESHOLD_MS = 6e4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
   maxQueuedBatches: 3,
@@ -257,6 +258,7 @@ var DEFAULT_CONFIG = {
   maxMiniTurnChars: 24e3,
   maxFlushAttempts: 3,
   sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -329,6 +331,12 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       1e3,
       3e5,
       DEFAULT_CONFIG.sessionEndTailTimeoutMs
+    ),
+    stallThresholdMs: clampInteger(
+      config3.stallThresholdMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.stallThresholdMs
     ),
     compactContextRatio: clampNumber(
       config3.compactContextRatio,
@@ -41930,6 +41938,55 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
 
 // src/worker/query-session.ts
 var QUERY_COMPACT_TIMEOUT_MS = 12e4;
+var MNEMO_ACTIVITY_TOOLS = /* @__PURE__ */ new Set([
+  "mcp__mnemo__remember",
+  "mcp__mnemo__recall"
+]);
+function isActivityContentBlock(block) {
+  if (block.type === "text" || block.type === "thinking" || block.type === "redacted_thinking" || block.type === "tool_result") {
+    return true;
+  }
+  return block.type === "tool_use" && typeof block.name === "string" && MNEMO_ACTIVITY_TOOLS.has(block.name);
+}
+function contentBlocks(message) {
+  if ((message.type === "assistant" || message.type === "user") && Array.isArray(
+    message.message?.content
+  )) {
+    return message.message.content;
+  }
+  return [];
+}
+function isExtractionAgentActivity(message) {
+  if (message.type === "stream_event") {
+    const event = message.event;
+    if (event.type === "content_block_start" && event.content_block && typeof event.content_block === "object") {
+      return isActivityContentBlock(
+        event.content_block
+      );
+    }
+    if (event.type === "content_block_delta" && event.delta && typeof event.delta === "object") {
+      const deltaType = event.delta.type;
+      return deltaType === "text_delta" || deltaType === "thinking_delta" || deltaType === "signature_delta" || deltaType === "input_json_delta";
+    }
+    return false;
+  }
+  if (message.type === "tool_progress") {
+    return true;
+  }
+  if (message.type === "assistant") {
+    if (message.error) {
+      return false;
+    }
+    return contentBlocks(message).some(isActivityContentBlock);
+  }
+  if (message.type === "user") {
+    if ("tool_use_result" in message && message.tool_use_result !== void 0) {
+      return true;
+    }
+    return contentBlocks(message).some((block) => block.type === "tool_result");
+  }
+  return false;
+}
 function createDeferred() {
   let resolve4;
   let reject;
@@ -42068,6 +42125,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
       mcpServers,
       pathToClaudeCodeExecutable,
       abortController,
+      includePartialMessages: true,
       systemPrompt: input.systemPrompt ?? `You are Mnemosyne, a long-lived memory worker for Claude Code. You extract structured memory by updating SQLite records for turns (T) and sessions (S).
 
 ## Lifetime
@@ -44805,7 +44863,6 @@ function createDiaryRuntime(options) {
 var WORKER_PORT = 37778;
 var STARTING_STALE_MS = 1e4;
 var WATCHDOG_INTERVAL_MS = 1e4;
-var STALLED_QUERY_MS = 3e4;
 var CONNECTION_RETRY_BACKOFF_MS = 1e4;
 var BILLING_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1e3;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
@@ -45204,6 +45261,8 @@ function createWorkerCore(deps) {
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
+      lastAgentActivityAt: 0,
+      requestInFlight: false,
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: /* @__PURE__ */ new Set(),
@@ -45243,9 +45302,17 @@ function createWorkerCore(deps) {
         const promptWithEnvelopes = envelopeBlocks.length > 0 ? `${envelopeBlocks.join("\n\n")}
 
 ${prompt}` : prompt;
-        state.lastActivity = nowMs();
-        state.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(promptWithEnvelopes);
+        const requestStartedAt = nowMs();
+        state.lastActivity = requestStartedAt;
+        state.lastAgentActivityAt = requestStartedAt;
+        state.lastPushAt = requestStartedAt;
+        state.requestInFlight = true;
+        let result;
+        try {
+          result = await runtime.sendPrompt(promptWithEnvelopes);
+        } finally {
+          state.requestInFlight = false;
+        }
         state.lastMessageAt = nowMs();
         state.queryPid = runtime.queryPid;
         state.agentSessionId = result.session_id;
@@ -45326,6 +45393,11 @@ ${prompt}` : prompt;
               { cause: message }
             );
           }
+          if (!isRetryableSignal && isExtractionAgentActivity(message)) {
+            const activityAt = nowMs();
+            state.lastAgentActivityAt = activityAt;
+            state.lastActivity = activityAt;
+          }
           if ("session_id" in message && typeof message.session_id === "string" && message.session_id !== "") {
             const newAgentSessionId = message.session_id;
             const isFirstObservation = state.agentSessionId !== newAgentSessionId;
@@ -45355,7 +45427,7 @@ ${prompt}` : prompt;
               } else if (block.type === "tool_use" && block.name === "mcp__mnemo__remember") {
                 state.lastMessageAt = nowMs();
                 state.lastActivity = nowMs();
-              } else if (block.type === "tool_use" && typeof block.name === "string" && block.name !== "mcp__mnemo__recall") {
+              } else if (block.type === "tool_use" && typeof block.name === "string" && block.name !== "mcp__mnemo__remember" && block.name !== "mcp__mnemo__recall") {
                 state.unitSignals.hadIllegalTool = true;
               }
             }
@@ -45371,8 +45443,10 @@ ${prompt}` : prompt;
           state.needsReprime = true;
         },
         onRemember: (id) => {
-          state.lastMessageAt = nowMs();
-          state.lastActivity = nowMs();
+          const activityAt = nowMs();
+          state.lastMessageAt = activityAt;
+          state.lastAgentActivityAt = activityAt;
+          state.lastActivity = activityAt;
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
             state.unitSignals.rememberedIds.add(Number(t[1]));
@@ -45568,6 +45642,8 @@ ${body}
     state.queryPid = void 0;
     state.lastPushAt = 0;
     state.lastMessageAt = 0;
+    state.lastAgentActivityAt = 0;
+    state.requestInFlight = false;
   }
   async function registerSessionEnv(contentSessionId, sessionDbId, rawEnv) {
     const captured = captureSessionEnv(rawEnv);
@@ -46474,12 +46550,14 @@ ${body}
           if (compactingSessions.has(state.sessionDbId)) {
             return;
           }
-          const hasInflightRequest = state.lastPushAt > state.lastMessageAt;
-          if (hasInflightRequest && currentMs - state.lastPushAt > STALLED_QUERY_MS) {
+          const hasInflightRequest = state.requestInFlight;
+          if (hasInflightRequest && currentMs - state.lastAgentActivityAt > config3.stallThresholdMs) {
             logger.warn?.("query session stalled, aborting", {
               sessionDbId: state.sessionDbId,
               lastPushAt: state.lastPushAt,
               lastMessageAt: state.lastMessageAt,
+              lastAgentActivityAt: state.lastAgentActivityAt,
+              stallThresholdMs: config3.stallThresholdMs,
               queryPid: state.queryPid
             });
             await closeSessionQuery(

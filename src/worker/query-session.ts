@@ -73,6 +73,97 @@ export interface WorkerQuerySession {
 }
 
 const QUERY_COMPACT_TIMEOUT_MS = 120_000;
+const MNEMO_ACTIVITY_TOOLS = new Set([
+  "mcp__mnemo__remember",
+  "mcp__mnemo__recall",
+]);
+
+function isActivityContentBlock(block: Record<string, unknown>): boolean {
+  if (
+    block.type === "text" ||
+    block.type === "thinking" ||
+    block.type === "redacted_thinking" ||
+    block.type === "tool_result"
+  ) {
+    return true;
+  }
+  return (
+    block.type === "tool_use" &&
+    typeof block.name === "string" &&
+    MNEMO_ACTIVITY_TOOLS.has(block.name)
+  );
+}
+
+function contentBlocks(message: SDKMessage): Array<Record<string, unknown>> {
+  if (
+    (message.type === "assistant" || message.type === "user") &&
+    Array.isArray(
+      (message as { message?: { content?: unknown } }).message?.content,
+    )
+  ) {
+    return (
+      message as { message: { content: Array<Record<string, unknown>> } }
+    ).message.content;
+  }
+  return [];
+}
+
+/**
+ * Whether an SDK event proves the extraction agent is still making progress.
+ * Error-only events deliberately return false so repeated API failures cannot
+ * feed the stall watchdog.
+ */
+export function isExtractionAgentActivity(message: SDKMessage): boolean {
+  if (message.type === "stream_event") {
+    const event = message.event as unknown as Record<string, unknown>;
+    if (
+      event.type === "content_block_start" &&
+      event.content_block &&
+      typeof event.content_block === "object"
+    ) {
+      return isActivityContentBlock(
+        event.content_block as Record<string, unknown>,
+      );
+    }
+    if (
+      event.type === "content_block_delta" &&
+      event.delta &&
+      typeof event.delta === "object"
+    ) {
+      const deltaType = (event.delta as Record<string, unknown>).type;
+      return (
+        deltaType === "text_delta" ||
+        deltaType === "thinking_delta" ||
+        deltaType === "signature_delta" ||
+        deltaType === "input_json_delta"
+      );
+    }
+    return false;
+  }
+
+  if (message.type === "tool_progress") {
+    return true;
+  }
+
+  if (message.type === "assistant") {
+    if (message.error) {
+      return false;
+    }
+    return contentBlocks(message).some(isActivityContentBlock);
+  }
+
+  if (message.type === "user") {
+    if (
+      "tool_use_result" in message &&
+      message.tool_use_result !== undefined
+    ) {
+      return true;
+    }
+    return contentBlocks(message).some((block) => block.type === "tool_result");
+  }
+
+  return false;
+}
 
 function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
@@ -257,6 +348,7 @@ export function createWorkerQuerySession(
       mcpServers,
       pathToClaudeCodeExecutable,
       abortController,
+      includePartialMessages: true,
       systemPrompt:
         input.systemPrompt ??
         `You are Mnemosyne, a long-lived memory worker for Claude Code. You extract structured memory by updating SQLite records for turns (T) and sessions (S).

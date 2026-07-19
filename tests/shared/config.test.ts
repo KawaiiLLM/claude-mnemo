@@ -101,6 +101,36 @@ describe("shared config", () => {
     expect(loadConfig(home).sessionEndTailTimeoutMs).toBe(90_000);
   });
 
+  test("extraction stall watchdog defaults to sixty seconds and accepts an override", () => {
+    expect(DEFAULT_CONFIG.stallThresholdMs).toBe(60_000);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ stallThresholdMs: 90_000 }),
+    );
+
+    expect(loadConfig(home).stallThresholdMs).toBe(90_000);
+  });
+
+  test("loadConfig clamps the extraction stall threshold into [1s, 5m]", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ stallThresholdMs: 1 }),
+    );
+    expect(loadConfig(home).stallThresholdMs).toBe(1_000);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ stallThresholdMs: 999_999 }),
+    );
+    expect(loadConfig(home).stallThresholdMs).toBe(300_000);
+  });
+
   test("loadConfig clamps compactContextRatio into [0.1, 0.95]", () => {
     const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });

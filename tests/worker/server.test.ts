@@ -200,6 +200,8 @@ function primeSessionState(
     lastPushAt: number;
     lastMessageAt: number;
     lastActivity: number;
+    lastAgentActivityAt: number;
+    requestInFlight: boolean;
   }> = {},
 ): void {
   const existing = core.sessions.get(sessionId);
@@ -220,6 +222,10 @@ function primeSessionState(
     lastPushAt: overrides.lastPushAt ?? 0,
     lastMessageAt: overrides.lastMessageAt ?? 0,
     lastActivity: overrides.lastActivity ?? 0,
+    lastAgentActivityAt:
+      overrides.lastAgentActivityAt ?? existing?.lastAgentActivityAt ?? 0,
+    requestInFlight:
+      overrides.requestInFlight ?? existing?.requestInFlight ?? false,
     processingLock: existing?.processingLock ?? Promise.resolve(),
     pushMessage: existing?.pushMessage ?? (async () => {}),
     unitSignals: existing?.unitSignals ?? {
@@ -2325,6 +2331,8 @@ describe("worker server", () => {
       lastPushAt: 1_000,
       lastMessageAt: 0,
       lastActivity: 0,
+      lastAgentActivityAt: 1_000,
+      requestInFlight: true,
     });
     core.sessions.get(compactSessionId)!.querySession = {
       sessionId: "worker-query",
@@ -2335,7 +2343,7 @@ describe("worker server", () => {
     } satisfies WorkerQuerySession;
     core.compactingSessions.add(compactSessionId);
 
-    await core.abortStalledSessions(1_000 + 31_000);
+    await core.abortStalledSessions(1_000 + 61_000);
 
     expect(closed).toEqual([]);
     expect(core.sessions.has(compactSessionId)).toBe(true);
@@ -2785,7 +2793,7 @@ describe("worker server", () => {
     const abortClassifications: string[] = [];
     const stateCore = createWorkerCore({
       db,
-      nowMs: () => 40_000,
+      nowMs: () => 100_000,
       createWorkerQuerySessionImpl: ((_input) =>
         ({
           sessionId: "worker-query",
@@ -2824,6 +2832,8 @@ describe("worker server", () => {
       lastPushAt: 1_000,
       lastMessageAt: 0,
       lastActivity: 0,
+      lastAgentActivityAt: 1_000,
+      requestInFlight: true,
       processingLock: Promise.resolve(),
       pushMessage: async () => {},
     });
@@ -2841,14 +2851,16 @@ describe("worker server", () => {
       },
       contentSessionId: null,
       project: null,
-      lastPushAt: 39_500,
-      lastMessageAt: 39_000,
+      lastPushAt: 99_500,
+      lastMessageAt: 99_000,
       lastActivity: 0,
+      lastAgentActivityAt: 99_500,
+      requestInFlight: true,
       processingLock: Promise.resolve(),
       pushMessage: async () => {},
     });
 
-    await stateCore.abortStalledSessions(40_000);
+    await stateCore.abortStalledSessions(100_000);
 
     expect(closed).toEqual([1]);
     expect(abortClassifications).toEqual(["connection"]);
@@ -2873,6 +2885,7 @@ describe("worker server", () => {
     let promptStarted = false;
     let rejectPrompt: ((error: unknown) => void) | null = null;
     let closeClassification: string | null = null;
+    let queryDeps: FakeQueryDeps | undefined;
     const core = createWorkerCore({
       db,
       config: { ...DEFAULT_CONFIG, maxQueuedBatches: 0 },
@@ -2880,21 +2893,17 @@ describe("worker server", () => {
       nowMs: () => currentMs,
       logger: { warn() {}, error() {} },
       createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps = fakeQueryDeps(args) as
-          | {
-              onMessage?: (message: Record<string, unknown>) => void;
-            }
-          | undefined;
+        queryDeps = fakeQueryDeps(args);
         return {
           sessionId: "worker-query",
           queryPid: 1111,
           async sendPrompt() {
             promptStarted = true;
-            deps?.onMessage?.({
+            queryDeps?.onMessage?.({
               type: "system",
               subtype: "api_error",
               error: new Error("socket reset"),
-            });
+            } as never);
             return new Promise<never>((_resolve, reject) => {
               rejectPrompt = reject;
             });
@@ -2914,7 +2923,14 @@ describe("worker server", () => {
     await waitUntil(() => promptStarted);
     expect(core.sessions.get(sessionId)?.lastMessageAt).toBe(0);
 
-    currentMs = 31_001;
+    currentMs = 50_000;
+    queryDeps?.onMessage?.({
+      type: "system",
+      subtype: "api_error",
+      error: new Error("still disconnected"),
+    } as never);
+
+    currentMs = 61_001;
     await core.abortStalledSessions(currentMs);
     await drain;
 
@@ -2929,6 +2945,174 @@ describe("worker server", () => {
       .all(sessionId);
     expect(queueRows).toHaveLength(2);
     expect(queueRows.every((row) => row.claimedAtEpoch === null)).toBe(true);
+  });
+
+  test("partial text and tool activity keep an in-flight extraction alive past sixty seconds total", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-watchdog-partial-progress",
+      project: "/tmp/project-watchdog",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, turnId, 101, "partial-progress");
+    queueTurnStop(db, sessionId, turnId, 201);
+
+    let currentMs = 1_000;
+    let promptStarted = false;
+    let closeCount = 0;
+    let resolvePrompt:
+      | ((result: { session_id: string }) => void)
+      | null = null;
+    let queryDeps: FakeQueryDeps | undefined;
+    const core = createWorkerCore({
+      db,
+      config: {
+        ...DEFAULT_CONFIG,
+        maxQueuedBatches: 0,
+        stallThresholdMs: 60_000,
+      },
+      now: () => 123,
+      nowMs: () => currentMs,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        queryDeps = fakeQueryDeps(args);
+        return {
+          sessionId: "worker-query",
+          queryPid: 2222,
+          async sendPrompt() {
+            promptStarted = true;
+            return new Promise<{ session_id: string }>((resolve) => {
+              resolvePrompt = resolve;
+            });
+          },
+          async close() {
+            closeCount += 1;
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const drain = core.scanAndDrainQueue();
+    await waitUntil(() => promptStarted);
+
+    currentMs = 25_000;
+    queryDeps?.onMessage?.({
+      type: "stream_event",
+      session_id: "worker-query",
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "still" },
+      },
+    } as never);
+    currentMs = 55_000;
+    await core.abortStalledSessions(currentMs);
+    expect(closeCount).toBe(0);
+
+    currentMs = 65_000;
+    queryDeps?.onMessage?.({
+      type: "assistant",
+      session_id: "worker-query",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "mcp__mnemo__recall",
+            input: { id: `T${turnId}` },
+          },
+        ],
+      },
+    } as never);
+    currentMs = 90_000;
+    await core.abortStalledSessions(currentMs);
+    expect(closeCount).toBe(0);
+
+    queryDeps?.onRemember?.(`T${turnId}`);
+    resolvePrompt?.({ session_id: "worker-query" });
+    await drain;
+  });
+
+  test("silence longer than the threshold after partial activity aborts the extraction", async () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-watchdog-silent-after-partial",
+      project: "/tmp/project-watchdog",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    queueObs(db, sessionId, turnId, 101, "silent-after-partial");
+    queueTurnStop(db, sessionId, turnId, 201);
+
+    let currentMs = 1_000;
+    let promptStarted = false;
+    let rejectPrompt: ((error: unknown) => void) | null = null;
+    let closeClassification: string | null = null;
+    let queryDeps: FakeQueryDeps | undefined;
+    const core = createWorkerCore({
+      db,
+      config: {
+        ...DEFAULT_CONFIG,
+        maxQueuedBatches: 0,
+        stallThresholdMs: 60_000,
+      },
+      now: () => 123,
+      nowMs: () => currentMs,
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        queryDeps = fakeQueryDeps(args);
+        return {
+          sessionId: "worker-query",
+          queryPid: 3333,
+          async sendPrompt() {
+            promptStarted = true;
+            return new Promise<never>((_resolve, reject) => {
+              rejectPrompt = reject;
+            });
+          },
+          async close(abortError?: Error) {
+            if (abortError) {
+              closeClassification = classifyWorkerError(abortError);
+              rejectPrompt?.(abortError);
+            }
+          },
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const drain = core.scanAndDrainQueue();
+    await waitUntil(() => promptStarted);
+
+    currentMs = 20_000;
+    queryDeps?.onMessage?.({
+      type: "stream_event",
+      session_id: "worker-query",
+      event: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "some output" },
+      },
+    } as never);
+
+    currentMs = 80_000;
+    await core.abortStalledSessions(currentMs);
+    expect(closeClassification).toBeNull();
+
+    currentMs = 81_000;
+    await core.abortStalledSessions(currentMs);
+    await drain;
+
+    expect(closeClassification).toBe("connection");
   });
 
   test("assistant and remember progress keep an in-flight agent alive", async () => {
@@ -3032,6 +3216,8 @@ describe("worker server", () => {
       lastPushAt: 100,
       lastMessageAt: 100,
       lastActivity: 100,
+      lastAgentActivityAt: 100,
+      requestInFlight: false,
       processingLock: Promise.resolve(),
       pushMessage: async () => {},
     });
@@ -3052,6 +3238,8 @@ describe("worker server", () => {
       lastPushAt: 1_999_500,
       lastMessageAt: 1_999_500,
       lastActivity: 1_999_500,
+      lastAgentActivityAt: 1_999_500,
+      requestInFlight: false,
       processingLock: Promise.resolve(),
       pushMessage: async () => {},
     });
@@ -3072,6 +3260,8 @@ describe("worker server", () => {
       lastPushAt: 1_999_000,
       lastMessageAt: 1_998_000,
       lastActivity: 100,
+      lastAgentActivityAt: 1_999_000,
+      requestInFlight: true,
       processingLock: Promise.resolve(),
       pushMessage: async () => {},
     });

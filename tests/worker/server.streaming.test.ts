@@ -27,6 +27,7 @@ const STREAM_CONFIG: MnemoConfig = {
   cacheMode: "auto",
   maxMiniTurnChars: MIN_MINI_TURN_CHARS,
   maxFlushAttempts: 3,
+  stallThresholdMs: 60_000,
   compactContextRatio: 0.5,
 };
 

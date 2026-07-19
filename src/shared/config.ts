@@ -13,6 +13,8 @@ export interface MnemoConfig {
   maxFlushAttempts: number;
   /** Wall-clock budget for a SessionEnd drain + flush before it is aborted. */
   sessionEndTailTimeoutMs: number;
+  /** Abort an in-flight extraction after this long with no agent activity. */
+  stallThresholdMs: number;
   /**
    * Fraction of the memory agent's context window at/above which a
    * worker-driven /compact is allowed. Below it, compact is skipped so a
@@ -70,6 +72,7 @@ export const DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1_000;
 // One knob keeps "content day closes exactly when its dream triggers" true.
 export const DEFAULT_DREAM_AGENT_HOUR = 4;
 export const DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 60_000;
+export const DEFAULT_STALL_THRESHOLD_MS = 60_000;
 
 export const DEFAULT_CONFIG: MnemoConfig = {
   mergeThresholdChars: 1000,
@@ -79,6 +82,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   maxMiniTurnChars: 24_000,
   maxFlushAttempts: 3,
   sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -201,6 +205,12 @@ function clampConfig(
       1_000,
       300_000,
       DEFAULT_CONFIG.sessionEndTailTimeoutMs,
+    ),
+    stallThresholdMs: clampInteger(
+      config.stallThresholdMs,
+      1_000,
+      300_000,
+      DEFAULT_CONFIG.stallThresholdMs,
     ),
     compactContextRatio: clampNumber(
       config.compactContextRatio,

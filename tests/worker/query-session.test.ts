@@ -10,7 +10,10 @@ import {
   classifyWorkerError,
   createWorkerAbortError,
 } from "../../src/worker/error-classifier";
-import { createWorkerQuerySession } from "../../src/worker/query-session";
+import {
+  createWorkerQuerySession,
+  isExtractionAgentActivity,
+} from "../../src/worker/query-session";
 
 describe("worker query session", () => {
   let db: Database;
@@ -782,6 +785,149 @@ describe("worker query session", () => {
     expect(capturedTools).toEqual([]);
     // The mnemo MCP server must still be present (arrives via mcpServers, not tools)
     expect((capturedMcpServers as Record<string, unknown>)?.mnemo).toBeDefined();
+  });
+
+  test("enables and forwards partial assistant stream events", async () => {
+    let includePartialMessages: boolean | undefined;
+    const seenMessageTypes: string[] = [];
+    const queryImpl = mock(
+      ({
+        prompt,
+        options,
+      }: {
+        prompt: AsyncIterable<unknown>;
+        options?: { includePartialMessages?: boolean };
+      }) =>
+        (async function* () {
+          includePartialMessages = options?.includePartialMessages;
+          for await (const _message of prompt) {
+            yield {
+              type: "stream_event",
+              event: {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: "still working" },
+              },
+              parent_tool_use_id: null,
+              uuid: "partial-1",
+              session_id: "agent-session-partial",
+            };
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 1,
+              duration_api_ms: 1,
+              is_error: false,
+              num_turns: 1,
+              result: "",
+              total_cost_usd: 0,
+              usage: {},
+              modelUsage: {},
+              permission_denials: [],
+              uuid: "result-partial",
+              session_id: "agent-session-partial",
+            };
+          }
+        })(),
+    );
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        mkdirSyncImpl: mock(() => undefined),
+        onMessage: (message) => seenMessageTypes.push(message.type),
+      },
+    );
+
+    await session.sendPrompt("first");
+
+    expect(includePartialMessages).toBe(true);
+    expect(seenMessageTypes).toEqual(["stream_event", "result"]);
+
+    await session.close();
+  });
+
+  test("parses agent activity without treating error-only events as liveness", () => {
+    const activityMessages = [
+      {
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "partial" },
+        },
+      },
+      {
+        type: "assistant",
+        message: { content: [{ type: "text", text: "whole" }] },
+      },
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "mcp__mnemo__remember", input: {} },
+          ],
+        },
+      },
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "tool_use", name: "mcp__mnemo__recall", input: {} },
+          ],
+        },
+      },
+      {
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "tool-1", content: "" }],
+        },
+      },
+      {
+        type: "assistant",
+        message: { content: [{ type: "thinking", thinking: "..." }] },
+      },
+      {
+        type: "tool_progress",
+        tool_use_id: "tool-1",
+        tool_name: "mcp__mnemo__recall",
+      },
+    ];
+
+    for (const message of activityMessages) {
+      expect(isExtractionAgentActivity(message as never)).toBe(true);
+    }
+
+    expect(
+      isExtractionAgentActivity({
+        type: "system",
+        subtype: "api_error",
+        error: { status: 503 },
+      } as never),
+    ).toBe(false);
+    expect(
+      isExtractionAgentActivity({
+        type: "stream_event",
+        event: { type: "error", error: { type: "overloaded_error" } },
+      } as never),
+    ).toBe(false);
+    expect(
+      isExtractionAgentActivity({
+        type: "stream_event",
+        event: { type: "message_stop" },
+      } as never),
+    ).toBe(false);
+    expect(
+      isExtractionAgentActivity({
+        type: "assistant",
+        error: "server_error",
+        message: { content: [] },
+      } as never),
+    ).toBe(false);
   });
 
   test("compact pushes /compact and resolves on compact_boundary", async () => {

@@ -73,6 +73,7 @@ import {
 } from "./processors";
 import {
   createWorkerQuerySession,
+  isExtractionAgentActivity,
   type WorkerQuerySession,
 } from "./query-session";
 import {
@@ -102,7 +103,6 @@ import {
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 10_000;
-const STALLED_QUERY_MS = 30_000;
 const CONNECTION_RETRY_BACKOFF_MS = 10_000;
 const BILLING_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1_000;
 const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
@@ -207,6 +207,8 @@ export interface SessionState {
   lastPushAt: number;
   lastMessageAt: number;
   lastActivity: number;
+  lastAgentActivityAt: number;
+  requestInFlight: boolean;
   queryPid?: number;
   agentSessionId?: string;
   // Set by the onCompactBoundary callback when the SDK auto-compacts the agent
@@ -881,6 +883,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       lastPushAt: 0,
       lastMessageAt: 0,
       lastActivity: nowMs(),
+      lastAgentActivityAt: 0,
+      requestInFlight: false,
       processingLock: Promise.resolve(),
       unitSignals: {
         rememberedIds: new Set<number>(),
@@ -924,9 +928,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           envelopeBlocks.length > 0
             ? `${envelopeBlocks.join("\n\n")}\n\n${prompt}`
             : prompt;
-        state!.lastActivity = nowMs();
-        state!.lastPushAt = nowMs();
-        const result = await runtime.sendPrompt(promptWithEnvelopes);
+        const requestStartedAt = nowMs();
+        state!.lastActivity = requestStartedAt;
+        state!.lastAgentActivityAt = requestStartedAt;
+        state!.lastPushAt = requestStartedAt;
+        state!.requestInFlight = true;
+        let result;
+        try {
+          result = await runtime.sendPrompt(promptWithEnvelopes);
+        } finally {
+          state!.requestInFlight = false;
+        }
         state!.lastMessageAt = nowMs();
         state!.queryPid = runtime.queryPid;
         state!.agentSessionId = result.session_id;
@@ -1027,6 +1039,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             );
           }
           if (
+            !isRetryableSignal &&
+            isExtractionAgentActivity(message)
+          ) {
+            const activityAt = nowMs();
+            state!.lastAgentActivityAt = activityAt;
+            state!.lastActivity = activityAt;
+          }
+          if (
             "session_id" in message &&
             typeof message.session_id === "string" &&
             message.session_id !== ""
@@ -1079,6 +1099,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
               } else if (
                 block.type === "tool_use" &&
                 typeof block.name === "string" &&
+                block.name !== "mcp__mnemo__remember" &&
                 block.name !== "mcp__mnemo__recall"
               ) {
                 state!.unitSignals.hadIllegalTool = true;
@@ -1096,8 +1117,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           state!.needsReprime = true;
         },
         onRemember: (id: string) => {
-          state!.lastMessageAt = nowMs();
-          state!.lastActivity = nowMs();
+          const activityAt = nowMs();
+          state!.lastMessageAt = activityAt;
+          state!.lastAgentActivityAt = activityAt;
+          state!.lastActivity = activityAt;
           const t = /^T(\d+)$/i.exec(id);
           if (t) {
             state!.unitSignals.rememberedIds.add(Number(t[1]));
@@ -1366,6 +1389,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     state.queryPid = undefined;
     state.lastPushAt = 0;
     state.lastMessageAt = 0;
+    state.lastAgentActivityAt = 0;
+    state.requestInFlight = false;
   }
 
   async function registerSessionEnv(
@@ -2580,16 +2605,18 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             return;
           }
 
-          const hasInflightRequest = state.lastPushAt > state.lastMessageAt;
+          const hasInflightRequest = state.requestInFlight;
 
           if (
             hasInflightRequest &&
-            currentMs - state.lastPushAt > STALLED_QUERY_MS
+            currentMs - state.lastAgentActivityAt > config.stallThresholdMs
           ) {
             logger.warn?.("query session stalled, aborting", {
               sessionDbId: state.sessionDbId,
               lastPushAt: state.lastPushAt,
               lastMessageAt: state.lastMessageAt,
+              lastAgentActivityAt: state.lastAgentActivityAt,
+              stallThresholdMs: config.stallThresholdMs,
               queryPid: state.queryPid,
             });
             await closeSessionQuery(
