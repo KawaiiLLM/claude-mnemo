@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.4-mrs337xc" : "dev";
+var BUILD_ID = true ? "0.6.5-mrs3f1mz" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -44071,7 +44071,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.6.4",
+        version: "0.6.5",
         tools: [
           toolImpl(
             "recall",
