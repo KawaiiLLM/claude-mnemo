@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.3-mrrfwr0b" : "dev";
+var BUILD_ID = true ? "0.6.4-mrrwn342" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -232,6 +232,9 @@ var import_node_fs2 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 var KNOWN_DREAM_AGENT_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
   "claude-opus-4-8",
   "claude-opus-4-6",
   "claude-opus-4-5",
@@ -240,7 +243,7 @@ var KNOWN_DREAM_AGENT_MODELS = [
   "claude-sonnet-4-5",
   "claude-haiku-4-5"
 ];
-var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
+var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
@@ -1352,6 +1355,11 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
 function getSession(db, id) {
   return db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) ?? null;
 }
+function getSessionByContentId(db, contentSessionId) {
+  return db.query(
+    `${SESSION_SELECT} WHERE content_session_id = ?`
+  ).get(contentSessionId) ?? null;
+}
 function updateCompactAnchor(db, sessionId) {
   db.query(
     `UPDATE sessions
@@ -2383,6 +2391,176 @@ function initializeDatabase(db) {
 // src/shared/logger.ts
 var import_node_fs4 = require("node:fs");
 var import_node_path4 = require("node:path");
+
+// src/shared/error-sanitizer.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
+var BUILTIN_HEADER_NAMES = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key"
+];
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function collectSensitiveValues(env) {
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
+      continue;
+    }
+    if (value.length >= 4) {
+      values.add(value);
+    }
+    try {
+      const url2 = new URL(value);
+      if (url2.username.length >= 1) {
+        values.add(decodeURIComponent(url2.username));
+      }
+      if (url2.password.length >= 1) {
+        values.add(decodeURIComponent(url2.password));
+      }
+    } catch {
+    }
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+function collectCustomHeaderNames(env) {
+  const names = new Set(BUILTIN_HEADER_NAMES);
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
+      continue;
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        names.add(line.slice(0, separator).trim().toLowerCase());
+      }
+    }
+  }
+  return [...names].filter((name) => name !== "");
+}
+function sanitizeSecretString(input, sensitiveEnv = process.env) {
+  let sanitized = input;
+  for (const value of collectSensitiveValues(sensitiveEnv)) {
+    sanitized = sanitized.replaceAll(value, REDACTED);
+  }
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
+    `$1${REDACTED}@`
+  );
+  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
+    const escaped = escapeRegExp(headerName);
+    sanitized = sanitized.replace(
+      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
+      `$1${REDACTED}$2`
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
+      `$1$2${REDACTED}`
+    );
+  }
+  return sanitized;
+}
+function sensitiveObjectKey(key, customHeaders) {
+  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
+}
+function sanitizeLogValue(value, sensitiveEnv = process.env) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
+  const visit = (current) => {
+    if (typeof current === "string") {
+      return sanitizeSecretString(current, sensitiveEnv);
+    }
+    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
+      return current;
+    }
+    if (typeof current === "bigint") {
+      return current.toString();
+    }
+    if (typeof current !== "object") {
+      return String(current);
+    }
+    if (seen.has(current)) {
+      return "[Circular]";
+    }
+    seen.add(current);
+    if (current instanceof Error) {
+      const error49 = current;
+      const summary = {
+        name: error49.name,
+        message: sanitizeSecretString(error49.message, sensitiveEnv)
+      };
+      for (const key of [
+        "type",
+        "status",
+        "requestId",
+        "request_id",
+        "code",
+        "retryInMs",
+        "retryAfter"
+      ]) {
+        const field = error49[key];
+        if (field !== void 0 && field !== null) {
+          summary[key] = visit(field);
+        }
+      }
+      return summary;
+    }
+    if (Array.isArray(current)) {
+      return current.map(visit);
+    }
+    const result = {};
+    for (const [key, field] of Object.entries(current)) {
+      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
+    }
+    return result;
+  };
+  return visit(value);
+}
+function directMetadata(error49) {
+  const seen = /* @__PURE__ */ new Set();
+  let current = error49;
+  let type = null;
+  let status = null;
+  let requestId = null;
+  while (typeof current === "object" && current !== null && !seen.has(current)) {
+    seen.add(current);
+    const record3 = current;
+    if (type === null && typeof record3.type === "string") {
+      type = record3.type;
+    }
+    if (status === null && typeof record3.status === "number") {
+      status = record3.status;
+    }
+    const candidateRequestId = record3.requestId ?? record3.request_id;
+    if (requestId === null && typeof candidateRequestId === "string") {
+      requestId = candidateRequestId;
+    }
+    current = record3.cause;
+  }
+  return { type, status, requestId };
+}
+function formatErrorForPersistence(error49, sensitiveEnv = process.env) {
+  const metadata = directMetadata(error49);
+  const fields = [
+    metadata.type ? `type=${sanitizeSecretString(metadata.type, sensitiveEnv)}` : null,
+    metadata.status !== null ? `status=${metadata.status}` : null,
+    metadata.requestId ? `request-id=${sanitizeSecretString(metadata.requestId, sensitiveEnv)}` : null
+  ].filter((field) => field !== null);
+  if (fields.length > 0) {
+    return fields.join(" ");
+  }
+  const name = error49 instanceof Error ? error49.name : "Error";
+  const message = error49 instanceof Error ? error49.message : typeof error49 === "string" ? error49 : "";
+  const sanitizedMessage = sanitizeSecretString(message, sensitiveEnv).replace(/\s+/g, " ").trim().slice(0, 500);
+  return sanitizedMessage === "" ? `type=${name}` : `type=${name} message=${sanitizedMessage}`;
+}
+
+// src/shared/logger.ts
 var LOG_PATH = (0, import_node_path4.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
@@ -2391,13 +2569,13 @@ function ensureLogDir() {
     dirEnsured = true;
   }
 }
-function writeLog(level, component, message, context) {
+function writeLog(level, component, message, context, sensitiveEnv = process.env) {
   const line = JSON.stringify({
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     level,
     component,
-    message,
-    context: context ?? null
+    message: sanitizeSecretString(message, sensitiveEnv),
+    context: context ? sanitizeLogValue(context, sensitiveEnv) : null
   });
   try {
     ensureLogDir();
@@ -2408,19 +2586,20 @@ function writeLog(level, component, message, context) {
 `);
   }
 }
-function createLogger(component) {
+function createLogger(component, options = {}) {
+  const sensitiveEnv = options.sensitiveEnv ?? process.env;
   return {
     debug(message, context) {
-      writeLog("debug", component, message, context);
+      writeLog("debug", component, message, context, sensitiveEnv);
     },
     info(message, context) {
-      writeLog("info", component, message, context);
+      writeLog("info", component, message, context, sensitiveEnv);
     },
     warn(message, context) {
-      writeLog("warn", component, message, context);
+      writeLog("warn", component, message, context, sensitiveEnv);
     },
     error(message, context) {
-      writeLog("error", component, message, context);
+      writeLog("error", component, message, context, sensitiveEnv);
     }
   };
 }
@@ -41672,15 +41851,79 @@ function missingHandler(toolName) {
 }
 
 // src/mnemosyne/env.ts
-var BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
-function buildIsolatedEnv(sourceEnv = process.env) {
-  const isolatedEnv = {};
-  for (const [key, value] of Object.entries(sourceEnv)) {
-    if (BLOCKED_ENV_KEYS.has(key)) {
-      continue;
+var LEGACY_BLOCKED_ENV_KEYS = /* @__PURE__ */ new Set(["ANTHROPIC_API_KEY", "CLAUDECODE"]);
+var OPERATIONAL_ENV_KEYS = /* @__PURE__ */ new Set([
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TZ",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE"
+]);
+var CAPTURED_SESSION_ENV_KEYS = [
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "NODE_EXTRA_CA_CERTS",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "http_proxy",
+  "HTTP_PROXY",
+  "https_proxy",
+  "HTTPS_PROXY",
+  "all_proxy",
+  "ALL_PROXY",
+  "no_proxy",
+  "NO_PROXY"
+];
+function captureSessionEnv(sourceEnv = process.env) {
+  const captured = {};
+  for (const key of CAPTURED_SESSION_ENV_KEYS) {
+    const value = sourceEnv[key];
+    if (value !== void 0) {
+      captured[key] = value;
     }
-    isolatedEnv[key] = value;
   }
+  return captured;
+}
+function copyOperationalEnv(sourceEnv) {
+  const operationalEnv = {};
+  for (const [key, value] of Object.entries(sourceEnv)) {
+    if (OPERATIONAL_ENV_KEYS.has(key) || key.startsWith("LC_")) {
+      operationalEnv[key] = value;
+    }
+  }
+  return operationalEnv;
+}
+function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
+  if (capturedSessionEnv === void 0) {
+    const sourceEnv2 = workerEnv ?? process.env;
+    const legacyEnv = {};
+    for (const [key, value] of Object.entries(sourceEnv2)) {
+      if (!LEGACY_BLOCKED_ENV_KEYS.has(key)) {
+        legacyEnv[key] = value;
+      }
+    }
+    legacyEnv.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
+    return legacyEnv;
+  }
+  const sourceEnv = workerEnv ?? process.env;
+  const isolatedEnv = {};
+  Object.assign(isolatedEnv, copyOperationalEnv(sourceEnv));
+  Object.assign(isolatedEnv, captureSessionEnv(capturedSessionEnv));
   isolatedEnv.CLAUDE_CODE_ENTRYPOINT = "sdk-ts";
   return isolatedEnv;
 }
@@ -41816,7 +42059,7 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const execution = queryImpl({
     prompt: promptStream,
     options: {
-      model: "claude-sonnet-5",
+      model: "sonnet",
       cwd: DATA_DIR,
       ...resumeTarget ? { resume: resumeTarget } : {},
       allowedTools: [...MNEMO_ALLOWED_TOOLS],
@@ -41950,7 +42193,7 @@ this overrides the normal "extract once, never revisit" rule for that block.
 - Always call \`remember()\` with an \`id\` (T<n> for a turn, S<n> for a session); the no-id route is rejected.
 - Never update any record not named in the current message's block headers.`,
       env: {
-        ...buildIsolatedEnv(),
+        ...input.agentEnv ?? buildIsolatedEnv(),
         ...input.config?.cacheMode === "5m" ? { FORCE_PROMPT_CACHING_5M: "1" } : {},
         ...input.config?.cacheMode === "1h" ? { ENABLE_PROMPT_CACHING_1H: "1" } : {},
         ENABLE_TOOL_SEARCH: "false"
@@ -43062,6 +43305,7 @@ var DreamMemoryStore = class {
 };
 
 // src/worker/error-classifier.ts
+var MAX_WORKER_RETRY_DELAY_MS = 24 * 60 * 60 * 1e3;
 var CONNECTION_ERROR_CODES = /* @__PURE__ */ new Set([
   "ECONNRESET",
   "ENOTFOUND",
@@ -43072,6 +43316,37 @@ var CONNECTION_ERROR_NAMES = /* @__PURE__ */ new Set([
   "APIConnectionError",
   "APIConnectionTimeoutError"
 ]);
+var DETERMINISTIC_STATUSES = /* @__PURE__ */ new Set([400, 401, 403, 404, 413]);
+var TRANSIENT_STATUSES = /* @__PURE__ */ new Set([408, 409, 429, 529]);
+var TRANSIENT_TYPES = /* @__PURE__ */ new Set([
+  "rate_limit",
+  "rate_limit_error",
+  "server_error",
+  "overloaded_error",
+  "api_error"
+]);
+var BLOCKED_TYPES = /* @__PURE__ */ new Set([
+  "billing_error",
+  "credit_exhausted",
+  "credit_exhausted_error",
+  "insufficient_credits",
+  "insufficient_credit"
+]);
+var DETERMINISTIC_TYPES = /* @__PURE__ */ new Set([
+  "authentication_failed",
+  "authentication_error",
+  "permission_error",
+  "invalid_request",
+  "invalid_request_error",
+  "invalid_model",
+  "model_not_found",
+  "not_found_error",
+  "request_too_large",
+  "conflict_error",
+  "business_conflict",
+  "resource_conflict"
+]);
+var BLOCKED_TEXT = /\b(?:billing[_ -]?error|credit(?:s)?[_ -]?exhausted|insufficient[_ -]?credits?)\b/i;
 var WorkerAbortError = class extends Error {
   workerAbortReason;
   constructor(reason, message) {
@@ -43086,41 +43361,256 @@ function createWorkerAbortError(reason, message) {
 function isObject4(value) {
   return typeof value === "object" && value !== null;
 }
-function classifyOne(error49) {
-  if (error49.type === "system" && error49.subtype === "api_error" || error49.type === "assistant" && error49.error === "server_error") {
-    return "connection";
+function normalizedType(value) {
+  if (typeof value !== "string") {
+    return null;
   }
-  if (typeof error49.status === "number") {
-    return "deterministic";
+  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  return normalized === "" ? null : normalized;
+}
+function numericStatus(value) {
+  const status = typeof value === "number" ? value : typeof value === "string" && /^\d{3}$/.test(value.trim()) ? Number(value) : Number.NaN;
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+function clampedRetryMs(value) {
+  const retryMs = typeof value === "number" ? value : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value) : Number.NaN;
+  if (!Number.isFinite(retryMs) || retryMs < 0) {
+    return null;
   }
-  if (error49.workerAbortReason === "stall-watchdog" || error49.workerAbortReason === "shutdown") {
-    return "connection";
+  return Math.min(Math.round(retryMs), MAX_WORKER_RETRY_DELAY_MS);
+}
+function headerValue(headers, name) {
+  if (!isObject4(headers)) {
+    return null;
   }
-  if (typeof error49.code === "string" && CONNECTION_ERROR_CODES.has(error49.code)) {
-    return "connection";
+  const getter = headers.get;
+  if (typeof getter === "function") {
+    const value = getter.call(headers, name);
+    return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
   }
-  const errorName = typeof error49.name === "string" ? error49.name : null;
-  const constructorName = typeof error49.constructor === "function" ? error49.constructor.name : null;
-  if (errorName !== null && CONNECTION_ERROR_NAMES.has(errorName) || constructorName !== null && CONNECTION_ERROR_NAMES.has(constructorName)) {
-    return "connection";
-  }
-  if (typeof error49.message === "string" && /\bfetch failed\b/i.test(error49.message)) {
-    return "connection";
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== name.toLowerCase()) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      return value.length > 0 ? String(value[0]) : null;
+    }
+    return value === null || value === void 0 ? null : String(value);
   }
   return null;
 }
-function classifyWorkerError(error49) {
-  const seen = /* @__PURE__ */ new Set();
-  let current = error49;
-  while (isObject4(current) && !seen.has(current)) {
-    seen.add(current);
-    const classification = classifyOne(current);
-    if (classification !== null) {
-      return classification;
+function headerEntries(headers) {
+  if (!isObject4(headers)) {
+    return [];
+  }
+  const entries = [];
+  const forEach = headers.forEach;
+  if (typeof forEach === "function") {
+    forEach.call(headers, (value, key) => {
+      entries.push([String(key), String(value)]);
+    });
+    return entries;
+  }
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        entries.push([key, String(item)]);
+      }
+    } else if (value !== null && value !== void 0) {
+      entries.push([key, String(value)]);
     }
-    current = current.cause;
+  }
+  return entries;
+}
+function collectSignals(error49) {
+  const signals = {
+    objects: [],
+    statuses: [],
+    types: [],
+    texts: [],
+    retryInMs: [],
+    retryAfter: [],
+    requestIds: [],
+    hasConnectionSignal: false
+  };
+  const seen = /* @__PURE__ */ new Set();
+  const queue = [error49];
+  while (queue.length > 0 && signals.objects.length < 100) {
+    const current = queue.shift();
+    if (typeof current === "string") {
+      signals.texts.push(current);
+      const trimmed = current.trim();
+      if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length <= 1e6) {
+        try {
+          queue.push(JSON.parse(trimmed));
+        } catch {
+        }
+      }
+      continue;
+    }
+    if (!isObject4(current) || seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+    signals.objects.push(current);
+    const status = numericStatus(current.status) ?? numericStatus(current.statusCode);
+    if (status !== null) {
+      signals.statuses.push(status);
+    }
+    const type = normalizedType(current.type);
+    if (type !== null) {
+      signals.types.push(type);
+    }
+    const errorType = normalizedType(current.error);
+    if (errorType !== null) {
+      signals.types.push(errorType);
+    }
+    const directRetry = clampedRetryMs(
+      current.retryInMs ?? current.retry_in_ms
+    );
+    if (directRetry !== null) {
+      signals.retryInMs.push(directRetry);
+    }
+    const retryAfter = headerValue(current.headers, "retry-after") ?? (typeof current.retryAfter === "string" ? current.retryAfter : typeof current.retry_after === "string" ? current.retry_after : null);
+    if (retryAfter !== null) {
+      signals.retryAfter.push(retryAfter);
+    }
+    for (const key of ["requestId", "request_id", "request-id"]) {
+      const value = current[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        signals.requestIds.push(value.trim());
+        break;
+      }
+    }
+    const headerRequestId = headerValue(current.headers, "request-id") ?? headerValue(current.headers, "x-request-id");
+    if (headerRequestId !== null) {
+      signals.requestIds.push(headerRequestId);
+    }
+    for (const [headerName, headerContent] of headerEntries(current.headers)) {
+      const normalizedHeaderName = headerName.toLowerCase();
+      if (normalizedHeaderName === "status" || normalizedHeaderName === "x-status" || normalizedHeaderName === "x-status-code") {
+        const headerStatus = numericStatus(headerContent);
+        if (headerStatus !== null) {
+          signals.statuses.push(headerStatus);
+        }
+      }
+      if (normalizedHeaderName === "error-type" || normalizedHeaderName === "x-error-type" || normalizedHeaderName === "anthropic-error-type") {
+        const headerType = normalizedType(headerContent);
+        if (headerType !== null) {
+          signals.types.push(headerType);
+        }
+      }
+      if (normalizedHeaderName === "error-message" || normalizedHeaderName === "x-error-message") {
+        signals.texts.push(headerContent);
+      }
+    }
+    if (current.type === "system" && current.subtype === "api_error" || current.type === "assistant" && (current.error === "rate_limit" || current.error === "server_error")) {
+      signals.hasConnectionSignal = true;
+    }
+    if (current.workerAbortReason === "stall-watchdog" || current.workerAbortReason === "shutdown") {
+      signals.hasConnectionSignal = true;
+    }
+    if (typeof current.code === "string" && CONNECTION_ERROR_CODES.has(current.code)) {
+      signals.hasConnectionSignal = true;
+    }
+    const errorName = typeof current.name === "string" ? current.name : null;
+    const constructorName = typeof current.constructor === "function" ? current.constructor.name : null;
+    if (errorName !== null && CONNECTION_ERROR_NAMES.has(errorName) || constructorName !== null && CONNECTION_ERROR_NAMES.has(constructorName)) {
+      signals.hasConnectionSignal = true;
+    }
+    if (typeof current.message === "string") {
+      signals.texts.push(current.message);
+    }
+    for (const key of [
+      "cause",
+      "error",
+      "body",
+      "response",
+      "data",
+      "event",
+      "headers",
+      "message"
+    ]) {
+      queue.push(current[key]);
+    }
+    for (const [key, value] of Object.entries(current)) {
+      if (typeof value === "string" && (key === "message" || key === "body" || key === "detail")) {
+        signals.texts.push(value);
+      }
+    }
+  }
+  if (signals.texts.some((text) => /\bfetch failed\b/i.test(text))) {
+    signals.hasConnectionSignal = true;
+  }
+  return signals;
+}
+function classifySignals(signals) {
+  const hasType = (types) => signals.types.some((type) => types.has(type));
+  if (signals.statuses.some((status) => DETERMINISTIC_STATUSES.has(status))) {
+    return "deterministic";
+  }
+  if (hasType(BLOCKED_TYPES) || signals.statuses.includes(402) || signals.texts.some((text) => BLOCKED_TEXT.test(text))) {
+    return "blocked";
+  }
+  if (hasType(DETERMINISTIC_TYPES)) {
+    return "deterministic";
+  }
+  if (hasType(TRANSIENT_TYPES) || signals.statuses.some(
+    (status) => TRANSIENT_STATUSES.has(status) || status >= 500 && status <= 599
+  ) || signals.hasConnectionSignal) {
+    return "connection";
+  }
+  if (signals.statuses.length > 0) {
+    return "deterministic";
   }
   return "deterministic";
+}
+function inspectWorkerError(error49) {
+  const signals = collectSignals(error49);
+  const meaningfulTypes = signals.types.filter(
+    (type) => type !== "assistant" && type !== "system" && type !== "stream_event" && type !== "error"
+  );
+  return {
+    classification: classifySignals(signals),
+    status: signals.statuses[0] ?? null,
+    type: meaningfulTypes[0] ?? null,
+    requestId: signals.requestIds[0] ?? null,
+    retryInMs: signals.retryInMs[0] ?? null,
+    retryAfter: signals.retryAfter[0] ?? null
+  };
+}
+function parseRetryAfterMs(value, nowMs = Date.now()) {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Math.min(Number(trimmed) * 1e3, MAX_WORKER_RETRY_DELAY_MS);
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isFinite(dateMs)) {
+    return null;
+  }
+  return Math.min(
+    Math.max(0, dateMs - nowMs),
+    MAX_WORKER_RETRY_DELAY_MS
+  );
+}
+function resolveWorkerRetryDelayMs(error49, defaultDelayMs, nowMs = Date.now()) {
+  const details = inspectWorkerError(error49);
+  if (details.retryInMs !== null) {
+    return details.retryInMs;
+  }
+  if (details.retryAfter !== null) {
+    const parsed = parseRetryAfterMs(details.retryAfter, nowMs);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return Math.min(
+    Math.max(0, Math.round(defaultDelayMs)),
+    MAX_WORKER_RETRY_DELAY_MS
+  );
+}
+function classifyWorkerError(error49) {
+  return inspectWorkerError(error49).classification;
 }
 
 // src/worker/diary-agent-runner.ts
@@ -43289,6 +43779,73 @@ var DIARY_ALLOWED_TOOLS = [
   "mcp__diary__timeline",
   "mcp__diary__read_doc"
 ];
+var DiarySdkError = class extends Error {
+  status;
+  type;
+  requestId;
+  retryInMs;
+  retryAfter;
+  classification;
+  constructor(source, fallback) {
+    const details = inspectWorkerError(source);
+    const stableFields = [
+      details.type ? `type=${details.type}` : null,
+      details.status !== null ? `status=${details.status}` : null,
+      details.requestId ? `request-id=${details.requestId}` : null
+    ].filter((field) => field !== null);
+    super(
+      stableFields.length > 0 ? `Diary SDK query failed (${stableFields.join(" ")})` : fallback
+    );
+    this.name = "DiarySdkError";
+    this.status = details.status;
+    this.type = details.type ?? (details.classification === "blocked" ? "billing_error" : details.classification === "connection" ? "api_error" : null);
+    this.requestId = details.requestId;
+    this.retryInMs = details.retryInMs;
+    this.retryAfter = details.retryAfter;
+    this.classification = details.classification;
+  }
+};
+function isStreamErrorMessage(message) {
+  const candidate = message;
+  if (candidate.type === "assistant" && typeof candidate.error === "string") {
+    return true;
+  }
+  if (candidate.type === "system" && candidate.subtype === "api_error") {
+    return true;
+  }
+  if (candidate.type === "stream_event") {
+    const event = candidate.event;
+    return typeof event === "object" && event !== null && (event.type === "error" || "error" in event);
+  }
+  return false;
+}
+var ERROR_CLASSIFICATION_PRIORITY = {
+  deterministic: 1,
+  connection: 2,
+  blocked: 3
+};
+function isHigherPriorityError(candidate, current) {
+  const candidatePriority = [
+    ERROR_CLASSIFICATION_PRIORITY[candidate.classification],
+    candidate.retryInMs === null ? 0 : 1,
+    candidate.retryAfter === null ? 0 : 1,
+    candidate.requestId === null ? 0 : 1,
+    candidate.status === null ? 0 : 1
+  ];
+  const currentPriority = [
+    ERROR_CLASSIFICATION_PRIORITY[current.classification],
+    current.retryInMs === null ? 0 : 1,
+    current.retryAfter === null ? 0 : 1,
+    current.requestId === null ? 0 : 1,
+    current.status === null ? 0 : 1
+  ];
+  for (let index = 0; index < candidatePriority.length; index += 1) {
+    if (candidatePriority[index] !== currentPriority[index]) {
+      return candidatePriority[index] > currentPriority[index];
+    }
+  }
+  return false;
+}
 function textResult3(text) {
   return {
     content: [{ type: "text", text }]
@@ -43329,7 +43886,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.6.3",
+        version: "0.6.4",
         tools: [
           toolImpl(
             "recall",
@@ -43386,9 +43943,13 @@ function createDiarySdkQuery(options) {
             // Force 5-minute prompt caching: the dream is a single short burst
             // (all turns seconds apart, done within minutes) with no cross-run
             // reuse, so the CC default 1h cache only pays the 2x write premium
-            // for nothing. Providing env replaces process.env entirely, so build
-            // from the isolated env. The summary agent keeps 1h via its own path.
-            env: { ...buildIsolatedEnv(), FORCE_PROMPT_CACHING_5M: "1" },
+            // for nothing. Providing env replaces process.env entirely. The
+            // runtime supplies the triggering session's safe snapshot; direct
+            // callers receive the sanitized operational baseline.
+            env: {
+              ...request.agentEnv ?? buildIsolatedEnv(process.env, {}),
+              FORCE_PROMPT_CACHING_5M: "1"
+            },
             // Write/Edit let the agent revise the staging copies incrementally
             // (only changed content becomes output tokens); canUseTool scopes
             // them to the run's staging subtree.
@@ -43405,24 +43966,39 @@ function createDiarySdkQuery(options) {
           }
         });
         let envelope = null;
+        let highestPriorityError = null;
         for await (const message of execution) {
           request.reportActivity();
           if (message.type !== "result") {
+            if (isStreamErrorMessage(message)) {
+              const candidate = new DiarySdkError(
+                message,
+                "Diary SDK query failed from a streamed error."
+              );
+              if (highestPriorityError === null || isHigherPriorityError(candidate, highestPriorityError)) {
+                highestPriorityError = candidate;
+              }
+            }
             continue;
           }
           if (message.subtype !== "success") {
-            throw new Error(
-              `Diary SDK query failed (${message.subtype}): ${message.errors.join("; ")}`
+            throw highestPriorityError ?? new DiarySdkError(
+              message.errors,
+              `Diary SDK query failed (${message.subtype}).`
             );
           }
           if (message.is_error) {
-            throw new Error(
-              `Diary SDK query returned an error result: ${message.result}`
+            throw highestPriorityError ?? new DiarySdkError(
+              message,
+              "Diary SDK query returned an error result."
             );
           }
           envelope = message.result;
         }
         if (envelope === null) {
+          if (highestPriorityError !== null) {
+            throw highestPriorityError;
+          }
           throw new Error("Diary SDK query completed without a result envelope.");
         }
         return envelope;
@@ -44084,6 +44660,8 @@ function createDreamJobProcessor(options) {
 }
 
 // src/worker/diary-runtime.ts
+var DREAM_CONNECTION_RETRY_MS = 15 * 60 * 1e3;
+var DREAM_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1e3;
 function dreamDateFromQueueItem(item) {
   if (item.kind !== "diary" || item.sessionDbId !== 0) {
     throw new Error(`Not a dream queue item: seq=${item.seq}`);
@@ -44126,12 +44704,23 @@ function createDreamQueueProcessor(options) {
         const failedAtEpoch = nowEpoch();
         const classification = classifyWorkerError(error49);
         const isShutdownAbort = typeof error49 === "object" && error49 !== null && "workerAbortReason" in error49 && error49.workerAbortReason === "shutdown";
-        const retryDelaySeconds = isShutdownAbort ? 0 : classification === "connection" ? 15 * 60 : 60;
+        const retryDelayMs = isShutdownAbort ? 0 : classification === "blocked" ? Math.max(
+          DREAM_BLOCKED_RETRY_FLOOR_MS,
+          resolveWorkerRetryDelayMs(
+            error49,
+            DREAM_BLOCKED_RETRY_FLOOR_MS,
+            failedAtEpoch * 1e3
+          )
+        ) : classification === "connection" ? resolveWorkerRetryDelayMs(
+          error49,
+          DREAM_CONNECTION_RETRY_MS,
+          failedAtEpoch * 1e3
+        ) : 60 * 1e3;
         options.stateStore.recordDreamFailure({
           date: date7,
           queueSeq: item.seq,
-          error: error49 instanceof Error ? error49.message : String(error49),
-          retryAtEpoch: failedAtEpoch + retryDelaySeconds,
+          error: formatErrorForPersistence(error49, options.sensitiveEnv),
+          retryAtEpoch: failedAtEpoch + Math.ceil(retryDelayMs / 1e3),
           countAttempt: classification === "deterministic"
         });
         throw error49;
@@ -44143,8 +44732,13 @@ function createDiaryRuntime(options) {
   const stateStore = createDiaryStateStore(options.db);
   const config3 = options.config ?? loadConfig();
   const runQuery = options.runQuery ?? createDiarySdkQuery({ dataRoot: options.dataRoot }).runQuery;
+  const operationalBaseline = buildIsolatedEnv(
+    options.workerEnv ?? process.env,
+    {}
+  );
+  let activeAgentEnv = operationalBaseline;
   const agentRunner = createDiaryAgentRunner({
-    runQuery,
+    runQuery: (request) => runQuery({ ...request, agentEnv: activeAgentEnv }),
     timeoutMs: config3.dreamAgentTimeoutMs,
     watchdogMs: config3.dreamAgentIdleWatchdogMs
   });
@@ -44164,18 +44758,27 @@ function createDiaryRuntime(options) {
     readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     nowEpoch: options.nowEpoch,
     timeZone: config3.dreamAgentTimeZone,
-    boundaryHour: config3.dreamAgentHour
+    boundaryHour: config3.dreamAgentHour,
+    sensitiveEnv: options.sensitiveEnv
   });
   let activeDream = null;
-  function trackDream(work) {
+  function trackDream(work, agentEnv = operationalBaseline) {
     if (activeDream) {
       return Promise.reject(new Error("Dream processing is already running."));
     }
-    const operation = work();
+    activeAgentEnv = { ...agentEnv };
+    let operation;
+    try {
+      operation = work();
+    } catch (error49) {
+      activeAgentEnv = operationalBaseline;
+      throw error49;
+    }
     const tracked = operation.finally(() => {
       if (activeDream === tracked) {
         activeDream = null;
       }
+      activeAgentEnv = operationalBaseline;
     });
     activeDream = tracked;
     tracked.catch(() => {
@@ -44184,7 +44787,7 @@ function createDiaryRuntime(options) {
   }
   return {
     processDreamDate: (date7) => trackDream(() => processDreamDateRaw(date7)),
-    processDreamItem: (item) => trackDream(() => dreamQueue.process(item)),
+    processDreamItem: (item, agentEnv) => trackDream(() => dreamQueue.process(item), agentEnv),
     isDreamRunning: () => activeDream !== null,
     async abortDream(reason) {
       const dream = activeDream;
@@ -44204,6 +44807,7 @@ var STARTING_STALE_MS = 1e4;
 var WATCHDOG_INTERVAL_MS = 1e4;
 var STALLED_QUERY_MS = 3e4;
 var CONNECTION_RETRY_BACKOFF_MS = 1e4;
+var BILLING_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1e3;
 var IDLE_QUERY_SESSION_MS = 30 * 60 * 1e3;
 var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
@@ -44237,21 +44841,10 @@ function resetUnitSignals(state) {
   state.unitSignals.rememberedSessionIds.clear();
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
-  state.unitSignals.connectionError = null;
+  state.unitSignals.retryableError = null;
 }
 function defaultNoopDrain() {
   return Promise.resolve();
-}
-function getStartupFlushSessionId(env = process.env) {
-  const raw = env.CLAUDE_MNEMO_FLUSH_SESSION_ID;
-  if (!raw) {
-    return null;
-  }
-  const sessionId = Number(raw);
-  if (!Number.isInteger(sessionId) || sessionId <= 0) {
-    return null;
-  }
-  return sessionId;
 }
 function createWorkerServerState(nowMs = Date.now()) {
   return {
@@ -44346,6 +44939,17 @@ function pruneBufferedUndoneItems(db, items) {
   }
   return { activeItems, prunedSeqs };
 }
+function capturedEnvsEqual(left, right) {
+  if (!left) {
+    return false;
+  }
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+  return rightEntries.every(([key, value]) => left[key] === value);
+}
 function createWorkerCore(deps) {
   const now = deps.now ?? (() => Math.floor(Date.now() / 1e3));
   const nowMs = deps.nowMs ?? Date.now;
@@ -44357,9 +44961,14 @@ function createWorkerCore(deps) {
   const buffers = /* @__PURE__ */ new Map();
   const compactingSessions = /* @__PURE__ */ new Set();
   const suspendedUntilBySession = /* @__PURE__ */ new Map();
+  const blockedUntilBySession = /* @__PURE__ */ new Map();
+  const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
+  const enforceSessionEnvPresence = deps.sessionEnvRegistry !== void 0;
+  const contentSessionIdByDbId = /* @__PURE__ */ new Map();
+  const isSessionRetryGated = (sessionDbId) => suspendedUntilBySession.has(sessionDbId) || blockedUntilBySession.has(sessionDbId);
   const diaryStateStore = createDiaryStateStore(deps.db);
-  let persistentRetryTimer = null;
   let diaryContinuationTimer = null;
+  let pendingDiaryTriggerSessionDbId;
   let globalScanInFlight = null;
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
@@ -44562,6 +45171,21 @@ function createWorkerCore(deps) {
     );
     return selected;
   }
+  function getRegisteredSessionEnv(sessionDbId) {
+    const knownContentSessionId = contentSessionIdByDbId.get(sessionDbId);
+    if (knownContentSessionId) {
+      return sessionEnvRegistry.get(knownContentSessionId);
+    }
+    const session = getSession(deps.db, sessionDbId);
+    if (!session) {
+      return void 0;
+    }
+    const captured = sessionEnvRegistry.get(session.contentSessionId);
+    if (captured) {
+      contentSessionIdByDbId.set(sessionDbId, session.contentSessionId);
+    }
+    return captured;
+  }
   function getOrCreateSessionState(sessionDbId) {
     let state = sessions.get(sessionDbId);
     if (state) {
@@ -44586,7 +45210,7 @@ function createWorkerCore(deps) {
         rememberedSessionIds: /* @__PURE__ */ new Set(),
         hadSubstantiveText: false,
         hadIllegalTool: false,
-        connectionError: null
+        retryableError: null
       },
       async pushMessage(prompt) {
         const runtime = ensureQuerySession(state);
@@ -44675,21 +45299,30 @@ ${prompt}` : prompt;
     if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
+    const capturedSessionEnv = getRegisteredSessionEnv(state.sessionDbId);
+    if (enforceSessionEnvPresence && !capturedSessionEnv) {
+      throw new Error(`Missing captured env for worker session ${state.sessionDbId}.`);
+    }
     state.querySession = createWorkerQuerySessionImpl(
       {
         db: deps.db,
         sessionDbId: state.sessionDbId,
         contentSessionId: session.contentSessionId,
         project: session.project,
+        agentEnv: capturedSessionEnv ? buildIsolatedEnv(
+          deps.workerEnv ?? process.env,
+          capturedSessionEnv
+        ) : buildIsolatedEnv(deps.workerEnv ?? process.env),
         config: config3,
         resumeAgentSessionId: options.forceFresh ? null : session.lastAgentSessionId
       },
       {
         onMessage: (message) => {
-          const isConnectionSignal = classifyWorkerError(message) === "connection";
-          if (isConnectionSignal) {
-            state.unitSignals.connectionError = new Error(
-              "Agent stream reported a connection failure.",
+          const messageClassification = classifyWorkerError(message);
+          const isRetryableSignal = messageClassification === "connection" || messageClassification === "blocked";
+          if (isRetryableSignal) {
+            state.unitSignals.retryableError = new Error(
+              messageClassification === "blocked" ? "Agent stream reported a blocked account." : "Agent stream reported a transient connection failure.",
               { cause: message }
             );
           }
@@ -44712,7 +45345,7 @@ ${prompt}` : prompt;
               }
             }
           }
-          if (!isConnectionSignal && message.type === "assistant" && Array.isArray(message.message?.content)) {
+          if (!isRetryableSignal && message.type === "assistant" && Array.isArray(message.message?.content)) {
             const content = message.message.content;
             for (const block of content) {
               if (block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) {
@@ -44792,8 +45425,8 @@ ${recentIndex}` : coldStart;
 ${body}
 </context>`
       );
-      if (state.unitSignals.connectionError) {
-        throw state.unitSignals.connectionError;
+      if (state.unitSignals.retryableError) {
+        throw state.unitSignals.retryableError;
       }
     }
     resetUnitSignals(state);
@@ -44821,8 +45454,8 @@ ${body}
     const resendKind = requiredIds.size === 0 ? "session-summary" : "turn";
     resetUnitSignals(state);
     await state.pushMessage(message);
-    if (state.unitSignals.connectionError) {
-      throw state.unitSignals.connectionError;
+    if (state.unitSignals.retryableError) {
+      throw state.unitSignals.retryableError;
     }
     if (evaluate() === "resolved") {
       return;
@@ -44830,8 +45463,8 @@ ${body}
     for (let i = 0; i < MAX_REMINDERS; i++) {
       resetUnitSignals(state);
       await state.pushMessage(buildCorrectiveResend(message, resendKind));
-      if (state.unitSignals.connectionError) {
-        throw state.unitSignals.connectionError;
+      if (state.unitSignals.retryableError) {
+        throw state.unitSignals.retryableError;
       }
       if (evaluate() === "resolved") {
         return;
@@ -44847,8 +45480,8 @@ ${body}
     await reopenQuerySessionFresh(state);
     resetUnitSignals(state);
     await state.pushMessage(buildCorrectiveResend(message, resendKind));
-    if (state.unitSignals.connectionError) {
-      throw state.unitSignals.connectionError;
+    if (state.unitSignals.retryableError) {
+      throw state.unitSignals.retryableError;
     }
     if (evaluate() === "resolved") {
       return;
@@ -44913,11 +45546,84 @@ ${body}
     })();
     return state.closing;
   }
-  async function suspendSessionAfterConnectionError(sessionDbId, error49) {
-    suspendedUntilBySession.set(sessionDbId, {
-      retryAtMs: nowMs() + CONNECTION_RETRY_BACKOFF_MS,
-      latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId)
-    });
+  async function recycleSessionQueryLocked(state) {
+    if (!state.querySession) {
+      return;
+    }
+    const runtime = state.querySession;
+    const queryPid = state.queryPid;
+    await Promise.race([
+      runtime.close(),
+      new Promise((resolve4) => {
+        setTimeout(resolve4, 5e3);
+      })
+    ]);
+    if (queryPid && isProcessAliveImpl(queryPid)) {
+      try {
+        process.kill(queryPid, "SIGKILL");
+      } catch {
+      }
+    }
+    state.querySession = null;
+    state.queryPid = void 0;
+    state.lastPushAt = 0;
+    state.lastMessageAt = 0;
+  }
+  async function registerSessionEnv(contentSessionId, sessionDbId, rawEnv) {
+    const captured = captureSessionEnv(rawEnv);
+    const previous = sessionEnvRegistry.get(contentSessionId);
+    const changed = !capturedEnvsEqual(previous, captured);
+    sessionEnvRegistry.set(contentSessionId, captured);
+    const suppliedSession = sessionDbId === void 0 ? null : getSession(deps.db, sessionDbId);
+    const dbSession = suppliedSession?.contentSessionId === contentSessionId ? suppliedSession : getSessionByContentId(deps.db, contentSessionId);
+    if (!dbSession) {
+      return null;
+    }
+    contentSessionIdByDbId.set(dbSession.id, contentSessionId);
+    blockedUntilBySession.delete(dbSession.id);
+    if (changed && sessions.get(dbSession.id)?.querySession) {
+      await withSessionProcessingLock(dbSession.id, async (state) => {
+        await recycleSessionQueryLocked(state);
+      });
+    }
+    return dbSession.id;
+  }
+  function clearSessionEnv(contentSessionId, sessionDbId) {
+    sessionEnvRegistry.delete(contentSessionId);
+    if (sessionDbId !== void 0) {
+      contentSessionIdByDbId.delete(sessionDbId);
+    }
+    for (const [dbId, knownContentSessionId] of contentSessionIdByDbId) {
+      if (knownContentSessionId === contentSessionId) {
+        contentSessionIdByDbId.delete(dbId);
+      }
+    }
+  }
+  async function suspendSessionAfterRetryableError(sessionDbId, error49) {
+    const classification = classifyWorkerError(error49);
+    const currentMs = nowMs();
+    const retryAfterMs = classification === "blocked" ? Math.max(
+      BILLING_BLOCKED_RETRY_FLOOR_MS,
+      resolveWorkerRetryDelayMs(
+        error49,
+        BILLING_BLOCKED_RETRY_FLOOR_MS,
+        currentMs
+      )
+    ) : resolveWorkerRetryDelayMs(
+      error49,
+      CONNECTION_RETRY_BACKOFF_MS,
+      currentMs
+    );
+    if (classification === "blocked") {
+      suspendedUntilBySession.delete(sessionDbId);
+      blockedUntilBySession.set(sessionDbId, currentMs + retryAfterMs);
+    } else {
+      blockedUntilBySession.delete(sessionDbId);
+      suspendedUntilBySession.set(sessionDbId, {
+        retryAtMs: currentMs + retryAfterMs,
+        latestTurnStopSeq: latestTurnStopSeqForSession(sessionDbId)
+      });
+    }
     resetClaimedQueueItemsForSession(deps.db, sessionDbId);
     buffers.delete(sessionDbId);
     const state = sessions.get(sessionDbId);
@@ -44925,9 +45631,10 @@ ${body}
       state.batchQueue = [];
       state.streamedParts.clear();
     }
-    logger.warn?.("mini-turn flush suspended after connection failure", {
+    logger.warn?.("mini-turn flush suspended after retryable failure", {
       sessionDbId,
-      retryAfterMs: CONNECTION_RETRY_BACKOFF_MS,
+      classification,
+      retryAfterMs,
       error: error49
     });
     await closeSessionQuery(
@@ -44979,7 +45686,7 @@ ${body}
         await sendSessionReprime(state);
         state.needsReprime = false;
       } catch (error49) {
-        if (classifyWorkerError(error49) === "connection") {
+        if (classifyWorkerError(error49) !== "deterministic") {
           throw error49;
         }
         logger.error?.("session re-prime failed; will retry next batch", {
@@ -45053,7 +45760,7 @@ ${body}
     state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
   }
   async function flushOneBatchLocked(state) {
-    if (suspendedUntilBySession.has(state.sessionDbId)) {
+    if (isSessionRetryGated(state.sessionDbId)) {
       state.batchQueue = [];
       state.streamedParts.clear();
       return "suspended";
@@ -45066,8 +45773,8 @@ ${body}
     try {
       await pushMiniTurnBatch(state, batch);
     } catch (error49) {
-      if (classifyWorkerError(error49) === "connection") {
-        await suspendSessionAfterConnectionError(state.sessionDbId, error49);
+      if (classifyWorkerError(error49) !== "deterministic") {
+        await suspendSessionAfterRetryableError(state.sessionDbId, error49);
         return "suspended";
       }
       batch.attempts += 1;
@@ -45137,7 +45844,7 @@ ${body}
   async function flushDrainTail(sessionFilter) {
     const sessionIds = sessionFilter === void 0 ? [...sessions.keys()] : sessions.has(sessionFilter) ? [sessionFilter] : [];
     for (const sessionDbId of sessionIds) {
-      if (suspendedUntilBySession.has(sessionDbId) || compactingSessions.has(sessionDbId)) {
+      if (isSessionRetryGated(sessionDbId) || compactingSessions.has(sessionDbId)) {
         continue;
       }
       const state = sessions.get(sessionDbId);
@@ -45293,47 +46000,6 @@ ${body}
       throw error49;
     }
   }
-  function schedulePersistentRetry() {
-    if (!deps.processDiaryItem) {
-      return;
-    }
-    const dueEpoch = deps.db.query(
-      `SELECT MIN(d.next_attempt_epoch) AS nextAttemptEpoch
-         FROM diary_day_state d
-         WHERE d.next_attempt_epoch IS NOT NULL
-           AND EXISTS (
-             SELECT 1
-             FROM pending_queue q
-             WHERE q.kind = 'diary'
-               AND q.claimed_at_epoch IS NULL
-               AND q.target_id = CAST(REPLACE(d.date, '-', '') AS INTEGER)
-           )`
-    ).get()?.nextAttemptEpoch ?? null;
-    if (dueEpoch === null) {
-      if (persistentRetryTimer) {
-        clearTimeoutImpl(persistentRetryTimer.handle);
-        persistentRetryTimer = null;
-      }
-      return;
-    }
-    if (persistentRetryTimer?.dueEpoch === dueEpoch) {
-      return;
-    }
-    if (persistentRetryTimer) {
-      clearTimeoutImpl(persistentRetryTimer.handle);
-    }
-    const handle = setTimeoutImpl(
-      async () => {
-        if (persistentRetryTimer?.dueEpoch !== dueEpoch) {
-          return;
-        }
-        persistentRetryTimer = null;
-        await scanAndDrainQueue();
-      },
-      Math.max(0, dueEpoch - now()) * 1e3
-    );
-    persistentRetryTimer = { handle, dueEpoch };
-  }
   function scheduleDiaryContinuation() {
     if (!deps.processDiaryItem) {
       return;
@@ -45354,7 +46020,7 @@ ${body}
         return;
       }
       diaryContinuationTimer = null;
-      await scanAndDrainQueue();
+      await scanAndDrainGlobalQueue(null);
     }, 0);
     diaryContinuationTimer = handle;
   }
@@ -45365,18 +46031,27 @@ ${body}
         suspendedUntilBySession.delete(sessionDbId);
       }
     }
-    if (sessionFilter !== void 0 && suspendedUntilBySession.has(sessionFilter)) {
-      return;
+    for (const [sessionDbId, blockedUntilMs] of blockedUntilBySession) {
+      if (blockedUntilMs <= currentMs) {
+        blockedUntilBySession.delete(sessionDbId);
+      }
+    }
+    if (enforceSessionEnvPresence && sessionFilter !== void 0 && !getRegisteredSessionEnv(sessionFilter)) {
+      return null;
+    }
+    if (sessionFilter !== void 0 && isSessionRetryGated(sessionFilter)) {
+      return null;
     }
     const skippedSeqs = /* @__PURE__ */ new Set();
-    let diaryProcessed = false;
+    let triggeringSessionDbId = null;
     while (true) {
-      if (sessionFilter !== void 0 && suspendedUntilBySession.has(sessionFilter)) {
-        return;
+      if (sessionFilter !== void 0 && isSessionRetryGated(sessionFilter)) {
+        return triggeringSessionDbId;
       }
       const excludedSessions = sessionFilter === void 0 ? /* @__PURE__ */ new Set([
         ...compactingSessions,
-        ...suspendedUntilBySession.keys()
+        ...suspendedUntilBySession.keys(),
+        ...blockedUntilBySession.keys()
       ]) : void 0;
       const item = claimNextItem(deps.db, now(), {
         sessionFilter,
@@ -45385,27 +46060,12 @@ ${body}
       });
       if (!item) {
         await flushDrainTail(sessionFilter);
-        if (sessionFilter === void 0 && deps.processDiaryItem && !diaryProcessed) {
-          const diaryItem = diaryStateStore.claimNextDiaryItem(now());
-          if (diaryItem) {
-            diaryProcessed = true;
-            try {
-              await deps.processDiaryItem(diaryItem);
-            } catch (error49) {
-              logger.error?.("diary queue item failed", {
-                seq: diaryItem.seq,
-                targetId: diaryItem.targetId,
-                error: error49
-              });
-            }
-            continue;
-          }
-        }
-        if (sessionFilter === void 0) {
-          schedulePersistentRetry();
-          scheduleDiaryContinuation();
-        }
-        return;
+        return triggeringSessionDbId;
+      }
+      if (enforceSessionEnvPresence && !getRegisteredSessionEnv(item.sessionDbId)) {
+        releaseQueueClaim(deps.db, item.seq);
+        skippedSeqs.add(item.seq);
+        continue;
       }
       if (item.kind === "obs") {
         getOrCreateBuffer(item.sessionDbId).items.push(item);
@@ -45434,6 +46094,7 @@ ${body}
         await withSessionProcessingLock(item.sessionDbId, async (state) => {
           await processTurnStopLocked(state, item);
         });
+        triggeringSessionDbId ??= item.sessionDbId;
       } catch (error49) {
         for (const seq of bufferedSeqs) {
           skippedSeqs.add(seq);
@@ -45447,21 +46108,74 @@ ${body}
       }
     }
   }
-  function scanAndDrainQueue(sessionFilter) {
-    if (sessionFilter !== void 0) {
-      return drainQueue(sessionFilter);
+  async function drainOneDiaryItem(triggeringSessionDbId) {
+    if (!deps.processDiaryItem) {
+      return;
+    }
+    const diaryItem = diaryStateStore.claimNextDiaryItem(now());
+    if (!diaryItem) {
+      return;
+    }
+    const capturedSessionEnv = triggeringSessionDbId === null ? void 0 : getRegisteredSessionEnv(triggeringSessionDbId);
+    if (!capturedSessionEnv) {
+      logger.warn?.(
+        "dream triggering session env unavailable; using operational baseline",
+        { triggeringSessionDbId }
+      );
+    }
+    const agentEnv = buildIsolatedEnv(
+      deps.workerEnv ?? process.env,
+      capturedSessionEnv ?? {}
+    );
+    try {
+      await deps.processDiaryItem(diaryItem, agentEnv);
+    } catch (error49) {
+      logger.error?.("diary queue item failed", {
+        seq: diaryItem.seq,
+        targetId: diaryItem.targetId,
+        error: error49
+      });
+    }
+  }
+  function scanAndDrainGlobalQueue(requestedTriggerSessionDbId) {
+    if (requestedTriggerSessionDbId !== void 0 && pendingDiaryTriggerSessionDbId === void 0) {
+      pendingDiaryTriggerSessionDbId = requestedTriggerSessionDbId;
     }
     if (globalScanInFlight) {
       return globalScanInFlight;
     }
-    const scan = drainQueue();
-    const tracked = scan.finally(() => {
-      if (globalScanInFlight === tracked) {
-        globalScanInFlight = null;
+    let tracked;
+    tracked = (async () => {
+      try {
+        do {
+          const requestedTriggerForThisDrain = pendingDiaryTriggerSessionDbId;
+          pendingDiaryTriggerSessionDbId = void 0;
+          const globallyProcessedTriggerSessionDbId = await drainQueue();
+          if (requestedTriggerForThisDrain !== void 0 || globallyProcessedTriggerSessionDbId !== null) {
+            await drainOneDiaryItem(
+              requestedTriggerForThisDrain !== void 0 ? requestedTriggerForThisDrain : globallyProcessedTriggerSessionDbId
+            );
+          }
+        } while (pendingDiaryTriggerSessionDbId !== void 0);
+      } finally {
+        if (globalScanInFlight === tracked) {
+          globalScanInFlight = null;
+        }
       }
-    });
+    })();
     globalScanInFlight = tracked;
     return tracked;
+  }
+  function scanAndDrainQueue(sessionFilter) {
+    if (sessionFilter !== void 0) {
+      return (async () => {
+        const triggeringSessionDbId = await drainQueue(sessionFilter);
+        if (triggeringSessionDbId !== null) {
+          await scanAndDrainGlobalQueue(triggeringSessionDbId);
+        }
+      })();
+    }
+    return scanAndDrainGlobalQueue();
   }
   async function drainSessionCompletely(sessionDbId) {
     let previousCount = Number.POSITIVE_INFINITY;
@@ -45541,13 +46255,13 @@ ${body}
         "shutdown",
         `SessionEnd tail timed out after ${config3.sessionEndTailTimeoutMs}ms`
       );
-      await suspendSessionAfterConnectionError(sessionDbId, abortError);
+      await suspendSessionAfterRetryableError(sessionDbId, abortError);
       await drainPromise.catch(() => {
       });
       await closeSessionQuery(sessionDbId, abortError);
       return;
     }
-    if (suspendedUntilBySession.has(sessionDbId)) {
+    if (isSessionRetryGated(sessionDbId)) {
       await closeSessionQuery(sessionDbId);
       return;
     }
@@ -45737,6 +46451,11 @@ ${body}
     },
     sendWorkUnit,
     reopenQuerySessionFresh,
+    registerSessionEnv,
+    clearSessionEnv,
+    clearBlockedSession(sessionDbId) {
+      blockedUntilBySession.delete(sessionDbId);
+    },
     hasLiveQuerySessions() {
       return Array.from(sessions.values()).some(
         (state) => state.querySession !== null
@@ -45873,9 +46592,12 @@ function ensureWorkerPidFile(deps = {}) {
 }
 function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(deps.nowMs?.() ?? Date.now())) {
   const runtimeDb = deps.db ?? createDatabase();
+  const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
   const runtimeProcessors = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerProcessors(runtimeDb);
   const runtime = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
     db: runtimeDb,
+    workerEnv: deps.workerEnv ?? deps.env,
+    sessionEnvRegistry,
     now: deps.now,
     nowMs: deps.nowMs,
     config: deps.config,
@@ -45892,6 +46614,8 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     await scanAndDrainQueue(sessionId);
   });
   const handleDreamImpl = deps.handleDreamImpl ?? runtime?.triggerManualDream ?? (() => ({ ok: false, status: 503, message: "dream runtime unavailable" }));
+  const registerSessionEnvImpl = deps.registerSessionEnvImpl ?? runtime?.registerSessionEnv;
+  const clearSessionEnvImpl = deps.clearSessionEnvImpl ?? runtime?.clearSessionEnv;
   let wakeScanInFlight = null;
   let activeGlobalWork = 0;
   let resolveGlobalWork = null;
@@ -45945,6 +46669,60 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         );
       }
       if (req.method === "POST" && url2.pathname === "/wake") {
+        return handleWake();
+      }
+      if (req.method === "POST" && url2.pathname === "/trigger") {
+        const payload = await req.json();
+        if (!payload.action || typeof payload.content_session_id !== "string" || payload.content_session_id === "" || !payload.env || typeof payload.env !== "object" || Array.isArray(payload.env)) {
+          return new Response("valid trigger identity and env are required", {
+            status: 400
+          });
+        }
+        const capturedEnv = Object.fromEntries(
+          Object.entries(payload.env).filter(
+            (entry) => typeof entry[1] === "string"
+          )
+        );
+        const associatedSessionId = registerSessionEnvImpl ? await registerSessionEnvImpl(
+          payload.content_session_id,
+          payload.session_id,
+          capturedEnv
+        ) : payload.session_id ?? null;
+        if (payload.action === "finish") {
+          if (associatedSessionId === null) {
+            clearSessionEnvImpl?.(payload.content_session_id, payload.session_id);
+            return new Response(null, { status: 200 });
+          }
+          const finish = handleFlushImpl(associatedSessionId).catch((error49) => {
+            deps.logger?.error?.("session finish request failed", {
+              sessionId: associatedSessionId,
+              error: error49
+            });
+          }).finally(() => {
+            clearSessionEnvImpl?.(
+              payload.content_session_id,
+              associatedSessionId
+            );
+          });
+          trackGlobalWork(finish);
+          return new Response(null, { status: 200 });
+        }
+        if (payload.action === "compact") {
+          if (associatedSessionId === null) {
+            return new Response("session_id is required", { status: 400 });
+          }
+          const compact = handleCompactImpl(
+            associatedSessionId,
+            payload.transcript_path
+          ).catch((error49) => {
+            deps.logger?.error?.("compact request failed", {
+              sessionId: associatedSessionId,
+              error: error49
+            });
+          });
+          trackGlobalWork(compact);
+          return new Response(null, { status: 200 });
+        }
         return handleWake();
       }
       if (req.method === "POST" && url2.pathname === "/compact") {
@@ -46081,16 +46859,20 @@ async function main(deps = {}) {
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config3 = deps.config ?? loadConfig();
+  const sessionEnvRegistry = /* @__PURE__ */ new Map();
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
   const diaryRuntime = deps.processDiaryItem ? null : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
     db,
     dataRoot: deps.dataRoot ?? DATA_DIR,
     nowEpoch: deps.now,
-    config: config3
+    config: config3,
+    workerEnv: env
   });
   const core = createWorkerCore({
     db,
+    workerEnv: env,
+    sessionEnvRegistry,
     now: deps.now,
     nowMs: deps.nowMs,
     config: config3,
@@ -46110,6 +46892,8 @@ async function main(deps = {}) {
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
+      registerSessionEnvImpl: core.registerSessionEnv,
+      clearSessionEnvImpl: core.clearSessionEnv,
       // Injecting core pieces above leaves the fetch factory's internal
       // runtime unset, so /dream must be wired explicitly or it 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream
@@ -46120,6 +46904,7 @@ async function main(deps = {}) {
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
+      hostname: "127.0.0.1",
       fetch: fetchHandler
     });
   } catch (error49) {
@@ -46147,15 +46932,6 @@ async function main(deps = {}) {
       buildId: BUILD_ID,
       port: WORKER_PORT
     });
-  }
-  const startupFlushSessionId = getStartupFlushSessionId(env);
-  if (startupFlushSessionId !== null) {
-    void fetchHandler(
-      new Request(`http://127.0.0.1:${WORKER_PORT}/flush`, {
-        method: "POST",
-        body: JSON.stringify({ session_id: startupFlushSessionId })
-      })
-    );
   }
   setInterval(() => {
     ensureWorkerPidFile(deps);

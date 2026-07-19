@@ -262,6 +262,9 @@ var import_node_fs2 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
 var KNOWN_DREAM_AGENT_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
   "claude-opus-4-8",
   "claude-opus-4-6",
   "claude-opus-4-5",
@@ -270,7 +273,7 @@ var KNOWN_DREAM_AGENT_MODELS = [
   "claude-sonnet-4-5",
   "claude-haiku-4-5"
 ];
-var DEFAULT_DREAM_AGENT_MODEL = "claude-opus-4-8";
+var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
@@ -1274,6 +1277,138 @@ function parseMarkdownSections(document) {
 // src/shared/logger.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path5 = require("node:path");
+
+// src/shared/error-sanitizer.ts
+var REDACTED = "[REDACTED]";
+var SENSITIVE_ENV_KEY = /(?:API[_-]?KEY|AUTH|TOKEN|SECRET|PASSWORD|COOKIE|CUSTOM[_-]?HEADERS|(?:^|_)PROXY$)/i;
+var BUILTIN_HEADER_NAMES = [
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "x-api-key",
+  "api-key"
+];
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function collectSensitiveValues(env) {
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !SENSITIVE_ENV_KEY.test(key)) {
+      continue;
+    }
+    if (value.length >= 4) {
+      values.add(value);
+    }
+    try {
+      const url = new URL(value);
+      if (url.username.length >= 1) {
+        values.add(decodeURIComponent(url.username));
+      }
+      if (url.password.length >= 1) {
+        values.add(decodeURIComponent(url.password));
+      }
+    } catch {
+    }
+  }
+  return [...values].sort((left, right) => right.length - left.length);
+}
+function collectCustomHeaderNames(env) {
+  const names = new Set(BUILTIN_HEADER_NAMES);
+  for (const [key, value] of Object.entries(env)) {
+    if (!value || !/CUSTOM[_-]?HEADERS/i.test(key)) {
+      continue;
+    }
+    for (const line of value.split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator > 0) {
+        names.add(line.slice(0, separator).trim().toLowerCase());
+      }
+    }
+  }
+  return [...names].filter((name) => name !== "");
+}
+function sanitizeSecretString(input, sensitiveEnv = process.env) {
+  let sanitized = input;
+  for (const value of collectSensitiveValues(sensitiveEnv)) {
+    sanitized = sanitized.replaceAll(value, REDACTED);
+  }
+  sanitized = sanitized.replace(
+    /\b([a-z][a-z0-9+.-]*:\/\/)([^/\s:@]+)(?::([^/\s@]*))?@/gi,
+    `$1${REDACTED}@`
+  );
+  for (const headerName of collectCustomHeaderNames(sensitiveEnv)) {
+    const escaped = escapeRegExp(headerName);
+    sanitized = sanitized.replace(
+      new RegExp(`("${escaped}"\\s*:\\s*")[^"]*(")`, "gi"),
+      `$1${REDACTED}$2`
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`(^|[\\r\\n,;{]\\s*)(${escaped}\\s*[:=]\\s*)[^\\r\\n,;}]+`, "gi"),
+      `$1$2${REDACTED}`
+    );
+  }
+  return sanitized;
+}
+function sensitiveObjectKey(key, customHeaders) {
+  return SENSITIVE_ENV_KEY.test(key) || customHeaders.has(key.toLowerCase());
+}
+function sanitizeLogValue(value, sensitiveEnv = process.env) {
+  const seen = /* @__PURE__ */ new WeakSet();
+  const customHeaders = new Set(collectCustomHeaderNames(sensitiveEnv));
+  const visit = (current) => {
+    if (typeof current === "string") {
+      return sanitizeSecretString(current, sensitiveEnv);
+    }
+    if (current === null || current === void 0 || typeof current === "number" || typeof current === "boolean") {
+      return current;
+    }
+    if (typeof current === "bigint") {
+      return current.toString();
+    }
+    if (typeof current !== "object") {
+      return String(current);
+    }
+    if (seen.has(current)) {
+      return "[Circular]";
+    }
+    seen.add(current);
+    if (current instanceof Error) {
+      const error = current;
+      const summary = {
+        name: error.name,
+        message: sanitizeSecretString(error.message, sensitiveEnv)
+      };
+      for (const key of [
+        "type",
+        "status",
+        "requestId",
+        "request_id",
+        "code",
+        "retryInMs",
+        "retryAfter"
+      ]) {
+        const field = error[key];
+        if (field !== void 0 && field !== null) {
+          summary[key] = visit(field);
+        }
+      }
+      return summary;
+    }
+    if (Array.isArray(current)) {
+      return current.map(visit);
+    }
+    const result = {};
+    for (const [key, field] of Object.entries(current)) {
+      result[key] = sensitiveObjectKey(key, customHeaders) ? REDACTED : visit(field);
+    }
+    return result;
+  };
+  return visit(value);
+}
+
+// src/shared/logger.ts
 var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
@@ -1282,13 +1417,13 @@ function ensureLogDir() {
     dirEnsured = true;
   }
 }
-function writeLog(level, component, message, context) {
+function writeLog(level, component, message, context, sensitiveEnv = process.env) {
   const line = JSON.stringify({
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     level,
     component,
-    message,
-    context: context ?? null
+    message: sanitizeSecretString(message, sensitiveEnv),
+    context: context ? sanitizeLogValue(context, sensitiveEnv) : null
   });
   try {
     ensureLogDir();
@@ -1299,19 +1434,20 @@ function writeLog(level, component, message, context) {
 `);
   }
 }
-function createLogger(component) {
+function createLogger(component, options = {}) {
+  const sensitiveEnv = options.sensitiveEnv ?? process.env;
   return {
     debug(message, context) {
-      writeLog("debug", component, message, context);
+      writeLog("debug", component, message, context, sensitiveEnv);
     },
     info(message, context) {
-      writeLog("info", component, message, context);
+      writeLog("info", component, message, context, sensitiveEnv);
     },
     warn(message, context) {
-      writeLog("warn", component, message, context);
+      writeLog("warn", component, message, context, sensitiveEnv);
     },
     error(message, context) {
-      writeLog("error", component, message, context);
+      writeLog("error", component, message, context, sensitiveEnv);
     }
   };
 }
@@ -2403,7 +2539,38 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.3-mrrfwr0b" : "dev";
+var BUILD_ID = true ? "0.6.4-mrrwn342" : "dev";
+
+// src/mnemosyne/env.ts
+var CAPTURED_SESSION_ENV_KEYS = [
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "NODE_EXTRA_CA_CERTS",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "http_proxy",
+  "HTTP_PROXY",
+  "https_proxy",
+  "HTTPS_PROXY",
+  "all_proxy",
+  "ALL_PROXY",
+  "no_proxy",
+  "NO_PROXY"
+];
+function captureSessionEnv(sourceEnv = process.env) {
+  const captured = {};
+  for (const key of CAPTURED_SESSION_ENV_KEYS) {
+    const value = sourceEnv[key];
+    if (value !== void 0) {
+      captured[key] = value;
+    }
+  }
+  return captured;
+}
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -2411,6 +2578,15 @@ var WORKER_BASE_URL = `http://127.0.0.1:${WORKER_PORT}`;
 var WAKE_TIMEOUT_MS = 500;
 var FLUSH_TIMEOUT_MS = 500;
 var COMPACT_TIMEOUT_MS = 5e3;
+function buildWorkerTriggerPayload(input, env = process.env) {
+  return {
+    action: input.action,
+    content_session_id: input.contentSessionId,
+    ...input.sessionDbId === void 0 ? {} : { session_id: input.sessionDbId },
+    ...input.transcriptPath === void 0 ? {} : { transcript_path: input.transcriptPath },
+    env: captureSessionEnv(env)
+  };
+}
 function createAbortSignal(timeoutMs) {
   return AbortSignal.timeout(timeoutMs);
 }
@@ -2559,83 +2735,61 @@ async function ensureCompatibleWorker(deps = {}) {
   }
   return "down";
 }
-async function notifyWorkerWake(deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, env);
-    if (!await waitForCompatibleWorker(deps)) {
-      return;
-    }
-  }
-  try {
-    await fetchImpl(`${WORKER_BASE_URL}/wake`, {
-      method: "POST",
-      body: "{}",
-      signal: createAbortSignal(WAKE_TIMEOUT_MS)
-    });
-  } catch {
-    spawnWorkerProcess(deps, env);
-  }
+async function notifyWorkerFlush(sessionDbId, contentSessionId, deps = {}, env = process.env) {
+  await notifyWorkerTrigger(
+    { action: "finish", contentSessionId, sessionDbId },
+    deps,
+    env,
+    FLUSH_TIMEOUT_MS
+  );
 }
-async function notifyWorkerFlush(sessionDbId, deps = {}, env = process.env) {
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const flushEnv = {
-    ...env,
-    CLAUDE_MNEMO_FLUSH_SESSION_ID: String(sessionDbId)
-  };
-  const status = await ensureCompatibleWorker(deps);
-  if (status === "unrecoverable-stale") {
-    logUnrecoverableStaleWorker();
-    return;
-  }
-  if (status === "down") {
-    spawnWorkerProcess(deps, flushEnv);
-    return;
-  }
-  try {
-    const response = await fetchImpl(`${WORKER_BASE_URL}/flush`, {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionDbId
-      }),
-      signal: createAbortSignal(FLUSH_TIMEOUT_MS)
-    });
-    if (response.ok) {
-      return;
-    }
-  } catch {
-  }
-  spawnWorkerProcess(deps, flushEnv);
+async function notifyWorkerCompact(sessionDbId, contentSessionId, transcriptPath, deps = {}, env = process.env) {
+  await notifyWorkerTrigger(
+    {
+      action: "compact",
+      contentSessionId,
+      sessionDbId,
+      transcriptPath
+    },
+    deps,
+    env,
+    COMPACT_TIMEOUT_MS,
+    true
+  );
 }
-async function notifyWorkerCompact(sessionDbId, transcriptPath, deps = {}, env = process.env) {
+async function notifyWorkerTrigger(input, deps = {}, env = process.env, timeoutMs = WAKE_TIMEOUT_MS, throwOnFailure = false) {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const status = await ensureCompatibleWorker(deps);
   if (status === "unrecoverable-stale") {
     logUnrecoverableStaleWorker();
-    throw new Error("Stale worker detected but no pid handle is available for restart.");
+    if (throwOnFailure) {
+      throw new Error("Stale worker detected but no pid handle is available for restart.");
+    }
+    return;
   }
   if (status === "down") {
     spawnWorkerProcess(deps, env);
     const ready = await waitForCompatibleWorker(deps);
     if (!ready) {
-      throw new Error("Worker did not become ready before compact request.");
+      if (throwOnFailure) {
+        throw new Error("Worker did not become ready before trigger request.");
+      }
+      return;
     }
   }
-  const response = await fetchImpl(`${WORKER_BASE_URL}/compact`, {
-    method: "POST",
-    body: JSON.stringify({
-      session_id: sessionDbId,
-      transcript_path: transcriptPath ?? null
-    }),
-    signal: createAbortSignal(COMPACT_TIMEOUT_MS)
-  });
-  if (!response.ok) {
-    throw new Error(`Worker compact request failed with status ${response.status}.`);
+  try {
+    const response = await fetchImpl(`${WORKER_BASE_URL}/trigger`, {
+      method: "POST",
+      body: JSON.stringify(buildWorkerTriggerPayload(input, env)),
+      signal: createAbortSignal(timeoutMs)
+    });
+    if (!response.ok && throwOnFailure) {
+      throw new Error(`Worker trigger request failed with status ${response.status}.`);
+    }
+  } catch (error) {
+    if (throwOnFailure) {
+      throw error;
+    }
   }
 }
 
@@ -2651,6 +2805,7 @@ function createCompactHandler(dependencies) {
     }
     await notifyWorkerCompact(
       session.id,
+      session.contentSessionId,
       input.transcriptPath,
       dependencies.workerClientDeps,
       dependencies.workerEnv
@@ -5683,6 +5838,17 @@ function createContextHandler(dependencies, section = "sessions") {
     return createReadOnlyContextHandler(dependencies, section);
   }
   return async function handleContextHook(input) {
+    if (dependencies.enableSessionEnvCapture && input.sessionId) {
+      void notifyWorkerTrigger(
+        {
+          action: "capture",
+          contentSessionId: input.sessionId,
+          sessionDbId: getSessionByContentId(dependencies.db, input.sessionId)?.id
+        },
+        dependencies.workerClientDeps,
+        dependencies.workerEnv
+      );
+    }
     const hookSpecificOutput = buildContextOutput(dependencies.db, input);
     if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
@@ -6244,7 +6410,12 @@ function createPostToolUseHandler(dependencies) {
     return {
       continue: true,
       asyncWork: async () => {
-        await notifyWorkerWake(
+        await notifyWorkerTrigger(
+          {
+            action: "wake",
+            contentSessionId: session.contentSessionId,
+            sessionDbId: session.id
+          },
           dependencies.workerClientDeps,
           dependencies.workerEnv
         );
@@ -6491,27 +6662,39 @@ function createSessionEndHandler(dependencies) {
     }
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
-      return { continue: true };
+      return {
+        continue: true,
+        asyncWork: async () => {
+          await notifyWorkerTrigger(
+            {
+              action: "finish",
+              contentSessionId: input.sessionId
+            },
+            dependencies.workerClientDeps,
+            dependencies.workerEnv
+          );
+        }
+      };
     }
-    if (!hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
-      return { continue: true };
-    }
-    const orphanTurns = getOrphanTurns(dependencies.db, session.id);
-    if (orphanTurns.length > 0) {
-      writeTransaction(dependencies.db, () => {
-        enqueueOrphanTurnStops(
-          dependencies.db,
-          session.id,
-          now(),
-          orphanTurns
-        );
-      });
+    if (hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
+      const orphanTurns = getOrphanTurns(dependencies.db, session.id);
+      if (orphanTurns.length > 0) {
+        writeTransaction(dependencies.db, () => {
+          enqueueOrphanTurnStops(
+            dependencies.db,
+            session.id,
+            now(),
+            orphanTurns
+          );
+        });
+      }
     }
     return {
       continue: true,
       asyncWork: async () => {
         await notifyWorkerFlush(
           session.id,
+          session.contentSessionId,
           dependencies.workerClientDeps,
           dependencies.workerEnv
         );
@@ -7260,7 +7443,12 @@ function createStopHandler(dependencies) {
       continue: true,
       exitCode: HOOK_SUCCESS_EXIT_CODE,
       asyncWork: async () => {
-        await notifyWorkerWake(
+        await notifyWorkerTrigger(
+          {
+            action: "wake",
+            contentSessionId: session.contentSessionId,
+            sessionDbId: session.id
+          },
           dependencies.workerClientDeps,
           dependencies.workerEnv
         );
@@ -7293,7 +7481,10 @@ function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
   nowEpoch,
-  config = loadConfig()
+  config = loadConfig(),
+  workerClientDeps,
+  workerEnv,
+  enableSessionEnvCapture = false
 }) {
   const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
@@ -7307,7 +7498,10 @@ function createDefaultHookHandlers({
       timeZone: config.dreamAgentTimeZone,
       backlogLimit: config.dreamAgentBacklogLimit
     },
-    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate()
+    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
+    workerClientDeps,
+    workerEnv,
+    enableSessionEnvCapture
   };
   return {
     ...createDefaultReadOnlyContextHandlers({ dataRoot }),
@@ -7317,12 +7511,12 @@ function createDefaultHookHandlers({
     ),
     "SessionStart:milestones": createMilestoneContextHandler({ db }),
     SessionStart: createContextHandler(contextDependencies),
-    SessionEnd: createSessionEndHandler({ db }),
-    PostToolUse: createPostToolUseHandler({ db }),
+    SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
+    PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
     PostCompact: createPostCompactHandler({ db }),
-    PreCompact: createCompactHandler({ db }),
+    PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
-    Stop: createStopHandler({ db })
+    Stop: createStopHandler({ db, workerClientDeps, workerEnv })
   };
 }
 function getDefaultHandlers() {
@@ -7331,7 +7525,11 @@ function getDefaultHandlers() {
   }
   const db = createDatabase(void 0, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
   initializeDatabase(db);
-  defaultHandlers = createDefaultHookHandlers({ db });
+  defaultHandlers = createDefaultHookHandlers({
+    db,
+    workerEnv: process.env,
+    enableSessionEnvCapture: true
+  });
   return defaultHandlers;
 }
 function getDefaultReadOnlyContextHandlers() {
