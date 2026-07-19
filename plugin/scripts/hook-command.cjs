@@ -1389,21 +1389,7 @@ function sortDiaryIndexRecentFirst(document) {
   return `${sorted.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
 }
 
-// src/diary/domain.ts
-var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-function diaryDayOf(epochSeconds) {
-  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
-}
-function estimateDiaryTokens(text) {
-  let weightedCodePoints = 0;
-  for (const codePoint of text) {
-    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
-  }
-  return Math.ceil(weightedCodePoints * 1.2);
-}
-
 // src/diary/memory-store.ts
-var MEMORY_DOCUMENT_TOKEN_LIMIT = 2e3;
 var DEFAULT_MEMORY_HISTORY_RETENTION = {
   newest: 30,
   monthly: true
@@ -1439,14 +1425,6 @@ function decodeUtf8(bytes, label) {
 function assertParseableMarkdown(label, document) {
   if (!parseMarkdownSections(document).some((section) => section.level >= 1)) {
     throw new Error(`${label} must contain at least one Markdown ATX heading`);
-  }
-}
-function assertHotMemoryWithinLimit(label, document) {
-  const tokens = estimateDiaryTokens(document);
-  if (tokens > MEMORY_DOCUMENT_TOKEN_LIMIT) {
-    throw new Error(
-      `${label} has ${tokens} estimated tokens and exceeds the ${MEMORY_DOCUMENT_TOKEN_LIMIT}-token limit; demote the oldest or least valuable entries to archive and retry`
-    );
   }
 }
 function defaultCurrentMemory() {
@@ -1648,8 +1626,6 @@ var DreamMemoryStore = class {
     assertParseableMarkdown("archive", input.archive);
     assertParseableMarkdown("diary", input.diary);
     assertParseableMarkdown("diaryIndex", input.diaryIndex);
-    assertHotMemoryWithinLimit("userProfile", input.userProfile);
-    assertHotMemoryWithinLimit("experience", input.experience);
   }
   async injectFault(point) {
     await this.faultInjector?.(point);
@@ -2427,7 +2403,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.2-mrqafnjr" : "dev";
+var BUILD_ID = true ? "0.6.3-mrrfwr0b" : "dev";
 
 // src/worker/client.ts
 var WORKER_PORT = 37778;
@@ -3585,6 +3561,19 @@ function resolveTurnPointers(db, sessionId, text) {
     }
     return `[S${sessionId}/T${turn.promptNumber}] "${turn.title ?? "untitled"}"`;
   });
+}
+
+// src/diary/domain.ts
+var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
+function diaryDayOf(epochSeconds) {
+  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
+}
+function estimateDiaryTokens(text) {
+  let weightedCodePoints = 0;
+  for (const codePoint of text) {
+    weightedCodePoints += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? 1.1 : 0.6;
+  }
+  return Math.ceil(weightedCodePoints * 1.2);
 }
 
 // src/mcp/timeline.ts

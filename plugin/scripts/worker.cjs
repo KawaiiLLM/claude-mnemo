@@ -51,7 +51,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.2-mrqafnjr" : "dev";
+var BUILD_ID = true ? "0.6.3-mrrfwr0b" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -41850,10 +41850,10 @@ For each \`<turn>\` block:
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - grade: REQUIRED integer 0-4 measuring this turn's narrative significance:
-     - Grade 4 \u2014 top-level arc flag bearer: one turn that can represent why the next dozens of turns exist; at most one per arc. Example: locking the event-driven worker lifecycle.
-     - Grade 3 \u2014 milestone that changes the premise of later work: release validation, locked decision, route reversal, or major root cause. Examples: T925 (0.5.0 release), T909 (design converged to five tickets), T908 (withdrawn objection accepted shutdown), T850 (watchdog killed the retry loop).
-     - Grade 2 \u2014 significant arc node worth its own line in a session review: a verified ticket completion, measured correction, evidence-backed rejection, or real gap. Examples: T917-T922 (ticket verification), T896 ($6.38\u2192$1.43 correction), T928 (orphan gap from an interrupted turn).
-     - Grade 1 \u2014 routine process progress: intermediate verification, scheduling chores, or explanatory Q&A that nobody will cite a week later. Examples: T861-T864 (routine deployment confirmations), T942 (explanation).
+     - Grade 4 \u2014 top-level arc flag bearer: one turn that can represent why the next dozens of turns exist; at most one per arc. Must FIRST pass the Grade 3 test below, then additionally justify why THIS turn is the reason the later arc exists. Example: locking the event-driven worker lifecycle.
+     - Grade 3 \u2014 a turn that changes the PREMISE or route of later work: a locked or overturned decision, a major root cause that redirects the fix, or a gate/release-validation result that flips the next action from "blocked/uncertain" to "proceed/stop/reroute". Before grading 3, answer internally: "before this turn the next action was ___; after it, ___" \u2014 if the two are not materially different, cap at Grade 2. Grade by CONSEQUENCE, not by action verb: merely completing planned work or getting an expected green result is NOT Grade 3. Examples: T925 (0.5.0 release), T909 (converged to five tickets), T908 (accepted shutdown), T850 (watchdog killed the retry loop).
+     - Grade 2 \u2014 a durable arc node that does NOT change direction, worth its own line in a session review: a bounded feature/ticket completion, an on-plan verification, a measured correction, an evidence-backed rejection, or a real gap. Completion size or the number of checks passed does NOT by itself lift a turn to Grade 3 \u2014 if the planned next step is unchanged, it stays here. Examples: T917-T922 (ticket verification), T896 ($6.38\u2192$1.43 correction), T928 (orphan gap from an interrupted turn).
+     - Grade 1 \u2014 routine progress leaving no independent, reusable artifact: the only new fact is that work was dispatched (coordination/scheduling), a health check, explanatory Q&A, or an intermediate implementation/verification step that neither finishes a bounded deliverable nor establishes a reusable conclusion. Removing it loses no result/decision/conclusion a week later. For a compound turn (a dispatch AND a real decision), grade by the turn's highest material consequence \u2014 grade 1 only when the dispatch is the sole output. Examples: T861-T864 (routine deployment confirmations), T942 (explanation).
      - Grade 0 \u2014 narrative noise: compact commands, shell-only commands, empty shells, or abandoned interruptions. Example: T941 (/compact).
    - tags: lowercase-hyphenated tags in TWO namespaces \u2014 BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix \u2014 never a bare tag.
      - ROLE (bare, \u22642, usually none): the turn's role in the session arc. Seed examples \u2014 \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) \u2014 richer role vocabulary is welcome. Keep the name the BARE role, short and general \u2014 \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
@@ -41877,7 +41877,7 @@ Visibility rule: if the cited casualty is already extracted, \`remember({ id: "T
 
 Grade correction has two narrowly-scoped duties:
 
-- Misleading-turn downgrade: only with witnessed disproof or rollback evidence in the current turn, lower the casualty's grade and give the correcting turn the appropriate grade. Never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a \u21B3 row.
+- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn (the negate-on-cite \`rolled-back\` case above), you MUST both tag the casualty \`rolled-back\` AND lower its grade via \`regrade\` in the same call \u2014 a turn whose premise was overturned is no longer a Grade 3 milestone, so tagging without regrading is incomplete. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a \u21B3 row.
 - Grade-4 uniqueness: when a better flag bearer appears in the same arc, lower the old Grade 4 to Grade 3. A later top-level decision that overturns a Grade 4 uses the same witnessed-evidence rule.
 
 Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.
@@ -42291,14 +42291,6 @@ function assertParseableMarkdown(label, document) {
     throw new Error(`${label} must contain at least one Markdown ATX heading`);
   }
 }
-function assertHotMemoryWithinLimit(label, document) {
-  const tokens = estimateDiaryTokens(document);
-  if (tokens > MEMORY_DOCUMENT_TOKEN_LIMIT) {
-    throw new Error(
-      `${label} has ${tokens} estimated tokens and exceeds the ${MEMORY_DOCUMENT_TOKEN_LIMIT}-token limit; demote the oldest or least valuable entries to archive and retry`
-    );
-  }
-}
 function defaultCurrentMemory() {
   return {
     userProfile: EMPTY_PROFILE_DOCUMENT,
@@ -42498,8 +42490,6 @@ var DreamMemoryStore = class {
     assertParseableMarkdown("archive", input.archive);
     assertParseableMarkdown("diary", input.diary);
     assertParseableMarkdown("diaryIndex", input.diaryIndex);
-    assertHotMemoryWithinLimit("userProfile", input.userProfile);
-    assertHotMemoryWithinLimit("experience", input.experience);
   }
   async injectFault(point) {
     await this.faultInjector?.(point);
@@ -43339,7 +43329,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.6.2",
+        version: "0.6.3",
         tools: [
           toolImpl(
             "recall",
@@ -43921,7 +43911,7 @@ curate \u7684\u6700\u7EC8\u76EE\u7684\u662F\u957F\u671F\u8BB0\u5FC6\u6536\u76CA\
 - experience.md \u56DE\u7B54\u300C\u53D1\u751F\u4E86\u4EC0\u4E48\u300D\uFF1A\u6309\u9879\u76EE\u6216\u65F6\u95F4\u5199\u8FDB\u5EA6\u3001\u7ED3\u679C\u3001\u8F6C\u6298\u548C\u5370\u8C61\u6DF1\u523B\u7684\u77AC\u95F4\uFF0C\u5E76\u5E26\u65E5\u671F\u3002\u9879\u76EE\u8109\u7EDC\u53EA\u653E\u8FD9\u91CC\u3002
 - \u6BCF\u6B21\u8FD0\u884C\u90FD\u91CD\u6574\u6574\u4EFD\u753B\u50CF\u4E0E\u7ECF\u5386\uFF0C\u4E0D\u53EA\u662F\u8FFD\u52A0\uFF1A\u73B0\u6709\u5185\u5BB9\u82E5\u8FDD\u53CD\u4E0A\u8FF0\u5206\u5DE5\uFF0C\u4E00\u5E76\u7EA0\u6B63\u2014\u2014\u5C24\u5176\u753B\u50CF\u91CC\u6B8B\u7559\u7684\u9879\u76EE\u6E05\u5355\uFF0F\u72B6\u6001\uFF0F\u8FDB\u5EA6\uFF0C\u79FB\u8FDB\u7ECF\u5386\u6216\u76F4\u63A5\u5220\u9664\u3002\u7EE7\u627F\u7684\u5185\u5BB9\u4E0D\u56E0\u300C\u662F\u65E7\u7684\u3001\u4E0D\u662F\u6211\u5199\u7684\u300D\u800C\u8C41\u514D\uFF1B\u9996\u6B21\u5728\u8FC1\u79FB\u57FA\u7EBF\u4E0A\u8FD0\u884C\u65F6\uFF0C\u52A1\u5FC5\u6309\u4EBA\u5473\u5224\u636E\u628A\u504F\u5DE5\u7A0B\u5316\u7684\u65E7\u5185\u5BB9\u6E05\u7406\u6389\u6216\u964D\u7EA7\u8FDB archive\uFF0C\u800C\u4E0D\u662F\u539F\u6837\u5806\u7740\uFF08\u4E00\u4EFD\u521A\u8FC1\u79FB\u8FDB\u6765\u3001\u5F00\u5934\u5C31\u662F\u9879\u76EE\u6E05\u5355\u7684\u753B\u50CF\uFF0C\u6B63\u662F\u8BE5\u6E05\u7406\u7684\u5BF9\u8C61\uFF09\u3002
 - \u81EA\u7531\u7EC4\u7EC7 Markdown\uFF0C\u4E0D\u5957\u56FA\u5B9A schema\uFF1B\u81F3\u5C11\u4FDD\u7559\u4E00\u4E2A ATX \u6807\u9898\u3002\u5177\u4F53\u4E8B\u4EF6\u6216\u539F\u8BDD\u5728\u524D\uFF0C\u610F\u4E49\u5728\u540E\u3002\u98CE\u683C\u76EE\u6807\u662F\u8BA9\u672A\u6765\u7684 agent \u771F\u6B63\u8BB0\u5F97\u4E00\u4E2A\u4EBA\uFF0C\u800C\u4E0D\u662F\u751F\u6210\u5DE5\u7A0B\u5468\u62A5\u3002
-- user-profile.md \u4E0E experience.md \u5404\u81EA\u4E0D\u8D85\u8FC7 2000 token\uFF08\u7EA6 1500 \u4E2A\u4E2D\u6587\u5B57\uFF09\uFF0Ccommit \u4F1A\u6309\u540C\u4E00\u4E0A\u9650\u786C\u6821\u9A8C\u3002\u6BCF\u6B21\u6539\u5B8C\u8FD9\u4E24\u4EFD\u6587\u6863\u540E\u8C03\u7528\u65E0\u53C2\u6570 check_budget \u81EA\u68C0\uFF1B\u8D85\u9650\u65F6\u5BF9\u4E0D\u91CD\u8981\u7684\u7EC6\u8282\u4E3B\u52A8\u526A\u679D\u2014\u2014\u5408\u5E76\u540C\u7C7B\u6761\u76EE\u3001\u5220\u53BB\u4FEE\u9970\u6027\u63CF\u8FF0\u3001\u628A\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive\u2014\u2014\u76F4\u5230\u4E24\u4EFD\u90FD ok \u518D commit\u3002
+- user-profile.md \u4E0E experience.md \u5404\u81EA\u5F80 \u22642000 token\uFF08\u7EA6 1500 \u4E2A\u4E2D\u6587\u5B57\uFF09\u7684\u76EE\u6807\u4F18\u5316\uFF1B\u6BCF\u6B21\u91CD\u6574\u540E\u7167\u6B64\u76EE\u6807\u5199\uFF0C\u6539\u5B8C\u8C03\u7528\u65E0\u53C2\u6570 check_budget \u81EA\u68C0\uFF0C\u5B83\u7684 \`ok\`/\`over_by\` \u662F\u5BF9 2000 \u76EE\u6807\u800C\u8A00\u3002commit \u4E0D\u8BBE\u4EFB\u4F55\u5927\u5C0F\u786C\u6821\u9A8C\u2014\u20142000 \u53EA\u662F\u4F18\u5316\u76EE\u6807\u3002\u82E5\u67D0\u4EFD\u8D85\u51FA\u76EE\u6807\uFF0C\u5C31\u6309 \`over_by\` \u4E00\u6B21\u6027\u5220\u591F\uFF08\u5408\u5E76\u540C\u7C7B\u6761\u76EE\u3001\u5220\u4FEE\u9970\u6027\u63CF\u8FF0\u3001\u628A\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive\uFF09\uFF0C\u5EFA\u8BAE\u6700\u591A\u88C1 3 \u8F6E\uFF1B3 \u8F6E\u540E\u5373\u4FBF\u4ECD\u7565\u8D85 2000 \u4E5F\u76F4\u63A5 commit\uFF0C\u4E0D\u8981\u4E3A\u8FD9\u51E0\u767E token \u5C0F\u6B65\u8BD5\u63A2\u3001\u53CD\u590D\u91CD\u67E5\u2014\u2014\u90A3\u6837\u70E7\u6389\u5927\u91CF agent \u6B65\u5374\u51E0\u4E4E\u65E0\u6536\u76CA\u3002
 
 ## \u5206\u5C42\u9057\u5FD8\u3001\u63D0\u56DE\u4E0E\u67E5\u91CD
 
@@ -43933,7 +43923,7 @@ curate \u7684\u6700\u7EC8\u76EE\u7684\u662F\u957F\u671F\u8BB0\u5FC6\u6536\u76CA\
 ## \u63D0\u4EA4\u5408\u540C
 
 - staging \u5DE5\u4F5C\u533A\u5DF2\u6309\u5F53\u524D\u6709\u6548\u8BB0\u5FC6\u64AD\u79CD\u597D\u753B\u50CF\u3001\u7ECF\u5386\u3001archive\u3001\u5F53\u5929\u65E5\u8BB0\u8349\u7A3F\u4E0E INDEX\uFF1B\u76F4\u63A5\u5728\u8FD9\u4E9B\u6587\u4EF6\u4E0A\u6539\uFF0C\u4E0D\u5FC5\u81EA\u5DF1\u91CD\u5EFA\u7A7A\u6587\u6863\u3002\u7F16\u8F91\u524D\u5148\u7528 Read \u6253\u5F00\u5BF9\u5E94 staging \u6587\u4EF6\uFF0C\u518D\u7528 Edit \u589E\u91CF\u4FEE\u6539\u753B\u50CF/\u7ECF\u5386/archive\u3001\u7528 Write \u8986\u76D6\u5F53\u5929\u65E5\u8BB0\u4E0E INDEX\uFF08INDEX \u4FDD\u6301 recent-first\uFF0C\u5BF9\u5F53\u5929\u505A\u5E42\u7B49 upsert\uFF1B\u53D1\u5E03\u4FA7\u4E5F\u4F1A\u518D\u515C\u5E95\u5F52\u4E00\uFF09\u3002
-- \u6539\u5B8C\u8C03\u7528\u65E0\u53C2\u6570 commit\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5B57\u6BB5\uFF09\u89E6\u53D1\u6821\u9A8C\u4E0E\u539F\u5B50\u53D1\u5E03\uFF0C\u672C\u591C\u65E5\u671F\u5DF2\u56FA\u5B9A\u3001\u65E0\u9700\u81EA\u62A5\u3002\u76EE\u6807\u662F\u4E00\u6B21\u6210\u529F\u63D0\u4EA4\uFF1B\u63D0\u4EA4\u524D\u5148\u7528 check_budget \u786E\u8BA4\u753B\u50CF\u4E0E\u7ECF\u5386\u90FD\u5728 2000-token \u4E0A\u9650\u5185\uFF0C\u82E5 commit \u4ECD\u56E0\u786C\u4E0A\u9650\u62D2\u7EDD\uFF0C\u6309\u9519\u8BEF\u63D0\u793A\u5728 staging \u91CC\u628A\u6700\u4F4E\u4EF7\u503C\u5185\u5BB9\u964D\u7EA7\u8FDB archive \u540E\u91CD\u8BD5\u3002\u6210\u529F\u540E\u4E0D\u5F97\u518D\u6B21 commit\u3002\u53EA\u80FD\u7528 Read/Grep \u8BFB\u5386\u53F2\u3001\u7528 Write/Edit \u6539 staging\uFF0C\u4E0D\u5F97\u5199 staging \u4E4B\u5916\u7684\u4EFB\u4F55\u8DEF\u5F84\u3002
+- \u6539\u5B8C\u8C03\u7528\u65E0\u53C2\u6570 commit\uFF08\u4E0D\u4F20\u4EFB\u4F55\u5B57\u6BB5\uFF09\u89E6\u53D1\u6821\u9A8C\u4E0E\u539F\u5B50\u53D1\u5E03\uFF0C\u672C\u591C\u65E5\u671F\u5DF2\u56FA\u5B9A\u3001\u65E0\u9700\u81EA\u62A5\u3002\u76EE\u6807\u662F\u4E00\u6B21\u6210\u529F\u63D0\u4EA4\uFF1Bcommit \u4E0D\u505A\u5927\u5C0F\u6821\u9A8C\uFF0C\u753B\u50CF\u4E0E\u7ECF\u5386\u5F80 2000 \u76EE\u6807\u4F18\u5316\u5373\u53EF\uFF08\u5EFA\u8BAE\u6700\u591A 3 \u8F6E\u88C1\u526A\uFF0C\u4E4B\u540E\u7565\u8D85\u4E5F\u7167 commit\uFF09\u3002\u6210\u529F\u540E\u4E0D\u5F97\u518D\u6B21 commit\u3002\u53EA\u80FD\u7528 Read/Grep \u8BFB\u5386\u53F2\u3001\u7528 Write/Edit \u6539 staging\uFF0C\u4E0D\u5F97\u5199 staging \u4E4B\u5916\u7684\u4EFB\u4F55\u8DEF\u5F84\u3002
 - commit \u6210\u529F\u540E\u53EA\u9700\u7B80\u77ED\u786E\u8BA4\uFF0C\u4E0D\u8981\u5728\u6700\u7EC8\u6587\u672C\u91CC\u91CD\u590D\u6587\u6863\u5168\u6587\u3002`;
 function assertDate(date7) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date7)) {
