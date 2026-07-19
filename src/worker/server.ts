@@ -343,10 +343,12 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   mkdirSyncImpl?: typeof mkdirSync;
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
+  hardExitTimerImpl?: HardExitTimer;
   hasLiveQuerySessionsImpl?: () => boolean;
   getGlobalScanInFlightImpl?: () => Promise<void> | null;
   isDreamRunningImpl?: () => boolean;
   abortDreamImpl?: () => Promise<void>;
+  abortAllExtractionSessionsImpl?: () => Promise<void>;
   processImpl?: Pick<NodeJS.Process, "pid" | "on" | "exit">;
   env?: NodeJS.ProcessEnv;
 }
@@ -357,6 +359,17 @@ interface WorkerServerState {
   lastHttpRequestAt: number;
   activeRequests: number;
   shuttingDown: boolean;
+}
+
+export interface HardExitTimer {
+  arm(): void;
+  cancel(): void;
+}
+
+interface HardExitTimerDeps extends WorkerServerDeps {
+  config: MnemoConfig;
+  sessionEnvRegistry: Map<string, CapturedSessionEnv>;
+  abortAllExtractionSessionsImpl: () => Promise<void>;
 }
 
 /**
@@ -378,6 +391,7 @@ export interface WorkerCore {
   finishSession(sessionDbId: number): Promise<void>;
   drainSessionCompletely(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
+  abortAllExtractionSessionsForShutdown(): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   triggerManualDream(date: unknown): ManualDreamResult;
   abortStalledSessions(nowMs?: number): Promise<void>;
@@ -415,6 +429,74 @@ export function createWorkerServerState(nowMs = Date.now()): WorkerServerState {
     lastHttpRequestAt: nowMs,
     activeRequests: 0,
     shuttingDown: false,
+  };
+}
+
+export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
+  const setTimeoutImpl =
+    deps.setTimeoutImpl ??
+    ((callback: () => void | Promise<void>, delayMs: number): unknown =>
+      setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl =
+    deps.clearTimeoutImpl ??
+    ((handle: unknown): void =>
+      clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const logger = deps.logger ?? console;
+  let pending:
+    | {
+        token: object;
+        handle: unknown;
+      }
+    | null = null;
+
+  return {
+    arm(): void {
+      if (pending || deps.sessionEnvRegistry.size !== 0) {
+        return;
+      }
+
+      const token = {};
+      const handle = setTimeoutImpl(() => {
+        if (pending?.token !== token) {
+          return;
+        }
+        pending = null;
+        if (deps.sessionEnvRegistry.size !== 0) {
+          return;
+        }
+
+        try {
+          void deps.abortAllExtractionSessionsImpl().catch((error) => {
+            logger.error?.("hard-exit extraction abort failed", { error });
+          });
+        } catch (error) {
+          logger.error?.("hard-exit extraction abort failed", { error });
+        } finally {
+          createHardExitCleanup(deps);
+        }
+      }, deps.config.hardExitTimeoutMs);
+      pending = { token, handle };
+
+      const remainingTurns =
+        deps.db
+          ?.query<{ count: number }, []>(
+            `SELECT COUNT(*) AS count
+             FROM pending_queue
+             WHERE kind = 'turn-stop'`,
+          )
+          .get()?.count ?? 0;
+      logger.warn?.("all content sessions closed; hard-exit timer armed", {
+        hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+        remainingTurns,
+      });
+    },
+    cancel(): void {
+      if (!pending) {
+        return;
+      }
+      clearTimeoutImpl(pending.handle);
+      pending = null;
+    },
   };
 }
 
@@ -2674,6 +2756,25 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await closeSessionQuery(sessionDbId);
   }
 
+  async function abortAllExtractionSessionsForShutdown(): Promise<void> {
+    const liveSessionIds = Array.from(sessions.values())
+      .filter((state) => state.querySession !== null)
+      .map((state) => state.sessionDbId);
+
+    await Promise.all(
+      liveSessionIds.map(async (sessionDbId) => {
+        const abortError = createWorkerAbortError(
+          "shutdown",
+          "Worker hard-exit deadline reached",
+        );
+        logger.warn?.("hard-exit shutdown requeue", { sessionDbId });
+        // Accepted degradation: released work may remain orphaned until a
+        // later flush re-scans; resume-on-next-start is intentionally deferred.
+        await suspendSessionAfterRetryableError(sessionDbId, abortError);
+      }),
+    );
+  }
+
   async function tickKeepaliveSessionLocked(
     state: SessionState,
     currentMs: number,
@@ -2875,6 +2976,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     finishSession,
     drainSessionCompletely,
     closeSessionQuery,
+    abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date: unknown): ManualDreamResult {
       if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -3161,6 +3263,17 @@ export function createWorkerFetchHandler(
     void work.then(settle, settle);
   }
 
+  function clearRegisteredSession(
+    contentSessionId: string,
+    sessionDbId?: number,
+  ): void {
+    const hadRegisteredSessions = sessionEnvRegistry.size > 0;
+    clearSessionEnvImpl?.(contentSessionId, sessionDbId);
+    if (hadRegisteredSessions && sessionEnvRegistry.size === 0) {
+      deps.hardExitTimerImpl?.arm();
+    }
+  }
+
   async function handleWake(): Promise<Response> {
     if (wakeScanInFlight) {
       state.scanPending = true;
@@ -3228,6 +3341,9 @@ export function createWorkerFetchHandler(
             (entry): entry is [string, string] => typeof entry[1] === "string",
           ),
         );
+        // Any new content-session activity means the previously observed
+        // registry-empty state is no longer the worker's final close.
+        deps.hardExitTimerImpl?.cancel();
         const associatedSessionId = registerSessionEnvImpl
           ? await registerSessionEnvImpl(
               payload.content_session_id,
@@ -3238,7 +3354,10 @@ export function createWorkerFetchHandler(
 
         if (payload.action === "finish") {
           if (associatedSessionId === null) {
-            clearSessionEnvImpl?.(payload.content_session_id, payload.session_id);
+            clearRegisteredSession(
+              payload.content_session_id,
+              payload.session_id,
+            );
             return new Response(null, { status: 200 });
           }
           const finish = handleFlushImpl(associatedSessionId)
@@ -3249,7 +3368,7 @@ export function createWorkerFetchHandler(
               });
             })
             .finally(() => {
-              clearSessionEnvImpl?.(
+              clearRegisteredSession(
                 payload.content_session_id!,
                 associatedSessionId,
               );
@@ -3339,19 +3458,31 @@ export async function shutdownGracefully(
   await deps.shutdownGracefullyImpl?.();
 }
 
-function createShutdownCleanup(deps: WorkerServerDeps = {}): () => Promise<void> {
+function createHardExitCleanup(deps: WorkerServerDeps): void {
+  void shutdownGracefully(deps).catch((error) => {
+    deps.logger?.error?.("hard-exit graceful cleanup failed", { error });
+  });
+  exitWorkerProcess(deps);
+}
+
+function exitWorkerProcess(deps: WorkerServerDeps): void {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? unlinkSync;
   const processImpl = deps.processImpl ?? process;
 
+  deps.hardExitTimerImpl?.cancel();
+  try {
+    unlinkSyncImpl(pidPath);
+  } catch {}
+  processImpl.exit(0);
+}
+
+function createShutdownCleanup(deps: WorkerServerDeps = {}): () => Promise<void> {
   return async () => {
     try {
       await shutdownGracefully(deps);
     } finally {
-      try {
-        unlinkSyncImpl(pidPath);
-      } catch {}
-      processImpl.exit(0);
+      exitWorkerProcess(deps);
     }
   };
 }
@@ -3468,6 +3599,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config = deps.config ?? loadConfig();
   const sessionEnvRegistry = new Map<string, CapturedSessionEnv>();
+  const logger = deps.logger ?? createLogger("MNEMOSYNE");
 
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
@@ -3488,6 +3620,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     sessionEnvRegistry,
     now: deps.now,
     nowMs: deps.nowMs,
+    setTimeoutImpl: deps.setTimeoutImpl,
+    clearTimeoutImpl: deps.clearTimeoutImpl,
     config,
     pushSessionSummaryPromptImpl:
       deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
@@ -3497,28 +3631,63 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     processDiaryItem:
       deps.processDiaryItem ??
       diaryRuntime?.processDreamItem,
-    logger: deps.logger ?? createLogger("MNEMOSYNE"),
+    logger,
   });
 
   core.recoverFromCrash();
+
+  let server!: { stop(force?: boolean): void };
+  const baseLifecycleDeps: WorkerServerDeps = {
+    ...deps,
+    db,
+    config,
+    sessionEnvRegistry,
+    hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
+    getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
+    isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+    abortDreamImpl: async () => {
+      await diaryRuntime?.abortDream?.("shutdown");
+    },
+    abortAllExtractionSessionsImpl: async () => {
+      serverState.shuttingDown = true;
+      await core.abortAllExtractionSessionsForShutdown();
+    },
+    shutdownGracefullyImpl: async () => {
+      await deps.shutdownGracefullyImpl?.();
+      server.stop(true);
+    },
+    logger,
+  };
+  const hardExitTimer = createHardExitTimer({
+    ...baseLifecycleDeps,
+    config,
+    sessionEnvRegistry,
+    abortAllExtractionSessionsImpl:
+      baseLifecycleDeps.abortAllExtractionSessionsImpl!,
+  });
+  const lifecycleDeps: WorkerServerDeps = {
+    ...baseLifecycleDeps,
+    hardExitTimerImpl: hardExitTimer,
+  };
 
   const fetchHandler = createWorkerFetchHandler(
     {
       ...deps,
       db,
       config,
+      sessionEnvRegistry,
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
       registerSessionEnvImpl: core.registerSessionEnv,
       clearSessionEnvImpl: core.clearSessionEnv,
+      hardExitTimerImpl: hardExitTimer,
       // Injecting core pieces above leaves the fetch factory's internal
       // runtime unset, so /dream must be wired explicitly or it 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream,
     },
     serverState,
   );
-  let server: { stop(force?: boolean): void };
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
@@ -3563,19 +3732,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
-    const lifecycleDeps: WorkerServerDeps = {
-      ...deps,
-      hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
-      getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
-      isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
-      abortDreamImpl: async () => {
-        await diaryRuntime?.abortDream?.("shutdown");
-      },
-      shutdownGracefullyImpl: async () => {
-        await deps.shutdownGracefullyImpl?.();
-        server.stop(true);
-      },
-    };
     void (async () => {
       const didShutdown = await checkForLastAgentShutdown(
         serverState,
@@ -3587,13 +3743,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     })();
   }, WATCHDOG_INTERVAL_MS);
 
-  registerShutdownCleanup({
-    ...deps,
-    shutdownGracefullyImpl: async () => {
-      await deps.shutdownGracefullyImpl?.();
-      server.stop(true);
-    },
-  });
+  registerShutdownCleanup(lifecycleDeps);
 }
 
 function isDirectExecution(): boolean {

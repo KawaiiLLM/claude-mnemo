@@ -101,6 +101,36 @@ describe("shared config", () => {
     expect(loadConfig(home).sessionEndTailTimeoutMs).toBe(90_000);
   });
 
+  test("hard-exit backstop defaults to seventy seconds and accepts an override", () => {
+    expect(DEFAULT_CONFIG.hardExitTimeoutMs).toBe(70_000);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ hardExitTimeoutMs: 80_000 }),
+    );
+
+    expect(loadConfig(home).hardExitTimeoutMs).toBe(80_000);
+  });
+
+  test("loadConfig clamps the hard-exit timeout into [1s, 5m]", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ hardExitTimeoutMs: 1 }),
+    );
+    expect(loadConfig(home).hardExitTimeoutMs).toBe(1_000);
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ hardExitTimeoutMs: 999_999 }),
+    );
+    expect(loadConfig(home).hardExitTimeoutMs).toBe(300_000);
+  });
+
   test("extraction stall watchdog defaults to sixty seconds and accepts an override", () => {
     expect(DEFAULT_CONFIG.stallThresholdMs).toBe(60_000);
 

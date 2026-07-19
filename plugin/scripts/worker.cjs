@@ -36,6 +36,7 @@ __export(server_exports, {
   buildReminderEnvelope: () => buildReminderEnvelope,
   checkForIdleWorkerShutdown: () => checkForIdleWorkerShutdown,
   checkForLastAgentShutdown: () => checkForLastAgentShutdown,
+  createHardExitTimer: () => createHardExitTimer,
   createWorkerCore: () => createWorkerCore,
   createWorkerFetchHandler: () => createWorkerFetchHandler,
   createWorkerServerState: () => createWorkerServerState,
@@ -51,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.4-mrs26zjw" : "dev";
+var BUILD_ID = true ? "0.6.4-mrs337xc" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -249,6 +250,7 @@ var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
+var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
 var DEFAULT_STALL_THRESHOLD_MS = 6e4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
@@ -258,6 +260,7 @@ var DEFAULT_CONFIG = {
   maxMiniTurnChars: 24e3,
   maxFlushAttempts: 3,
   sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -331,6 +334,12 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       1e3,
       3e5,
       DEFAULT_CONFIG.sessionEndTailTimeoutMs
+    ),
+    hardExitTimeoutMs: clampInteger(
+      config3.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
     ),
     stallThresholdMs: clampInteger(
       config3.stallThresholdMs,
@@ -45039,6 +45048,55 @@ function createWorkerServerState(nowMs = Date.now()) {
     shuttingDown: false
   };
 }
+function createHardExitTimer(deps) {
+  const setTimeoutImpl = deps.setTimeoutImpl ?? ((callback, delayMs) => setTimeout(() => void callback(), delayMs));
+  const clearTimeoutImpl = deps.clearTimeoutImpl ?? ((handle) => clearTimeout(handle));
+  const logger = deps.logger ?? console;
+  let pending = null;
+  return {
+    arm() {
+      if (pending || deps.sessionEnvRegistry.size !== 0) {
+        return;
+      }
+      const token = {};
+      const handle = setTimeoutImpl(() => {
+        if (pending?.token !== token) {
+          return;
+        }
+        pending = null;
+        if (deps.sessionEnvRegistry.size !== 0) {
+          return;
+        }
+        try {
+          void deps.abortAllExtractionSessionsImpl().catch((error49) => {
+            logger.error?.("hard-exit extraction abort failed", { error: error49 });
+          });
+        } catch (error49) {
+          logger.error?.("hard-exit extraction abort failed", { error: error49 });
+        } finally {
+          createHardExitCleanup(deps);
+        }
+      }, deps.config.hardExitTimeoutMs);
+      pending = { token, handle };
+      const remainingTurns = deps.db?.query(
+        `SELECT COUNT(*) AS count
+             FROM pending_queue
+             WHERE kind = 'turn-stop'`
+      ).get()?.count ?? 0;
+      logger.warn?.("all content sessions closed; hard-exit timer armed", {
+        hardExitTimeoutMs: deps.config.hardExitTimeoutMs,
+        remainingTurns
+      });
+    },
+    cancel() {
+      if (!pending) {
+        return;
+      }
+      clearTimeoutImpl(pending.handle);
+      pending = null;
+    }
+  };
+}
 async function withTimeout(promise2, ms, message) {
   return Promise.race([
     promise2,
@@ -46706,6 +46764,19 @@ ${body}
     }
     await closeSessionQuery(sessionDbId);
   }
+  async function abortAllExtractionSessionsForShutdown() {
+    const liveSessionIds = Array.from(sessions.values()).filter((state) => state.querySession !== null).map((state) => state.sessionDbId);
+    await Promise.all(
+      liveSessionIds.map(async (sessionDbId) => {
+        const abortError = createWorkerAbortError(
+          "shutdown",
+          "Worker hard-exit deadline reached"
+        );
+        logger.warn?.("hard-exit shutdown requeue", { sessionDbId });
+        await suspendSessionAfterRetryableError(sessionDbId, abortError);
+      })
+    );
+  }
   async function tickKeepaliveSessionLocked(state, currentMs) {
     pruneBatchQueueLocked(state);
     if (state.batchQueue.length === 0 || state.lastPushAt <= 0) {
@@ -46859,6 +46930,7 @@ ${body}
     finishSession,
     drainSessionCompletely,
     closeSessionQuery,
+    abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date7) {
       if (typeof date7 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date7)) {
@@ -47078,6 +47150,13 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     };
     void work.then(settle, settle);
   }
+  function clearRegisteredSession(contentSessionId, sessionDbId) {
+    const hadRegisteredSessions = sessionEnvRegistry.size > 0;
+    clearSessionEnvImpl?.(contentSessionId, sessionDbId);
+    if (hadRegisteredSessions && sessionEnvRegistry.size === 0) {
+      deps.hardExitTimerImpl?.arm();
+    }
+  }
   async function handleWake() {
     if (wakeScanInFlight) {
       state.scanPending = true;
@@ -47124,6 +47203,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
             (entry) => typeof entry[1] === "string"
           )
         );
+        deps.hardExitTimerImpl?.cancel();
         const associatedSessionId = registerSessionEnvImpl ? await registerSessionEnvImpl(
           payload.content_session_id,
           payload.session_id,
@@ -47131,7 +47211,10 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
         ) : payload.session_id ?? null;
         if (payload.action === "finish") {
           if (associatedSessionId === null) {
-            clearSessionEnvImpl?.(payload.content_session_id, payload.session_id);
+            clearRegisteredSession(
+              payload.content_session_id,
+              payload.session_id
+            );
             return new Response(null, { status: 200 });
           }
           const finish = handleFlushImpl(associatedSessionId).catch((error49) => {
@@ -47140,7 +47223,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
               error: error49
             });
           }).finally(() => {
-            clearSessionEnvImpl?.(
+            clearRegisteredSession(
               payload.content_session_id,
               associatedSessionId
             );
@@ -47211,19 +47294,29 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
 async function shutdownGracefully(deps = {}) {
   await deps.shutdownGracefullyImpl?.();
 }
-function createShutdownCleanup(deps = {}) {
+function createHardExitCleanup(deps) {
+  void shutdownGracefully(deps).catch((error49) => {
+    deps.logger?.error?.("hard-exit graceful cleanup failed", { error: error49 });
+  });
+  exitWorkerProcess(deps);
+}
+function exitWorkerProcess(deps) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs8.unlinkSync;
   const processImpl = deps.processImpl ?? process;
+  deps.hardExitTimerImpl?.cancel();
+  try {
+    unlinkSyncImpl(pidPath);
+  } catch {
+  }
+  processImpl.exit(0);
+}
+function createShutdownCleanup(deps = {}) {
   return async () => {
     try {
       await shutdownGracefully(deps);
     } finally {
-      try {
-        unlinkSyncImpl(pidPath);
-      } catch {
-      }
-      processImpl.exit(0);
+      exitWorkerProcess(deps);
     }
   };
 }
@@ -47301,6 +47394,7 @@ async function main(deps = {}) {
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config3 = deps.config ?? loadConfig();
   const sessionEnvRegistry = /* @__PURE__ */ new Map();
+  const logger = deps.logger ?? createLogger("MNEMOSYNE");
   initializeDatabase(db);
   const processors = createWorkerProcessors(db);
   const diaryRuntime = deps.processDiaryItem ? null : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
@@ -47316,32 +47410,67 @@ async function main(deps = {}) {
     sessionEnvRegistry,
     now: deps.now,
     nowMs: deps.nowMs,
+    setTimeoutImpl: deps.setTimeoutImpl,
+    clearTimeoutImpl: deps.clearTimeoutImpl,
     config: config3,
     pushSessionSummaryPromptImpl: deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
     closeSessionQueryImpl: deps.closeSessionQueryImpl,
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl,
     processDiaryItem: deps.processDiaryItem ?? diaryRuntime?.processDreamItem,
-    logger: deps.logger ?? createLogger("MNEMOSYNE")
+    logger
   });
   core.recoverFromCrash();
+  let server;
+  const baseLifecycleDeps = {
+    ...deps,
+    db,
+    config: config3,
+    sessionEnvRegistry,
+    hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
+    getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
+    isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
+    abortDreamImpl: async () => {
+      await diaryRuntime?.abortDream?.("shutdown");
+    },
+    abortAllExtractionSessionsImpl: async () => {
+      serverState.shuttingDown = true;
+      await core.abortAllExtractionSessionsForShutdown();
+    },
+    shutdownGracefullyImpl: async () => {
+      await deps.shutdownGracefullyImpl?.();
+      server.stop(true);
+    },
+    logger
+  };
+  const hardExitTimer = createHardExitTimer({
+    ...baseLifecycleDeps,
+    config: config3,
+    sessionEnvRegistry,
+    abortAllExtractionSessionsImpl: baseLifecycleDeps.abortAllExtractionSessionsImpl
+  });
+  const lifecycleDeps = {
+    ...baseLifecycleDeps,
+    hardExitTimerImpl: hardExitTimer
+  };
   const fetchHandler = createWorkerFetchHandler(
     {
       ...deps,
       db,
       config: config3,
+      sessionEnvRegistry,
       scanAndDrainQueue: core.scanAndDrainQueue,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
       registerSessionEnvImpl: core.registerSessionEnv,
       clearSessionEnvImpl: core.clearSessionEnv,
+      hardExitTimerImpl: hardExitTimer,
       // Injecting core pieces above leaves the fetch factory's internal
       // runtime unset, so /dream must be wired explicitly or it 503s.
       handleDreamImpl: deps.handleDreamImpl ?? core.triggerManualDream
     },
     serverState
   );
-  let server;
   try {
     server = BunServeImpl({
       port: WORKER_PORT,
@@ -47381,19 +47510,6 @@ async function main(deps = {}) {
     void core.runRetryTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
-    const lifecycleDeps = {
-      ...deps,
-      hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
-      getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
-      isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
-      abortDreamImpl: async () => {
-        await diaryRuntime?.abortDream?.("shutdown");
-      },
-      shutdownGracefullyImpl: async () => {
-        await deps.shutdownGracefullyImpl?.();
-        server.stop(true);
-      }
-    };
     void (async () => {
       const didShutdown = await checkForLastAgentShutdown(
         serverState,
@@ -47404,13 +47520,7 @@ async function main(deps = {}) {
       }
     })();
   }, WATCHDOG_INTERVAL_MS);
-  registerShutdownCleanup({
-    ...deps,
-    shutdownGracefullyImpl: async () => {
-      await deps.shutdownGracefullyImpl?.();
-      server.stop(true);
-    }
-  });
+  registerShutdownCleanup(lifecycleDeps);
 }
 function isDirectExecution() {
   const entry = process.argv[1] ?? "";
@@ -47426,6 +47536,7 @@ if (isDirectExecution()) {
   buildReminderEnvelope,
   checkForIdleWorkerShutdown,
   checkForLastAgentShutdown,
+  createHardExitTimer,
   createWorkerCore,
   createWorkerFetchHandler,
   createWorkerServerState,

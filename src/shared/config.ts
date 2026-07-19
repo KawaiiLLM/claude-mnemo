@@ -13,6 +13,8 @@ export interface MnemoConfig {
   maxFlushAttempts: number;
   /** Wall-clock budget for a SessionEnd drain + flush before it is aborted. */
   sessionEndTailTimeoutMs: number;
+  /** Hard worker-exit cap after the final content session closes. */
+  hardExitTimeoutMs: number;
   /** Abort an in-flight extraction after this long with no agent activity. */
   stallThresholdMs: number;
   /**
@@ -72,6 +74,7 @@ export const DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1_000;
 // One knob keeps "content day closes exactly when its dream triggers" true.
 export const DEFAULT_DREAM_AGENT_HOUR = 4;
 export const DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 60_000;
+export const DEFAULT_HARD_EXIT_TIMEOUT_MS = 70_000;
 export const DEFAULT_STALL_THRESHOLD_MS = 60_000;
 
 export const DEFAULT_CONFIG: MnemoConfig = {
@@ -82,6 +85,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   maxMiniTurnChars: 24_000,
   maxFlushAttempts: 3,
   sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -205,6 +209,12 @@ function clampConfig(
       1_000,
       300_000,
       DEFAULT_CONFIG.sessionEndTailTimeoutMs,
+    ),
+    hardExitTimeoutMs: clampInteger(
+      config.hardExitTimeoutMs,
+      1_000,
+      300_000,
+      DEFAULT_CONFIG.hardExitTimeoutMs,
     ),
     stallThresholdMs: clampInteger(
       config.stallThresholdMs,

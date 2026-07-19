@@ -674,6 +674,75 @@ describe("worker server", () => {
     expect(serverState.globalScanInFlight).toBeNull();
   });
 
+  test("finish arms hard exit only when the session registry empties, and later work cancels it", async () => {
+    const sessionEnvRegistry = new Map<string, Record<string, string>>([
+      ["still-open", {}],
+    ]);
+    const armHardExitTimer = mock(() => {});
+    const cancelHardExitTimer = mock(() => {});
+    const serverState = createWorkerServerState(100);
+    const handler = createWorkerFetchHandler(
+      {
+        sessionEnvRegistry,
+        registerSessionEnvImpl: async (contentSessionId, sessionDbId, env) => {
+          sessionEnvRegistry.set(contentSessionId, env);
+          return sessionDbId ?? null;
+        },
+        clearSessionEnvImpl: (contentSessionId) => {
+          sessionEnvRegistry.delete(contentSessionId);
+        },
+        handleFlushImpl: async () => {},
+        hardExitTimerImpl: {
+          arm: armHardExitTimer,
+          cancel: cancelHardExitTimer,
+        },
+      },
+      serverState,
+    );
+
+    const finish = async (
+      contentSessionId: string,
+      sessionId: number,
+    ): Promise<void> => {
+      const response = await handler(
+        new Request("http://127.0.0.1:37778/trigger", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "finish",
+            content_session_id: contentSessionId,
+            session_id: sessionId,
+            env: {},
+          }),
+        }),
+      );
+      expect(response.status).toBe(200);
+      await serverState.globalScanInFlight;
+    };
+
+    await finish("closing-first", 1);
+    expect(sessionEnvRegistry.has("still-open")).toBe(true);
+    expect(armHardExitTimer).not.toHaveBeenCalled();
+
+    await finish("still-open", 2);
+    expect(sessionEnvRegistry.size).toBe(0);
+    expect(armHardExitTimer).toHaveBeenCalledTimes(1);
+
+    cancelHardExitTimer.mockClear();
+    const response = await handler(
+      new Request("http://127.0.0.1:37778/trigger", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "wake",
+          content_session_id: "new-turn-stop",
+          session_id: 3,
+          env: {},
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(cancelHardExitTimer).toHaveBeenCalledTimes(1);
+  });
+
   test("checkForLastAgentShutdown requires no live query, global work, or HTTP request", async () => {
     const shutdown = mock(async () => {});
     const processExit = mock((_code?: number) => undefined as never);
@@ -732,12 +801,17 @@ describe("worker server", () => {
       serverState.globalScanInFlight = null;
     });
     const shutdown = mock(async () => {});
+    const cancelHardExitTimer = mock(() => {});
     const processExit = mock((_code?: number) => undefined as never);
     const didShutdown = await checkForLastAgentShutdown(serverState, {
       hasLiveQuerySessionsImpl: () => false,
       isDreamRunningImpl: () => dreamRunning,
       abortDreamImpl: abortDream,
       shutdownGracefullyImpl: shutdown,
+      hardExitTimerImpl: {
+        arm() {},
+        cancel: cancelHardExitTimer,
+      },
       processImpl: {
         pid: process.pid,
         on: mock(() => process as never),
@@ -747,6 +821,7 @@ describe("worker server", () => {
 
     expect(didShutdown).toBe(true);
     expect(abortDream).toHaveBeenCalledTimes(1);
+    expect(cancelHardExitTimer).toHaveBeenCalledTimes(1);
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(processExit).toHaveBeenCalledWith(0);
   });
@@ -3630,6 +3705,8 @@ describe("worker server", () => {
     const intervalCallbacks: Array<() => void> = [];
     const stop = mock((_force?: boolean) => {});
     const processExit = mock((_code?: number) => undefined as never);
+    const scheduledTimeouts: Array<{ handle: string; delayMs: number }> = [];
+    const clearedTimeouts: string[] = [];
     const originalSetInterval = globalThis.setInterval;
 
     globalThis.setInterval = mock(((callback: () => void) => {
@@ -3652,6 +3729,14 @@ describe("worker server", () => {
           () => { closes += 1; },
         ),
         isProcessAliveImpl: () => false,
+        setTimeoutImpl(_callback, delayMs) {
+          const handle = `timeout-${scheduledTimeouts.length + 1}`;
+          scheduledTimeouts.push({ handle, delayMs });
+          return handle;
+        },
+        clearTimeoutImpl(handle) {
+          clearedTimeouts.push(handle as string);
+        },
         existsSyncImpl: () => false,
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,
         writeFileSyncImpl: (() => undefined) as typeof import("node:fs").writeFileSync,
@@ -3685,6 +3770,13 @@ describe("worker server", () => {
       expect(sentPrompts).toHaveLength(1);
       expect(sentPrompts[0]).toContain(`<obs id="O`);
       expect(closes).toBe(1);
+      await waitUntil(() =>
+        scheduledTimeouts.some(({ delayMs }) => delayMs === 70_000)
+      );
+      const hardExitHandle = scheduledTimeouts.find(
+        ({ delayMs }) => delayMs === 70_000,
+      )!.handle;
+      expect(clearedTimeouts).not.toContain(hardExitHandle);
 
       // The second 10-second interval is the lifecycle decision tick. Once the
       // bounded tail has removed the final query session and its tracked flush
@@ -3694,6 +3786,7 @@ describe("worker server", () => {
       await waitUntil(() => processExit.mock.calls.length === 1);
       expect(stop).toHaveBeenCalledWith(true);
       expect(processExit).toHaveBeenCalledWith(0);
+      expect(clearedTimeouts).toContain(hardExitHandle);
     } finally {
       globalThis.setInterval = originalSetInterval;
     }

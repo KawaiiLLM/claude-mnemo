@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -9,7 +9,10 @@ import { getTurnById } from "../../src/db/turns";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
 import { classifyWorkerError } from "../../src/worker/error-classifier";
 import { DELIVERY_DROPPED_PENDING_TAG } from "../../src/worker/invalidation";
-import { createWorkerCore } from "../../src/worker/server";
+import {
+  createHardExitTimer,
+  createWorkerCore,
+} from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 function seedQueuedTurn(db: Database, contentSessionId: string): {
@@ -232,5 +235,93 @@ describe("SessionEnd bounded tail", () => {
     expect(getTurnById(db, ending.turnId)?.tags ?? []).not.toContain(
       DELIVERY_DROPPED_PENDING_TAG,
     );
+  });
+
+  test("hard-exit timer aborts a hung extraction, requeues without a strike, and exits at the cap", async () => {
+    const ending = seedQueuedTurn(db, "hard-exit-session");
+    let rejectPush: ((error: unknown) => void) | undefined;
+    let pushes = 0;
+    const closeErrors: Error[] = [];
+    const core = createWorkerCore({
+      db,
+      config: { ...DEFAULT_CONFIG, maxQueuedBatches: 0 },
+      createWorkerQuerySessionImpl: (() => ({
+        sessionId: "hung-agent",
+        queryPid: undefined,
+        async sendPrompt() {
+          pushes += 1;
+          return new Promise<never>((_resolve, reject) => {
+            rejectPush = reject;
+          });
+        },
+        async close(abortError?: Error) {
+          if (abortError) {
+            closeErrors.push(abortError);
+            rejectPush?.(abortError);
+          }
+        },
+      } satisfies WorkerQuerySession)) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      closeSessionQueryImpl: async () =>
+        new Promise<void>(() => {}),
+      isProcessAliveImpl: () => false,
+      logger: { warn() {}, error() {} },
+    });
+
+    const flush = core.flushSession(ending.sessionId);
+    for (let tick = 0; tick < 50 && !rejectPush; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(rejectPush).toBeDefined();
+
+    let fireHardExit: (() => Promise<void>) | undefined;
+    const delays: number[] = [];
+    const shutdownGracefully = mock(async () =>
+      new Promise<void>(() => {})
+    );
+    const processExit = mock((_code?: number) => undefined as never);
+    const hardExitTimer = createHardExitTimer({
+      config: { ...DEFAULT_CONFIG, hardExitTimeoutMs: 70_000 },
+      sessionEnvRegistry: new Map(),
+      abortAllExtractionSessionsImpl:
+        core.abortAllExtractionSessionsForShutdown,
+      setTimeoutImpl(callback, delayMs) {
+        delays.push(delayMs);
+        fireHardExit = async () => {
+          await callback();
+        };
+        return "hard-exit";
+      },
+      clearTimeoutImpl() {},
+      shutdownGracefullyImpl: shutdownGracefully,
+      unlinkSyncImpl: (() => undefined) as typeof import("node:fs").unlinkSync,
+      processImpl: {
+        pid: process.pid,
+        on: (() => process) as typeof process.on,
+        exit: processExit,
+      },
+      logger: { warn() {}, error() {} },
+    });
+
+    hardExitTimer.arm();
+    expect(delays).toEqual([70_000]);
+    expect(processExit).not.toHaveBeenCalled();
+    await fireHardExit?.();
+    void flush.catch(() => {});
+
+    const turn = getTurnById(db, ending.turnId);
+    expect(pushes).toBe(1);
+    expect(closeErrors.map(classifyWorkerError)).toEqual(["connection"]);
+    expect(getPendingQueueCount(db, ending.sessionId)).toBe(1);
+    expect(
+      db.query<{ claimedAtEpoch: number | null }, [number]>(
+        `SELECT claimed_at_epoch AS claimedAtEpoch
+         FROM pending_queue WHERE session_db_id = ?`,
+      ).get(ending.sessionId)?.claimedAtEpoch,
+    ).toBeNull();
+    expect(turn?.status).toBe("active");
+    expect(turn?.extractionStallAttempts).toBe(0);
+    expect(turn?.tags ?? []).not.toContain(DELIVERY_DROPPED_PENDING_TAG);
+    expect(shutdownGracefully).toHaveBeenCalledTimes(1);
+    expect(processExit).toHaveBeenCalledWith(0);
   });
 });

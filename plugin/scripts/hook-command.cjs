@@ -279,6 +279,7 @@ var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
+var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
 var DEFAULT_STALL_THRESHOLD_MS = 6e4;
 var DEFAULT_CONFIG = {
   mergeThresholdChars: 1e3,
@@ -288,6 +289,7 @@ var DEFAULT_CONFIG = {
   maxMiniTurnChars: 24e3,
   maxFlushAttempts: 3,
   sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -361,6 +363,12 @@ function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, logger) 
       1e3,
       3e5,
       DEFAULT_CONFIG.sessionEndTailTimeoutMs
+    ),
+    hardExitTimeoutMs: clampInteger(
+      config.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
     ),
     stallThresholdMs: clampInteger(
       config.stallThresholdMs,
@@ -2584,7 +2592,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.4-mrs26zjw" : "dev";
+var BUILD_ID = true ? "0.6.4-mrs337xc" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
