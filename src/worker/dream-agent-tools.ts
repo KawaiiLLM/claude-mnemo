@@ -25,11 +25,11 @@ export function assertDreamCommitToolFields(
 export const dreamCheckBudgetInputShape: Record<string, never> = {};
 
 /**
- * Payload-free self-check for the hot-memory token caps. Reads the staged
- * user-profile and experience back from the workspace and reports each
- * document's estimated tokens against the commit-enforced limit, so the agent
- * can prune BEFORE burning a failed commit attempt. Uses the same estimator
- * and constant as commitNight — the check can never disagree with the gate.
+ * Payload-free self-check for the hot-memory token target. Reads the staged
+ * user-profile and experience back and reports each document's estimated tokens
+ * against the SOFT TARGET the agent optimizes toward. `ok: false` / `over_by`>0
+ * only means the doc is over the aim — commit is NOT size-gated, so the agent
+ * trims toward target in at most ~3 passes and then commits regardless.
  */
 export function createDreamCheckBudgetToolHandler(
   readStagedNight: () => Promise<CommitNightInput>,

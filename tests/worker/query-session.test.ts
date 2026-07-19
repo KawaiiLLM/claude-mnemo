@@ -591,6 +591,8 @@ describe("worker query session", () => {
     );
     expect(prompt).toContain("grade: REQUIRED integer 0-4");
     expect(prompt).toContain("Grade 4 — top-level arc flag bearer");
+    // 2/3 discriminator: completion is not a premise change (grade-inflation fix)
+    expect(prompt).toContain("Grade by CONSEQUENCE, not by action verb");
     expect(prompt).toContain("T925 (0.5.0 release)");
     expect(prompt).toContain("T896 ($6.38→$1.43 correction)");
     expect(prompt).toContain("T941 (/compact)");

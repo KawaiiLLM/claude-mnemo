@@ -14,8 +14,16 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseMarkdownSections } from "../shared/markdown-sections";
 import { createLogger } from "../shared/logger";
 import { sortDiaryIndexRecentFirst } from "./diary-index";
-import { estimateDiaryTokens } from "./domain";
 
+/**
+ * Soft target the dream agent optimizes each hot-memory document toward —
+ * surfaced by check_budget. NOT enforced at commit: the agent aims for this in
+ * at most ~3 trim passes and then commits whatever it has, so docs settle near
+ * the target without grinding for the last few hundred tokens. A hard commit
+ * gate proved worthless — it only forced the grind, and injection is separately
+ * capped (PROFILE_INJECTION_TOKEN_BUDGET) so an over-target doc never bloats
+ * what a session sees.
+ */
 export const MEMORY_DOCUMENT_TOKEN_LIMIT = 2_000;
 export const DEFAULT_MEMORY_HISTORY_RETENTION: MemoryHistoryRetention = {
   newest: 30,
@@ -167,18 +175,6 @@ function decodeUtf8(bytes: Uint8Array, label: string): string {
 function assertParseableMarkdown(label: string, document: string): void {
   if (!parseMarkdownSections(document).some((section) => section.level >= 1)) {
     throw new Error(`${label} must contain at least one Markdown ATX heading`);
-  }
-}
-
-function assertHotMemoryWithinLimit(
-  label: "userProfile" | "experience",
-  document: string,
-): void {
-  const tokens = estimateDiaryTokens(document);
-  if (tokens > MEMORY_DOCUMENT_TOKEN_LIMIT) {
-    throw new Error(
-      `${label} has ${tokens} estimated tokens and exceeds the ${MEMORY_DOCUMENT_TOKEN_LIMIT}-token limit; demote the oldest or least valuable entries to archive and retry`,
-    );
   }
 }
 
@@ -420,8 +416,6 @@ export class DreamMemoryStore {
     assertParseableMarkdown("archive", input.archive);
     assertParseableMarkdown("diary", input.diary);
     assertParseableMarkdown("diaryIndex", input.diaryIndex);
-    assertHotMemoryWithinLimit("userProfile", input.userProfile);
-    assertHotMemoryWithinLimit("experience", input.experience);
   }
 
   private async injectFault(point: CommitFaultPoint): Promise<void> {

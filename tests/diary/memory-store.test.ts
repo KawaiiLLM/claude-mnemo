@@ -139,29 +139,23 @@ describe("DreamMemoryStore", () => {
     });
   });
 
-  test("rejects a CJK-aware over-5k hot-memory document before publishing", async () => {
+  test("does not size-gate hot-memory documents at commit (over-target publishes fine)", async () => {
     const dataRoot = createRoot("claude-mnemo-dream-limit-");
     const store = new DreamMemoryStore(dataRoot);
     const prior = night("2026-07-10", "prior");
     await store.commitNight(prior);
-    const oversized = `# Profile\n\n${"汉".repeat(4_000)}\n`;
-    expect(estimateDiaryTokens(oversized)).toBeGreaterThan(
+    const overTarget = `# Profile\n\n${"汉".repeat(4_000)}\n`;
+    expect(estimateDiaryTokens(overTarget)).toBeGreaterThan(
       MEMORY_DOCUMENT_TOKEN_LIMIT,
     );
 
-    await expect(
-      store.commitNight({
-        ...night("2026-07-11", "too large"),
-        userProfile: oversized,
-      }),
-    ).rejects.toThrow(/userProfile.*2000.*demote/i);
-
-    expect(await store.readCurrentMemory()).toEqual({
-      userProfile: prior.userProfile,
-      experience: prior.experience,
-      archive: prior.archive,
+    await store.commitNight({
+      ...night("2026-07-11", "over target"),
+      userProfile: overTarget,
     });
-    expect(await store.readLastSuccessfulDate()).toBe("2026-07-10");
+
+    expect((await store.readCurrentMemory()).userProfile).toBe(overTarget);
+    expect(await store.readLastSuccessfulDate()).toBe("2026-07-11");
   });
 
   test("lists and hash-verifies snapshots, then atomically restores one as current", async () => {
