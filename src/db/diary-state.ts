@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite";
 
-import { addCalendarDays, contentDateAt } from "../diary/calendar";
+import {
+  addCalendarDays,
+  calendarDayBounds,
+  contentDateAt,
+} from "../diary/calendar";
 import {
   DEFAULT_DREAM_AGENT_HOUR,
   DEFAULT_DREAM_AGENT_TIME_ZONE,
@@ -90,6 +94,10 @@ interface PendingQueueRow {
   enqueuedAtEpoch: number;
 }
 
+interface DiaryQueueCandidateRow extends PendingQueueRow {
+  date: string;
+}
+
 interface DiaryDayStateRow {
   date: string;
   watermark: string | null;
@@ -109,16 +117,17 @@ const DIARY_QUEUE_SELECT = `
     q.target_id AS targetId,
     q.session_db_id AS sessionDbId,
     q.claimed_at_epoch AS claimedAtEpoch,
-    q.enqueued_at_epoch AS enqueuedAtEpoch
+    q.enqueued_at_epoch AS enqueuedAtEpoch,
+    d.date
   FROM pending_queue q
   JOIN diary_day_state d
     ON CAST(REPLACE(d.date, '-', '') AS INTEGER) = q.target_id
 `;
 
-export function markSettledDiaryDayStaleForTurn(
-  db: Database,
-  createdAtEpoch: number,
-): void {
+function readDreamCalendarBoundary(db: Database): {
+  timeZone: string;
+  boundaryHour: number;
+} {
   const timeZone =
     db.query<{ value: string }, []>(
       "SELECT value FROM diary_state WHERE key = 'dream_timezone'",
@@ -128,6 +137,55 @@ export function markSettledDiaryDayStaleForTurn(
       "SELECT value FROM diary_state WHERE key = 'dream_hour'",
     ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR,
   );
+  return { timeZone, boundaryHour };
+}
+
+function findReadyDiaryItem(
+  db: Database,
+  nowEpoch: number,
+): DiaryQueueCandidateRow | null {
+  const candidates = db.query<DiaryQueueCandidateRow, [number]>(
+    `${DIARY_QUEUE_SELECT}
+     WHERE q.kind = 'diary'
+       AND q.claimed_at_epoch IS NULL
+       AND d.terminal = 0
+       AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
+     ORDER BY q.seq ASC`,
+  ).all(nowEpoch);
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
+  const isComplete = db.query<
+    { one: number },
+    [number, number, number, number]
+  >(
+    `SELECT 1 AS one
+     WHERE ? >= ?
+       AND NOT EXISTS (
+         SELECT 1
+         FROM turns t
+         WHERE t.created_at_epoch >= ?
+           AND t.created_at_epoch < ?
+           AND t.status IN ('active','provisional')
+       )`,
+  );
+
+  for (const candidate of candidates) {
+    const { startEpoch, endEpoch } = calendarDayBounds(
+      candidate.date,
+      timeZone,
+      boundaryHour,
+    );
+    if (isComplete.get(nowEpoch, endEpoch, startEpoch, endEpoch)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export function markSettledDiaryDayStaleForTurn(
+  db: Database,
+  createdAtEpoch: number,
+): void {
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
   const date = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query<unknown, [string]>(
     `UPDATE diary_day_state
@@ -166,17 +224,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
 
     claimNextDiaryItem(claimedAtEpoch): PendingQueueItem | null {
       return runWriteTransaction(db, () => {
-        const row = db
-          .query<PendingQueueRow, [number]>(
-            `${DIARY_QUEUE_SELECT}
-             WHERE q.kind = 'diary'
-               AND q.claimed_at_epoch IS NULL
-               AND d.terminal = 0
-               AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-             ORDER BY q.seq ASC
-             LIMIT 1`,
-          )
-          .get(claimedAtEpoch);
+        const row = findReadyDiaryItem(db, claimedAtEpoch);
         if (!row) return null;
 
         const result = db.query<unknown, [number, number]>(
@@ -187,21 +235,13 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
         if (result.changes !== 1) {
           throw new Error(`unexpected claim race on dream queue seq=${row.seq}`);
         }
-        return { ...row, claimedAtEpoch };
+        const { date: _date, ...item } = row;
+        return { ...item, claimedAtEpoch };
       });
     },
 
     hasReadyDiaryItem(nowEpoch): boolean {
-      return db
-        .query<{ one: number }, [number]>(
-          `${DIARY_QUEUE_SELECT}
-           WHERE q.kind = 'diary'
-             AND q.claimed_at_epoch IS NULL
-             AND d.terminal = 0
-             AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-           LIMIT 1`,
-        )
-        .get(nowEpoch) !== null;
+      return findReadyDiaryItem(db, nowEpoch) !== null;
     },
 
     getDayState(date): DiaryDayState | null {

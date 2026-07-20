@@ -31605,7 +31605,7 @@ var DEFAULT_DREAM_AGENT_HOUR = 4;
 
 // src/db/diary-state.ts
 init_database();
-function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+function readDreamCalendarBoundary(db) {
   const timeZone = db.query(
     "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
   ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
@@ -31614,6 +31614,10 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
       "SELECT value FROM diary_state WHERE key = 'dream_hour'"
     ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
   );
+  return { timeZone, boundaryHour };
+}
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
   const date5 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query(
     `UPDATE diary_day_state

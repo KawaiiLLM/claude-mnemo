@@ -35,6 +35,7 @@ import { createLogger } from "../../src/shared/logger";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
 const roots: string[] = [];
+const DREAM_READY_EPOCH = Date.parse("2026-07-11T00:00:00Z") / 1_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
@@ -110,7 +111,7 @@ describe("createDiaryRuntime", () => {
 
     try {
       await runtime.processDreamItem(
-        stateStore.claimNextDiaryItem(100)!,
+        stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!,
         agentEnv,
       );
       expect(seenAgentEnv).toEqual(agentEnv);
@@ -158,7 +159,7 @@ describe("createDiaryRuntime", () => {
       db,
       dataRoot,
       config: DEFAULT_CONFIG,
-      nowEpoch: () => 200,
+      nowEpoch: () => DREAM_READY_EPOCH,
       async runQuery(request) {
         runs += 1;
         if (runs === 1) {
@@ -186,7 +187,7 @@ describe("createDiaryRuntime", () => {
     });
 
     try {
-      const firstItem = stateStore.claimNextDiaryItem(200)!;
+      const firstItem = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
       const firstRun = runtime.processDreamItem(firstItem);
       await started;
       expect(runtime.isDreamRunning()).toBe(true);
@@ -200,7 +201,7 @@ describe("createDiaryRuntime", () => {
       expect(runtime.isDreamRunning()).toBe(false);
       expect(stateStore.getDayState("2026-07-10")).toMatchObject({
         attemptCount: 0,
-        nextAttemptEpoch: 200,
+        nextAttemptEpoch: DREAM_READY_EPOCH,
         terminal: false,
         lastError: null,
       });
@@ -209,11 +210,13 @@ describe("createDiaryRuntime", () => {
 
       const core = createWorkerCore({
         db,
-        now: () => 200,
+        now: () => DREAM_READY_EPOCH,
         processDiaryItem: runtime.processDreamItem,
         logger: { warn() {}, error() {} },
       });
-      updateTurnById(db, retryTurn.id, { status: "active" });
+      db.query(
+        "UPDATE turns SET status = 'active', created_at_epoch = ? WHERE id = ?",
+      ).run(DREAM_READY_EPOCH, retryTurn.id);
       enqueueQueueItem(db, {
         kind: "turn-stop",
         targetId: retryTurn.id,
@@ -224,7 +227,7 @@ describe("createDiaryRuntime", () => {
 
       expect(runs).toBe(2);
       expect(stateStore.getDayState("2026-07-10")).toMatchObject({
-        settledAtEpoch: 200,
+        settledAtEpoch: DREAM_READY_EPOCH,
         attemptCount: 0,
         nextAttemptEpoch: null,
         terminal: false,
@@ -277,7 +280,7 @@ describe("createDiaryRuntime", () => {
 
       try {
         await expect(
-          processor.process(stateStore.claimNextDiaryItem(100)!),
+          processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!),
         ).rejects.toThrow();
         expect(stateStore.getDayState("2026-07-10")).toMatchObject({
           attemptCount,
@@ -301,7 +304,7 @@ describe("createDiaryRuntime", () => {
     stateStore.enqueueDay({ date: "2026-07-08", enqueuedAtEpoch: 100 });
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const failedAtEpoch = 100 + attempt * 20;
-      const item = stateStore.claimNextDiaryItem(failedAtEpoch)!;
+      const item = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
       stateStore.recordDreamFailure({
         date: "2026-07-08",
         queueSeq: item.seq,
@@ -325,7 +328,7 @@ describe("createDiaryRuntime", () => {
 
     try {
       stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 500 });
-      await processor.process(stateStore.claimNextDiaryItem(500)!);
+      await processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!);
       expect(stateStore.getDayState("2026-07-08")).toMatchObject({
         attemptCount: 3,
         terminal: true,
@@ -334,7 +337,7 @@ describe("createDiaryRuntime", () => {
 
       remoteAttemptSucceeded = true;
       stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 500 });
-      await processor.process(stateStore.claimNextDiaryItem(500)!);
+      await processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!);
       expect(stateStore.getDayState("2026-07-08")).toMatchObject({
         attemptCount: 0,
         terminal: false,
@@ -358,7 +361,7 @@ describe("createDiaryRuntime", () => {
       db,
       stateStore,
       readLastSuccessfulDate: async () => null,
-      nowEpoch: () => 100,
+      nowEpoch: () => DREAM_READY_EPOCH,
       timeZone: "Asia/Shanghai",
       async processDreamDate(date) {
         calls.push(date);
@@ -368,20 +371,25 @@ describe("createDiaryRuntime", () => {
     });
 
     try {
-      await processor.process(stateStore.claimNextDiaryItem(100)!);
+      await processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!);
       await expect(
-        processor.process(stateStore.claimNextDiaryItem(100)!),
+        processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!),
       ).rejects.toThrow("one date failed");
-      await processor.process(stateStore.claimNextDiaryItem(100)!);
+      await processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!);
 
       expect(calls).toEqual(["2026-07-08", "2026-07-09", "2026-07-10"]);
-      expect(stateStore.getDayState("2026-07-08")?.settledAtEpoch).toBe(100);
+      expect(stateStore.getDayState("2026-07-08")?.settledAtEpoch).toBe(
+        DREAM_READY_EPOCH,
+      );
       expect(stateStore.getDayState("2026-07-09")).toMatchObject({
         attemptCount: 1,
-        nextAttemptEpoch: 110,
+        nextAttemptEpoch:
+          DREAM_READY_EPOCH + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1_000),
         retryDisposition: "permanent",
       });
-      expect(stateStore.getDayState("2026-07-10")?.settledAtEpoch).toBe(100);
+      expect(stateStore.getDayState("2026-07-10")?.settledAtEpoch).toBe(
+        DREAM_READY_EPOCH,
+      );
     } finally {
       db.close();
     }
@@ -462,7 +470,7 @@ describe("createDiaryRuntime", () => {
     try {
       let streamedError: unknown;
       try {
-        await processor.process(stateStore.claimNextDiaryItem(100)!);
+        await processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!);
       } catch (error) {
         streamedError = error;
       }
@@ -562,7 +570,7 @@ describe("createDiaryRuntime", () => {
 
       try {
         await expect(
-          processor.process(stateStore.claimNextDiaryItem(100)!),
+          processor.process(stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!),
         ).rejects.toThrow();
         expect(stateStore.getDayState("2026-07-10")).toMatchObject({
           attemptCount: 1,
@@ -630,7 +638,9 @@ describe("createDiaryRuntime", () => {
 
     try {
       stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-      await runtime.processDreamItem(stateStore.claimNextDiaryItem(200)!);
+      await runtime.processDreamItem(
+        stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!,
+      );
       expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(false);
 
       updateTurnById(db, turn.id, {
@@ -652,7 +662,9 @@ describe("createDiaryRuntime", () => {
           enqueuedAtEpoch: 400,
         }),
       ).toEqual(["2026-07-10"]);
-      await runtime.processDreamItem(stateStore.claimNextDiaryItem(400)!);
+      await runtime.processDreamItem(
+        stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!,
+      );
 
       const experience = readFileSync(join(dataRoot, "memory", "experience.md"), "utf8");
       expect(dreamRuns).toBe(2);
@@ -777,7 +789,9 @@ describe("createDiaryRuntime", () => {
 
     try {
       stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-      await runtime.processDreamItem(stateStore.claimNextDiaryItem(200)!);
+      await runtime.processDreamItem(
+        stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!,
+      );
 
       expect(dreamRuns).toBe(1);
       expect(await new DreamMemoryStore(dataRoot).readLastSuccessfulDate())

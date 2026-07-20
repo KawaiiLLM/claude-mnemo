@@ -12,6 +12,9 @@ import {
 } from "../../src/db/turns";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
+const AFTER_JULY_10_CONTENT_DAY =
+  Date.parse("2026-07-11T00:00:00Z") / 1_000;
+
 describe("turn diary invalidation", () => {
   let db: Database;
 
@@ -52,7 +55,7 @@ describe("turn diary invalidation", () => {
       observations: [],
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = stateStore.claimNextDiaryItem(200)!;
+    const claimed = stateStore.claimNextDiaryItem(AFTER_JULY_10_CONTENT_DAY)!;
     stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
@@ -100,7 +103,7 @@ describe("turn diary invalidation", () => {
       observations: [],
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = stateStore.claimNextDiaryItem(200)!;
+    const claimed = stateStore.claimNextDiaryItem(AFTER_JULY_10_CONTENT_DAY)!;
     stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
@@ -142,7 +145,7 @@ describe("turn diary invalidation", () => {
       observations: [],
     });
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = stateStore.claimNextDiaryItem(200)!;
+    const claimed = stateStore.claimNextDiaryItem(AFTER_JULY_10_CONTENT_DAY)!;
     stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,

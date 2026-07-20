@@ -64,6 +64,7 @@ const QUIET_STREAMING = {
   maxFlushAttempts: 3,
   compactContextRatio: 0.5,
 };
+const DREAM_READY_EPOCH = Date.parse("2026-07-11T00:00:00Z") / 1_000;
 
 // Read the turn ids carried by a batch regardless of kind (merged | slice).
 function batchTurnIds(batch: {
@@ -597,7 +598,7 @@ describe("worker server", () => {
 
     // Drive 2026-07-10 terminal via the unified three-attempt cap.
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
-    const first = store.claimNextDiaryItem(1)!;
+    const first = store.claimNextDiaryItem(DREAM_READY_EPOCH)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: first.seq,
@@ -605,7 +606,7 @@ describe("worker server", () => {
       failedAtEpoch: 1,
       outcome: "permanent",
     });
-    const second = store.claimNextDiaryItem(11)!;
+    const second = store.claimNextDiaryItem(DREAM_READY_EPOCH + 10)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: second.seq,
@@ -613,7 +614,7 @@ describe("worker server", () => {
       failedAtEpoch: 11,
       outcome: "permanent",
     });
-    const third = store.claimNextDiaryItem(21)!;
+    const third = store.claimNextDiaryItem(DREAM_READY_EPOCH + 20)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: third.seq,
@@ -984,7 +985,7 @@ describe("worker server", () => {
     const processDiaryItem = mock(async () => {});
     const core = createWorkerCore({
       db,
-      now: () => 123,
+      now: () => DREAM_READY_EPOCH,
       processDiaryItem,
     });
 
@@ -1015,7 +1016,7 @@ describe("worker server", () => {
     });
     const core = createWorkerCore({
       db,
-      now: () => 123,
+      now: () => DREAM_READY_EPOCH,
       config: {
         ...DEFAULT_CONFIG,
         mergeThresholdChars: 1,
@@ -1069,7 +1070,7 @@ describe("worker server", () => {
     const sessionWorkBufferedBeforeDiary: boolean[] = [];
     const core = createWorkerCore({
       db,
-      now: () => 123,
+      now: () => DREAM_READY_EPOCH,
       processDiaryItem: async (item) => {
         sessionWorkBufferedBeforeDiary.push(
           core.buffers
@@ -1112,7 +1113,7 @@ describe("worker server", () => {
     const processedDates: number[] = [];
     const core = createWorkerCore({
       db,
-      now: () => 123,
+      now: () => DREAM_READY_EPOCH,
       async processDiaryItem(item) {
         processedDates.push(item.targetId);
         stateStore.acknowledgeDiaryItem(item.seq);
@@ -1149,7 +1150,7 @@ describe("worker server", () => {
     queueTurnStop(db, sessionId, firstTurnId, 100);
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    let nowEpoch = 100;
+    let nowEpoch = DREAM_READY_EPOCH;
     let attempts = 0;
     const scheduled: Array<{
       callback: () => void | Promise<void>;
@@ -1188,21 +1189,21 @@ describe("worker server", () => {
     await core.scanAndDrainQueue(sessionId);
 
     expect(attempts).toBe(1);
-    nowEpoch = 160;
+    nowEpoch = DREAM_READY_EPOCH + 60;
     for (const timer of scheduled.filter((entry) => entry.dueEpoch <= nowEpoch)) {
       await timer.callback();
     }
     expect(attempts).toBe(1);
 
     const secondTurnId = createTurn(db, sessionId, 2);
-    queueTurnStop(db, sessionId, secondTurnId, 160);
+    queueTurnStop(db, sessionId, secondTurnId, DREAM_READY_EPOCH + 60);
     await core.scanAndDrainQueue(sessionId);
 
     expect(attempts).toBe(2);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
     expect(stateStore.getDayState("2026-07-10")).toMatchObject({
       needsRegen: false,
-      settledAtEpoch: 160,
+      settledAtEpoch: DREAM_READY_EPOCH + 60,
     });
   });
 
@@ -1219,15 +1220,15 @@ describe("worker server", () => {
     }).id;
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const failedItem = stateStore.claimNextDiaryItem(100)!;
+    const failedItem = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
     stateStore.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: failedItem.seq,
       error: "wait for floor",
-      failedAtEpoch: 190,
+      failedAtEpoch: DREAM_READY_EPOCH + 90,
       outcome: "permanent",
     });
-    let nowEpoch = 150;
+    let nowEpoch = DREAM_READY_EPOCH + 50;
     const processDiaryItem = mock(async (item) => {
       stateStore.settleDreamDay({
         date: "2026-07-10",
@@ -1248,7 +1249,7 @@ describe("worker server", () => {
     await core.scanAndDrainQueue(sessionId);
     expect(processDiaryItem).not.toHaveBeenCalled();
 
-    nowEpoch = 200;
+    nowEpoch = DREAM_READY_EPOCH + 100;
     const dueTurnId = createTurn(db, sessionId, 2);
     queueTurnStop(db, sessionId, dueTurnId, 200);
     await core.scanAndDrainQueue(sessionId);
@@ -1271,7 +1272,7 @@ describe("worker server", () => {
     const stateStore = createDiaryStateStore(db);
 
     stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 90 });
-    const firstTerminalAttempt = stateStore.claimNextDiaryItem(90)!;
+    const firstTerminalAttempt = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
     stateStore.recordDreamFailure({
       date: "2026-07-09",
       queueSeq: firstTerminalAttempt.seq,
@@ -1279,7 +1280,9 @@ describe("worker server", () => {
       failedAtEpoch: 81,
       outcome: "permanent",
     });
-    const secondTerminalAttempt = stateStore.claimNextDiaryItem(91)!;
+    const secondTerminalAttempt = stateStore.claimNextDiaryItem(
+      DREAM_READY_EPOCH + 10,
+    )!;
     stateStore.recordDreamFailure({
       date: "2026-07-09",
       queueSeq: secondTerminalAttempt.seq,
@@ -1287,7 +1290,9 @@ describe("worker server", () => {
       failedAtEpoch: 91,
       outcome: "permanent",
     });
-    const thirdTerminalAttempt = stateStore.claimNextDiaryItem(101)!;
+    const thirdTerminalAttempt = stateStore.claimNextDiaryItem(
+      DREAM_READY_EPOCH + 20,
+    )!;
     stateStore.recordDreamFailure({
       date: "2026-07-09",
       queueSeq: thirdTerminalAttempt.seq,
@@ -1297,7 +1302,7 @@ describe("worker server", () => {
     });
 
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const settledItem = stateStore.claimNextDiaryItem(100)!;
+    const settledItem = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
     stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: settledItem.seq,
@@ -3551,7 +3556,7 @@ describe("worker server", () => {
     initializeSchema(runtimeDb);
     const stateStore = createDiaryStateStore(runtimeDb);
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
-    const first = stateStore.claimNextDiaryItem(1)!;
+    const first = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!;
     stateStore.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: first.seq,
@@ -3559,7 +3564,7 @@ describe("worker server", () => {
       failedAtEpoch: 1,
       outcome: "permanent",
     });
-    const second = stateStore.claimNextDiaryItem(11)!;
+    const second = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH + 10)!;
     stateStore.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: second.seq,
@@ -3567,7 +3572,7 @@ describe("worker server", () => {
       failedAtEpoch: 11,
       outcome: "permanent",
     });
-    const third = stateStore.claimNextDiaryItem(21)!;
+    const third = stateStore.claimNextDiaryItem(DREAM_READY_EPOCH + 20)!;
     stateStore.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: third.seq,

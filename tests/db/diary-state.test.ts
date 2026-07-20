@@ -10,6 +10,42 @@ import {
 import { initializeSchema } from "../../src/db/schema";
 import { DREAM_RETRY_BACKOFF_MS } from "../../src/shared/config";
 
+const CONTENT_DAY = "2026-07-10";
+// Asia/Shanghai content-day 2026-07-10 with a 04:00 boundary is exactly
+// [2026-07-09T20:00:00Z, 2026-07-10T20:00:00Z).
+const CONTENT_DAY_START_EPOCH = Date.parse("2026-07-09T20:00:00Z") / 1_000;
+const CONTENT_DAY_END_EPOCH = Date.parse("2026-07-10T20:00:00Z") / 1_000;
+const READY_EPOCH = CONTENT_DAY_END_EPOCH + 86_400;
+
+function configureContentDayBoundary(db: Database): void {
+  db.query(
+    `INSERT INTO diary_state (key, value)
+     VALUES ('dream_timezone', 'Asia/Shanghai'), ('dream_hour', '4')`,
+  ).run();
+}
+
+function insertTurn(
+  db: Database,
+  promptNumber: number,
+  status: string,
+  createdAtEpoch: number,
+): void {
+  const session = db.query<{ id: number }, []>(
+    `INSERT INTO sessions (
+       content_session_id, project, created_at_epoch
+     ) VALUES ('diary-completeness', '/projects/diary', 1)
+     ON CONFLICT(content_session_id) DO UPDATE SET
+       project = excluded.project
+     RETURNING id`,
+  ).get();
+  if (!session) throw new Error("Failed to create diary completeness session");
+  db.query(
+    `INSERT INTO turns (
+       session_id, prompt_number, status, created_at_epoch
+     ) VALUES (?, ?, ?, ?)`,
+  ).run(session.id, promptNumber, status, createdAtEpoch);
+}
+
 describe("DiaryStateStore dream queue", () => {
   let db: Database;
 
@@ -87,15 +123,15 @@ describe("DiaryStateStore dream queue", () => {
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 101 });
 
-    expect(store.claimNextDiaryItem(200)).toEqual({
+    expect(store.claimNextDiaryItem(READY_EPOCH)).toEqual({
       seq: 1,
       kind: "diary",
       targetId: 20260710,
       sessionDbId: 0,
-      claimedAtEpoch: 200,
+      claimedAtEpoch: READY_EPOCH,
       enqueuedAtEpoch: 100,
     });
-    expect(store.claimNextDiaryItem(200)).toBeNull();
+    expect(store.claimNextDiaryItem(READY_EPOCH)).toBeNull();
   });
 
   test("persists only dream scheduling state", () => {
@@ -114,13 +150,67 @@ describe("DiaryStateStore dream queue", () => {
     });
   });
 
+  test("withholds a diary day until its content-day boundary has ended", () => {
+    configureContentDayBoundary(db);
+    const store = createDiaryStateStore(db);
+    store.enqueueDay({ date: CONTENT_DAY, enqueuedAtEpoch: 100 });
+
+    expect(store.hasReadyDiaryItem(CONTENT_DAY_END_EPOCH - 1)).toBe(false);
+    expect(store.claimNextDiaryItem(CONTENT_DAY_END_EPOCH - 1)).toBeNull();
+    expect(store.hasReadyDiaryItem(CONTENT_DAY_END_EPOCH)).toBe(true);
+  });
+
+  test.each(["active", "provisional"])(
+    "withholds an ended content-day while a %s turn is non-finalized",
+    (status) => {
+      configureContentDayBoundary(db);
+      const store = createDiaryStateStore(db);
+      store.enqueueDay({ date: CONTENT_DAY, enqueuedAtEpoch: 100 });
+      insertTurn(db, 1, status, CONTENT_DAY_START_EPOCH);
+
+      expect(store.hasReadyDiaryItem(CONTENT_DAY_END_EPOCH)).toBe(false);
+      expect(store.claimNextDiaryItem(CONTENT_DAY_END_EPOCH)).toBeNull();
+    },
+  );
+
+  test("claims an ended content-day once all of its turns are finalized", () => {
+    configureContentDayBoundary(db);
+    const store = createDiaryStateStore(db);
+    store.enqueueDay({ date: CONTENT_DAY, enqueuedAtEpoch: 100 });
+    insertTurn(db, 1, "active", CONTENT_DAY_END_EPOCH - 1);
+
+    expect(store.claimNextDiaryItem(CONTENT_DAY_END_EPOCH)).toBeNull();
+    db.query("UPDATE turns SET status = 'extracted'").run();
+
+    expect(store.hasReadyDiaryItem(CONTENT_DAY_END_EPOCH)).toBe(true);
+    expect(store.claimNextDiaryItem(CONTENT_DAY_END_EPOCH)?.targetId).toBe(
+      20260710,
+    );
+  });
+
+  test("does not block an ended day on extracted, skipped, or next-day turns", () => {
+    configureContentDayBoundary(db);
+    const store = createDiaryStateStore(db);
+    store.enqueueDay({ date: CONTENT_DAY, enqueuedAtEpoch: 100 });
+    insertTurn(db, 1, "extracted", CONTENT_DAY_START_EPOCH);
+    insertTurn(db, 2, "skipped", CONTENT_DAY_END_EPOCH - 1);
+    // The upper bound is exclusive: this active turn belongs to the next
+    // content-day and must not block 2026-07-10.
+    insertTurn(db, 3, "active", CONTENT_DAY_END_EPOCH);
+
+    expect(store.hasReadyDiaryItem(CONTENT_DAY_END_EPOCH)).toBe(true);
+    expect(store.claimNextDiaryItem(CONTENT_DAY_END_EPOCH)?.targetId).toBe(
+      20260710,
+    );
+  });
+
   test("counts transient failures under one cap and honors the minimal backoff floor", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
     const backoffSec = Math.ceil(DREAM_RETRY_BACKOFF_MS / 1_000);
 
     for (let attempt = 1; attempt <= DREAM_MAX_AUTO_ATTEMPTS; attempt += 1) {
-      const failedAtEpoch = attempt * 100;
+      const failedAtEpoch = READY_EPOCH + attempt * 100;
       const item = store.claimNextDiaryItem(failedAtEpoch)!;
       store.recordDreamFailure({
         date: "2026-07-10",
@@ -165,7 +255,7 @@ describe("DiaryStateStore dream queue", () => {
       "transient",
       "transient",
     ].entries()) {
-      const failedAtEpoch = 100 + index * 20;
+      const failedAtEpoch = READY_EPOCH + 100 + index * 20;
       const item = store.claimNextDiaryItem(failedAtEpoch)!;
       store.recordDreamFailure({
         date: "2026-07-10",
@@ -192,7 +282,7 @@ describe("DiaryStateStore dream queue", () => {
       "transient",
       "permanent",
     ].entries()) {
-      const failedAtEpoch = 100 + index * 20;
+      const failedAtEpoch = READY_EPOCH + 100 + index * 20;
       const item = store.claimNextDiaryItem(failedAtEpoch)!;
       store.recordDreamFailure({
         date: "2026-07-10",
@@ -215,7 +305,7 @@ describe("DiaryStateStore dream queue", () => {
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
 
     for (let shutdown = 0; shutdown < DREAM_MAX_AUTO_ATTEMPTS + 2; shutdown += 1) {
-      const failedAtEpoch = 100 + shutdown;
+      const failedAtEpoch = READY_EPOCH + 100 + shutdown;
       const item = store.claimNextDiaryItem(failedAtEpoch)!;
       store.recordDreamFailure({
         date: "2026-07-10",
@@ -237,12 +327,12 @@ describe("DiaryStateStore dream queue", () => {
   test("clears disposition when a retry cycle is reset or settled", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const first = store.claimNextDiaryItem(100)!;
+    const first = store.claimNextDiaryItem(READY_EPOCH)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: first.seq,
       error: "deterministic failure",
-      failedAtEpoch: 100,
+      failedAtEpoch: READY_EPOCH,
       outcome: "permanent",
     });
     expect(store.getDayState("2026-07-10")?.retryDisposition).toBe("permanent");
@@ -254,15 +344,15 @@ describe("DiaryStateStore dream queue", () => {
       retryDisposition: null,
     });
 
-    const second = store.claimNextDiaryItem(110)!;
+    const second = store.claimNextDiaryItem(READY_EPOCH + 10)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: second.seq,
       error: "transient failure",
-      failedAtEpoch: 110,
+      failedAtEpoch: READY_EPOCH + 10,
       outcome: "transient",
     });
-    const third = store.claimNextDiaryItem(120)!;
+    const third = store.claimNextDiaryItem(READY_EPOCH + 20)!;
     store.settleDreamDay({
       date: "2026-07-10",
       queueSeq: third.seq,
@@ -280,7 +370,7 @@ describe("DiaryStateStore dream queue", () => {
   test("settles a dream date and acknowledges its queue item", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = store.claimNextDiaryItem(200)!;
+    const claimed = store.claimNextDiaryItem(READY_EPOCH)!;
     store.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
@@ -309,7 +399,7 @@ describe("DiaryStateStore dream queue", () => {
       ["2026-07-09", "permanent"],
     ] as const) {
       for (let attempt = 0; attempt < DREAM_MAX_AUTO_ATTEMPTS; attempt += 1) {
-        const failedAtEpoch = 100 + attempt * 20;
+        const failedAtEpoch = READY_EPOCH + 100 + attempt * 20;
         const item = store.claimNextDiaryItem(failedAtEpoch)!;
         expect(item.targetId).toBe(Number(date.replaceAll("-", "")));
         store.recordDreamFailure({
@@ -322,7 +412,7 @@ describe("DiaryStateStore dream queue", () => {
       }
     }
 
-    const successful = store.claimNextDiaryItem(1_000)!;
+    const successful = store.claimNextDiaryItem(READY_EPOCH + 1_000)!;
     expect(successful.targetId).toBe(20260710);
     store.settleDreamDay({
       date: "2026-07-10",
@@ -352,7 +442,7 @@ describe("DiaryStateStore dream queue", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-08", enqueuedAtEpoch: 100 });
     for (let attempt = 0; attempt < DREAM_MAX_AUTO_ATTEMPTS; attempt += 1) {
-      const failedAtEpoch = 100 + attempt * 20;
+      const failedAtEpoch = READY_EPOCH + 100 + attempt * 20;
       const item = store.claimNextDiaryItem(failedAtEpoch)!;
       store.recordDreamFailure({
         date: "2026-07-08",
@@ -365,7 +455,7 @@ describe("DiaryStateStore dream queue", () => {
 
     for (const date of ["2026-07-09", "2026-07-10"]) {
       store.enqueueDay({ date, enqueuedAtEpoch: 500 });
-      const item = store.claimNextDiaryItem(500)!;
+      const item = store.claimNextDiaryItem(READY_EPOCH + 500)!;
       store.settleDreamDay({
         date,
         queueSeq: item.seq,
@@ -422,7 +512,7 @@ describe("DiaryStateStore dream queue", () => {
   test("demotes an explicitly stale earlier date to terminal and never resurrects it", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-01", enqueuedAtEpoch: 100 });
-    const claimed = store.claimNextDiaryItem(100)!;
+    const claimed = store.claimNextDiaryItem(READY_EPOCH)!;
     store.settleDreamDay({
       date: "2026-07-01",
       queueSeq: claimed.seq,
@@ -457,12 +547,12 @@ describe("DiaryStateStore dream queue", () => {
   test("does not reconcile an unsettled failure for the committed marker date", () => {
     const store = createDiaryStateStore(db);
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = store.claimNextDiaryItem(100)!;
+    const claimed = store.claimNextDiaryItem(READY_EPOCH)!;
     store.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: claimed.seq,
       error: "agent timed out after commit",
-      failedAtEpoch: 200,
+      failedAtEpoch: READY_EPOCH + 100,
       outcome: "transient",
     });
 
@@ -488,7 +578,9 @@ describe("DiaryStateStore dream queue", () => {
       enqueuedAtEpoch: 100,
     });
     store.enqueueDay({ date: "2026-11-01", enqueuedAtEpoch: 100 });
-    const claimed = store.claimNextDiaryItem(100)!;
+    const claimed = store.claimNextDiaryItem(
+      Date.parse("2026-11-02T10:00:00Z") / 1_000,
+    )!;
     store.settleDreamDay({
       date: "2026-11-01",
       queueSeq: claimed.seq,
@@ -517,7 +609,9 @@ describe("DiaryStateStore dream queue", () => {
       enqueuedAtEpoch: 100,
     });
     store.enqueueDay({ date: "2026-07-15", enqueuedAtEpoch: 100 });
-    const claimed = store.claimNextDiaryItem(100)!;
+    const claimed = store.claimNextDiaryItem(
+      Date.parse("2026-07-16T20:00:00Z") / 1_000,
+    )!;
     store.settleDreamDay({
       date: "2026-07-15",
       queueSeq: claimed.seq,

@@ -89,22 +89,6 @@ describe("runHookCommand", () => {
         updatedAtEpoch: null,
         completedAtEpoch: null,
       });
-      db.query(
-        `INSERT INTO turns (
-          session_id,
-          prompt_number,
-          status,
-          user_prompt,
-          assistant_response,
-          created_at_epoch
-        ) VALUES (?, 1, 'active', ?, ?, ?)`,
-      ).run(
-        session.id,
-        "Yesterday through the production handler factory",
-        "Queue this material for the diary",
-        Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
-      );
-
       await new DreamMemoryStore(dataRoot).commitNight({
         date: "2026-07-10",
         userProfile: "## 身份与背景\n## 专长与判断力\n## 品味与兴趣\n## 沟通风格\n## 协作偏好\n- 生产 wiring 中的用户画像 [S1/T1]\n",
@@ -129,6 +113,23 @@ describe("runHookCommand", () => {
         remoteAttemptSucceeded: false,
       });
       diaryStateStore.markDayStale("2026-07-10");
+      // Model an active turn arriving after the prior dream settled. Claiming
+      // a day that already contains this non-finalized turn is now forbidden.
+      db.query(
+        `INSERT INTO turns (
+          session_id,
+          prompt_number,
+          status,
+          user_prompt,
+          assistant_response,
+          created_at_epoch
+        ) VALUES (?, 1, 'active', ?, ?, ?)`,
+      ).run(
+        session.id,
+        "Yesterday through the production handler factory",
+        "Queue this material for the diary",
+        Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
+      );
       const fetchImpl = mock(async () => new Response(null, { status: 200 }));
       const handlers = createDefaultHookHandlers({
         db,

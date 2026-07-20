@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrsx373h" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsxp4wr" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -418,12 +418,13 @@ var DIARY_QUEUE_SELECT = `
     q.target_id AS targetId,
     q.session_db_id AS sessionDbId,
     q.claimed_at_epoch AS claimedAtEpoch,
-    q.enqueued_at_epoch AS enqueuedAtEpoch
+    q.enqueued_at_epoch AS enqueuedAtEpoch,
+    d.date
   FROM pending_queue q
   JOIN diary_day_state d
     ON CAST(REPLACE(d.date, '-', '') AS INTEGER) = q.target_id
 `;
-function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+function readDreamCalendarBoundary(db) {
   const timeZone = db.query(
     "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
   ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
@@ -432,6 +433,43 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
       "SELECT value FROM diary_state WHERE key = 'dream_hour'"
     ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
   );
+  return { timeZone, boundaryHour };
+}
+function findReadyDiaryItem(db, nowEpoch) {
+  const candidates = db.query(
+    `${DIARY_QUEUE_SELECT}
+     WHERE q.kind = 'diary'
+       AND q.claimed_at_epoch IS NULL
+       AND d.terminal = 0
+       AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
+     ORDER BY q.seq ASC`
+  ).all(nowEpoch);
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
+  const isComplete = db.query(
+    `SELECT 1 AS one
+     WHERE ? >= ?
+       AND NOT EXISTS (
+         SELECT 1
+         FROM turns t
+         WHERE t.created_at_epoch >= ?
+           AND t.created_at_epoch < ?
+           AND t.status IN ('active','provisional')
+       )`
+  );
+  for (const candidate of candidates) {
+    const { startEpoch, endEpoch } = calendarDayBounds(
+      candidate.date,
+      timeZone,
+      boundaryHour
+    );
+    if (isComplete.get(nowEpoch, endEpoch, startEpoch, endEpoch)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
   const date7 = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
   db.query(
     `UPDATE diary_day_state
@@ -468,15 +506,7 @@ function createDiaryStateStore(db) {
     },
     claimNextDiaryItem(claimedAtEpoch) {
       return runWriteTransaction(db, () => {
-        const row = db.query(
-          `${DIARY_QUEUE_SELECT}
-             WHERE q.kind = 'diary'
-               AND q.claimed_at_epoch IS NULL
-               AND d.terminal = 0
-               AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-             ORDER BY q.seq ASC
-             LIMIT 1`
-        ).get(claimedAtEpoch);
+        const row = findReadyDiaryItem(db, claimedAtEpoch);
         if (!row) return null;
         const result = db.query(
           `UPDATE pending_queue
@@ -486,18 +516,12 @@ function createDiaryStateStore(db) {
         if (result.changes !== 1) {
           throw new Error(`unexpected claim race on dream queue seq=${row.seq}`);
         }
-        return { ...row, claimedAtEpoch };
+        const { date: _date2, ...item } = row;
+        return { ...item, claimedAtEpoch };
       });
     },
     hasReadyDiaryItem(nowEpoch) {
-      return db.query(
-        `${DIARY_QUEUE_SELECT}
-           WHERE q.kind = 'diary'
-             AND q.claimed_at_epoch IS NULL
-             AND d.terminal = 0
-             AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-           LIMIT 1`
-      ).get(nowEpoch) !== null;
+      return findReadyDiaryItem(db, nowEpoch) !== null;
     },
     getDayState(date7) {
       const row = db.query(

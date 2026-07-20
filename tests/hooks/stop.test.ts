@@ -152,16 +152,12 @@ describe("handleStopHook", () => {
 
   test("marks a settled diary day stale only when Stop changes the assistant response", async () => {
     const createdAtEpoch = Date.parse("2026-07-10T04:00:00Z") / 1_000;
-    db.query(
-      `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
-      ) VALUES (?, 1, 'active', 'Pending work', 'Original answer', ?)`,
-    ).run(sessionId, createdAtEpoch);
-
     const stateStore = createDiaryStateStore(db);
     stateStore.initializeBootstrap("2026-07-11");
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    const claimed = stateStore.claimNextDiaryItem(200)!;
+    const claimed = stateStore.claimNextDiaryItem(
+      Date.parse("2026-07-11T00:00:00Z") / 1_000,
+    )!;
     stateStore.settleDreamDay({
       date: "2026-07-10",
       queueSeq: claimed.seq,
@@ -169,6 +165,14 @@ describe("handleStopHook", () => {
       settledAtEpoch: 250,
       remoteAttemptSucceeded: false,
     });
+
+    // Insert directly after settlement to model a turn arriving in the
+    // watermark race without invoking the normal invalidation write path.
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Pending work', 'Original answer', ?)`,
+    ).run(sessionId, createdAtEpoch);
 
     const handler = createStopHandler({ db, now: () => 500 });
     await handler(createInput({ lastAssistantMessage: "Original answer" }));
