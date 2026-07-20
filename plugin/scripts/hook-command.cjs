@@ -2711,7 +2711,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrsxp4wr" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsxqnbc" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

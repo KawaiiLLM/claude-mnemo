@@ -78,7 +78,7 @@ export const DREAM_CURATE_PROMPT = `# Dream agent：单趟日记与记忆整理
 
 - extracted turn 通常先看摘要；未提取 turn 用 recall 拉 prompt＋response；skipped response 低信任，以 prompt 为准。材料里每个字段已被截到约 200 token，签名式原话很可能被截断——要逐字引用或看跨日上下文时，用 recall/timeline/read_doc/Read 回取原文，别照抄截断片段。
 - 日记是 durable 的索引日志，不是热记忆：用 agent 第一人称，按项目组织当天真正值得记的事（里程碑、决策、纠正、印象深刻的交流；跳过例行往返），每条保留真实 [S/T] 指针。库、算法、接口、调试往返等工程细节可以且只应该留在日记，不要写入画像或经历。
-- 更新 diary/INDEX.md 为 recent-first 目录，保留既有日期并对当天做幂等 upsert。
+- 更新 diary/INDEX.md 为 recent-first 目录，保留既有日期并对当天做幂等 upsert；每条索引项的摘要控制在 100 字以内——它会被注入未来会话作为「近期大局」的模糊印象，只写当天最值得记的一两点脉络（保留项目名与版本号等关键词），工程细节与原文留在当天日记正文、不在索引里展开。
 - 这是按日期 upsert：同一天因迟到 turn 重跑时，替换该日 diary、索引项与记忆中的当日贡献，不得追加第二份同日贡献；其他日期的记忆保持原样。
 
 ## 人味记忆的 curate 判据
