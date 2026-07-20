@@ -35,7 +35,7 @@ __export(hook_command_exports, {
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
-var import_node_fs6 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var import_bun_sqlite2 = require("bun:sqlite");
 
 // src/shared/hook-constants.ts
@@ -107,9 +107,6 @@ function syncSleep(ms) {
   const wakeSignal = new Int32Array(new SharedArrayBuffer(4));
   Atomics.wait(wakeSignal, 0, 0, ms);
 }
-function genericWriteBackoffMs(attempt) {
-  return Math.min(25, 5 * (attempt + 1));
-}
 function hookWriteBackoffMs(attempt) {
   return Math.min(100, 25 * 2 ** attempt);
 }
@@ -139,20 +136,6 @@ function isSqliteBusy(err) {
   }
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   return /\bSQLITE_BUSY(?:_SNAPSHOT)?\b/.test(message) || /\bdatabase is locked\b/i.test(message) || /\bdatabase table is locked\b/i.test(message);
-}
-function runWriteTransaction(db, fn, attempts = 3) {
-  const txn = db.transaction(fn);
-  const maxAttempts = Math.max(1, Math.floor(attempts));
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return txn.immediate();
-    } catch (err) {
-      if (attempt >= maxAttempts - 1 || !isSqliteBusy(err)) {
-        throw err;
-      }
-      syncSleep(genericWriteBackoffMs(attempt));
-    }
-  }
 }
 function runHookWriteTransaction(db, fn, options = {}) {
   const txn = db.transaction(fn);
@@ -186,624 +169,6 @@ function runHookWriteTransaction(db, fn, options = {}) {
       sleep2(delayMs);
     }
   }
-}
-
-// src/diary/calendar.ts
-var dateFormatters = /* @__PURE__ */ new Map();
-var timeFormatters = /* @__PURE__ */ new Map();
-function dateFormatter(timeZone) {
-  let formatter = dateFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-CA", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-    dateFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-function timeFormatter(timeZone) {
-  let formatter = timeFormatters.get(timeZone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-GB", {
-      timeZone,
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23"
-    });
-    timeFormatters.set(timeZone, formatter);
-  }
-  return formatter;
-}
-function partNumber(parts, type) {
-  const value = parts.find((part) => part.type === type)?.value;
-  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
-  return Number.parseInt(value, 10);
-}
-function assertCalendarDate(date) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    throw new Error(`Invalid calendar date: ${date}`);
-  }
-}
-function calendarDateAt(epochSeconds, timeZone) {
-  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
-  const year = String(partNumber(parts, "year")).padStart(4, "0");
-  const month = String(partNumber(parts, "month")).padStart(2, "0");
-  const day = String(partNumber(parts, "day")).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function contentDateAt(epochSeconds, timeZone, boundaryHour) {
-  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
-}
-function addCalendarDays(date, days) {
-  assertCalendarDate(date);
-  const value = /* @__PURE__ */ new Date(`${date}T00:00:00Z`);
-  value.setUTCDate(value.getUTCDate() + days);
-  return value.toISOString().slice(0, 10);
-}
-function calendarDayStartEpoch(date, timeZone) {
-  assertCalendarDate(date);
-  const utcMidnight = Date.parse(`${date}T00:00:00Z`) / 1e3;
-  let low = utcMidnight - 2 * 86400;
-  let high = utcMidnight + 2 * 86400;
-  while (low < high) {
-    const middle = Math.floor((low + high) / 2);
-    if (calendarDateAt(middle, timeZone) < date) {
-      low = middle + 1;
-    } else {
-      high = middle;
-    }
-  }
-  if (calendarDateAt(low, timeZone) !== date) {
-    throw new Error(`Calendar date does not exist in ${timeZone}: ${date}`);
-  }
-  return low;
-}
-function calendarDayBounds(date, timeZone, boundaryHour = 0) {
-  const shift = boundaryHour * 3600;
-  return {
-    startEpoch: calendarDayStartEpoch(date, timeZone) + shift,
-    endEpoch: calendarDayStartEpoch(addCalendarDays(date, 1), timeZone) + shift
-  };
-}
-function dreamTriggerWindow(input) {
-  const today = calendarDateAt(input.nowEpoch, input.timeZone);
-  const parts = timeFormatter(input.timeZone).formatToParts(
-    input.nowEpoch * 1e3
-  );
-  const hour = partNumber(parts, "hour");
-  return {
-    today,
-    yesterday: addCalendarDays(today, -1),
-    hasPassedTrigger: hour >= input.triggerHour
-  };
-}
-
-// src/shared/config.ts
-var import_node_fs2 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path3 = require("node:path");
-var KNOWN_DREAM_AGENT_MODELS = [
-  "opus",
-  "sonnet",
-  "haiku",
-  "claude-opus-4-8",
-  "claude-opus-4-6",
-  "claude-opus-4-5",
-  "claude-sonnet-5",
-  "claude-sonnet-4-6",
-  "claude-sonnet-4-5",
-  "claude-haiku-4-5"
-];
-var DEFAULT_DREAM_AGENT_MODEL = "opus";
-var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-var DREAM_RETRY_BACKOFF_MS = 1e4;
-var DEFAULT_DREAM_AGENT_HOUR = 4;
-var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
-var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-var DEFAULT_STALL_THRESHOLD_MS = 6e4;
-var DEFAULT_CONFIG = {
-  mergeThresholdChars: 1e3,
-  maxQueuedBatches: 3,
-  keepaliveLeadMs: 6e4,
-  cacheMode: "auto",
-  maxMiniTurnChars: 24e3,
-  maxFlushAttempts: 3,
-  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
-  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
-  compactContextRatio: 0.5,
-  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-  dreamAgentBacklogLimit: 1
-};
-var MIN_MINI_TURN_CHARS = 10240;
-var MIN_FLUSH_ATTEMPTS = 1;
-var MIN_COMPACT_CONTEXT_RATIO = 0.1;
-var MAX_COMPACT_CONTEXT_RATIO = 0.95;
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function clampNumber(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function resolveDreamAgentModel(value, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
-  );
-  return DEFAULT_DREAM_AGENT_MODEL;
-}
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
-  return {
-    mergeThresholdChars: config.mergeThresholdChars,
-    maxQueuedBatches: config.maxQueuedBatches,
-    keepaliveLeadMs: config.keepaliveLeadMs,
-    cacheMode: config.cacheMode,
-    maxMiniTurnChars: clampNumber(
-      config.maxMiniTurnChars,
-      MIN_MINI_TURN_CHARS,
-      Number.MAX_SAFE_INTEGER,
-      DEFAULT_CONFIG.maxMiniTurnChars
-    ),
-    maxFlushAttempts: clampNumber(
-      config.maxFlushAttempts,
-      MIN_FLUSH_ATTEMPTS,
-      Number.MAX_SAFE_INTEGER,
-      DEFAULT_CONFIG.maxFlushAttempts
-    ),
-    sessionEndTailTimeoutMs: clampInteger(
-      config.sessionEndTailTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.sessionEndTailTimeoutMs
-    ),
-    hardExitTimeoutMs: clampInteger(
-      config.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    stallThresholdMs: clampInteger(
-      config.stallThresholdMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.stallThresholdMs
-    ),
-    compactContextRatio: clampNumber(
-      config.compactContextRatio,
-      MIN_COMPACT_CONTEXT_RATIO,
-      MAX_COMPACT_CONTEXT_RATIO,
-      DEFAULT_CONFIG.compactContextRatio
-    ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
-    dreamAgentTimeoutMs: clampInteger(
-      config.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
-  }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-
-// src/db/diary-state.ts
-var DREAM_MAX_AUTO_ATTEMPTS = 3;
-var DIARY_QUEUE_SELECT = `
-  SELECT
-    q.seq,
-    q.kind,
-    q.target_id AS targetId,
-    q.session_db_id AS sessionDbId,
-    q.claimed_at_epoch AS claimedAtEpoch,
-    q.enqueued_at_epoch AS enqueuedAtEpoch,
-    d.date
-  FROM pending_queue q
-  JOIN diary_day_state d
-    ON CAST(REPLACE(d.date, '-', '') AS INTEGER) = q.target_id
-`;
-function readDreamCalendarBoundary(db) {
-  const timeZone = db.query(
-    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
-  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
-  const boundaryHour = Number(
-    db.query(
-      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
-    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
-  );
-  return { timeZone, boundaryHour };
-}
-function findReadyDiaryItem(db, nowEpoch) {
-  const candidates = db.query(
-    `${DIARY_QUEUE_SELECT}
-     WHERE q.kind = 'diary'
-       AND q.claimed_at_epoch IS NULL
-       AND d.terminal = 0
-       AND (d.next_attempt_epoch IS NULL OR d.next_attempt_epoch <= ?)
-     ORDER BY q.seq ASC`
-  ).all(nowEpoch);
-  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
-  const isComplete = db.query(
-    `SELECT 1 AS one
-     WHERE ? >= ?
-       AND NOT EXISTS (
-         SELECT 1
-         FROM turns t
-         WHERE t.created_at_epoch >= ?
-           AND t.created_at_epoch < ?
-           AND t.status IN ('active','provisional')
-       )`
-  );
-  for (const candidate of candidates) {
-    const { startEpoch, endEpoch } = calendarDayBounds(
-      candidate.date,
-      timeZone,
-      boundaryHour
-    );
-    if (isComplete.get(nowEpoch, endEpoch, startEpoch, endEpoch)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
-  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
-  const date = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
-  db.query(
-    `UPDATE diary_day_state
-     SET needs_regen = 1,
-         attempt_count = 0,
-         next_attempt_epoch = NULL,
-         retry_disposition = NULL,
-         last_error = NULL
-     WHERE date = ?
-       AND settled_at_epoch IS NOT NULL
-       AND date >= COALESCE(
-         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
-         '9999-12-31'
-       )`
-  ).run(date);
-}
-function createDiaryStateStore(db) {
-  return {
-    enqueueDay(input) {
-      const targetId = Number(input.date.replaceAll("-", ""));
-      runWriteTransaction(db, () => {
-        db.query(
-          `INSERT INTO diary_day_state (date)
-           VALUES (?)
-           ON CONFLICT DO NOTHING`
-        ).run(input.date);
-        db.query(
-          `INSERT INTO pending_queue (
-             kind, target_id, session_db_id, enqueued_at_epoch
-           ) VALUES ('diary', ?, 0, ?)
-           ON CONFLICT DO NOTHING`
-        ).run(targetId, input.enqueuedAtEpoch);
-      });
-    },
-    claimNextDiaryItem(claimedAtEpoch) {
-      return runWriteTransaction(db, () => {
-        const row = findReadyDiaryItem(db, claimedAtEpoch);
-        if (!row) return null;
-        const result = db.query(
-          `UPDATE pending_queue
-           SET claimed_at_epoch = ?
-           WHERE seq = ? AND claimed_at_epoch IS NULL`
-        ).run(claimedAtEpoch, row.seq);
-        if (result.changes !== 1) {
-          throw new Error(`unexpected claim race on dream queue seq=${row.seq}`);
-        }
-        const { date: _date, ...item } = row;
-        return { ...item, claimedAtEpoch };
-      });
-    },
-    hasReadyDiaryItem(nowEpoch) {
-      return findReadyDiaryItem(db, nowEpoch) !== null;
-    },
-    getDayState(date) {
-      const row = db.query(
-        `SELECT
-           date,
-           watermark,
-           settled_at_epoch AS settledAtEpoch,
-           needs_regen AS needsRegen,
-           attempt_count AS attemptCount,
-           next_attempt_epoch AS nextAttemptEpoch,
-           terminal,
-           retry_disposition AS retryDisposition,
-           last_error AS lastError
-         FROM diary_day_state
-         WHERE date = ?`
-      ).get(date);
-      return row ? {
-        ...row,
-        needsRegen: row.needsRegen === 1,
-        terminal: row.terminal === 1
-      } : null;
-    },
-    recordDreamFailure(input) {
-      runWriteTransaction(db, () => {
-        if (input.outcome === "shutdown") {
-          db.query(
-            `UPDATE diary_day_state
-             SET needs_regen = 1,
-                 next_attempt_epoch = ?
-             WHERE date = ?`
-          ).run(input.failedAtEpoch, input.date);
-        } else {
-          const retryAtEpoch = input.failedAtEpoch + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1e3);
-          db.query(
-            `UPDATE diary_day_state
-             SET needs_regen = 1,
-                 attempt_count = attempt_count + 1,
-                 last_error = ?,
-                 retry_disposition = CASE
-                   WHEN retry_disposition = 'permanent' THEN 'permanent'
-                   WHEN ? = 'permanent' THEN 'permanent'
-                   ELSE ? END,
-                 terminal = CASE
-                   WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
-                 next_attempt_epoch = CASE
-                   WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END
-             WHERE date = ?`
-          ).run(
-            input.error,
-            input.outcome,
-            input.outcome,
-            DREAM_MAX_AUTO_ATTEMPTS,
-            DREAM_MAX_AUTO_ATTEMPTS,
-            retryAtEpoch,
-            input.date
-          );
-        }
-        db.query(
-          `UPDATE pending_queue
-           SET claimed_at_epoch = NULL
-           WHERE seq = ? AND kind = 'diary'`
-        ).run(input.queueSeq);
-      });
-    },
-    settleDreamDay(input) {
-      runWriteTransaction(db, () => {
-        db.query(
-          `UPDATE diary_day_state
-           SET watermark = ?,
-               settled_at_epoch = ?,
-               needs_regen = 0,
-               attempt_count = 0,
-               next_attempt_epoch = NULL,
-               terminal = 0,
-               retry_disposition = NULL,
-               last_error = NULL
-           WHERE date = ?`
-        ).run(input.watermark, input.settledAtEpoch, input.date);
-        db.query(
-          "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
-        ).run(input.queueSeq);
-        if (input.remoteAttemptSucceeded) {
-          const transientDates = db.query(
-            `SELECT date
-             FROM diary_day_state
-             WHERE date <> ?
-               AND terminal = 1
-               AND retry_disposition = 'transient'`
-          ).all(input.date);
-          for (const { date } of transientDates) {
-            db.query(
-              `UPDATE diary_day_state
-               SET needs_regen = 1,
-                   attempt_count = 0,
-                   next_attempt_epoch = NULL,
-                   terminal = 0,
-                   retry_disposition = NULL,
-                   last_error = NULL
-               WHERE date = ?`
-            ).run(date);
-            db.query(
-              `INSERT INTO pending_queue (
-                 kind, target_id, session_db_id, enqueued_at_epoch
-               ) VALUES ('diary', ?, 0, ?)
-               ON CONFLICT DO UPDATE SET claimed_at_epoch = NULL`
-            ).run(
-              Number(date.replaceAll("-", "")),
-              input.settledAtEpoch
-            );
-          }
-        }
-      });
-    },
-    acknowledgeDiaryItem(queueSeq) {
-      db.query(
-        "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
-      ).run(queueSeq);
-    },
-    hasQueuedDay(date) {
-      const targetId = Number(date.replaceAll("-", ""));
-      return db.query(
-        `SELECT 1 AS one
-         FROM pending_queue
-         WHERE kind = 'diary' AND target_id = ?
-         LIMIT 1`
-      ).get(targetId) !== null;
-    },
-    markDayStale(date) {
-      db.query(
-        `UPDATE diary_day_state
-         SET needs_regen = 1,
-             attempt_count = 0,
-             next_attempt_epoch = NULL,
-             terminal = 0,
-             retry_disposition = NULL,
-             last_error = NULL
-         WHERE date = ?`
-      ).run(date);
-    },
-    markDayStaleAndEnqueue(input) {
-      runWriteTransaction(db, () => {
-        this.markDayStale(input.date);
-        this.enqueueDay(input);
-      });
-    },
-    reconcileBacklog(input) {
-      if (!Number.isSafeInteger(input.maxDays) || input.maxDays < 1) {
-        throw new Error("Dream backlog maxDays must be a positive integer");
-      }
-      db.query(
-        `INSERT INTO diary_state (key, value) VALUES ('dream_timezone', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-      ).run(input.timeZone);
-      db.query(
-        `INSERT INTO diary_state (key, value) VALUES ('dream_hour', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-      ).run(String(input.boundaryHour ?? DEFAULT_DREAM_AGENT_HOUR));
-      const startDate = input.lastSuccessfulDate === null ? input.cutoverDate : addCalendarDays(input.lastSuccessfulDate, 1);
-      const dates = /* @__PURE__ */ new Set();
-      for (let date = startDate < input.cutoverDate ? input.cutoverDate : startDate; date < input.today; date = addCalendarDays(date, 1)) {
-        dates.add(date);
-      }
-      for (const row of db.query(
-        `SELECT date
-         FROM diary_day_state
-         WHERE needs_regen = 1
-           AND date >= ?
-           AND date < ?
-           AND (
-             settled_at_epoch IS NOT NULL
-             OR ? IS NULL
-             OR date <> ?
-           )`
-      ).all(
-        input.cutoverDate,
-        input.today,
-        input.lastSuccessfulDate,
-        input.lastSuccessfulDate
-      )) {
-        dates.add(row.date);
-      }
-      for (const row of db.query(
-        `SELECT date FROM diary_day_state
-         WHERE terminal = 1 AND date >= ? AND date < ?`
-      ).all(input.cutoverDate, input.today)) {
-        dates.delete(row.date);
-      }
-      const sorted = Array.from(dates).sort();
-      const keep = sorted.slice(-input.maxDays);
-      const terminalize = sorted.slice(0, sorted.length - keep.length);
-      return runWriteTransaction(db, () => {
-        for (const date of terminalize) {
-          db.query(
-            `INSERT INTO diary_day_state (
-               date, terminal, retry_disposition, next_attempt_epoch
-             )
-             VALUES (?, 1, 'permanent', NULL)
-             ON CONFLICT(date) DO UPDATE SET
-               terminal = 1,
-               retry_disposition = 'permanent',
-               next_attempt_epoch = NULL`
-          ).run(date);
-          db.query(
-            "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?"
-          ).run(Number(date.replaceAll("-", "")));
-        }
-        for (const date of keep) {
-          this.enqueueDay({ date, enqueuedAtEpoch: input.enqueuedAtEpoch });
-        }
-        return keep;
-      });
-    },
-    initializeBootstrap(today) {
-      const defaultCutoverDate = addCalendarDays(today, -14);
-      return runWriteTransaction(db, () => {
-        db.query(
-          `INSERT INTO diary_state (key, value)
-           VALUES ('cutover_date', ?)
-           ON CONFLICT DO NOTHING`
-        ).run(defaultCutoverDate);
-        const cutoverDate = db.query(
-          "SELECT value FROM diary_state WHERE key = 'cutover_date'"
-        ).get()?.value;
-        if (!cutoverDate) throw new Error("Dream cutover date was not initialized");
-        return { cutoverDate };
-      });
-    }
-  };
 }
 
 // src/db/search.ts
@@ -1351,14 +716,14 @@ function initializeDatabase(db) {
 
 // src/diary/file-store.ts
 var import_promises = require("node:fs/promises");
-var import_node_path4 = require("node:path");
+var import_node_path3 = require("node:path");
 var DiaryFileStore = class {
   constructor(dataRoot) {
     this.dataRoot = dataRoot;
   }
   dataRoot;
   async readIndex() {
-    const diaryRoot = (0, import_node_path4.join)(this.dataRoot, "diary");
+    const diaryRoot = (0, import_node_path3.join)(this.dataRoot, "diary");
     try {
       const rootMetadata = await (0, import_promises.lstat)(diaryRoot);
       if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
@@ -1367,7 +732,7 @@ var DiaryFileStore = class {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    const indexPath = (0, import_node_path4.join)(diaryRoot, "INDEX.md");
+    const indexPath = (0, import_node_path3.join)(diaryRoot, "INDEX.md");
     try {
       const indexMetadata = await (0, import_promises.lstat)(indexPath);
       if (indexMetadata.isSymbolicLink() || !indexMetadata.isFile()) {
@@ -1383,7 +748,7 @@ var DiaryFileStore = class {
 // src/diary/memory-store.ts
 var import_node_crypto = require("node:crypto");
 var import_promises2 = require("node:fs/promises");
-var import_node_path6 = require("node:path");
+var import_node_path5 = require("node:path");
 
 // src/shared/markdown-sections.ts
 var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
@@ -1447,8 +812,8 @@ function parseMarkdownSections(document) {
 }
 
 // src/shared/logger.ts
-var import_node_fs3 = require("node:fs");
-var import_node_path5 = require("node:path");
+var import_node_fs2 = require("node:fs");
+var import_node_path4 = require("node:path");
 
 // src/shared/error-sanitizer.ts
 var REDACTED = "[REDACTED]";
@@ -1581,11 +946,11 @@ function sanitizeLogValue(value, sensitiveEnv = process.env) {
 }
 
 // src/shared/logger.ts
-var LOG_PATH = (0, import_node_path5.join)(DATA_DIR, "claude-mnemo.log");
+var LOG_PATH = (0, import_node_path4.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
   if (!dirEnsured) {
-    (0, import_node_fs3.mkdirSync)(DATA_DIR, { recursive: true });
+    (0, import_node_fs2.mkdirSync)(DATA_DIR, { recursive: true });
     dirEnsured = true;
   }
 }
@@ -1599,7 +964,7 @@ function writeLog(level, component, message, context, sensitiveEnv = process.env
   });
   try {
     ensureLogDir();
-    (0, import_node_fs3.appendFileSync)(LOG_PATH, `${line}
+    (0, import_node_fs2.appendFileSync)(LOG_PATH, `${line}
 `);
   } catch {
     process.stderr.write(`${line}
@@ -1762,8 +1127,8 @@ function assertSafeId(id) {
   }
 }
 function isWithin(root, target) {
-  const pathFromRoot = (0, import_node_path6.relative)(root, target);
-  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path6.sep}`) && !pathFromRoot.startsWith(import_node_path6.sep);
+  const pathFromRoot = (0, import_node_path5.relative)(root, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path5.sep}`) && !pathFromRoot.startsWith(import_node_path5.sep);
 }
 var DreamMemoryStore = class {
   constructor(dataRoot, options = {}) {
@@ -1939,28 +1304,28 @@ var DreamMemoryStore = class {
     await this.faultInjector?.(point);
   }
   memoryRoot() {
-    return (0, import_node_path6.join)(this.dataRoot, "memory");
+    return (0, import_node_path5.join)(this.dataRoot, "memory");
   }
   memoryPath(filename) {
-    return (0, import_node_path6.join)(this.memoryRoot(), filename);
+    return (0, import_node_path5.join)(this.memoryRoot(), filename);
   }
   historyRoot() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "history");
+    return (0, import_node_path5.join)(this.memoryRoot(), "history");
   }
   transactionsRoot() {
-    return (0, import_node_path6.join)(this.memoryRoot(), ".transactions");
+    return (0, import_node_path5.join)(this.memoryRoot(), ".transactions");
   }
   successMarkerPath() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "last-successful.json");
+    return (0, import_node_path5.join)(this.memoryRoot(), "last-successful.json");
   }
   migrationStatePath() {
-    return (0, import_node_path6.join)(this.memoryRoot(), "migration-state.json");
+    return (0, import_node_path5.join)(this.memoryRoot(), "migration-state.json");
   }
   async assertWorkspaceRootsAreSafe(options = {}) {
     if (options.createDataRoot !== false) {
       await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
     }
-    for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path6.join)(this.dataRoot, "diary")]) {
+    for (const root of [this.dataRoot, this.memoryRoot(), (0, import_node_path5.join)(this.dataRoot, "diary")]) {
       try {
         const metadata = await (0, import_promises2.lstat)(root);
         if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -1972,8 +1337,8 @@ var DreamMemoryStore = class {
     }
   }
   async assertFileIsSafe(path2) {
-    const absoluteRoot = (0, import_node_path6.resolve)(this.dataRoot);
-    const absolutePath = (0, import_node_path6.resolve)(path2);
+    const absoluteRoot = (0, import_node_path5.resolve)(this.dataRoot);
+    const absolutePath = (0, import_node_path5.resolve)(path2);
     if (!isWithin(absoluteRoot, absolutePath)) {
       throw new Error(`Dream workspace path is outside data root: ${path2}`);
     }
@@ -2009,15 +1374,15 @@ var DreamMemoryStore = class {
     const createdAt = this.now().toISOString();
     const id = snapshotId(new Date(createdAt));
     const historyRoot = this.historyRoot();
-    const finalRoot = (0, import_node_path6.join)(historyRoot, id);
-    const temporaryRoot = (0, import_node_path6.join)(historyRoot, `.${id}.tmp`);
+    const finalRoot = (0, import_node_path5.join)(historyRoot, id);
+    const temporaryRoot = (0, import_node_path5.join)(historyRoot, `.${id}.tmp`);
     await (0, import_promises2.mkdir)(historyRoot, { recursive: true });
     await (0, import_promises2.mkdir)(temporaryRoot);
     try {
       const files = {};
       for (const filename of MEMORY_FILES) {
         const bytes = encoder.encode(documentForFilename(documents, filename));
-        await this.writeFileSynced((0, import_node_path6.join)(temporaryRoot, filename), bytes);
+        await this.writeFileSynced((0, import_node_path5.join)(temporaryRoot, filename), bytes);
         files[filename] = sha256(bytes);
       }
       const manifest = {
@@ -2028,7 +1393,7 @@ var DreamMemoryStore = class {
         files
       };
       await this.writeFileSynced(
-        (0, import_node_path6.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
+        (0, import_node_path5.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
@@ -2070,7 +1435,7 @@ var DreamMemoryStore = class {
   }
   async readSnapshotManifest(id) {
     assertSafeId(id);
-    const root = (0, import_node_path6.join)(this.historyRoot(), id);
+    const root = (0, import_node_path5.join)(this.historyRoot(), id);
     const metadata = await (0, import_promises2.lstat)(root);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
       throw new Error(`Memory snapshot is not a real directory: ${id}`);
@@ -2079,7 +1444,7 @@ var DreamMemoryStore = class {
     try {
       manifest = JSON.parse(
         decodeUtf8(
-          await (0, import_promises2.readFile)((0, import_node_path6.join)(root, SNAPSHOT_MANIFEST_FILE)),
+          await (0, import_promises2.readFile)((0, import_node_path5.join)(root, SNAPSHOT_MANIFEST_FILE)),
           `memory snapshot manifest ${id}`
         )
       );
@@ -2102,10 +1467,10 @@ var DreamMemoryStore = class {
   }
   async verifySnapshotWithoutRecovery(id) {
     const manifest = await this.readSnapshotManifest(id);
-    const root = (0, import_node_path6.join)(this.historyRoot(), id);
+    const root = (0, import_node_path5.join)(this.historyRoot(), id);
     const loaded = {};
     for (const filename of MEMORY_FILES) {
-      const path2 = (0, import_node_path6.join)(root, filename);
+      const path2 = (0, import_node_path5.join)(root, filename);
       const metadata = await (0, import_promises2.lstat)(path2);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new Error(`Invalid memory snapshot document: ${id}/${filename}`);
@@ -2144,7 +1509,7 @@ var DreamMemoryStore = class {
     }
     for (const snapshot of snapshots) {
       if (!keep.has(snapshot.id)) {
-        await (0, import_promises2.rm)((0, import_node_path6.join)(this.historyRoot(), snapshot.id), {
+        await (0, import_promises2.rm)((0, import_node_path5.join)(this.historyRoot(), snapshot.id), {
           recursive: true,
           force: true
         });
@@ -2155,32 +1520,32 @@ var DreamMemoryStore = class {
   async prepareTransaction(kind, date, documents) {
     if (date !== null) assertDiaryDate(date);
     const id = (0, import_node_crypto.randomUUID)();
-    const root = (0, import_node_path6.join)(this.transactionsRoot(), id);
-    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "backups"), { recursive: true });
-    await (0, import_promises2.mkdir)((0, import_node_path6.join)(root, "staged"), { recursive: true });
+    const root = (0, import_node_path5.join)(this.transactionsRoot(), id);
+    await (0, import_promises2.mkdir)((0, import_node_path5.join)(root, "backups"), { recursive: true });
+    await (0, import_promises2.mkdir)((0, import_node_path5.join)(root, "staged"), { recursive: true });
     const targets = [];
     try {
       for (const [relativePath, document] of Object.entries(documents)) {
         this.assertTransactionPath(relativePath);
-        const finalPath = (0, import_node_path6.join)(this.dataRoot, relativePath);
+        const finalPath = (0, import_node_path5.join)(this.dataRoot, relativePath);
         await this.assertFileIsSafe(finalPath);
         let existed = true;
         try {
           const bytes = await (0, import_promises2.readFile)(finalPath);
-          await this.writeFileSynced((0, import_node_path6.join)(root, "backups", relativePath), bytes);
+          await this.writeFileSynced((0, import_node_path5.join)(root, "backups", relativePath), bytes);
         } catch (error) {
           if (error.code !== "ENOENT") throw error;
           existed = false;
         }
         await this.writeFileSynced(
-          (0, import_node_path6.join)(root, "staged", relativePath),
+          (0, import_node_path5.join)(root, "staged", relativePath),
           encoder.encode(document)
         );
         targets.push({ path: relativePath, existed });
       }
       const manifest = { version: 1, id, kind, date, targets };
       await this.writeFileSynced(
-        (0, import_node_path6.join)(root, "manifest.json"),
+        (0, import_node_path5.join)(root, "manifest.json"),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
@@ -2193,23 +1558,23 @@ var DreamMemoryStore = class {
   }
   async publishTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
-      await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(finalPath), { recursive: true });
-      await (0, import_promises2.rename)((0, import_node_path6.join)(transaction.root, "staged", target.path), finalPath);
-      await this.syncDirectory((0, import_node_path6.dirname)(finalPath));
+      const finalPath = (0, import_node_path5.join)(this.dataRoot, target.path);
+      await (0, import_promises2.mkdir)((0, import_node_path5.dirname)(finalPath), { recursive: true });
+      await (0, import_promises2.rename)((0, import_node_path5.join)(transaction.root, "staged", target.path), finalPath);
+      await this.syncDirectory((0, import_node_path5.dirname)(finalPath));
     }
   }
   async rollbackTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path6.join)(this.dataRoot, target.path);
+      const finalPath = (0, import_node_path5.join)(this.dataRoot, target.path);
       if (target.existed) {
-        const backup = await (0, import_promises2.readFile)((0, import_node_path6.join)(transaction.root, "backups", target.path));
+        const backup = await (0, import_promises2.readFile)((0, import_node_path5.join)(transaction.root, "backups", target.path));
         await this.writeAtomically(finalPath, backup);
       } else {
         await (0, import_promises2.unlink)(finalPath).catch((error) => {
           if (error.code !== "ENOENT") throw error;
         });
-        await this.syncDirectory((0, import_node_path6.dirname)(finalPath)).catch(() => void 0);
+        await this.syncDirectory((0, import_node_path5.dirname)(finalPath)).catch(() => void 0);
       }
     }
     await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
@@ -2245,11 +1610,11 @@ var DreamMemoryStore = class {
       if (!entry.isDirectory() || entry.isSymbolicLink()) {
         throw new Error(`Invalid dream transaction entry: ${entry.name}`);
       }
-      const root = (0, import_node_path6.join)(this.transactionsRoot(), entry.name);
+      const root = (0, import_node_path5.join)(this.transactionsRoot(), entry.name);
       let manifest;
       try {
         manifest = JSON.parse(
-          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path6.join)(root, "manifest.json")), "dream transaction manifest")
+          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path5.join)(root, "manifest.json")), "dream transaction manifest")
         );
       } catch (error) {
         if (error.code === "ENOENT") {
@@ -2281,7 +1646,7 @@ var DreamMemoryStore = class {
     }
   }
   assertTransactionPath(path2) {
-    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path6.resolve)(this.dataRoot), (0, import_node_path6.resolve)(this.dataRoot, path2))) {
+    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path5.resolve)(this.dataRoot), (0, import_node_path5.resolve)(this.dataRoot, path2))) {
       throw new Error(`Invalid dream transaction path: ${path2}`);
     }
   }
@@ -2358,10 +1723,10 @@ var DreamMemoryStore = class {
     );
   }
   async loadLegacyCurrentPersona() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
     const currentBytes = await this.readLegacyFile(
-      (0, import_node_path6.join)(personaRoot, "CURRENT"),
+      (0, import_node_path5.join)(personaRoot, "CURRENT"),
       "persona CURRENT"
     );
     let current;
@@ -2375,15 +1740,15 @@ var DreamMemoryStore = class {
     if (!Number.isSafeInteger(current.generation) || current.generation < 1) {
       throw new LegacyPersonaUnavailableError("Invalid legacy persona CURRENT generation");
     }
-    const generationRoot = (0, import_node_path6.join)(
+    const generationRoot = (0, import_node_path5.join)(
       personaRoot,
       "generations",
       String(current.generation)
     );
     const [manifestBytes, profileBytes, experienceBytes] = await Promise.all([
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "manifest.json"), "generation manifest"),
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "user-profile.md"), "user profile"),
-      this.readLegacyFile((0, import_node_path6.join)(generationRoot, "experience.md"), "experience")
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "manifest.json"), "generation manifest"),
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "user-profile.md"), "user profile"),
+      this.readLegacyFile((0, import_node_path5.join)(generationRoot, "experience.md"), "experience")
     ]);
     if (manifestBytes.length !== currentBytes.length || !manifestBytes.every((byte, index) => byte === currentBytes[index])) {
       throw new LegacyPersonaUnavailableError(
@@ -2419,10 +1784,10 @@ var DreamMemoryStore = class {
     };
   }
   async retireLegacyPersonaLayout() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
-    await (0, import_promises2.rm)((0, import_node_path6.join)(personaRoot, "generations"), { recursive: true, force: true });
-    await (0, import_promises2.unlink)((0, import_node_path6.join)(personaRoot, "CURRENT")).catch((error) => {
+    await (0, import_promises2.rm)((0, import_node_path5.join)(personaRoot, "generations"), { recursive: true, force: true });
+    await (0, import_promises2.unlink)((0, import_node_path5.join)(personaRoot, "CURRENT")).catch((error) => {
       if (error.code !== "ENOENT") throw error;
     });
     if (await this.pathExists(personaRoot)) {
@@ -2430,7 +1795,7 @@ var DreamMemoryStore = class {
     }
   }
   async assertLegacyPersonaRootIsSafe() {
-    const personaRoot = (0, import_node_path6.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path5.join)(this.dataRoot, "persona");
     try {
       const metadata = await (0, import_promises2.lstat)(personaRoot);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -2469,7 +1834,7 @@ var DreamMemoryStore = class {
     }
   }
   async writeFileSynced(path2, bytes) {
-    await (0, import_promises2.mkdir)((0, import_node_path6.dirname)(path2), { recursive: true });
+    await (0, import_promises2.mkdir)((0, import_node_path5.dirname)(path2), { recursive: true });
     const file = await (0, import_promises2.open)(path2, "wx");
     try {
       await file.writeFile(bytes);
@@ -2480,10 +1845,10 @@ var DreamMemoryStore = class {
   }
   async writeAtomically(path2, bytes) {
     await this.assertFileIsSafe(path2);
-    const parent = (0, import_node_path6.dirname)(path2);
-    const temporary = (0, import_node_path6.join)(
+    const parent = (0, import_node_path5.dirname)(path2);
+    const temporary = (0, import_node_path5.join)(
       parent,
-      `.${(0, import_node_path6.basename)(path2)}.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`
+      `.${(0, import_node_path5.basename)(path2)}.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`
     );
     await (0, import_promises2.mkdir)(parent, { recursive: true });
     try {
@@ -2707,11 +2072,11 @@ function setSessionLineageStatus(db, sessionId, status) {
 
 // src/worker/client.ts
 var import_node_child_process = require("node:child_process");
-var import_node_fs4 = require("node:fs");
-var import_node_path7 = require("node:path");
+var import_node_fs3 = require("node:fs");
+var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrsxqnbc" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsycqmw" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -2771,17 +2136,17 @@ function resolvePluginRoot(env = process.env) {
   if (env.CLAUDE_PLUGIN_ROOT && env.CLAUDE_PLUGIN_ROOT.trim() !== "") {
     return env.CLAUDE_PLUGIN_ROOT;
   }
-  const currentDir = (0, import_node_path7.dirname)(__filename);
+  const currentDir = (0, import_node_path6.dirname)(__filename);
   if (currentDir.endsWith("/plugin/scripts") || currentDir.endsWith("\\plugin\\scripts")) {
-    return (0, import_node_path7.resolve)(currentDir, "..");
+    return (0, import_node_path6.resolve)(currentDir, "..");
   }
-  return (0, import_node_path7.resolve)(currentDir, "..", "..", "plugin");
+  return (0, import_node_path6.resolve)(currentDir, "..", "..", "plugin");
 }
 function resolveWorkerScriptPaths(env = process.env) {
   const pluginRoot = resolvePluginRoot(env);
   return {
-    bunRunnerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "bun-runner.js"),
-    workerPath: (0, import_node_path7.join)(pluginRoot, "scripts", "worker.cjs")
+    bunRunnerPath: (0, import_node_path6.join)(pluginRoot, "scripts", "bun-runner.js"),
+    workerPath: (0, import_node_path6.join)(pluginRoot, "scripts", "worker.cjs")
   };
 }
 async function readWorkerHealth(fetchImpl, timeoutMs) {
@@ -2815,12 +2180,12 @@ async function readWorkerHealth(fetchImpl, timeoutMs) {
 }
 function readWorkerPidFallback(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs3.existsSync;
   if (!existsSyncImpl(pidPath)) {
     return null;
   }
   try {
-    const pid = Number((0, import_node_fs4.readFileSync)(pidPath, "utf8").trim());
+    const pid = Number((0, import_node_fs3.readFileSync)(pidPath, "utf8").trim());
     if (Number.isInteger(pid) && pid > 0) {
       return pid;
     }
@@ -2848,7 +2213,7 @@ function resolveStaleWorkerPid(health, deps = {}) {
 }
 function spawnWorkerProcess(deps = {}, env = process.env) {
   const spawnImpl = deps.spawnImpl ?? import_node_child_process.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs4.existsSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs3.existsSync;
   const { bunRunnerPath, workerPath } = resolveWorkerScriptPaths(env);
   if (!existsSyncImpl(bunRunnerPath) || !existsSyncImpl(workerPath)) {
     return;
@@ -2987,10 +2352,10 @@ function createCompactHandler(dependencies) {
 }
 
 // src/hooks/handlers/context.ts
-var import_node_path10 = require("node:path");
+var import_node_path9 = require("node:path");
 
 // src/shared/file-tree.ts
-var import_node_path8 = __toESM(require("node:path"), 1);
+var import_node_path7 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -3087,7 +2452,7 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative2 = import_node_path8.default.posix.relative(root, value);
+    const relative2 = import_node_path7.default.posix.relative(root, value);
     if (!relative2 || relative2 === "") {
       continue;
     }
@@ -3617,6 +2982,74 @@ function renderNode(node, options) {
   }
 }
 
+// src/diary/calendar.ts
+var dateFormatters = /* @__PURE__ */ new Map();
+function dateFormatter(timeZone) {
+  let formatter = dateFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
+    dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+function partNumber(parts, type) {
+  const value = parts.find((part) => part.type === type)?.value;
+  if (value === void 0) throw new Error(`Missing ${type} calendar part`);
+  return Number.parseInt(value, 10);
+}
+function calendarDateAt(epochSeconds, timeZone) {
+  const parts = dateFormatter(timeZone).formatToParts(epochSeconds * 1e3);
+  const year = String(partNumber(parts, "year")).padStart(4, "0");
+  const month = String(partNumber(parts, "month")).padStart(2, "0");
+  const day = String(partNumber(parts, "day")).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function contentDateAt(epochSeconds, timeZone, boundaryHour) {
+  return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
+}
+
+// src/shared/config.ts
+var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+var DEFAULT_DREAM_AGENT_HOUR = 4;
+
+// src/db/diary-state.ts
+function readDreamCalendarBoundary(db) {
+  const timeZone = db.query(
+    "SELECT value FROM diary_state WHERE key = 'dream_timezone'"
+  ).get()?.value ?? DEFAULT_DREAM_AGENT_TIME_ZONE;
+  const boundaryHour = Number(
+    db.query(
+      "SELECT value FROM diary_state WHERE key = 'dream_hour'"
+    ).get()?.value ?? DEFAULT_DREAM_AGENT_HOUR
+  );
+  return { timeZone, boundaryHour };
+}
+function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
+  const { timeZone, boundaryHour } = readDreamCalendarBoundary(db);
+  const date = contentDateAt(createdAtEpoch, timeZone, boundaryHour);
+  db.query(
+    `UPDATE diary_day_state
+     SET needs_regen = 1,
+         attempt_count = 0,
+         next_attempt_epoch = NULL,
+         retry_disposition = NULL,
+         last_error = NULL
+     WHERE date = ?
+       AND settled_at_epoch IS NOT NULL
+       AND date >= COALESCE(
+         (SELECT value FROM diary_state WHERE key = 'cutover_date'),
+         '9999-12-31'
+       )`
+  ).run(date);
+}
+
 // src/db/turns.ts
 var TURN_SELECT = `
   SELECT
@@ -3900,9 +3333,6 @@ function resolveTurnPointers(db, sessionId, text) {
 
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
-function diaryDayOf(epochSeconds) {
-  return new Date((epochSeconds + UTC_PLUS_EIGHT_SECONDS) * 1e3).toISOString().slice(0, 10);
-}
 function estimateDiaryTokens(text) {
   let weightedCodePoints = 0;
   for (const codePoint of text) {
@@ -5554,7 +4984,7 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
 }
 
 // src/diary/persona-render.ts
-var import_node_path9 = require("node:path");
+var import_node_path8 = require("node:path");
 var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
 var DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1e3;
 var SESSION_INJECTION_TOKEN_BUDGET = 2e3;
@@ -5657,7 +5087,7 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
     )
   ];
   const alternateTargets = distinctTargets.length > 0 ? `\uFF1B\u53E6\u89C1 ${distinctTargets.join("\u3001")}` : "";
-  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
+  return `\uFF08${(0, import_node_path8.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
 }
 function renderBoundedInjectionBlock(input) {
   for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
@@ -5756,7 +5186,7 @@ async function readPersonaContext(memoryStore) {
     }
     return renderSessionStartPersonaInjection({
       userProfile: memory.userProfile,
-      path: (0, import_node_path10.join)(memoryStore.dataRoot, "memory", "user-profile.md")
+      path: (0, import_node_path9.join)(memoryStore.dataRoot, "memory", "user-profile.md")
     });
   } catch {
     return void 0;
@@ -5915,7 +5345,7 @@ async function readRecentContext(db, fileStore, input) {
       diaryIndex,
       paths: {
         recentSessions: "recall()",
-        diaryIndex: fileStore?.dataRoot ? (0, import_node_path10.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
+        diaryIndex: fileStore?.dataRoot ? (0, import_node_path9.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
       }
     });
   } catch {
@@ -6036,36 +5466,12 @@ function createContextHandler(dependencies, section = "sessions") {
         markSessionRunStart(dependencies.db, session.id);
       }
     }
-    const nowEpoch = dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1e3);
-    const triggerWindow = dependencies.dreamSchedule ? dreamTriggerWindow({
-      nowEpoch,
-      timeZone: dependencies.dreamSchedule.timeZone,
-      triggerHour: dependencies.dreamSchedule.hour
-    }) : null;
-    const today = triggerWindow?.today ?? diaryDayOf(nowEpoch);
-    try {
-      if (dependencies.diaryStateStore) {
-        const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        if (triggerWindow?.hasPassedTrigger) {
-          dependencies.diaryStateStore.reconcileBacklog({
-            today,
-            cutoverDate: bootstrap.cutoverDate,
-            lastSuccessfulDate: await dependencies.readLastSuccessfulDate?.() ?? null,
-            maxDays: dependencies.dreamSchedule.backlogLimit,
-            timeZone: dependencies.dreamSchedule.timeZone,
-            boundaryHour: dependencies.dreamSchedule.hour,
-            enqueuedAtEpoch: nowEpoch
-          });
-        }
-      }
-    } catch {
-    }
     return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
   };
 }
 
 // src/shared/transcript-parser.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -6151,10 +5557,10 @@ function detectInterruptedPromptIdsInEntries(entries) {
   return collectInterruptedPromptIds(entries);
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -7660,25 +7066,13 @@ function createDefaultReadOnlyContextHandlers({
 function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
-  nowEpoch,
-  config = loadConfig(),
   workerClientDeps,
   workerEnv,
   enableSessionEnvCapture = false
 }) {
-  const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
-  const dreamStore = new DreamMemoryStore(dataRoot);
   const contextDependencies = {
     db,
-    diaryStateStore,
-    nowEpoch,
-    dreamSchedule: {
-      hour: config.dreamAgentHour,
-      timeZone: config.dreamAgentTimeZone,
-      backlogLimit: config.dreamAgentBacklogLimit
-    },
-    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     workerClientDeps,
     workerEnv,
     enableSessionEnvCapture
@@ -7723,7 +7117,7 @@ function getDefaultRecentContextHandler() {
     return defaultRecentContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs6.existsSync)(databasePath)) {
+  if (!(0, import_node_fs5.existsSync)(databasePath)) {
     defaultRecentContextHandler = async () => ({ continue: true });
     return defaultRecentContextHandler;
   }
@@ -7742,7 +7136,7 @@ function getDefaultMilestoneContextHandler() {
     return defaultMilestoneContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs6.existsSync)(databasePath)) {
+  if (!(0, import_node_fs5.existsSync)(databasePath)) {
     defaultMilestoneContextHandler = async () => ({ continue: true });
     return defaultMilestoneContextHandler;
   }
@@ -7766,7 +7160,7 @@ function getDefaultHandler(handlerKey) {
   return getDefaultHandlers()[handlerKey];
 }
 function readJsonFromStdin() {
-  const input = (0, import_node_fs6.readFileSync)(0, "utf8").trim();
+  const input = (0, import_node_fs5.readFileSync)(0, "utf8").trim();
   if (input === "") {
     return {};
   }

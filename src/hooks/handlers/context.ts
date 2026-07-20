@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 
-import type { DiaryStateStore } from "../../db/diary-state";
 import {
   getRecentSessions,
   getSessionByContentId,
@@ -18,7 +17,6 @@ import { parseMarkdownSections } from "../../shared/markdown-sections";
 import { resolveTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
-import { diaryDayOf } from "../../diary/domain";
 import type { DiaryFileStore } from "../../diary/file-store";
 import type { DreamMemoryStore } from "../../diary/memory-store";
 import {
@@ -27,7 +25,6 @@ import {
   renderSessionStartRecentSessionsInjection,
   SESSION_INJECTION_TOKEN_BUDGET,
 } from "../../diary/persona-render";
-import { dreamTriggerWindow } from "../../diary/calendar";
 import { markSessionRunStart } from "../../db/session-run";
 import {
   notifyWorkerTrigger,
@@ -47,18 +44,6 @@ export interface ReadOnlyContextHandlerDependencies {
 export interface ContextHandlerDependencies
   extends ReadOnlyContextHandlerDependencies {
   db: Database;
-  diaryStateStore?: Pick<
-    DiaryStateStore,
-    | "initializeBootstrap"
-    | "reconcileBacklog"
-  >;
-  nowEpoch?: () => number;
-  dreamSchedule?: {
-    hour: number;
-    timeZone: string;
-    backlogLimit: number;
-  };
-  readLastSuccessfulDate?: () => Promise<string | null>;
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
   enableSessionEnvCapture?: boolean;
@@ -489,37 +474,6 @@ export function createContextHandler(
         markSessionRunStart(dependencies.db, session.id);
       }
     }
-    const nowEpoch =
-      dependencies.nowEpoch?.() ?? Math.floor(Date.now() / 1_000);
-    const triggerWindow = dependencies.dreamSchedule
-      ? dreamTriggerWindow({
-          nowEpoch,
-          timeZone: dependencies.dreamSchedule.timeZone,
-          triggerHour: dependencies.dreamSchedule.hour,
-        })
-      : null;
-    const today = triggerWindow?.today ?? diaryDayOf(nowEpoch);
-
-    try {
-      if (dependencies.diaryStateStore) {
-        const bootstrap = dependencies.diaryStateStore.initializeBootstrap(today);
-        if (triggerWindow?.hasPassedTrigger) {
-          dependencies.diaryStateStore.reconcileBacklog({
-            today,
-            cutoverDate: bootstrap.cutoverDate,
-            lastSuccessfulDate:
-              await dependencies.readLastSuccessfulDate?.() ?? null,
-            maxDays: dependencies.dreamSchedule!.backlogLimit,
-            timeZone: dependencies.dreamSchedule!.timeZone,
-            boundaryHour: dependencies.dreamSchedule!.hour,
-            enqueuedAtEpoch: nowEpoch,
-          });
-        }
-      }
-    } catch {
-      // Diary backfill is best-effort: SessionStart context must still be returned.
-    }
-
     return hookSpecificOutput
       ? { continue: true, hookSpecificOutput }
       : { continue: true };

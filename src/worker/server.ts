@@ -288,6 +288,7 @@ export interface WorkerCoreDeps {
     item: PendingQueueItem,
     agentEnv: NodeJS.ProcessEnv,
   ) => Promise<void>;
+  reconcileDreamBacklog?: (nowEpoch: number) => Promise<void>;
   setTimeoutImpl?: (
     callback: () => void | Promise<void>,
     delayMs: number,
@@ -2623,6 +2624,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             requestedTriggerForThisDrain !== undefined ||
             globallyProcessedTriggerSessionDbId !== null
           ) {
+            const hasEndEventTrigger =
+              (requestedTriggerForThisDrain !== undefined &&
+                requestedTriggerForThisDrain !== null) ||
+              globallyProcessedTriggerSessionDbId !== null;
+            if (hasEndEventTrigger) {
+              try {
+                await deps.reconcileDreamBacklog?.(now());
+              } catch (error) {
+                logger.error?.("dream backlog reconcile failed", { error });
+              }
+            }
             await drainOneDiaryItem(
               requestedTriggerForThisDrain !== undefined
                 ? requestedTriggerForThisDrain
@@ -2747,6 +2759,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       await closeSessionQuery(sessionDbId, abortError);
       return;
     }
+
+    await scanAndDrainGlobalQueue(sessionDbId);
 
     if (isSessionRetryGated(sessionDbId)) {
       await closeSessionQuery(sessionDbId);
@@ -2899,6 +2913,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           error,
         });
       }
+
+      await scanAndDrainGlobalQueue(sessionDbId);
 
       try {
         const state = getOrCreateSessionState(sessionDbId);
@@ -3631,6 +3647,8 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     processDiaryItem:
       deps.processDiaryItem ??
       diaryRuntime?.processDreamItem,
+    reconcileDreamBacklog:
+      deps.reconcileDreamBacklog ?? diaryRuntime?.reconcileDreamBacklog,
     logger,
   });
 

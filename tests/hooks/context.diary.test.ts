@@ -24,7 +24,7 @@ import {
 } from "../../src/diary/persona-render";
 import { createContextHandler } from "../../src/hooks/handlers/context";
 
-describe("SessionStart dream scheduling and injection", () => {
+describe("SessionStart dream isolation and injection", () => {
   let db: Database;
   const roots: string[] = [];
 
@@ -61,42 +61,20 @@ describe("SessionStart dream scheduling and injection", () => {
     };
   }
 
-  test("queues every missed date after the configured hour without waking the worker", async () => {
+  test("does not bootstrap or queue a due dream after the configured hour", async () => {
     const stateStore = createDiaryStateStore(db);
     const nowEpoch = Date.parse("2026-07-11T05:00:00+08:00") / 1_000;
     await createContextHandler({
       db,
-      diaryStateStore: stateStore,
-      nowEpoch: () => nowEpoch,
-      dreamSchedule: {
-        hour: 4,
-        timeZone: "Asia/Shanghai",
-        backlogLimit: 7,
-      },
-      readLastSuccessfulDate: async () => "2026-07-07",
     })(session("dream-schedule", nowEpoch));
 
-    expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260708);
-    expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260709);
-    expect(stateStore.claimNextDiaryItem(nowEpoch)?.targetId).toBe(20260710);
     expect(stateStore.claimNextDiaryItem(nowEpoch)).toBeNull();
-  });
-
-  test("does not queue before the configured hour", async () => {
-    const stateStore = createDiaryStateStore(db);
-    const nowEpoch = Date.parse("2026-07-11T03:00:00+08:00") / 1_000;
-    await createContextHandler({
-      db,
-      diaryStateStore: stateStore,
-      nowEpoch: () => nowEpoch,
-      dreamSchedule: {
-        hour: 4,
-        timeZone: "Asia/Shanghai",
-        backlogLimit: 7,
-      },
-      readLastSuccessfulDate: async () => "2026-07-07",
-    })(session("dream-pre-trigger", nowEpoch));
-    expect(stateStore.claimNextDiaryItem(nowEpoch)).toBeNull();
+    expect(db.query<{ value: string }, []>(
+      "SELECT value FROM diary_state WHERE key = 'cutover_date'",
+    ).get()).toBeNull();
+    expect(db.query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM session_run_state",
+    ).get()?.count).toBe(1);
   });
 
   test("splits bounded state, persona, and recent/diary output while sessions side effects run once", async () => {
@@ -145,22 +123,10 @@ describe("SessionStart dream scheduling and injection", () => {
       ].join("\n"),
     );
     const nowEpoch = Date.parse("2026-07-11T12:00:00+08:00") / 1_000;
-    const stateStore = {
-      initializeBootstrap: mock(() => ({ cutoverDate: "2026-07-01" })),
-      reconcileBacklog: mock(() => []),
-    };
     const dependencies = {
       db,
-      diaryStateStore: stateStore,
       fileStore: new DiaryFileStore(dataRoot),
       memoryStore,
-      nowEpoch: () => nowEpoch,
-      dreamSchedule: {
-        hour: 4,
-        timeZone: "Asia/Shanghai",
-        backlogLimit: 7,
-      },
-      readLastSuccessfulDate: async () => "2026-07-10",
     };
     const input = {
       ...session("dream-injection", nowEpoch),
@@ -215,8 +181,6 @@ describe("SessionStart dream scheduling and injection", () => {
     expect(recent).not.toContain("memory/archive.md");
     expect(index.indexOf("2026-07-10")).toBeLessThan(index.indexOf("2026-07-09"));
     expect(index.indexOf("2026-07-09")).toBeLessThan(index.indexOf("2026-07-08"));
-    expect(stateStore.initializeBootstrap).toHaveBeenCalledTimes(1);
-    expect(stateStore.reconcileBacklog).toHaveBeenCalledTimes(1);
     expect(db.query<{ startTurnId: number }, []>(
       `SELECT start_turn_id AS startTurnId
        FROM session_run_state

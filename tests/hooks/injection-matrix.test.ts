@@ -68,10 +68,6 @@ describe("SessionStart injection matrix", () => {
           'stranded response', 1700000120)`,
       ).run(current.id);
 
-      const initializeBootstrap = mock(() => ({
-        cutoverDate: "2026-07-01",
-      }));
-      const reconcileBacklog = mock(() => []);
       const input: NormalizedHookInput = {
         eventName: "SessionStart",
         source,
@@ -82,10 +78,6 @@ describe("SessionStart injection matrix", () => {
       };
       const dependencies = {
         db,
-        diaryStateStore: {
-          initializeBootstrap,
-          reconcileBacklog,
-        },
         fileStore: {
           readIndex: async () =>
             new TextEncoder().encode(
@@ -99,14 +91,6 @@ describe("SessionStart injection matrix", () => {
             experience: "# Experience\n\n- MUST_NOT_BE_INJECTED\n",
           }),
         },
-        nowEpoch: () =>
-          Date.parse("2026-07-11T12:00:00+08:00") / 1_000,
-        dreamSchedule: {
-          hour: 4,
-          timeZone: "Asia/Shanghai",
-          backlogLimit: 7,
-        },
-        readLastSuccessfulDate: async () => "2026-07-10",
       };
 
       const sessions = await createContextHandler(dependencies)(input);
@@ -142,8 +126,6 @@ describe("SessionStart injection matrix", () => {
       );
       expect(estimateDiaryTokens(recent.hookSpecificOutput!))
         .toBeLessThanOrEqual(SESSION_INJECTION_TOKEN_BUDGET);
-      expect(initializeBootstrap).toHaveBeenCalledTimes(1);
-      expect(reconcileBacklog).toHaveBeenCalledTimes(1);
       expect(db.query<{ count: number }, [string]>(
         "SELECT COUNT(*) AS count FROM sessions WHERE content_session_id = ?",
       ).get(`current-${source}`)?.count).toBe(1);

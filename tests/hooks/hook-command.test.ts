@@ -161,7 +161,7 @@ describe("runHookCommand", () => {
       await Promise.resolve();
       await Promise.resolve();
 
-      expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(true);
+      expect(createDiaryStateStore(db).hasQueuedDay("2026-07-10")).toBe(false);
       expect(sessionsResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).toContain("## Persona");
       expect(personaResult.hookSpecificOutput).toContain(

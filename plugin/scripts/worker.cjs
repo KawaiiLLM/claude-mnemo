@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrsxqnbc" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsycqmw" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -163,6 +163,7 @@ function runWriteTransaction(db, fn, attempts = 3) {
 
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
+var timeFormatters = /* @__PURE__ */ new Map();
 function dateFormatter(timeZone) {
   let formatter = dateFormatters.get(timeZone);
   if (!formatter) {
@@ -173,6 +174,20 @@ function dateFormatter(timeZone) {
       day: "2-digit"
     });
     dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+function timeFormatter(timeZone) {
+  let formatter = timeFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23"
+    });
+    timeFormatters.set(timeZone, formatter);
   }
   return formatter;
 }
@@ -225,6 +240,18 @@ function calendarDayBounds(date7, timeZone, boundaryHour = 0) {
   return {
     startEpoch: calendarDayStartEpoch(date7, timeZone) + shift,
     endEpoch: calendarDayStartEpoch(addCalendarDays(date7, 1), timeZone) + shift
+  };
+}
+function dreamTriggerWindow(input) {
+  const today = calendarDateAt(input.nowEpoch, input.timeZone);
+  const parts = timeFormatter(input.timeZone).formatToParts(
+    input.nowEpoch * 1e3
+  );
+  const hour = partNumber(parts, "hour");
+  return {
+    today,
+    yesterday: addCalendarDays(today, -1),
+    hasPassedTrigger: hour >= input.triggerHour
   };
 }
 
@@ -45053,6 +45080,28 @@ function createDiaryRuntime(options) {
     return tracked;
   }
   return {
+    async reconcileDreamBacklog(nowEpoch) {
+      const triggerWindow = dreamTriggerWindow({
+        nowEpoch,
+        timeZone: config3.dreamAgentTimeZone,
+        triggerHour: config3.dreamAgentHour
+      });
+      const { cutoverDate } = stateStore.initializeBootstrap(
+        triggerWindow.today
+      );
+      if (!triggerWindow.hasPassedTrigger) {
+        return;
+      }
+      stateStore.reconcileBacklog({
+        today: triggerWindow.today,
+        cutoverDate,
+        lastSuccessfulDate: await dreamStore.readLastSuccessfulDate(),
+        maxDays: config3.dreamAgentBacklogLimit,
+        timeZone: config3.dreamAgentTimeZone,
+        boundaryHour: config3.dreamAgentHour,
+        enqueuedAtEpoch: nowEpoch
+      });
+    },
     processDreamDate: (date7) => trackDream(async () => {
       await processDreamDateRaw(date7);
     }),
@@ -46733,6 +46782,14 @@ ${body}
           pendingDiaryTriggerSessionDbId = void 0;
           const globallyProcessedTriggerSessionDbId = await drainQueue();
           if (requestedTriggerForThisDrain !== void 0 || globallyProcessedTriggerSessionDbId !== null) {
+            const hasEndEventTrigger = requestedTriggerForThisDrain !== void 0 && requestedTriggerForThisDrain !== null || globallyProcessedTriggerSessionDbId !== null;
+            if (hasEndEventTrigger) {
+              try {
+                await deps.reconcileDreamBacklog?.(now());
+              } catch (error49) {
+                logger.error?.("dream backlog reconcile failed", { error: error49 });
+              }
+            }
             await drainOneDiaryItem(
               requestedTriggerForThisDrain !== void 0 ? requestedTriggerForThisDrain : globallyProcessedTriggerSessionDbId
             );
@@ -46842,6 +46899,7 @@ ${body}
       await closeSessionQuery(sessionDbId, abortError);
       return;
     }
+    await scanAndDrainGlobalQueue(sessionDbId);
     if (isSessionRetryGated(sessionDbId)) {
       await closeSessionQuery(sessionDbId);
       return;
@@ -46949,6 +47007,7 @@ ${body}
           error: error49
         });
       }
+      await scanAndDrainGlobalQueue(sessionDbId);
       try {
         const state = getOrCreateSessionState(sessionDbId);
         const summaryShape = { kind: "session-summary" };
@@ -47502,6 +47561,7 @@ async function main(deps = {}) {
     createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
     isProcessAliveImpl: deps.isProcessAliveImpl,
     processDiaryItem: deps.processDiaryItem ?? diaryRuntime?.processDreamItem,
+    reconcileDreamBacklog: deps.reconcileDreamBacklog ?? diaryRuntime?.reconcileDreamBacklog,
     logger
   });
   core.recoverFromCrash();

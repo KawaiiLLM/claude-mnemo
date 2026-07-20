@@ -6,12 +6,10 @@ import {
   HOOK_SUCCESS_EXIT_CODE,
 } from "../shared/hook-constants";
 import { createDatabase } from "../db/database";
-import { createDiaryStateStore } from "../db/diary-state";
 import { initializeDatabase } from "../db/schema";
 import { DiaryFileStore } from "../diary/file-store";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { DATA_DIR, resolveDatabasePath } from "../shared/paths";
-import { loadConfig, type MnemoConfig } from "../shared/config";
 import { normalizeHookInput } from "./adapters";
 import { createCompactHandler } from "./handlers/compact";
 import {
@@ -46,8 +44,6 @@ const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 export interface DefaultHookHandlersDependencies {
   db: ReturnType<typeof createDatabase>;
   dataRoot?: string;
-  nowEpoch?: () => number;
-  config?: MnemoConfig;
   workerClientDeps?: import("../worker/client").WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
   enableSessionEnvCapture?: boolean;
@@ -76,25 +72,13 @@ function createDefaultReadOnlyContextHandlers({
 export function createDefaultHookHandlers({
   db,
   dataRoot = DATA_DIR,
-  nowEpoch,
-  config = loadConfig(),
   workerClientDeps,
   workerEnv,
   enableSessionEnvCapture = false,
 }: DefaultHookHandlersDependencies): Record<string, HookHandler> {
-  const diaryStateStore = createDiaryStateStore(db);
   const fileStore = new DiaryFileStore(dataRoot);
-  const dreamStore = new DreamMemoryStore(dataRoot);
   const contextDependencies: ContextHandlerDependencies = {
     db,
-    diaryStateStore,
-    nowEpoch,
-    dreamSchedule: {
-      hour: config.dreamAgentHour,
-      timeZone: config.dreamAgentTimeZone,
-      backlogLimit: config.dreamAgentBacklogLimit,
-    },
-    readLastSuccessfulDate: () => dreamStore.readLastSuccessfulDate(),
     workerClientDeps,
     workerEnv,
     enableSessionEnvCapture,

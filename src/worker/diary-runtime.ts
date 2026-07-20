@@ -4,6 +4,7 @@ import { createDiaryStateStore } from "../db/diary-state";
 import type { PendingQueueItem } from "../db/pending-queue";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { computeDiaryWatermark } from "../diary/domain";
+import { dreamTriggerWindow } from "../diary/calendar";
 import { buildIsolatedEnv } from "../mnemosyne/env";
 import { loadConfig, type MnemoConfig } from "../shared/config";
 import {
@@ -132,6 +133,7 @@ export interface CreateDiaryRuntimeOptions {
 }
 
 export interface DiaryRuntime {
+  reconcileDreamBacklog(nowEpoch: number): Promise<void>;
   processDreamDate(date: string): Promise<void>;
   processDreamItem(
     item: PendingQueueItem,
@@ -219,6 +221,28 @@ export function createDiaryRuntime(
   }
 
   return {
+    async reconcileDreamBacklog(nowEpoch) {
+      const triggerWindow = dreamTriggerWindow({
+        nowEpoch,
+        timeZone: config.dreamAgentTimeZone,
+        triggerHour: config.dreamAgentHour,
+      });
+      const { cutoverDate } = stateStore.initializeBootstrap(
+        triggerWindow.today,
+      );
+      if (!triggerWindow.hasPassedTrigger) {
+        return;
+      }
+      stateStore.reconcileBacklog({
+        today: triggerWindow.today,
+        cutoverDate,
+        lastSuccessfulDate: await dreamStore.readLastSuccessfulDate(),
+        maxDays: config.dreamAgentBacklogLimit,
+        timeZone: config.dreamAgentTimeZone,
+        boundaryHour: config.dreamAgentHour,
+        enqueuedAtEpoch: nowEpoch,
+      });
+    },
     processDreamDate: (date) =>
       trackDream(async () => {
         await processDreamDateRaw(date);

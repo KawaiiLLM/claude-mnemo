@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
@@ -19,6 +22,7 @@ import {
 } from "../../src/db/turns";
 import { createWorkerProcessors } from "../../src/worker/processors";
 import { classifyWorkerError } from "../../src/worker/error-classifier";
+import { createDiaryRuntime } from "../../src/worker/diary-runtime";
 import {
   checkForIdleWorkerShutdown,
   checkForLastAgentShutdown,
@@ -241,6 +245,7 @@ function primeSessionState(
 
 describe("worker server", () => {
   let db: Database;
+  const roots: string[] = [];
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -249,6 +254,9 @@ describe("worker server", () => {
 
   afterEach(() => {
     db.close();
+    for (const root of roots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("acquireWorkerSingleton writes a starting marker when nothing is running", () => {
@@ -643,6 +651,40 @@ describe("worker server", () => {
     db.close();
   });
 
+  test("manual dream continuation drains its requested day without reconciling automatic backlog", async () => {
+    const manualDb = createDatabase(":memory:");
+    initializeSchema(manualDb);
+    const store = createDiaryStateStore(manualDb);
+    const reconcileDreamBacklog = mock(async () => {});
+    const processedTargets: number[] = [];
+    let continuation: (() => void | Promise<void>) | null = null;
+    const core = createWorkerCore({
+      db: manualDb,
+      now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1_000),
+      logger: { warn() {}, error() {} },
+      reconcileDreamBacklog,
+      setTimeoutImpl(callback) {
+        continuation = callback;
+        return "manual-dream-continuation";
+      },
+      async processDiaryItem(item) {
+        processedTargets.push(item.targetId);
+        store.acknowledgeDiaryItem(item.seq);
+      },
+    });
+
+    expect(core.triggerManualDream("2026-07-10")).toEqual({
+      ok: true,
+      date: "2026-07-10",
+    });
+    expect(continuation).not.toBeNull();
+    await continuation!();
+
+    expect(processedTargets).toEqual([20260710]);
+    expect(reconcileDreamBacklog).not.toHaveBeenCalled();
+    manualDb.close();
+  });
+
   test("createWorkerFetchHandler tracks HTTP activity timestamps for compact requests", async () => {
     const serverState = createWorkerServerState(100);
     const handler = createWorkerFetchHandler(
@@ -1031,6 +1073,136 @@ describe("worker server", () => {
     expect(sentPrompts).toHaveLength(1);
     expect(processDiaryItem).toHaveBeenCalledTimes(1);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+  });
+
+  test("an end-event reconciles after extraction, bootstraps, and drains a newly complete due day", async () => {
+    const nowEpoch = Date.parse("2026-07-11T05:00:00+08:00") / 1_000;
+    const dataRoot = mkdtempSync(join(tmpdir(), "claude-mnemo-end-event-dream-"));
+    roots.push(dataRoot);
+    mkdirSync(join(dataRoot, "memory"), { recursive: true });
+    writeFileSync(
+      join(dataRoot, "memory", "last-successful.json"),
+      `${JSON.stringify({
+        last_successful_date: "2026-07-09",
+        transaction_id: "ticket-03-marker",
+      })}\n`,
+    );
+    const stateStore = createDiaryStateStore(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "worker-session-end-event-dream",
+      project: "/tmp/project-end-event-dream",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = createTurn(db, sessionId, 1);
+    db.query("UPDATE turns SET created_at_epoch = ? WHERE id = ?").run(
+      Date.parse("2026-07-10T12:00:00+08:00") / 1_000,
+      turnId,
+    );
+    queueTurnStop(db, sessionId, turnId, nowEpoch);
+
+    const runtime = createDiaryRuntime({
+      db,
+      dataRoot,
+      nowEpoch: () => nowEpoch,
+      config: {
+        ...DEFAULT_CONFIG,
+        dreamAgentBacklogLimit: 1,
+      },
+    });
+    const sentPrompts: string[] = [];
+    const dispatchStates: Array<{ targetId: number; turnStatus: string | null }> = [];
+    const core = createWorkerCore({
+      db,
+      now: () => nowEpoch,
+      config: {
+        ...DEFAULT_CONFIG,
+        mergeThresholdChars: 1,
+        maxQueuedBatches: 0,
+      },
+      logger: { warn() {}, error() {} },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const queryDeps = fakeQueryDeps(args);
+        return {
+          sessionId: "end-event-dream-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            updateTurnById(db, turnId, { status: "extracted" });
+            queryDeps?.onMessage?.({ session_id: "end-event-dream-query" });
+            queryDeps?.onRemember?.(`T${turnId}`);
+            return { session_id: "end-event-dream-query" };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      reconcileDreamBacklog: runtime.reconcileDreamBacklog,
+      async processDiaryItem(item) {
+        dispatchStates.push({
+          targetId: item.targetId,
+          turnStatus: getTurnById(db, turnId)?.status ?? null,
+        });
+        stateStore.acknowledgeDiaryItem(item.seq);
+      },
+    });
+
+    expect(db.query<{ value: string }, []>(
+      "SELECT value FROM diary_state WHERE key = 'cutover_date'",
+    ).get()).toBeNull();
+
+    await core.scanAndDrainQueue(sessionId);
+
+    expect(sentPrompts).toHaveLength(1);
+    expect(getTurnById(db, turnId)?.status).toBe("extracted");
+    expect(dispatchStates).toEqual([
+      { targetId: 20260710, turnStatus: "extracted" },
+    ]);
+    expect(db.query<{ value: string }, []>(
+      "SELECT value FROM diary_state WHERE key = 'cutover_date'",
+    ).get()?.value).toBe("2026-06-27");
+    expect(stateStore.getDayState("2026-07-09")).toBeNull();
+    expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+  });
+
+  test("session-end and compact reconcile even without a queued turn-stop", async () => {
+    const sessionEndId = upsertSession(db, {
+      contentSessionId: "worker-session-end-reconcile",
+      project: "/tmp/project-end-reconcile",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const compactId = upsertSession(db, {
+      contentSessionId: "worker-compact-reconcile",
+      project: "/tmp/project-compact-reconcile",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 2,
+      updatedAtEpoch: 2,
+      completedAtEpoch: null,
+    }).id;
+    const reconcileDreamBacklog = mock(async () => {});
+    const core = createWorkerCore({
+      db,
+      now: () => DREAM_READY_EPOCH,
+      reconcileDreamBacklog,
+      pushSessionSummaryPromptImpl: async () => {},
+      logger: { warn() {}, error() {} },
+    });
+
+    await core.finishSession(sessionEndId);
+    await core.handleCompact(compactId, null);
+
+    expect(reconcileDreamBacklog.mock.calls.map(([nowEpoch]) => nowEpoch))
+      .toEqual([DREAM_READY_EPOCH, DREAM_READY_EPOCH]);
   });
 
   test("global drain buffers session work before processing at most one diary", async () => {
