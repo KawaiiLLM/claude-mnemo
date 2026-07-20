@@ -129,6 +129,10 @@ const SCHEMA_SQL = `
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
     terminal INTEGER NOT NULL DEFAULT 0,
+    retry_disposition TEXT CHECK (
+      retry_disposition IS NULL OR
+      retry_disposition IN ('transient', 'permanent')
+    ),
     last_error TEXT
   );
 
@@ -143,6 +147,7 @@ const SCHEMA_SQL = `
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
+  ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -166,6 +171,28 @@ function ensureDiaryDayStateTerminalColumn(db: Database): void {
 
   db.exec(
     "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
+function ensureDiaryDayStateRetryDispositionColumn(db: Database): void {
+  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
+    db.exec(
+      `ALTER TABLE diary_day_state
+       ADD COLUMN retry_disposition TEXT
+       CHECK (
+         retry_disposition IS NULL OR
+         retry_disposition IN ('transient', 'permanent')
+       )`,
+    );
+  }
+
+  // Before this column existed, every terminal day was manual-only regardless
+  // of whether it came from retry exhaustion or backlog eviction. Preserve
+  // that behavior instead of accidentally making old terminal rows recoverable.
+  db.exec(
+    `UPDATE diary_day_state
+     SET retry_disposition = 'permanent'
+     WHERE terminal = 1 AND retry_disposition IS NULL`,
   );
 }
 

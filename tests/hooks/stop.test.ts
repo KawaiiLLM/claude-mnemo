@@ -167,6 +167,7 @@ describe("handleStopHook", () => {
       queueSeq: claimed.seq,
       watermark: "watermark",
       settledAtEpoch: 250,
+      remoteAttemptSucceeded: false,
     });
 
     const handler = createStopHandler({ db, now: () => 500 });

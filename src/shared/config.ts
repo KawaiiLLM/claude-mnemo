@@ -68,6 +68,9 @@ export const DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1_000;
 // observed), which the old hard-wired 120s idle watchdog killed before commit.
 // Ten minutes clears the observed gap while staying under the request timeout.
 export const DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1_000;
+// Dream retries are event-driven; this is only a small floor that prevents two
+// closely spaced turn-stop drains from launching full dream runs back-to-back.
+export const DREAM_RETRY_BACKOFF_MS = 10_000;
 // Local wall-clock hour that serves as BOTH the dream trigger hour and the
 // content-day boundary: a turn before this hour belongs to the previous day's
 // diary (late-night work rolls back), and day D's dream fires at D+1 this hour.

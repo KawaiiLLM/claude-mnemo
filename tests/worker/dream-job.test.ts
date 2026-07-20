@@ -121,9 +121,11 @@ describe("dream job processor", () => {
     };
 
     try {
-      await createDreamJobProcessor({ db, dataRoot, store, agentRunner })
-        .process("2026-07-10");
+      const result =
+        await createDreamJobProcessor({ db, dataRoot, store, agentRunner })
+          .process("2026-07-10");
 
+      expect(result).toEqual({ remoteAttemptSucceeded: true });
       expect(calls).toHaveLength(1);
       expect(calls[0]?.model).toBe(DEFAULT_DREAM_AGENT_MODEL);
       expect(await store.readLastSuccessfulDate()).toBe("2026-07-10");
@@ -193,7 +195,7 @@ describe("dream job processor", () => {
     let agentCalls = 0;
 
     try {
-      await createDreamJobProcessor({
+      const result = await createDreamJobProcessor({
         db,
         dataRoot,
         store,
@@ -205,6 +207,7 @@ describe("dream job processor", () => {
         },
       }).process("2026-07-10");
 
+      expect(result).toEqual({ remoteAttemptSucceeded: false });
       expect(agentCalls).toBe(0);
       expect(await store.readCurrentMemory()).toEqual({
         userProfile: "# User Profile\n\n- values careful memory [S1/T1]\n",
@@ -216,6 +219,34 @@ describe("dream job processor", () => {
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe("# Diary Index\n\n- 2026-07-10：安静的一天\n- 2026-07-09：prior day\n");
       expect(await store.readLastSuccessfulDate()).toBe("2026-07-10");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("an already-committed date reports a local no-op", async () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const dataRoot = tempRoot("claude-mnemo-dream-noop-");
+    const store = new DreamMemoryStore(dataRoot);
+    await seedCurrentMemory(store);
+    let agentCalls = 0;
+
+    try {
+      const result = await createDreamJobProcessor({
+        db,
+        dataRoot,
+        store,
+        agentRunner: {
+          async run() {
+            agentCalls += 1;
+            throw new Error("already committed dates must not invoke the agent");
+          },
+        },
+      }).process("2026-07-09");
+
+      expect(result).toEqual({ remoteAttemptSucceeded: false });
+      expect(agentCalls).toBe(0);
     } finally {
       db.close();
     }

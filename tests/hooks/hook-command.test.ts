@@ -126,6 +126,7 @@ describe("runHookCommand", () => {
         queueSeq: claimed.seq,
         watermark: "production-wiring-watermark",
         settledAtEpoch: nowEpoch,
+        remoteAttemptSucceeded: false,
       });
       diaryStateStore.markDayStale("2026-07-10");
       const fetchImpl = mock(async () => new Response(null, { status: 200 }));

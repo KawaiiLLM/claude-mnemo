@@ -49,12 +49,20 @@ export interface CreateDreamJobProcessorOptions {
 
 export interface DreamJobProcessor {
   /** Ticket 05 calls this once it has selected an unprocessed calendar date. */
-  process(date: string, options?: DreamJobProcessOptions): Promise<void>;
+  process(
+    date: string,
+    options?: DreamJobProcessOptions,
+  ): Promise<DreamJobProcessResult>;
 }
 
 export interface DreamJobProcessOptions {
   /** Explicit ticket-05 late-turn regeneration or retry of a known failed gap. */
   regenerate?: boolean;
+}
+
+export interface DreamJobProcessResult {
+  /** True only when this run invoked the remote agent and reached a durable success. */
+  remoteAttemptSucceeded: boolean;
 }
 
 /**
@@ -208,7 +216,7 @@ export function createDreamJobProcessor(
         existingMarker !== null &&
         existingMarker >= date
       ) {
-        return;
+        return { remoteAttemptSucceeded: false };
       }
       await store.migrateLegacyPersona();
       const initialFullFill = await store.requiresInitialFullFill();
@@ -234,7 +242,7 @@ export function createDreamJobProcessor(
           diary: `# ${date}\n\n安静的一天。\n`,
           diaryIndex: quietDayIndex(date, currentIndex),
         });
-        return;
+        return { remoteAttemptSucceeded: false };
       }
 
       const turnReferences = loadDiaryTurnReferences(options.db, rows);
@@ -274,7 +282,7 @@ export function createDreamJobProcessor(
         if (nightCommit.wasCommitted()) {
           const committedThrough = await store.readLastSuccessfulDate();
           if (committedThrough !== null && committedThrough >= date) {
-            return;
+            return { remoteAttemptSucceeded: true };
           }
         }
         throw error;
@@ -289,6 +297,7 @@ export function createDreamJobProcessor(
       if (lastSuccessfulDate === null || lastSuccessfulDate < date) {
         throw new Error(`Dream commit did not publish the success marker for ${date}`);
       }
+      return { remoteAttemptSucceeded: true };
     },
   };
 }

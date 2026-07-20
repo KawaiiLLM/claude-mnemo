@@ -58,6 +58,7 @@ describe("turn diary invalidation", () => {
       queueSeq: claimed.seq,
       watermark: "watermark",
       settledAtEpoch: 250,
+      remoteAttemptSucceeded: false,
     });
 
     updateTurnById(db, turn.id, {
@@ -105,6 +106,7 @@ describe("turn diary invalidation", () => {
       queueSeq: claimed.seq,
       watermark: "watermark",
       settledAtEpoch: 250,
+      remoteAttemptSucceeded: false,
     });
 
     updateTurnBackfill(db, turn.id, "complete response", 0);
@@ -146,6 +148,7 @@ describe("turn diary invalidation", () => {
       queueSeq: claimed.seq,
       watermark: "watermark",
       settledAtEpoch: 250,
+      remoteAttemptSucceeded: false,
     });
 
     resetTurnExtractionFields(db, turn.id, 300);

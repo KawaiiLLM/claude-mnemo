@@ -277,6 +277,7 @@ var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+var DREAM_RETRY_BACKOFF_MS = 1e4;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
 var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
@@ -438,7 +439,7 @@ function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: 
 }
 
 // src/db/diary-state.ts
-var DREAM_MAX_AUTO_ATTEMPTS = 2;
+var DREAM_MAX_AUTO_ATTEMPTS = 3;
 var DIARY_QUEUE_SELECT = `
   SELECT
     q.seq,
@@ -466,6 +467,7 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
      SET needs_regen = 1,
          attempt_count = 0,
          next_attempt_epoch = NULL,
+         retry_disposition = NULL,
          last_error = NULL
      WHERE date = ?
        AND settled_at_epoch IS NOT NULL
@@ -536,6 +538,7 @@ function createDiaryStateStore(db) {
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
            terminal,
+           retry_disposition AS retryDisposition,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`
@@ -548,19 +551,24 @@ function createDiaryStateStore(db) {
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
-        if (input.countAttempt === false) {
+        if (input.outcome === "shutdown") {
           db.query(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  next_attempt_epoch = ?
              WHERE date = ?`
-          ).run(input.retryAtEpoch, input.date);
+          ).run(input.failedAtEpoch, input.date);
         } else {
+          const retryAtEpoch = input.failedAtEpoch + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1e3);
           db.query(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  attempt_count = attempt_count + 1,
                  last_error = ?,
+                 retry_disposition = CASE
+                   WHEN retry_disposition = 'permanent' THEN 'permanent'
+                   WHEN ? = 'permanent' THEN 'permanent'
+                   ELSE ? END,
                  terminal = CASE
                    WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
                  next_attempt_epoch = CASE
@@ -568,9 +576,11 @@ function createDiaryStateStore(db) {
              WHERE date = ?`
           ).run(
             input.error,
+            input.outcome,
+            input.outcome,
             DREAM_MAX_AUTO_ATTEMPTS,
             DREAM_MAX_AUTO_ATTEMPTS,
-            input.retryAtEpoch,
+            retryAtEpoch,
             input.date
           );
         }
@@ -590,12 +600,44 @@ function createDiaryStateStore(db) {
                needs_regen = 0,
                attempt_count = 0,
                next_attempt_epoch = NULL,
+               terminal = 0,
+               retry_disposition = NULL,
                last_error = NULL
            WHERE date = ?`
         ).run(input.watermark, input.settledAtEpoch, input.date);
         db.query(
           "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
         ).run(input.queueSeq);
+        if (input.remoteAttemptSucceeded) {
+          const transientDates = db.query(
+            `SELECT date
+             FROM diary_day_state
+             WHERE date <> ?
+               AND terminal = 1
+               AND retry_disposition = 'transient'`
+          ).all(input.date);
+          for (const { date } of transientDates) {
+            db.query(
+              `UPDATE diary_day_state
+               SET needs_regen = 1,
+                   attempt_count = 0,
+                   next_attempt_epoch = NULL,
+                   terminal = 0,
+                   retry_disposition = NULL,
+                   last_error = NULL
+               WHERE date = ?`
+            ).run(date);
+            db.query(
+              `INSERT INTO pending_queue (
+                 kind, target_id, session_db_id, enqueued_at_epoch
+               ) VALUES ('diary', ?, 0, ?)
+               ON CONFLICT DO UPDATE SET claimed_at_epoch = NULL`
+            ).run(
+              Number(date.replaceAll("-", "")),
+              input.settledAtEpoch
+            );
+          }
+        }
       });
     },
     acknowledgeDiaryItem(queueSeq) {
@@ -619,6 +661,7 @@ function createDiaryStateStore(db) {
              attempt_count = 0,
              next_attempt_epoch = NULL,
              terminal = 0,
+             retry_disposition = NULL,
              last_error = NULL
          WHERE date = ?`
       ).run(date);
@@ -677,9 +720,14 @@ function createDiaryStateStore(db) {
       return runWriteTransaction(db, () => {
         for (const date of terminalize) {
           db.query(
-            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
-             VALUES (?, 1, NULL)
-             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`
+            `INSERT INTO diary_day_state (
+               date, terminal, retry_disposition, next_attempt_epoch
+             )
+             VALUES (?, 1, 'permanent', NULL)
+             ON CONFLICT(date) DO UPDATE SET
+               terminal = 1,
+               retry_disposition = 'permanent',
+               next_attempt_epoch = NULL`
           ).run(date);
           db.query(
             "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?"
@@ -952,6 +1000,10 @@ var SCHEMA_SQL = `
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
     terminal INTEGER NOT NULL DEFAULT 0,
+    retry_disposition TEXT CHECK (
+      retry_disposition IS NULL OR
+      retry_disposition IN ('transient', 'permanent')
+    ),
     last_error TEXT
   );
 
@@ -965,6 +1017,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
+  ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -986,6 +1039,23 @@ function ensureDiaryDayStateTerminalColumn(db) {
   }
   db.exec(
     "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
+}
+function ensureDiaryDayStateRetryDispositionColumn(db) {
+  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
+    db.exec(
+      `ALTER TABLE diary_day_state
+       ADD COLUMN retry_disposition TEXT
+       CHECK (
+         retry_disposition IS NULL OR
+         retry_disposition IN ('transient', 'permanent')
+       )`
+    );
+  }
+  db.exec(
+    `UPDATE diary_day_state
+     SET retry_disposition = 'permanent'
+     WHERE terminal = 1 AND retry_disposition IS NULL`
   );
 }
 function dropRetiredMaintenanceState(db) {
@@ -2592,7 +2662,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrs3f1mz" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsx373h" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

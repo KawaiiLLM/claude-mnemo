@@ -19,15 +19,12 @@ import { loadDiaryMaterial } from "./diary-material";
 import {
   createDreamJobProcessor,
   type DreamJobProcessOptions,
+  type DreamJobProcessResult,
 } from "./dream-job";
 import {
   classifyWorkerError,
-  resolveWorkerRetryDelayMs,
   type WorkerAbortReason,
 } from "./error-classifier";
-
-const DREAM_CONNECTION_RETRY_MS = 15 * 60 * 1_000;
-const DREAM_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1_000;
 
 export interface CreateDreamQueueProcessorOptions {
   db: Database;
@@ -38,7 +35,10 @@ export interface CreateDreamQueueProcessorOptions {
     | "markDayStaleAndEnqueue"
     | "getDayState"
   >;
-  processDreamDate(date: string, options?: DreamJobProcessOptions): Promise<void>;
+  processDreamDate(
+    date: string,
+    options?: DreamJobProcessOptions,
+  ): Promise<DreamJobProcessResult>;
   readLastSuccessfulDate(): Promise<string | null>;
   nowEpoch?: () => number;
   timeZone: string;
@@ -77,7 +77,7 @@ export function createDreamQueueProcessor(
           dayState?.needsRegen === true &&
           dayState.settledAtEpoch === null &&
           lastSuccessfulDate === date;
-        await options.processDreamDate(date, {
+        const result = await options.processDreamDate(date, {
           regenerate: dayState?.needsRegen === true && !committedButUnsettled,
         });
         options.stateStore.settleDreamDay({
@@ -85,6 +85,7 @@ export function createDreamQueueProcessor(
           queueSeq: item.seq,
           watermark: processedWatermark,
           settledAtEpoch: nowEpoch(),
+          remoteAttemptSucceeded: result.remoteAttemptSucceeded,
         });
 
         // A turn can finalize while the dream transaction is in flight. Close
@@ -103,35 +104,16 @@ export function createDreamQueueProcessor(
           error !== null &&
           "workerAbortReason" in error &&
           error.workerAbortReason === "shutdown";
-        // Connection failures never consume the retry budget, so their retry
-        // rate is the only bound on cost: a dream attempt that burns tokens
-        // before an idle-watchdog kill must not respin on the 60s cadence
-        // (the 0.4.0 burn pattern). Fast-fail outages lose nothing from the
-        // longer wait — a dream is never urgent.
-        const retryDelayMs = isShutdownAbort
-          ? 0
-          : classification === "blocked"
-            ? Math.max(
-                DREAM_BLOCKED_RETRY_FLOOR_MS,
-                resolveWorkerRetryDelayMs(
-                  error,
-                  DREAM_BLOCKED_RETRY_FLOOR_MS,
-                  failedAtEpoch * 1_000,
-                ),
-              )
-            : classification === "connection"
-              ? resolveWorkerRetryDelayMs(
-                  error,
-                  DREAM_CONNECTION_RETRY_MS,
-                  failedAtEpoch * 1_000,
-                )
-              : 60 * 1_000;
         options.stateStore.recordDreamFailure({
           date,
           queueSeq: item.seq,
           error: formatErrorForPersistence(error, options.sensitiveEnv),
-          retryAtEpoch: failedAtEpoch + Math.ceil(retryDelayMs / 1_000),
-          countAttempt: classification === "deterministic",
+          failedAtEpoch,
+          outcome: isShutdownAbort
+            ? "shutdown"
+            : classification === "connection" || classification === "blocked"
+              ? "transient"
+              : "permanent",
         });
         throw error;
       }
@@ -237,7 +219,10 @@ export function createDiaryRuntime(
   }
 
   return {
-    processDreamDate: (date) => trackDream(() => processDreamDateRaw(date)),
+    processDreamDate: (date) =>
+      trackDream(async () => {
+        await processDreamDateRaw(date);
+      }),
     processDreamItem: (item, agentEnv) =>
       trackDream(() => dreamQueue.process(item), agentEnv),
     isDreamRunning: () => activeDream !== null,

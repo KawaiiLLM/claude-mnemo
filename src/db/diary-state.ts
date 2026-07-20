@@ -4,16 +4,19 @@ import { addCalendarDays, contentDateAt } from "../diary/calendar";
 import {
   DEFAULT_DREAM_AGENT_HOUR,
   DEFAULT_DREAM_AGENT_TIME_ZONE,
+  DREAM_RETRY_BACKOFF_MS,
 } from "../shared/config";
 import { runWriteTransaction } from "./database";
 import type { PendingQueueItem } from "./pending-queue";
 
 /**
- * A dream day gets one automatic retry after its first failure; the second
- * failure trips `terminal = 1`, which excludes the day from every automatic
- * path (claim, reconcile) until a manual trigger resets it.
+ * Every non-shutdown dream failure consumes one attempt from the same bounded
+ * retry cycle, regardless of error class.
  */
-export const DREAM_MAX_AUTO_ATTEMPTS = 2;
+export const DREAM_MAX_AUTO_ATTEMPTS = 3;
+
+export type DreamFailureOutcome = "transient" | "permanent" | "shutdown";
+export type DreamRetryDisposition = Exclude<DreamFailureOutcome, "shutdown">;
 
 export interface EnqueueDiaryDayInput {
   date: string;
@@ -24,10 +27,8 @@ export interface RecordDreamFailureInput {
   date: string;
   queueSeq: number;
   error: string;
-  /** Epoch to schedule the single auto-retry at; ignored once the day trips terminal. */
-  retryAtEpoch: number;
-  /** False for connection failures, which delay work without consuming retry budget. */
-  countAttempt?: boolean;
+  failedAtEpoch: number;
+  outcome: DreamFailureOutcome;
 }
 
 export interface SettleDreamDayInput {
@@ -35,6 +36,7 @@ export interface SettleDreamDayInput {
   queueSeq: number;
   watermark: string;
   settledAtEpoch: number;
+  remoteAttemptSucceeded: boolean;
 }
 
 export interface ReconcileDreamBacklogInput {
@@ -56,6 +58,7 @@ export interface DiaryDayState {
   attemptCount: number;
   nextAttemptEpoch: number | null;
   terminal: boolean;
+  retryDisposition: DreamRetryDisposition | null;
   lastError: string | null;
 }
 
@@ -95,6 +98,7 @@ interface DiaryDayStateRow {
   attemptCount: number;
   nextAttemptEpoch: number | null;
   terminal: number;
+  retryDisposition: DreamRetryDisposition | null;
   lastError: string | null;
 }
 
@@ -130,6 +134,7 @@ export function markSettledDiaryDayStaleForTurn(
      SET needs_regen = 1,
          attempt_count = 0,
          next_attempt_epoch = NULL,
+         retry_disposition = NULL,
          last_error = NULL
      WHERE date = ?
        AND settled_at_epoch IS NOT NULL
@@ -209,6 +214,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
            terminal,
+           retry_disposition AS retryDisposition,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`,
@@ -224,26 +230,43 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
 
     recordDreamFailure(input): void {
       runWriteTransaction(db, () => {
-        if (input.countAttempt === false) {
-          // Connection failures are suspension, not a failed attempt. Preserve
-          // the attempt/terminal/error record and only make the queued day
-          // claimable again after its lightweight delay.
+        if (input.outcome === "shutdown") {
+          // Shutdown is not a failed attempt. Keep the current cycle's prior
+          // disposition/error evidence and make the same item immediately
+          // eligible for the next event-driven drain.
           db.query<unknown, [number, string]>(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  next_attempt_epoch = ?
              WHERE date = ?`,
-          ).run(input.retryAtEpoch, input.date);
+          ).run(input.failedAtEpoch, input.date);
         } else {
           // SQLite evaluates every SET expression against the pre-update row,
           // so `attempt_count + 1` is the post-failure count throughout. On the
-          // capped attempt the day trips terminal and drops its retry schedule;
-          // an already-terminal day stays terminal (the CASE preserves it).
-          db.query<unknown, [string, number, number, number, string]>(
+          // capped attempt the day trips terminal and drops its retry schedule.
+          // A permanent disposition is sticky for the entire retry cycle.
+          const retryAtEpoch =
+            input.failedAtEpoch + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1_000);
+          db.query<
+            unknown,
+            [
+              string,
+              DreamRetryDisposition,
+              DreamRetryDisposition,
+              number,
+              number,
+              number,
+              string,
+            ]
+          >(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  attempt_count = attempt_count + 1,
                  last_error = ?,
+                 retry_disposition = CASE
+                   WHEN retry_disposition = 'permanent' THEN 'permanent'
+                   WHEN ? = 'permanent' THEN 'permanent'
+                   ELSE ? END,
                  terminal = CASE
                    WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
                  next_attempt_epoch = CASE
@@ -251,9 +274,11 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
              WHERE date = ?`,
           ).run(
             input.error,
+            input.outcome,
+            input.outcome,
             DREAM_MAX_AUTO_ATTEMPTS,
             DREAM_MAX_AUTO_ATTEMPTS,
-            input.retryAtEpoch,
+            retryAtEpoch,
             input.date,
           );
         }
@@ -274,12 +299,45 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
                needs_regen = 0,
                attempt_count = 0,
                next_attempt_epoch = NULL,
+               terminal = 0,
+               retry_disposition = NULL,
                last_error = NULL
            WHERE date = ?`,
         ).run(input.watermark, input.settledAtEpoch, input.date);
         db.query<unknown, [number]>(
           "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'",
         ).run(input.queueSeq);
+
+        if (input.remoteAttemptSucceeded) {
+          const transientDates = db.query<{ date: string }, [string]>(
+            `SELECT date
+             FROM diary_day_state
+             WHERE date <> ?
+               AND terminal = 1
+               AND retry_disposition = 'transient'`,
+          ).all(input.date);
+          for (const { date } of transientDates) {
+            db.query<unknown, [string]>(
+              `UPDATE diary_day_state
+               SET needs_regen = 1,
+                   attempt_count = 0,
+                   next_attempt_epoch = NULL,
+                   terminal = 0,
+                   retry_disposition = NULL,
+                   last_error = NULL
+               WHERE date = ?`,
+            ).run(date);
+            db.query<unknown, [number, number]>(
+              `INSERT INTO pending_queue (
+                 kind, target_id, session_db_id, enqueued_at_epoch
+               ) VALUES ('diary', ?, 0, ?)
+               ON CONFLICT DO UPDATE SET claimed_at_epoch = NULL`,
+            ).run(
+              Number(date.replaceAll("-", "")),
+              input.settledAtEpoch,
+            );
+          }
+        }
       });
     },
 
@@ -306,6 +364,7 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
              attempt_count = 0,
              next_attempt_epoch = NULL,
              terminal = 0,
+             retry_disposition = NULL,
              last_error = NULL
          WHERE date = ?`,
       ).run(date);
@@ -383,9 +442,14 @@ export function createDiaryStateStore(db: Database): DiaryStateStore {
       return runWriteTransaction(db, () => {
         for (const date of terminalize) {
           db.query<unknown, [string]>(
-            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
-             VALUES (?, 1, NULL)
-             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`,
+            `INSERT INTO diary_day_state (
+               date, terminal, retry_disposition, next_attempt_epoch
+             )
+             VALUES (?, 1, 'permanent', NULL)
+             ON CONFLICT(date) DO UPDATE SET
+               terminal = 1,
+               retry_disposition = 'permanent',
+               next_attempt_epoch = NULL`,
           ).run(date);
           db.query<unknown, [number]>(
             "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?",

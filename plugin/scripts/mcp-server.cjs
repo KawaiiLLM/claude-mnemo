@@ -7592,6 +7592,7 @@ __export(schema_exports, {
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
+  ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -7613,6 +7614,23 @@ function ensureDiaryDayStateTerminalColumn(db) {
   }
   db.exec(
     "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
+}
+function ensureDiaryDayStateRetryDispositionColumn(db) {
+  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
+    db.exec(
+      `ALTER TABLE diary_day_state
+       ADD COLUMN retry_disposition TEXT
+       CHECK (
+         retry_disposition IS NULL OR
+         retry_disposition IN ('transient', 'permanent')
+       )`
+    );
+  }
+  db.exec(
+    `UPDATE diary_day_state
+     SET retry_disposition = 'permanent'
+     WHERE terminal = 1 AND retry_disposition IS NULL`
   );
 }
 function dropRetiredMaintenanceState(db) {
@@ -7978,6 +7996,10 @@ var init_schema = __esm({
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
     terminal INTEGER NOT NULL DEFAULT 0,
+    retry_disposition TEXT CHECK (
+      retry_disposition IS NULL OR
+      retry_disposition IN ('transient', 'permanent')
+    ),
     last_error TEXT
   );
 
@@ -31598,6 +31620,7 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
      SET needs_regen = 1,
          attempt_count = 0,
          next_attempt_epoch = NULL,
+         retry_disposition = NULL,
          last_error = NULL
      WHERE date = ?
        AND settled_at_epoch IS NOT NULL

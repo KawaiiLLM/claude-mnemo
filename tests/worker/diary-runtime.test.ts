@@ -25,8 +25,12 @@ import {
   createDreamQueueProcessor,
 } from "../../src/worker/diary-runtime";
 import { createDiarySdkQuery } from "../../src/worker/diary-sdk-query";
+import { createWorkerAbortError } from "../../src/worker/error-classifier";
 import { createWorkerCore, main } from "../../src/worker/server";
-import { DEFAULT_CONFIG } from "../../src/shared/config";
+import {
+  DEFAULT_CONFIG,
+  DREAM_RETRY_BACKOFF_MS,
+} from "../../src/shared/config";
 import { createLogger } from "../../src/shared/logger";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
@@ -233,64 +237,110 @@ describe("createDiaryRuntime", () => {
     }
   });
 
-  test("two connection failures do not consume attempts and the day later settles automatically", async () => {
+  test.each([
+    [
+      "connection",
+      Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+      "transient",
+      1,
+    ],
+    [
+      "blocked",
+      Object.assign(new Error("billing blocked"), { type: "billing_error" }),
+      "transient",
+      1,
+    ],
+    ["deterministic", new Error("invalid dream output"), "permanent", 1],
+    [
+      "shutdown",
+      createWorkerAbortError("shutdown"),
+      null,
+      0,
+    ],
+  ] as const)(
+    "routes %s dream errors to the unified failure outcome",
+    async (_label, failure, retryDisposition, attemptCount) => {
+      const db = createDatabase(":memory:");
+      initializeSchema(db);
+      const stateStore = createDiaryStateStore(db);
+      stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
+      const processor = createDreamQueueProcessor({
+        db,
+        stateStore,
+        readLastSuccessfulDate: async () => null,
+        nowEpoch: () => 100,
+        timeZone: "Asia/Shanghai",
+        async processDreamDate() {
+          throw failure;
+        },
+      });
+
+      try {
+        await expect(
+          processor.process(stateStore.claimNextDiaryItem(100)!),
+        ).rejects.toThrow();
+        expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+          attemptCount,
+          nextAttemptEpoch:
+            attemptCount === 0
+              ? 100
+              : 100 + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1_000),
+          terminal: false,
+          retryDisposition,
+        });
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  test("resurrects transient-terminal days only after remote-verified success", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const stateStore = createDiaryStateStore(db);
-    stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
-    let nowEpoch = 100;
-    let runs = 0;
+    stateStore.enqueueDay({ date: "2026-07-08", enqueuedAtEpoch: 100 });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const failedAtEpoch = 100 + attempt * 20;
+      const item = stateStore.claimNextDiaryItem(failedAtEpoch)!;
+      stateStore.recordDreamFailure({
+        date: "2026-07-08",
+        queueSeq: item.seq,
+        error: "temporary outage",
+        failedAtEpoch,
+        outcome: "transient",
+      });
+    }
+
+    let remoteAttemptSucceeded = false;
     const processor = createDreamQueueProcessor({
       db,
       stateStore,
       readLastSuccessfulDate: async () => null,
-      nowEpoch: () => nowEpoch,
+      nowEpoch: () => 500,
       timeZone: "Asia/Shanghai",
       async processDreamDate() {
-        runs += 1;
-        if (runs <= 2) {
-          throw Object.assign(new Error("socket reset"), {
-            code: "ECONNRESET",
-          });
-        }
+        return { remoteAttemptSucceeded };
       },
     });
 
     try {
-      await expect(
-        processor.process(stateStore.claimNextDiaryItem(nowEpoch)!),
-      ).rejects.toThrow("socket reset");
-      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
-        attemptCount: 0,
-        nextAttemptEpoch: 1000,
-        terminal: false,
-        lastError: null,
+      stateStore.enqueueDay({ date: "2026-07-09", enqueuedAtEpoch: 500 });
+      await processor.process(stateStore.claimNextDiaryItem(500)!);
+      expect(stateStore.getDayState("2026-07-08")).toMatchObject({
+        attemptCount: 3,
+        terminal: true,
+        retryDisposition: "transient",
       });
 
-      nowEpoch = 1000;
-      await expect(
-        processor.process(stateStore.claimNextDiaryItem(nowEpoch)!),
-      ).rejects.toThrow("socket reset");
-      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
+      remoteAttemptSucceeded = true;
+      stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 500 });
+      await processor.process(stateStore.claimNextDiaryItem(500)!);
+      expect(stateStore.getDayState("2026-07-08")).toMatchObject({
         attemptCount: 0,
-        nextAttemptEpoch: 1900,
         terminal: false,
-        lastError: null,
+        retryDisposition: null,
       });
-
-      nowEpoch = 1900;
-      await processor.process(stateStore.claimNextDiaryItem(nowEpoch)!);
-
-      expect(runs).toBe(3);
-      expect(stateStore.getDayState("2026-07-10")).toMatchObject({
-        settledAtEpoch: 1900,
-        needsRegen: false,
-        attemptCount: 0,
-        nextAttemptEpoch: null,
-        terminal: false,
-        lastError: null,
-      });
-      expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
+      expect(stateStore.hasQueuedDay("2026-07-08")).toBe(true);
     } finally {
       db.close();
     }
@@ -313,6 +363,7 @@ describe("createDiaryRuntime", () => {
       async processDreamDate(date) {
         calls.push(date);
         if (date === "2026-07-09") throw new Error("one date failed");
+        return { remoteAttemptSucceeded: false };
       },
     });
 
@@ -327,7 +378,8 @@ describe("createDiaryRuntime", () => {
       expect(stateStore.getDayState("2026-07-08")?.settledAtEpoch).toBe(100);
       expect(stateStore.getDayState("2026-07-09")).toMatchObject({
         attemptCount: 1,
-        nextAttemptEpoch: 160,
+        nextAttemptEpoch: 110,
+        retryDisposition: "permanent",
       });
       expect(stateStore.getDayState("2026-07-10")?.settledAtEpoch).toBe(100);
     } finally {
@@ -449,7 +501,6 @@ describe("createDiaryRuntime", () => {
         subtype: "api_error",
         error: { status: 429, retryInMs: 5_000 },
       },
-      105,
     ],
     [
       "billing",
@@ -458,11 +509,10 @@ describe("createDiaryRuntime", () => {
         error: "billing_error",
         message: { content: [] },
       },
-      86_500,
     ],
   ] as const)(
-    "routes a streamed dream %s through date-keyed non-attempt retry state",
-    async (_label, streamMessage, expectedRetryEpoch) => {
+    "routes a streamed dream %s through the uniform transient retry state",
+    async (_label, streamMessage) => {
       const db = createDatabase(":memory:");
       initializeSchema(db);
       const stateStore = createDiaryStateStore(db);
@@ -515,10 +565,10 @@ describe("createDiaryRuntime", () => {
           processor.process(stateStore.claimNextDiaryItem(100)!),
         ).rejects.toThrow();
         expect(stateStore.getDayState("2026-07-10")).toMatchObject({
-          attemptCount: 0,
-          nextAttemptEpoch: expectedRetryEpoch,
+          attemptCount: 1,
+          nextAttemptEpoch: 110,
           terminal: false,
-          lastError: null,
+          retryDisposition: "transient",
         });
       } finally {
         db.close();

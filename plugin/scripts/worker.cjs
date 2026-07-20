@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path10 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.6.5-mrs3f1mz" : "dev";
+var BUILD_ID = true ? "0.6.5-mrsx373h" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -248,6 +248,7 @@ var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+var DREAM_RETRY_BACKOFF_MS = 1e4;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
 var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
 var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
@@ -409,7 +410,7 @@ function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: 
 }
 
 // src/db/diary-state.ts
-var DREAM_MAX_AUTO_ATTEMPTS = 2;
+var DREAM_MAX_AUTO_ATTEMPTS = 3;
 var DIARY_QUEUE_SELECT = `
   SELECT
     q.seq,
@@ -437,6 +438,7 @@ function markSettledDiaryDayStaleForTurn(db, createdAtEpoch) {
      SET needs_regen = 1,
          attempt_count = 0,
          next_attempt_epoch = NULL,
+         retry_disposition = NULL,
          last_error = NULL
      WHERE date = ?
        AND settled_at_epoch IS NOT NULL
@@ -507,6 +509,7 @@ function createDiaryStateStore(db) {
            attempt_count AS attemptCount,
            next_attempt_epoch AS nextAttemptEpoch,
            terminal,
+           retry_disposition AS retryDisposition,
            last_error AS lastError
          FROM diary_day_state
          WHERE date = ?`
@@ -519,19 +522,24 @@ function createDiaryStateStore(db) {
     },
     recordDreamFailure(input) {
       runWriteTransaction(db, () => {
-        if (input.countAttempt === false) {
+        if (input.outcome === "shutdown") {
           db.query(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  next_attempt_epoch = ?
              WHERE date = ?`
-          ).run(input.retryAtEpoch, input.date);
+          ).run(input.failedAtEpoch, input.date);
         } else {
+          const retryAtEpoch = input.failedAtEpoch + Math.ceil(DREAM_RETRY_BACKOFF_MS / 1e3);
           db.query(
             `UPDATE diary_day_state
              SET needs_regen = 1,
                  attempt_count = attempt_count + 1,
                  last_error = ?,
+                 retry_disposition = CASE
+                   WHEN retry_disposition = 'permanent' THEN 'permanent'
+                   WHEN ? = 'permanent' THEN 'permanent'
+                   ELSE ? END,
                  terminal = CASE
                    WHEN attempt_count + 1 >= ? THEN 1 ELSE terminal END,
                  next_attempt_epoch = CASE
@@ -539,9 +547,11 @@ function createDiaryStateStore(db) {
              WHERE date = ?`
           ).run(
             input.error,
+            input.outcome,
+            input.outcome,
             DREAM_MAX_AUTO_ATTEMPTS,
             DREAM_MAX_AUTO_ATTEMPTS,
-            input.retryAtEpoch,
+            retryAtEpoch,
             input.date
           );
         }
@@ -561,12 +571,44 @@ function createDiaryStateStore(db) {
                needs_regen = 0,
                attempt_count = 0,
                next_attempt_epoch = NULL,
+               terminal = 0,
+               retry_disposition = NULL,
                last_error = NULL
            WHERE date = ?`
         ).run(input.watermark, input.settledAtEpoch, input.date);
         db.query(
           "DELETE FROM pending_queue WHERE seq = ? AND kind = 'diary'"
         ).run(input.queueSeq);
+        if (input.remoteAttemptSucceeded) {
+          const transientDates = db.query(
+            `SELECT date
+             FROM diary_day_state
+             WHERE date <> ?
+               AND terminal = 1
+               AND retry_disposition = 'transient'`
+          ).all(input.date);
+          for (const { date: date7 } of transientDates) {
+            db.query(
+              `UPDATE diary_day_state
+               SET needs_regen = 1,
+                   attempt_count = 0,
+                   next_attempt_epoch = NULL,
+                   terminal = 0,
+                   retry_disposition = NULL,
+                   last_error = NULL
+               WHERE date = ?`
+            ).run(date7);
+            db.query(
+              `INSERT INTO pending_queue (
+                 kind, target_id, session_db_id, enqueued_at_epoch
+               ) VALUES ('diary', ?, 0, ?)
+               ON CONFLICT DO UPDATE SET claimed_at_epoch = NULL`
+            ).run(
+              Number(date7.replaceAll("-", "")),
+              input.settledAtEpoch
+            );
+          }
+        }
       });
     },
     acknowledgeDiaryItem(queueSeq) {
@@ -590,6 +632,7 @@ function createDiaryStateStore(db) {
              attempt_count = 0,
              next_attempt_epoch = NULL,
              terminal = 0,
+             retry_disposition = NULL,
              last_error = NULL
          WHERE date = ?`
       ).run(date7);
@@ -648,9 +691,14 @@ function createDiaryStateStore(db) {
       return runWriteTransaction(db, () => {
         for (const date7 of terminalize) {
           db.query(
-            `INSERT INTO diary_day_state (date, terminal, next_attempt_epoch)
-             VALUES (?, 1, NULL)
-             ON CONFLICT(date) DO UPDATE SET terminal = 1, next_attempt_epoch = NULL`
+            `INSERT INTO diary_day_state (
+               date, terminal, retry_disposition, next_attempt_epoch
+             )
+             VALUES (?, 1, 'permanent', NULL)
+             ON CONFLICT(date) DO UPDATE SET
+               terminal = 1,
+               retry_disposition = 'permanent',
+               next_attempt_epoch = NULL`
           ).run(date7);
           db.query(
             "DELETE FROM pending_queue WHERE kind = 'diary' AND target_id = ?"
@@ -2238,6 +2286,10 @@ var SCHEMA_SQL = `
     attempt_count INTEGER NOT NULL DEFAULT 0,
     next_attempt_epoch INTEGER,
     terminal INTEGER NOT NULL DEFAULT 0,
+    retry_disposition TEXT CHECK (
+      retry_disposition IS NULL OR
+      retry_disposition IN ('transient', 'permanent')
+    ),
     last_error TEXT
   );
 
@@ -2251,6 +2303,7 @@ var SCHEMA_SQL = `
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
+  ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
@@ -2272,6 +2325,23 @@ function ensureDiaryDayStateTerminalColumn(db) {
   }
   db.exec(
     "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  );
+}
+function ensureDiaryDayStateRetryDispositionColumn(db) {
+  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
+    db.exec(
+      `ALTER TABLE diary_day_state
+       ADD COLUMN retry_disposition TEXT
+       CHECK (
+         retry_disposition IS NULL OR
+         retry_disposition IN ('transient', 'permanent')
+       )`
+    );
+  }
+  db.exec(
+    `UPDATE diary_day_state
+     SET retry_disposition = 'permanent'
+     WHERE terminal = 1 AND retry_disposition IS NULL`
   );
 }
 function dropRetiredMaintenanceState(db) {
@@ -44766,7 +44836,7 @@ function createDreamJobProcessor(options) {
       assertDate(date7);
       const existingMarker = await store.readLastSuccessfulDate();
       if (!processOptions.regenerate && existingMarker !== null && existingMarker >= date7) {
-        return;
+        return { remoteAttemptSucceeded: false };
       }
       await store.migrateLegacyPersona();
       const initialFullFill = await store.requiresInitialFullFill();
@@ -44791,7 +44861,7 @@ function createDreamJobProcessor(options) {
 `,
           diaryIndex: quietDayIndex(date7, currentIndex)
         });
-        return;
+        return { remoteAttemptSucceeded: false };
       }
       const turnReferences = loadDiaryTurnReferences(options.db, rows);
       const stagingPaths = await seedDreamStaging({
@@ -44826,7 +44896,7 @@ function createDreamJobProcessor(options) {
         if (nightCommit.wasCommitted()) {
           const committedThrough = await store.readLastSuccessfulDate();
           if (committedThrough !== null && committedThrough >= date7) {
-            return;
+            return { remoteAttemptSucceeded: true };
           }
         }
         throw error49;
@@ -44840,13 +44910,12 @@ function createDreamJobProcessor(options) {
       if (lastSuccessfulDate === null || lastSuccessfulDate < date7) {
         throw new Error(`Dream commit did not publish the success marker for ${date7}`);
       }
+      return { remoteAttemptSucceeded: true };
     }
   };
 }
 
 // src/worker/diary-runtime.ts
-var DREAM_CONNECTION_RETRY_MS = 15 * 60 * 1e3;
-var DREAM_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1e3;
 function dreamDateFromQueueItem(item) {
   if (item.kind !== "diary" || item.sessionDbId !== 0) {
     throw new Error(`Not a dream queue item: seq=${item.seq}`);
@@ -44870,14 +44939,15 @@ function createDreamQueueProcessor(options) {
         const dayState = options.stateStore.getDayState(date7);
         const lastSuccessfulDate = await options.readLastSuccessfulDate();
         const committedButUnsettled = dayState?.needsRegen === true && dayState.settledAtEpoch === null && lastSuccessfulDate === date7;
-        await options.processDreamDate(date7, {
+        const result = await options.processDreamDate(date7, {
           regenerate: dayState?.needsRegen === true && !committedButUnsettled
         });
         options.stateStore.settleDreamDay({
           date: date7,
           queueSeq: item.seq,
           watermark: processedWatermark,
-          settledAtEpoch: nowEpoch()
+          settledAtEpoch: nowEpoch(),
+          remoteAttemptSucceeded: result.remoteAttemptSucceeded
         });
         if (watermarkFor(date7) !== processedWatermark) {
           options.stateStore.markDayStaleAndEnqueue({
@@ -44889,24 +44959,12 @@ function createDreamQueueProcessor(options) {
         const failedAtEpoch = nowEpoch();
         const classification = classifyWorkerError(error49);
         const isShutdownAbort = typeof error49 === "object" && error49 !== null && "workerAbortReason" in error49 && error49.workerAbortReason === "shutdown";
-        const retryDelayMs = isShutdownAbort ? 0 : classification === "blocked" ? Math.max(
-          DREAM_BLOCKED_RETRY_FLOOR_MS,
-          resolveWorkerRetryDelayMs(
-            error49,
-            DREAM_BLOCKED_RETRY_FLOOR_MS,
-            failedAtEpoch * 1e3
-          )
-        ) : classification === "connection" ? resolveWorkerRetryDelayMs(
-          error49,
-          DREAM_CONNECTION_RETRY_MS,
-          failedAtEpoch * 1e3
-        ) : 60 * 1e3;
         options.stateStore.recordDreamFailure({
           date: date7,
           queueSeq: item.seq,
           error: formatErrorForPersistence(error49, options.sensitiveEnv),
-          retryAtEpoch: failedAtEpoch + Math.ceil(retryDelayMs / 1e3),
-          countAttempt: classification === "deterministic"
+          failedAtEpoch,
+          outcome: isShutdownAbort ? "shutdown" : classification === "connection" || classification === "blocked" ? "transient" : "permanent"
         });
         throw error49;
       }
@@ -44971,7 +45029,9 @@ function createDiaryRuntime(options) {
     return tracked;
   }
   return {
-    processDreamDate: (date7) => trackDream(() => processDreamDateRaw(date7)),
+    processDreamDate: (date7) => trackDream(async () => {
+      await processDreamDateRaw(date7);
+    }),
     processDreamItem: (item, agentEnv) => trackDream(() => dreamQueue.process(item), agentEnv),
     isDreamRunning: () => activeDream !== null,
     async abortDream(reason) {

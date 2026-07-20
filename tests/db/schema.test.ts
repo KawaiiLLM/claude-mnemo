@@ -54,6 +54,7 @@ describe("initializeSchema", () => {
       "attempt_count",
       "next_attempt_epoch",
       "terminal",
+      "retry_disposition",
       "last_error",
     ]);
   });

@@ -595,12 +595,32 @@ describe("worker server", () => {
     });
     const store = createDiaryStateStore(db);
 
-    // Drive 2026-07-10 terminal via the one-retry cap.
+    // Drive 2026-07-10 terminal via the unified three-attempt cap.
     store.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 1 });
     const first = store.claimNextDiaryItem(1)!;
-    store.recordDreamFailure({ date: "2026-07-10", queueSeq: first.seq, error: "x", retryAtEpoch: 2 });
-    const second = store.claimNextDiaryItem(2)!;
-    store.recordDreamFailure({ date: "2026-07-10", queueSeq: second.seq, error: "x", retryAtEpoch: 3 });
+    store.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: first.seq,
+      error: "x",
+      failedAtEpoch: 1,
+      outcome: "permanent",
+    });
+    const second = store.claimNextDiaryItem(11)!;
+    store.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: second.seq,
+      error: "x",
+      failedAtEpoch: 11,
+      outcome: "permanent",
+    });
+    const third = store.claimNextDiaryItem(21)!;
+    store.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: third.seq,
+      error: "x",
+      failedAtEpoch: 21,
+      outcome: "permanent",
+    });
     expect(store.getDayState("2026-07-10")?.terminal).toBe(true);
 
     // Manual trigger resets it to a clean, non-terminal, retryable, queued state.
@@ -609,6 +629,7 @@ describe("worker server", () => {
       terminal: false,
       attemptCount: 0,
       needsRegen: true,
+      retryDisposition: null,
     });
     expect(store.hasQueuedDay("2026-07-10")).toBe(true);
 
@@ -1149,7 +1170,8 @@ describe("worker server", () => {
             date: "2026-07-10",
             queueSeq: item.seq,
             error: "temporary failure",
-            retryAtEpoch: nowEpoch + 60,
+            failedAtEpoch: nowEpoch,
+            outcome: "permanent",
           });
           throw new Error("temporary failure");
         }
@@ -1158,6 +1180,7 @@ describe("worker server", () => {
           queueSeq: item.seq,
           watermark: "settled-on-next-turn",
           settledAtEpoch: nowEpoch,
+          remoteAttemptSucceeded: false,
         });
       },
     });
@@ -1201,7 +1224,8 @@ describe("worker server", () => {
       date: "2026-07-10",
       queueSeq: failedItem.seq,
       error: "wait for floor",
-      retryAtEpoch: 200,
+      failedAtEpoch: 190,
+      outcome: "permanent",
     });
     let nowEpoch = 150;
     const processDiaryItem = mock(async (item) => {
@@ -1210,6 +1234,7 @@ describe("worker server", () => {
         queueSeq: item.seq,
         watermark: "after-floor",
         settledAtEpoch: nowEpoch,
+        remoteAttemptSucceeded: false,
       });
     });
     const core = createWorkerCore({
@@ -1251,14 +1276,24 @@ describe("worker server", () => {
       date: "2026-07-09",
       queueSeq: firstTerminalAttempt.seq,
       error: "first failure",
-      retryAtEpoch: 91,
+      failedAtEpoch: 81,
+      outcome: "permanent",
     });
     const secondTerminalAttempt = stateStore.claimNextDiaryItem(91)!;
     stateStore.recordDreamFailure({
       date: "2026-07-09",
       queueSeq: secondTerminalAttempt.seq,
       error: "second failure",
-      retryAtEpoch: 92,
+      failedAtEpoch: 91,
+      outcome: "permanent",
+    });
+    const thirdTerminalAttempt = stateStore.claimNextDiaryItem(101)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-09",
+      queueSeq: thirdTerminalAttempt.seq,
+      error: "third failure",
+      failedAtEpoch: 101,
+      outcome: "permanent",
     });
 
     stateStore.enqueueDay({ date: "2026-07-10", enqueuedAtEpoch: 100 });
@@ -1268,6 +1303,7 @@ describe("worker server", () => {
       queueSeq: settledItem.seq,
       watermark: "already-committed",
       settledAtEpoch: 100,
+      remoteAttemptSucceeded: false,
     });
 
     const processDiaryItem = mock(async () => {});
@@ -3520,14 +3556,24 @@ describe("worker server", () => {
       date: "2026-07-10",
       queueSeq: first.seq,
       error: "first failure",
-      retryAtEpoch: 2,
+      failedAtEpoch: 1,
+      outcome: "permanent",
     });
-    const second = stateStore.claimNextDiaryItem(2)!;
+    const second = stateStore.claimNextDiaryItem(11)!;
     stateStore.recordDreamFailure({
       date: "2026-07-10",
       queueSeq: second.seq,
       error: "second failure",
-      retryAtEpoch: 3,
+      failedAtEpoch: 11,
+      outcome: "permanent",
+    });
+    const third = stateStore.claimNextDiaryItem(21)!;
+    stateStore.recordDreamFailure({
+      date: "2026-07-10",
+      queueSeq: third.seq,
+      error: "third failure",
+      failedAtEpoch: 21,
+      outcome: "permanent",
     });
     expect(stateStore.getDayState("2026-07-10")?.terminal).toBe(true);
 
