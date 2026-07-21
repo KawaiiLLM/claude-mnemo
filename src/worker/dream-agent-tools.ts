@@ -26,7 +26,7 @@ export const dreamCheckBudgetInputShape: Record<string, never> = {};
 
 /**
  * Payload-free self-check for the hot-memory token target. Reads the staged
- * user-profile and experience back and reports each document's estimated tokens
+ * user-profile back and reports its estimated tokens
  * against the SOFT TARGET the agent optimizes toward. `ok: false` / `over_by`>0
  * only means the doc is over the aim — commit is NOT size-gated, so the agent
  * trims toward target in at most ~3 passes and then commits regardless.
@@ -47,7 +47,6 @@ export function createDreamCheckBudgetToolHandler(
       (
         [
           ["user-profile.md", staged.userProfile],
-          ["experience.md", staged.experience],
         ] as const
       ).map(([filename, document]) => {
         const tokens = estimateDiaryTokens(document);

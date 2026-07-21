@@ -47,7 +47,6 @@ afterEach(() => {
 function writeStaging(dataRoot: string, night: CommitNightInput): void {
   const paths = dreamStagingPaths(dataRoot, night.date);
   writeFileSync(paths.userProfile, night.userProfile);
-  writeFileSync(paths.experience, night.experience);
   writeFileSync(paths.archive, night.archive);
   writeFileSync(paths.diary, night.diary);
   writeFileSync(paths.diaryIndex, night.diaryIndex);
@@ -99,7 +98,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: "# Experience\n",
           archive: "# Memory Archive\n",
           diary: "# 2026-07-10\n",
           diaryIndex: "# Diary Index\n",
@@ -176,7 +174,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: "# Experience\n",
           archive: "# Memory Archive\n",
           diary: "# 2026-07-10\n\n- retried after shutdown\n",
           diaryIndex: "# Diary Index\n\n- 2026-07-10：retried\n",
@@ -626,7 +623,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: `# Experience\n\n- 2026-07-10: ${revision} contribution [S${session.id}/T1]\n`,
           archive: "# Memory Archive\n",
           diary: `# 2026-07-10\n\n- ${revision} diary [S${session.id}/T1]\n`,
           diaryIndex: `# Diary Index\n\n- 2026-07-10：${revision}\n`,
@@ -666,13 +662,10 @@ describe("createDiaryRuntime", () => {
         stateStore.claimNextDiaryItem(DREAM_READY_EPOCH)!,
       );
 
-      const experience = readFileSync(join(dataRoot, "memory", "experience.md"), "utf8");
       expect(dreamRuns).toBe(2);
-      expect(experience).toContain("late-finalized contribution");
-      expect(experience).not.toContain("initial contribution");
-      expect(experience.match(/2026-07-10/g)).toHaveLength(1);
-      expect(readFileSync(join(dataRoot, "diary", "2026-07-10.md"), "utf8"))
-        .toContain("late-finalized diary");
+      const diary = readFileSync(join(dataRoot, "diary", "2026-07-10.md"), "utf8");
+      expect(diary).toContain("late-finalized diary");
+      expect(diary).not.toContain("initial diary");
       expect(stateStore.getDayState("2026-07-10")?.needsRegen).toBe(false);
     } finally {
       db.close();
@@ -717,7 +710,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: "# Experience\n",
           archive: "# Memory Archive\n",
           diary: "# 2026-07-10\n",
           diaryIndex: "# Diary Index\n",
@@ -777,7 +769,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: "# Experience\n\n- committed once [S1/T1]\n",
           archive: "# Memory Archive\n",
           diary: "# 2026-07-10\n\n- committed once [S1/T1]\n",
           diaryIndex: "# Diary Index\n\n- 2026-07-10：committed once\n",
@@ -859,7 +850,6 @@ describe("createDiaryRuntime", () => {
         writeStaging(dataRoot, {
           date: "2026-07-10",
           userProfile: "# User Profile\n",
-          experience: "# Experience\n\n- 2026-07-10: only contribution [S1/T1]\n",
           archive: "# Memory Archive\n",
           diary: "# 2026-07-10\n\n- only contribution [S1/T1]\n",
           diaryIndex: "# Diary Index\n\n- 2026-07-10：only contribution\n",
@@ -871,8 +861,8 @@ describe("createDiaryRuntime", () => {
 
     try {
       await runtime.processDreamDate("2026-07-10");
-      const committedExperience = readFileSync(
-        join(dataRoot, "memory", "experience.md"),
+      const committedDiary = readFileSync(
+        join(dataRoot, "diary", "2026-07-10.md"),
         "utf8",
       );
       const snapshotCount = (await new DreamMemoryStore(dataRoot).listSnapshots()).length;
@@ -881,8 +871,8 @@ describe("createDiaryRuntime", () => {
 
       expect(dreamRuns).toBe(1);
       expect(seenTimeouts).toEqual([2_400_000]);
-      expect(readFileSync(join(dataRoot, "memory", "experience.md"), "utf8"))
-        .toBe(committedExperience);
+      expect(readFileSync(join(dataRoot, "diary", "2026-07-10.md"), "utf8"))
+        .toBe(committedDiary);
       expect((await new DreamMemoryStore(dataRoot).listSnapshots()).length)
         .toBe(snapshotCount);
     } finally {

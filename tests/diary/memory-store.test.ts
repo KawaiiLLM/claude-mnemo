@@ -14,7 +14,6 @@ import { join } from "node:path";
 
 import {
   DreamMemoryStore,
-  EMPTY_EXPERIENCE_DOCUMENT,
   EMPTY_PROFILE_DOCUMENT,
   MEMORY_DOCUMENT_TOKEN_LIMIT,
 } from "../../src/diary/memory-store";
@@ -38,7 +37,6 @@ function night(date: string, suffix: string) {
   return {
     date,
     userProfile: `# Profile\n\n- profile ${suffix}\n`,
-    experience: `# Experience\n\n- experience ${suffix}\n`,
     archive: `# Archive\n\n- archive ${suffix}\n`,
     diary: `# ${date}\n\n- diary ${suffix}\n`,
     diaryIndex: `# Diary Index\n\n- ${date}: ${suffix}\n`,
@@ -115,7 +113,6 @@ describe("DreamMemoryStore", () => {
 
     expect(await store.readCurrentMemory()).toEqual({
       userProfile: prior.userProfile,
-      experience: prior.experience,
       archive: prior.archive,
     });
     expect(readFileSync(join(dataRoot, "diary", "2026-07-10.md"), "utf8")).toBe(
@@ -134,7 +131,6 @@ describe("DreamMemoryStore", () => {
     const verified = await store.verifySnapshot(failedSnapshot!.id);
     expect(verified.documents).toEqual({
       userProfile: prior.userProfile,
-      experience: prior.experience,
       archive: prior.archive,
     });
   });
@@ -171,7 +167,6 @@ describe("DreamMemoryStore", () => {
     expect(preSecond).toBeDefined();
     expect((await store.verifySnapshot(preSecond!.id)).documents).toEqual({
       userProfile: first.userProfile,
-      experience: first.experience,
       archive: first.archive,
     });
 
@@ -179,7 +174,6 @@ describe("DreamMemoryStore", () => {
 
     expect(await store.readCurrentMemory()).toEqual({
       userProfile: first.userProfile,
-      experience: first.experience,
       archive: first.archive,
     });
   });
@@ -222,9 +216,9 @@ describe("DreamMemoryStore", () => {
     });
     expect(await store.readCurrentMemory()).toEqual({
       userProfile,
-      experience,
       archive: "# Memory Archive\n",
     });
+    expect(existsSync(join(dataRoot, "memory", "experience.md"))).toBe(false);
     expect(existsSync(join(dataRoot, "persona", "CURRENT"))).toBe(false);
     expect(existsSync(join(dataRoot, "persona", "generations"))).toBe(false);
     expect(await store.requiresInitialFullFill()).toBe(false);
@@ -247,7 +241,6 @@ describe("DreamMemoryStore", () => {
     });
     expect(await store.readCurrentMemory()).toEqual({
       userProfile: EMPTY_PROFILE_DOCUMENT,
-      experience: EMPTY_EXPERIENCE_DOCUMENT,
       archive: "# Memory Archive\n",
     });
     expect(await store.requiresInitialFullFill()).toBe(true);

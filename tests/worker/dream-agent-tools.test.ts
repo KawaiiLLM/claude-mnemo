@@ -26,7 +26,6 @@ function stagedNight(overrides: Partial<CommitNightInput> = {}): CommitNightInpu
   return {
     date: "2026-07-10",
     userProfile: "# Profile\n\n- current\n",
-    experience: "# Experience\n\n- current\n",
     archive: "# Archive\n",
     diary: "# 2026-07-10\n\n- event\n",
     diaryIndex: "# Diary Index\n\n- 2026-07-10: event\n",
@@ -65,7 +64,6 @@ describe("dream commit tool", () => {
     // Seeded staging is empty defaults; the commit publishes them verbatim.
     expect(await store.readCurrentMemory()).toEqual({
       userProfile: "# User Profile\n",
-      experience: "# Experience\n",
       archive: "# Memory Archive\n",
     });
     expect(await store.readLastSuccessfulDate()).toBe("2026-07-10");
@@ -100,7 +98,7 @@ describe("dream commit tool", () => {
       ok: false,
     });
     expect(report["user-profile.md"].over_by).toBeGreaterThan(0);
-    expect(report["experience.md"]).toMatchObject({ ok: true, over_by: 0 });
+    expect(Object.keys(report)).toEqual(["user-profile.md"]);
   });
 
   test("check_budget rejects any tool argument (payload-free)", async () => {
@@ -121,7 +119,6 @@ describe("dream commit tool", () => {
     await store.commitNight({
       date: "2026-07-09",
       userProfile: "# User Profile\n\n- durable trait [S1/T1]\n",
-      experience: "# Experience\n\n- durable arc [S1/T1]\n",
       archive: "# Memory Archive\n",
       diary: "# 2026-07-09\n\n- prior\n",
       diaryIndex: "# Diary Index\n\n- 2026-07-09: prior\n",
@@ -129,7 +126,7 @@ describe("dream commit tool", () => {
 
     const paths = await seedDreamStaging({ dataRoot, date: "2026-07-10", store });
     // A seeded memory doc vanishes before commit reads staging back.
-    rmSync(paths.experience);
+    rmSync(paths.archive);
     const commit = createDreamCommitToolHandler(store, () =>
       readDreamStaging({ dataRoot, date: "2026-07-10" }),
     );
@@ -137,7 +134,7 @@ describe("dream commit tool", () => {
     await expect(commit({})).rejects.toThrow("missing at commit time");
     // No publish happened: the live memory layer and success marker are intact.
     expect(await store.readLastSuccessfulDate()).toBe("2026-07-09");
-    expect((await store.readCurrentMemory()).experience).toContain("durable arc");
+    expect((await store.readCurrentMemory()).userProfile).toContain("durable trait");
   });
 
   test("seed refuses to run when .dream-staging escapes the data root via a symlink", async () => {

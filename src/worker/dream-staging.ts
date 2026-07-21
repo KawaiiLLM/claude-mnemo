@@ -8,7 +8,7 @@ import {
 
 /**
  * Per-run staging workspace under the data root. The dream agent's Write/Edit
- * tools are scoped to this subtree; the payload-free commit reads the six
+ * tools are scoped to this subtree; the payload-free commit reads the five
  * documents back from here instead of from tool arguments. Kept outside the
  * live `memory/` and `diary/` subtrees (leading dot) so it never leaks into the
  * agent's read/grep history scope and never becomes a commit target.
@@ -24,7 +24,6 @@ export interface DreamStagingPaths {
   /** Absolute root of this run's staging workspace. */
   root: string;
   userProfile: string;
-  experience: string;
   archive: string;
   diary: string;
   diaryIndex: string;
@@ -35,7 +34,6 @@ export function dreamStagingPaths(dataRoot: string, date: string): DreamStagingP
   return {
     root,
     userProfile: join(root, "memory", "user-profile.md"),
-    experience: join(root, "memory", "experience.md"),
     archive: join(root, "memory", "archive.md"),
     diary: join(root, "diary", `${date}.md`),
     diaryIndex: join(root, "diary", "INDEX.md"),
@@ -149,7 +147,6 @@ export async function seedDreamStaging(options: {
 
   await Promise.all([
     writeFile(paths.userProfile, memory.userProfile),
-    writeFile(paths.experience, memory.experience),
     writeFile(paths.archive, memory.archive),
     writeFile(paths.diary, diaryDraft),
     writeFile(paths.diaryIndex, diaryIndex),
@@ -159,7 +156,7 @@ export async function seedDreamStaging(options: {
 }
 
 /**
- * Reads the six documents the agent produced back out of the staging
+ * Reads the five documents the agent produced back out of the staging
  * workspace and assembles the CommitNightInput consumed by the unchanged
  * `commitNight` transaction. The three memory documents fail CLOSED (a missing
  * seeded file throws) so a commit can never silently erase live memory; the
@@ -170,14 +167,13 @@ export async function readDreamStaging(options: {
   date: string;
 }): Promise<CommitNightInput> {
   const paths = dreamStagingPaths(options.dataRoot, options.date);
-  const [userProfile, experience, archive, diary, diaryIndex] = await Promise.all([
+  const [userProfile, archive, diary, diaryIndex] = await Promise.all([
     readSeededMemoryDoc(paths.userProfile, "user-profile.md"),
-    readSeededMemoryDoc(paths.experience, "experience.md"),
     readSeededMemoryDoc(paths.archive, "archive.md"),
     readOrDefault(paths.diary, `# ${options.date}\n`),
     readOrDefault(paths.diaryIndex, "# Diary Index\n"),
   ]);
-  return { date: options.date, userProfile, experience, archive, diary, diaryIndex };
+  return { date: options.date, userProfile, archive, diary, diaryIndex };
 }
 
 export async function cleanupDreamStaging(

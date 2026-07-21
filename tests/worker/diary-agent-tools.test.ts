@@ -73,6 +73,49 @@ describe("shared SDK agent tools", () => {
     }
   });
 
+  test("allows validated dream rule read and write tools", async () => {
+    const handlers = createDreamAgentToolHandlers({ db, dataRoot });
+    const permissionOptions = {
+      signal: new AbortController().signal,
+      toolUseID: "tool-use",
+    };
+    const cases = [
+      ["mcp__diary__list_rule_hits", { date: "2026-07-10" }],
+      [
+        "mcp__diary__read_turn_detail",
+        { turn_ref: "S1/T1", opts: { cap: 1500 } },
+      ],
+      [
+        "mcp__diary__propose_rule",
+        {
+          name: "bounded-command",
+          claim: "运行长命令时必须设置 timeout。",
+          rationale: "避免无界等待。",
+          scope: "global",
+          trigger_kind: "tool",
+          trigger_spec: { kind: "tool", tool: "Bash", param_absent: "timeout" },
+        },
+      ],
+      [
+        "mcp__diary__submit_judgment",
+        {
+          rule_id: 1,
+          source_event_id: 1,
+          label: "helpful",
+          rationale: "产生了正面作用。",
+          adjustment: { action: "retain" },
+        },
+      ],
+    ] as const;
+
+    for (const [toolName, input] of cases) {
+      expect(await handlers.canUseTool(toolName, input, permissionOptions)).toEqual({
+        behavior: "allow",
+        updatedInput: input,
+      });
+    }
+  });
+
   test("allows Write/Edit inside the staging subtree and rejects them elsewhere", async () => {
     const stagingRoot = join(dataRoot, ".dream-staging", "2026-07-10");
     mkdirSync(join(stagingRoot, "memory"), { recursive: true });

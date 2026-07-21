@@ -31,12 +31,10 @@ export const DEFAULT_MEMORY_HISTORY_RETENTION: MemoryHistoryRetention = {
 };
 
 export const EMPTY_PROFILE_DOCUMENT = "# User Profile\n";
-export const EMPTY_EXPERIENCE_DOCUMENT = "# Experience\n";
 export const EMPTY_ARCHIVE_DOCUMENT = "# Memory Archive\n";
 
 const MEMORY_FILES = [
   "user-profile.md",
-  "experience.md",
   "archive.md",
 ] as const;
 const SNAPSHOT_MANIFEST_FILE = "manifest.json";
@@ -45,13 +43,12 @@ type MemoryFilename = (typeof MEMORY_FILES)[number];
 
 export interface CurrentMemoryDocuments {
   userProfile: string;
-  experience: string;
   archive: string;
 }
 
 export type CurrentMemoryInjectionDocuments = Pick<
   CurrentMemoryDocuments,
-  "userProfile" | "experience"
+  "userProfile"
 >;
 
 export interface CommitNightInput extends CurrentMemoryDocuments {
@@ -181,7 +178,6 @@ function assertParseableMarkdown(label: string, document: string): void {
 function defaultCurrentMemory(): CurrentMemoryDocuments {
   return {
     userProfile: EMPTY_PROFILE_DOCUMENT,
-    experience: EMPTY_EXPERIENCE_DOCUMENT,
     archive: EMPTY_ARCHIVE_DOCUMENT,
   };
 }
@@ -193,8 +189,6 @@ function documentForFilename(
   switch (filename) {
     case "user-profile.md":
       return documents.userProfile;
-    case "experience.md":
-      return documents.experience;
     case "archive.md":
       return documents.archive;
   }
@@ -265,7 +259,6 @@ export class DreamMemoryStore {
 
     const transaction = await this.prepareTransaction("commit", input.date, {
       "memory/user-profile.md": normalizedInput.userProfile,
-      "memory/experience.md": normalizedInput.experience,
       "memory/archive.md": normalizedInput.archive,
       "memory/migration-state.json": this.serializeMigrationState(false),
       [`diary/${input.date}.md`]: normalizedInput.diary,
@@ -317,15 +310,12 @@ export class DreamMemoryStore {
   }
 
   async readInjectionDocuments(): Promise<CurrentMemoryInjectionDocuments> {
-    // SessionStart persona/experience hooks are read-only by contract. In
+    // SessionStart persona hooks are read-only by contract. In
     // particular, do not create roots or recover transactions here: those
     // operations may mutate files and belong to writer-owned flows.
     await this.assertWorkspaceRootsAreSafe({ createDataRoot: false });
-    const [userProfile, experience] = await Promise.all([
-      this.readMemoryDocument("user-profile.md", ""),
-      this.readMemoryDocument("experience.md", ""),
-    ]);
-    return { userProfile, experience };
+    const userProfile = await this.readMemoryDocument("user-profile.md", "");
+    return { userProfile };
   }
 
   async requiresInitialFullFill(): Promise<boolean> {
@@ -354,7 +344,6 @@ export class DreamMemoryStore {
     const snapshot = await this.verifySnapshotWithoutRecovery(id);
     const transaction = await this.prepareTransaction("restore", snapshot.date, {
       "memory/user-profile.md": snapshot.documents.userProfile,
-      "memory/experience.md": snapshot.documents.experience,
       "memory/archive.md": snapshot.documents.archive,
     });
     await this.executeTransaction(
@@ -371,9 +360,8 @@ export class DreamMemoryStore {
     await this.recoverIncompleteTransactions();
     await this.assertWorkspaceRootsAreSafe();
     const hasProfile = await this.pathExists(this.memoryPath("user-profile.md"));
-    const hasExperience = await this.pathExists(this.memoryPath("experience.md"));
 
-    if (hasProfile && hasExperience) {
+    if (hasProfile) {
       const migrationState = await this.readMigrationStateWithoutRecovery();
       if (
         !(await this.pathExists(this.memoryPath("archive.md"))) ||
@@ -412,7 +400,6 @@ export class DreamMemoryStore {
 
   private validateCommitDocuments(input: CommitNightInput): void {
     assertParseableMarkdown("userProfile", input.userProfile);
-    assertParseableMarkdown("experience", input.experience);
     assertParseableMarkdown("archive", input.archive);
     assertParseableMarkdown("diary", input.diary);
     assertParseableMarkdown("diaryIndex", input.diaryIndex);
@@ -482,12 +469,11 @@ export class DreamMemoryStore {
 
   private async readCurrentMemoryWithoutRecovery(): Promise<CurrentMemoryDocuments> {
     const defaults = defaultCurrentMemory();
-    const [userProfile, experience, archive] = await Promise.all([
+    const [userProfile, archive] = await Promise.all([
       this.readMemoryDocument("user-profile.md", defaults.userProfile),
-      this.readMemoryDocument("experience.md", defaults.experience),
       this.readMemoryDocument("archive.md", defaults.archive),
     ]);
-    return { userProfile, experience, archive };
+    return { userProfile, archive };
   }
 
   private async readMemoryDocument(
@@ -637,7 +623,6 @@ export class DreamMemoryStore {
       createdAt: manifest.created_at,
       documents: {
         userProfile: loaded["user-profile.md"],
-        experience: loaded["experience.md"],
         archive: loaded["archive.md"],
       },
     };
@@ -900,11 +885,9 @@ export class DreamMemoryStore {
     requiresFullFill: boolean,
   ): Promise<void> {
     assertParseableMarkdown("userProfile", documents.userProfile);
-    assertParseableMarkdown("experience", documents.experience);
     assertParseableMarkdown("archive", documents.archive);
     const transaction = await this.prepareTransaction("migration", null, {
       "memory/user-profile.md": documents.userProfile,
-      "memory/experience.md": documents.experience,
       "memory/archive.md": documents.archive,
       "memory/migration-state.json": this.serializeMigrationState(requiresFullFill),
     });
@@ -982,7 +965,6 @@ export class DreamMemoryStore {
       generation: current.generation,
       documents: {
         userProfile,
-        experience,
         archive: EMPTY_ARCHIVE_DOCUMENT,
       },
     };

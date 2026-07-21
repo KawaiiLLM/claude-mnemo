@@ -8,6 +8,10 @@ import {
   classifyWorkerError,
   resolveWorkerRetryDelayMs,
 } from "../../src/worker/error-classifier";
+import {
+  WORKER_TOOL_RESULT_MAX_CHARS,
+  WORKER_TOOL_RESULT_TRUNCATION_HINT,
+} from "../../src/mcp/handlers";
 
 function sdkRequest() {
   return {
@@ -64,8 +68,10 @@ describe("shared SDK agent query", () => {
     const server = { type: "sdk", name: "diary-server" };
     let serverDefinition: unknown;
     const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
-    const toolImpl = mock((name: string, _description: string, _shape: unknown, handler: never) => {
+    const descriptions = new Map<string, string>();
+    const toolImpl = mock((name: string, description: string, _shape: unknown, handler: never) => {
       handlers.set(name, handler);
+      descriptions.set(name, description);
       return { name };
     });
     const seenCalls: Array<{ options: Record<string, unknown> }> = [];
@@ -86,6 +92,25 @@ describe("shared SDK agent query", () => {
         expect(commitResult).toEqual({
           content: [{ type: "text", text: '{"status":"committed"}' }],
         });
+        const proposalResult = await handlers.get("propose_rule")!({ name: "rule" });
+        expect(JSON.parse(
+          (proposalResult as { content: Array<{ text: string }> }).content[0]!.text,
+        )).toEqual({ kind: "propose_rule", text: '{"status":"created"}' });
+        const judgmentResult = await handlers.get("submit_judgment")!({ label: "helpful" });
+        expect(JSON.parse(
+          (judgmentResult as { content: Array<{ text: string }> }).content[0]!.text,
+        )).toEqual({ kind: "submit_judgment", text: '{"status":"recorded"}' });
+        const hitsResult = await handlers.get("list_rule_hits")!({ date: "2026-07-10" });
+        expect(JSON.parse(
+          (hitsResult as { content: Array<{ text: string }> }).content[0]!.text,
+        )).toEqual({
+          kind: "list_rule_hits",
+          text: '{"date":"2026-07-10","hits":[]}',
+        });
+        const detailResult = await handlers.get("read_turn_detail")!({ turn_ref: "S1/T1" });
+        expect(JSON.parse(
+          (detailResult as { content: Array<{ text: string }> }).content[0]!.text,
+        )).toEqual({ kind: "read_turn_detail", text: '{"turn_ref":"S1/T1"}' });
         yield { type: "result", subtype: "success", is_error: false, result: "done" };
       })();
     });
@@ -96,6 +121,18 @@ describe("shared SDK agent query", () => {
     }));
     const commit = mock(async () => ({
       content: [{ type: "text" as const, text: '{"status":"committed"}' }],
+    }));
+    const proposeRule = mock(async () => ({
+      content: [{ type: "text" as const, text: '{"status":"created"}' }],
+    }));
+    const submitJudgment = mock(async () => ({
+      content: [{ type: "text" as const, text: '{"status":"recorded"}' }],
+    }));
+    const listRuleHits = mock(async () => ({
+      content: [{ type: "text" as const, text: '{"date":"2026-07-10","hits":[]}' }],
+    }));
+    const readTurnDetail = mock(async () => ({
+      content: [{ type: "text" as const, text: '{"turn_ref":"S1/T1"}' }],
     }));
     const envelope = await createDiarySdkQuery({
       dataRoot: "/tmp/claude-mnemo-diary-sdk",
@@ -125,6 +162,10 @@ describe("shared SDK agent query", () => {
         readDoc: async () => "read_doc </tag> & data",
         canUseTool,
         commit,
+        listRuleHits,
+        readTurnDetail,
+        proposeRule,
+        submitJudgment,
       },
     });
 
@@ -135,6 +176,10 @@ describe("shared SDK agent query", () => {
       "mcp__diary__recall",
       "mcp__diary__timeline",
       "mcp__diary__read_doc",
+      "mcp__diary__list_rule_hits",
+      "mcp__diary__read_turn_detail",
+      "mcp__diary__propose_rule",
+      "mcp__diary__submit_judgment",
       "mcp__diary__commit",
     ]);
     expect(seenCalls[0]?.options.canUseTool).toBe(canUseTool);
@@ -156,8 +201,60 @@ describe("shared SDK agent query", () => {
       "recall",
       "timeline",
       "read_doc",
+      "list_rule_hits",
+      "read_turn_detail",
+      "propose_rule",
+      "submit_judgment",
       "commit",
     ]);
+    expect(descriptions.get("submit_judgment")).toContain(
+      "Each hit can be judged only once",
+    );
+    expect(descriptions.get("submit_judgment")).toContain("status=conflict");
+    expect(descriptions.get("read_turn_detail")).toContain("opts.text_cap");
+    expect(descriptions.get("read_turn_detail")).toContain("opts.text_offset");
+    expect(descriptions.get("read_turn_detail")).toContain("*_truncated");
+  });
+
+  test("caps every rule read/write tool result under the shared context budget", async () => {
+    const handlers = new Map<string, (args: Record<string, unknown>) => Promise<unknown>>();
+    const oversized = "x".repeat(WORKER_TOOL_RESULT_MAX_CHARS * 2);
+    const toolImpl = (name: string, _description: string, _shape: unknown, handler: never) => {
+      handlers.set(name, handler);
+      return { name };
+    };
+    const queryImpl = () => (async function* () {
+      for (const name of [
+        "list_rule_hits",
+        "read_turn_detail",
+        "propose_rule",
+        "submit_judgment",
+      ]) {
+        const result = await handlers.get(name)!({});
+        const text = (result as { content: Array<{ text: string }> }).content[0]!.text;
+        expect(text.length).toBeLessThanOrEqual(WORKER_TOOL_RESULT_MAX_CHARS);
+        const envelope = JSON.parse(text);
+        expect(envelope.kind).toBe(name);
+        expect(envelope.text).toEndWith(WORKER_TOOL_RESULT_TRUNCATION_HINT);
+      }
+      yield { type: "result", subtype: "success", is_error: false, result: "done" };
+    })();
+
+    await createDiarySdkQuery({
+      dataRoot: "/tmp/claude-mnemo-diary-sdk-budget",
+      queryImpl: queryImpl as never,
+      createSdkMcpServerImpl: ((definition: unknown) => definition) as never,
+      toolImpl: toolImpl as never,
+    }).runQuery({
+      ...sdkRequest(),
+      toolHandlers: {
+        ...sdkRequest().toolHandlers,
+        listRuleHits: async () => ({ content: [{ type: "text", text: oversized }] }),
+        readTurnDetail: async () => ({ content: [{ type: "text", text: oversized }] }),
+        proposeRule: async () => ({ content: [{ type: "text", text: oversized }] }),
+        submitJudgment: async () => ({ content: [{ type: "text", text: oversized }] }),
+      },
+    });
   });
 
   test.each([

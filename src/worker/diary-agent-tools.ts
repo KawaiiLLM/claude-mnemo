@@ -5,8 +5,19 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import {
   createDatabaseBackedHandlers,
+  textResult,
   type ToolHandler,
 } from "../mcp/handlers";
+import {
+  createDreamRuleWriteTools,
+  proposeRuleInputSchema,
+  submitJudgmentInputSchema,
+} from "../rules/dream-write-tools";
+import {
+  createDreamRuleReadTools,
+  listRuleHitsInputSchema,
+  readTurnDetailInputSchema,
+} from "../rules/dream-read-tools";
 import { assertDreamCommitToolFields } from "./dream-agent-tools";
 import { assertStagingRootWithinDataRoot } from "./dream-staging";
 
@@ -36,6 +47,17 @@ export interface DiaryAgentToolHandlers {
   canUseTool: CanUseTool;
   commit?: ToolHandler;
   checkBudget?: ToolHandler;
+  proposeRule?: ToolHandler;
+  submitJudgment?: ToolHandler;
+  listRuleHits?: ToolHandler;
+  readTurnDetail?: ToolHandler;
+}
+
+export interface DreamAgentToolHandlers extends DiaryAgentToolHandlers {
+  proposeRule: ToolHandler;
+  submitJudgment: ToolHandler;
+  listRuleHits: ToolHandler;
+  readTurnDetail: ToolHandler;
 }
 
 export type CreateDreamAgentToolHandlersOptions = Omit<
@@ -225,6 +247,14 @@ export function createAgentWorkspacePermissionGuard(
         });
       } else if (toolName === "mcp__diary__commit") {
         assertDreamCommitToolFields(input);
+      } else if (toolName === "mcp__diary__propose_rule") {
+        proposeRuleInputSchema.parse(input);
+      } else if (toolName === "mcp__diary__submit_judgment") {
+        submitJudgmentInputSchema.parse(input);
+      } else if (toolName === "mcp__diary__list_rule_hits") {
+        listRuleHitsInputSchema.parse(input);
+      } else if (toolName === "mcp__diary__read_turn_detail") {
+        readTurnDetailInputSchema.parse(input);
       } else {
         throw new Error(`Tool is outside the allowed dream agent tool scope: ${toolName}`);
       }
@@ -283,9 +313,26 @@ export function createDiaryAgentToolHandlers(
 
 export function createDreamAgentToolHandlers(
   options: CreateDreamAgentToolHandlersOptions,
-): DiaryAgentToolHandlers {
-  return createDiaryAgentToolHandlers({
+): DreamAgentToolHandlers {
+  const handlers = createDiaryAgentToolHandlers({
     ...options,
     allowedDocumentSubtrees: DREAM_AGENT_DOCUMENT_SUBTREES,
   });
+  const ruleWriteTools = createDreamRuleWriteTools({ db: options.db });
+  const ruleReadTools = createDreamRuleReadTools({ db: options.db });
+  return {
+    ...handlers,
+    listRuleHits: async (input) => {
+      const { date } = listRuleHitsInputSchema.parse(input);
+      return textResult(JSON.stringify(ruleReadTools.listRuleHits(date)));
+    },
+    readTurnDetail: async (input) => {
+      const { turn_ref, opts } = readTurnDetailInputSchema.parse(input);
+      return textResult(JSON.stringify(ruleReadTools.readTurnDetail(turn_ref, opts)));
+    },
+    proposeRule: async (input) =>
+      textResult(JSON.stringify(ruleWriteTools.proposeRule(input))),
+    submitJudgment: async (input) =>
+      textResult(JSON.stringify(ruleWriteTools.submitJudgment(input))),
+  };
 }
