@@ -26,6 +26,8 @@ import {
   SESSION_INJECTION_TOKEN_BUDGET,
 } from "../../diary/persona-render";
 import { markSessionRunStart } from "../../db/session-run";
+import { createRuleStore } from "../../db/rules";
+import { renderRuleDigest } from "../../rules/digest";
 import {
   notifyWorkerTrigger,
   type WorkerClientDeps,
@@ -49,7 +51,7 @@ export interface ContextHandlerDependencies
   enableSessionEnvCapture?: boolean;
 }
 
-export type ContextSection = "sessions" | "persona" | "recent";
+export type ContextSection = "sessions" | "persona" | "recent" | "digest";
 export type ReadOnlyContextSection = Exclude<ContextSection, "sessions">;
 
 const EMPTY_CONTEXT_FALLBACK = "claude-mnemo memory available via recall() and the mnemo-replay skill.";
@@ -315,6 +317,20 @@ async function readRecentContext(
   }
 }
 
+function readRuleDigestContext(
+  db: Database,
+  input: NormalizedHookInput,
+): string | undefined {
+  try {
+    return renderRuleDigest({
+      rules: createRuleStore(db).list(),
+      project: input.cwd ?? undefined,
+    }) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function buildContextOutput(
   db: Database,
   input: NormalizedHookInput,
@@ -425,6 +441,15 @@ export function createReadOnlyContextHandler(
 
     if (!dependencies.db) {
       return { continue: true };
+    }
+    if (section === "digest") {
+      const hookSpecificOutput = readRuleDigestContext(
+        dependencies.db,
+        _input,
+      );
+      return hookSpecificOutput
+        ? { continue: true, hookSpecificOutput }
+        : { continue: true };
     }
     const hookSpecificOutput = await readRecentContext(
       dependencies.db,

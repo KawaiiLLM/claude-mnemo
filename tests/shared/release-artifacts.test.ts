@@ -67,6 +67,7 @@ describe("release artifacts", () => {
         "plugin/scripts/mcp-server.cjs",
         "plugin/scripts/worker.cjs",
         "plugin/scripts/replay-parse.cjs",
+        "plugin/scripts/turn-detail.sh",
       ],
       {
         encoding: "utf8",
@@ -127,6 +128,7 @@ describe("release artifacts", () => {
     // fails here instead of shipping a stale bundle.
     const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
     expect(hookCommand).toContain("renderPersonaDocumentInjection");
+    expect(hookCommand).toContain("pre-tool-dispatch");
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [

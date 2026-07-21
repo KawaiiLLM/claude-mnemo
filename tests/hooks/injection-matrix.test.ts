@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 
 import { createDatabase } from "../../src/db/database";
+import { createRuleStore } from "../../src/db/rules";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
@@ -60,6 +61,16 @@ describe("SessionStart injection matrix", () => {
         ) VALUES (?, 1, 'extracted', 'current prompt', 'current response',
           'Current milestone', 'feature', 1700000110)`,
       ).run(current.id);
+      createRuleStore(db).create({
+        name: `matrix-rule-${source}`,
+        claim: "当前任务涉及断言时，先检查证据。",
+        rationale: "防止无依据断言。",
+        scope: "/projects/matrix",
+        triggerKind: "none",
+        triggerSpec: null,
+        status: "confirmed",
+        createdAtEpoch: 1_700_000_120,
+      });
       db.query(
         `INSERT INTO turns (
           session_id, prompt_number, status, user_prompt,
@@ -102,6 +113,10 @@ describe("SessionStart injection matrix", () => {
         dependencies,
         "recent",
       )(input);
+      const digest = await createReadOnlyContextHandler(
+        dependencies,
+        "digest",
+      )(input);
       const milestones = await createMilestoneContextHandler({
         db,
         renderMilestoneInjection: () => "MILESTONE_OUTPUT",
@@ -121,6 +136,9 @@ describe("SessionStart injection matrix", () => {
       expect(recent.hookSpecificOutput).toContain("## Recent Sessions");
       expect(recent.hookSpecificOutput).toContain("# Diary Index");
       expect(recent.hookSpecificOutput).toContain(`Prior ${source}`);
+      expect(digest.hookSpecificOutput).toContain("## Rule Digest");
+      expect(digest.hookSpecificOutput).toContain(`matrix-rule-${source}`);
+      expect(digest.hookSpecificOutput).toContain("适用范围：仅当前项目");
       expect(recent.hookSpecificOutput).not.toContain(
         "MUST_NOT_BE_INJECTED",
       );
