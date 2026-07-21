@@ -141,6 +141,197 @@ const SCHEMA_SQL = `
     value TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    claim TEXT NOT NULL CHECK (length(claim) <= 300),
+    rationale TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL CHECK (
+      trigger_kind IN ('prompt', 'tool', 'result', 'none')
+    ),
+    trigger_spec TEXT CHECK (
+      (trigger_kind = 'none' AND trigger_spec IS NULL) OR
+      (trigger_kind != 'none' AND trigger_spec IS NOT NULL AND json_valid(trigger_spec))
+    ),
+    status TEXT NOT NULL CHECK (
+      status IN ('provisional', 'confirmed', 'refuted', 'retired', 'digest_only')
+    ),
+    evidence TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence)),
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    last_evidence_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS rule_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_uid TEXT UNIQUE NOT NULL,
+    rule_id INTEGER NOT NULL REFERENCES rules(id),
+    event_kind TEXT NOT NULL,
+    source_event_id INTEGER REFERENCES rule_events(id),
+    turn_ref TEXT,
+    label TEXT,
+    rationale TEXT,
+    adjustment_json TEXT CHECK (
+      adjustment_json IS NULL OR json_valid(adjustment_json)
+    ),
+    status_before TEXT CHECK (
+      status_before IS NULL OR
+      status_before IN ('provisional', 'confirmed', 'refuted', 'retired', 'digest_only')
+    ),
+    status_after TEXT CHECK (
+      status_after IS NULL OR
+      status_after IN ('provisional', 'confirmed', 'refuted', 'retired', 'digest_only')
+    ),
+    created_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_rules_scope_status
+    ON rules(scope, status);
+
+  CREATE INDEX IF NOT EXISTS idx_rule_events_rule_created
+    ON rule_events(rule_id, created_at_epoch, id);
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_events_one_judgment_per_hit
+    ON rule_events(source_event_id) WHERE event_kind = 'judgment';
+
+  CREATE TRIGGER IF NOT EXISTS rules_no_hard_delete
+    BEFORE DELETE ON rules
+    BEGIN
+      SELECT RAISE(ABORT, 'rules are append-only; retire or refute instead');
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS rules_validate_trigger_spec_insert
+    BEFORE INSERT ON rules
+    WHEN NEW.trigger_kind != 'none' AND (
+      length(CAST(NEW.trigger_spec AS BLOB)) > 1024 OR
+      json_type(NEW.trigger_spec, '$.kind') IS NOT 'text' OR
+      json_extract(NEW.trigger_spec, '$.kind') IS NOT NEW.trigger_kind OR
+      (NEW.trigger_kind = 'prompt' AND (
+        json_type(NEW.trigger_spec, '$.keywords') IS NOT 'array' OR
+        json_array_length(NEW.trigger_spec, '$.keywords') NOT BETWEEN 1 AND 8 OR
+        EXISTS (
+          SELECT 1 FROM json_each(NEW.trigger_spec, '$.keywords')
+          WHERE type != 'text' OR length(value) < 3
+        ) OR
+        (json_type(NEW.trigger_spec, '$.match') IS NOT NULL AND (
+         json_type(NEW.trigger_spec, '$.match') IS NOT 'text' OR
+         json_extract(NEW.trigger_spec, '$.match') NOT IN ('any', 'all')
+        )) OR
+        EXISTS (
+          SELECT 1 FROM json_each(NEW.trigger_spec)
+          WHERE key NOT IN ('kind', 'keywords', 'match')
+        )
+      )) OR
+      (NEW.trigger_kind = 'tool' AND (
+        json_type(NEW.trigger_spec, '$.tool') IS NOT 'text' OR
+        length(json_extract(NEW.trigger_spec, '$.tool')) = 0 OR
+        (json_type(NEW.trigger_spec, '$.require_param') IS NOT NULL AND
+         (json_type(NEW.trigger_spec, '$.require_param') != 'text' OR
+          length(json_extract(NEW.trigger_spec, '$.require_param')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.param_absent') IS NOT NULL AND
+         (json_type(NEW.trigger_spec, '$.param_absent') != 'text' OR
+          length(json_extract(NEW.trigger_spec, '$.param_absent')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.path_glob') IS NOT NULL AND
+         (json_type(NEW.trigger_spec, '$.path_glob') != 'text' OR
+          length(json_extract(NEW.trigger_spec, '$.path_glob')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.command_prefix') IS NOT NULL AND (
+          json_type(NEW.trigger_spec, '$.command_prefix') != 'array' OR
+          json_array_length(NEW.trigger_spec, '$.command_prefix') NOT BETWEEN 1 AND 4 OR
+          EXISTS (
+            SELECT 1 FROM json_each(NEW.trigger_spec, '$.command_prefix')
+            WHERE type != 'text' OR length(value) = 0
+          )
+        )) OR
+        EXISTS (
+          SELECT 1 FROM json_each(NEW.trigger_spec)
+          WHERE key NOT IN (
+            'kind', 'tool', 'require_param', 'param_absent',
+            'command_prefix', 'path_glob'
+          )
+        )
+      )) OR
+      (NEW.trigger_kind = 'result' AND (
+        (json_type(NEW.trigger_spec, '$.tool') IS NOT NULL AND
+         (json_type(NEW.trigger_spec, '$.tool') != 'text' OR
+          length(json_extract(NEW.trigger_spec, '$.tool')) = 0)) OR
+        json_type(NEW.trigger_spec, '$.patterns') IS NOT 'array' OR
+        json_array_length(NEW.trigger_spec, '$.patterns') NOT BETWEEN 1 AND 4 OR
+        EXISTS (
+          SELECT 1 FROM json_each(NEW.trigger_spec, '$.patterns')
+          WHERE type != 'text' OR length(value) NOT BETWEEN 1 AND 64
+        ) OR
+        EXISTS (
+          SELECT 1 FROM json_each(NEW.trigger_spec)
+          WHERE key NOT IN ('kind', 'tool', 'patterns')
+        )
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid trigger_spec');
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS rules_validate_trigger_spec_update
+    BEFORE UPDATE OF trigger_kind, trigger_spec ON rules
+    WHEN NEW.trigger_kind != 'none' AND (
+      length(CAST(NEW.trigger_spec AS BLOB)) > 1024 OR
+      json_type(NEW.trigger_spec, '$.kind') IS NOT 'text' OR
+      json_extract(NEW.trigger_spec, '$.kind') IS NOT NEW.trigger_kind OR
+      (NEW.trigger_kind = 'prompt' AND (
+        json_type(NEW.trigger_spec, '$.keywords') IS NOT 'array' OR
+        json_array_length(NEW.trigger_spec, '$.keywords') NOT BETWEEN 1 AND 8 OR
+        EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec, '$.keywords') WHERE type != 'text' OR length(value) < 3) OR
+        (json_type(NEW.trigger_spec, '$.match') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.match') IS NOT 'text' OR json_extract(NEW.trigger_spec, '$.match') NOT IN ('any', 'all'))) OR
+        EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec) WHERE key NOT IN ('kind', 'keywords', 'match'))
+      )) OR
+      (NEW.trigger_kind = 'tool' AND (
+        json_type(NEW.trigger_spec, '$.tool') IS NOT 'text' OR length(json_extract(NEW.trigger_spec, '$.tool')) = 0 OR
+        (json_type(NEW.trigger_spec, '$.require_param') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.require_param') != 'text' OR length(json_extract(NEW.trigger_spec, '$.require_param')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.param_absent') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.param_absent') != 'text' OR length(json_extract(NEW.trigger_spec, '$.param_absent')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.path_glob') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.path_glob') != 'text' OR length(json_extract(NEW.trigger_spec, '$.path_glob')) = 0)) OR
+        (json_type(NEW.trigger_spec, '$.command_prefix') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.command_prefix') != 'array' OR json_array_length(NEW.trigger_spec, '$.command_prefix') NOT BETWEEN 1 AND 4 OR EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec, '$.command_prefix') WHERE type != 'text' OR length(value) = 0))) OR
+        EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec) WHERE key NOT IN ('kind', 'tool', 'require_param', 'param_absent', 'command_prefix', 'path_glob'))
+      )) OR
+      (NEW.trigger_kind = 'result' AND (
+        (json_type(NEW.trigger_spec, '$.tool') IS NOT NULL AND (json_type(NEW.trigger_spec, '$.tool') != 'text' OR length(json_extract(NEW.trigger_spec, '$.tool')) = 0)) OR
+        json_type(NEW.trigger_spec, '$.patterns') IS NOT 'array' OR
+        json_array_length(NEW.trigger_spec, '$.patterns') NOT BETWEEN 1 AND 4 OR
+        EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec, '$.patterns') WHERE type != 'text' OR length(value) NOT BETWEEN 1 AND 64) OR
+        EXISTS (SELECT 1 FROM json_each(NEW.trigger_spec) WHERE key NOT IN ('kind', 'tool', 'patterns'))
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'invalid trigger_spec');
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS rule_events_validate_source
+    BEFORE INSERT ON rule_events
+    WHEN
+      (NEW.event_kind = 'judgment' AND (
+        NEW.source_event_id IS NULL OR NOT EXISTS (
+          SELECT 1 FROM rule_events source
+          WHERE source.id = NEW.source_event_id
+            AND source.rule_id = NEW.rule_id
+            AND source.event_kind = 'hit'
+        )
+      )) OR
+      (NEW.event_kind != 'judgment' AND NEW.source_event_id IS NOT NULL)
+    BEGIN
+      SELECT RAISE(ABORT, 'source_event_id must link a judgment to a hit for the same rule');
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS rule_events_no_update
+    BEFORE UPDATE ON rule_events
+    BEGIN
+      SELECT RAISE(ABORT, 'rule_events is append-only');
+    END;
+
+  CREATE TRIGGER IF NOT EXISTS rule_events_no_delete
+    BEFORE DELETE ON rule_events
+    BEGIN
+      SELECT RAISE(ABORT, 'rule_events is append-only');
+    END;
+
   ${MEMORY_FTS_DDL}
 `;
 
@@ -421,6 +612,7 @@ function shouldRebuildSearchIndex(db: Database): boolean {
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
     { table: "observations", layer: "observation" },
+    { table: "rules", layer: "rule" },
   ] as const;
 
   const hasAnySourceRows = sourceLayers.some(({ table }) =>
@@ -486,6 +678,14 @@ function hasLegacySchema(db: Database): boolean {
 }
 
 function resetSchema(db: Database): void {
+  db.exec("DROP TRIGGER IF EXISTS rule_events_validate_source");
+  db.exec("DROP TRIGGER IF EXISTS rules_validate_trigger_spec_update");
+  db.exec("DROP TRIGGER IF EXISTS rules_validate_trigger_spec_insert");
+  db.exec("DROP TRIGGER IF EXISTS rule_events_no_delete");
+  db.exec("DROP TRIGGER IF EXISTS rule_events_no_update");
+  db.exec("DROP TRIGGER IF EXISTS rules_no_hard_delete");
+  db.exec("DROP TABLE IF EXISTS rule_events");
+  db.exec("DROP TABLE IF EXISTS rules");
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
   db.exec("DROP TABLE IF EXISTS diary_state");
   db.exec("DROP TABLE IF EXISTS diary_day_state");

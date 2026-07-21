@@ -27,6 +27,20 @@ export interface ObservationFtsRecord {
   content: string | null;
 }
 
+export interface RuleFtsRecord {
+  id: number;
+  name: string;
+  claim: string;
+}
+
+export function normalizeTrigramText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 export interface SearchMemoryOptions {
   scope?: "sessions" | "turns" | "observations";
   query?: string;
@@ -219,7 +233,7 @@ function buildSafeFtsQuery(query?: string): string | undefined {
 
 function indexFtsRecord(
   db: Database,
-  layer: "session" | "turn" | "observation",
+  layer: "session" | "turn" | "observation" | "rule",
   sourceId: number,
   title: string | null,
   content: string | null,
@@ -235,6 +249,40 @@ function indexFtsRecord(
   db.query(
     "INSERT INTO memory_fts (layer, source_id, title, content, extra, prompt, response) VALUES (?, ?, ?, ?, ?, ?, ?)",
   ).run(layer, sourceId, title, content, extra, prompt ?? "", response ?? "");
+}
+
+export function indexRuleToFTS(db: Database, rule: RuleFtsRecord): void {
+  indexFtsRecord(
+    db,
+    "rule",
+    rule.id,
+    rule.name,
+    normalizeTrigramText(rule.claim),
+    "",
+    null,
+    null,
+  );
+}
+
+export function searchRuleClaimCandidates(
+  db: Database,
+  trigrams: readonly string[],
+): number[] {
+  if (trigrams.length === 0) {
+    return [];
+  }
+  const query = [...new Set(trigrams)]
+    .map((trigram) => `"${trigram.replaceAll('"', '""')}"`)
+    .join(" OR ");
+  return db
+    .query<{ sourceId: number }, [string]>(
+      `SELECT CAST(source_id AS INTEGER) AS sourceId
+       FROM memory_fts
+       WHERE memory_fts MATCH ? AND layer = 'rule'
+       ORDER BY bm25(memory_fts, 0.0, 0.0, 1.0) ASC, sourceId ASC`,
+    )
+    .all(query)
+    .map(({ sourceId }) => sourceId);
 }
 
 export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void {
@@ -402,6 +450,13 @@ export function rebuildSearchIndex(db: Database): void {
       title: observation.title,
       content: observation.content,
     });
+  }
+
+  const ruleRows = db
+    .query<RuleFtsRecord, []>("SELECT id, name, claim FROM rules ORDER BY id")
+    .all();
+  for (const rule of ruleRows) {
+    indexRuleToFTS(db, rule);
   }
 }
 
