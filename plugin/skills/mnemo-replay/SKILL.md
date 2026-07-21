@@ -1,6 +1,6 @@
 ---
 name: mnemo-replay
-description: Read a past turn's full content — the user prompt, the complete assistant narration, and every tool call's raw input/output — directly from the mnemo SQLite database, which stores them uncapped (recall and timeline only show a truncated slice). Use after recall/timeline has pointed you at a session or turn. The raw JSONL transcript is a fallback only for exact bytes or message metadata the database does not mirror.
+description: Read a past turn's full content — the user prompt, the complete assistant narration, and every tool call's raw input/output — directly from the mnemo SQLite database, which stores them uncapped (recall and timeline only show a truncated slice). Bundles turn-detail.sh for one-command structured turn access with budget control. Use after recall/timeline has pointed you at a session or turn. The raw JSONL transcript is a fallback only for exact bytes or message metadata the database does not mirror.
 ---
 
 # Mnemo Replay
@@ -37,9 +37,20 @@ Do not write through `sqlite3`. Writes still go through `remember`.
 | `turns` | One user prompt in a session | `id`, `session_id`, `prompt_number`, `status`, `title`, `content`, `user_prompt`, `assistant_response`, `assistant_transcript`, `type`, `tags`, `files_read`, `files_modified`, `tool_call_count` |
 | `observations` | One tool call in a turn | `id`, `turn_id`, `tool_name`, `tool_input`, `tool_result`, `status`, `title`, `content` |
 
-### Reconstruct an entire turn
+### Reconstruct an entire turn (start here)
 
-Prompt, complete assistant narration, and every tool call's raw input/output — entirely from the database, no JSONL:
+Use the bundled CLI — it packages the canonical two-query pattern with budget control, so a single command returns prompt, full narration, and every tool call as one JSON object:
+
+```bash
+"$CLAUDE_PLUGIN_ROOT/scripts/turn-detail.sh" S12 3                    # default: obs I/O truncated to 1500 chars
+"$CLAUDE_PLUGIN_ROOT/scripts/turn-detail.sh" S12 3 --no-obs           # turn text only
+"$CLAUDE_PLUGIN_ROOT/scripts/turn-detail.sh" S12 3 --tool 'Bash' --cap 300
+"$CLAUDE_PLUGIN_ROOT/scripts/turn-detail.sh" S12 3 --full             # uncapped (tool_result can be 100s of KB — check *_len first)
+```
+
+Every observation always reports true `input_len`/`result_len` regardless of truncation, so start capped and re-query `--full` only for the rows that matter. Turn text fields are never truncated.
+
+For query shapes the CLI does not cover (joins, aggregates, cross-turn scans), drop to raw SQL — that freedom is the point of this axis:
 
 ```sql
 SELECT user_prompt, assistant_transcript
@@ -52,8 +63,10 @@ WHERE turn_id = (SELECT id FROM turns WHERE session_id = 12 AND prompt_number = 
 ORDER BY id;
 ```
 
-- `assistant_transcript` is the **full interleaved narration** — every assistant text block of the turn. `assistant_response` is only the **final** block (what the extractor and the `recall` preview see). Populated for turns recorded since the column was added; older turns leave it `NULL` — fall back to the JSONL for those.
+- `assistant_transcript` is the **full interleaved narration** — every assistant text block of the turn. `assistant_response` is only the **final** block (what the extractor and the `recall` preview see). Hypothesis-refuted-mid-turn reasoning often lives only in the transcript, never in the final response. Populated for turns recorded since the column was added; older turns leave it `NULL` — fall back to the JSONL for those.
+- Field semantics: `NULL` = never captured; `''` = captured empty (e.g. an interrupted turn).
 - `observations.tool_input` / `tool_result` are stored **uncapped**, even for `skipped` rows.
+- **Locate turns by DB keys only** — `(session_id, prompt_number)` for turns, `turn_id` for observations. `turns.transcript_line_start` is a best-effort JSONL line hint and is known to duplicate/go stale (notably on notification-driven turns); never use it for content lookup.
 
 ### Other useful queries
 
@@ -114,6 +127,6 @@ Use raw `Read`/`Grep` only when even the script's output is insufficient — ins
 ## Guidance
 
 - Always narrow with `recall` / `timeline` first; `mnemo-replay` reads a known target.
-- For a turn's full content — prompt, complete assistant narration, every tool call's raw I/O — query the **database**: `turns.user_prompt` + `turns.assistant_transcript` + `observations.tool_input`/`tool_result`, all uncapped. This is the default path.
-- Treat SQLite as read-only; writes go through `remember`.
-- Go to the **JSONL** only for what the DB does not store (exact bytes, message metadata, interleaving order, or `NULL` `assistant_transcript` on older turns), and prefer `replay-parse.cjs` over hand-parsing.
+- For a turn's full content, reach for `turn-detail.sh` first — one command, structured JSON, budget-controlled. Drop to raw SQL for anything it does not express.
+- Treat SQLite as read-only; writes go through `remember` (`turn-detail.sh` opens the DB `-readonly`).
+- Go to the **JSONL** only for what the DB does not store (exact bytes, message metadata, interleaving order, thinking blocks, or `NULL` `assistant_transcript` on older turns), and prefer `replay-parse.cjs` over hand-parsing.
