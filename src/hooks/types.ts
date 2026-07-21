@@ -1,4 +1,5 @@
 export type HookEventName =
+  | "PreToolUse"
   | "PostToolUse"
   | "PostCompact"
   | "SessionStart"
@@ -15,6 +16,7 @@ export interface NormalizedHookInput {
   cwd?: string;
   prompt?: string;
   toolName?: string;
+  toolUseId?: string;
   toolInput?: unknown;
   toolResponse?: unknown;
   transcriptPath?: string;

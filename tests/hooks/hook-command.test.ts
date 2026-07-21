@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
+import { createRuleStore } from "../../src/db/rules";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { DreamMemoryStore } from "../../src/diary/memory-store";
@@ -113,6 +114,16 @@ describe("runHookCommand", () => {
         remoteAttemptSucceeded: false,
       });
       diaryStateStore.markDayStale("2026-07-10");
+      createRuleStore(db).create({
+        name: "production-digest-rule",
+        claim: "准备作出排他性断言时，先检查可溯源材料。",
+        rationale: "防止把未验证判断写成事实。",
+        scope: "/projects/default-hook-wiring",
+        triggerKind: "none",
+        triggerSpec: null,
+        status: "confirmed",
+        createdAtEpoch: nowEpoch,
+      });
       // Model an active turn arriving after the prior dream settled. Claiming
       // a day that already contains this non-finalized turn is now forbidden.
       db.query(
@@ -157,6 +168,7 @@ describe("runHookCommand", () => {
       const sessionsResult = await handlers.SessionStart!(input);
       const personaResult = await handlers["SessionStart:persona"]!(input);
       const recentResult = await handlers["SessionStart:recent"]!(input);
+      const digestResult = await handlers["SessionStart:digest"]!(input);
       const milestonesResult = await handlers["SessionStart:milestones"]!(input);
       await Promise.resolve();
       await Promise.resolve();
@@ -173,6 +185,8 @@ describe("runHookCommand", () => {
       expect(recentResult.hookSpecificOutput).toContain(
         "- 2026-07-10：生产 wiring 日记索引",
       );
+      expect(digestResult.hookSpecificOutput).toContain("## Rule Digest");
+      expect(digestResult.hookSpecificOutput).toContain("production-digest-rule");
       expect(milestonesResult).toEqual({ continue: true });
       expect(personaResult.hookSpecificOutput).not.toContain("不应注入的归档内容");
       expect(recentResult.hookSpecificOutput).not.toContain("生产 wiring 中的协作经历");
@@ -180,6 +194,7 @@ describe("runHookCommand", () => {
       expect(sessionsResult.asyncWork).toBeUndefined();
       expect(personaResult.asyncWork).toBeUndefined();
       expect(recentResult.asyncWork).toBeUndefined();
+      expect(digestResult.asyncWork).toBeUndefined();
       expect(milestonesResult.asyncWork).toBeUndefined();
       expect(readFileSync(join(dataRoot, "diary", "INDEX.md"), "utf8"))
         .toBe(indexBeforeSessionStart);
@@ -233,9 +248,11 @@ describe("runHookCommand", () => {
       } as const;
       const sessionsResult = await handlers.SessionStart!(input);
       const recentResult = await handlers["SessionStart:recent"]!(input);
+      const digestResult = await handlers["SessionStart:digest"]!(input);
 
       expect(sessionsResult).toEqual({ continue: true });
       expect(recentResult).toEqual({ continue: true });
+      expect(digestResult).toEqual({ continue: true });
     } finally {
       db.close();
       rmSync(dataRoot, { recursive: true, force: true });
@@ -306,6 +323,7 @@ describe("runHookCommand", () => {
     const sessionsHandler = mock(async () => ({ continue: true }));
     const personaHandler = mock(async () => ({ continue: true }));
     const recentHandler = mock(async () => ({ continue: true }));
+    const digestHandler = mock(async () => ({ continue: true }));
     const milestonesHandler = mock(async () => ({ continue: true }));
     const run = runHookCommand as unknown as (
       dependencies?: TestHookCommandDependencies,
@@ -314,6 +332,7 @@ describe("runHookCommand", () => {
       SessionStart: sessionsHandler,
       "SessionStart:persona": personaHandler,
       "SessionStart:recent": recentHandler,
+      "SessionStart:digest": digestHandler,
       "SessionStart:milestones": milestonesHandler,
     };
 
@@ -321,6 +340,7 @@ describe("runHookCommand", () => {
       [undefined, sessionsHandler],
       ["persona", personaHandler],
       ["recent", recentHandler],
+      ["digest", digestHandler],
       ["milestones", milestonesHandler],
     ] as const) {
       await run({
@@ -387,12 +407,81 @@ describe("runHookCommand", () => {
         continue: false,
         suppressOutput: true,
         hookSpecificOutput: {
-          hookEventName: "SessionStart",
+          hookEventName: "Stop",
           additionalContext: "sync-result",
         },
       }),
     ]);
   });
+
+  test.each([
+    [
+      "UserPromptSubmit",
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "session-test",
+        prompt: "Remember this rule",
+      },
+      "prompt-tip",
+      '{"continue":true,"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"prompt-tip"}}',
+    ],
+    [
+      "PreToolUse",
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "session-test",
+        tool_name: "Bash",
+        tool_input: { command: "bun test" },
+      },
+      "pre-tool-tip",
+      '{"continue":true,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"pre-tool-tip"}}',
+    ],
+    [
+      "PostToolUse",
+      {
+        hook_event_name: "PostToolUse",
+        session_id: "session-test",
+        tool_name: "Bash",
+        tool_response: "17 pass",
+      },
+      "post-tool-tip",
+      '{"continue":true,"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"post-tool-tip"}}',
+    ],
+  ])(
+    "writes %s as the hook-specific output event",
+    async (eventName, rawInput, additionalContext, expectedOutput) => {
+      const writes: string[] = [];
+      const input: NormalizedHookInput = {
+        ...createNormalizedInput(),
+        eventName: eventName as NormalizedHookInput["eventName"],
+      };
+      const normalizeInput = mock(() => input);
+
+      const exitCode = await runHookCommand({
+        env: {},
+        argv: ["bun", "hook-command.ts"],
+        stdout: {
+          write: mock((chunk: string) => {
+            writes.push(chunk);
+            return true;
+          }),
+        },
+        stderr: { write: mock(() => true) },
+        readJsonFromStdin: () => rawInput,
+        normalizeHookInputImpl: normalizeInput,
+        handlers: {
+          [eventName]: async () => ({
+            continue: true,
+            hookSpecificOutput: additionalContext,
+          }),
+        },
+      });
+
+      expect(exitCode).toBe(HOOK_SUCCESS_EXIT_CODE);
+      expect(normalizeInput).toHaveBeenCalledWith(rawInput);
+      expect(writes).toEqual([expectedOutput]);
+    },
+  );
 
   test("skips sync hook result output entirely when async work is present", async () => {
     const runner = createRunner(async () => ({

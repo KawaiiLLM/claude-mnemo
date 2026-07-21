@@ -53,6 +53,7 @@ function resolveEventName(raw: Record<string, unknown>): HookEventName {
   ]);
 
   switch (eventName) {
+    case "PreToolUse":
     case "PostToolUse":
     case "PostCompact":
     case "SessionStart":
@@ -77,6 +78,7 @@ export function normalizeClaudeCodeHookInput(
     cwd: getString(raw, ["cwd", "workspace_path", "workspacePath"]),
     prompt: getString(raw, ["prompt", "user_prompt", "userPrompt"]),
     toolName: getString(raw, ["tool_name", "toolName"]),
+    toolUseId: getString(raw, ["tool_use_id", "toolUseId"]),
     toolInput: getUnknown(raw, ["tool_input", "toolInput"]),
     toolResponse: getUnknown(raw, ["tool_response", "toolResponse"]),
     transcriptPath: getString(raw, ["transcript_path", "transcriptPath"]),

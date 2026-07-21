@@ -23,7 +23,12 @@ import { createMilestoneContextHandler } from "./handlers/context-milestones";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
-import type { HookHandler, HookResult } from "./types";
+import {
+  createPostToolUseDispatcher,
+  createPreToolUseDispatcher,
+  createUserPromptSubmitDispatcher,
+} from "../rules/pretooluse-dispatcher";
+import type { HookEventName, HookHandler, HookResult } from "./types";
 
 export interface HookCommandDependencies {
   env?: NodeJS.ProcessEnv;
@@ -38,7 +43,11 @@ export interface HookCommandDependencies {
 let defaultHandlers: Record<string, HookHandler> | undefined;
 let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
 let defaultRecentContextHandler: HookHandler | undefined;
+let defaultDigestContextHandler: HookHandler | undefined;
 let defaultMilestoneContextHandler: HookHandler | undefined;
+let defaultPreToolUseHandler: HookHandler | undefined;
+let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
+let defaultPostToolUseDispatcher: HookHandler | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
 export interface DefaultHookHandlersDependencies {
@@ -90,6 +99,7 @@ export function createDefaultHookHandlers({
       { db, fileStore },
       "recent",
     ),
+    "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:milestones": createMilestoneContextHandler({ db }),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
@@ -166,9 +176,61 @@ function getDefaultMilestoneContextHandler(): HookHandler {
   return defaultMilestoneContextHandler;
 }
 
+function getDefaultDigestContextHandler(): HookHandler {
+  if (defaultDigestContextHandler) {
+    return defaultDigestContextHandler;
+  }
+
+  const databasePath = resolveDatabasePath();
+  if (!existsSync(databasePath)) {
+    defaultDigestContextHandler = async () => ({ continue: true });
+    return defaultDigestContextHandler;
+  }
+
+  const db = new Database(databasePath, {
+    readonly: true,
+    create: false,
+  });
+  defaultDigestContextHandler = createReadOnlyContextHandler({ db }, "digest");
+  return defaultDigestContextHandler;
+}
+
+function getDefaultPreToolUseHandler(): HookHandler {
+  if (!defaultPreToolUseHandler) {
+    defaultPreToolUseHandler = createPreToolUseDispatcher();
+  }
+  return defaultPreToolUseHandler;
+}
+
+function getDefaultUserPromptSubmitDispatcher(): HookHandler {
+  if (!defaultUserPromptSubmitDispatcher) {
+    defaultUserPromptSubmitDispatcher = createUserPromptSubmitDispatcher();
+  }
+  return defaultUserPromptSubmitDispatcher;
+}
+
+function getDefaultPostToolUseDispatcher(): HookHandler {
+  if (!defaultPostToolUseDispatcher) {
+    defaultPostToolUseDispatcher = createPostToolUseDispatcher();
+  }
+  return defaultPostToolUseDispatcher;
+}
+
 function getDefaultHandler(handlerKey: string): HookHandler | undefined {
+  if (handlerKey === "PreToolUse") {
+    return getDefaultPreToolUseHandler();
+  }
+  if (handlerKey === "UserPromptSubmit:rule-dispatch") {
+    return getDefaultUserPromptSubmitDispatcher();
+  }
+  if (handlerKey === "PostToolUse:rule-dispatch") {
+    return getDefaultPostToolUseDispatcher();
+  }
   if (handlerKey === "SessionStart:recent") {
     return getDefaultRecentContextHandler();
+  }
+  if (handlerKey === "SessionStart:digest") {
+    return getDefaultDigestContextHandler();
   }
   if (handlerKey === "SessionStart:milestones") {
     return getDefaultMilestoneContextHandler();
@@ -197,6 +259,12 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
       return "SessionEnd";
     case "tool-use":
       return "PostToolUse";
+    case "pre-tool-dispatch":
+      return "PreToolUse";
+    case "prompt-dispatch":
+      return "UserPromptSubmit";
+    case "result-dispatch":
+      return "PostToolUse";
     case "post-compact":
       return "PostCompact";
     case "compact":
@@ -210,15 +278,29 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
   }
 }
 
+function ruleDispatcherKeyFromCommandArgument(
+  arg?: string,
+): "UserPromptSubmit:rule-dispatch" | "PostToolUse:rule-dispatch" | undefined {
+  switch (arg) {
+    case "prompt-dispatch":
+      return "UserPromptSubmit:rule-dispatch";
+    case "result-dispatch":
+      return "PostToolUse:rule-dispatch";
+    default:
+      return undefined;
+  }
+}
+
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "recent" | "milestones" {
+): "sessions" | "persona" | "recent" | "digest" | "milestones" {
   if (command !== "context") {
     return "sessions";
   }
   return section === "persona" ||
     section === "recent" ||
+    section === "digest" ||
     section === "milestones"
     ? section
     : "sessions";
@@ -226,6 +308,7 @@ function contextSectionFromCommandArguments(
 
 function writeHookResult(
   result: HookResult,
+  eventName: HookEventName,
   stdout: Pick<NodeJS.WriteStream, "write"> = process.stdout,
 ): void {
   const output: Record<string, unknown> = {
@@ -238,7 +321,7 @@ function writeHookResult(
 
   if (result.hookSpecificOutput !== undefined) {
     output.hookSpecificOutput = {
-      hookEventName: "SessionStart",
+      hookEventName: eventName,
       additionalContext: result.hookSpecificOutput,
     };
   }
@@ -273,10 +356,10 @@ export async function runHookCommand(
 
     const normalizedInput = normalizeInput(rawInput);
     const contextSection = contextSectionFromCommandArguments(argv[2], argv[3]);
-    const handlerKey =
-      normalizedInput.eventName === "SessionStart" && contextSection !== "sessions"
+    const handlerKey = ruleDispatcherKeyFromCommandArgument(argv[2]) ??
+      (normalizedInput.eventName === "SessionStart" && contextSection !== "sessions"
         ? `SessionStart:${contextSection}`
-        : normalizedInput.eventName;
+        : normalizedInput.eventName);
     const handler = dependencies.handlers
       ? dependencies.handlers[handlerKey]
       : getDefaultHandler(handlerKey);
@@ -293,7 +376,7 @@ export async function runHookCommand(
       return HOOK_SUCCESS_EXIT_CODE;
     }
 
-    writeHookResult(result, stdout);
+    writeHookResult(result, normalizedInput.eventName, stdout);
 
     return result.exitCode ?? HOOK_SUCCESS_EXIT_CODE;
   } catch (error) {
