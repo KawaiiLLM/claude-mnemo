@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { encodeProjectPath, resolveTranscriptPath } from "../../src/shared/paths";
 
@@ -10,7 +12,10 @@ describe("resolveTranscriptPath", () => {
         "session-123",
       ),
     ).toBe(
-      "/Users/zhaoqixuan/.claude/projects/-Users-zhaoqixuan-Projects-claude-mnemo/session-123.jsonl",
+      join(
+        homedir(),
+        ".claude/projects/-Users-zhaoqixuan-Projects-claude-mnemo/session-123.jsonl",
+      ),
     );
   });
 
@@ -25,7 +30,10 @@ describe("resolveTranscriptPath", () => {
         "resume-target",
       ),
     ).toBe(
-      "/Users/zhaoqixuan/.claude/projects/-Users-zhaoqixuan--claude-mnemo/resume-target.jsonl",
+      join(
+        homedir(),
+        ".claude/projects/-Users-zhaoqixuan--claude-mnemo/resume-target.jsonl",
+      ),
     );
   });
 });

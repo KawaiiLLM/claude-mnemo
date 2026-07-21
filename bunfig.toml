@@ -1,0 +1,4 @@
+[test]
+# Redirect HOME to a throwaway sandbox before any test module loads, so the
+# suite can never write into the real ~/.claude-mnemo. See the preload file.
+preload = ["./tests/support/sandbox-home.preload.ts"]

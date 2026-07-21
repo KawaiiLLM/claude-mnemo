@@ -259,6 +259,15 @@ describe("worker server", () => {
     }
   });
 
+  // Every direct main() call must get its own throwaway data root; otherwise
+  // main() resolves ~/.claude-mnemo from homedir() and the real diary runtime
+  // writes dream commits into the user's actual data. Registered for cleanup.
+  const mkMainDataRoot = (): string => {
+    const root = mkdtempSync(join(tmpdir(), "claude-mnemo-main-"));
+    roots.push(root);
+    return root;
+  };
+
   test("acquireWorkerSingleton writes a starting marker when nothing is running", () => {
     const writes: Array<{ path: string; value: string }> = [];
 
@@ -3643,6 +3652,7 @@ describe("worker server", () => {
     try {
       await main({
         db: createDatabase(":memory:"),
+        dataRoot: mkMainDataRoot(),
         logger: { warn() {}, error() {} },
         BunServeImpl: mock((options: { hostname?: string }) => {
           serveHostname = options.hostname;
@@ -3687,6 +3697,7 @@ describe("worker server", () => {
     try {
       await main({
         db: runtimeDb,
+        dataRoot: mkMainDataRoot(),
         env: {},
         now: () => 123,
         processDiaryItem,
@@ -3775,6 +3786,7 @@ describe("worker server", () => {
     try {
       await main({
         db: runtimeDb,
+        dataRoot: mkMainDataRoot(),
         env: {},
         now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1_000),
         processDiaryItem,
@@ -3852,6 +3864,7 @@ describe("worker server", () => {
     try {
       await main({
         db: runtimeDb,
+        dataRoot: mkMainDataRoot(),
         env: {},
         config: {
           ...DEFAULT_CONFIG,
@@ -3940,6 +3953,12 @@ describe("worker server", () => {
     try {
       await main({
         db,
+        dataRoot: mkMainDataRoot(),
+        // Null the diary runtime: the fresh temp data root has no dream
+        // history, so the finish end-event would otherwise reconcile a backlog
+        // and stall on a real (unmocked) dream. This test exercises the memory
+        // agent's SessionEnd tail, not diaries.
+        processDiaryItem: mock(async () => {}),
         env: {},
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
@@ -4028,6 +4047,7 @@ describe("worker server", () => {
     try {
       await main({
         db,
+        dataRoot: mkMainDataRoot(),
         env: {},
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
