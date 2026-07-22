@@ -33526,7 +33526,7 @@ function estimateDiaryTokens(text) {
 }
 
 // src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = Number.MAX_SAFE_INTEGER;
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
 function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
   return createdAtEpoch >= cutoffEpoch;
 }
@@ -35492,7 +35492,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.7.1" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.8.0" : "0.0.0-test";
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {

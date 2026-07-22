@@ -2297,7 +2297,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.7.1-mrvumezb" : "dev";
+var BUILD_ID = true ? "0.8.0-mrvv4q3b" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3563,7 +3563,7 @@ function estimateDiaryTokens(text) {
 }
 
 // src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = Number.MAX_SAFE_INTEGER;
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
 function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
   return createdAtEpoch >= cutoffEpoch;
 }

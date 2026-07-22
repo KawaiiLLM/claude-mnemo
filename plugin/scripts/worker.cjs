@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path15 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.7.1-mrvumezb" : "dev";
+var BUILD_ID = true ? "0.8.0-mrvv4q3b" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -40218,7 +40218,7 @@ function estimateDiaryTokens(text) {
 }
 
 // src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = Number.MAX_SAFE_INTEGER;
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
 function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
   return createdAtEpoch >= cutoffEpoch;
 }
@@ -42832,7 +42832,7 @@ For each \`<turn>\` block:
      - Grade 1 \u2014 routine execution with no independently persistable conclusion: a module coded/tested, an intermediate green result, an environment prepared, a worker dispatched, a probe started, or ordinary progress confirmation. It is useful only for short-term continuation.
      - Grade 0 \u2014 no future value: deleting the turn loses nothing. This includes status checks that found nothing, "still running / no change" polls, empty or shell-only commands, irrelevant incidental explanations that formed no reusable conclusion, and repeated confirmations. Grade 0 is judged by outcome, not action type: a status check that uncovered a real problem is not Grade 0, and "no later decision consumed it" is never sufficient by itself.
      - Compound turns: grade by the highest material consequence, not by whichever action happened last.
-     - Worked examples from the validated research session: extraction-failure diagnosis = Grade 4 origin; probe design and SFT-pilot design = Grade 3 design events; probe result determining the SFT go decision = Grade 3 conclusion; driver root-cause chain = Grade 2 durable pitfall; probe launch confirmations = Grade 1 routine execution; "still healthy" polls = Grade 0.
+     - Worked examples from the validated research session: extraction-failure diagnosis = Grade 4 origin; probe design and SFT-pilot design = Grade 3 design events; probe result determining the SFT go decision = Grade 3 conclusion; an evaluation-validity fix protecting a pre-registered gate (e.g. correcting a leaky data split before the run) = Grade 3, because its absence would corrupt the arc's conclusions; driver root-cause chain = Grade 2 durable pitfall; probe launch confirmations = Grade 1 routine execution; "still healthy" polls = Grade 0 even when they report an on-track number.
    - tags: lowercase-hyphenated tags in TWO namespaces \u2014 BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix \u2014 never a bare tag.
      - ROLE (bare, \u22642, usually none): the turn's role in the session arc. Seed examples \u2014 \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) \u2014 richer role vocabulary is welcome. Keep the name the BARE role, short and general \u2014 \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
      - TOPIC (\`topic:\` prefix, 0-3): what the turn is about \u2014 feature area, file, library, or action (e.g. \`topic:milestone-scoring\`, \`topic:recall-faceting\`). For faceted recall only; topic tags NEVER affect milestones. Topics are exact-match classification keys, so consistency beats precision: when a turn continues a theme from recent turns, REUSE their exact spelling \u2014 a multi-turn arc carries ONE stable topic on every turn of the arc, never per-turn variants (\`topic:verifier\` throughout, not \`verifier-rubric\`/\`verifier-design\`/\`verifier-training\` drift). Mint a new topic only on a genuine theme shift. A turn spanning several themes carries one tag per theme (\u22643). Tag the theme even when the title already conveys it \u2014 recall's \`tag:\` filter matches tags, not titles.
@@ -45411,7 +45411,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.7.1",
+        version: "0.8.0",
         tools: [
           toolImpl(
             "recall",

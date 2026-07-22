@@ -6,7 +6,7 @@
 
 **Status:** ready-for-agent (execution reserved for the maintainer session, not Codex)
 
-- [ ] Slim-payload blind run completed; boundary comparison recorded alongside the validation script outside the repo.
-- [ ] No divergence on the validated exemplar set (or divergences resolved by rubric/skeleton fixes before release).
-- [ ] Cutoff constant set to the release timestamp.
-- [ ] Version bumped at all six sites, artifacts rebuilt, release pushed.
+- [x] Slim-payload blind run completed; boundary comparison recorded alongside the validation script outside the repo (/tmp/s15385-grades-sonnet-slim{,2,3}.json; three rounds, 2026-07-22).
+- [x] No divergence on the validated exemplar set — round 3 passed 9/9 after two rubric fixes (evaluation-validity-fix = G3 worked example; numeric on-track polls = G0). Round-1 divergence was traced to the experiment brief lacking the production worked examples, not to the slim payload.
+- [x] Cutoff constant set to the release timestamp (epoch 1784711427).
+- [x] Version bumped at all six sites (0.8.0), artifacts rebuilt, release pushed.
