@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId } from "../../db/sessions";
+import type { TurnStatus } from "../../db/turns";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerTrigger, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -12,6 +13,7 @@ export interface PostToolUseHandlerDependencies {
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
+  logger?: Pick<Console, "warn">;
 }
 
 function stringifyToolPayload(value: unknown): string | null {
@@ -24,14 +26,17 @@ function stringifyToolPayload(value: unknown): string | null {
   return stripPrivateTags(normalized);
 }
 
-function getLatestTurnId(db: Database, sessionDbId: number): number | null {
+function getLatestTurn(
+  db: Database,
+  sessionDbId: number,
+): { id: number; status: TurnStatus } | null {
   const row = db
-    .query<{ id: number }, [number]>(
-      `SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`,
+    .query<{ id: number; status: TurnStatus }, [number]>(
+      `SELECT id, status FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`,
     )
     .get(sessionDbId);
 
-  return row?.id ?? null;
+  return row ?? null;
 }
 
 export function createPostToolUseHandler(
@@ -39,10 +44,19 @@ export function createPostToolUseHandler(
 ) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
 
   return async function handlePostToolUseHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
+    if (input.agentId !== undefined) {
+      logger.warn?.("post-tool-use ignored", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: "child-agent-sidechain",
+      });
+      return { continue: true };
+    }
+
     if (!input.sessionId || !input.toolName) {
       return { continue: true };
     }
@@ -52,17 +66,20 @@ export function createPostToolUseHandler(
       return { continue: true };
     }
 
-    const latestTurnId = getLatestTurnId(dependencies.db, session.id);
-    if (!latestTurnId) {
-      return { continue: true };
-    }
-
     const createdAtEpoch = now();
     const toolName = input.toolName;
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
 
-    writeTransaction(dependencies.db, () => {
+    const writeResult = writeTransaction(dependencies.db, () => {
+      const latestTurn = getLatestTurn(dependencies.db, session.id);
+      if (!latestTurn) {
+        return { outcome: "no-root-turn" as const, turnId: null };
+      }
+      if (latestTurn.status !== "active" && latestTurn.status !== "provisional") {
+        return { outcome: "terminal-root-turn" as const, turnId: latestTurn.id };
+      }
+
       const inserted = dependencies.db
         .query<
           { id: number },
@@ -86,7 +103,7 @@ export function createPostToolUseHandler(
           `,
         )
         .get(
-          latestTurnId,
+          latestTurn.id,
           toolName,
           toolInput,
           toolResult,
@@ -109,7 +126,17 @@ export function createPostToolUseHandler(
           `,
         )
         .run(inserted.id, session.id, createdAtEpoch);
+      return { outcome: "inserted" as const, turnId: latestTurn.id };
     });
+
+    if (writeResult.outcome !== "inserted") {
+      logger.warn?.("post-tool-use ignored", {
+        sessionId: input.sessionId,
+        turnId: writeResult.turnId,
+        reasonCode: writeResult.outcome,
+      });
+      return { continue: true };
+    }
 
     return {
       continue: true,

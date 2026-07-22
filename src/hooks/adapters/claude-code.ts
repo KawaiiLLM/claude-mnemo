@@ -75,6 +75,7 @@ export function normalizeClaudeCodeHookInput(
     source: getString(raw, ["source"]),
     trigger: getString(raw, ["trigger"]),
     sessionId: getString(raw, ["session_id", "sessionId"]),
+    agentId: getString(raw, ["agent_id", "agentId"]),
     cwd: getString(raw, ["cwd", "workspace_path", "workspacePath"]),
     prompt: getString(raw, ["prompt", "user_prompt", "userPrompt"]),
     toolName: getString(raw, ["tool_name", "toolName"]),

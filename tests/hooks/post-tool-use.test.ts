@@ -170,6 +170,25 @@ describe("handlePostToolUseHook", () => {
     expect(transactionRunner).toHaveBeenCalledTimes(1);
   });
 
+  test("rechecks live ownership inside the same transaction as insertion", async () => {
+    const transactionRunner = mock((_runnerDb: Database, fn: () => unknown) => {
+      db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(turnId);
+      return fn();
+    });
+    const handler = createPostToolUseHandler({
+      db,
+      runHookWriteTransaction: transactionRunner,
+      logger: { warn() {} },
+    });
+
+    const result = await handler(createInput());
+
+    expect(result).toEqual({ continue: true });
+    expect(db.query<{ count: number }, []>(
+      "SELECT COUNT(*) AS count FROM observations",
+    ).get()?.count).toBe(0);
+  });
+
   test("continues without writing when session or turn context is missing", async () => {
     const fetchImpl = mock(async () => new Response(null, { status: 200 }));
     const handler = createPostToolUseHandler({
@@ -195,4 +214,61 @@ describe("handlePostToolUseHook", () => {
     ).toBe(0);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  test("ignores child-agent events before database writes or worker wake", async () => {
+    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+    const transactionRunner = mock((_db: Database, fn: () => unknown) => fn());
+    const handler = createPostToolUseHandler({
+      db,
+      workerClientDeps: { fetchImpl },
+      runHookWriteTransaction: transactionRunner,
+    });
+
+    const result = await handler(createInput({ agentId: "child-agent-7" }));
+
+    expect(result).toEqual({ continue: true });
+    expect(transactionRunner).not.toHaveBeenCalled();
+    expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM observations").get()?.count).toBe(0);
+    expect(getQueueRows(db)).toEqual([]);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  for (const status of ["extracted", "skipped", "failed", "undone"] as const) {
+    test(`ignores root events when the latest turn is ${status}`, async () => {
+      db.query("UPDATE turns SET status = ? WHERE id = ?").run(status, turnId);
+      const handler = createPostToolUseHandler({ db });
+
+      const result = await handler(createInput());
+
+      expect(result).toEqual({ continue: true });
+      expect(db.query<{ status: string }, [number]>("SELECT status FROM turns WHERE id = ?").get(turnId)?.status).toBe(status);
+      expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM observations").get()?.count).toBe(0);
+    });
+  }
+
+  for (const status of ["active", "provisional"] as const) {
+    test(`attaches root events to the latest ${status} turn`, async () => {
+      db.query("UPDATE turns SET status = ? WHERE id = ?").run(status, turnId);
+      const handler = createPostToolUseHandler({ db });
+
+      const result = await handler(createInput({ toolName: "SendMessage" }));
+
+      expect(typeof result.asyncWork).toBe("function");
+      expect(db.query<{ turnId: number; toolName: string }, []>(
+        "SELECT turn_id AS turnId, tool_name AS toolName FROM observations",
+      ).get()).toEqual({ turnId, toolName: "SendMessage" });
+    });
+  }
+
+  for (const toolName of ["Agent", "Bash", "SendMessage"] as const) {
+    test(`records a top-level ${toolName} launch without agentId`, async () => {
+      const handler = createPostToolUseHandler({ db });
+
+      await handler(createInput({ toolName }));
+
+      expect(db.query<{ toolName: string }, []>(
+        "SELECT tool_name AS toolName FROM observations",
+      ).get()?.toolName).toBe(toolName);
+    });
+  }
 });

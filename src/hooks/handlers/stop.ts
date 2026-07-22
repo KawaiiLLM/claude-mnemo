@@ -226,7 +226,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
       asyncWork: async () => {
         await notifyWorkerTrigger(
           {
-            action: "wake",
+            action: "turn-stop",
             contentSessionId: session.contentSessionId,
             sessionDbId: session.id,
           },

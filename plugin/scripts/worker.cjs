@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path15 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.0-mrvv4q3b" : "dev";
+var BUILD_ID = true ? "0.8.0-mrvxuhaa" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -46876,9 +46876,9 @@ function createDiaryRuntime(options) {
         triggerWindow.today
       );
       if (!triggerWindow.hasPassedTrigger) {
-        return;
+        return [];
       }
-      stateStore.reconcileBacklog({
+      return stateStore.reconcileBacklog({
         today: triggerWindow.today,
         cutoverDate,
         lastSuccessfulDate: await dreamStore.readLastSuccessfulDate(),
@@ -46903,6 +46903,132 @@ function createDiaryRuntime(options) {
       });
     }
   };
+}
+
+// src/worker/turn-liveness.ts
+function listCompletionEvidencedTurnsForDate(db, date7, timeZone, boundaryHour) {
+  const { startEpoch, endEpoch } = calendarDayBounds(
+    date7,
+    timeZone,
+    boundaryHour
+  );
+  return db.query(
+    `SELECT
+       t.id,
+       t.session_id AS sessionDbId,
+       t.prompt_number AS promptNumber,
+       t.was_interrupted AS wasInterrupted,
+       t.was_rolled_back AS wasRolledBack,
+       EXISTS (
+         SELECT 1 FROM pending_queue q
+         WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+       ) AS hasQueuedStop,
+       EXISTS (
+         SELECT 1 FROM turns later
+         WHERE later.session_id = t.session_id
+           AND later.prompt_number > t.prompt_number
+       ) AS hasLaterTurn
+     FROM turns t
+     WHERE t.created_at_epoch >= ?
+       AND t.created_at_epoch < ?
+       AND t.status IN ('active', 'provisional')
+       AND t.assistant_response IS NOT NULL
+     ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(startEpoch, endEpoch).filter(
+    (turn) => turn.hasQueuedStop === 1 || turn.hasLaterTurn === 1 || turn.wasInterrupted === 1 || turn.wasRolledBack === 1
+  );
+}
+function restoreStrandedTurnStops(db, options) {
+  const candidates = /* @__PURE__ */ new Map();
+  for (const date7 of new Set(options.dueDates)) {
+    for (const candidate of listCompletionEvidencedTurnsForDate(
+      db,
+      date7,
+      options.timeZone,
+      options.boundaryHour
+    )) {
+      candidates.set(candidate.id, candidate);
+    }
+  }
+  const strandedTurnIds = [];
+  const unreachableTurnIds = [];
+  const enqueuedSessionDbIds = /* @__PURE__ */ new Set();
+  let enqueuedTurnStopCount = 0;
+  for (const candidate of candidates.values()) {
+    strandedTurnIds.push(candidate.id);
+    if (!options.hasRegisteredSessionEnv(candidate.sessionDbId)) {
+      unreachableTurnIds.push(candidate.id);
+      continue;
+    }
+    const enqueued = runWriteTransaction(db, () => {
+      const current = getTurnById(db, candidate.id);
+      if (!current || current.status !== "active" && current.status !== "provisional") {
+        return false;
+      }
+      const exists = db.query(
+        `SELECT 1 AS one FROM pending_queue
+         WHERE kind = 'turn-stop' AND target_id = ? LIMIT 1`
+      ).get(candidate.id);
+      if (exists) {
+        return false;
+      }
+      db.query(
+        `INSERT INTO pending_queue (
+           kind, target_id, session_db_id, enqueued_at_epoch
+         ) VALUES ('turn-stop', ?, ?, ?)`
+      ).run(candidate.id, candidate.sessionDbId, options.nowEpoch);
+      return true;
+    });
+    if (enqueued) {
+      enqueuedTurnStopCount += 1;
+      enqueuedSessionDbIds.add(candidate.sessionDbId);
+    }
+  }
+  return {
+    strandedTurnIds,
+    unreachableTurnIds,
+    enqueuedSessionDbIds: [...enqueuedSessionDbIds],
+    enqueuedTurnStopCount
+  };
+}
+function completionFloorStatus(turn) {
+  return turn.title !== null || turn.content !== null ? "extracted" : "failed";
+}
+function finalizeUnreachableStrandedTurns(db, turnIds) {
+  const results = [];
+  for (const turnId of new Set(turnIds)) {
+    const result = runWriteTransaction(db, () => {
+      const turn = getTurnById(db, turnId);
+      if (!turn || turn.status !== "active" && turn.status !== "provisional") {
+        return null;
+      }
+      const status = completionFloorStatus(turn);
+      db.query(
+        "UPDATE turns SET status = ? WHERE id = ?"
+      ).run(status, turnId);
+      db.query(
+        `UPDATE observations SET status = 'skipped'
+         WHERE turn_id = ? AND status = 'pending'`
+      ).run(turnId);
+      db.query(
+        `DELETE FROM pending_queue
+         WHERE (kind = 'turn-stop' AND target_id = ?)
+            OR (kind = 'obs' AND target_id IN (
+              SELECT id FROM observations WHERE turn_id = ?
+            ))`
+      ).run(turnId, turnId);
+      return {
+        turnId,
+        sessionDbId: turn.sessionId,
+        status,
+        reasonCode: status === "extracted" ? "unreachable-partial-preserved" : "unreachable-no-usable-record"
+      };
+    });
+    if (result) {
+      results.push(result);
+    }
+  }
+  return results;
 }
 
 // src/worker/server.ts
@@ -47099,6 +47225,35 @@ function pruneBufferedUndoneItems(db, items) {
     activeItems.push(item);
   }
   return { activeItems, prunedSeqs };
+}
+function retireObservationIfOwnerIsNotLive(db, item) {
+  if (item.kind !== "obs") {
+    return false;
+  }
+  return runWriteTransaction(db, () => {
+    const owner = db.query(
+      `SELECT o.id AS observationId, t.status AS turnStatus
+         FROM pending_queue q
+         LEFT JOIN observations o ON o.id = q.target_id
+         LEFT JOIN turns t ON t.id = o.turn_id
+         WHERE q.seq = ? AND q.kind = 'obs'`
+    ).get(item.seq);
+    if (!owner) {
+      return true;
+    }
+    if (owner.turnStatus === "active" || owner.turnStatus === "provisional") {
+      return false;
+    }
+    if (owner.observationId !== null) {
+      db.query(
+        "UPDATE observations SET status = 'skipped' WHERE id = ?"
+      ).run(owner.observationId);
+    }
+    db.query("DELETE FROM pending_queue WHERE seq = ?").run(
+      item.seq
+    );
+    return true;
+  });
 }
 function capturedEnvsEqual(left, right) {
   if (!left) {
@@ -47733,8 +47888,8 @@ ${coldStart}
       if (!turn) {
         continue;
       }
-      const hasContent = turn.title !== null || turn.content !== null;
-      if (turn.status === "extracted" || hasContent) {
+      const floorStatus = completionFloorStatus(turn);
+      if (turn.status === "extracted" || floorStatus === "extracted") {
         if (turn.status !== "extracted") {
           updateTurnById(deps.db, turnId, { status: "extracted" });
         }
@@ -48402,6 +48557,9 @@ ${coldStart}
     diaryContinuationTimer = handle;
   }
   async function drainQueue(sessionFilter) {
+    const result = {
+      turnStopSessionDbIds: /* @__PURE__ */ new Set()
+    };
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
       const backoffElapsed = suspension.retryAtMs <= currentMs;
@@ -48423,16 +48581,15 @@ ${coldStart}
       }
     }
     if (enforceSessionEnvPresence && sessionFilter !== void 0 && !getRegisteredSessionEnv(sessionFilter)) {
-      return null;
+      return result;
     }
     if (sessionFilter !== void 0 && isSessionRetryGated(sessionFilter)) {
-      return null;
+      return result;
     }
     const skippedSeqs = /* @__PURE__ */ new Set();
-    let triggeringSessionDbId = null;
     while (true) {
       if (sessionFilter !== void 0 && isSessionRetryGated(sessionFilter)) {
-        return triggeringSessionDbId;
+        return result;
       }
       const excludedSessions = sessionFilter === void 0 ? /* @__PURE__ */ new Set([
         ...compactingSessions,
@@ -48446,7 +48603,10 @@ ${coldStart}
       });
       if (!item) {
         await flushDrainTail(sessionFilter);
-        return triggeringSessionDbId;
+        return result;
+      }
+      if (retireObservationIfOwnerIsNotLive(deps.db, item)) {
+        continue;
       }
       const activeRetryPlan = pendingStallRetryBySession.get(item.sessionDbId)?.[0];
       const itemTurnId = item.kind === "turn-stop" ? item.targetId : getObservation(deps.db, item.targetId)?.turnId ?? null;
@@ -48487,7 +48647,7 @@ ${coldStart}
         await withSessionProcessingLock(item.sessionDbId, async (state) => {
           await processTurnStopLocked(state, item);
         });
-        triggeringSessionDbId ??= item.sessionDbId;
+        result.turnStopSessionDbIds.add(item.sessionDbId);
       } catch (error49) {
         for (const seq of bufferedSeqs) {
           skippedSeqs.add(seq);
@@ -48530,6 +48690,53 @@ ${coldStart}
       });
     }
   }
+  async function coordinateEndEvent(triggeringSessionDbId) {
+    let dueDates = [];
+    try {
+      dueDates = await deps.reconcileDreamBacklog?.(now()) ?? [];
+    } catch (error49) {
+      logger.error?.("dream backlog reconcile failed", { error: error49 });
+    }
+    if (dueDates.length > 0) {
+      const repair = restoreStrandedTurnStops(deps.db, {
+        dueDates,
+        timeZone: config3.dreamAgentTimeZone,
+        boundaryHour: config3.dreamAgentHour,
+        nowEpoch: now(),
+        hasRegisteredSessionEnv: (sessionDbId) => getRegisteredSessionEnv(sessionDbId) !== void 0
+      });
+      if (repair.enqueuedTurnStopCount > 0) {
+        await drainQueue();
+        if (compactingSessions.has(triggeringSessionDbId) && repair.enqueuedSessionDbIds.includes(triggeringSessionDbId)) {
+          await drainQueue(triggeringSessionDbId);
+        }
+        for (const sessionDbId of repair.enqueuedSessionDbIds) {
+          await withSessionProcessingLock(sessionDbId, async (state) => {
+            await flushAllBatchesLocked(state);
+          });
+        }
+      }
+      for (const floored of finalizeUnreachableStrandedTurns(
+        deps.db,
+        repair.unreachableTurnIds
+      )) {
+        removeTurnFromBuffer(floored.sessionDbId, floored.turnId);
+        logger.warn?.("stranded turn completion floor applied", {
+          sessionDbId: floored.sessionDbId,
+          turnId: floored.turnId,
+          reasonCode: floored.reasonCode
+        });
+      }
+    }
+    await drainOneDiaryItem(triggeringSessionDbId);
+  }
+  async function flushTurnStopSessions(result) {
+    for (const sessionDbId of result.turnStopSessionDbIds) {
+      await withSessionProcessingLock(sessionDbId, async (state) => {
+        await flushAllBatchesLocked(state);
+      });
+    }
+  }
   function scanAndDrainGlobalQueue(requestedTriggerSessionDbId) {
     if (requestedTriggerSessionDbId !== void 0 && pendingDiaryTriggerSessionDbId === void 0) {
       pendingDiaryTriggerSessionDbId = requestedTriggerSessionDbId;
@@ -48539,23 +48746,23 @@ ${coldStart}
     }
     let tracked;
     tracked = (async () => {
+      const turnStopSessionDbIdsAwaitingTrigger = /* @__PURE__ */ new Set();
       try {
         do {
           const requestedTriggerForThisDrain = pendingDiaryTriggerSessionDbId;
           pendingDiaryTriggerSessionDbId = void 0;
-          const globallyProcessedTriggerSessionDbId = await drainQueue();
-          if (requestedTriggerForThisDrain !== void 0 || globallyProcessedTriggerSessionDbId !== null) {
-            const hasEndEventTrigger = requestedTriggerForThisDrain !== void 0 && requestedTriggerForThisDrain !== null || globallyProcessedTriggerSessionDbId !== null;
-            if (hasEndEventTrigger) {
-              try {
-                await deps.reconcileDreamBacklog?.(now());
-              } catch (error49) {
-                logger.error?.("dream backlog reconcile failed", { error: error49 });
-              }
-            }
-            await drainOneDiaryItem(
-              requestedTriggerForThisDrain !== void 0 ? requestedTriggerForThisDrain : globallyProcessedTriggerSessionDbId
-            );
+          const drainResult = await drainQueue();
+          for (const sessionDbId of drainResult.turnStopSessionDbIds) {
+            turnStopSessionDbIdsAwaitingTrigger.add(sessionDbId);
+          }
+          if (requestedTriggerForThisDrain !== void 0 && requestedTriggerForThisDrain !== null) {
+            await flushTurnStopSessions({
+              turnStopSessionDbIds: turnStopSessionDbIdsAwaitingTrigger
+            });
+            turnStopSessionDbIdsAwaitingTrigger.clear();
+            await coordinateEndEvent(requestedTriggerForThisDrain);
+          } else if (requestedTriggerForThisDrain === null) {
+            await drainOneDiaryItem(null);
           }
         } while (pendingDiaryTriggerSessionDbId !== void 0);
       } finally {
@@ -48570,13 +48777,13 @@ ${coldStart}
   function scanAndDrainQueue(sessionFilter) {
     if (sessionFilter !== void 0) {
       return (async () => {
-        const triggeringSessionDbId = await drainQueue(sessionFilter);
-        if (triggeringSessionDbId !== null) {
-          await scanAndDrainGlobalQueue(triggeringSessionDbId);
-        }
+        await drainQueue(sessionFilter);
       })();
     }
     return scanAndDrainGlobalQueue();
+  }
+  async function handleTurnStop(sessionDbId) {
+    await scanAndDrainGlobalQueue(sessionDbId);
   }
   async function drainSessionCompletely(sessionDbId) {
     let previousCount = Number.POSITIVE_INFINITY;
@@ -48831,6 +49038,7 @@ ${coldStart}
     compactingSessions,
     recoverFromCrash,
     scanAndDrainQueue,
+    handleTurnStop,
     processClaimedItem,
     flushSession,
     finishSession,
@@ -49013,7 +49221,7 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
   const runtimeDb = deps.db ?? createDatabase();
   const sessionEnvRegistry = deps.sessionEnvRegistry ?? /* @__PURE__ */ new Map();
   const runtimeProcessors = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerProcessors(runtimeDb);
-  const runtime = deps.scanAndDrainQueue || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
+  const runtime = deps.scanAndDrainQueue || deps.handleTurnStopImpl || deps.handleFlushImpl || deps.handleCompactImpl || deps.recoverFromCrashImpl ? void 0 : createWorkerCore({
     db: runtimeDb,
     workerEnv: deps.workerEnv ?? deps.env,
     sessionEnvRegistry,
@@ -49026,6 +49234,9 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
     isProcessAliveImpl: deps.isProcessAliveImpl
   });
   const scanAndDrainQueue = deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
+  const handleTurnStopImpl = deps.handleTurnStopImpl ?? runtime?.handleTurnStop ?? (async (sessionId) => {
+    await scanAndDrainQueue(sessionId);
+  });
   const handleFlushImpl = deps.handleFlushImpl ?? runtime?.finishSession ?? (async (sessionId) => {
     await scanAndDrainQueue(sessionId);
   });
@@ -49135,6 +49346,21 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
             );
           });
           trackGlobalWork(finish);
+          return new Response(null, { status: 200 });
+        }
+        if (payload.action === "turn-stop") {
+          if (associatedSessionId === null) {
+            return new Response("session_id is required", { status: 400 });
+          }
+          const turnStop = handleTurnStopImpl(associatedSessionId).catch(
+            (error49) => {
+              deps.logger?.error?.("turn-stop request failed", {
+                sessionId: associatedSessionId,
+                error: error49
+              });
+            }
+          );
+          trackGlobalWork(turnStop);
           return new Response(null, { status: 200 });
         }
         if (payload.action === "compact") {
@@ -49367,6 +49593,7 @@ async function main(deps = {}) {
       config: config3,
       sessionEnvRegistry,
       scanAndDrainQueue: core.scanAndDrainQueue,
+      handleTurnStopImpl: core.handleTurnStop,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
       registerSessionEnvImpl: core.registerSessionEnv,

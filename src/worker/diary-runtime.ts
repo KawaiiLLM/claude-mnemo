@@ -133,7 +133,7 @@ export interface CreateDiaryRuntimeOptions {
 }
 
 export interface DiaryRuntime {
-  reconcileDreamBacklog(nowEpoch: number): Promise<void>;
+  reconcileDreamBacklog(nowEpoch: number): Promise<string[]>;
   processDreamDate(date: string): Promise<void>;
   processDreamItem(
     item: PendingQueueItem,
@@ -231,9 +231,9 @@ export function createDiaryRuntime(
         triggerWindow.today,
       );
       if (!triggerWindow.hasPassedTrigger) {
-        return;
+        return [];
       }
-      stateStore.reconcileBacklog({
+      return stateStore.reconcileBacklog({
         today: triggerWindow.today,
         cutoverDate,
         lastSuccessfulDate: await dreamStore.readLastSuccessfulDate(),

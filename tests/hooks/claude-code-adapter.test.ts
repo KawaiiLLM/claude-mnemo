@@ -13,4 +13,30 @@ describe("normalizeClaudeCodeHookInput", () => {
     expect(normalized.eventName).toBe("SessionEnd");
     expect(normalized.sessionId).toBe("session-end-1");
   });
+
+  test("normalizes child-agent identity while preserving the raw payload", () => {
+    const raw = {
+      hook_event_name: "PostToolUse",
+      session_id: "root-session",
+      agent_id: "child-agent-7",
+      agent_type: "researcher",
+      tool_name: "WebFetch",
+    };
+
+    const normalized = normalizeClaudeCodeHookInput(raw);
+
+    expect(normalized.agentId).toBe("child-agent-7");
+    expect(normalized.raw).toBe(raw);
+  });
+
+  test("leaves agentId absent for root payloads even when agent_type is present", () => {
+    const normalized = normalizeClaudeCodeHookInput({
+      hook_event_name: "PostToolUse",
+      session_id: "root-session",
+      agent_type: "main-session-agent",
+      tool_name: "Agent",
+    });
+
+    expect(normalized.agentId).toBeUndefined();
+  });
 });

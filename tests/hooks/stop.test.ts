@@ -143,7 +143,7 @@ describe("handleStopHook", () => {
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:37778/health");
     expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
     expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
-      action: "wake",
+      action: "turn-stop",
       content_session_id: "session-stop",
       session_id: sessionId,
       env: {},

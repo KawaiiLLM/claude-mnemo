@@ -2144,6 +2144,7 @@ function normalizeClaudeCodeHookInput(raw) {
     source: getString(raw, ["source"]),
     trigger: getString(raw, ["trigger"]),
     sessionId: getString(raw, ["session_id", "sessionId"]),
+    agentId: getString(raw, ["agent_id", "agentId"]),
     cwd: getString(raw, ["cwd", "workspace_path", "workspacePath"]),
     prompt: getString(raw, ["prompt", "user_prompt", "userPrompt"]),
     toolName: getString(raw, ["tool_name", "toolName"]),
@@ -2297,7 +2298,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.0-mrvv4q3b" : "dev";
+var BUILD_ID = true ? "0.8.0-mrvxuhaa" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20321,16 +20322,24 @@ function stringifyToolPayload(value) {
   const normalized = typeof value === "string" ? value : JSON.stringify(value);
   return stripPrivateTags(normalized);
 }
-function getLatestTurnId(db, sessionDbId) {
+function getLatestTurn(db, sessionDbId) {
   const row = db.query(
-    `SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+    `SELECT id, status FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionDbId);
-  return row?.id ?? null;
+  return row ?? null;
 }
 function createPostToolUseHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
   return async function handlePostToolUseHook(input) {
+    if (input.agentId !== void 0) {
+      logger.warn?.("post-tool-use ignored", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: "child-agent-sidechain"
+      });
+      return { continue: true };
+    }
     if (!input.sessionId || !input.toolName) {
       return { continue: true };
     }
@@ -20338,15 +20347,18 @@ function createPostToolUseHandler(dependencies) {
     if (!session) {
       return { continue: true };
     }
-    const latestTurnId = getLatestTurnId(dependencies.db, session.id);
-    if (!latestTurnId) {
-      return { continue: true };
-    }
     const createdAtEpoch = now();
     const toolName = input.toolName;
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
-    writeTransaction(dependencies.db, () => {
+    const writeResult = writeTransaction(dependencies.db, () => {
+      const latestTurn = getLatestTurn(dependencies.db, session.id);
+      if (!latestTurn) {
+        return { outcome: "no-root-turn", turnId: null };
+      }
+      if (latestTurn.status !== "active" && latestTurn.status !== "provisional") {
+        return { outcome: "terminal-root-turn", turnId: latestTurn.id };
+      }
       const inserted = dependencies.db.query(
         `
             INSERT INTO observations (
@@ -20359,7 +20371,7 @@ function createPostToolUseHandler(dependencies) {
             RETURNING id
           `
       ).get(
-        latestTurnId,
+        latestTurn.id,
         toolName,
         toolInput,
         toolResult,
@@ -20378,7 +20390,16 @@ function createPostToolUseHandler(dependencies) {
             ) VALUES ('obs', ?, ?, ?)
           `
       ).run(inserted.id, session.id, createdAtEpoch);
+      return { outcome: "inserted", turnId: latestTurn.id };
     });
+    if (writeResult.outcome !== "inserted") {
+      logger.warn?.("post-tool-use ignored", {
+        sessionId: input.sessionId,
+        turnId: writeResult.turnId,
+        reasonCode: writeResult.outcome
+      });
+      return { continue: true };
+    }
     return {
       continue: true,
       asyncWork: async () => {
@@ -21287,7 +21308,7 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
 }
 
 // src/hooks/handlers/stop.ts
-function getLatestTurn(db, sessionDbId) {
+function getLatestTurn2(db, sessionDbId) {
   const row = db.query(
     `
         SELECT
@@ -21331,7 +21352,7 @@ function createStopHandler(dependencies) {
         exitCode: HOOK_SUCCESS_EXIT_CODE
       };
     }
-    const turn = getLatestTurn(dependencies.db, session.id);
+    const turn = getLatestTurn2(dependencies.db, session.id);
     if (!turn) {
       return {
         continue: true,
@@ -21417,7 +21438,7 @@ function createStopHandler(dependencies) {
       asyncWork: async () => {
         await notifyWorkerTrigger(
           {
-            action: "wake",
+            action: "turn-stop",
             contentSessionId: session.contentSessionId,
             sessionDbId: session.id
           },

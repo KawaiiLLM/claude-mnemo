@@ -13,6 +13,7 @@ export interface NormalizedHookInput {
   source?: string;
   trigger?: string;
   sessionId?: string;
+  agentId?: string;
   cwd?: string;
   prompt?: string;
   toolName?: string;

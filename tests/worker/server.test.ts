@@ -9,7 +9,7 @@ import { createDiaryStateStore } from "../../src/db/diary-state";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { estimateDiaryTokens } from "../../src/diary/domain";
-import { DEFAULT_CONFIG } from "../../src/shared/config";
+import { DEFAULT_CONFIG, MIN_MINI_TURN_CHARS } from "../../src/shared/config";
 import { TASK_CAUSALITY_ERA_CUTOFF_EPOCH } from "../../src/task-causality-era";
 import {
   getSession,
@@ -1079,7 +1079,7 @@ describe("worker server", () => {
       processDiaryItem,
     });
 
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
 
     expect(sentPrompts).toHaveLength(1);
     expect(processDiaryItem).toHaveBeenCalledTimes(1);
@@ -1165,7 +1165,7 @@ describe("worker server", () => {
       "SELECT value FROM diary_state WHERE key = 'cutover_date'",
     ).get()).toBeNull();
 
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
 
     expect(sentPrompts).toHaveLength(1);
     expect(getTurnById(db, turnId)?.status).toBe("extracted");
@@ -1264,11 +1264,133 @@ describe("worker server", () => {
       },
     });
 
-    await core.scanAndDrainQueue(triggerSessionId);
+    await core.handleTurnStop(triggerSessionId);
 
     expect(sessionWorkBufferedBeforeDiary).toEqual([true]);
     expect(stateStore.hasQueuedDay("2026-07-09")).toBe(false);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(true);
+  });
+
+  test("turn-stop waits for an in-flight wake drain so earlier observations complete in order", async () => {
+    const wakeSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-slow-wake",
+      project: "/tmp/project-slow-wake",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const wakeTurnId = createTurn(db, wakeSessionId, 1);
+
+    const stoppingSessionId = upsertSession(db, {
+      contentSessionId: "worker-session-mid-drain-stop",
+      project: "/tmp/project-mid-drain-stop",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    const stoppingTurnId = createTurn(db, stoppingSessionId, 1);
+    const earlierObservationId = queueObs(
+      db,
+      stoppingSessionId,
+      stoppingTurnId,
+      100,
+      "before-turn-stop",
+    );
+    for (let index = 0; index < 12; index += 1) {
+      const observationId = queueObs(
+        db,
+        wakeSessionId,
+        wakeTurnId,
+        101 + index,
+        `slow-wake-${index}`,
+      );
+      db.query("UPDATE observations SET tool_result = ? WHERE id = ?").run(
+        "x".repeat(800),
+        observationId,
+      );
+    }
+
+    let wakePromptStarted = false;
+    let releaseWakePrompt!: () => void;
+    const wakePromptGate = new Promise<void>((resolve) => {
+      releaseWakePrompt = resolve;
+    });
+    const sentPrompts: string[] = [];
+    const core = createWorkerCore({
+      db,
+      config: {
+        ...DEFAULT_CONFIG,
+        maxMiniTurnChars: MIN_MINI_TURN_CHARS,
+        mergeThresholdChars: 5_000,
+        maxQueuedBatches: 3,
+      },
+      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+        const queryDeps = fakeQueryDeps(args);
+        return {
+          sessionId: "serialized-drain-query",
+          queryPid: 1234,
+          async sendPrompt(prompt: string) {
+            sentPrompts.push(prompt);
+            queryDeps?.onMessage?.({ session_id: "serialized-drain-query" });
+            if (prompt.includes(`<turn id="T${wakeTurnId}"`)) {
+              wakePromptStarted = true;
+              await wakePromptGate;
+            }
+            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+              const turnId = Number(match[1]);
+              if (turnId === stoppingTurnId) {
+                updateTurnById(db, turnId, { status: "extracted" });
+              }
+              queryDeps?.onRemember?.(`T${turnId}`);
+            }
+            return { session_id: "serialized-drain-query" };
+          },
+          async close() {},
+        } satisfies WorkerQuerySession;
+      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+      isProcessAliveImpl: () => false,
+    });
+
+    const wakeDrain = core.scanAndDrainQueue();
+    await waitUntil(() => wakePromptStarted);
+    expect(wakePromptStarted).toBe(true);
+    expect(
+      core.buffers
+        .get(stoppingSessionId)
+        ?.items.some((item) => item.targetId === earlierObservationId),
+    ).toBe(true);
+
+    queueTurnStop(db, stoppingSessionId, stoppingTurnId, 200);
+    const turnStopDrain = core.handleTurnStop(stoppingSessionId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(getTurnById(db, stoppingTurnId)?.status).toBe("active");
+    expect(
+      sentPrompts.some((prompt) => prompt.includes(`<turn id="T${stoppingTurnId}"`)),
+    ).toBe(false);
+
+    releaseWakePrompt();
+    await Promise.all([wakeDrain, turnStopDrain]);
+
+    expect(getTurnById(db, stoppingTurnId)?.status).toBe("extracted");
+    expect(
+      sentPrompts.some(
+        (prompt) =>
+          prompt.includes(`<turn id="T${stoppingTurnId}"`) &&
+          prompt.includes(`<obs id="O${earlierObservationId}"`),
+      ),
+    ).toBe(true);
+    expect(
+      db.query<{ status: string }, [number]>(
+        "SELECT status FROM observations WHERE id = ?",
+      ).get(earlierObservationId)?.status,
+    ).toBe("skipped");
   });
 
   test("each turn-stop drain processes at most one diary without self-continuing the backlog", async () => {
@@ -1303,7 +1425,7 @@ describe("worker server", () => {
       },
     });
 
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
     expect(processedDates).toEqual([20260708]);
 
     await Promise.resolve();
@@ -1311,7 +1433,7 @@ describe("worker server", () => {
 
     const secondTurnId = createTurn(db, sessionId, 2);
     queueTurnStop(db, sessionId, secondTurnId, 200);
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
     expect(processedDates).toEqual([20260708, 20260709]);
     expect(stateStore.hasQueuedDay("2026-07-08")).toBe(false);
     expect(stateStore.hasQueuedDay("2026-07-09")).toBe(false);
@@ -1369,7 +1491,7 @@ describe("worker server", () => {
       },
     });
 
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
 
     expect(attempts).toBe(1);
     nowEpoch = DREAM_READY_EPOCH + 60;
@@ -1380,7 +1502,7 @@ describe("worker server", () => {
 
     const secondTurnId = createTurn(db, sessionId, 2);
     queueTurnStop(db, sessionId, secondTurnId, DREAM_READY_EPOCH + 60);
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
 
     expect(attempts).toBe(2);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);
@@ -1429,13 +1551,13 @@ describe("worker server", () => {
 
     const earlyTurnId = createTurn(db, sessionId, 1);
     queueTurnStop(db, sessionId, earlyTurnId, 150);
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
     expect(processDiaryItem).not.toHaveBeenCalled();
 
     nowEpoch = DREAM_READY_EPOCH + 100;
     const dueTurnId = createTurn(db, sessionId, 2);
     queueTurnStop(db, sessionId, dueTurnId, 200);
-    await core.scanAndDrainQueue(sessionId);
+    await core.handleTurnStop(sessionId);
 
     expect(processDiaryItem).toHaveBeenCalledTimes(1);
     expect(stateStore.hasQueuedDay("2026-07-10")).toBe(false);

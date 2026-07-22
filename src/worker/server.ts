@@ -12,7 +12,7 @@ import { join } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { BUILD_ID } from "../shared/build-id";
-import { createDatabase } from "../db/database";
+import { createDatabase, runWriteTransaction } from "../db/database";
 import { createDiaryStateStore } from "../db/diary-state";
 import { contentDateAt } from "../diary/calendar";
 import {
@@ -102,6 +102,11 @@ import {
   resolveWorkerRetryDelayMs,
 } from "./error-classifier";
 import {
+  completionFloorStatus,
+  finalizeUnreachableStrandedTurns,
+  restoreStrandedTurnStops,
+} from "./turn-liveness";
+import {
   buildIsolatedEnv,
   captureSessionEnv,
   type CapturedSessionEnv,
@@ -128,6 +133,10 @@ const AGENT_COMPACT_MAX_TOKENS = 100_000;
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
+}
+
+interface DrainQueueResult {
+  turnStopSessionDbIds: Set<number>;
 }
 
 export interface BufferState {
@@ -287,7 +296,7 @@ export interface WorkerCoreDeps {
     item: PendingQueueItem,
     agentEnv: NodeJS.ProcessEnv,
   ) => Promise<void>;
-  reconcileDreamBacklog?: (nowEpoch: number) => Promise<void>;
+  reconcileDreamBacklog?: (nowEpoch: number) => Promise<string[] | void>;
   setTimeoutImpl?: (
     callback: () => void | Promise<void>,
     delayMs: number,
@@ -316,6 +325,7 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   ) => DiaryRuntime;
   BunServeImpl?: typeof Bun.serve;
   scanAndDrainQueue?: QueueDrain;
+  handleTurnStopImpl?: (sessionId: number) => Promise<void>;
   handleFlushImpl?: (sessionId: number) => Promise<void>;
   handleCompactImpl?: (
     sessionId: number,
@@ -386,6 +396,7 @@ export interface WorkerCore {
   compactingSessions: Set<number>;
   recoverFromCrash(): void;
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
+  handleTurnStop(sessionDbId: number): Promise<void>;
   processClaimedItem(item: PendingQueueItem): Promise<void>;
   flushSession(sessionDbId: number): Promise<void>;
   finishSession(sessionDbId: number): Promise<void>;
@@ -624,6 +635,47 @@ function pruneBufferedUndoneItems(
   }
 
   return { activeItems, prunedSeqs };
+}
+
+function retireObservationIfOwnerIsNotLive(
+  db: Database,
+  item: PendingQueueItem,
+): boolean {
+  if (item.kind !== "obs") {
+    return false;
+  }
+
+  return runWriteTransaction(db, () => {
+    const owner = db
+      .query<
+        { observationId: number | null; turnStatus: string | null },
+        [number]
+      >(
+        `SELECT o.id AS observationId, t.status AS turnStatus
+         FROM pending_queue q
+         LEFT JOIN observations o ON o.id = q.target_id
+         LEFT JOIN turns t ON t.id = o.turn_id
+         WHERE q.seq = ? AND q.kind = 'obs'`,
+      )
+      .get(item.seq);
+
+    if (!owner) {
+      return true;
+    }
+    if (owner.turnStatus === "active" || owner.turnStatus === "provisional") {
+      return false;
+    }
+
+    if (owner.observationId !== null) {
+      db.query<unknown, [number]>(
+        "UPDATE observations SET status = 'skipped' WHERE id = ?",
+      ).run(owner.observationId);
+    }
+    db.query<unknown, [number]>("DELETE FROM pending_queue WHERE seq = ?").run(
+      item.seq,
+    );
+    return true;
+  });
 }
 
 function capturedEnvsEqual(
@@ -1492,8 +1544,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       // Already-extracted turns are terminal — a real remember already ran;
       // leave them. A partial extraction (title/content set, e.g. a provisional
       // turn a mid-slice wrote) is finalized to extracted, keeping the partial.
-      const hasContent = turn.title !== null || turn.content !== null;
-      if (turn.status === "extracted" || hasContent) {
+      const floorStatus = completionFloorStatus(turn);
+      if (turn.status === "extracted" || floorStatus === "extracted") {
         if (turn.status !== "extracted") {
           updateTurnById(deps.db, turnId, { status: "extracted" });
         }
@@ -2381,7 +2433,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     diaryContinuationTimer = handle;
   }
 
-  async function drainQueue(sessionFilter?: number): Promise<number | null> {
+  async function drainQueue(sessionFilter?: number): Promise<DrainQueueResult> {
+    const result: DrainQueueResult = {
+      turnStopSessionDbIds: new Set<number>(),
+    };
     const currentMs = nowMs();
     for (const [sessionDbId, suspension] of suspendedUntilBySession) {
       const backoffElapsed = suspension.retryAtMs <= currentMs;
@@ -2412,24 +2467,22 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       sessionFilter !== undefined &&
       !getRegisteredSessionEnv(sessionFilter)
     ) {
-      return null;
+      return result;
     }
     if (
       sessionFilter !== undefined &&
       isSessionRetryGated(sessionFilter)
     ) {
-      return null;
+      return result;
     }
 
     const skippedSeqs = new Set<number>();
-    let triggeringSessionDbId: number | null = null;
-
     while (true) {
       if (
         sessionFilter !== undefined &&
         isSessionRetryGated(sessionFilter)
       ) {
-        return triggeringSessionDbId;
+        return result;
       }
       const excludedSessions =
         sessionFilter === undefined
@@ -2447,7 +2500,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       if (!item) {
         await flushDrainTail(sessionFilter);
-        return triggeringSessionDbId;
+        return result;
+      }
+
+      if (retireObservationIfOwnerIsNotLive(deps.db, item)) {
+        continue;
       }
 
       // The newer turn-stop is only the retry signal. Keep its work out of the
@@ -2512,7 +2569,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         await withSessionProcessingLock(item.sessionDbId, async (state) => {
           await processTurnStopLocked(state, item);
         });
-        triggeringSessionDbId ??= item.sessionDbId;
+        result.turnStopSessionDbIds.add(item.sessionDbId);
       } catch (error) {
         for (const seq of bufferedSeqs) {
           skippedSeqs.add(seq);
@@ -2565,6 +2622,71 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
+  async function coordinateEndEvent(
+    triggeringSessionDbId: number,
+  ): Promise<void> {
+    let dueDates: string[] = [];
+    try {
+      dueDates = (await deps.reconcileDreamBacklog?.(now())) ?? [];
+    } catch (error) {
+      logger.error?.("dream backlog reconcile failed", { error });
+    }
+
+    if (dueDates.length > 0) {
+      const repair = restoreStrandedTurnStops(deps.db, {
+        dueDates,
+        timeZone: config.dreamAgentTimeZone,
+        boundaryHour: config.dreamAgentHour,
+        nowEpoch: now(),
+        hasRegisteredSessionEnv: (sessionDbId) =>
+          getRegisteredSessionEnv(sessionDbId) !== undefined,
+      });
+
+      if (repair.enqueuedTurnStopCount > 0) {
+        await drainQueue();
+        // A PreCompact end event keeps its session in compactingSessions for
+        // the entire repair window. The ordinary global drain must continue
+        // excluding that session so it cannot race compact-time streaming,
+        // but repair-restored completion work for the triggering session is
+        // part of this same serialized compact operation and must finish
+        // before diary readiness is checked.
+        if (
+          compactingSessions.has(triggeringSessionDbId) &&
+          repair.enqueuedSessionDbIds.includes(triggeringSessionDbId)
+        ) {
+          await drainQueue(triggeringSessionDbId);
+        }
+        for (const sessionDbId of repair.enqueuedSessionDbIds) {
+          await withSessionProcessingLock(sessionDbId, async (state) => {
+            await flushAllBatchesLocked(state);
+          });
+        }
+      }
+
+      for (const floored of finalizeUnreachableStrandedTurns(
+        deps.db,
+        repair.unreachableTurnIds,
+      )) {
+        removeTurnFromBuffer(floored.sessionDbId, floored.turnId);
+        logger.warn?.("stranded turn completion floor applied", {
+          sessionDbId: floored.sessionDbId,
+          turnId: floored.turnId,
+          reasonCode: floored.reasonCode,
+        });
+      }
+    }
+
+    await drainOneDiaryItem(triggeringSessionDbId);
+  }
+
+  async function flushTurnStopSessions(result: DrainQueueResult): Promise<void> {
+    for (const sessionDbId of result.turnStopSessionDbIds) {
+      await withSessionProcessingLock(sessionDbId, async (state) => {
+        await flushAllBatchesLocked(state);
+      });
+    }
+  }
+
   function scanAndDrainGlobalQueue(
     requestedTriggerSessionDbId?: number | null,
   ): Promise<void> {
@@ -2582,32 +2704,27 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     let tracked!: Promise<void>;
     tracked = (async () => {
+      const turnStopSessionDbIdsAwaitingTrigger = new Set<number>();
       try {
         do {
           const requestedTriggerForThisDrain =
             pendingDiaryTriggerSessionDbId;
           pendingDiaryTriggerSessionDbId = undefined;
-          const globallyProcessedTriggerSessionDbId = await drainQueue();
+          const drainResult = await drainQueue();
+          for (const sessionDbId of drainResult.turnStopSessionDbIds) {
+            turnStopSessionDbIdsAwaitingTrigger.add(sessionDbId);
+          }
           if (
-            requestedTriggerForThisDrain !== undefined ||
-            globallyProcessedTriggerSessionDbId !== null
+            requestedTriggerForThisDrain !== undefined &&
+            requestedTriggerForThisDrain !== null
           ) {
-            const hasEndEventTrigger =
-              (requestedTriggerForThisDrain !== undefined &&
-                requestedTriggerForThisDrain !== null) ||
-              globallyProcessedTriggerSessionDbId !== null;
-            if (hasEndEventTrigger) {
-              try {
-                await deps.reconcileDreamBacklog?.(now());
-              } catch (error) {
-                logger.error?.("dream backlog reconcile failed", { error });
-              }
-            }
-            await drainOneDiaryItem(
-              requestedTriggerForThisDrain !== undefined
-                ? requestedTriggerForThisDrain
-                : globallyProcessedTriggerSessionDbId,
-            );
+            await flushTurnStopSessions({
+              turnStopSessionDbIds: turnStopSessionDbIdsAwaitingTrigger,
+            });
+            turnStopSessionDbIdsAwaitingTrigger.clear();
+            await coordinateEndEvent(requestedTriggerForThisDrain);
+          } else if (requestedTriggerForThisDrain === null) {
+            await drainOneDiaryItem(null);
           }
         } while (pendingDiaryTriggerSessionDbId !== undefined);
       } finally {
@@ -2623,13 +2740,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   function scanAndDrainQueue(sessionFilter?: number): Promise<void> {
     if (sessionFilter !== undefined) {
       return (async () => {
-        const triggeringSessionDbId = await drainQueue(sessionFilter);
-        if (triggeringSessionDbId !== null) {
-          await scanAndDrainGlobalQueue(triggeringSessionDbId);
-        }
+        await drainQueue(sessionFilter);
       })();
     }
     return scanAndDrainGlobalQueue();
+  }
+
+  async function handleTurnStop(sessionDbId: number): Promise<void> {
+    // Turn-stop wakes share the global drain serializer with ordinary wake
+    // scans. A direct session drain can otherwise overtake rows already being
+    // claimed by an in-flight global drain and terminalize their owner first.
+    await scanAndDrainGlobalQueue(sessionDbId);
   }
 
   async function drainSessionCompletely(sessionDbId: number): Promise<void> {
@@ -2955,6 +3076,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     compactingSessions,
     recoverFromCrash,
     scanAndDrainQueue,
+    handleTurnStop,
     processClaimedItem,
     flushSession,
     finishSession,
@@ -3183,6 +3305,7 @@ export function createWorkerFetchHandler(
       : createWorkerProcessors(runtimeDb);
   const runtime =
     deps.scanAndDrainQueue ||
+    deps.handleTurnStopImpl ||
     deps.handleFlushImpl ||
     deps.handleCompactImpl ||
     deps.recoverFromCrashImpl
@@ -3204,6 +3327,12 @@ export function createWorkerFetchHandler(
 
   const scanAndDrainQueue =
     deps.scanAndDrainQueue ?? runtime?.scanAndDrainQueue ?? defaultNoopDrain;
+  const handleTurnStopImpl =
+    deps.handleTurnStopImpl ??
+    runtime?.handleTurnStop ??
+    (async (sessionId: number) => {
+      await scanAndDrainQueue(sessionId);
+    });
   const handleFlushImpl =
     deps.handleFlushImpl ??
     runtime?.finishSession ??
@@ -3301,7 +3430,7 @@ export function createWorkerFetchHandler(
 
       if (req.method === "POST" && url.pathname === "/trigger") {
         const payload = (await req.json()) as {
-          action?: "capture" | "wake" | "compact" | "finish";
+          action?: "capture" | "wake" | "turn-stop" | "compact" | "finish";
           content_session_id?: string;
           session_id?: number;
           transcript_path?: string | null;
@@ -3358,6 +3487,22 @@ export function createWorkerFetchHandler(
               );
             });
           trackGlobalWork(finish);
+          return new Response(null, { status: 200 });
+        }
+
+        if (payload.action === "turn-stop") {
+          if (associatedSessionId === null) {
+            return new Response("session_id is required", { status: 400 });
+          }
+          const turnStop = handleTurnStopImpl(associatedSessionId).catch(
+            (error) => {
+              deps.logger?.error?.("turn-stop request failed", {
+                sessionId: associatedSessionId,
+                error,
+              });
+            },
+          );
+          trackGlobalWork(turnStop);
           return new Response(null, { status: 200 });
         }
 
@@ -3663,6 +3808,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
       config,
       sessionEnvRegistry,
       scanAndDrainQueue: core.scanAndDrainQueue,
+      handleTurnStopImpl: core.handleTurnStop,
       handleFlushImpl: core.finishSession,
       handleCompactImpl: core.handleCompact,
       registerSessionEnvImpl: core.registerSessionEnv,

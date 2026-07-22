@@ -220,7 +220,7 @@ describe("createDiaryRuntime", () => {
         sessionDbId: session.id,
         enqueuedAtEpoch: 200,
       });
-      await core.scanAndDrainQueue();
+      await core.handleTurnStop(session.id);
 
       expect(runs).toBe(2);
       expect(stateStore.getDayState("2026-07-10")).toMatchObject({
@@ -933,6 +933,29 @@ describe("createDiaryRuntime", () => {
         dataRoot,
         config: DEFAULT_CONFIG,
         logger: { warn() {}, error() {} },
+        createWorkerQuerySessionImpl: ((...args: unknown[]) => {
+          const queryDeps = (args.length === 2 ? args[1] : args[3]) as
+            | { onRemember?: (id: string) => void }
+            | undefined;
+          return {
+            sessionId: "main-runtime-worker",
+            queryPid: 123,
+            async sendPrompt(prompt: string) {
+              for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
+                const turnId = Number(match[1]);
+                updateTurnById(db, turnId, {
+                  status: "extracted",
+                  title: "complete",
+                  content: "complete",
+                });
+                queryDeps?.onRemember?.(`T${turnId}`);
+              }
+              return { session_id: "main-runtime-worker" };
+            },
+            async close() {},
+          };
+        }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        isProcessAliveImpl: () => false,
         createDiaryRuntimeImpl(options) {
           factoryCalls += 1;
           expect(options.db).toBe(db);
@@ -971,7 +994,7 @@ describe("createDiaryRuntime", () => {
         new Request("http://127.0.0.1:37778/trigger", {
           method: "POST",
           body: JSON.stringify({
-            action: "wake",
+            action: "turn-stop",
             content_session_id: "dream-main-turn-stop",
             session_id: session.id,
             env: { ANTHROPIC_AUTH_TOKEN: "dream-main-token" },

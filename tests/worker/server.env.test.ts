@@ -157,12 +157,12 @@ describe("worker per-session env registry", () => {
     });
     expect(closes).toBe(1);
     addQueuedTurn(db, sessionA.id, 2);
-    await core.scanAndDrainQueue(sessionA.id);
+    await core.handleTurnStop(sessionA.id);
     expect(spawned[2]?.env?.ANTHROPIC_AUTH_TOKEN).toBe("auth-a-rotated");
 
     core.clearSessionEnv("content-a", sessionA.id);
     addQueuedTurn(db, sessionA.id, 3);
-    await core.scanAndDrainQueue(sessionA.id);
+    await core.handleTurnStop(sessionA.id);
     expect(spawned).toHaveLength(3);
     expect(listPendingQueueItems(db, sessionA.id)).toHaveLength(1);
   });
@@ -311,7 +311,7 @@ describe("worker per-session env registry", () => {
       ANTHROPIC_MODEL: "must-not-override-opus",
       HTTP_PROXY: "http://proxy-a",
     });
-    await core.scanAndDrainQueue(sessionA.id);
+    await core.handleTurnStop(sessionA.id);
 
     expect(dreamSpawnEnvs).toEqual([
       {
@@ -387,7 +387,7 @@ describe("worker per-session env registry", () => {
       ANTHROPIC_AUTH_TOKEN: "auth-a",
       HTTPS_PROXY: "http://proxy-a",
     });
-    await core.scanAndDrainQueue(sessionA.id);
+    await core.handleTurnStop(sessionA.id);
 
     expect(dreamSpawnEnvs).toEqual([
       {

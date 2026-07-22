@@ -19,7 +19,12 @@ const WAKE_TIMEOUT_MS = 500;
 const FLUSH_TIMEOUT_MS = 500;
 const COMPACT_TIMEOUT_MS = 5_000;
 
-export type WorkerTriggerAction = "capture" | "wake" | "compact" | "finish";
+export type WorkerTriggerAction =
+  | "capture"
+  | "wake"
+  | "turn-stop"
+  | "compact"
+  | "finish";
 
 export interface WorkerTriggerInput {
   action: WorkerTriggerAction;
