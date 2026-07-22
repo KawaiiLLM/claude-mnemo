@@ -1,0 +1,113 @@
+# Task-causality significance grading
+
+**Status:** ready-for-agent
+**Date:** 2026-07-22 (rev 3 — post GPT review round 2; bridge-G4 rule, citation-based arc protocol, conditional density alarm, intra-class truncation)
+**Origin:** S15069 T67–T78 — production grade audit + user's redefinition of grade semantics + Sonnet blind re-annotation experiment on S15385 (52 turns) + two GPT spec reviews
+
+## Problem Statement
+
+The significance grades that the extraction agent assigns to turns are anchored to the wrong axis. The current rubric grades by *immediate-action change*: any turn after which "the next action is materially different" qualifies for Grade 3. In real sessions this systematically inflates environment troubleshooting (a GPU-driver root cause, a WSL crash workaround, a wrong filename) to milestone grade while it says nothing about the task the session exists to accomplish. A blind audit of 100 recent turns plus a Sonnet re-annotation of one 52-turn research session confirmed the pattern: roughly half of all Grade 3 turns were local troubleshooting turns that never touched the task's design, while durable pitfall conclusions sat unrecognized in Grade 1 and pure "still running" polls occupied Grade 1 instead of Grade 0.
+
+Two secondary problems compound this:
+
+1. The per-100-turn calibration block injected into the extraction agent carries a fixed percentage baseline (G4 <2%, G3 ≈8%, G2 ≈25%, G1 ≈45%, G0 ≈20%) derived from a single operations-heavy session (S1730). Against research-shaped sessions the baseline reads as perpetual drift, inviting either false alarm or quota-matching behavior.
+2. The extraction agent's re-prime payload (after compact/reopen) spends ~12.6K tokens on a full milestone timeline plus a 30-turn collapsed index with descriptions — none of which is organized by task structure, so the agent re-primes on narrative volume rather than on the causal skeleton it needs to grade consistently.
+
+## Solution
+
+Replace the grading axis with **task-level causality**: a grade states at which level of the session's task hierarchy a turn operates, not how surprising it felt in the moment.
+
+- **G4 — task origin or re-foundation.** The turn that establishes why a work arc exists: its motivation, the problem it must solve, its success criteria. A task arc is a body of work expected (by scope of the ask, at grading time) to span on the order of 50+ turns. One G4 per arc; a second G4 is legal only when the arc's motive or success criteria are radically redefined mid-flight. An overturned founding motive is demoted with `rolled-back` evidence.
+- **G3 — major milestone within the arc.** A turn that materially affects the arc's **design** (problem model, design philosophy, architecture, decomposition, evaluation method, principles of action) or its **conclusions** (an experiment or gate result that determines how the task proceeds or what it has established). There is no second-level sub-task concept: proposing a major experiment or delivery plan inside the arc is a G3 design event, not a new origin. Work that exists only to unblock execution — environment fixes, toolchain repair, local debugging — does not reach G3 however dramatic it was; its durable residue lands at G2. The operative test is the **deletion test**: if this turn were deleted, would the task's design, evaluation method, principles of action, or established conclusions change? If only the next execution action changes, cap at G2.
+- **G2 — durable conclusion or complete delivery.** (a) Durable knowledge worth persisting: environment pitfalls, reusable root causes, experiment results below task-conclusion weight, established constraints, evidence-backed rejections. (b) Complete deliveries: a feature fully coded and tested, a ticket done end-to-end, a commit/release, an independently verifiable stage delivery. Environment and toolchain decisions normally live here. A planned release is G2 unless the release itself opens or closes a task-level gate. When the user's ask IS a knowledge question, a complete answer is a delivery and is graded by delivery completeness — not dismissed as explanation.
+- **G1 — routine execution.** Progress with no independently persistable conclusion: a module coded/tested, an intermediate green result, an environment prepared, a worker dispatched, a probe started, ordinary progress confirmation. Useful only for short-term continuation.
+- **G0 — no future value.** Deleting the turn loses nothing: status checks that found nothing, "still running / no change" polls, empty or shell-only commands, incidental explanations irrelevant to the task that formed no reusable conclusion and influenced no later work, repeated confirmations. Judged by outcome, not action type: a status check that uncovered a real problem is not G0, and "no later decision consumed it" is by itself never sufficient for G0.
+
+The fixed percentage baseline is removed. Calibration becomes invariant-based: the injected block keeps the session's own observed distribution (cheap, factual) and states qualitative structural invariants — one G4 per arc; G3 requires passing the deletion test; troubleshooting chains resolve to G2 conclusions, not G3 chains; no-change polls are G0. No standing density number appears in the prompt: the G3 density threshold (~1 per 10 turns) lives in code as a **conditional alarm** — the calibration builder checks the session's own recent window and emits one alarm line only when the threshold is exceeded ("N G3 grades in the last M turns — re-run the deletion test on each"). A number that appears only on violation cannot function as a standing quota. The G4 ~50-turn figure remains in the G4 definition itself because it defines arc scale, not an output rate.
+
+The extraction re-prime payload is restructured around the same hierarchy: instead of a full milestone timeline plus a described 30-turn index, the agent receives the task skeleton — the arc's G4 origin and current G3 anchors, each carrying compressed semantics — plus the session state block and a bare recent-turn index. Target: a precise token cap (defined below) against today's ~12.6K, while giving the agent exactly the structure the rubric asks it to reason over.
+
+Milestone selection is aligned with the new semantics: turns graded G0/G1 no longer enter the ordinary milestone pool via content bonuses (insight/spec/tag), because under the new rubric a turn with a durable conclusion is by definition G2+. G2 turns are the ordinary milestone candidates; G3/G4 form the arc backbone. Structural always-keep rows (correctors, outcomes, endpoints, compact boundaries) are unaffected. This rule is era-gated (below) so historical timelines do not silently lose rows.
+
+## Era cutoff protocol
+
+Grades are unversioned integers; old-semantics and new-semantics grades are indistinguishable in storage. Rather than backfill, a fixed **effective epoch** separates the eras:
+
+- A single cutoff constant (the release timestamp of this feature) lives in code, not schema. A turn is **task-causality era** iff its creation epoch is ≥ the cutoff.
+- The milestone-pool gating rule (no G0/G1 entry via content bonus) applies **only to task-causality-era turns**. Legacy turns keep the legacy pool behavior, so historical daily timelines render exactly as before.
+- The re-prime task skeleton trusts only task-causality-era G4/G3 as live anchors. Legacy G3/G4 in the same session are rendered under a `legacy` marker: visible as historical context, never presented as the arc's trusted backbone.
+- A session straddling the cutoff may therefore have no trusted G4, and `regrade` cannot repair this: it changes only the grade, never the turn's creation epoch, so a re-graded legacy turn stays legacy. Instead the rubric instructs the agent to establish a **bridge G4**: the first post-cutoff turn that can summarize the arc's existing motive and success criteria is graded G4 and becomes the arc's trusted foundation. Legacy turns are never promoted into the trusted backbone.
+- The cutoff must be testable: seeded tests place turns on both sides of the constant and assert pool membership and skeleton trust flip exactly at the boundary.
+
+## Arc assignment protocol
+
+Storage has no arc identifier and causal citations are optional, so arc membership must be computable from grades, order, and the existing `[T<n>]` citation data alone:
+
+- **Every G4 opens a new arc by default.**
+- **A re-foundation G4 must cite the G4 it re-founds.** That citation assigns it to the existing arc; a G4 with no G4-citation is a new arc. Re-foundation does NOT imply rollback: when a motive evolves, both G4s remain legitimate founding points of their phases. Only a motive disproved by witnessed evidence gets the `rolled-back` tag and demotion, via the existing negate-on-cite duty.
+- **A G3 attaches to the nearest preceding trusted G4** (its arc) by default. A G3 that resumes an earlier arc must explicitly cite that arc's G4 to be grouped there.
+- The rubric states these citation duties to the extraction agent; the skeleton renderer applies the same rules deterministically. A G3 with no preceding trusted G4 in a straddling session renders under the `legacy` block's arc context until a bridge G4 exists.
+
+## User Stories
+
+1. As the extraction agent, I want the rubric to define grades by task-causal level, so that I stop promoting environment troubleshooting to milestone grade.
+2. As the extraction agent, I want G3 defined by the deletion test with a code-side density alarm that fires only on violation, so that my inflation is bounded without any standing distribution target in my prompt.
+3. As the extraction agent, I want an explicit rule that unblocking-execution work caps at G2, so that a debugging campaign with its own "success criteria" cannot masquerade as a milestone.
+4. As the extraction agent, I want the G4 re-foundation allowance (second G4 only on radical motive/criteria redefinition), so that long arcs with a genuine pivot keep both founding points.
+5. As the extraction agent, I want knowledge-answer deliveries graded by delivery completeness, so that Q&A-shaped tasks are not auto-demoted to G0.
+6. As the extraction agent, I want grade-by-outcome examples for status checks, so that a check that uncovered a real problem is not auto-graded G0.
+7. As the extraction agent, I want the calibration block to state structural invariants instead of target percentages, so that research-shaped sessions are not pressured toward an operations-shaped distribution.
+8. As the extraction agent, I want to still see my session's own observed distribution, so that I can notice my own drift without a foreign baseline.
+9. As the extraction agent, I want my re-prime to present the arc's G4 origin and G3 anchors with DB ids and one line of compressed semantics each, so that I can compare new turns against the arc's motive, evaluation method, and principles — not just against titles.
+10. As the extraction agent, I want legacy-era anchors visibly marked in the skeleton, so that I never cite an old-semantics troubleshooting G3 as the arc's live backbone.
+11. As the extraction agent, I want the bridge-G4 instruction for cutoff-straddling sessions, so that I found the arc anew on the first post-cutoff turn that summarizes its motive, instead of trying to promote a legacy turn that can never become trusted.
+12. As the extraction agent, I want the recent-turn index in re-prime reduced to title + grade + dbid, so that re-prime cost drops without losing citation coordinates.
+13. As the extraction agent, I want the regrade duty updated to the new semantics, so that overturning a cited turn demotes it within the task-causality scale.
+14. As a user reading a timeline, I want G3 rows to be design and conclusion milestones, so that the milestone view reads as the task's decision arc rather than a debugging diary.
+15. As a user reading a timeline, I want durable pitfalls surfaced at G2, so that踩坑 conclusions are preserved without polluting the arc backbone.
+16. As a user reading a timeline, I want historical days to render exactly as before the release, so that the pool-rule change causes no silent regression in old data.
+17. As the main-session Claude, I want milestone injection at resume/compact built from the new backbone, so that the 2,000-token budget is spent on task structure rather than promoted noise.
+18. As a maintainer, I want the era cutoff expressed as one testable constant, so that mixed-era behavior is deterministic without a schema change.
+19. As a maintainer, I want the rubric, calibration, skeleton, and pool changes covered by prompt-assembly, rendering, and selection tests, so that regressions in injected text are caught without live API calls.
+20. As a cost-conscious user, I want the re-prime payload cut to roughly a third under a precise cap, so that every compact/reopen of a long session stops paying ~9K unnecessary tokens.
+21. As a reviewer of extraction quality, I want a pre-ship offline validation that slim re-prime preserves grading boundaries, so that the payload cut is proven not to degrade judgment before it ships.
+22. As the extraction agent, I want citation duties for re-foundation G4s and arc-resuming G3s, so that arc grouping is computable from data I already emit.
+23. As a maintainer, I want the skeleton's intra-class truncation order fully specified, so that budget pressure never silently drops an arc's founding context.
+
+## Implementation Decisions
+
+- **Rubric rewrite (extraction prompt).** The grade section of the per-turn extraction instructions is rewritten around the five task-causality definitions above, including: the scope-of-the-ask judgment for arc identity (~50+ turns expected); the unblocking-execution cap; the outcome-not-action rule for G0 with the "no later decision" non-sufficiency clause; the knowledge-answer-as-delivery rule; the compound-turn rule (grade by highest material consequence) retained from the current rubric. Worked examples are replaced with the S15385 exemplars validated in the blind experiment (extraction-failure diagnosis = G4; probe design and SFT-pilot design = G3 design events; probe result determining SFT go = G3 conclusion event; driver root-cause chain = G2; probe launch confirmations = G1; "still healthy" polls = G0).
+- **Regrade duties.** The misleading-turn downgrade (negate-on-cite + regrade in the same call, witnessed evidence only) is retained unchanged. The "better flag bearer" G4 rule is replaced by the re-foundation rule with its citation duty (a re-foundation G4 cites the G4 it re-founds; rollback stays a separate, evidence-gated act). The bridge-G4 instruction for straddling sessions is added; `regrade` is never presented as a way to create a trusted anchor from a legacy turn. The known protocol debt that `regrade` is single-target (cannot atomically demote two casualties) is explicitly NOT addressed here — separate ticket.
+- **Calibration block.** Keeps its cadence (every 10th prompt) and its observed-distribution table; drops the reference-percentage sentence entirely. In its place: the qualitative structural invariants listed in Solution (deletion test, one-G4-per-arc, troubleshooting→G2, polls→G0). The G3 density threshold is a code-side constant checked against the session's own recent window; the builder emits a single alarm line only when the threshold is exceeded. No standing distribution target of any kind remains in the prompt.
+- **Era cutoff.** One code-level epoch constant set at release time. Pool gating and skeleton trust are the only two behaviors keyed on it. No schema change, no data migration, no version column.
+- **Re-prime skeleton — source.** Derived by filtering the session's full turn set by stored grade directly. It must NOT pass through the milestone daily-budget, selection, or tail-pagination machinery: an early G4 or an over-budget G3 must never be silently dropped from the skeleton.
+- **Re-prime skeleton — shape.** Grouped by arc using the Arc assignment protocol above (G4 opens arc; re-foundation G4 grouped via its citation and marked as re-foundation; G3 attaches to nearest preceding trusted G4 unless it cites an earlier one). Legacy anchors render in a separate trailing `legacy` block. Each anchor line = DB id + grade + title + one compressed semantic clause (~120 chars) sourced from the turn's stored insight (fallback: content excerpt). Casualty rows keep their casualty marker so overturned anchors are never cited as live.
+- **Re-prime payload — budget.** Total hard cap 4,000 estimated tokens. Class retention order under pressure: session state → live G4 lines → live G3 lines → legacy/casualty block → recent-turn bare index (title + grade + dbid) → overflow pointer to the timeline tool. Intra-class truncation: (1) the overflow pointer's space is reserved up front, before any class is placed; (2) all live G4 lines are unconditionally kept; (3) when live G3 lines exceed the remaining budget, each arc keeps at least its earliest and latest live G3, then remaining space fills with further G3 lines newest-first; (4) any omission at any level emits the timeline pointer. Token estimation reuses the existing diary token estimator.
+- **Milestone scoring.** For task-causality-era turns, the content-bonus path (insight/spec/tag) no longer lifts grade-0/1 turns over the milestone pool threshold; the bonus continues to apply to G2+ turns for ranking among candidates. Legacy-era turns keep the current behavior verbatim. Grade base scores, citation in-degree caps, structural always-keeps, corrector promotion, and the adaptive daily budget are unchanged.
+- **No schema change.** The grade column, its 0–4 check constraint, and all storage paths are untouched.
+
+## Testing Decisions
+
+- Good tests here assert *externally observable text and selection outcomes*, not prompt internals: given a seeded in-memory database, the assembled instruction text contains the new invariants and contains no percentage or density target; the calibration alarm line appears only for a seeded session whose recent window exceeds the G3 density threshold; the re-prime payload for a seeded session contains the arc-grouped G4/G3 skeleton with correct DB ids (including a cited re-foundation grouped into its arc and an uncited G4 opening a new arc), marks legacy anchors, respects the 4,000-token cap, and truncates in the specified class and intra-class order (earliest+latest G3 per arc survive pressure; live G4 always survives; pointer always emitted on omission); the milestone pool for a seeded day excludes a post-cutoff G1-with-insight turn, includes a post-cutoff G2 turn, and keeps a pre-cutoff G1-with-insight turn.
+- Era boundary tests seed turns on both sides of the cutoff constant and assert pool membership and skeleton trust flip exactly at the boundary.
+- Modules under test: the extraction prompt assembly, the calibration block builder, the worker re-prime renderer (new skeleton path), and the milestone scoring/selection layer.
+- Prior art: the existing worker prompt-assembly tests and milestone scoring tests (seeded bun:sqlite in-memory databases, pure-function rendering assertions, the timeline selection suite). The test-suite HOME sandbox (0.7.1) applies; any test touching the worker's main assembly passes an explicit temporary data root.
+- **Pre-ship offline validation (not an automated test):** re-run the S15385 blind-annotation experiment feeding the annotator the slim skeleton payload instead of full context, and compare G3/G2 boundaries against the full-context run. Divergence on the validated exemplars blocks release. This mirrors the /tmp-verifier approach used for the 0.2.38 milestone scoring change; live-model consistency checks do not belong in CI.
+
+## Out of Scope
+
+- Regrading or migrating historical turns; any comparison of legacy-era grades against the new rubric.
+- Multi-target atomic `regrade` (existing protocol debt — separate ticket).
+- Changes to the recall tool's search semantics, pagination, or truncation (the "leaner recall usage" finding is agent discipline, not code).
+- The main-session SessionStart/compact milestone hook's 2,000-token degradation ladder (it consumes the same backbone but its budget machinery is untouched).
+- The rules ledger, dream agent, diary induction, and persona pipelines.
+- Tag scoring (still an open 0.2.38+ item) and any new tag namespaces.
+- The per-session summary agent's cost profile.
+
+## Further Notes
+
+- Evidence base: a 100-turn manual audit (S15069 T69) plus a Sonnet blind re-annotation of S15385's 52 consecutive turns. The blind run reproduced every intended correction autonomously (troubleshooting chain G3→G2, launch confirmations G3→G1, polls G1→G0, durable pitfalls G1→G2). Its one failure mode — minting 4 G4s by treating each experiment design as a sub-task origin — is closed in rev 2 by removing the sub-task concept entirely: G3 is a milestone *within* the arc, and density invariants (~1 G4 / 50+ turns, ~1 G3 / 10+ turns) give the agent a self-check. Corrected reference distribution for S15385: G4=1, G3=7, G2=24, G1=13, G0=7 (density expectation ~5 G3 over 52 turns; 7 is within smell-check tolerance — the invariant is an order-of-magnitude alarm, not a quota).
+- The percentage baseline removed here originated from S1730 (operations-heavy) and was already labeled "calibration only, not a quota"; the audit showed it misleads more than it calibrates once session shapes diversify.
+- The re-prime restructure deliberately feeds the agent the same structure the rubric asks it to reason over; this is the concept-integrity argument for doing rubric and re-prime in one feature rather than two.
+- GPT review (rev 1 → rev 2) contributed: the unblocking-execution boundary, the knowledge-answer clarification, the era-cutoff protocol, anchor semantic lines + offline validation, and the skeleton source/grouping/budget protocol. Its "second-level sub-task must decompose the goal" fix was superseded by the user's simpler decision to drop the concept.
+- GPT review round 2 (rev 2 → rev 3) contributed: the bridge-G4 rule (regrade cannot move a turn's era, so legacy turns are never promotable to trusted anchors), the citation-based arc assignment protocol, and the intra-class truncation order. Its demand to drop the G3 density number from the prompt was resolved as a conditional alarm: the threshold lives in code and surfaces only on violation, so the user's density definition survives without a standing quota. Its coupling of re-foundation to `rolled-back` was rejected: an evolved motive leaves both G4s as legitimate phase foundations; rollback remains a separate, evidence-gated act.

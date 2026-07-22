@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { resolveTranscriptPath } from "../shared/paths";
+import { isTaskCausalityEra } from "../task-causality-era";
 
 export interface TimelineInput {
   id: string;
@@ -695,7 +696,21 @@ function hasMilestoneTagFamily(turn: TurnRecord): boolean {
     .some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
 }
 
-function milestoneContentScore(turn: TurnRecord): number {
+function milestoneContentScore(
+  turn: TurnRecord,
+  taskCausalityEraCutoffEpoch?: number,
+): number {
+  if (
+    turn.significanceGrade !== null &&
+    turn.significanceGrade <= 1 &&
+    isTaskCausalityEra(
+      turn.createdAtEpoch,
+      taskCausalityEraCutoffEpoch,
+    )
+  ) {
+    return 0;
+  }
+
   return Math.max(
     hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
     isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
@@ -703,10 +718,15 @@ function milestoneContentScore(turn: TurnRecord): number {
   );
 }
 
-function milestoneWeightedScore(turn: TurnRecord, citedBy = 0, citationCap = 2): number {
+function milestoneWeightedScore(
+  turn: TurnRecord,
+  citedBy = 0,
+  citationCap = 2,
+  taskCausalityEraCutoffEpoch?: number,
+): number {
   return (
     milestoneBaseScore(turn) +
-    milestoneContentScore(turn) +
+    milestoneContentScore(turn, taskCausalityEraCutoffEpoch) +
     Math.min(citedBy, citationCap)
   );
 }
@@ -1269,6 +1289,7 @@ export function selectMilestoneTurns(view: {
    * full-window view (every cite is already in-window).
    */
   sessionTurns?: TurnRecord[];
+  taskCausalityEraCutoffEpoch?: number;
 }): MilestoneSelection {
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
     (turn) => turn.status !== "skipped",
@@ -1327,6 +1348,7 @@ export function selectMilestoneTurns(view: {
       turn,
       citedByPrompt.get(turn.promptNumber) ?? 0,
       citationCap,
+      view.taskCausalityEraCutoffEpoch,
     );
   };
 

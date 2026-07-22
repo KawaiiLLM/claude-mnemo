@@ -616,15 +616,43 @@ describe("worker query session", () => {
       "bugfix | feature | refactor | change | discovery | decision",
     );
     expect(prompt).toContain("grade: REQUIRED integer 0-4");
-    expect(prompt).toContain("Grade 4 — top-level arc flag bearer");
-    // 2/3 discriminator: completion is not a premise change (grade-inflation fix)
-    expect(prompt).toContain("Grade by CONSEQUENCE, not by action verb");
-    expect(prompt).toContain("T925 (0.5.0 release)");
-    expect(prompt).toContain("T896 ($6.38→$1.43 correction)");
-    expect(prompt).toContain("T941 (/compact)");
+    expect(prompt).toContain("Grade 4 — task origin or re-foundation");
+    expect(prompt).toContain("scope of the ask");
+    expect(prompt).toContain("50+ turns");
+    expect(prompt).toContain("deletion test");
+    expect(prompt).toContain(
+      "would the task's design, evaluation method, principles of action, or established conclusions change",
+    );
+    expect(prompt).toContain("unblock execution");
+    expect(prompt).toContain("cap at Grade 2");
+    expect(prompt).toContain(
+      "complete answer to a knowledge-question task is a delivery",
+    );
+    expect(prompt).toContain("judged by outcome, not action type");
+    expect(prompt).toContain(
+      '"no later decision consumed it" is never sufficient by itself',
+    );
+    expect(prompt).toContain("bridge Grade 4");
+    expect(prompt).toContain("must cite the Grade 4 it re-founds");
+    expect(prompt).toContain(
+      "Grade 3 that resumes an earlier arc must cite that arc's Grade 4",
+    );
+    expect(prompt).toContain("extraction-failure diagnosis");
+    expect(prompt).toContain("probe design and SFT-pilot design");
+    expect(prompt).toContain("probe result determining the SFT go decision");
+    expect(prompt).toContain("driver root-cause chain");
+    expect(prompt).toContain("probe launch confirmations");
+    expect(prompt).toContain('"still healthy" polls');
+    expect(prompt).not.toContain("before this turn the next action was");
+    expect(prompt).not.toContain("better flag bearer");
+    expect(prompt).not.toContain("T925");
+    expect(prompt).not.toContain("T909");
+    expect(prompt).not.toContain("T908");
+    expect(prompt).not.toContain("T850");
+    expect(prompt).not.toContain("G4 <2%");
     expect(prompt).toContain("Misleading-turn downgrade");
     expect(prompt).toContain("only with witnessed disproof or rollback evidence");
-    expect(prompt).toContain("Grade-4 uniqueness");
+    expect(prompt).toContain("Grade-4 re-foundation");
     expect(prompt).toContain('regrade: { id: "T<n>", grade: 0|1|2|3|4 }');
 
     expect(capturedAllowedTools).toEqual([

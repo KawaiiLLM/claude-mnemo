@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path15 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.7.1-mru92d3x" : "dev";
+var BUILD_ID = true ? "0.7.1-mrvumezb" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1855,12 +1855,6 @@ function getFirstTurn(db, sessionId) {
       `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
     ).get(sessionId) ?? null
   );
-}
-function getMaxPromptNumber(db, sessionId) {
-  const row = db.query(
-    "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
-  ).get(sessionId);
-  return row?.max ?? null;
 }
 
 // src/shared/transcript-parser.ts
@@ -3823,6 +3817,7 @@ function buildObsBlock(observationId, toolName, toolInput, toolResult) {
 </obs>`;
 }
 var STALE_TURN_THRESHOLD = 10;
+var G3_DENSITY_ALARM_TURNS_PER_GRADE = 10;
 function buildTurnSignificanceCalibration(db, sessionId, promptNumber) {
   if (promptNumber <= 0 || promptNumber % 10 !== 0) {
     return "";
@@ -3848,10 +3843,11 @@ function buildTurnSignificanceCalibration(db, sessionId, promptNumber) {
     }
   }
   const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
+  const densityAlarm = total > 0 && counts[3] * G3_DENSITY_ALARM_TURNS_PER_GRADE > total ? `
+${counts[3]} G3 grades in the last ${total} turns \u2014 re-run the deletion test on each.` : "";
   return `<significance-calibration window="previous 100 turns">
 Recent distribution (${total} turns): grade 4=${counts[4]}, grade 3=${counts[3]}, grade 2=${counts[2]}, grade 1=${counts[1]}, grade 0=${counts[0]}, ungraded=${ungraded}.
-Reference baseline (calibration only, not a quota): grade 4 <2%, grade 3 \u22488%, grade 2 \u224825%, grade 1 \u224845%, grade 0 \u224820%.
-Session distributions vary. Use this only to notice drift; never change a grade to match the baseline.
+Structural self-checks: one Grade 4 per arc unless a radical re-foundation cites it; every Grade 3 must pass the deletion test; Troubleshooting chains resolve to Grade 2 conclusions, not Grade 3 chains; No-change polls are Grade 0.${densityAlarm}
 </significance-calibration>`;
 }
 function buildBatchPrompt(args) {
@@ -40221,6 +40217,12 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/task-causality-era.ts
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = Number.MAX_SAFE_INTEGER;
+function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
+  return createdAtEpoch >= cutoffEpoch;
+}
+
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
@@ -40584,15 +40586,21 @@ function hasMilestoneDevArtifact(turn) {
 function hasMilestoneTagFamily(turn) {
   return turn.tags.filter((tag) => !tag.includes(":")).some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
 }
-function milestoneContentScore(turn) {
+function milestoneContentScore(turn, taskCausalityEraCutoffEpoch) {
+  if (turn.significanceGrade !== null && turn.significanceGrade <= 1 && isTaskCausalityEra(
+    turn.createdAtEpoch,
+    taskCausalityEraCutoffEpoch
+  )) {
+    return 0;
+  }
   return Math.max(
     hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
     isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
     hasMilestoneTagFamily(turn) ? MILESTONE_TAG_FAMILY_WEIGHT : 0
   );
 }
-function milestoneWeightedScore(turn, citedBy = 0, citationCap = 2) {
-  return milestoneBaseScore(turn) + milestoneContentScore(turn) + Math.min(citedBy, citationCap);
+function milestoneWeightedScore(turn, citedBy = 0, citationCap = 2, taskCausalityEraCutoffEpoch) {
+  return milestoneBaseScore(turn) + milestoneContentScore(turn, taskCausalityEraCutoffEpoch) + Math.min(citedBy, citationCap);
 }
 function buildMilestoneCitationInDegree(turns) {
   const seq = sortTurnsForAnalysis(turns).filter((turn) => turn.status !== "skipped");
@@ -40986,7 +40994,8 @@ function selectMilestoneTurns(view) {
     return milestoneWeightedScore(
       turn,
       citedByPrompt.get(turn.promptNumber) ?? 0,
-      citationCap
+      citationCap,
+      view.taskCausalityEraCutoffEpoch
     );
   };
   const runIds = /* @__PURE__ */ new Map();
@@ -41307,44 +41316,6 @@ function buildTimelineView(db, input, preloadedTurns) {
     hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
     milestoneTail,
     breadcrumb
-  };
-}
-function buildContextTimelineView(db, sessionId, view = "turns") {
-  const session = getSession(db, sessionId);
-  if (!session) {
-    throw new Error(`timeline: session S${sessionId} not found`);
-  }
-  const sortedTurns = getTurnsForSession(db, sessionId).sort((a, b) => {
-    if (a.promptNumber !== b.promptNumber) {
-      return a.promptNumber - b.promptNumber;
-    }
-    if (a.createdAtEpoch !== b.createdAtEpoch) {
-      return a.createdAtEpoch - b.createdAtEpoch;
-    }
-    return a.id - b.id;
-  });
-  if (sortedTurns.length === 0) {
-    return buildTimelineView(db, { id: `S${sessionId}` });
-  }
-  if (view === "milestones") {
-    return buildTimelineView(db, {
-      id: `S${sessionId}`,
-      view: "milestones",
-      pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
-      milestoneTail: true
-    }, sortedTurns);
-  }
-  const windowTurns = sortedTurns.slice(-DEFAULT_TIMELINE_PAGE_SIZE);
-  const firstPromptNumber = windowTurns[0].promptNumber;
-  const lastPromptNumber = windowTurns[windowTurns.length - 1].promptNumber;
-  const timelineView = buildTimelineView(db, {
-    id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
-    pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
-    view
-  }, sortedTurns);
-  return {
-    ...timelineView,
-    hasEarlier: firstPromptNumber !== sortedTurns[0].promptNumber
   };
 }
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
@@ -41746,13 +41717,245 @@ function timelineQuery(db, input) {
   }
 }
 
-// src/mcp/session-output.ts
-var defaultTimelineRenderer = {
-  buildContextTimelineView,
-  renderTimeline
-};
-var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+// src/mcp/task-skeleton.ts
+var TASK_CAUSALITY_REPRIME_TOKEN_BUDGET = 4e3;
+var RECENT_TURN_LIMIT = 30;
+var ANCHOR_TITLE_CODE_POINT_CAP = 72;
+var ANCHOR_SEMANTIC_CODE_POINT_CAP = 120;
+var ANCHOR_COMPRESSION_LEVELS = [
+  { title: ANCHOR_TITLE_CODE_POINT_CAP, semantic: ANCHOR_SEMANTIC_CODE_POINT_CAP },
+  { title: 32, semantic: 48 },
+  { title: 1, semantic: 1 }
+];
 function capCodePoints(value, max) {
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function cleanInline(value) {
+  return value.split("\n").map((line) => line.trim().replace(/^-\s*/, "")).filter(Boolean).join("; ").replace(/\s+/g, " ").trim();
+}
+function anchorSemantic(turn, cap = ANCHOR_SEMANTIC_CODE_POINT_CAP) {
+  const insight = cleanInline(turn.insight ?? "");
+  const fallback = cleanInline(turn.content ?? "");
+  return capCodePoints(
+    insight || fallback || "No compressed semantics stored.",
+    cap
+  );
+}
+function anchorTitle(turn, cap = ANCHOR_TITLE_CODE_POINT_CAP) {
+  return capCodePoints(
+    cleanInline(turn.title ?? "") || "(untitled)",
+    cap
+  );
+}
+function isCasualty(turn) {
+  return turn.wasInterrupted || turn.wasRolledBack || turn.status === "undone" || turn.tags.includes("rolled-back");
+}
+function renderAnchor(turn, options = {}, compression = ANCHOR_COMPRESSION_LEVELS[0]) {
+  const minimallyCompressed = compression.title === 1 && compression.semantic === 1;
+  const arc = options.arcId === void 0 ? "" : minimallyCompressed ? `A${options.arcId}|` : `Arc T${options.arcId} | `;
+  const prefixMarker = options.marker?.startsWith("[") ? `${options.marker} ` : "";
+  const inlineMarker = options.marker && !options.marker.startsWith("[") ? `${minimallyCompressed ? "R" : options.marker} ` : "";
+  return `${arc}${prefixMarker}[dbid:T${turn.id}] G${turn.significanceGrade} ${inlineMarker}${anchorTitle(turn, compression.title)} \u2014 ${anchorSemantic(turn, compression.semantic)}`;
+}
+function findCitedTrustedFoundation(turn, trustedG4ById) {
+  return parseContentReferences(turn.content, 8).map((id) => trustedG4ById.get(id)).find((cited) => cited !== void 0 && cited.promptNumber < turn.promptNumber);
+}
+function groupAnchors(turns, cutoffEpoch) {
+  const anchors = [...turns].filter((turn) => turn.significanceGrade === 4 || turn.significanceGrade === 3).sort(
+    (left, right) => left.promptNumber !== right.promptNumber ? left.promptNumber - right.promptNumber : left.id - right.id
+  );
+  const trustedG4ArcById = /* @__PURE__ */ new Map();
+  const trustedG4ById = /* @__PURE__ */ new Map();
+  const liveG4 = [];
+  const liveG3Candidates = [];
+  const trailing = [];
+  for (const turn of anchors) {
+    if (!isTaskCausalityEra(turn.createdAtEpoch, cutoffEpoch)) {
+      trailing.push({
+        turn,
+        marker: isCasualty(turn) ? "legacy casualty" : "legacy"
+      });
+      continue;
+    }
+    if (isCasualty(turn)) {
+      trailing.push({ turn, marker: "casualty" });
+      continue;
+    }
+    if (turn.significanceGrade === 3) {
+      liveG3Candidates.push(turn);
+      continue;
+    }
+    const citedFoundation = findCitedTrustedFoundation(turn, trustedG4ById);
+    const arcId = citedFoundation ? trustedG4ArcById.get(citedFoundation.id) : turn.id;
+    trustedG4ArcById.set(turn.id, arcId);
+    trustedG4ById.set(turn.id, turn);
+    liveG4.push({ turn, arcId, reFoundation: citedFoundation !== void 0 });
+  }
+  const liveG3 = [];
+  for (const turn of liveG3Candidates) {
+    const citedFoundation = findCitedTrustedFoundation(turn, trustedG4ById);
+    const nearestFoundation = [...liveG4].reverse().find((foundation) => foundation.turn.promptNumber < turn.promptNumber);
+    const arcId = citedFoundation ? trustedG4ArcById.get(citedFoundation.id) : nearestFoundation?.arcId;
+    if (arcId === void 0) {
+      trailing.push({ turn, marker: "pre-bridge" });
+    } else {
+      liveG3.push({ turn, arcId });
+    }
+  }
+  trailing.sort((left, right) => left.turn.promptNumber - right.turn.promptNumber);
+  return { liveG4, liveG3, trailing };
+}
+function renderSection(heading, lines) {
+  return [heading, ...lines.map((line) => `- ${line}`)].join("\n");
+}
+function joinParts(parts) {
+  return parts.filter(Boolean).join("\n\n");
+}
+function requiredG3Anchors(liveG3) {
+  const byArc = /* @__PURE__ */ new Map();
+  for (const anchor of liveG3) {
+    const entries = byArc.get(anchor.arcId) ?? [];
+    entries.push(anchor);
+    byArc.set(anchor.arcId, entries);
+  }
+  const required3 = /* @__PURE__ */ new Map();
+  for (const anchors of byArc.values()) {
+    required3.set(anchors[0].turn.id, anchors[0]);
+    required3.set(anchors[anchors.length - 1].turn.id, anchors[anchors.length - 1]);
+  }
+  return [...required3.values()].sort(
+    (left, right) => left.turn.promptNumber - right.turn.promptNumber
+  );
+}
+function bareRecentTurnLine(turn) {
+  const grade = turn.significanceGrade === null ? "?" : String(turn.significanceGrade);
+  return `[dbid:T${turn.id}] G${grade} ${anchorTitle(turn)}`;
+}
+function renderTaskCausalityReprime(input) {
+  const tokenBudget = input.tokenBudget ?? TASK_CAUSALITY_REPRIME_TOKEN_BUDGET;
+  const pointer = `More context: timeline(id="S${input.sessionId}")`;
+  const { liveG4, liveG3, trailing } = groupAnchors(
+    input.turns,
+    input.taskCausalityEraCutoffEpoch
+  );
+  const parts = [input.sessionState];
+  let omitted = false;
+  const fitsWithReservedPointer = (candidateParts) => estimateDiaryTokens(joinParts([...candidateParts, pointer])) <= tokenBudget;
+  const requiredG3 = requiredG3Anchors(liveG3);
+  const renderG4Section = (compression2) => renderSection(
+    "Live G4 foundations:",
+    liveG4.map(
+      (foundation) => renderAnchor(
+        foundation.turn,
+        {
+          arcId: foundation.arcId,
+          marker: foundation.reFoundation ? "re-foundation" : void 0
+        },
+        compression2
+      )
+    )
+  );
+  const renderG3Section = (anchors, compression2) => renderSection(
+    "Live G3 anchors:",
+    anchors.map(
+      (anchor) => renderAnchor(anchor.turn, { arcId: anchor.arcId }, compression2)
+    )
+  );
+  const mandatoryPartsFor = (compression2) => [
+    input.sessionState,
+    ...liveG4.length > 0 ? [renderG4Section(compression2)] : [],
+    ...requiredG3.length > 0 ? [renderG3Section(requiredG3, compression2)] : []
+  ];
+  const compression = ANCHOR_COMPRESSION_LEVELS.find(
+    (level) => fitsWithReservedPointer(mandatoryPartsFor(level))
+  );
+  if (!compression) {
+    throw new RangeError(
+      `Task-causality re-prime mandatory state and anchors exceed ${tokenBudget} tokens.`
+    );
+  }
+  if (compression !== ANCHOR_COMPRESSION_LEVELS[0]) {
+    omitted = true;
+  }
+  if (liveG4.length > 0) {
+    parts.push(renderG4Section(compression));
+  }
+  if (liveG3.length > 0) {
+    const fullSection = renderG3Section(liveG3, compression);
+    if (fitsWithReservedPointer([...parts, fullSection])) {
+      parts.push(fullSection);
+    } else {
+      omitted = true;
+      const selected = [...requiredG3];
+      const requiredIds = new Set(selected.map((anchor) => anchor.turn.id));
+      const extras = liveG3.filter((anchor) => !requiredIds.has(anchor.turn.id)).sort((left, right) => right.turn.promptNumber - left.turn.promptNumber);
+      for (const anchor of extras) {
+        const candidate = [...selected, anchor];
+        if (fitsWithReservedPointer([
+          ...parts,
+          renderG3Section(candidate, compression)
+        ])) {
+          selected.push(anchor);
+        }
+      }
+      parts.push(renderG3Section(selected, compression));
+    }
+  }
+  if (trailing.length > 0) {
+    const selected = [];
+    const sectionFor = (anchors) => renderSection(
+      "Legacy / casualties (not trusted backbone):",
+      anchors.map(
+        (anchor) => renderAnchor(
+          anchor.turn,
+          { marker: `[${anchor.marker}]` },
+          compression
+        )
+      )
+    );
+    for (const anchor of trailing) {
+      if (fitsWithReservedPointer([...parts, sectionFor([...selected, anchor])])) {
+        selected.push(anchor);
+      } else {
+        omitted = true;
+      }
+    }
+    if (selected.length > 0) {
+      parts.push(sectionFor(selected));
+    }
+  }
+  const recentTurns = [...input.turns].sort((left, right) => left.promptNumber - right.promptNumber).slice(-RECENT_TURN_LIMIT);
+  if (recentTurns.length > 0) {
+    const selected = [];
+    const sectionFor = (turns) => renderSection("Recent turns (bare index):", turns.map(bareRecentTurnLine));
+    for (const turn of [...recentTurns].reverse()) {
+      if (fitsWithReservedPointer([...parts, sectionFor([...selected, turn])])) {
+        selected.push(turn);
+      } else {
+        omitted = true;
+      }
+    }
+    if (selected.length > 0) {
+      selected.reverse();
+      parts.push(sectionFor(selected));
+    }
+  }
+  if (omitted) {
+    parts.push(pointer);
+  }
+  return joinParts(parts);
+}
+function buildTaskCausalityReprime(db, input) {
+  return renderTaskCausalityReprime({
+    ...input,
+    turns: getTurnsForSession(db, input.sessionId)
+  });
+}
+
+// src/mcp/session-output.ts
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints2(value, max) {
   if (!value) {
     return value;
   }
@@ -41760,12 +41963,12 @@ function capCodePoints(value, max) {
   return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
 }
 function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
-  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const title = (capPriorityFields ? capCodePoints2(input.title, 100) : input.title) ?? "(untitled session)";
   const lines = [
     `[S${input.id}] ${title}`
   ];
   const pushField = (label, value, cap) => {
-    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    const rendered = capPriorityFields && cap ? capCodePoints2(value ?? null, cap) : value;
     if (rendered) {
       lines.push(`  ${label}: ${rendered}`);
     }
@@ -41823,54 +42026,54 @@ function measureSessionStateTokens(input) {
     total: estimateDiaryTokens(full)
   };
 }
-function renderCurrentSessionOutput(db, session, sessionRecord, timelineRenderer = defaultTimelineRenderer) {
-  const lines = [
-    `[S${session.id}] ${session.title ?? "(untitled session)"}`
-  ];
-  const pushField = (label, value) => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  pushField("content", session.content);
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else if ((session.insight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of session.insight ?? []) {
-      lines.push(`    - ${item}`);
-    }
+function renderBoundedSessionStateOutput(input) {
+  const full = renderSessionStateOutput(input);
+  if (estimateDiaryTokens(full) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return full;
   }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-  try {
-    const timelineView = timelineRenderer.buildContextTimelineView(
-      db,
-      sessionRecord.id,
-      "milestones"
-    );
-    lines.push("");
-    lines.push(
-      timelineRenderer.renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true
-      })
-    );
-  } catch {
+  const pointer = `  \u2026 state truncated; full summary: recall(id="S${input.id}")`;
+  const uncappedStateLines = buildSessionStateLines(input, false, false);
+  const stateFitsUncapped = estimateDiaryTokens([...uncappedStateLines, pointer].join("\n")) <= CURRENT_SESSION_STATE_TOKEN_BUDGET;
+  const lines = buildSessionStateLines(input, !stateFitsUncapped);
+  const included = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const candidate = [
+      ...included,
+      lines[index],
+      pointer
+    ].join("\n");
+    if (estimateDiaryTokens(candidate) > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+      break;
+    }
+    included.push(lines[index]);
   }
-  return lines.join("\n");
+  const withPointer = [...included, pointer].join("\n");
+  if (estimateDiaryTokens(withPointer) <= CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return withPointer;
+  }
+  return included.join("\n");
+}
+function renderCurrentSessionStateOutput(session, sessionRecord) {
+  return renderBoundedSessionStateOutput({
+    id: sessionRecord.id,
+    title: session.title ?? null,
+    content: session.content ?? null,
+    // context.ts currently resolves pointers on FormattedSession. Read raw
+    // storage here so state injection keeps compact [T<n>] coordinates.
+    decision: sessionRecord.decision ?? session.decision ?? null,
+    done: sessionRecord.done ?? session.done ?? null,
+    current: session.current ?? null,
+    nextSteps: session.nextSteps ?? null,
+    reference: session.reference ?? null,
+    legacyInsight: session.insight
+  });
+}
+function renderCurrentSessionOutput(db, session, sessionRecord, options = {}) {
+  return buildTaskCausalityReprime(db, {
+    sessionId: sessionRecord.id,
+    sessionState: renderCurrentSessionStateOutput(session, sessionRecord),
+    ...options
+  });
 }
 
 // src/mcp/remember.ts
@@ -42622,17 +42825,19 @@ For each \`<turn>\` block:
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
    - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
-   - grade: REQUIRED integer 0-4 measuring this turn's narrative significance:
-     - Grade 4 \u2014 top-level arc flag bearer: one turn that can represent why the next dozens of turns exist; at most one per arc. Must FIRST pass the Grade 3 test below, then additionally justify why THIS turn is the reason the later arc exists. Example: locking the event-driven worker lifecycle.
-     - Grade 3 \u2014 a turn that changes the PREMISE or route of later work: a locked or overturned decision, a major root cause that redirects the fix, or a gate/release-validation result that flips the next action from "blocked/uncertain" to "proceed/stop/reroute". Before grading 3, answer internally: "before this turn the next action was ___; after it, ___" \u2014 if the two are not materially different, cap at Grade 2. Grade by CONSEQUENCE, not by action verb: merely completing planned work or getting an expected green result is NOT Grade 3. Examples: T925 (0.5.0 release), T909 (converged to five tickets), T908 (accepted shutdown), T850 (watchdog killed the retry loop).
-     - Grade 2 \u2014 a durable arc node that does NOT change direction, worth its own line in a session review: a bounded feature/ticket completion, an on-plan verification, a measured correction, an evidence-backed rejection, or a real gap. Completion size or the number of checks passed does NOT by itself lift a turn to Grade 3 \u2014 if the planned next step is unchanged, it stays here. Examples: T917-T922 (ticket verification), T896 ($6.38\u2192$1.43 correction), T928 (orphan gap from an interrupted turn).
-     - Grade 1 \u2014 routine progress leaving no independent, reusable artifact: the only new fact is that work was dispatched (coordination/scheduling), a health check, explanatory Q&A, or an intermediate implementation/verification step that neither finishes a bounded deliverable nor establishes a reusable conclusion. Removing it loses no result/decision/conclusion a week later. For a compound turn (a dispatch AND a real decision), grade by the turn's highest material consequence \u2014 grade 1 only when the dispatch is the sole output. Examples: T861-T864 (routine deployment confirmations), T942 (explanation).
-     - Grade 0 \u2014 narrative noise: compact commands, shell-only commands, empty shells, or abandoned interruptions. Example: T941 (/compact).
+   - grade: REQUIRED integer 0-4 measuring this turn's task-level causality:
+     - Grade 4 \u2014 task origin or re-foundation: establishes why a work arc exists \u2014 its motive, problem, and success criteria. Judge arc scale from the scope of the ask at grading time: an arc is expected to span roughly 50+ turns. Every Grade 4 opens a new arc by default; normally one Grade 4 per arc. A second is legal only when the motive or success criteria are radically redefined. A re-foundation must cite the Grade 4 it re-founds as [T<n>]; evolution alone does not imply rollback.
+     - Grade 3 \u2014 a major milestone within an arc that materially affects its design (problem model, design philosophy, architecture, decomposition, evaluation method, or principles of action) or its established conclusions. Apply the deletion test: "if this turn were deleted, would the task's design, evaluation method, principles of action, or established conclusions change?" If only the next execution action changes, cap at Grade 2. Work that exists only to unblock execution \u2014 environment fixes, toolchain repair, or local debugging \u2014 cannot reach Grade 3 however dramatic it was; cap at Grade 2. A Grade 3 that resumes an earlier arc must cite that arc's Grade 4; otherwise attach it to the nearest preceding Grade 4.
+     - Grade 2 \u2014 a durable conclusion or complete delivery. This includes reusable environment pitfalls and root causes, experiment results below task-conclusion weight, established constraints, evidence-backed rejections, a feature or ticket completed end-to-end, a commit/release, or another independently verifiable stage delivery. Environment and toolchain decisions normally live here. When the user's ask is a knowledge question, a complete answer to a knowledge-question task is a delivery and is graded by completeness.
+     - Grade 1 \u2014 routine execution with no independently persistable conclusion: a module coded/tested, an intermediate green result, an environment prepared, a worker dispatched, a probe started, or ordinary progress confirmation. It is useful only for short-term continuation.
+     - Grade 0 \u2014 no future value: deleting the turn loses nothing. This includes status checks that found nothing, "still running / no change" polls, empty or shell-only commands, irrelevant incidental explanations that formed no reusable conclusion, and repeated confirmations. Grade 0 is judged by outcome, not action type: a status check that uncovered a real problem is not Grade 0, and "no later decision consumed it" is never sufficient by itself.
+     - Compound turns: grade by the highest material consequence, not by whichever action happened last.
+     - Worked examples from the validated research session: extraction-failure diagnosis = Grade 4 origin; probe design and SFT-pilot design = Grade 3 design events; probe result determining the SFT go decision = Grade 3 conclusion; driver root-cause chain = Grade 2 durable pitfall; probe launch confirmations = Grade 1 routine execution; "still healthy" polls = Grade 0.
    - tags: lowercase-hyphenated tags in TWO namespaces \u2014 BARE role tags + \`topic:\`-prefixed topic tags. Every bare tag MUST name the turn's role in the session arc; anything describing content, area, file, or action takes the \`topic:\` prefix \u2014 never a bare tag.
      - ROLE (bare, \u22642, usually none): the turn's role in the session arc. Seed examples \u2014 \`rolled-back\` (this turn was overturned), \`correction\` (this turn fixed/overturned an earlier one), \`deferred\` (a direction proposed then parked). This list is OPEN, not closed: when a turn genuinely plays a role the seeds don't name, coin a fresh one (e.g. \`final-decision\`, \`user-frustration\`, \`blocked\`, \`spike\`) \u2014 richer role vocabulary is welcome. Keep the name the BARE role, short and general \u2014 \`correction\`, never \`schema-correction\` (the specifics go in \`content\` / \`topic:\`). These feed milestone selection; only the literal \`rolled-back\` drives the default marker. Most ordinary work turns have NO role tag.
      - TOPIC (\`topic:\` prefix, 0-3): what the turn is about \u2014 feature area, file, library, or action (e.g. \`topic:milestone-scoring\`, \`topic:recall-faceting\`). For faceted recall only; topic tags NEVER affect milestones. Topics are exact-match classification keys, so consistency beats precision: when a turn continues a theme from recent turns, REUSE their exact spelling \u2014 a multi-turn arc carries ONE stable topic on every turn of the arc, never per-turn variants (\`topic:verifier\` throughout, not \`verifier-rubric\`/\`verifier-design\`/\`verifier-training\` drift). Mint a new topic only on a genuine theme shift. A turn spanning several themes carries one tag per theme (\u22643). Tag the theme even when the title already conveys it \u2014 recall's \`tag:\` filter matches tags, not titles.
    - tag style: a turn that merely performs a revert/restore is NOT \`rolled-back\` (that action, if tagged at all, is \`topic:revert\`). The literal \`rolled-back\` marks a turn that was itself overturned \u2014 when this turn overturns a cited earlier turn, see Correcting an earlier turn: the casualty gets \`rolled-back\`.
-   - If the turn has no tool calls, no file changes, and no user decisions: \`remember({ id: "T<n>", status: "skipped", grade: 0 })\` instead.
+   - If the turn has no tool calls, no file changes, no user decisions, and no reusable conclusion or complete knowledge-answer delivery: \`remember({ id: "T<n>", status: "skipped", grade: 0 })\` instead.
 
 2. Optionally refresh the session summary \u2014 ONLY if this turn materially changed the session's direction, goals, or key findings (new goal, completed milestone, reversed decision, new constraint). Small incremental progress does NOT qualify. A refresh rewrites the WHOLE summary: re-supply all seven fields (\`title\`, \`content\`, \`decision\`, \`done\`, \`current\`, \`next_steps\`, \`reference\`) \u2014 omitting any is rejected \u2014 editing on top of the inline \`<prior_session>\` values. \`remember({ id: "S<n>", title, content, decision, done, current, next_steps, reference })\`. See "Session summary fields" below for what each field holds.
 
@@ -42650,8 +42855,9 @@ Visibility rule: if the cited casualty is already extracted, \`remember({ id: "T
 
 Grade correction has two narrowly-scoped duties:
 
-- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn (the negate-on-cite \`rolled-back\` case above), you MUST both tag the casualty \`rolled-back\` AND lower its grade via \`regrade\` in the same call \u2014 a turn whose premise was overturned is no longer a Grade 3 milestone, so tagging without regrading is incomplete. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a \u21B3 row.
-- Grade-4 uniqueness: when a better flag bearer appears in the same arc, lower the old Grade 4 to Grade 3. A later top-level decision that overturns a Grade 4 uses the same witnessed-evidence rule.
+- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn (the negate-on-cite \`rolled-back\` case above), you MUST both tag the casualty \`rolled-back\` AND lower its grade via \`regrade\` in the same call \u2014 tagging without regrading is incomplete. Demote it to the grade its surviving task-causal consequence warrants. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a \u21B3 row.
+- Grade-4 re-foundation: a radical redefinition may create a second Grade 4 in the same arc, but the new Grade 4 must cite the Grade 4 it re-founds. Do not demote the earlier foundation merely because the motive evolved; only witnessed disproof triggers the separate \`rolled-back\` downgrade above.
+- Bridge Grade 4 for cutoff-straddling sessions: legacy Grade 3/4 rows are historical context, never trusted anchors, and \`regrade\` cannot change their creation era. Grade the first post-cutoff turn that can summarize the existing arc's motive and success criteria as a bridge Grade 4. Never try to turn a legacy row into the trusted foundation via \`regrade\`.
 
 Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.
 
@@ -47440,39 +47646,16 @@ ${prompt}` : prompt;
   function ensureQuerySessionFresh(state) {
     return ensureQuerySession(state, { forceFresh: true });
   }
-  function buildRecentTurnIndex(sessionDbId) {
-    const maxPromptNumber = getMaxPromptNumber(deps.db, sessionDbId);
-    if (maxPromptNumber === null) {
-      return "";
-    }
-    const lo = Math.max(1, maxPromptNumber - 29);
-    try {
-      return recallMemory(deps.db, {
-        id: `S${sessionDbId}/T${lo}..${maxPromptNumber}`,
-        depth: "collapsed",
-        // pageSize must cover the whole window so all 30 turns render in one page.
-        pageSize: 30,
-        includeDbTurnIds: true
-      });
-    } catch {
-      return "";
-    }
-  }
   async function sendSessionReprime(state) {
     const runtime = ensureQuerySession(state);
     const formatted = buildSessionSummary(deps.db, state.sessionDbId);
     const session = getSession(deps.db, state.sessionDbId);
     if (formatted && session) {
       const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
-      const recentIndex = buildRecentTurnIndex(state.sessionDbId);
-      const body = recentIndex ? `${coldStart}
-
-Most recent turns (cite by DB id):
-${recentIndex}` : coldStart;
       resetUnitSignals(state);
       await runtime.sendPrompt(
         `<context note="Session so far. CONTEXT ONLY \u2014 do not remember anything from this message; await the next message.">
-${body}
+${coldStart}
 </context>`
       );
       if (state.unitSignals.retryableError) {

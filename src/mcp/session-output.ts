@@ -4,27 +4,7 @@ import type { SessionRecord } from "../db/sessions";
 import { estimateDiaryTokens } from "../diary/domain";
 import { splitBulletField } from "./format";
 import type { FormattedSession } from "./format";
-import { buildContextTimelineView, renderTimeline } from "./timeline";
-
-type ContextTimelineViewMode = "turns" | "milestones" | "phases";
-type ContextTimelineView = ReturnType<typeof buildContextTimelineView>;
-
-export interface CurrentSessionTimelineRenderer {
-  buildContextTimelineView: (
-    db: Database,
-    sessionId: number,
-    view?: ContextTimelineViewMode,
-  ) => ContextTimelineView;
-  renderTimeline: (
-    view: ContextTimelineView,
-    options: { promptCap?: number; showEarlierHint?: boolean },
-  ) => string;
-}
-
-const defaultTimelineRenderer: CurrentSessionTimelineRenderer = {
-  buildContextTimelineView,
-  renderTimeline,
-};
+import { buildTaskCausalityReprime } from "./task-skeleton";
 
 export const CURRENT_SESSION_STATE_TOKEN_BUDGET = 2_000;
 
@@ -207,70 +187,23 @@ export function renderCurrentSessionStateOutput(
   });
 }
 
-// Worker re-prime keeps the pre-state-layer shared rendering contract. The
-// SessionStart injection path deliberately calls renderCurrentSessionStateOutput
-// instead, so the independent milestone hook is its only timeline source.
+export interface CurrentSessionReprimeOptions {
+  taskCausalityEraCutoffEpoch?: number;
+  tokenBudget?: number;
+}
+
+// Worker re-prime is task-causality-specific. SessionStart deliberately keeps
+// calling renderCurrentSessionStateOutput, so its independent milestone hook and
+// 2,000-token degradation ladder are unchanged.
 export function renderCurrentSessionOutput(
   db: Database,
   session: FormattedSession,
   sessionRecord: SessionRecord,
-  timelineRenderer: CurrentSessionTimelineRenderer = defaultTimelineRenderer,
+  options: CurrentSessionReprimeOptions = {},
 ): string {
-  const lines = [
-    `[S${session.id}] ${session.title ?? "(untitled session)"}`,
-  ];
-  const pushField = (
-    label: string,
-    value: string | null | undefined,
-  ): void => {
-    if (value) {
-      lines.push(`  ${label}: ${value}`);
-    }
-  };
-  const pushBulletField = (
-    label: string,
-    value: string | null | undefined,
-  ): void => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-
-  pushField("content", session.content);
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else if ((session.insight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of session.insight ?? []) {
-      lines.push(`    - ${item}`);
-    }
-  }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-
-  try {
-    const timelineView = timelineRenderer.buildContextTimelineView(
-      db,
-      sessionRecord.id,
-      "milestones",
-    );
-    lines.push("");
-    lines.push(
-      timelineRenderer.renderTimeline(timelineView, {
-        promptCap: 80,
-        showEarlierHint: true,
-      }),
-    );
-  } catch {
-    // Re-prime still provides the summary if timeline rendering fails.
-  }
-
-  return lines.join("\n");
+  return buildTaskCausalityReprime(db, {
+    sessionId: sessionRecord.id,
+    sessionState: renderCurrentSessionStateOutput(session, sessionRecord),
+    ...options,
+  });
 }

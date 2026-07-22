@@ -27,7 +27,6 @@ import {
 } from "../db/observations";
 import {
   clearExtractionStallRetries,
-  getMaxPromptNumber,
   getTurnById,
   listExtractionStallRetries,
   recordExtractionStalls,
@@ -96,7 +95,7 @@ import {
   type DiaryRuntime,
 } from "./diary-runtime";
 import { renderCurrentSessionOutput } from "../mcp/session-output";
-import { buildSessionSummary, recallMemory } from "../mcp/recall";
+import { buildSessionSummary } from "../mcp/recall";
 import {
   classifyWorkerError,
   createWorkerAbortError,
@@ -1354,35 +1353,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return ensureQuerySession(state, { forceFresh: true });
   }
 
-  // Recall-style, collapsed index of the session's most recent (≤30) turns,
-  // rendered in the WORKER DB-id space (`dbid:T<dbid>` per line). The agent
-  // cites turns by DB id, so the re-prime must hand it citable ids for recent
-  // turns it can no longer see in its (compacted) history. Empty string when the
-  // session has no turns yet.
-  function buildRecentTurnIndex(sessionDbId: number): string {
-    const maxPromptNumber = getMaxPromptNumber(deps.db, sessionDbId);
-    if (maxPromptNumber === null) {
-      return "";
-    }
-    const lo = Math.max(1, maxPromptNumber - 29);
-    try {
-      return recallMemory(deps.db, {
-        id: `S${sessionDbId}/T${lo}..${maxPromptNumber}`,
-        depth: "collapsed",
-        // pageSize must cover the whole window so all 30 turns render in one page.
-        pageSize: 30,
-        includeDbTurnIds: true,
-      });
-    } catch {
-      // Re-prime must stay resilient even if the recent-turn index fails to
-      // render; the structured summary digest below is the primary payload.
-      return "";
-    }
-  }
-
-  // Re-cold-start the (existing) query session with the shared SessionStart
-  // render so a freshly-compacted / reopened agent regains the session's
-  // structured state, plus a recent-turn DB-id index it can cite. The re-prime
+  // Re-cold-start the (existing) query session with bounded session state, the
+  // task-causality arc skeleton, and its bare recent-turn DB-id index. The re-prime
   // response is exempt from derailment detection. Used by both the derailment
   // reopen and the post-compact (worker-driven + SDK-auto) re-prime paths.
   async function sendSessionReprime(state: SessionState): Promise<void> {
@@ -1391,13 +1363,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const session = getSession(deps.db, state.sessionDbId);
     if (formatted && session) {
       const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
-      const recentIndex = buildRecentTurnIndex(state.sessionDbId);
-      const body = recentIndex
-        ? `${coldStart}\n\nMost recent turns (cite by DB id):\n${recentIndex}`
-        : coldStart;
       resetUnitSignals(state);
       await runtime.sendPrompt(
-        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${body}\n</context>`,
+        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${coldStart}\n</context>`,
       );
       if (state.unitSignals.retryableError) {
         throw state.unitSignals.retryableError;

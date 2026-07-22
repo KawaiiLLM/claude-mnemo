@@ -2297,7 +2297,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.7.1-mru92d3x" : "dev";
+var BUILD_ID = true ? "0.7.1-mrvumezb" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3562,6 +3562,12 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
+// src/task-causality-era.ts
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = Number.MAX_SAFE_INTEGER;
+function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
+  return createdAtEpoch >= cutoffEpoch;
+}
+
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
@@ -3925,15 +3931,21 @@ function hasMilestoneDevArtifact(turn) {
 function hasMilestoneTagFamily(turn) {
   return turn.tags.filter((tag) => !tag.includes(":")).some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
 }
-function milestoneContentScore(turn) {
+function milestoneContentScore(turn, taskCausalityEraCutoffEpoch) {
+  if (turn.significanceGrade !== null && turn.significanceGrade <= 1 && isTaskCausalityEra(
+    turn.createdAtEpoch,
+    taskCausalityEraCutoffEpoch
+  )) {
+    return 0;
+  }
   return Math.max(
     hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
     isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
     hasMilestoneTagFamily(turn) ? MILESTONE_TAG_FAMILY_WEIGHT : 0
   );
 }
-function milestoneWeightedScore(turn, citedBy = 0, citationCap = 2) {
-  return milestoneBaseScore(turn) + milestoneContentScore(turn) + Math.min(citedBy, citationCap);
+function milestoneWeightedScore(turn, citedBy = 0, citationCap = 2, taskCausalityEraCutoffEpoch) {
+  return milestoneBaseScore(turn) + milestoneContentScore(turn, taskCausalityEraCutoffEpoch) + Math.min(citedBy, citationCap);
 }
 function buildMilestoneCitationInDegree(turns) {
   const seq = sortTurnsForAnalysis(turns).filter((turn) => turn.status !== "skipped");
@@ -4327,7 +4339,8 @@ function selectMilestoneTurns(view) {
     return milestoneWeightedScore(
       turn,
       citedByPrompt.get(turn.promptNumber) ?? 0,
-      citationCap
+      citationCap,
+      view.taskCausalityEraCutoffEpoch
     );
   };
   const runIds = /* @__PURE__ */ new Map();

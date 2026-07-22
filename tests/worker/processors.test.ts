@@ -516,7 +516,7 @@ describe("worker processors", () => {
     expect(prompt).not.toContain("current_prompt: Diagnose auth race");
   });
 
-  test("buildTurnSignificanceCalibration appears only every 10 prompts and reports the prior 100 turns", () => {
+  test("buildTurnSignificanceCalibration keeps cadence, observed distribution, invariants, and one conditional alarm", () => {
     const insert = db.query(
       `INSERT INTO turns (
          session_id, prompt_number, status, significance_grade, created_at_epoch
@@ -536,12 +536,43 @@ describe("worker processors", () => {
 
     expect(calibration).toContain("previous 100 turns");
     expect(calibration).toContain("grade 4=");
-    expect(calibration).toContain("Reference baseline");
-    expect(calibration).toContain("4 <2%");
-    expect(calibration).toContain("calibration only, not a quota");
-    expect(calibration).toContain("never change a grade to match");
+    expect(calibration).toContain("one Grade 4 per arc");
+    expect(calibration).toContain("deletion test");
+    expect(calibration).toContain("Troubleshooting chains");
+    expect(calibration).toContain("No-change polls are Grade 0");
+    expect(calibration).not.toContain("Reference baseline");
+    expect(calibration).not.toContain("%");
     // T1 is ungraded and T2-T9 are old grade-4 rows outside T10-T109.
     expect(calibration).toContain("grade 4=21");
+    const alarms = calibration
+      .split("\n")
+      .filter((line) => line.includes("re-run the deletion test on each"));
+    expect(alarms).toEqual([
+      "20 G3 grades in the last 100 turns — re-run the deletion test on each.",
+    ]);
+  });
+
+  test("buildTurnSignificanceCalibration omits every density number for a compliant window", () => {
+    const insert = db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, significance_grade, created_at_epoch
+       ) VALUES (?, ?, 'extracted', ?, ?)`,
+    );
+    for (let promptNumber = 2; promptNumber <= 10; promptNumber += 1) {
+      insert.run(
+        sessionId,
+        promptNumber,
+        2,
+        120 + promptNumber,
+      );
+    }
+
+    const calibration = buildTurnSignificanceCalibration(db, sessionId, 10);
+    expect(calibration).toContain("Recent distribution (9 turns)");
+    expect(calibration).not.toContain("G3 grades in the last");
+    expect(calibration).not.toContain("1 per 10");
+    expect(calibration).not.toContain("10 turns per");
+    expect(calibration).not.toContain("%");
   });
 
   test("renderMiniTurn wraps turn prompt in <source_prompt> data envelope (D2)", () => {

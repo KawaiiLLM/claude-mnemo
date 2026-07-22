@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -178,7 +178,7 @@ describe("renderCurrentSessionStateOutput", () => {
     expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2}/);
   });
 
-  test("keeps the worker re-prime renderer's existing milestone timeline", () => {
+  test("renders the worker re-prime from state, the arc skeleton, and a bare recent index", () => {
     const session: FormattedSession = {
       id: sessionRecord.id,
       title: sessionRecord.title,
@@ -194,21 +194,30 @@ describe("renderCurrentSessionStateOutput", () => {
       turnCount: 1,
       observationCount: 0,
     };
-    const buildContextTimelineView = mock(() => ({}) as never);
-    const renderTimeline = mock(() => "rendered milestone timeline");
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, title, content, insight,
+         significance_grade, created_at_epoch
+       ) VALUES
+         (?, 1, 'extracted', 'Task origin', 'Why the task exists', '- Success means green', 4, 200),
+         (?, 2, 'extracted', 'Design anchor', 'Architecture changed', '- Use the new boundary', 3, 201),
+         (?, 3, 'extracted', 'Routine progress', 'OLD DESCRIBED INDEX DETAIL', NULL, 1, 202)`,
+    ).run(sessionRecord.id, sessionRecord.id, sessionRecord.id);
 
     const output = renderCurrentSessionOutput(db, session, sessionRecord, {
-      buildContextTimelineView,
-      renderTimeline,
+      taskCausalityEraCutoffEpoch: 200,
     });
 
-    expect(buildContextTimelineView).toHaveBeenCalledWith(
-      db,
-      sessionRecord.id,
-      "milestones",
-    );
-    expect(renderTimeline).toHaveBeenCalledTimes(1);
-    expect(output).toContain("rendered milestone timeline");
+    expect(output).toContain(`[S${sessionRecord.id}] Test session title`);
+    expect(output).toContain("Live G4 foundations:");
+    expect(output).toContain("[dbid:T1] G4 Task origin");
+    expect(output).toContain("Live G3 anchors:");
+    expect(output).toContain("[dbid:T2] G3 Design anchor");
+    expect(output).toContain("Recent turns (bare index):");
+    expect(output).toContain("[dbid:T3] G1 Routine progress");
+    expect(output).not.toContain("OLD DESCRIBED INDEX DETAIL");
+    expect(output).not.toContain("shape signals");
+    expect(output).not.toMatch(/── \d{4}-\d{2}-\d{2}/);
   });
 
   test("uses raw [T<n>] coordinates and renders fields in state-first order", () => {

@@ -225,6 +225,7 @@ export function buildObsBlock(
 // D5: a session whose summary is this many extracted turns behind is flagged
 // stale, and the next injected batch nudges a full refresh.
 export const STALE_TURN_THRESHOLD = 10;
+export const G3_DENSITY_ALARM_TURNS_PER_GRADE = 10;
 
 export function buildTurnSignificanceCalibration(
   db: Database,
@@ -261,11 +262,14 @@ export function buildTurnSignificanceCalibration(
     }
   }
   const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
+  const densityAlarm =
+    total > 0 && counts[3]! * G3_DENSITY_ALARM_TURNS_PER_GRADE > total
+      ? `\n${counts[3]} G3 grades in the last ${total} turns — re-run the deletion test on each.`
+      : "";
 
   return `<significance-calibration window="previous 100 turns">
 Recent distribution (${total} turns): grade 4=${counts[4]}, grade 3=${counts[3]}, grade 2=${counts[2]}, grade 1=${counts[1]}, grade 0=${counts[0]}, ungraded=${ungraded}.
-Reference baseline (calibration only, not a quota): grade 4 <2%, grade 3 ≈8%, grade 2 ≈25%, grade 1 ≈45%, grade 0 ≈20%.
-Session distributions vary. Use this only to notice drift; never change a grade to match the baseline.
+Structural self-checks: one Grade 4 per arc unless a radical re-foundation cites it; every Grade 3 must pass the deletion test; Troubleshooting chains resolve to Grade 2 conclusions, not Grade 3 chains; No-change polls are Grade 0.${densityAlarm}
 </significance-calibration>`;
 }
 

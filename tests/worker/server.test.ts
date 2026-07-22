@@ -8,7 +8,9 @@ import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
+import { estimateDiaryTokens } from "../../src/diary/domain";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
+import { TASK_CAUSALITY_ERA_CUTOFF_EPOCH } from "../../src/task-causality-era";
 import {
   getSession,
   updateLastAgentSessionId,
@@ -2028,7 +2030,7 @@ describe("worker server", () => {
     expect(state.needsReprime).toBe(false);
   });
 
-  test("the re-prime payload carries the recent-turn index with dbid:T<dbid> tokens", async () => {
+  test("the bounded re-prime carries state, arc skeleton, and a bare recent-turn index", async () => {
     const sessionId = upsertSession(db, {
       contentSessionId: "worker-session-reprime-index",
       project: "/tmp/project-reprime-index",
@@ -2040,9 +2042,63 @@ describe("worker server", () => {
       completedAtEpoch: null,
     }).id;
 
-    createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
+    const turn1 = createTurn(db, sessionId, 1, "Turn 1", "Reply 1");
     const turn2 = createTurn(db, sessionId, 2, "Turn 2", "Reply 2");
     const turn3 = createTurn(db, sessionId, 3, "Turn 3", "Reply 3");
+    db.query(
+      `UPDATE turns
+       SET status = 'extracted', title = ?, content = ?, insight = ?,
+           significance_grade = ?, created_at_epoch = ?
+       WHERE id = ?`,
+    ).run(
+      "Task origin",
+      "The task motive and success criteria.",
+      "- Preserve the causal backbone",
+      4,
+      TASK_CAUSALITY_ERA_CUTOFF_EPOCH,
+      turn1,
+    );
+    db.query(
+      `UPDATE turns
+       SET status = 'extracted', title = ?, content = ?, insight = ?,
+           significance_grade = ?, created_at_epoch = ?
+       WHERE id = ?`,
+    ).run(
+      "Design anchor",
+      "The architecture changed.",
+      "- Keep the pure renderer",
+      3,
+      TASK_CAUSALITY_ERA_CUTOFF_EPOCH,
+      turn2,
+    );
+    const updateRoutine = db.query(
+      `UPDATE turns
+       SET status = 'extracted', title = ?, content = ?, significance_grade = 1,
+           created_at_epoch = ?
+       WHERE id = ?`,
+    );
+    updateRoutine.run(
+      "Routine 3",
+      "OLD DESCRIBED INDEX DETAIL 3",
+      TASK_CAUSALITY_ERA_CUTOFF_EPOCH,
+      turn3,
+    );
+    let lastTurnId = turn3;
+    for (let promptNumber = 4; promptNumber <= 80; promptNumber += 1) {
+      lastTurnId = createTurn(
+        db,
+        sessionId,
+        promptNumber,
+        `Turn ${promptNumber}`,
+        `Reply ${promptNumber}`,
+      );
+      updateRoutine.run(
+        `Routine ${promptNumber}`,
+        `OLD DESCRIBED INDEX DETAIL ${promptNumber} ${"verbose ".repeat(20)}`,
+        TASK_CAUSALITY_ERA_CUTOFF_EPOCH,
+        lastTurnId,
+      );
+    }
     queueObs(db, sessionId, turn3, 101, "reprime-index");
     queueTurnStop(db, sessionId, turn3, 201);
 
@@ -2066,10 +2122,20 @@ describe("worker server", () => {
     await core.flushSession(sessionId);
 
     const reprime = sentPrompts[0]!;
-    expect(reprime).toContain("Most recent turns (cite by DB id):");
-    // DB ids (not prompt numbers) are emitted so the agent can cite them.
+    expect(reprime).toContain("Reprime index session");
+    expect(reprime).toContain("Live G4 foundations:");
+    expect(reprime).toContain(`dbid:T${turn1}`);
+    expect(reprime).toContain("Live G3 anchors:");
     expect(reprime).toContain(`dbid:T${turn2}`);
-    expect(reprime).toContain(`dbid:T${turn3}`);
+    expect(reprime).toContain("Recent turns (bare index):");
+    expect(reprime).toContain(`dbid:T${lastTurnId}`);
+    expect(reprime).not.toContain("OLD DESCRIBED INDEX DETAIL");
+    expect(reprime).not.toContain("Most recent turns (cite by DB id):");
+    expect(reprime).not.toContain("shape signals");
+    const body = reprime
+      .replace(/^<context[^>]*>\n/, "")
+      .replace(/\n<\/context>$/, "");
+    expect(estimateDiaryTokens(body)).toBeLessThanOrEqual(4_000);
   });
 
   test("worker-driven compact re-primes once and does NOT leave needsReprime set (no double re-prime)", async () => {

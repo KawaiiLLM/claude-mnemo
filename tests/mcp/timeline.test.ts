@@ -1363,13 +1363,71 @@ describe("isVersionBumpTurn", () => {
 });
 
 describe("selectMilestoneTurns (narrative digest)", () => {
-  const select = (rows: TurnRecord[]): MilestoneSelection =>
+  const select = (
+    rows: TurnRecord[],
+    taskCausalityEraCutoffEpoch?: number,
+  ): MilestoneSelection =>
     selectMilestoneTurns({
       windowTurns: rows,
       windowSignals: detectShapeSignals(rows),
       compactBoundaries: [],
+      taskCausalityEraCutoffEpoch,
     });
   const kept = (s: MilestoneSelection) => s.kept.map((k) => k.turn.promptNumber).sort((a, b) => a - b);
+
+  it("era-gates content-bonus admission for G0/G1 while preserving legacy and G2 ranking", () => {
+    const cutoff = 200;
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 4, createdAtEpoch: 100 }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "legacy insight", insight: "- legacy", significanceGrade: 1, createdAtEpoch: cutoff - 1 }),
+      turn({ id: 3, promptNumber: 3, type: "refactor", title: "boundary spec", filesModified: ["docs/plans/boundary.md"], significanceGrade: 1, createdAtEpoch: cutoff }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "durable conclusion", insight: "- durable", significanceGrade: 2, createdAtEpoch: cutoff + 1 }),
+      turn({ id: 5, promptNumber: 5, type: "decision", title: "end", tags: ["shipped"], significanceGrade: 4, createdAtEpoch: cutoff + 2 }),
+    ];
+
+    const result = select(rows, cutoff);
+    expect(kept(result)).toContain(2);
+    expect(kept(result)).not.toContain(3);
+    expect(kept(result)).toContain(4);
+    expect(
+      result.kept.find((milestone) => milestone.turn.promptNumber === 4)?.score,
+    ).toBe(4);
+  });
+
+  it("flips otherwise-identical G1-with-insight pool membership exactly at the cutoff", () => {
+    const cutoff = 200;
+    const selectedAt = (createdAtEpoch: number): number[] =>
+      kept(select([
+        turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 4, createdAtEpoch: 100 }),
+        turn({ id: 2, promptNumber: 2, type: "discovery", title: "same insight", insight: "- same", significanceGrade: 1, createdAtEpoch }),
+        turn({ id: 3, promptNumber: 3, type: "decision", title: "end", significanceGrade: 4, createdAtEpoch: cutoff + 1 }),
+      ], cutoff));
+
+    expect(selectedAt(cutoff - 1)).toContain(2);
+    expect(selectedAt(cutoff)).not.toContain(2);
+  });
+
+  it("keeps structural rows in both eras despite low grades", () => {
+    const cutoff = 200;
+    const rows = [
+      turn({ id: 10, promptNumber: 1, type: "discovery", title: "legacy endpoint", significanceGrade: 0, createdAtEpoch: 100 }),
+      turn({ id: 20, promptNumber: 2, type: "discovery", title: "legacy casualty", content: "old premise", tags: ["rolled-back"], significanceGrade: 0, createdAtEpoch: 150 }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", title: "legacy corrector", content: "fixes [T20]", significanceGrade: 0, createdAtEpoch: 160 }),
+      turn({ id: 40, promptNumber: 4, type: "feature", title: "new outcome", tags: ["shipped"], significanceGrade: 0, createdAtEpoch: cutoff }),
+      turn({ id: 50, promptNumber: 5, type: "compact", title: "new compact", significanceGrade: 0, createdAtEpoch: cutoff + 1 }),
+      turn({ id: 60, promptNumber: 6, type: "discovery", title: "new casualty", tags: ["rolled-back"], significanceGrade: 0, createdAtEpoch: cutoff + 2 }),
+      turn({ id: 70, promptNumber: 7, type: "bugfix", title: "new corrector", content: "fixes [T60]", significanceGrade: 0, createdAtEpoch: cutoff + 3 }),
+      turn({ id: 80, promptNumber: 8, type: "discovery", title: "new endpoint", significanceGrade: 0, createdAtEpoch: cutoff + 4 }),
+    ];
+
+    const result = selectMilestoneTurns({
+      windowTurns: rows,
+      windowSignals: detectShapeSignals(rows),
+      compactBoundaries: [5],
+      taskCausalityEraCutoffEpoch: cutoff,
+    });
+    expect(kept(result)).toEqual([1, 3, 4, 5, 7, 8]);
+  });
 
   it("lets a high-grade low-type turn beat a low-grade high-type turn", () => {
     const base = 1_779_782_400;
