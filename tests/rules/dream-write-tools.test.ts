@@ -9,6 +9,11 @@ import {
   RULE_CLAIM_SIMILARITY_THRESHOLD,
 } from "../../src/rules/dream-write-tools";
 
+const CROSS_SESSION_EVIDENCE = [
+  { ref: "S7/T3", note: "session 7 evidence", at: 180 },
+  { ref: "S8/T4", note: "session 8 evidence", at: 190 },
+];
+
 function ruleInput(overrides: Partial<CreateRuleInput> = {}): CreateRuleInput {
   return {
     name: "bash-timeout",
@@ -39,6 +44,7 @@ function proposalInput(overrides: Record<string, unknown> = {}) {
       tool: "Bash",
       param_absent: "timeout",
     },
+    evidence: CROSS_SESSION_EVIDENCE,
     ...overrides,
   };
 }
@@ -49,9 +55,185 @@ describe("dream rule write tools", () => {
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
+    db.run(`
+      INSERT INTO sessions (id, content_session_id, project, created_at_epoch)
+      VALUES
+        (7, 'evidence-session-7', '/project', 1),
+        (8, 'evidence-session-8', '/project', 1)
+    `);
+    db.run(`
+      INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+      VALUES
+        (7, 3, 'extracted', 2),
+        (7, 4, 'extracted', 3),
+        (8, 4, 'extracted', 4)
+    `);
   });
 
   afterEach(() => db.close());
+
+  test("rejects a new rule with fewer than two evidence items", () => {
+    const tools = createDreamRuleWriteTools({ db, now: () => 200 });
+    const { evidence: _evidence, ...withoutEvidence } = proposalInput();
+
+    for (const input of [
+      withoutEvidence,
+      proposalInput({ evidence: [] }),
+      proposalInput({
+        evidence: [{ ref: "S7/T3", note: "only one turn", at: 180 }],
+      }),
+    ]) {
+      expect(tools.proposeRule(input)).toMatchObject({
+        status: "rejected",
+        reason: "insufficient_evidence",
+        detail: "at least 2 evidence items are required",
+      });
+    }
+    expect(createRuleStore(db).list()).toEqual([]);
+  });
+
+  test("rejects malformed or dangling refs when adding evidence", () => {
+    const store = createRuleStore(db);
+    const active = store.create(ruleInput({ status: "confirmed" }));
+    const tools = createDreamRuleWriteTools({ db, now: () => 200 });
+
+    for (const [evidence, detail] of [
+      [
+        [{ ref: "S7-T3", note: "malformed", at: 180 }],
+        "evidence[0].ref must match ^S\\d+/T\\d+$",
+      ],
+      [
+        [{ ref: "S7/T999", note: "dangling", at: 180 }],
+        "evidence[0].ref does not reference an existing turn: S7/T999",
+      ],
+    ]) {
+      expect(tools.proposeRule(proposalInput({
+        add_evidence_to: active.id,
+        evidence,
+      }))).toMatchObject({
+        status: "rejected",
+        reason: "insufficient_evidence",
+        detail,
+      });
+    }
+    expect(store.get(active.id)?.evidence).toEqual([]);
+  });
+
+  test("keeps add-evidence target errors ahead of the evidence gate", () => {
+    const store = createRuleStore(db);
+    const tombstone = store.create(ruleInput({ status: "refuted" }));
+    const tools = createDreamRuleWriteTools({ db, now: () => 200 });
+    const malformedEvidence = [{
+      ref: "not-a-turn",
+      note: "must not replace boundary errors",
+      at: 180,
+    }];
+
+    expect(() => tools.proposeRule(proposalInput({
+      add_evidence_to: 999,
+      evidence: malformedEvidence,
+    }))).toThrow("rule 999 not found");
+    expect(() => tools.proposeRule(proposalInput({
+      add_evidence_to: tombstone.id,
+      evidence: malformedEvidence,
+    }))).toThrow(`cannot add evidence to tombstoned rule ${tombstone.id}`);
+  });
+
+  test("rejects two evidence items that resolve to the same turn", () => {
+    const result = createDreamRuleWriteTools({ db, now: () => 200 }).proposeRule(
+      proposalInput({
+        evidence: [
+          { ref: "S7/T3", note: "first note", at: 180 },
+          { ref: "S7/T3", note: "second note", at: 190 },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "rejected",
+      reason: "insufficient_evidence",
+      detail: "at least 2 distinct turns are required",
+    });
+  });
+
+  test("requires global evidence to span real sessions and accepts cross-session evidence", () => {
+    const tools = createDreamRuleWriteTools({ db, now: () => 200 });
+    const sameSession = tools.proposeRule(proposalInput({
+      evidence: [
+        { ref: "S7/T3", note: "first turn", at: 180 },
+        { ref: "S7/T4", note: "second turn", at: 190 },
+      ],
+    }));
+
+    expect(sameSession).toMatchObject({
+      status: "rejected",
+      reason: "insufficient_evidence",
+      detail: "global scope requires evidence from at least 2 distinct sessions",
+    });
+
+    const crossSession = tools.proposeRule(proposalInput({
+      name: "cross-session-rule",
+      claim: "跨会话证据足够时可以创建全局规则。",
+      evidence: CROSS_SESSION_EVIDENCE,
+    }));
+    expect(crossSession).toMatchObject({
+      status: "created",
+      idempotent: false,
+      rule: { name: "cross-session-rule" },
+    });
+  });
+
+  test("rejects malformed evidence refs with a format detail", () => {
+    const result = createDreamRuleWriteTools({ db, now: () => 200 }).proposeRule(
+      proposalInput({
+        evidence: [
+          { ref: "S7-T3", note: "malformed", at: 180 },
+          CROSS_SESSION_EVIDENCE[1],
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      status: "rejected",
+      reason: "insufficient_evidence",
+      detail: "evidence[0].ref must match ^S\\d+/T\\d+$",
+    });
+  });
+
+  test("rejects well-formed refs that do not resolve to their claimed session turn", () => {
+    const tools = createDreamRuleWriteTools({ db, now: () => 200 });
+
+    for (const ref of ["S999/T3", "S7/T999", "S7/T5"]) {
+      expect(tools.proposeRule(proposalInput({
+        evidence: [
+          { ref, note: "dangling", at: 180 },
+          CROSS_SESSION_EVIDENCE[1],
+        ],
+      }))).toMatchObject({
+        status: "rejected",
+        reason: "insufficient_evidence",
+        detail: `evidence[0].ref does not reference an existing turn: ${ref}`,
+      });
+    }
+  });
+
+  test("checks evidence before duplicate detection", () => {
+    const store = createRuleStore(db);
+    store.create(ruleInput());
+
+    const result = createDreamRuleWriteTools({ db, now: () => 200 }).proposeRule(
+      proposalInput({
+        evidence: [{ ref: "S7/T3", note: "only one turn", at: 180 }],
+      }),
+    );
+
+    expect(result).toEqual({
+      status: "rejected",
+      reason: "insufficient_evidence",
+      detail: "at least 2 evidence items are required",
+    });
+    expect(store.list()).toHaveLength(1);
+  });
 
   test("rejects a tombstoned similar claim and returns its rejection reason", () => {
     const store = createRuleStore(db);
@@ -175,6 +357,28 @@ describe("dream rule write tools", () => {
     expect(store.listEvents(active.id).filter(({ eventKind }) =>
       eventKind === "evidence_added"
     )).toHaveLength(1);
+  });
+
+  test("keeps noncanonical persisted evidence readable through rule and event replay", () => {
+    const store = createRuleStore(db);
+    const legacyEvidence = [{
+      ref: "legacy-session:turn-3",
+      note: "stored before the handler-local gate",
+      at: 90,
+    }];
+    const rule = store.create(ruleInput({ evidence: legacyEvidence }));
+    store.createEvent({
+      eventUid: "legacy-evidence-event",
+      ruleId: rule.id,
+      eventKind: "evidence_added",
+      adjustment: { evidence: legacyEvidence },
+      createdAtEpoch: 100,
+    });
+
+    expect(store.get(rule.id)?.evidence).toEqual(legacyEvidence);
+    expect(store.getEventByUid("legacy-evidence-event")).toMatchObject({
+      adjustment: { evidence: legacyEvidence },
+    });
   });
 
   test("creates a distinct proposal and records the explicit distinction idempotently", () => {

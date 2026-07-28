@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path15 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.1-mrvy72lo" : "dev";
+var BUILD_ID = true ? "0.8.1-ms4jssx9" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -42823,7 +42823,7 @@ For each \`<turn>\` block:
 1. Always: \`remember({ id: "T<n>", title, content, insight, type, tags, grade })\`
    - title: 5-15 words summarizing the turn's outcome
    - content: 100-300 chars, what happened and why. If this turn causally builds on, overturns, or verifies an earlier turn, cite that driver inline as \`[T<n>]\` using the id from its \`<turn id="T...">\` block (or a \`dbid:T<n>\` from the recent-turn index / a recall result). ALWAYS wrap the id in square brackets \u2014 write \`[T4243]\`, never bare \`T4243\` or \`(T4243)\` \u2014 even when the reference is woven into a sentence: write "reverted the inversion from [T4243]", NOT "...from T4243". Only causally-significant predecessor(s), at most ~2; omit if none.
-   - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for key lessons
+   - insight: optional, 1-3 bullet lines (\u226450 chars each, prefixed "- ") for any generalizable finding, lesson, or pitfall that could be useful in future; representative signals include tool errors, repeated trial-and-error, repeated operations, and environment facts \u2014 record these even when the turn ultimately self-corrected successfully
    - type: MUST be exactly one of \`bugfix | feature | refactor | change | discovery | decision\`
    - grade: REQUIRED integer 0-4 measuring this turn's task-level causality:
      - Grade 4 \u2014 task origin or re-foundation: establishes why a work arc exists \u2014 its motive, problem, and success criteria. Judge arc scale from the scope of the ask at grading time: an arc is expected to span roughly 50+ turns. Every Grade 4 opens a new arc by default; normally one Grade 4 per arc. A second is legal only when the motive or success criteria are radically redefined. A re-foundation must cite the Grade 4 it re-founds as [T<n>]; evolution alone does not imply rollback.
@@ -44862,6 +44862,41 @@ function exactNameCandidate(rule) {
     ...isTombstoneStatus(rule.status) ? {} : { suggested_action: "add_evidence" }
   };
 }
+var EVIDENCE_REF_PATTERN = /^S(\d+)\/T(\d+)$/;
+function validateProposalEvidence(db, input) {
+  const evidence = input.evidence ?? [];
+  const isAddEvidenceOperation = input.add_evidence_to !== void 0;
+  if (!isAddEvidenceOperation && evidence.length < 2) {
+    return "at least 2 evidence items are required";
+  }
+  const resolvedTurns = [];
+  for (const [index, item] of evidence.entries()) {
+    const match = EVIDENCE_REF_PATTERN.exec(item.ref);
+    if (!match) {
+      return `evidence[${index}].ref must match ^S\\d+/T\\d+$`;
+    }
+    const sessionId = Number(match[1]);
+    const promptNumber = Number(match[2]);
+    const turn = Number.isSafeInteger(sessionId) && Number.isSafeInteger(promptNumber) ? db.query(
+      `SELECT t.id, t.session_id AS sessionId
+           FROM turns t
+           JOIN sessions s ON s.id = t.session_id
+           WHERE t.session_id = ? AND t.prompt_number = ?`
+    ).get(sessionId, promptNumber) : null;
+    if (!turn) {
+      return `evidence[${index}].ref does not reference an existing turn: ${item.ref}`;
+    }
+    resolvedTurns.push(turn);
+  }
+  if (isAddEvidenceOperation) return null;
+  if (new Set(resolvedTurns.map(({ id }) => id)).size < 2) {
+    return "at least 2 distinct turns are required";
+  }
+  if (input.scope === "global" && new Set(resolvedTurns.map(({ sessionId }) => sessionId)).size < 2) {
+    return "global scope requires evidence from at least 2 distinct sessions";
+  }
+  return null;
+}
 function createDreamRuleWriteTools(options) {
   const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
   return {
@@ -44877,14 +44912,24 @@ function createDreamRuleWriteTools(options) {
           if (!priorRule || priorEvent.eventKind !== expectedKind) {
             throw new Error(`event_uid collision for ${uid}`);
           }
+          if (input.add_evidence_to === void 0) {
+            return {
+              status: "created",
+              idempotent: true,
+              event_uid: uid,
+              rule: priorRule,
+              event: priorEvent
+            };
+          }
           return {
-            status: input.add_evidence_to === void 0 ? "created" : "evidence_added",
+            status: "evidence_added",
             idempotent: true,
             event_uid: uid,
             rule: priorRule,
             event: priorEvent
           };
         }
+        let evidenceTarget = null;
         if (input.add_evidence_to !== void 0) {
           const target = store.get(input.add_evidence_to);
           if (!target) {
@@ -44895,19 +44940,30 @@ function createDreamRuleWriteTools(options) {
               `cannot add evidence to tombstoned rule ${input.add_evidence_to}`
             );
           }
+          evidenceTarget = target;
+        }
+        const evidenceRejection = validateProposalEvidence(options.db, input);
+        if (evidenceRejection) {
+          return {
+            status: "rejected",
+            reason: "insufficient_evidence",
+            detail: evidenceRejection
+          };
+        }
+        if (evidenceTarget) {
           const evidence = input.evidence;
           const createdAtEpoch2 = now();
-          const rule2 = store.update(target.id, {
-            evidence: [...target.evidence, ...evidence],
+          const rule2 = store.update(evidenceTarget.id, {
+            evidence: [...evidenceTarget.evidence, ...evidence],
             updatedAtEpoch: createdAtEpoch2,
             lastEvidenceAtEpoch: Math.max(
-              target.lastEvidenceAtEpoch,
+              evidenceTarget.lastEvidenceAtEpoch,
               ...evidence.map(({ at }) => at)
             )
           });
           const event2 = store.createEvent({
             eventUid: uid,
-            ruleId: target.id,
+            ruleId: evidenceTarget.id,
             eventKind: "evidence_added",
             rationale: input.rationale,
             adjustment: { evidence_count: evidence.length },
@@ -45672,7 +45728,7 @@ function rewriteInternalTurnIds(value, turnReferences) {
 function loadDiaryTurnReferences(db, rows) {
   const turnIds = /* @__PURE__ */ new Set();
   for (const row of rows) {
-    for (const value of [row.title, row.content]) {
+    for (const value of [row.title, row.content, row.insight]) {
       if (!value) continue;
       for (const match of value.matchAll(INTERNAL_TURN_ID_PATTERN)) {
         turnIds.add(Number.parseInt(match[1], 10));
@@ -45710,11 +45766,15 @@ function renderDiaryMaterial(row, turnReferences) {
       turnReferences
     );
     const contentWithoutTitle = title ? dropLeadingTitle(content, title) : content;
+    const insight = row.insight?.trim() ? truncateMaterialField(
+      rewriteInternalTurnIds(row.insight.trim(), turnReferences)
+    ) : void 0;
     return {
       ...base,
       summary: truncateMaterialField(
         contentWithoutTitle || title || "\uFF08\u65E0\u6458\u8981\uFF09"
-      )
+      ),
+      ...insight ? { insight } : {}
     };
   }
   return {
@@ -46534,6 +46594,7 @@ curate \u7684\u6700\u7EC8\u76EE\u7684\u662F\u957F\u671F\u8BB0\u5FC6\u6536\u76CA\
 
 ## \u89C4\u5219\u5F52\u7EB3\uFF08Induction\uFF09
 
+- \u63D0\u51FA\u89C4\u5219\u524D\uFF0C\u5148\u7528 recall \u68C0\u7D22\u5386\u53F2\uFF08insight \u5DF2\u5165\u5168\u6587\u7D22\u5F15\uFF09\uFF0C\u6536\u96C6\u8DE8 session \u590D\u53D1\u8BC1\u636E\uFF1B\u8BC1\u636E\u4E0D\u8DB3\u7684\u5047\u8BBE\u4E0D\u8981\u63D0\u4EA4\u3002
 - \u5206\u6790\u5F53\u5929\u8F68\u8FF9\uFF0C\u53EA\u6709\u5728\u5F97\u5230\u53EF\u8BC1\u4F2A\u7684\u300C\u6761\u4EF6\u2192\u52A8\u4F5C\u300D\u89C4\u5219\u5047\u8BBE\u3001\u673A\u5236\u7406\u7531\u4E0E\u5145\u5206\u7684\u771F\u5B9E [S/T] \u8BC1\u636E\u5F15\u7528\u65F6\uFF0C\u624D\u8C03\u7528 propose_rule \u63D0\u51FA\u5047\u8BBE\uFF1B\u4E0D\u8981\u4E3A\u4E86\u51D1\u6570\u63D0\u4EA4\u4F4E\u8D28\u91CF\u89C4\u5219\u3002
 - \u5224\u91CD\u53EA\u7531 propose_rule \u5DE5\u5177\u5185\u90E8\u5F3A\u5236\u6267\u884C\u3002\u4F60\u53EA\u8D1F\u8D23\u5224\u65AD\u89C4\u5219\u5047\u8BBE\u7684\u8D28\u91CF\u4E0E\u8BC1\u636E\u5F15\u7528\u662F\u5426\u5145\u5206\uFF0C\u4E0D\u5F97\u81EA\u884C\u5B9E\u73B0\u3001\u731C\u6D4B\u6216\u7ED5\u8FC7\u5224\u91CD\u903B\u8F91\uFF1B\u5DE5\u5177\u8FD4\u56DE\u6D3B\u8DC3\u76F8\u4F3C\u5019\u9009\u5E76\u5EFA\u8BAE add_evidence \u65F6\uFF0C\u7528\u8BE5\u5019\u9009 id \u4F5C\u4E3A add_evidence_to\u3001\u643A\u5E26\u65B0\u7684 evidence \u518D\u8C03\u7528 propose_rule\uFF1B\u786E\u5C5E\u4E0D\u540C\u89C4\u5219\u65F6\uFF0C\u660E\u786E\u8BF4\u660E\u5DEE\u5F02\u540E\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u63D0\u3002
 

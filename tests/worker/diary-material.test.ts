@@ -129,6 +129,28 @@ describe("renderDiaryMaterial", () => {
     });
   });
 
+  test("keeps non-extracted serialized output unchanged when insight is present", () => {
+    for (const status of ["active", "provisional", "skipped", "failed", "undone"] as const) {
+      const rendered = renderDiaryMaterial(materialRow({
+        status,
+        title: null,
+        content: null,
+        insight: "Must remain invisible outside extracted turns.",
+      }), new Map());
+      const expected = {
+        kind: "turn_manifest",
+        ref: "S7/T3",
+        number: 3,
+        status,
+        user_prompt: "Please summarize this turn.",
+        response: "Raw response",
+        ...(status === "skipped" ? { response_trust: "low" } : {}),
+      };
+
+      expect(JSON.stringify(rendered)).toBe(JSON.stringify(expected));
+    }
+  });
+
   test("drops a redundant leading title from extracted content", () => {
     const rendered = renderDiaryMaterial(materialRow({
       title: "Material manifest v2",
@@ -145,6 +167,27 @@ describe("renderDiaryMaterial", () => {
     }), new Map())).toMatchObject({
       summary: "Title-only extraction",
     });
+  });
+
+  test("renders non-empty extracted insight after stripping private content", () => {
+    expect(renderDiaryMaterial(materialRow({
+      insight: "Keep this.<private>secret</private> Share that.",
+    }), new Map())).toEqual({
+      kind: "turn_manifest",
+      ref: "S7/T3",
+      number: 3,
+      status: "extracted",
+      user_prompt: "Please summarize this turn.",
+      summary: "Rendered the enriched material fields.",
+      insight: "Keep this. Share that.",
+    });
+  });
+
+  test("omits null and whitespace-only extracted insight", () => {
+    for (const insight of [null, "   "]) {
+      expect(renderDiaryMaterial(materialRow({ insight }), new Map()))
+        .not.toHaveProperty("insight");
+    }
   });
 
   test("rewrites resolvable internal DB turn ids to S/T citations", () => {
@@ -183,6 +226,19 @@ describe("renderDiaryMaterial", () => {
         summary: `Resolved [S${sessionId}/T27], preserved [T99999].`,
       });
 
+      const insightOnlyRow = materialRow({
+        title: "No title reference",
+        content: "No summary reference.",
+        insight: `Insight-only pointer [T${turnId}].`,
+      });
+      expect(renderDiaryMaterial(
+        insightOnlyRow,
+        loadDiaryTurnReferences(db, [insightOnlyRow]),
+      )).toMatchObject({
+        summary: "No summary reference.",
+        insight: `Insight-only pointer [S${sessionId}/T27].`,
+      });
+
       db.exec("PRAGMA foreign_keys = OFF");
       const danglingTurnId = db.query<{ id: number }, []>(
         "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (99999, 4, 'extracted', 1) RETURNING id",
@@ -201,11 +257,12 @@ describe("renderDiaryMaterial", () => {
     }
   });
 
-  test("caps every prompt, summary, and response field at 200 diary tokens", () => {
+  test("caps every prompt, summary, insight, and response field at 200 diary tokens", () => {
     const extracted = renderDiaryMaterial(materialRow({
       userPrompt: "用户希望继续完善材料清单。".repeat(80),
       title: "材料清单",
       content: "这是需要保留的摘要内容。".repeat(80),
+      insight: "这是需要保留的机制级教训。".repeat(80),
     }), new Map());
     const unextracted = renderDiaryMaterial(materialRow({
       status: "active",
@@ -219,6 +276,11 @@ describe("renderDiaryMaterial", () => {
     expect("summary" in extracted).toBe(true);
     expect(estimateDiaryTokens("summary" in extracted ? extracted.summary : ""))
       .toBeLessThanOrEqual(200);
+    expect("insight" in extracted).toBe(true);
+    expect(estimateDiaryTokens(
+      "insight" in extracted ? extracted.insight ?? "" : "",
+    )).toBeLessThanOrEqual(200);
+    expect("insight" in extracted ? extracted.insight : "").toEndWith("…");
     expect(estimateDiaryTokens(unextracted.user_prompt)).toBeLessThanOrEqual(200);
     expect("response" in unextracted).toBe(true);
     expect(estimateDiaryTokens("response" in unextracted ? unextracted.response : ""))

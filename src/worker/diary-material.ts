@@ -79,7 +79,7 @@ interface RenderedDiaryMaterialBase {
 }
 
 export type RenderedDiaryMaterial =
-  | (RenderedDiaryMaterialBase & { summary: string })
+  | (RenderedDiaryMaterialBase & { summary: string; insight?: string })
   | (RenderedDiaryMaterialBase & {
     response: string;
     response_trust?: "low";
@@ -169,11 +169,11 @@ function rewriteInternalTurnIds(
 
 export function loadDiaryTurnReferences(
   db: Database,
-  rows: readonly Pick<DiaryMaterialRow, "title" | "content">[],
+  rows: readonly Pick<DiaryMaterialRow, "title" | "content" | "insight">[],
 ): Map<number, DiaryTurnReference> {
   const turnIds = new Set<number>();
   for (const row of rows) {
-    for (const value of [row.title, row.content]) {
+    for (const value of [row.title, row.content, row.insight]) {
       if (!value) continue;
       for (const match of value.matchAll(INTERNAL_TURN_ID_PATTERN)) {
         turnIds.add(Number.parseInt(match[1]!, 10));
@@ -220,11 +220,17 @@ export function renderDiaryMaterial(
     const contentWithoutTitle = title
       ? dropLeadingTitle(content, title)
       : content;
+    const insight = row.insight?.trim()
+      ? truncateMaterialField(
+        rewriteInternalTurnIds(row.insight.trim(), turnReferences),
+      )
+      : undefined;
     return {
       ...base,
       summary: truncateMaterialField(
         contentWithoutTitle || title || "（无摘要）",
       ),
+      ...(insight ? { insight } : {}),
     };
   }
 

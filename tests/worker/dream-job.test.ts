@@ -114,6 +114,11 @@ describe("dream job processor", () => {
     expect(list).toBeGreaterThan(review);
     expect(detail).toBeGreaterThan(list);
     expect(judgment).toBeGreaterThan(detail);
+    const inductionSection = prompt.slice(induction, review);
+    expect(inductionSection).toContain("recall");
+    expect(inductionSection).toContain("insight 已入全文索引");
+    expect(inductionSection).toContain("跨 session 复发证据");
+    expect(inductionSection).toContain("证据不足的假设不要提交");
     expect(prompt).toContain("判重只由 propose_rule 工具内部强制执行");
     expect(prompt).toContain("遵从（compliance）不等于有用（usefulness）");
     expect(prompt).toContain("只有规则对结果产生了正面作用才算有用");

@@ -84,6 +84,11 @@ interface SimilarRuleCandidate {
 export type ProposeRuleResult =
   | {
       status: "rejected";
+      reason: "insufficient_evidence";
+      detail: string;
+    }
+  | {
+      status: "rejected";
       reason: "exact_name" | "similar_claim";
       candidates: SimilarRuleCandidate[];
     }
@@ -214,6 +219,54 @@ function exactNameCandidate(rule: Rule): SimilarRuleCandidate {
   };
 }
 
+const EVIDENCE_REF_PATTERN = /^S(\d+)\/T(\d+)$/;
+
+function validateProposalEvidence(
+  db: Database,
+  input: ProposeRuleInput,
+): string | null {
+  const evidence = input.evidence ?? [];
+  const isAddEvidenceOperation = input.add_evidence_to !== undefined;
+  if (!isAddEvidenceOperation && evidence.length < 2) {
+    return "at least 2 evidence items are required";
+  }
+
+  const resolvedTurns: Array<{ id: number; sessionId: number }> = [];
+  for (const [index, item] of evidence.entries()) {
+    const match = EVIDENCE_REF_PATTERN.exec(item.ref);
+    if (!match) {
+      return `evidence[${index}].ref must match ^S\\d+/T\\d+$`;
+    }
+    const sessionId = Number(match[1]);
+    const promptNumber = Number(match[2]);
+    const turn = Number.isSafeInteger(sessionId) &&
+        Number.isSafeInteger(promptNumber)
+      ? db.query<{ id: number; sessionId: number }, [number, number]>(
+          `SELECT t.id, t.session_id AS sessionId
+           FROM turns t
+           JOIN sessions s ON s.id = t.session_id
+           WHERE t.session_id = ? AND t.prompt_number = ?`,
+        ).get(sessionId, promptNumber)
+      : null;
+    if (!turn) {
+      return `evidence[${index}].ref does not reference an existing turn: ${item.ref}`;
+    }
+    resolvedTurns.push(turn);
+  }
+
+  if (isAddEvidenceOperation) return null;
+  if (new Set(resolvedTurns.map(({ id }) => id)).size < 2) {
+    return "at least 2 distinct turns are required";
+  }
+  if (
+    input.scope === "global" &&
+    new Set(resolvedTurns.map(({ sessionId }) => sessionId)).size < 2
+  ) {
+    return "global scope requires evidence from at least 2 distinct sessions";
+  }
+  return null;
+}
+
 export function createDreamRuleWriteTools(
   options: CreateDreamRuleWriteToolsOptions,
 ): {
@@ -237,10 +290,17 @@ export function createDreamRuleWriteTools(
           if (!priorRule || priorEvent.eventKind !== expectedKind) {
             throw new Error(`event_uid collision for ${uid}`);
           }
+          if (input.add_evidence_to === undefined) {
+            return {
+              status: "created" as const,
+              idempotent: true,
+              event_uid: uid,
+              rule: priorRule,
+              event: priorEvent,
+            };
+          }
           return {
-            status: input.add_evidence_to === undefined
-              ? "created" as const
-              : "evidence_added" as const,
+            status: "evidence_added" as const,
             idempotent: true,
             event_uid: uid,
             rule: priorRule,
@@ -248,6 +308,7 @@ export function createDreamRuleWriteTools(
           };
         }
 
+        let evidenceTarget: Rule | null = null;
         if (input.add_evidence_to !== undefined) {
           const target = store.get(input.add_evidence_to);
           if (!target) {
@@ -258,19 +319,32 @@ export function createDreamRuleWriteTools(
               `cannot add evidence to tombstoned rule ${input.add_evidence_to}`,
             );
           }
+          evidenceTarget = target;
+        }
+
+        const evidenceRejection = validateProposalEvidence(options.db, input);
+        if (evidenceRejection) {
+          return {
+            status: "rejected" as const,
+            reason: "insufficient_evidence" as const,
+            detail: evidenceRejection,
+          };
+        }
+
+        if (evidenceTarget) {
           const evidence = input.evidence!;
           const createdAtEpoch = now();
-          const rule = store.update(target.id, {
-            evidence: [...target.evidence, ...evidence],
+          const rule = store.update(evidenceTarget.id, {
+            evidence: [...evidenceTarget.evidence, ...evidence],
             updatedAtEpoch: createdAtEpoch,
             lastEvidenceAtEpoch: Math.max(
-              target.lastEvidenceAtEpoch,
+              evidenceTarget.lastEvidenceAtEpoch,
               ...evidence.map(({ at }) => at),
             ),
           });
           const event = store.createEvent({
             eventUid: uid,
-            ruleId: target.id,
+            ruleId: evidenceTarget.id,
             eventKind: "evidence_added",
             rationale: input.rationale,
             adjustment: { evidence_count: evidence.length },

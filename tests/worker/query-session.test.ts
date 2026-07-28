@@ -615,6 +615,11 @@ describe("worker query session", () => {
     expect(prompt).toContain(
       "bugfix | feature | refactor | change | discovery | decision",
     );
+    expect(prompt).toContain("tool errors");
+    expect(prompt).toContain("repeated trial-and-error");
+    expect(prompt).toContain("repeated operations");
+    expect(prompt).toContain("environment facts");
+    expect(prompt).toContain("self-corrected successfully");
     expect(prompt).toContain("grade: REQUIRED integer 0-4");
     expect(prompt).toContain("Grade 4 — task origin or re-foundation");
     expect(prompt).toContain("scope of the ask");
