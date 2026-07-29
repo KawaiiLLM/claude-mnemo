@@ -1,6 +1,6 @@
 {
   "name": "claude-mnemo",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Structured memory for Claude Code powered by Mnemosyne",
   "author": {
     "name": "moedb"
