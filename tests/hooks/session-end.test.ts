@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
@@ -137,7 +138,7 @@ describe("handleSessionEndHook", () => {
     expect(spawnImpl).not.toHaveBeenCalled();
   });
 
-  test("enqueues a turn-stop for an interrupted final turn before flushing", async () => {
+  test("finalizes an interrupted final turn and retires its pending observations before flushing", async () => {
     await createContextHandler({
       db,
       nowEpoch: () => 200,
@@ -157,6 +158,18 @@ describe("handleSessionEndHook", () => {
     const turnId = db
       .query<{ id: number }, []>(`SELECT id FROM turns ORDER BY id DESC LIMIT 1`)
       .get()!.id;
+    const observation = createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: "{}",
+      toolResult: "partial result",
+      createdAtEpoch: 202,
+    });
+    db.query(
+      `INSERT INTO pending_queue (
+         kind, target_id, session_db_id, enqueued_at_epoch
+       ) VALUES ('obs', ?, ?, 202)`,
+    ).run(observation.id, sessionId);
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
         return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
@@ -175,19 +188,78 @@ describe("handleSessionEndHook", () => {
     const result = await handler(createInput());
     await result.asyncWork?.();
 
-    const queued = db
-      .query<{ kind: string; targetId: number; enqueuedAtEpoch: number }, []>(
-        `SELECT kind, target_id AS targetId, enqueued_at_epoch AS enqueuedAtEpoch
-         FROM pending_queue WHERE kind = 'turn-stop'`,
+    const turn = db
+      .query<{ status: string; updatedAtEpoch: number | null }, [number]>(
+        `SELECT status, updated_at_epoch AS updatedAtEpoch
+         FROM turns WHERE id = ?`,
       )
-      .all();
-    expect(queued).toEqual([
-      { kind: "turn-stop", targetId: turnId, enqueuedAtEpoch: 300 },
-    ]);
+      .get(turnId);
+    expect(turn).toEqual({ status: "skipped", updatedAtEpoch: 300 });
+    expect(
+      db
+        .query<{ status: string }, [number]>(
+          "SELECT status FROM observations WHERE id = ?",
+        )
+        .get(observation.id)?.status,
+    ).toBe("skipped");
+    expect(
+      db
+        .query<{ count: number }, [number, number]>(
+          `SELECT COUNT(*) AS count FROM pending_queue
+           WHERE (kind = 'turn-stop' AND target_id = ?)
+              OR (kind = 'obs' AND target_id IN (
+                SELECT id FROM observations WHERE turn_id = ?
+              ))`,
+        )
+        .get(turnId, turnId)?.count,
+    ).toBe(0);
     expect(fetchImpl.mock.calls[1]?.[0]).toBe("http://127.0.0.1:37778/trigger");
   });
 
-  test("does not duplicate a turn-stop that the Stop hook already queued", async () => {
+  test("preserves partial orphan content by finalizing the turn as extracted", async () => {
+    await createContextHandler({
+      db,
+      nowEpoch: () => 200,
+    })(
+      createInput({
+        eventName: "SessionStart",
+        source: "resume",
+      }),
+    );
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt, title,
+         created_at_epoch
+       ) VALUES (?, 1, 'active', 'interrupted prompt', 'Partial title', 201)`,
+    ).run(sessionId);
+    const turnId = db
+      .query<{ id: number }, []>(`SELECT id FROM turns ORDER BY id DESC LIMIT 1`)
+      .get()!.id;
+    const handler = createSessionEndHandler({
+      db,
+      now: () => 300,
+    });
+
+    await handler(createInput());
+
+    expect(
+      db
+        .query<{ status: string }, [number]>(
+          "SELECT status FROM turns WHERE id = ?",
+        )
+        .get(turnId)?.status,
+    ).toBe("extracted");
+    expect(
+      db
+        .query<{ count: number }, [number]>(
+          `SELECT COUNT(*) AS count FROM pending_queue
+           WHERE kind = 'turn-stop' AND target_id = ?`,
+        )
+        .get(turnId)?.count,
+    ).toBe(0);
+  });
+
+  test("leaves a turn whose turn-stop is already queued for extraction", async () => {
     await createContextHandler({
       db,
       nowEpoch: () => 200,
@@ -200,7 +272,7 @@ describe("handleSessionEndHook", () => {
     db.query(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, created_at_epoch
-       ) VALUES (?, 1, 'active', 'normal prompt', 201)`,
+       ) VALUES (?, 1, 'active', 'interrupted prompt', 201)`,
     ).run(sessionId);
     const turnId = db
       .query<{ id: number }, []>(`SELECT id FROM turns ORDER BY id DESC LIMIT 1`)
@@ -209,6 +281,60 @@ describe("handleSessionEndHook", () => {
       `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
        VALUES ('turn-stop', ?, ?, 202)`,
     ).run(turnId, sessionId);
+    const handler = createSessionEndHandler({
+      db,
+      now: () => 300,
+    });
+
+    await handler(createInput());
+
+    expect(
+      db
+        .query<{ status: string }, [number]>(
+          "SELECT status FROM turns WHERE id = ?",
+        )
+        .get(turnId)?.status,
+    ).toBe("active");
+    expect(
+      db
+        .query<{ count: number }, [number]>(
+          `SELECT COUNT(*) AS count FROM pending_queue
+           WHERE kind = 'turn-stop' AND target_id = ?`,
+        )
+        .get(turnId)?.count,
+    ).toBe(1);
+  });
+
+  test("leaves a completed-response turn and all of its queue items untouched", async () => {
+    await createContextHandler({
+      db,
+      nowEpoch: () => 200,
+    })(
+      createInput({
+        eventName: "SessionStart",
+        source: "resume",
+      }),
+    );
+    db.query(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, user_prompt,
+         assistant_response, created_at_epoch
+       ) VALUES (?, 1, 'active', 'normal prompt', 'completed response', 201)`,
+    ).run(sessionId);
+    const turnId = db
+      .query<{ id: number }, []>(`SELECT id FROM turns ORDER BY id DESC LIMIT 1`)
+      .get()!.id;
+    const observation = createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: "{}",
+      toolResult: "result",
+      createdAtEpoch: 202,
+    });
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, 202), ('obs', ?, ?, 203)`,
+    ).run(turnId, sessionId, observation.id, sessionId);
     const fetchImpl = mock(async (input: string | URL) => {
       if (String(input).endsWith("/health")) {
         return new Response(JSON.stringify({ ok: true, buildId: BUILD_ID }), {
@@ -227,13 +353,34 @@ describe("handleSessionEndHook", () => {
     const result = await handler(createInput());
     await result.asyncWork?.();
 
-    const count = db
-      .query<{ n: number }, [number]>(
-        `SELECT COUNT(*) AS n FROM pending_queue
-         WHERE kind = 'turn-stop' AND target_id = ?`,
-      )
-      .get(turnId)!.n;
-    expect(count).toBe(1);
+    expect(
+      db
+        .query<{ status: string; updatedAtEpoch: number | null }, [number]>(
+          `SELECT status, updated_at_epoch AS updatedAtEpoch
+           FROM turns WHERE id = ?`,
+        )
+        .get(turnId),
+    ).toEqual({ status: "active", updatedAtEpoch: null });
+    expect(
+      db
+        .query<{ status: string }, [number]>(
+          "SELECT status FROM observations WHERE id = ?",
+        )
+        .get(observation.id)?.status,
+    ).toBe("pending");
+    expect(
+      db
+        .query<{ kind: string; targetId: number }, [number, number]>(
+          `SELECT kind, target_id AS targetId FROM pending_queue
+           WHERE (kind = 'turn-stop' AND target_id = ?)
+              OR (kind = 'obs' AND target_id = ?)
+           ORDER BY seq`,
+        )
+        .all(turnId, observation.id),
+    ).toEqual([
+      { kind: "turn-stop", targetId: turnId },
+      { kind: "obs", targetId: observation.id },
+    ]);
   });
 
   test("a glance leaves an older run's orphan turn untouched", async () => {
@@ -244,6 +391,21 @@ describe("handleSessionEndHook", () => {
          session_id, prompt_number, status, user_prompt, created_at_epoch
        ) VALUES (?, 1, 'active', 'old interrupted prompt', 90)`,
     ).run(sessionId);
+    const turnId = db
+      .query<{ id: number }, []>(`SELECT id FROM turns ORDER BY id DESC LIMIT 1`)
+      .get()!.id;
+    const observation = createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: "{}",
+      toolResult: "old result",
+      createdAtEpoch: 91,
+    });
+    db.query(
+      `INSERT INTO pending_queue (
+         kind, target_id, session_db_id, enqueued_at_epoch
+       ) VALUES ('obs', ?, ?, 91)`,
+    ).run(observation.id, sessionId);
     await createContextHandler({
       db,
       nowEpoch: () => 200,
@@ -266,12 +428,28 @@ describe("handleSessionEndHook", () => {
     expect(result.continue).toBe(true);
     expect(typeof result.asyncWork).toBe("function");
     expect(fetchImpl).not.toHaveBeenCalled();
-    const count = db
-      .query<{ n: number }, []>(
-        `SELECT COUNT(*) AS n FROM pending_queue WHERE kind = 'turn-stop'`,
-      )
-      .get()!.n;
-    expect(count).toBe(0);
+    expect(
+      db
+        .query<{ status: string; updatedAtEpoch: number | null }, [number]>(
+          `SELECT status, updated_at_epoch AS updatedAtEpoch
+           FROM turns WHERE id = ?`,
+        )
+        .get(turnId),
+    ).toEqual({ status: "active", updatedAtEpoch: null });
+    expect(
+      db
+        .query<{ status: string }, [number]>(
+          "SELECT status FROM observations WHERE id = ?",
+        )
+        .get(observation.id)?.status,
+    ).toBe("pending");
+    expect(
+      db
+        .query<{ kind: string; targetId: number }, []>(
+          "SELECT kind, target_id AS targetId FROM pending_queue ORDER BY seq",
+        )
+        .all(),
+    ).toEqual([{ kind: "obs", targetId: observation.id }]);
   });
 
   test("does nothing when the content session is unknown", async () => {

@@ -72,3 +72,52 @@ export function enqueueOrphanTurnStops(
   }
   return orphans.length;
 }
+
+/**
+ * Finalize orphans that can no longer receive content without attempting
+ * extraction. Callers own the surrounding transaction.
+ */
+export function skipOrphanTurns(
+  db: Database,
+  sessionDbId: number,
+  nowEpoch: number,
+  orphans: OrphanTurnRef[],
+): number {
+  let processedCount = 0;
+  for (const orphan of orphans) {
+    const turn = db
+      .query<{ title: string | null; content: string | null }, [number, number]>(
+        "SELECT title, content FROM turns WHERE id = ? AND session_id = ?",
+      )
+      .get(orphan.id, sessionDbId);
+    if (!turn) {
+      continue;
+    }
+
+    const status =
+      turn.title !== null || turn.content !== null ? "extracted" : "skipped";
+    const result = db.query<unknown, [string, number, number]>(
+      `
+        UPDATE turns
+        SET status = ?, updated_at_epoch = ?
+        WHERE id = ? AND status IN ('active', 'provisional')
+      `,
+    ).run(status, nowEpoch, orphan.id);
+    if (result.changes === 0) {
+      continue;
+    }
+
+    db.query<unknown, [number]>(
+      `UPDATE observations SET status = 'skipped'
+       WHERE turn_id = ? AND status = 'pending'`,
+    ).run(orphan.id);
+    db.query<unknown, [number]>(
+      `DELETE FROM pending_queue
+       WHERE kind = 'obs' AND target_id IN (
+         SELECT id FROM observations WHERE turn_id = ?
+       )`,
+    ).run(orphan.id);
+    processedCount += result.changes;
+  }
+  return processedCount;
+}

@@ -2298,7 +2298,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.2-ms4jy7qb" : "dev";
+var BUILD_ID = true ? "0.8.2-ms5rkeb3" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20644,6 +20644,40 @@ function enqueueOrphanTurnStops(db, sessionDbId, nowEpoch, orphans) {
   }
   return orphans.length;
 }
+function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
+  let processedCount = 0;
+  for (const orphan of orphans) {
+    const turn = db.query(
+      "SELECT title, content FROM turns WHERE id = ? AND session_id = ?"
+    ).get(orphan.id, sessionDbId);
+    if (!turn) {
+      continue;
+    }
+    const status = turn.title !== null || turn.content !== null ? "extracted" : "skipped";
+    const result = db.query(
+      `
+        UPDATE turns
+        SET status = ?, updated_at_epoch = ?
+        WHERE id = ? AND status IN ('active', 'provisional')
+      `
+    ).run(status, nowEpoch, orphan.id);
+    if (result.changes === 0) {
+      continue;
+    }
+    db.query(
+      `UPDATE observations SET status = 'skipped'
+       WHERE turn_id = ? AND status = 'pending'`
+    ).run(orphan.id);
+    db.query(
+      `DELETE FROM pending_queue
+       WHERE kind = 'obs' AND target_id IN (
+         SELECT id FROM observations WHERE turn_id = ?
+       )`
+    ).run(orphan.id);
+    processedCount += result.changes;
+  }
+  return processedCount;
+}
 
 // src/hooks/handlers/session-end.ts
 function createSessionEndHandler(dependencies) {
@@ -20673,12 +20707,7 @@ function createSessionEndHandler(dependencies) {
       const orphanTurns = getOrphanTurns(dependencies.db, session.id);
       if (orphanTurns.length > 0) {
         writeTransaction(dependencies.db, () => {
-          enqueueOrphanTurnStops(
-            dependencies.db,
-            session.id,
-            now(),
-            orphanTurns
-          );
+          skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
       }
     }

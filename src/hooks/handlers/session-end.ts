@@ -4,8 +4,8 @@ import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId } from "../../db/sessions";
 import { hasNewTurnSinceSessionRunStart } from "../../db/session-run";
 import {
-  enqueueOrphanTurnStops,
   getOrphanTurns,
+  skipOrphanTurns,
 } from "../../db/orphan-turns";
 import {
   notifyWorkerFlush,
@@ -53,21 +53,17 @@ export function createSessionEndHandler(
       };
     }
 
-    // A turn interrupted mid-response never fires the Stop hook, so its
-    // turn-stop is normally back-filled by the NEXT Stop in this session —
-    // which never comes if the user closes right after interrupting. Enqueue
-    // those orphans here so the session-end tail drain consumes them within
-    // the same bounded budget.
+    // A turn interrupted mid-response will never receive more content after
+    // the session exits. Enqueueing a turn-stop here only works if the
+    // session's env is still registered at the exact moment SessionEnd runs;
+    // that precondition necessarily fails, stranding the queue item and
+    // leaving the turn active forever, which permanently blocks the diary
+    // readiness gate. Finalize these orphans directly without enqueueing.
     if (hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
       const orphanTurns = getOrphanTurns(dependencies.db, session.id);
       if (orphanTurns.length > 0) {
         writeTransaction(dependencies.db, () => {
-          enqueueOrphanTurnStops(
-            dependencies.db,
-            session.id,
-            now(),
-            orphanTurns,
-          );
+          skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
       }
     }
