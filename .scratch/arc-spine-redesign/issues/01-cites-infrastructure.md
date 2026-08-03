@@ -1,5 +1,7 @@
 # 01 — cites 引用基础设施
 
+**Status: done** — 64fcee1（含 codex 审查轮 9 项修复；门禁 1271/0）
+
 **What to build:** 提取写入的结构化引用成为可查询的机器事实：remember 携带 `cites`（严格 `{id, relation}` 元素、replace-set 流式语义）落入带级联外键的 `turn_citations` 边表并置 `cites_recorded` 标志；legacy turn 经字面文法（单引用/逗号列表/闭区间范围/带注解）解析行内引用作为回退。完成后可对任意 fixture 会话查询任意 turn 的入度与关系集，legacy/新纪元的回退谓词行为可断言。
 
 **Blocked by:** None — can start immediately.
