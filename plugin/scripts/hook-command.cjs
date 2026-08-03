@@ -2379,7 +2379,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-msdfl3zr" : "dev";
+var BUILD_ID = true ? "0.8.3-msdih7nw" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3828,16 +3828,341 @@ function getSessionEffectiveCitations(db, sessionId) {
   return effective;
 }
 
+// src/shared/transcript-parser.ts
+var import_node_fs4 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function detectInterruptedPromptIdsInEntries(entries) {
+  return collectInterruptedPromptIds(entries);
+}
+function parseTranscriptLineWindow(lines, firstLineNumber) {
+  const entries = [];
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: firstLineNumber + index
+    });
+  });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function collectOrderedPromptIds(entries) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of entries) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function countUserPromptsInEntries(entries) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
+  let count = 0;
+  for (const entry of entries) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
 var PROMPT_COLUMN_CAP = 100;
-var TITLE_COLUMN_CAP = 80;
 var BROKEN_PROMPT_MIN_PREFIX = 20;
 var BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1e3;
 var TOOL_BURST_TOP_N = 3;
-var MILESTONE_TITLE_CAP = 90;
-var MILESTONE_REFERENCE_CAP = 2;
-var MILESTONE_REFERENCE_PARSE_CAP = 8;
+var DEFAULT_TITLE_CAP = 100;
+var MILESTONE_UNIT_TOKEN_CAP = 150;
+var MILESTONE_UNIT_PULLED_CAP = 4;
+var MILESTONE_PROMPT_PREFIX_CAP = 32;
+var MILESTONE_FILE_BASENAME_CAP = 3;
+var MILESTONE_NOTIFICATION_MARKER = "\u27E8notify\u27E9";
+var MILESTONE_OVER_BUDGET_NOTE = "  \u26A0 over budget: anchor rows kept in full";
+var MILESTONE_DESC_INDENT = "        ";
+var MILESTONE_DESC_WRAP_CHARS = 92;
 var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "merged",
   "shipped",
@@ -3889,6 +4214,8 @@ var TYPE_EMOJI_MAP = {
 };
 var PENDING_EMOJI = "\u23F3";
 var MISSING_LINE_ANCHOR = "\u2014";
+var MISSING_GRADE_CELL = "\u2014";
+var TURN_TABLE_HEADER = "T# | line | time | gap | stats | G | prompt \u2192 title";
 function typeEmoji(type) {
   if (type === null) return PENDING_EMOJI;
   return TYPE_EMOJI_MAP[type] ?? "\u2022";
@@ -4025,13 +4352,17 @@ function resolveWindow(range, totalTurns, bounds = { first: 1, last: totalTurns 
   }
   throw new Error(`Unknown range kind: ${range.kind}`);
 }
+function extractCommandName(raw) {
+  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
+  return match ? match[1].trim() : null;
+}
 function cleanPromptForLabel(raw) {
   if (raw === null) {
     return "";
   }
-  const commandName = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
-  if (commandName) {
-    return commandName[1].trim();
+  const commandName = extractCommandName(raw);
+  if (commandName !== null) {
+    return commandName;
   }
   const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
   const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
@@ -4513,6 +4844,13 @@ function detectShapeSignals(turns) {
     externalInputs
   };
 }
+function compareMilestoneRank(left, right) {
+  if (left.score !== right.score) return right.score - left.score;
+  const leftTools = left.turn.toolCallCount ?? 0;
+  const rightTools = right.turn.toolCallCount ?? 0;
+  if (leftTools !== rightTools) return rightTools - leftTools;
+  return left.turn.promptNumber - right.turn.promptNumber;
+}
 function selectMilestoneTurns(view) {
   const eraCutoff = view.taskCausalityEraCutoffEpoch;
   const universe = view.sessionTurns ?? view.windowTurns;
@@ -4520,7 +4858,13 @@ function selectMilestoneTurns(view) {
     (turn) => turn.status !== "skipped" && turn.type !== "compact"
   );
   if (seq.length === 0) {
-    return { kept: [], ranked: [], pulled: [], overflowByDay: [] };
+    return {
+      kept: [],
+      ranked: [],
+      pulled: [],
+      overflowByDay: [],
+      effGradeByTurnId: /* @__PURE__ */ new Map()
+    };
   }
   const citations = view.citations ?? inlineCitationFallback(universe);
   const inDegree = citationInDegree(citations);
@@ -4589,22 +4933,24 @@ function selectMilestoneTurns(view) {
       rows.push(row);
     }
   }
-  const ranked = [...poolRows].sort((left, right) => {
-    if (left.score !== right.score) return right.score - left.score;
-    const leftTools = left.turn.toolCallCount ?? 0;
-    const rightTools = right.turn.toolCallCount ?? 0;
-    if (leftTools !== rightTools) return rightTools - leftTools;
-    return left.turn.promptNumber - right.turn.promptNumber;
-  });
+  const ranked = [...poolRows].sort(compareMilestoneRank);
   const pulled = [];
   const pulledIds = /* @__PURE__ */ new Set();
+  const pulledByTurnId = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const entry = citations.get(row.turn.id);
     if (entry === void 0) {
       continue;
     }
     for (const citedTurnId of entry.citedTurnIds) {
-      if (pulledIds.has(citedTurnId) || keptIds.has(citedTurnId)) {
+      if (keptIds.has(citedTurnId)) {
+        continue;
+      }
+      const already = pulledByTurnId.get(citedTurnId);
+      if (already !== void 0) {
+        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
+          already.citerPromptNumbers.push(row.turn.promptNumber);
+        }
         continue;
       }
       const cited = universeById.get(citedTurnId);
@@ -4617,13 +4963,16 @@ function selectMilestoneTurns(view) {
         continue;
       }
       pulledIds.add(citedTurnId);
-      pulled.push({
+      const antecedent = {
         turn: cited,
         effGrade,
         citedByPromptNumber: row.turn.promptNumber,
+        citerPromptNumbers: [row.turn.promptNumber],
         label: pulledAntecedentLabel(cited),
         supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
-      });
+      };
+      pulled.push(antecedent);
+      pulledByTurnId.set(citedTurnId, antecedent);
     }
   }
   const overflowByDay = [];
@@ -4646,7 +4995,11 @@ function selectMilestoneTurns(view) {
       lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
     });
   }
-  return { kept: rows, ranked, pulled, overflowByDay };
+  const effGradeByTurnId = /* @__PURE__ */ new Map();
+  for (const turn of seq) {
+    effGradeByTurnId.set(turn.id, effGradeOf(turn));
+  }
+  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
 }
 function pulledAntecedentLabel(turn) {
   if (turn.title !== null && turn.title.trim() !== "") {
@@ -4654,53 +5007,6 @@ function pulledAntecedentLabel(turn) {
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
   return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP);
-}
-function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
-  return parseInlineCitations(content, cap);
-}
-function resolveMilestoneReferences(db, kept) {
-  const keptPromptsByDay = /* @__PURE__ */ new Map();
-  for (const milestone of kept) {
-    const day = formatLocalDate(milestone.turn.createdAtEpoch);
-    const prompts = keptPromptsByDay.get(day) ?? /* @__PURE__ */ new Set();
-    prompts.add(milestone.turn.promptNumber);
-    keptPromptsByDay.set(day, prompts);
-  }
-  for (const milestone of kept) {
-    const ids = parseContentReferences(
-      milestone.turn.content,
-      MILESTONE_REFERENCE_PARSE_CAP
-    );
-    if (ids.length === 0) {
-      continue;
-    }
-    const references = [];
-    for (const id of ids) {
-      const cited = getTurnById(db, id);
-      if (cited === null || // Session-id guard: a cross-session (or missing) cite renders inert.
-      cited.sessionId !== milestone.turn.sessionId || // Predecessor guard: a causal reference points backward; a self/future
-      // cite is not a driver and renders inert.
-      cited.promptNumber >= milestone.turn.promptNumber) {
-        continue;
-      }
-      const milestoneDay = formatLocalDate(milestone.turn.createdAtEpoch);
-      if (keptPromptsByDay.get(milestoneDay)?.has(cited.promptNumber) === true) {
-        continue;
-      }
-      references.push({
-        promptNumber: cited.promptNumber,
-        title: cited.title ?? "(untitled)",
-        marker: milestoneMarker(cited)
-      });
-      if (references.length >= MILESTONE_REFERENCE_CAP) {
-        break;
-      }
-    }
-    if (references.length > 0) {
-      milestone.references = references;
-    }
-  }
-  return kept;
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -4792,9 +5098,6 @@ function buildTimelineView(db, input, preloadedTurns) {
     // pull-through all consume this map (spec §B).
     citations: getSessionEffectiveCitations(db, session.id)
   });
-  if (viewKind === "milestones") {
-    resolveMilestoneReferences(db, milestoneSelection.kept);
-  }
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns = viewKind === "turns" ? paginateItems(nonSkippedTurns, page, pageSize) : emptyPaginatedItems(nonSkippedTurns.length, pageSize);
@@ -4823,6 +5126,7 @@ function buildTimelineView(db, input, preloadedTurns) {
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
     milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
+    turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
     pagedPhases: pagedPhases.items,
     viewItemTotal,
@@ -4943,55 +5247,496 @@ function formatShowingLine(view) {
   }
   return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
-function renderTurnTable(view, promptCap = PROMPT_COLUMN_CAP) {
+function renderTurnTable(view, promptCap, titleCap) {
   const renderedTurns = view.pageTurns.map((turn) => ({
     turn,
     marker: null
   }));
-  return renderTurnRows(view, renderedTurns, promptCap);
+  return renderTurnRows(view, renderedTurns, promptCap, titleCap);
 }
 var MILESTONE_MARKER_GLYPH = {
   invalidated: "\u{1F6AB}",
   reversed: "\u21A9\uFE0F",
   outcome: "\u{1F3C1}"
 };
-function renderMilestoneReferenceLines(references) {
-  return references.map((ref) => {
-    const markerGlyph = ref.marker === "invalidated" || ref.marker === "reversed" ? `${MILESTONE_MARKER_GLYPH[ref.marker]} ` : "";
-    const title = sanitizeTimelineField(
-      truncateText2(ref.title, MILESTONE_TITLE_CAP)
-    );
-    return `      \u21B3 ${markerGlyph}T${ref.promptNumber} ${title}`;
-  });
-}
-function renderMilestoneDigest(view) {
-  if (view.milestoneDayGroups.length === 0) {
-    return [];
+function truncateToTokens(text, maxTokens) {
+  if (maxTokens <= 0) {
+    return "";
   }
-  const lines = [""];
-  for (const group of view.milestoneDayGroups) {
-    const contSuffix = group.continued ? " (cont.)" : "";
-    lines.push(
-      `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount} kept${contSuffix} \u2500\u2500`
-    );
-    for (const milestone of group.rows) {
-      const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-      const emoji3 = typeEmoji(milestone.turn.type);
-      const title = sanitizeTimelineField(
-        truncateText2(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP)
-      );
-      lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji3} ${title}`);
-      lines.push(...renderMilestoneReferenceLines(milestone.references ?? []));
+  if (estimateDiaryTokens(text) <= maxTokens) {
+    return text;
+  }
+  const points = [...text];
+  let low = 0;
+  let high = points.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = `${points.slice(0, mid).join("")}\u2026`;
+    if (estimateDiaryTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
     }
-    if (group.overflow !== null) {
-      lines.push(
-        `        \u2026 +${group.overflow.count} more \u2192 timeline(id="S${view.session.id}", view="turns") @ T${group.overflow.firstPrompt}\u2013T${group.overflow.lastPrompt}`
-      );
+  }
+  return best;
+}
+function wrapPlainText(text, width) {
+  const points = [...text];
+  const lines = [];
+  let start = 0;
+  while (start < points.length) {
+    if (points.length - start <= width) {
+      lines.push(points.slice(start).join(""));
+      break;
+    }
+    const hardEnd = start + width;
+    let breakAt = -1;
+    for (let index = hardEnd; index > start; index -= 1) {
+      if (points[index] === " ") {
+        breakAt = index;
+        break;
+      }
+    }
+    if (breakAt > start) {
+      lines.push(points.slice(start, breakAt).join(""));
+      start = breakAt + 1;
+    } else {
+      lines.push(points.slice(start, hardEnd).join(""));
+      start = hardEnd;
     }
   }
   return lines;
 }
-function renderTurnRows(view, renderedTurns, promptCap) {
+function pathBasename(path2) {
+  const parts = path2.split("/");
+  return parts[parts.length - 1] || path2;
+}
+function renderModifiedFilesTail(turn) {
+  if (turn.filesModified.length === 0) {
+    return "";
+  }
+  const shown = turn.filesModified.slice(0, MILESTONE_FILE_BASENAME_CAP).map(pathBasename);
+  const hidden = turn.filesModified.length - shown.length;
+  return `  \u270F\uFE0F${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
+}
+function milestonePromptPrefix(turn) {
+  const raw = turn.userPrompt;
+  if (raw === null) {
+    return "";
+  }
+  const commandName = extractCommandName(raw);
+  if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
+    return MILESTONE_NOTIFICATION_MARKER;
+  }
+  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
+}
+function initialUnitTrim(unit) {
+  return {
+    showDesc: true,
+    descTokens: null,
+    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    pulledTitleTokens: null,
+    titleTokens: null,
+    promptTokens: null,
+    showFiles: true
+  };
+}
+function milestoneDescText(turn) {
+  return (turn.content ?? "").replace(/\s+/g, " ").trim();
+}
+function renderUnitLines(unit, trim, titleCap) {
+  const { milestone } = unit;
+  const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
+  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn));
+  if (trim.promptTokens !== null) {
+    prompt = truncateToTokens(prompt, trim.promptTokens);
+  }
+  let title = sanitizeTimelineField(
+    truncateText2(milestone.turn.title ?? "(untitled)", titleCap)
+  );
+  if (trim.titleTokens !== null) {
+    title = truncateToTokens(title, trim.titleTokens);
+  }
+  const head = prompt !== "" && title !== "" ? `${prompt} \u2192 ${title}` : `${prompt}${title}`;
+  const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+  const lines = [
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}`.trimEnd()
+  ];
+  if (trim.showDesc) {
+    const raw = milestoneDescText(milestone.turn);
+    const desc = trim.descTokens === null ? raw : truncateToTokens(raw, trim.descTokens);
+    if (desc !== "") {
+      for (const line of wrapPlainText(desc, MILESTONE_DESC_WRAP_CHARS)) {
+        lines.push(`${MILESTONE_DESC_INDENT}${line}`);
+      }
+    }
+  }
+  for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
+    const superseded = antecedent.supersededBy.length > 0;
+    const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
+    let label = sanitizeTimelineField(truncateText2(antecedent.label, titleCap));
+    if (trim.pulledTitleTokens !== null) {
+      label = truncateToTokens(label, trim.pulledTitleTokens);
+    }
+    const backLink = superseded ? ` \u2192\u88ABT${antecedent.supersededBy.join("/T")}\u63A8\u7FFB` : "";
+    lines.push(
+      `      \u21B3 ${reversalGlyph}T${antecedent.turn.promptNumber} ${typeEmoji(antecedent.turn.type)} G${antecedent.effGrade} ${label}${backLink}`
+    );
+  }
+  const foldedPulled = unit.pulled.length - trim.pulledShown;
+  if (foldedPulled > 0) {
+    lines.push(`      \u21B3 +${foldedPulled} \u524D\u4EF6`);
+  }
+  return lines;
+}
+function unitTokens(unit, trim, titleCap) {
+  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap).join("\n"));
+}
+function largestFittingTokens(unit, trim, titleCap, cap, apply) {
+  let low = 0;
+  let high = cap;
+  let best = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    apply(mid);
+    if (unitTokens(unit, trim, titleCap) <= cap) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  apply(best < 0 ? 0 : best);
+  return best;
+}
+function fitUnitTrim(unit, titleCap, cap, base) {
+  const trim = { ...base };
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
+    const best = largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+      trim.descTokens = value;
+    });
+    if (best <= 0) {
+      trim.showDesc = false;
+      trim.descTokens = null;
+    } else {
+      return trim;
+    }
+  }
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap) > cap) {
+    trim.pulledShown -= 1;
+  }
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  if (trim.pulledShown > 0) {
+    largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+      trim.pulledTitleTokens = value;
+    });
+    if (unitTokens(unit, trim, titleCap) <= cap) {
+      return trim;
+    }
+  }
+  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+    trim.titleTokens = value;
+  });
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+    trim.promptTokens = value;
+  });
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  trim.showFiles = false;
+  return trim;
+}
+function renderUnitFitted(unit, titleCap, descOff) {
+  const base = initialUnitTrim(unit);
+  if (descOff) {
+    base.showDesc = false;
+  }
+  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base);
+  const lines = renderUnitLines(unit, trim, titleCap);
+  if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
+    return lines;
+  }
+  return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
+}
+var HAN_WEIGHT_TENTHS = 11;
+var OTHER_WEIGHT_TENTHS = 6;
+var NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
+function textWeightTenths(text) {
+  let total = 0;
+  for (const codePoint of text) {
+    total += new RegExp("\\p{Script=Han}", "u").test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
+  }
+  return total;
+}
+function tokensFromWeightTenths(tenths) {
+  return Math.ceil(tenths * 12 / 100);
+}
+function createMilestoneBodyModel(view, titleCap) {
+  const pagedPrompts = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
+  );
+  const milestoneByPrompt = new Map(
+    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone])
+  );
+  const mainRowTurnIds = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.id)
+  );
+  const pullable = view.milestonePulled.filter(
+    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id)
+  );
+  const pullOrder = new Map(
+    pullable.map((antecedent, index) => [antecedent, index])
+  );
+  const antecedentDates = new Map(
+    pullable.map(
+      (antecedent) => [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)]
+    )
+  );
+  const retainedPrompts = new Set(pagedPrompts);
+  const removed = /* @__PURE__ */ new Set();
+  const descOff = /* @__PURE__ */ new Set();
+  const homedPulled = /* @__PURE__ */ new Map();
+  const unitEntries = /* @__PURE__ */ new Map();
+  const sections = view.milestoneDayGroups.map((group) => ({
+    date: group.date,
+    labelEpoch: group.labelEpoch,
+    group
+  }));
+  const groupedDates = new Set(sections.map((section) => section.date));
+  const syntheticEpochs = /* @__PURE__ */ new Map();
+  for (const antecedent of pullable) {
+    const date5 = antecedentDates.get(antecedent);
+    if (groupedDates.has(date5)) {
+      continue;
+    }
+    const known = syntheticEpochs.get(date5);
+    if (known === void 0 || antecedent.turn.createdAtEpoch < known) {
+      syntheticEpochs.set(date5, antecedent.turn.createdAtEpoch);
+    }
+  }
+  for (const [date5, labelEpoch] of syntheticEpochs) {
+    sections.push({ date: date5, labelEpoch, group: null });
+  }
+  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
+  const orderedStates = sections.map((section) => ({
+    section,
+    rows: section.group === null ? [] : [...section.group.rows],
+    droppedPrompts: [],
+    orphanPrompts: [],
+    frameTenths: 0,
+    unitTenths: 0
+  }));
+  const stateByDate = new Map(
+    orderedStates.map((state) => [state.section.date, state])
+  );
+  const stateOfMilestone = /* @__PURE__ */ new Map();
+  for (const state of orderedStates) {
+    for (const milestone of state.rows) {
+      stateOfMilestone.set(milestone, state);
+    }
+  }
+  let totalTenths = 0;
+  let priced = false;
+  function lineTenths(line) {
+    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
+  }
+  function unitEntryFor(milestone) {
+    const cached2 = unitEntries.get(milestone);
+    if (cached2 !== void 0) {
+      return cached2;
+    }
+    const pulled = [...homedPulled.get(milestone.turn.promptNumber) ?? []].sort(
+      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0)
+    );
+    const lines = renderUnitFitted(
+      { milestone, pulled },
+      titleCap,
+      descOff.has(milestone)
+    );
+    const entry = {
+      lines,
+      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0)
+    };
+    unitEntries.set(milestone, entry);
+    return entry;
+  }
+  function invalidateUnit(milestone) {
+    const previous = unitEntries.get(milestone);
+    unitEntries.delete(milestone);
+    const state = stateOfMilestone.get(milestone);
+    if (!priced || state === void 0 || removed.has(milestone)) {
+      return;
+    }
+    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
+    state.unitTenths += delta;
+    totalTenths += delta;
+  }
+  function sectionFrameLines(state) {
+    const { group } = state.section;
+    const extraPrompts = [...state.droppedPrompts, ...state.orphanPrompts];
+    const base = group?.overflow ?? null;
+    const hiddenCount = (base?.count ?? 0) + extraPrompts.length;
+    if (group === null && hiddenCount === 0) {
+      return [];
+    }
+    const header = group === null ? `\u2500\u2500 ${formatLocalDateWithWeekday(state.section.labelEpoch)} \xB7 T${Math.min(
+      ...extraPrompts
+    )}\u2013T${Math.max(...extraPrompts)} \xB7 0 kept \u2500\u2500` : `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedPrompts.length} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
+    if (hiddenCount === 0) {
+      return [header, ""];
+    }
+    const prompts = [
+      ...base === null ? [] : [base.firstPrompt, base.lastPrompt],
+      ...extraPrompts
+    ];
+    return [
+      header,
+      `        \u2026 +${hiddenCount} more \u2192 timeline(id="S${view.session.id}", view="turns") @ within T${Math.min(
+        ...prompts
+      )}..T${Math.max(...prompts)}`
+    ];
+  }
+  function refreshFrame(state) {
+    const tenths = sectionFrameLines(state).filter((line) => line !== "").reduce((sum, line) => sum + lineTenths(line), 0);
+    totalTenths += tenths - state.frameTenths;
+    state.frameTenths = tenths;
+  }
+  function homeAntecedent(antecedent) {
+    const home = antecedent.citerPromptNumbers.find(
+      (promptNumber) => retainedPrompts.has(promptNumber)
+    );
+    if (home !== void 0) {
+      homedPulled.set(home, [...homedPulled.get(home) ?? [], antecedent]);
+      const host = milestoneByPrompt.get(home);
+      if (host !== void 0) {
+        invalidateUnit(host);
+      }
+      return;
+    }
+    if (!antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))) {
+      return;
+    }
+    const state = stateByDate.get(antecedentDates.get(antecedent));
+    if (state === void 0) {
+      return;
+    }
+    state.orphanPrompts.push(antecedent.turn.promptNumber);
+    refreshFrame(state);
+  }
+  for (const antecedent of pullable) {
+    homeAntecedent(antecedent);
+  }
+  for (const state of orderedStates) {
+    state.unitTenths = state.rows.reduce(
+      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
+      0
+    );
+    totalTenths += state.unitTenths;
+    refreshFrame(state);
+  }
+  totalTenths += NEWLINE_WEIGHT_TENTHS;
+  priced = true;
+  return {
+    disableDesc(milestone) {
+      if (descOff.has(milestone) || removed.has(milestone)) {
+        return;
+      }
+      descOff.add(milestone);
+      invalidateUnit(milestone);
+    },
+    removeUnit(milestone) {
+      if (removed.has(milestone)) {
+        return;
+      }
+      const promptNumber = milestone.turn.promptNumber;
+      const state = stateOfMilestone.get(milestone);
+      if (state !== void 0) {
+        const entry = unitEntryFor(milestone);
+        state.unitTenths -= entry.tenths;
+        totalTenths -= entry.tenths;
+        state.rows = state.rows.filter((row) => row !== milestone);
+        state.droppedPrompts.push(promptNumber);
+      }
+      removed.add(milestone);
+      retainedPrompts.delete(promptNumber);
+      unitEntries.delete(milestone);
+      const orphaned = homedPulled.get(promptNumber) ?? [];
+      homedPulled.delete(promptNumber);
+      for (const antecedent of orphaned) {
+        homeAntecedent(antecedent);
+      }
+      if (state !== void 0) {
+        refreshFrame(state);
+      }
+    },
+    weightTenths() {
+      return totalTenths;
+    },
+    lines() {
+      const out = [""];
+      for (const state of orderedStates) {
+        const frame = sectionFrameLines(state);
+        if (frame.length === 0) {
+          continue;
+        }
+        out.push(frame[0]);
+        for (const milestone of state.rows) {
+          out.push(...unitEntryFor(milestone).lines);
+        }
+        if (frame[1] !== void 0 && frame[1] !== "") {
+          out.push(frame[1]);
+        }
+      }
+      return out;
+    }
+  };
+}
+function renderMilestoneBody(view, titleCap) {
+  if (view.milestoneDayGroups.length === 0) {
+    return [];
+  }
+  return createMilestoneBodyModel(view, titleCap).lines();
+}
+function milestoneDegradationOrder(view) {
+  return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
+}
+function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure) {
+  const body = createMilestoneBodyModel(view, titleCap);
+  const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines()) <= tokenBudget;
+  if (fits()) {
+    return body.lines();
+  }
+  for (const milestone of milestoneDegradationOrder(view)) {
+    body.disableDesc(milestone);
+    if (fits()) {
+      return body.lines();
+    }
+  }
+  for (const milestone of milestoneDegradationOrder(view)) {
+    if (milestone.alwaysKeep) {
+      continue;
+    }
+    body.removeUnit(milestone);
+    if (fits()) {
+      return body.lines();
+    }
+  }
+  return [...body.lines(), MILESTONE_OVER_BUDGET_NOTE];
+}
+function renderTurnRows(view, renderedTurns, promptCap, titleCap) {
   if (renderedTurns.length === 0) {
     return [];
   }
@@ -5003,7 +5748,7 @@ function renderTurnRows(view, renderedTurns, promptCap) {
   const previousEpochByPrompt = computePreviousEpochByPrompt(view.windowTurns);
   const lines = [
     "",
-    "T# | line | time | gap | stats | prompt \u2192 title"
+    TURN_TABLE_HEADER
   ];
   let previousRenderedEpoch = null;
   for (let index = 0; index < renderedTurns.length; index += 1) {
@@ -5017,6 +5762,8 @@ function renderTurnRows(view, renderedTurns, promptCap) {
         previousEpochByPrompt.get(turn.promptNumber) ?? null,
         brokenPromptCandidates.has(turn.promptNumber),
         promptCap,
+        titleCap,
+        view.turnEffGrades.get(turn.id),
         marker
       )
     );
@@ -5036,7 +5783,7 @@ function computePreviousEpochByPrompt(turns) {
 function renderDayDivider(currentEpoch, previousRenderedEpoch) {
   return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
 }
-function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, marker = null) {
+function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titleCap, effGrade, marker = null) {
   const isUndone = turn.status === "undone";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
@@ -5047,7 +5794,7 @@ function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, mark
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "\u2A2F " : "";
   const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, marker)
+    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker)
   );
   return [
     `${statusPrefix}T${turn.promptNumber}`,
@@ -5055,6 +5802,10 @@ function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, mark
     formatLocalTime(turn.createdAtEpoch),
     `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
     renderStats(turn),
+    // Grade column (spec §D): the arc view and the turn table print the same
+    // effGrade, so "how important" is read off the row instead of inferred from
+    // the type icon. `—` is a turn with no main-row candidacy (a compact marker).
+    effGrade === void 0 ? MISSING_GRADE_CELL : `G${effGrade}`,
     `${renderedPrompt} \u2192 ${titleText}`
   ].join(" | ");
 }
@@ -5072,7 +5823,7 @@ function renderStats(turn) {
   }
   return stats.length > 0 ? stats.join(" ") : "\u2014";
 }
-function renderTitleCell(turn, isUndone, compactMetadata, marker = null) {
+function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null) {
   const markerPrefix = marker ? `${marker} ` : "";
   if (turn.type === "compact") {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
@@ -5081,13 +5832,13 @@ function renderTitleCell(turn, isUndone, compactMetadata, marker = null) {
   }
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, TITLE_COLUMN_CAP - 3)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -5097,7 +5848,7 @@ function sanitizeTimelineField(value) {
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
-function renderPhases(view) {
+function renderPhases(view, titleCap) {
   if (view.pagedPhases.length === 0) {
     return [];
   }
@@ -5133,12 +5884,7 @@ function renderPhases(view) {
     const leadTurn = turnByPrompt.get(phase.startPromptNumber);
     const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(
-      truncateText2(
-        leadText,
-        TITLE_COLUMN_CAP
-      )
-    );
+    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap));
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
     );
@@ -5219,14 +5965,32 @@ function renderLineagePointer(view) {
 }
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
-  const body = view.view === "phases" ? renderPhases(view) : view.view === "milestones" ? renderMilestoneDigest(view) : renderTurnTable(view, promptCap);
-  return [
+  const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  const assemble = (bodyLines) => [
     ...renderSessionHeader(view),
-    ...body,
+    ...bodyLines,
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
   ].join("\n");
+  if (view.view === "phases") {
+    return assemble(renderPhases(view, titleCap));
+  }
+  if (view.view !== "milestones") {
+    return assemble(renderTurnTable(view, promptCap, titleCap));
+  }
+  if (options.tokenBudget === void 0) {
+    return assemble(renderMilestoneBody(view, titleCap));
+  }
+  return assemble(
+    fitMilestoneBodyToBudget(
+      view,
+      titleCap,
+      options.tokenBudget,
+      textWeightTenths(assemble([])),
+      (bodyLines) => estimateDiaryTokens(assemble(bodyLines))
+    )
+  );
 }
 
 // src/mcp/session-output.ts
@@ -20411,326 +21175,6 @@ function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
     processedCount += result.changes;
   }
   return processedCount;
-}
-
-// src/shared/transcript-parser.ts
-var import_node_fs4 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function getFirstTextContent(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
-  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isInterruptedUserMarker(entry) {
-  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function isChainParticipant(entry) {
-  return entry.type !== "progress";
-}
-function collectInterruptedPromptIds(entries) {
-  const interruptedPromptIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry.promptId && isInterruptedUserMarker(entry)) {
-      interruptedPromptIds.add(entry.promptId);
-    }
-  }
-  return interruptedPromptIds;
-}
-function detectInterruptedPromptIdsInEntries(entries) {
-  return collectInterruptedPromptIds(entries);
-}
-function parseTranscriptLineWindow(lines, firstLineNumber) {
-  const entries = [];
-  lines.forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: firstLineNumber + index
-    });
-  });
-  return entries;
-}
-function dedupeTranscriptEntries(entries) {
-  const uuidToIndex = /* @__PURE__ */ new Map();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      const existingIndex = uuidToIndex.get(entry.uuid);
-      if (existingIndex !== void 0) {
-        deduped[existingIndex] = mergeTranscriptEntries(
-          deduped[existingIndex],
-          entry
-        );
-        continue;
-      }
-      uuidToIndex.set(entry.uuid, deduped.length);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  return dedupeTranscriptEntries(
-    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
-  );
-}
-function mergeUsage(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    inputTokens: later?.inputTokens ?? first?.inputTokens,
-    outputTokens: later?.outputTokens ?? first?.outputTokens,
-    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
-    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
-  };
-}
-function mergeCompactMetadata(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    trigger: later?.trigger ?? first?.trigger,
-    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
-    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
-  };
-}
-function mergeTranscriptEntries(first, later) {
-  return {
-    type: later.type ?? first.type,
-    subtype: later.subtype ?? first.subtype,
-    role: later.role ?? first.role,
-    content: later.content ?? first.content,
-    promptId: first.promptId ?? later.promptId,
-    permissionMode: later.permissionMode ?? first.permissionMode,
-    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
-    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
-    isSidechain: later.isSidechain ?? first.isSidechain,
-    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
-    uuid: first.uuid ?? later.uuid,
-    parentUuid: later.parentUuid ?? first.parentUuid,
-    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
-    timestamp: first.timestamp ?? later.timestamp,
-    usage: mergeUsage(first.usage, later.usage),
-    durationMs: later.durationMs ?? first.durationMs,
-    messageCount: later.messageCount ?? first.messageCount,
-    compactMetadata: mergeCompactMetadata(
-      first.compactMetadata,
-      later.compactMetadata
-    ),
-    lineNumber: first.lineNumber
-  };
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
-    // an earlier true flag only because mergeTranscriptEntries uses ??.
-    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
-    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
-  };
-}
-function collectOrderedPromptIds(entries) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  entries.forEach((entry, index) => {
-    if (entry.promptId && !seen.has(entry.promptId)) {
-      seen.add(entry.promptId);
-      out.push({ promptId: entry.promptId, index });
-    }
-  });
-  return out;
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
-  const interruptedPromptIds = collectInterruptedPromptIds(entries);
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of entries) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-function countUserPromptsInEntries(entries) {
-  const seenPromptIds = /* @__PURE__ */ new Set();
-  let count = 0;
-  for (const entry of entries) {
-    if (!isCountedUserPrompt(entry)) {
-      continue;
-    }
-    if (entry.promptId) {
-      if (seenPromptIds.has(entry.promptId)) {
-        continue;
-      }
-      seenPromptIds.add(entry.promptId);
-      count += 1;
-      continue;
-    }
-    if (extractUserPrompt(entry) !== "") {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 // src/hooks/transcript-scan.ts

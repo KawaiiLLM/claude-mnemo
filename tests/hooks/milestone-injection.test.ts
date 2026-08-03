@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
+import { createDatabase } from "../../src/db/database";
+import { replaceTurnCitations } from "../../src/db/citations";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import { getTurn } from "../../src/db/turns";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import {
   renderMilestoneInjection,
+  renderSessionMilestoneInjection,
   type MilestoneTimelineRenderer,
 } from "../../src/hooks/milestone-injection";
 import type {
@@ -140,5 +146,83 @@ describe("renderMilestoneInjection degradation", () => {
       { keptCount: 1, promptLo: 1, promptHi: 1 },
       { keptCount: 1, promptLo: 4, promptHi: 4 },
     ]);
+  });
+});
+
+const ERA_BASE = 1_785_000_000;
+
+/** A four-row arc with one pulled antecedent, seeded straight into SQLite. */
+function seedInjectionArc(db: ReturnType<typeof createDatabase>): number {
+  initializeSchema(db);
+  const session = upsertSession(db, {
+    contentSessionId: "injection-arc",
+    project: "/tmp/claude-mnemo-test",
+    title: "injection arc",
+    insight: null,
+    createdAtEpoch: ERA_BASE,
+    updatedAtEpoch: ERA_BASE + 240,
+    completedAtEpoch: null,
+  });
+  const insert = db.query(
+    `INSERT INTO turns (
+       session_id, prompt_number, status, user_prompt, title, content, type,
+       significance_grade, cites_recorded, tool_call_count, created_at_epoch,
+       tags, files_read, files_modified
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, '[]', '[]', ?)`,
+  );
+  const rows: Array<[number, string, string, string, string | null, string, number, number, string]> = [
+    [1, "extracted", "卷号锚定要解决什么", "Framed the slicing problem", "Opened the arc and named the downstream consumer.", "decision", 4, 0, '["src/slicing.md"]'],
+    [2, "skipped", "取证", "Measured a 12-14% error", null, "discovery", 2, 3, "[]"],
+    [3, "extracted", "没有卷数怎么办", "Adopted cursor slicing", "Weighed the evidence and switched the anchor.", "decision", 3, 5, '["src/cursor.ts"]'],
+    [4, "extracted", "发布", "0.9.0 released", "Cut the release.", "feature", 2, 1, '["package.json"]'],
+  ];
+  for (const [promptNumber, status, prompt, title, content, type, grade, tools, files] of rows) {
+    insert.run(
+      session.id, promptNumber, status, prompt, title, content, type, grade, tools,
+      ERA_BASE + promptNumber * 60, files,
+    );
+  }
+  const turnId = (promptNumber: number) => getTurn(db, session.id, promptNumber)!.id;
+  replaceTurnCitations(db, turnId(3), [{ id: turnId(2), relation: "evidence-for" }], ERA_BASE);
+  return session.id;
+}
+
+/**
+ * Before-state for ticket 04. The hook's DEFAULT renderer is already the unified
+ * one, so SessionStart emits the new row shape today — an accepted deviation,
+ * not a regression to undo. Every other test in this file injects a fake
+ * renderer and therefore says nothing about what actually ships; this one pins
+ * the real combined behavior shallowly, so ticket 04's replacement has something
+ * to diff against. It stays deliberately small: the ladder re-renders the whole
+ * view once per candidate count, which is quadratic in the milestone count.
+ */
+describe("renderMilestoneInjection with the real renderer (ticket 04 before-state)", () => {
+  test("emits unified spine rows and still walks the degradation ladder", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedInjectionArc(db);
+
+    const roomy = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: 4_000,
+    });
+
+    // Unified rows: T# · type emoji · grade · prompt → title, plus a ↳ row for
+    // the pulled antecedent and the ✏️ file tail. None of this existed on the
+    // pre-ticket-03 injection path.
+    expect(roomy).toContain("T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem");
+    expect(roomy).toContain("↳ T2 🔵 G2 Measured a 12-14% error");
+    expect(roomy).toContain("✏️");
+    // Stage 1 fits, so nothing is stripped and no pointer is appended.
+    expect(roomy).toContain("shape signals");
+    expect(roomy).not.toContain("更多里程碑见");
+
+    // A budget that stage 1 cannot meet drops the shape signals and appends the
+    // pointer — the ladder is still the outer mechanism.
+    const tight = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: 400,
+    });
+    expect(tight).not.toContain("shape signals");
+    expect(tight).toContain('（更多里程碑见 timeline(id="S1")）');
+    expect(tight).toContain("T1 ⚖️ G4");
+    expect(estimateDiaryTokens(tight)).toBeLessThanOrEqual(400);
   });
 });

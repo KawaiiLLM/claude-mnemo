@@ -137,7 +137,14 @@ export function isInterruptedUserMarker(entry: TranscriptEntry): boolean {
   );
 }
 
-function isKnownSystemInjectedContent(content: string): boolean {
+/**
+ * Harness-injected user content: a task notification, a slash-command envelope,
+ * or the `⏺ Ran ` echo. Exported because the milestone row renderer collapses
+ * such a prompt to a marker instead of spending row budget on it, and that
+ * collapse must agree with prompt counting — a second, private predicate would
+ * drift and print envelope XML as if it were something the user typed.
+ */
+export function isKnownSystemInjectedContent(content: string): boolean {
   return (
     content.startsWith("<task-notification>") ||
     content.startsWith("<local-command-") ||

@@ -145,6 +145,10 @@ describe("release artifacts", () => {
       "recordDreamFailure", // retryable dream queue path
       "exceedsG3EvidenceGate", // actual-vs-target calibration deviation gate
       "Origin duty, arc-scoped", // arc-scoped provisional Grade-4 rubric rule
+      // The [T<n>] inline parser moved here alone: the arc renderer takes its ↳
+      // rows from structured pull-through now, so task-skeleton (worker-side) is
+      // its only remaining caller and the MCP bundle tree-shakes it away.
+      "parseContentReferences",
     ]) {
       expect(worker).toContain(marker);
     }
@@ -154,13 +158,26 @@ describe("release artifacts", () => {
       "OUTCOME_TAGS",
       '"release"', // release tag → 🏁 milestone
       "REVERSED_ROLE_TAGS", // literal rolled-back role tag → ↩️ milestone
-      "parseContentReferences", // [T<n>] causal-ref resolver
       "parseInlineCitations", // shared literal inline-citation grammar
       "turn_citations", // structured citation edge table
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
       "buildCorrectionGraph", // corrector-promotion / victim-demotion selection
       "json_each", // tag: facet — json_each exact-match clause
       "workerRecallInputShape", // worker recall schema shared by SDK agents
+      "renderMilestoneBody", // unified row renderer — arc body
+      "fitUnitTrim", // per-unit 150-token hard cap, spec §D termination order
+      "fitMilestoneBodyToBudget", // global budget: desc → title-only → drop unit
+      // incremental body model: memoized unit fits + running token weight, so a
+      // long session's budget search is linear rather than quadratic
+      "createMilestoneBodyModel",
+      "orphanPrompts", // `+N more` conservation for a day with no rendered rows
+      // esbuild writes the bundle ASCII-escaped, so the CJK render literals are
+      // matched in their escaped form: `前件` (↳ fold counter past the
+      // 4-antecedent cap) and `被T` (🚫 back-link on a superseded ↳ row).
+      "\\u524D\\u4EF6",
+      "\\u88ABT",
+      "compareMilestoneRank", // one ordering for selection rank and budget degradation
+      "citerPromptNumbers", // full citer list — antecedent re-homing after a removal
     ]) {
       expect(mcpServer).toContain(marker);
     }
@@ -168,6 +185,10 @@ describe("release artifacts", () => {
     // The `tag:` rejection was removed when the turn-scoped facet landed; a
     // stale bundle would still carry it and silently break `tag:` in the plugin.
     expect(mcpServer).not.toContain("tag: filtering was removed");
+    // The inline-only ≤2-ref ↳ mechanism was replaced by structured
+    // pull-through; a stale bundle would still carry the resolver and render
+    // the pre-redesign sub-lines.
+    expect(mcpServer).not.toContain("resolveMilestoneReferences");
 
     expect(worker).toContain("Correcting an earlier turn");
     expect(worker).toContain('tags: ["rolled-back"]');

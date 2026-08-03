@@ -293,9 +293,9 @@ function handleTurnRemember(
     return parameterError(statusError);
   }
 
-  // DB-aware predecessor predicate, mirroring the read-side resolver
-  // (timeline.ts resolveMilestoneReferences): a bare `T<n>` is bracketed only if
-  // the cited turn exists, shares this turn's session, and precedes it by
+  // DB-aware predecessor predicate, mirroring the read-side pull-through guard
+  // (timeline.ts selectMilestoneTurns): a bare `T<n>` is bracketed only if the
+  // cited turn exists, shares this turn's session, and precedes it by
   // prompt_number. `current` is null only when the turn itself is missing, in
   // which case updateTurnById below returns null → "not found".
   const current = getTurnById(db, turnId);

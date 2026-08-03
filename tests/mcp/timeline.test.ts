@@ -28,16 +28,30 @@ import {
   parseContentReferences,
   parseTimelineId,
   renderTimeline,
-  MILESTONE_REFERENCE_CAP,
-  MILESTONE_REFERENCE_PARSE_CAP,
+  compareMilestoneRank,
+  DEFAULT_TITLE_CAP,
+  MILESTONE_NOTIFICATION_MARKER,
+  MILESTONE_OVER_BUDGET_NOTE,
+  MILESTONE_PROMPT_PREFIX_CAP,
+  MILESTONE_UNIT_PULLED_CAP,
+  MILESTONE_UNIT_TOKEN_CAP,
   resolveWindow,
   segmentPhases,
   selectMilestoneTurns,
   timelineQuery,
   truncateText,
+  truncateToTokens,
+  TURN_TABLE_HEADER,
+  type KeptMilestone,
   type MilestoneSelection,
   type TimelineView,
 } from "../../src/mcp/timeline";
+import { estimateDiaryTokens } from "../../src/diary/domain";
+import { timelineInputSchema } from "../../src/mcp/definitions";
+import {
+  replaceTurnCitations,
+  type CitationRelation,
+} from "../../src/db/citations";
 
 function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
   return {
@@ -1882,7 +1896,13 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
       turn({ id: 1, promptNumber: 1, status: "skipped", type: null, title: null, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "compact", title: "/compact", createdAtEpoch: era + 60 }),
     ]);
-    expect(result).toEqual({ kept: [], ranked: [], pulled: [], overflowByDay: [] });
+    expect(result).toEqual({
+      kept: [],
+      ranked: [],
+      pulled: [],
+      overflowByDay: [],
+      effGradeByTurnId: new Map(),
+    });
   });
 });
 
@@ -2573,7 +2593,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T1..5" });
     const output = renderTimeline(view);
 
-    expect(output).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).toContain(TURN_TABLE_HEADER);
   });
 
   it("showing line reports page counts when the candidate set exceeds pageSize", () => {
@@ -2759,7 +2779,7 @@ describe("renderTimeline", () => {
 
     expect(output).toContain("phases:");
     expect(output).toMatch(/shape signals \(window T10-T15\):/);
-    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renders phases labeled session-wide only in the phases view", () => {
@@ -2772,7 +2792,7 @@ describe("renderTimeline", () => {
 
     expect(output).toContain("phases:");
     expect(output).toMatch(/shape signals \(window T1-T21 = full session\):/);
-    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renders shape signals as a window-scoped block", () => {
@@ -2823,20 +2843,20 @@ describe("renderTimeline", () => {
       buildTimelineView(db, { id: "S1", view: "phases" }),
     );
 
-    expect(defaultOutput).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(defaultOutput).toContain(TURN_TABLE_HEADER);
     expect(defaultOutput).toContain("shape signals");
     expect(defaultOutput).not.toMatch(/\n\s+phases[:(]/);
-    expect(turnsOutput).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(turnsOutput).toContain(TURN_TABLE_HEADER);
     expect(turnsOutput).toContain("shape signals");
     expect(turnsOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(turnPromptNumbers(turnsOutput)).toEqual([1, 2, 3, 4, 5]);
     expect(milestonePromptNumbers(milestoneOutput)).toEqual([1, 3, 5]);
-    expect(milestoneOutput).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(milestoneOutput).not.toContain(TURN_TABLE_HEADER);
     expect(milestoneOutput).toContain("shape signals");
     expect(milestoneOutput).not.toMatch(/\n\s+phases[:(]/);
     expect(phasesOutput).toContain("phases:");
     expect(phasesOutput).toContain("shape signals");
-    expect(phasesOutput).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(phasesOutput).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renders cross-day header dates and day dividers for turns and milestones", () => {
@@ -2956,7 +2976,7 @@ describe("renderTimeline", () => {
     expect(output).toContain("05-30→05-31");
     expect(output).toContain("cross-day feature");
     expect(output).toContain("next day decision");
-    expect(output).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).not.toContain(TURN_TABLE_HEADER);
   });
 
   it("renderTimeline respects promptCap option", () => {
@@ -2981,7 +3001,7 @@ describe("renderTimeline", () => {
     const view = buildTimelineView(db, { id: "S1/T19..21" });
     const output = renderTimeline(view);
 
-    expect(output).toContain("T# | line | time | gap | stats | prompt → title");
+    expect(output).toContain(TURN_TABLE_HEADER);
     expect(output).not.toContain("───");
   });
 
@@ -3083,7 +3103,7 @@ describe("renderTimeline", () => {
     );
 
     expect(milestoneRowCount(milestone)).toBeLessThan(turnRowCount(full));
-    expect(milestone).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(milestone).not.toContain(TURN_TABLE_HEADER);
     // T6 is kept (front-gutter milestone row); T2 is suppressed; T11 is folded
     // into the day's overflow rather than rendered as its own row.
     expect(milestone).toMatch(/^\s+(?:\S+ )?T6 /m);
@@ -3095,7 +3115,7 @@ describe("renderTimeline", () => {
 });
 
 describe("renderMilestoneDigest layout", () => {
-  it("renders day-grouped title-only rows with front-gutter markers, no prompt/stats columns", () => {
+  it("renders day-grouped spine rows with front-gutter markers, no turn-table columns", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
     const rows = [
@@ -3106,10 +3126,13 @@ describe("renderMilestoneDigest layout", () => {
     seedTimelineSession(db, rows);
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
 
-    expect(out).not.toContain("PROMPTTEXT"); // no user prompt
+    // The spine row now carries the user's own words (spec §D): the reader sees
+    // the turn-of-phrase that opened the turn, not just the extractor's title.
+    expect(out).toContain("PROMPTTEXT → kick off the design");
     expect(out).not.toContain("T# | line | time | gap"); // not the turn table
     expect(out).toContain("↩️ T2"); // reversed marker in front gutter
     expect(out).toContain("🏁 T3"); // outcome marker in front gutter
+    expect(out).toContain("✏️a.ts"); // modified-file basenames ride the row
     expect(out).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T1–T3 · \d+ kept/); // day header (full date, matches day-divider style)
   });
 });
@@ -3145,7 +3168,7 @@ describe("timelineQuery", () => {
 
     // The milestone view dispatches to the day-grouped digest, not the turn table.
     const milestoneOut = timelineQuery(db, { id: "S1", view: "milestones" });
-    expect(milestoneOut).not.toContain("T# | line | time | gap | stats | prompt → title");
+    expect(milestoneOut).not.toContain(TURN_TABLE_HEADER);
     expect(milestoneOut).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
   });
 });
@@ -3259,7 +3282,7 @@ describe("fork-lineage breadcrumb in timeline", () => {
   });
 });
 
-describe("milestone causal references (Component 3)", () => {
+describe("legacy inline citations feed pull-through", () => {
   // DB ids are auto-assigned at insert; resolve the driver's real id by prompt
   // number, then embed `[T<dbid>]` into the milestone's content. This keeps the
   // citation in the agent's DB-id space (what remember() uses), not the
@@ -3318,340 +3341,1377 @@ describe("milestone causal references (Component 3)", () => {
     ]);
   });
 
-  it("renders a ↳ sub-line for an in-session [T<dbid>] reference, mapped to its prompt number", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const previousDay = base - 24 * 60 * 60;
-    // Driver is at promptNumber 7 but inserted first (DB id 1), so the DB-id
-    // space and prompt-number space genuinely differ — proving the renderer
-    // maps id → prompt number rather than echoing the cited id.
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 7,
-        type: "discovery",
-        title: "reference prompt has conflicting guidance",
-        toolCallCount: 99,
-        createdAtEpoch: previousDay,
-      }),
-      turn({
-        promptNumber: 8,
-        type: "feature",
-        title: "0.2.32 released: reference field durable-pointers-only",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-    ]);
-    const driverId = dbId(db, 1, 7);
-    expect(driverId).not.toBe(7); // DB id != prompt number
-    // T8 (kept outcome) cites the driver via its DB id.
-    setContent(db, 1, 8, `Driven by [T${driverId}]. Final design.`);
-
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-
-    expect(out).toContain("🏁 T8");
-    // Sub-line uses the driver's PROMPT number (T7), not the cited DB id.
-    expect(out).toContain("      ↳ T7 reference prompt has conflicting guidance");
-    expect(out).not.toContain(`↳ T${driverId} `); // not the DB id space
-  });
-
-  it("suppresses a same-day reference sub-line when the cited turn is already kept", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "kept design driver",
-        createdAtEpoch: base,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "feature",
-        title: "release citing already-kept driver",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-    ]);
-    const driverId = dbId(db, 1, 1);
-    setContent(db, 1, 2, `Builds on [T${driverId}].`);
-
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-    expect(out).toContain("T1 ⚖️ kept design driver");
-    expect(out).toContain("🏁 T2 🟣 release citing already-kept driver");
-    expect(out).not.toContain("↳ T1 kept design driver");
-  });
-
-  it("caps at 2 sub-lines even when content cites 3 references", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const previousDay = base - 24 * 60 * 60;
-    seedTimelineSession(db, [
-      turn({ promptNumber: 1, type: "discovery", title: "driver one", toolCallCount: 99, createdAtEpoch: previousDay }),
-      turn({ promptNumber: 2, type: "discovery", title: "driver two", toolCallCount: 99, createdAtEpoch: previousDay + 60 }),
-      turn({ promptNumber: 3, type: "discovery", title: "driver three", toolCallCount: 99, createdAtEpoch: previousDay + 120 }),
-      turn({
-        promptNumber: 4,
-        type: "feature",
-        title: "release citing three drivers",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 180,
-      }),
-    ]);
-    const a = dbId(db, 1, 1);
-    const b = dbId(db, 1, 2);
-    const c = dbId(db, 1, 3);
-    setContent(db, 1, 4, `Builds on [T${a}], supersedes [T${b}], verifies [T${c}].`);
-
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const release = view.pagedMilestones.find((m) => m.turn.promptNumber === 4);
-    expect(release?.references).toHaveLength(2);
-    expect(release?.references?.map((r) => r.promptNumber)).toEqual([1, 2]);
-
-    const out = renderTimeline(view);
-    const subLines = out.split("\n").filter((l) => l.includes("↳"));
-    expect(subLines).toHaveLength(2);
-    expect(out).toContain("      ↳ T1 driver one");
-    expect(out).toContain("      ↳ T2 driver two");
-    expect(subLines.join("\n")).not.toContain("driver three");
-  });
-
-  it("prefixes the sub-line with the marker glyph when the cited turn is rolled back", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const previousDay = base - 24 * 60 * 60;
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "decision",
-        title: "approach we later reversed",
-        wasRolledBack: true,
-        status: "extracted",
-        toolCallCount: 99,
-        createdAtEpoch: previousDay,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "feature",
-        title: "release superseding the reversed approach",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-    ]);
-    const reversedId = dbId(db, 1, 1);
-    setContent(db, 1, 2, `Supersedes [T${reversedId}].`);
-
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-    // ↩️ reversed glyph rides the sub-line; the edge is kept.
-    expect(out).toContain("      ↳ ↩️ T1 approach we later reversed");
-  });
-
-  it("resolves a driver outside a ranged view's window via getTurnById, not the in-memory window", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const rows: TurnRecord[] = [];
-    // The driver lives at T1 (out of the requested range).
-    rows.push(
-      turn({
-        promptNumber: 1,
-        type: "discovery",
-        title: "out-of-range driver discovery",
-        toolCallCount: 99,
-        createdAtEpoch: base,
-      }),
-    );
-    // Filler so the in-range milestone is not also T1.
-    for (let pn = 2; pn <= 9; pn += 1) {
-      rows.push(
-        turn({
-          promptNumber: pn,
-          type: "discovery",
-          title: `noise ${pn}`,
-          toolCallCount: 0,
-          createdAtEpoch: base + pn * 60,
-        }),
-      );
-    }
-    rows.push(
-      turn({
-        promptNumber: 10,
-        type: "feature",
-        title: "in-range release citing the out-of-range driver",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 600,
-      }),
-    );
-    seedTimelineSession(db, rows);
-    const driverId = dbId(db, 1, 1);
-    setContent(db, 1, 10, `Driven by [T${driverId}].`);
-
-    // Range excludes T1; the kept milestone T10 still resolves its driver.
-    const view = buildTimelineView(db, { id: "S1/T5..10", view: "milestones" });
-    expect(view.windowTurns.some((t) => t.promptNumber === 1)).toBe(false); // driver not in window
-    const out = renderTimeline(view);
-
-    expect(out).toContain("🏁 T10");
-    expect(out).toContain("      ↳ T1 out-of-range driver discovery");
-  });
-
-  it("renders no sub-line for a reference that resolves to a different session", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-
-    // Primary session S1 holds a kept release that will cite a FOREIGN turn id.
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "feature",
-        title: "release citing a cross-session id",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-    ]);
-
-    // A second session (S2) whose turn the milestone (wrongly) cites.
-    const foreign = upsertSession(db, {
-      contentSessionId: "foreign-session",
-      project: "/tmp/claude-mnemo-test",
-      title: "foreign",
-      insight: null,
-      createdAtEpoch: base,
-      updatedAtEpoch: base,
-      completedAtEpoch: null,
-    });
-    expect(foreign.id).not.toBe(1); // guarantee a genuine cross-session id
-    db.query(
-      `INSERT INTO turns (session_id, prompt_number, status, title, type, created_at_epoch)
-       VALUES (?, ?, 'extracted', ?, 'discovery', ?)`,
-    ).run(foreign.id, 1, "foreign-session driver", base);
-    const foreignTurnId = getTurn(db, foreign.id, 1)!.id;
-
-    // S1's milestone cites the foreign turn's DB id; the session guard rejects it.
-    setContent(db, 1, 1, `Driven by [T${foreignTurnId}].`);
-
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-    expect(out).toContain("🏁 T1"); // the milestone itself still renders
-    expect(out).not.toContain("↳"); // cross-session cite produces no sub-line
-    expect(out).not.toContain("foreign-session driver");
-  });
-
-  it("renders no sub-line for a self or future (non-predecessor) reference", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    seedTimelineSession(db, [
-      turn({
-        promptNumber: 1,
-        type: "feature",
-        title: "release citing itself and the future",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        title: "a later non-driver",
-        toolCallCount: 0,
-        createdAtEpoch: base + 60,
-      }),
-    ]);
-    const selfId = dbId(db, 1, 1);
-    const futureId = dbId(db, 1, 2);
-    // A causal reference must point backward; self (==) and future (>) are inert.
-    setContent(db, 1, 1, `Self [T${selfId}] and future [T${futureId}].`);
-
-    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
-    expect(out).toContain("🏁 T1");
-    expect(out).not.toContain("↳"); // neither self nor future is a predecessor
-  });
-
-  it("surfaces a valid predecessor even when invalid refs (missing, future, self) are cited first", () => {
-    const db = createDatabase(":memory:");
-    const base = 1_779_782_400;
-    const rows: TurnRecord[] = [];
-    rows.push(
-      turn({
-        promptNumber: 1,
-        type: "discovery",
-        title: "the real driver",
-        toolCallCount: 99,
-        createdAtEpoch: base - 24 * 60 * 60,
-      }),
-    );
-    for (let pn = 2; pn <= 9; pn += 1) {
-      rows.push(
-        turn({
-          promptNumber: pn,
-          type: "discovery",
-          title: `noise ${pn}`,
-          toolCallCount: 0,
-          createdAtEpoch: base + pn * 60,
-        }),
-      );
-    }
-    rows.push(
-      turn({
-        promptNumber: 10,
-        type: "decision",
-        title: "release with invalid leading cites",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 600,
-      }),
-    );
-    rows.push(
-      turn({
-        promptNumber: 11,
-        type: "discovery",
-        title: "a later turn",
-        toolCallCount: 0,
-        createdAtEpoch: base + 660,
-      }),
-    );
-    seedTimelineSession(db, rows);
-    const driverId = dbId(db, 1, 1);
-    const selfId = dbId(db, 1, 10);
-    const futureId = dbId(db, 1, 11);
-    // Missing id + future + self lead; the valid predecessor trails. Capping
-    // raw parse at the display cap (2) would lose it — parse-then-validate keeps it.
-    setContent(
-      db,
-      1,
-      10,
-      `[T999999] [T${futureId}] [T${selfId}] [T${driverId}].`,
-    );
-
-    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    const release = view.pagedMilestones.find((m) => m.turn.promptNumber === 10);
-    expect(release?.references?.map((r) => r.promptNumber)).toEqual([1]);
-
-    const out = renderTimeline(view);
-    expect(out).toContain("      ↳ T1 the real driver");
-  });
 });
 
 describe("parseContentReferences", () => {
   const twelveRefs = Array.from({ length: 12 }, (_, i) => `[T${i + 1}]`).join(" ");
 
-  it("keeps the milestone caps even though the shared grammar is uncapped", () => {
-    // The cap lives with this consumer, not in db/citations' grammar: the
-    // settle/pull-through readers must see every id a legacy turn cites.
-    expect(
-      parseContentReferences(twelveRefs, MILESTONE_REFERENCE_PARSE_CAP),
-    ).toHaveLength(MILESTONE_REFERENCE_PARSE_CAP);
-    expect(parseContentReferences(twelveRefs)).toHaveLength(
-      MILESTONE_REFERENCE_CAP,
-    );
+  it("applies the caller's cap; the shared grammar itself stays uncapped", () => {
+    // The cap lives with the consumer, not in db/citations' grammar: the
+    // settle/pull-through readers must see every id a legacy turn cites. There
+    // is no milestone-display default to inherit any more — the arc view's ↳
+    // rows come from the structured pull-through set, not from re-parsed prose.
+    expect(parseContentReferences(twelveRefs, 8)).toHaveLength(8);
+    expect(parseContentReferences(twelveRefs, 2)).toHaveLength(2);
   });
 
   it("resolves the wider shared forms too", () => {
+    expect(parseContentReferences("[T8075, T9824]", 8)).toEqual([8075, 9824]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unified row renderer (spec §D)
+// ---------------------------------------------------------------------------
+
+/** Comfortably inside the task-causality era, so stored grades are read verbatim. */
+const ERA_BASE = 1_785_000_000;
+
+/**
+ * Era fixture seeder. Writes the stored grade AND states `cites_recorded`
+ * explicitly for every row: `1` means "the extractor spoke", so an empty edge
+ * set is authoritative and the legacy inline `[T<n>]` fallback stays out of the
+ * way. Leaving the flag at its default would silently route era fixtures through
+ * the legacy reader.
+ */
+function seedArcSession(
+  db: Database,
+  rows: TurnRecord[],
+  overrides: Partial<UpsertSessionInput> = {},
+) {
+  const session = seedTimelineSession(db, rows, overrides);
+  const setGrade = db.query(
+    "UPDATE turns SET significance_grade = ? WHERE session_id = ? AND prompt_number = ?",
+  );
+  for (const row of rows) {
+    if (row.significanceGrade !== null) {
+      setGrade.run(row.significanceGrade, session.id, row.promptNumber);
+    }
+  }
+  db.query("UPDATE turns SET cites_recorded = 1 WHERE session_id = ?").run(
+    session.id,
+  );
+  return session;
+}
+
+function turnDbId(db: Database, sessionId: number, promptNumber: number): number {
+  const record = getTurn(db, sessionId, promptNumber);
+  if (record === null) throw new Error(`no turn S${sessionId}/T${promptNumber}`);
+  return record.id;
+}
+
+function citeTurns(
+  db: Database,
+  sessionId: number,
+  citingPrompt: number,
+  cites: Array<[number, CitationRelation]>,
+): void {
+  replaceTurnCitations(
+    db,
+    turnDbId(db, sessionId, citingPrompt),
+    cites.map(([promptNumber, relation]) => ({
+      id: turnDbId(db, sessionId, promptNumber),
+      relation,
+    })),
+    ERA_BASE,
+  );
+}
+
+// A spine row is `   <glyph> T<n> <emoji> G<g> …`; the glyph slot is two blanks
+// when the row carries no marker. ↳ rows, desc lines and the `… +N more` hint
+// all sit further in and never match.
+const SPINE_ROW_RE = /^ {3}(?:.{1,2} )?T\d+ /u;
+const PULLED_ROW_RE = /^\s+↳ /u;
+const OVERFLOW_HINT_RE = /^\s+… \+(\d+) more/u;
+
+function spineRowLines(output: string): string[] {
+  return output.split("\n").filter((line) => SPINE_ROW_RE.test(line));
+}
+
+function spinePromptNumbers(output: string): number[] {
+  return spineRowLines(output).map((line) => Number(line.match(/T(\d+)/)![1]));
+}
+
+function pulledRowLines(output: string): string[] {
+  return output.split("\n").filter((line) => PULLED_ROW_RE.test(line));
+}
+
+function pulledPromptNumbers(output: string): number[] {
+  return pulledRowLines(output)
+    .filter((line) => !line.includes("前件"))
+    .map((line) => Number(line.match(/T(\d+)/)![1]));
+}
+
+/** Every `+N more` hint's N, summed — the fully hidden turns. */
+function hiddenTurnTotal(output: string): number {
+  return output
+    .split("\n")
+    .map((line) => line.match(OVERFLOW_HINT_RE))
+    .filter((match): match is RegExpMatchArray => match !== null)
+    .reduce((sum, match) => sum + Number(match[1]), 0);
+}
+
+/** Every day-group header line in the arc body. */
+function dayHeaderLines(output: string): string[] {
+  return output.split("\n").filter((line) => /^── .+ kept.* ──$/u.test(line));
+}
+
+/** Every `↳ +N 前件` fold's N, summed. */
+function foldedAntecedentTotal(output: string): number {
+  return output
+    .split("\n")
+    .map((line) => line.match(/↳ \+(\d+) 前件/))
+    .filter((match): match is RegExpMatchArray => match !== null)
+    .reduce((sum, match) => sum + Number(match[1]), 0);
+}
+
+/** Groups the body into render units: a spine row plus the lines homed under it. */
+function renderUnitBlocks(output: string): string[][] {
+  const blocks: string[][] = [];
+  let current: string[] | null = null;
+
+  for (const line of output.split("\n")) {
+    if (SPINE_ROW_RE.test(line)) {
+      current = [line];
+      blocks.push(current);
+      continue;
+    }
+    if (current === null) continue;
+    if (OVERFLOW_HINT_RE.test(line)) {
+      current = null;
+      continue;
+    }
+    if (PULLED_ROW_RE.test(line) || /^ {8}\S/u.test(line)) {
+      current.push(line);
+      continue;
+    }
+    current = null;
+  }
+
+  return blocks;
+}
+
+function unitBlockFor(output: string, promptNumber: number): string[] {
+  const block = renderUnitBlocks(output).find((lines) =>
+    new RegExp(`T${promptNumber} `).test(lines[0]!),
+  );
+  if (block === undefined) throw new Error(`no render unit for T${promptNumber}`);
+  return block;
+}
+
+/**
+ * A design-iteration arc: origin → evidence → decision → the decision that
+ * supersedes it → release, plus one dispatch turn that earns no row at all.
+ */
+function seedDesignArc(db: Database) {
+  const rows = [
+    turn({
+      promptNumber: 1,
+      type: "decision",
+      significanceGrade: 4,
+      userPrompt: "卷号锚定要解决什么",
+      title: "Framed the slicing problem",
+      content: "Opened the arc: what does downstream actually consume?",
+      filesModified: ["docs/specs/slicing.md"],
+      createdAtEpoch: ERA_BASE,
+    }),
+    turn({
+      promptNumber: 2,
+      type: "discovery",
+      significanceGrade: 2,
+      userPrompt: "先量误差",
+      title: "12-14% error",
+      content: "Sampled 200 cards; the error is structural, not noise.",
+      createdAtEpoch: ERA_BASE + 60,
+    }),
+    turn({
+      promptNumber: 3,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "按卷号锚",
+      title: "Volume anchoring",
+      content: "Anchored slices on volume numbers.",
+      createdAtEpoch: ERA_BASE + 120,
+    }),
+    turn({
+      promptNumber: 4,
+      type: "change",
+      significanceGrade: 1,
+      userPrompt: "接到 loader",
+      title: "Wired the loader",
+      content: "Mechanical wiring, no decision.",
+      createdAtEpoch: ERA_BASE + 180,
+    }),
+    turn({
+      promptNumber: 5,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "没有卷数怎么办",
+      title: "Cursor slicing",
+      content:
+        "User questioned whether volume numbers are even needed downstream.",
+      createdAtEpoch: ERA_BASE + 240,
+    }),
+    turn({
+      promptNumber: 6,
+      type: "feature",
+      significanceGrade: 2,
+      userPrompt: "发布",
+      title: "0.9.0 released",
+      content: "Cut the release.",
+      tags: ["release"],
+      filesModified: ["package.json", ".claude-plugin/plugin.json"],
+      createdAtEpoch: ERA_BASE + 300,
+    }),
+  ];
+  const session = seedArcSession(db, rows);
+  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 5, [
+    [3, "supersedes"],
+    [2, "evidence-for"],
+  ]);
+  return session;
+}
+
+describe("unified row renderer — row formats (spec §D)", () => {
+  it("renders a spine row as T# emoji grade prompt → title ✏️files, with an indented desc block", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 1);
+
+    expect(block[0]).toBe(
+      "      T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem  ✏️slicing.md",
+    );
+    // The desc rides underneath, indented, carrying process and evidence.
+    expect(block[1]).toMatch(/^ {8}Opened the arc: what does downstream/);
+  });
+
+  it("renders a pulled row as ↳ 🚫 T# emoji grade title →被T<n>推翻, title only", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    // T3 was superseded by T5: it renders as a casualty under its corrector,
+    // with the back-link that keeps a reader from reading it as current fact.
+    expect(out).toContain("      ↳ 🚫 T3 ⚖️ G1 Volume anchoring →被T5推翻");
+    // A non-victim antecedent renders with no glyph and no back-link.
+    expect(out).toContain("      ↳ T2 🔵 G2 12-14% error");
+    // ↳ rows are title-only: the antecedent's desc never renders.
+    expect(out).not.toContain("Sampled 200 cards");
+  });
+
+  it("collapses a harness-injected prompt to a marker instead of spending row budget", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt:
+          "<task-notification>\nAgent general-purpose (abc) completed\n</task-notification>",
+        title: "Read the worker report and locked the plan",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "接着做",
+        title: "Second decision",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(out).toContain(
+      `T1 ⚖️ G4 ${MILESTONE_NOTIFICATION_MARKER} → Read the worker report and locked the plan`,
+    );
+    expect(out).not.toContain("task-notification>");
+    expect(out).not.toContain("general-purpose");
+  });
+
+  it("renders a slash-command prompt as its command name, not the notify marker", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt:
+          "<command-message>review-pr is running…</command-message>\n<command-name>/review-pr</command-name>\n<command-args>1421</command-args>",
+        title: "Reviewed the PR and asked for a rebase",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    // A slash-command envelope IS harness-injected XML, but which command ran is
+    // a real user act — the same extraction the turns view does keeps it.
+    expect(out).toContain("T2 ⚖️ G3 /review-pr → Reviewed the PR and asked for a rebase");
+    expect(out).not.toContain(MILESTONE_NOTIFICATION_MARKER);
+    expect(out).not.toContain("command-name>");
+    expect(out).not.toContain("1421");
+  });
+
+  it("collapses a command envelope with no command name left in it", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "<local-command-stdout>ok</local-command-stdout>",
+        title: "origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "继续",
+        title: "second",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(out).toContain(`T1 ⚖️ G4 ${MILESTONE_NOTIFICATION_MARKER} → origin`);
+  });
+
+  it("renders the grade column in the turns view alongside line/time/gap/stats", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "turns" }));
+
+    expect(out).toContain(TURN_TABLE_HEADER);
+    expect(TURN_TABLE_HEADER.split(" | ")).toEqual([
+      "T#",
+      "line",
+      "time",
+      "gap",
+      "stats",
+      "G",
+      "prompt → title",
+    ]);
+    const row = out.split("\n").find((line) => line.startsWith("T5 |"))!;
+    const cells = row.split(" | ");
+    expect(cells).toHaveLength(7);
+    expect(cells[5]).toBe("G3");
+    // The turn table prints the SAME effGrade the arc view does — T3 was
+    // superseded, so both surfaces show it demoted rather than at its stored 3.
+    expect(out.split("\n").find((line) => line.startsWith("T3 |"))!.split(" | ")[5]).toBe(
+      "G1",
+    );
+  });
+
+  it("prints — in the grade column for a turn with no main-row candidacy", () => {
+    const db = createDatabase(":memory:");
+    const session = seedSession(db);
+    db.query(
+      "UPDATE turns SET type = 'compact', title = '/compact' WHERE session_id = ? AND prompt_number = 21",
+    ).run(session.id);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
+    const row = out.split("\n").find((line) => line.startsWith("T21 |"))!;
+
+    expect(row.split(" | ")[5]).toBe("—");
+  });
+
+  it("caps the prompt prefix by characters and the ✏️ tail by file count", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "长".repeat(120),
+        title: "origin",
+        filesModified: ["a/one.ts", "b/two.ts", "c/three.ts", "d/four.ts", "e/five.ts"],
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p2",
+        title: "end",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const head = unitBlockFor(out, 1)[0]!;
+
+    expect(head).toContain(`${"长".repeat(MILESTONE_PROMPT_PREFIX_CAP)}… → origin`);
+    expect(head).not.toContain("长".repeat(MILESTONE_PROMPT_PREFIX_CAP + 1));
+    // Basenames, capped, with the remainder as a count — the row is a pointer.
+    expect(head).toContain("✏️one.ts,two.ts,three.ts+2");
+  });
+
+  it("truncateToTokens is Han-aware and always terminates", () => {
+    // 1.1 weight per Han code point × 1.2: 20 tokens buys ~15 Han characters,
+    // which is why titleCap alone cannot bound a unit.
+    const han = "锚".repeat(200);
+    expect(estimateDiaryTokens(truncateToTokens(han, 20))).toBeLessThanOrEqual(20);
+    expect(truncateToTokens(han, 20).endsWith("…")).toBe(true);
+    expect(truncateToTokens(han, 20).length).toBeLessThan(han.length);
+    // ASCII of the same token budget fits nearly twice as much text.
+    expect([...truncateToTokens("x".repeat(200), 20)].length).toBeGreaterThan(
+      [...truncateToTokens(han, 20)].length,
+    );
+    // Degenerate budgets return something renderable rather than looping.
+    expect(truncateToTokens(han, 0)).toBe("");
+    expect(truncateToTokens("short", 999)).toBe("short");
+  });
+
+  it("treats titleCap as the char-level cap in every view, defaulting to 100", () => {
+    const db = createDatabase(":memory:");
+    const longTitle = "x".repeat(140);
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "p1",
+        title: longTitle,
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p2",
+        title: longTitle,
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+
+    for (const view of ["milestones", "turns"] as const) {
+      const timelineView = buildTimelineView(db, { id: "S1", view });
+      expect(renderTimeline(timelineView)).toContain(`${"x".repeat(DEFAULT_TITLE_CAP)}…`);
+      expect(renderTimeline(timelineView, { titleCap: 24 })).toContain(
+        `${"x".repeat(24)}…`,
+      );
+      expect(renderTimeline(timelineView, { titleCap: 24 })).not.toContain(
+        "x".repeat(25),
+      );
+    }
+  });
+});
+
+describe("unified row renderer — per-unit hard cap (spec §D)", () => {
+  it("pins the hard cap at 150 tokens", () => {
+    // Pinned as a literal exactly once, here: every other assertion reads the
+    // constant, so without this one line the whole cap suite would happily
+    // re-derive itself from a wrong value. 150 and not 100 because a unit is the
+    // spine row PLUS its ↳ rows — see the constant's own note.
+    expect(MILESTONE_UNIT_TOKEN_CAP).toBe(150);
+  });
+
+  it("lets a spine row keep two ↳ antecedents intact inside the cap", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 5);
+
+    // The 100-token cap could not have fitted this: a full spine row plus two
+    // ~25-32-token antecedents overruns it, so both ↳ rows would have folded
+    // into `+2 前件` and pull-through would have been decorative.
+    expect(block.filter((line) => PULLED_ROW_RE.test(line))).toHaveLength(2);
+    expect(block.join("\n")).not.toContain("前件");
+    expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
+      MILESTONE_UNIT_TOKEN_CAP,
+    );
+    expect(estimateDiaryTokens(block.join("\n"))).toBeGreaterThan(100);
+  });
+
+  it("keeps every render unit inside the hard cap on a real arc", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    for (const block of renderUnitBlocks(out)) {
+      expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
+        MILESTONE_UNIT_TOKEN_CAP,
+      );
+    }
+  });
+
+  it("truncates the desc of an oversized single row instead of dropping the row", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "The origin decision",
+        content: "证据".repeat(600),
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "继续",
+        title: "The follow-up decision",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 1);
+
+    expect(block[0]).toContain("The origin decision");
+    expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
+      MILESTONE_UNIT_TOKEN_CAP,
+    );
+    expect(block.slice(1).join("")).toContain("…"); // desc truncated, not dropped
+  });
+
+  it("terminates on four max-length Han titles by token-truncating the title lines", () => {
+    const db = createDatabase(":memory:");
+    const maxHanTitle = "锚".repeat(DEFAULT_TITLE_CAP + 40);
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      ...[2, 3, 4, 5].map((promptNumber) =>
+        turn({
+          promptNumber,
+          type: "discovery",
+          significanceGrade: 2,
+          userPrompt: `p${promptNumber}`,
+          title: maxHanTitle,
+          createdAtEpoch: ERA_BASE + promptNumber * 60,
+        }),
+      ),
+      turn({
+        promptNumber: 6,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "定稿",
+        title: maxHanTitle,
+        createdAtEpoch: ERA_BASE + 360,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(
+      db,
+      session.id,
+      6,
+      [2, 3, 4, 5].map((promptNumber) => [promptNumber, "evidence-for"]),
+    );
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 6);
+
+    // Termination, not overflow: the unit is inside the hard cap even though
+    // titleCap alone would have allowed 5 × 100 Han characters (~660 tokens).
+    expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
+      MILESTONE_UNIT_TOKEN_CAP,
+    );
+    expect(block[0]).toContain("…"); // token-level title truncation fired
+    // Folding the ↳ rows into the counter is what freed the room for it.
+    expect(block.join("\n")).toContain("↳ +4 前件");
+  });
+
+  it("drops a pathological ✏️ tail rather than let it breach the cap", () => {
+    const db = createDatabase(":memory:");
+    const monstrousBasename = `${"generated-fixture-".repeat(20)}.ts`;
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "feature",
+        significanceGrade: 3,
+        userPrompt: "生成",
+        title: "Generated the fixture set",
+        filesModified: [`src/generated/${monstrousBasename}`],
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 2);
+
+    // Step ⑤ of the ladder: the file count is capped but a basename is not, so a
+    // single generated name can outweigh the row. It goes whole — no half name,
+    // no `+N` stub — and the ⑥ clamp never has to cut the head line.
+    expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
+      MILESTONE_UNIT_TOKEN_CAP,
+    );
+    expect(block[0]).not.toContain("✏️");
+    expect(block[0]).not.toContain("generated-fixture-");
+    expect(block).toHaveLength(1);
+    // The cost of the ladder's order, frozen so it stays visible: ③ and ④ zero
+    // the title and the prefix BEFORE ⑤ reaches the tail, so a row that reaches
+    // step ⑤ arrives there already stripped to its identity columns.
+    expect(block[0]).toBe("      T2 🟣 G3");
+  });
+
+  it("caps rendered ↳ rows at four and folds the rest into +N 前件", () => {
+    const db = createDatabase(":memory:");
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "o",
+        title: "o",
+        createdAtEpoch: ERA_BASE,
+      }),
+      ...[2, 3, 4, 5, 6, 7].map((promptNumber) =>
+        turn({
+          promptNumber,
+          type: "discovery",
+          significanceGrade: 2,
+          userPrompt: "p",
+          title: "a",
+          createdAtEpoch: ERA_BASE + promptNumber * 60,
+        }),
+      ),
+      turn({
+        promptNumber: 8,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p",
+        title: "x",
+        createdAtEpoch: ERA_BASE + 480,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(
+      db,
+      session.id,
+      8,
+      [2, 3, 4, 5, 6, 7].map((promptNumber) => [promptNumber, "evidence-for"]),
+    );
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+    const block = unitBlockFor(out, 8);
+
+    expect(block.filter((line) => PULLED_ROW_RE.test(line) && !line.includes("前件")))
+      .toHaveLength(MILESTONE_UNIT_PULLED_CAP);
+    expect(block.join("\n")).toContain("↳ +2 前件");
+  });
+
+  it("never renders a turn twice: a kept G2 row is a main row, not also a ↳ row", () => {
+    const db = createDatabase(":memory:");
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        significanceGrade: 2,
+        userPrompt: "p1",
+        title: "the endpoint that is also an antecedent",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p2",
+        title: "cites the endpoint",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(db, session.id, 2, [[1, "evidence-for"]]);
+
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const out = renderTimeline(view);
+
+    // T1 is a window endpoint, so it holds a main row despite being G2 and cited.
+    expect(spinePromptNumbers(out)).toContain(1);
+    expect(pulledPromptNumbers(out)).not.toContain(1);
+    expect(view.milestonePulled).toHaveLength(0);
+  });
+});
+
+/**
+ * Two spine rows consume one shared antecedent. T4 carries more tool calls than
+ * T3, so the rank comparator puts T4 ahead — which makes T3, the EARLIER citer
+ * and the antecedent's initial home, the first unit a budget removes.
+ */
+function seedSharedAntecedentArc(db: Database) {
+  const rows = [
+    turn({
+      promptNumber: 1,
+      type: "decision",
+      significanceGrade: 4,
+      userPrompt: "开题",
+      title: "arc origin",
+      content: "origin desc ".repeat(4),
+      createdAtEpoch: ERA_BASE,
+    }),
+    turn({
+      promptNumber: 2,
+      type: "discovery",
+      significanceGrade: 2,
+      userPrompt: "取证",
+      title: "shared evidence",
+      content: "evidence desc ".repeat(4),
+      createdAtEpoch: ERA_BASE + 60,
+    }),
+    turn({
+      promptNumber: 3,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "第一处消费",
+      title: "first consumer",
+      content: "first consumer desc ".repeat(4),
+      toolCallCount: 0,
+      createdAtEpoch: ERA_BASE + 120,
+    }),
+    turn({
+      promptNumber: 4,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "第二处消费",
+      title: "second consumer",
+      content: "second consumer desc ".repeat(4),
+      toolCallCount: 9,
+      createdAtEpoch: ERA_BASE + 180,
+    }),
+    turn({
+      promptNumber: 5,
+      type: "change",
+      significanceGrade: 1,
+      userPrompt: "杂活",
+      title: "dispatch chore",
+      createdAtEpoch: ERA_BASE + 240,
+    }),
+    turn({
+      promptNumber: 6,
+      type: "feature",
+      significanceGrade: 2,
+      userPrompt: "发布",
+      title: "shipped",
+      content: "release desc ".repeat(4),
+      tags: ["release"],
+      filesModified: ["package.json", ".claude-plugin/plugin.json"],
+      createdAtEpoch: ERA_BASE + 300,
+    }),
+  ];
+  const session = seedArcSession(db, rows);
+  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+  return session;
+}
+
+/**
+ * A cross-day arc whose only antecedent lives on a day that owns no main row:
+ * T2 is skipped (so it is no main-row candidate at all) and is cited by T3 and
+ * T4, both of which sit on a later day and are both removable. Remove them and
+ * T2 has nowhere to render — and no day group of its own to be counted in.
+ */
+function seedOrphanDayArc(db: Database) {
+  const day = 86_400;
+  const rows = [
+    turn({
+      promptNumber: 1,
+      type: "decision",
+      significanceGrade: 4,
+      userPrompt: "开题",
+      title: "arc origin",
+      content: "origin desc ".repeat(4),
+      createdAtEpoch: ERA_BASE,
+    }),
+    turn({
+      promptNumber: 2,
+      type: "discovery",
+      significanceGrade: 2,
+      status: "skipped",
+      userPrompt: "取证",
+      title: "cross-day evidence",
+      createdAtEpoch: ERA_BASE + day,
+    }),
+    turn({
+      promptNumber: 3,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "第一处消费",
+      title: "first consumer",
+      content: "first consumer desc ".repeat(4),
+      toolCallCount: 0,
+      createdAtEpoch: ERA_BASE + 2 * day,
+    }),
+    turn({
+      promptNumber: 4,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "第二处消费",
+      title: "second consumer",
+      content: "second consumer desc ".repeat(4),
+      toolCallCount: 9,
+      createdAtEpoch: ERA_BASE + 2 * day + 60,
+    }),
+    turn({
+      promptNumber: 5,
+      type: "decision",
+      significanceGrade: 3,
+      userPrompt: "收尾",
+      title: "closing decision",
+      content: "closing desc ".repeat(4),
+      createdAtEpoch: ERA_BASE + 2 * day + 120,
+    }),
+  ];
+  const session = seedArcSession(db, rows);
+  citeTurns(db, session.id, 3, [[2, "evidence-for"]]);
+  citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+  return session;
+}
+
+const LONG_ARC_MAIN_ROWS = 900;
+
+/**
+ * A long session shaped like the one the SessionStart injection actually meets:
+ * 900 main rows spread over a month, every sixth one an anchor the budget may
+ * not drop, and a skipped antecedent every tenth row so the fitter has real
+ * re-homing work to do as it removes citers.
+ */
+function seedLongArcSession(db: Database) {
+  const rows: TurnRecord[] = [];
+  const antecedentOf = new Map<number, number>();
+  let promptNumber = 0;
+  let epoch = ERA_BASE;
+
+  for (let index = 0; index < LONG_ARC_MAIN_ROWS; index += 1) {
+    if (index % 10 === 9) {
+      promptNumber += 1;
+      epoch += 300;
+      rows.push(
+        turn({
+          promptNumber,
+          type: "discovery",
+          significanceGrade: 2,
+          status: "skipped",
+          userPrompt: `证据 ${promptNumber}`,
+          title: `evidence sample ${promptNumber} for the slicing survey`,
+          createdAtEpoch: epoch,
+        }),
+      );
+      antecedentOf.set(promptNumber + 1, promptNumber);
+    }
+    promptNumber += 1;
+    epoch += 300;
+    const anchor = index % 6 === 0;
+    rows.push(
+      turn({
+        promptNumber,
+        type: anchor ? "decision" : "feature",
+        significanceGrade: anchor ? 4 : 3,
+        userPrompt: `第 ${promptNumber} 轮的提问，问题描述有一点长`,
+        title: `Decision ${promptNumber}: locked the slicing rule for this batch`,
+        content: `Weighed the alternatives for batch ${promptNumber} and recorded why the cursor form wins. `.repeat(
+          3,
+        ),
+        toolCallCount: index % 7,
+        filesModified: [`src/batch/${promptNumber}.ts`, `tests/batch/${promptNumber}.test.ts`],
+        createdAtEpoch: epoch,
+      }),
+    );
+  }
+
+  const session = seedArcSession(db, rows);
+  for (const [citing, cited] of antecedentOf) {
+    citeTurns(db, session.id, citing, [[cited, "evidence-for"]]);
+  }
+  return session;
+}
+
+describe("unified row renderer — global token budget (spec §D)", () => {
+  it("is off by default: MCP views are bounded by pagination alone", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const out = renderTimeline(view);
+
+    expect(spinePromptNumbers(out)).toEqual(
+      view.pagedMilestones.map((milestone) => milestone.turn.promptNumber),
+    );
+    expect(out).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
+    // Every unit still carries its desc.
+    for (const block of renderUnitBlocks(out)) {
+      expect(block.length).toBeGreaterThan(1);
+    }
+  });
+
+  it("degrades desc before removing anything, lowest-ranked unit first", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = renderTimeline(view);
+    const lowest = [...view.pagedMilestones].sort(compareMilestoneRank).reverse()[0]!;
+    const highest = [...view.pagedMilestones].sort(compareMilestoneRank)[0]!;
+
+    const tightened = renderTimeline(view, {
+      tokenBudget: estimateDiaryTokens(full) - 1,
+    });
+
+    expect(spinePromptNumbers(tightened)).toEqual(spinePromptNumbers(full));
     expect(
-      parseContentReferences("[T8075, T9824]", MILESTONE_REFERENCE_PARSE_CAP),
-    ).toEqual([8075, 9824]);
+      unitBlockFor(tightened, lowest.turn.promptNumber).filter(
+        (line) => !PULLED_ROW_RE.test(line),
+      ),
+    ).toHaveLength(1);
+    expect(
+      unitBlockFor(tightened, highest.turn.promptNumber).length,
+    ).toBeGreaterThan(1);
+  });
+
+  it("removes the lowest-ranked removable unit first and conserves it into +N more", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = renderTimeline(view);
+    const allRows = spinePromptNumbers(full);
+
+    let firstDrop: { output: string; missing: number[] } | null = null;
+    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
+      const output = renderTimeline(view, { tokenBudget: budget });
+      const rows = spinePromptNumbers(output);
+      if (rows.length < allRows.length) {
+        firstDrop = {
+          output,
+          missing: allRows.filter((promptNumber) => !rows.includes(promptNumber)),
+        };
+        break;
+      }
+    }
+
+    expect(firstDrop).not.toBeNull();
+    // T3 and T4 are both G3; T4 has more tool calls, so the tie-break ranks T4
+    // higher and T3 is the first unit the budget gives up.
+    expect(firstDrop!.missing).toEqual([3]);
+    expect(hiddenTurnTotal(firstDrop!.output)).toBe(hiddenTurnTotal(full) + 1);
+  });
+
+  it("re-homes a shared antecedent onto the earliest retained citer", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = renderTimeline(view);
+
+    // Before any removal, the shared antecedent sits under its earliest citer.
+    expect(unitBlockFor(full, 3).join("\n")).toContain("↳ T2");
+    expect(unitBlockFor(full, 4).join("\n")).not.toContain("↳ T2");
+
+    let rehomed: string | null = null;
+    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
+      const output = renderTimeline(view, { tokenBudget: budget });
+      if (!spinePromptNumbers(output).includes(3)) {
+        rehomed = output;
+        break;
+      }
+    }
+
+    expect(rehomed).not.toBeNull();
+    expect(unitBlockFor(rehomed!, 4).join("\n")).toContain("↳ T2");
+    expect(pulledPromptNumbers(rehomed!)).toContain(2);
+  });
+
+  it("folds an antecedent with no retained citer left back into +N more", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const candidateTotal =
+      view.pagedMilestones.length +
+      view.milestonePulled.length +
+      hiddenTurnTotal(renderTimeline(view));
+
+    const starved = renderTimeline(view, { tokenBudget: 40 });
+
+    // Both citers of T2 are gone, so T2 renders nowhere and is counted hidden.
+    expect(spinePromptNumbers(starved)).not.toContain(3);
+    expect(spinePromptNumbers(starved)).not.toContain(4);
+    expect(pulledPromptNumbers(starved)).not.toContain(2);
+    // Conservation: every candidate turn is still accounted for by exactly one
+    // of the four buckets — a main row, a ↳ row, a fold counter, or `+N more`.
+    expect(
+      spinePromptNumbers(starved).length +
+        pulledPromptNumbers(starved).length +
+        foldedAntecedentTotal(starved) +
+        hiddenTurnTotal(starved),
+    ).toBe(candidateTotal);
+  });
+
+  it("counts an orphaned antecedent whose day has no rendered rows of its own", () => {
+    const db = createDatabase(":memory:");
+    seedOrphanDayArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = renderTimeline(view);
+
+    // Precondition: T2's day owns no main row, so at full budget it renders only
+    // as a ↳ row under its earliest citer and its day has no group at all.
+    expect(pulledPromptNumbers(full)).toEqual([2]);
+    expect(dayHeaderLines(full)).toHaveLength(2);
+    const candidateTotal =
+      view.pagedMilestones.length +
+      view.milestonePulled.length +
+      hiddenTurnTotal(full);
+
+    const starved = renderTimeline(view, { tokenBudget: 60 });
+
+    // Both citers are gone, so T2 renders nowhere — and the day it belongs to
+    // gets a header of its own purely to carry the count.
+    expect(spinePromptNumbers(starved)).not.toContain(3);
+    expect(spinePromptNumbers(starved)).not.toContain(4);
+    expect(pulledPromptNumbers(starved)).not.toContain(2);
+    expect(dayHeaderLines(starved)).toHaveLength(3);
+    expect(starved).toContain(
+      '… +1 more → timeline(id="S1", view="turns") @ within T2..T2',
+    );
+    // Conservation: kept + pulled + folded + hidden still equals the candidate
+    // total, which is exactly what a lost orphan would have broken.
+    expect(
+      spinePromptNumbers(starved).length +
+        pulledPromptNumbers(starved).length +
+        foldedAntecedentTotal(starved) +
+        hiddenTurnTotal(starved),
+    ).toBe(candidateTotal);
+  });
+
+  it("degrades but never removes an always-keep unit, and notes the overrun", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const anchors = view.pagedMilestones
+      .filter((milestone) => milestone.alwaysKeep)
+      .map((milestone) => milestone.turn.promptNumber);
+    expect(anchors.length).toBeGreaterThan(0);
+
+    const starved = renderTimeline(view, { tokenBudget: 1 });
+
+    expect(spinePromptNumbers(starved)).toEqual(anchors);
+    expect(starved).toContain(MILESTONE_OVER_BUDGET_NOTE);
+    // Anchors are rendered, just stripped back to title-only.
+    for (const promptNumber of anchors) {
+      expect(unitBlockFor(starved, promptNumber).filter(
+        (line) => !PULLED_ROW_RE.test(line),
+      )).toHaveLength(1);
+    }
+  });
+
+  it("fits a 900-row page in linear time, not quadratic", () => {
+    const db = createDatabase(":memory:");
+    seedLongArcSession(db);
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "milestones",
+      // What the SessionStart injection asks for: one page, every row on it.
+      pageSize: Number.MAX_SAFE_INTEGER,
+    });
+    expect(view.pagedMilestones.length).toBe(LONG_ARC_MAIN_ROWS);
+    expect(view.pagedMilestones.filter((m) => m.alwaysKeep).length).toBeGreaterThan(140);
+
+    const started = Bun.nanoseconds();
+    const out = renderTimeline(view, { tokenBudget: 2_500 });
+    const elapsedMs = (Bun.nanoseconds() - started) / 1_000_000;
+
+    // Deliberately generous: the point is to fail loudly if the fitter ever goes
+    // back to re-rendering and re-measuring the whole page on every degradation
+    // step (which is ~1.6s here), not to police a few hundred milliseconds.
+    expect(elapsedMs).toBeLessThan(1_500);
+    // This budget cannot hold 150 anchors, so the run walks the ENTIRE ladder —
+    // every desc off, every removable unit gone — and still ends over budget.
+    // That is the worst case by construction, and the anchors survive it.
+    expect(out).toContain(MILESTONE_OVER_BUDGET_NOTE);
+    const survivors = new Set(spinePromptNumbers(out));
+    for (const anchor of view.pagedMilestones.filter((m) => m.alwaysKeep)) {
+      expect(survivors.has(anchor.turn.promptNumber)).toBe(true);
+    }
+    expect(survivors.size).toBe(
+      view.pagedMilestones.filter((m) => m.alwaysKeep).length,
+    );
+  });
+
+  it("never silently overruns any budget on the way down", () => {
+    const db = createDatabase(":memory:");
+    seedSharedAntecedentArc(db);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = estimateDiaryTokens(renderTimeline(view));
+
+    // The fitter prices each step with its own incremental token weight and only
+    // confirms a stop with `estimateDiaryTokens`. If those two ever drift apart
+    // — a changed weight in diary/domain.ts, a body line the model forgets to
+    // price — the search stops early and the output quietly exceeds the budget.
+    for (let budget = 1; budget <= full + 5; budget += 7) {
+      const out = renderTimeline(view, { tokenBudget: budget });
+      if (estimateDiaryTokens(out) > budget) {
+        // The one sanctioned overrun: anchors that cannot be cut any further.
+        expect(out).toContain(MILESTONE_OVER_BUDGET_NOTE);
+      }
+    }
+  });
+
+  it("orders equal-score rows stably by tool count then prompt number", () => {
+    const left = {
+      turn: { toolCallCount: 3, promptNumber: 10 },
+      score: 3,
+    } as unknown as KeptMilestone;
+    const right = {
+      turn: { toolCallCount: 3, promptNumber: 4 },
+      score: 3,
+    } as unknown as KeptMilestone;
+    const busier = {
+      turn: { toolCallCount: 9, promptNumber: 99 },
+      score: 3,
+    } as unknown as KeptMilestone;
+
+    expect([left, right, busier].sort(compareMilestoneRank)).toEqual([
+      busier,
+      right,
+      left,
+    ]);
+    // Degradation walks this order backwards, so the later prompt goes first.
+    expect([left, right, busier].sort(compareMilestoneRank).reverse()[0]).toBe(left);
+  });
+});
+
+describe("unified row renderer — view preservation matrix (spec §D)", () => {
+  it("keeps the three view names and their bodies distinct", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const views = (["turns", "milestones", "phases"] as const).map((view) => ({
+      view,
+      out: renderTimeline(buildTimelineView(db, { id: "S1", view })),
+    }));
+
+    for (const { view, out } of views) {
+      // Shape signals survive on every view.
+      expect(out).toContain("shape signals (window T1-T6");
+      if (view === "turns") {
+        expect(out).toContain(TURN_TABLE_HEADER);
+      } else {
+        expect(out).not.toContain(TURN_TABLE_HEADER);
+      }
+      if (view === "phases") {
+        expect(out).toContain("# | date | type | turns | span | work | lead title");
+      } else {
+        expect(out).not.toContain("# | date | type | turns | span | work | lead title");
+      }
+    }
+  });
+
+  it("counts main rows against pageSize; ↳ rows ride along without a page slot", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const view = buildTimelineView(db, {
+      id: "S1",
+      view: "milestones",
+      pageSize: 2,
+    });
+    const out = renderTimeline(view);
+
+    expect(view.pageSize).toBe(2);
+    expect(view.pageCount).toBe(2);
+    expect(spinePromptNumbers(out)).toHaveLength(2);
+    // Both of T5's antecedents render on this page anyway.
+    expect(pulledRowLines(out).length).toBeGreaterThan(0);
+  });
+
+  it("renders +N more as a sparse min..max, not a contiguous range", () => {
+    const db = createDatabase(":memory:");
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "p1",
+        title: "origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      ...[2, 3, 4].map((promptNumber) =>
+        turn({
+          promptNumber,
+          type: "change",
+          significanceGrade: 1,
+          userPrompt: `p${promptNumber}`,
+          title: `chore ${promptNumber}`,
+          createdAtEpoch: ERA_BASE + promptNumber * 60,
+        }),
+      ),
+      turn({
+        promptNumber: 5,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p5",
+        title: "mid decision",
+        createdAtEpoch: ERA_BASE + 300,
+      }),
+      turn({
+        promptNumber: 6,
+        type: "change",
+        significanceGrade: 1,
+        userPrompt: "p6",
+        title: "chore 6",
+        createdAtEpoch: ERA_BASE + 360,
+      }),
+      turn({
+        promptNumber: 7,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "p7",
+        title: "end",
+        createdAtEpoch: ERA_BASE + 420,
+      }),
+    ];
+    seedArcSession(db, rows);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    // Hidden turns are T2, T3, T4, T6 — sparse, so the hint reports bounds.
+    expect(out).toContain(
+      '… +4 more → timeline(id="S1", view="turns") @ within T2..T6',
+    );
+    expect(out).not.toContain("@ T2–T6");
+  });
+
+  it("keeps titleCap and tokenBudget out of the public MCP schema", () => {
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", titleCap: 100 }),
+    ).toThrow();
+    expect(() =>
+      timelineInputSchema.parse({ id: "S42", tokenBudget: 2500 }),
+    ).toThrow();
+  });
+});
+
+describe("unified row renderer — frozen shapes", () => {
+  const bodyRows = (output: string): string[] =>
+    output
+      .split("\n")
+      .filter(
+        (line) =>
+          SPINE_ROW_RE.test(line) ||
+          PULLED_ROW_RE.test(line) ||
+          OVERFLOW_HINT_RE.test(line),
+      );
+
+  it("design-iteration arc with a supersession", () => {
+    const db = createDatabase(":memory:");
+    seedDesignArc(db);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(bodyRows(out)).toEqual([
+      "      T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem  ✏️slicing.md",
+      "      T5 ⚖️ G3 没有卷数怎么办 → Cursor slicing",
+      "      ↳ T2 🔵 G2 12-14% error",
+      "      ↳ 🚫 T3 ⚖️ G1 Volume anchoring →被T5推翻",
+      "   🏁 T6 🟣 G2 发布 → 0.9.0 released  ✏️package.json,plugin.json",
+      '        … +1 more → timeline(id="S1", view="turns") @ within T4..T4',
+    ]);
+  });
+
+  it("research shape with notification prompts", () => {
+    const db = createDatabase(":memory:");
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "调研一下三种切分方案",
+        title: "Opened the slicing survey",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "discovery",
+        significanceGrade: 2,
+        userPrompt: "<task-notification>worker A done</task-notification>",
+        title: "Worker A: cursor slicing wins on recall",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "discovery",
+        significanceGrade: 1,
+        userPrompt: "<task-notification>worker B done</task-notification>",
+        title: "Worker B: inconclusive",
+        createdAtEpoch: ERA_BASE + 120,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "<task-notification>worker C done</task-notification>",
+        title: "Picked cursor slicing on the survey evidence",
+        createdAtEpoch: ERA_BASE + 180,
+      }),
+    ];
+    const session = seedArcSession(db, rows);
+    citeTurns(db, session.id, 4, [[2, "evidence-for"]]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(bodyRows(out)).toEqual([
+      "      T1 ⚖️ G4 调研一下三种切分方案 → Opened the slicing survey",
+      "      T4 ⚖️ G3 ⟨notify⟩ → Picked cursor slicing on the survey evidence",
+      "      ↳ T2 🔵 G2 Worker A: cursor slicing wins on recall",
+      '        … +1 more → timeline(id="S1", view="turns") @ within T3..T3',
+    ]);
+  });
+
+  it("legacy pre-era session with inline citations and no stored grades", () => {
+    const db = createDatabase(":memory:");
+    const preEra = 1_779_782_400;
+    const rows = [
+      turn({
+        promptNumber: 1,
+        type: "discovery",
+        userPrompt: "先看看现状",
+        title: "surveyed the loader",
+        createdAtEpoch: preEra,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "decision",
+        userPrompt: "就这么定",
+        title: "legacy decision",
+        createdAtEpoch: preEra + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "feature",
+        userPrompt: "实现",
+        title: "legacy feature",
+        filesModified: ["src/loader.ts"],
+        createdAtEpoch: preEra + 120,
+      }),
+    ];
+    // No seedArcSession here on purpose: `cites_recorded` stays 0, so the
+    // legacy inline `[T<n>]` grammar is the citation source.
+    const session = seedTimelineSession(db, rows);
+    db.query(
+      "UPDATE turns SET content = ? WHERE session_id = ? AND prompt_number = 2",
+    ).run(`Builds on [T${turnDbId(db, session.id, 1)}].`, session.id);
+
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(bodyRows(out)).toEqual([
+      "      T1 🔵 G1 先看看现状 → surveyed the loader",
+      "      T2 ⚖️ G3 就这么定 → legacy decision",
+      "      T3 🟣 G2 实现 → legacy feature  ✏️loader.ts",
+    ]);
+    // A legacy grade never reaches 4: it can never claim the anchor tier.
+    expect(out).not.toContain("G4");
   });
 });

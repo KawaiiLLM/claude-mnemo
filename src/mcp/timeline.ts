@@ -6,7 +6,9 @@ import {
 } from "../db/citations";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
+import { estimateDiaryTokens } from "../diary/domain";
 import { resolveTranscriptPath } from "../shared/paths";
+import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 
 export interface TimelineInput {
@@ -45,6 +47,12 @@ export interface TimelineView {
    * milestones view.
    */
   milestonePulled: PulledAntecedent[];
+  /**
+   * effGrade per turn DB id (spec §C truth table, after victim demotion and
+   * corrector promotion), so every view can print the grade column. Turns with
+   * no main-row candidacy at all (compact markers) are absent.
+   */
+  turnEffGrades: ReadonlyMap<number, number>;
   milestoneDayGroups: MilestoneDayGroup[];
   pagedPhases: Phase[];
   viewItemTotal: number;
@@ -65,6 +73,22 @@ export interface TimelineView {
 export interface RenderTimelineOptions {
   promptCap?: number;
   showEarlierHint?: boolean;
+  /**
+   * Character ceiling on any rendered title, in every view (spec §D). Replaces
+   * the old per-view 80/90-char constants. NOT part of the public MCP schema:
+   * the tool surface sizes itself by pagination alone, and this knob exists for
+   * the SessionStart injection.
+   */
+  titleCap?: number;
+  /**
+   * Whole-output token budget (spec §D). Left undefined — which is what every
+   * MCP view does — the renderer emits the full page and only pagination bounds
+   * it. Set, the milestones body degrades lowest-score render units first
+   * (desc → title-only → drop the unit) until the output fits; always-keep units
+   * degrade but are never dropped, so an anchor-only set that still overruns is
+   * rendered in full with one overflow note appended.
+   */
+  tokenBudget?: number;
 }
 
 export interface SystemTimezoneSource {
@@ -78,22 +102,52 @@ export interface SystemTimezoneSource {
 
 export const DEFAULT_TIMELINE_PAGE_SIZE = 30;
 export const PROMPT_COLUMN_CAP = 100;
-export const TITLE_COLUMN_CAP = 80;
 export const BROKEN_PROMPT_MIN_PREFIX = 20;
 export const BROKEN_PROMPT_MAX_GAP_MS = 5 * 60 * 1000;
 export const TOOL_BURST_TOP_N = 3;
 
-export const MILESTONE_TITLE_CAP = 90;
-/** Max causal references rendered as sub-lines under a single milestone. */
-export const MILESTONE_REFERENCE_CAP = 2;
 /**
- * Max raw `[T<n>]` candidates parsed out of one milestone's content before
- * validation. Higher than the display cap so that invalid leading refs
- * (cross-session, self/future, missing) don't crowd out valid predecessors —
- * the resolver validates these candidates and keeps the first
- * `MILESTONE_REFERENCE_CAP` that survive. Bounds work on pathological content.
+ * Default for `RenderTimelineOptions.titleCap` — the single character ceiling on
+ * a rendered title, shared by every view (spec §D). The old split caps (80 in the
+ * turn table, 90 in the milestone digest, and a 50-char injection-only stage) cut
+ * real titles mid-clause: measured title P50 is 72 characters.
  */
-export const MILESTONE_REFERENCE_PARSE_CAP = 8;
+export const DEFAULT_TITLE_CAP = 100;
+
+/**
+ * Hard per-render-unit token ceiling (spec §D). A unit is one spine row plus the
+ * `↳` antecedents homed under it; `estimateDiaryTokens` measures it. This is a
+ * ceiling, not a quota — a full spine row costs about 70-85 tokens.
+ *
+ * 150 and not 100: the earlier 100 was estimated off the spine row ALONE and
+ * forgot that the `↳` rows count against the same unit. A 70-88-token spine row
+ * plus even one 25-32-token antecedent already breaches 100, so every unit that
+ * pulled anything would have folded its antecedents away and the pull-through
+ * mechanism would have been decorative. 150 lets "spine + 2 antecedents" survive
+ * intact; total output size stays bounded by the global `tokenBudget`.
+ */
+export const MILESTONE_UNIT_TOKEN_CAP = 150;
+/** Max `↳` rows rendered under one spine row; the rest fold into `↳ +N 前件`. */
+export const MILESTONE_UNIT_PULLED_CAP = 4;
+/**
+ * Character budget for the user-prompt prefix carried on a spine row. Kept well
+ * under the title cap on purpose: the prefix is a turn-of-phrase signal, and the
+ * unit's token cap sacrifices the TITLE before the prefix, so a generous prefix
+ * would let the user's opening words crowd out the conclusion they led to.
+ */
+export const MILESTONE_PROMPT_PREFIX_CAP = 32;
+/** Max `✏️` basenames on a spine row before the tail collapses to `+N`. */
+export const MILESTONE_FILE_BASENAME_CAP = 3;
+/** What a harness-injected prompt (task notification, command envelope) collapses to. */
+export const MILESTONE_NOTIFICATION_MARKER = "⟨notify⟩";
+/**
+ * Appended when the always-keep units alone overrun `tokenBudget`. Anchors are
+ * never dropped silently: the reader is told the budget was exceeded instead.
+ */
+export const MILESTONE_OVER_BUDGET_NOTE =
+  "  ⚠ over budget: anchor rows kept in full";
+const MILESTONE_DESC_INDENT = "        ";
+const MILESTONE_DESC_WRAP_CHARS = 92;
 
 export const OUTCOME_TAGS = new Set([
   "merged",
@@ -212,22 +266,6 @@ export interface ShapeSignals {
   externalInputs: Array<{ promptNumber: number; source: string }>;
 }
 
-/**
- * A causal reference cited in a milestone's `content` as `[T<dbid>]`, resolved
- * to its driver turn. The renderer shows these as indented `↳` sub-lines so the
- * "why" rides on the marker rather than competing for a per-day milestone slot.
- * Resolution is done in the query layer (where `db` is available); the renderer
- * stays pure and only formats the pre-resolved data.
- */
-export interface CitedReference {
-  /** The driver's user-facing prompt number (for display). */
-  promptNumber: number;
-  /** The driver's title (already resolved; truncated at render time). */
-  title: string;
-  /** The driver's milestone marker, used to flag a rolled-back/invalidated cause. */
-  marker: MilestoneMarker;
-}
-
 export interface KeptMilestone {
   turn: TurnRecord;
   /** effGrade + tie-break (spec §C). Ordering only; never crosses a grade tier. */
@@ -245,17 +283,6 @@ export interface KeptMilestone {
    * window endpoint); the renderer turns it into the `→被T<n>推翻` back-link.
    */
   supersededBy?: number[];
-  /**
-   * Resolved causal references parsed from `turn.content` (`[T<dbid>]`), ≤2.
-   * Populated in the query layer via `resolveMilestoneReferences`; absent (or
-   * empty) when the milestone cites nothing resolvable in-session.
-   *
-   * INTERIM: this is the pre-redesign ↳ path that the current renderer still
-   * consumes. `MilestoneSelection.pulled` is the systematic replacement (spec
-   * §C ⑤); the unified row renderer (ticket 03) switches over and this field
-   * goes away with it.
-   */
-  references?: CitedReference[];
 }
 
 /**
@@ -271,6 +298,14 @@ export interface PulledAntecedent {
    * citer among the kept rows, so a shared antecedent appears exactly once.
    */
   citedByPromptNumber: number;
+  /**
+   * EVERY kept main row that cites this antecedent, ascending — `citedByPromptNumber`
+   * is just the first. The renderer needs the full list because dropping a unit
+   * under a token budget must re-home that unit's shared antecedents onto the
+   * earliest still-rendered citer (spec §D); with only the earliest citer stored,
+   * an antecedent cited three times would vanish the moment its first citer went.
+   */
+  citerPromptNumbers: number[];
   /**
    * Render-ready one-line label: the stored title when there is one, else a
    * ≤`MILESTONE_PULLED_LABEL_CAP`-char prefix of the user prompt. Existing
@@ -306,6 +341,13 @@ export interface MilestoneSelection {
   /** ↳ antecedents pulled in by the kept rows, in citer order then cite order. */
   pulled: PulledAntecedent[];
   overflowByDay: OverflowHint[];
+  /**
+   * effGrade for EVERY main-row candidate in the window, keyed by DB id — the
+   * post-demotion/post-promotion value, not the stored grade. The turns view
+   * renders a grade column off this, so its `G` cell agrees with the arc view
+   * instead of re-deriving a raw grade that a supersession has already voided.
+   */
+  effGradeByTurnId: Map<number, number>;
 }
 
 export interface MilestoneDayGroup {
@@ -332,6 +374,11 @@ export const TYPE_EMOJI_MAP: Record<string, string> = {
 
 export const PENDING_EMOJI = "⏳";
 const MISSING_LINE_ANCHOR = "—";
+const MISSING_GRADE_CELL = "—";
+
+/** Turn-table column set. `G` is the grade column the arc view also renders. */
+export const TURN_TABLE_HEADER =
+  "T# | line | time | gap | stats | G | prompt → title";
 
 function typeEmoji(type: string | null): string {
   if (type === null) return PENDING_EMOJI;
@@ -512,14 +559,26 @@ export function resolveWindow(
   throw new Error(`Unknown range kind: ${(range as { kind: string }).kind}`);
 }
 
+/**
+ * The `/name` inside a slash-command envelope, or null when there is none.
+ * Shared by the turn table and the arc rows so a `/compact`-style prompt reads
+ * the same on both surfaces: the envelope is harness-injected XML, but the
+ * command name inside it IS what the user typed and must survive the
+ * injected-content collapse.
+ */
+export function extractCommandName(raw: string): string | null {
+  const match = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
+  return match ? match[1]!.trim() : null;
+}
+
 export function cleanPromptForLabel(raw: string | null): string {
   if (raw === null) {
     return "";
   }
 
-  const commandName = raw.match(/<command-name>\s*([^<]+?)\s*<\/command-name>/);
-  if (commandName) {
-    return commandName[1].trim();
+  const commandName = extractCommandName(raw);
+  if (commandName !== null) {
+    return commandName;
   }
 
   const stripped = raw
@@ -1294,6 +1353,24 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
 }
 
 /**
+ * The one retention ordering, best first: score, then tool count, then the
+ * earlier prompt (spec §C tie-break). `MilestoneSelection.ranked` sorts with it
+ * and the renderer's budget degrades in its reverse, so "least valuable" means
+ * exactly one thing across selection and rendering — and equal-score rows keep a
+ * stable order instead of drifting with page position.
+ */
+export function compareMilestoneRank(
+  left: KeptMilestone,
+  right: KeptMilestone,
+): number {
+  if (left.score !== right.score) return right.score - left.score;
+  const leftTools = left.turn.toolCallCount ?? 0;
+  const rightTools = right.turn.toolCallCount ?? 0;
+  if (leftTools !== rightTools) return rightTools - leftTools;
+  return left.turn.promptNumber - right.turn.promptNumber;
+}
+
+/**
  * Grade-first milestone selection (spec §C). The six steps run in this order and
  * the order is load-bearing:
  *
@@ -1337,7 +1414,13 @@ export function selectMilestoneTurns(view: {
     (turn) => turn.status !== "skipped" && turn.type !== "compact",
   );
   if (seq.length === 0) {
-    return { kept: [], ranked: [], pulled: [], overflowByDay: [] };
+    return {
+      kept: [],
+      ranked: [],
+      pulled: [],
+      overflowByDay: [],
+      effGradeByTurnId: new Map(),
+    };
   }
 
   const citations = view.citations ?? inlineCitationFallback(universe);
@@ -1426,25 +1509,30 @@ export function selectMilestoneTurns(view: {
     }
   }
 
-  const ranked = [...poolRows].sort((left, right) => {
-    if (left.score !== right.score) return right.score - left.score;
-    const leftTools = left.turn.toolCallCount ?? 0;
-    const rightTools = right.turn.toolCallCount ?? 0;
-    if (leftTools !== rightTools) return rightTools - leftTools;
-    return left.turn.promptNumber - right.turn.promptNumber;
-  });
+  const ranked = [...poolRows].sort(compareMilestoneRank);
 
   // ⑤ pull-through. Rows are already in prompt order, so the first row to claim
   // an antecedent IS its earliest citer — a shared antecedent renders once.
   const pulled: PulledAntecedent[] = [];
   const pulledIds = new Set<number>();
+  const pulledByTurnId = new Map<number, PulledAntecedent>();
   for (const row of rows) {
     const entry = citations.get(row.turn.id);
     if (entry === undefined) {
       continue;
     }
     for (const citedTurnId of entry.citedTurnIds) {
-      if (pulledIds.has(citedTurnId) || keptIds.has(citedTurnId)) {
+      if (keptIds.has(citedTurnId)) {
+        continue;
+      }
+      const already = pulledByTurnId.get(citedTurnId);
+      if (already !== undefined) {
+        // Second and later citers of the same antecedent: the ↳ row still
+        // renders once, under the earliest citer, but the renderer needs the
+        // whole citer list to re-home it when that citer is dropped.
+        if (!already.citerPromptNumbers.includes(row.turn.promptNumber)) {
+          already.citerPromptNumbers.push(row.turn.promptNumber);
+        }
         continue;
       }
       const cited = universeById.get(citedTurnId);
@@ -1462,13 +1550,16 @@ export function selectMilestoneTurns(view: {
         continue;
       }
       pulledIds.add(citedTurnId);
-      pulled.push({
+      const antecedent: PulledAntecedent = {
         turn: cited,
         effGrade,
         citedByPromptNumber: row.turn.promptNumber,
+        citerPromptNumbers: [row.turn.promptNumber],
         label: pulledAntecedentLabel(cited),
         supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? []),
-      });
+      };
+      pulled.push(antecedent);
+      pulledByTurnId.set(citedTurnId, antecedent);
     }
   }
 
@@ -1497,7 +1588,12 @@ export function selectMilestoneTurns(view: {
     });
   }
 
-  return { kept: rows, ranked, pulled, overflowByDay };
+  const effGradeByTurnId = new Map<number, number>();
+  for (const turn of seq) {
+    effGradeByTurnId.set(turn.id, effGradeOf(turn));
+  }
+
+  return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
 }
 
 /**
@@ -1517,99 +1613,26 @@ function pulledAntecedentLabel(turn: TurnRecord): string {
 }
 
 /**
- * Parses inline DB-id causal references out of a milestone's content, in order,
- * de-duplicated, capped at `MILESTONE_REFERENCE_CAP`. These are DB turn ids (the
- * agent's id space, the same id passed to `remember()`), NOT user-facing prompt
- * numbers — the caller resolves them via `getTurnById` and maps id → prompt
- * number for display.
+ * Parses inline DB-id causal references out of a turn's content, in order,
+ * de-duplicated, capped at `cap`. These are DB turn ids (the agent's id space,
+ * the same id passed to `remember()`), NOT user-facing prompt numbers — the
+ * caller resolves them and maps id → prompt number for display.
  *
  * The grammar lives in db/citations.ts (`parseInlineCitations`) and is shared
- * with the structured-citation fallback, so the milestone view and the settle
- * path can never disagree about what a legacy turn cites. It covers the single
- * `[T8501]` form this function used to handle plus the comma-list, inclusive
- * range, and annotated forms — a strict superset, so no previously-recognised
- * citation stops resolving.
+ * with the structured-citation fallback, so no two consumers can disagree about
+ * what a legacy turn cites. It covers the single `[T8501]` form plus the
+ * comma-list, inclusive range, and annotated forms.
  *
- * The grammar itself is uncapped; `cap` is this consumer's own ceiling on how
- * many raw candidates the milestone path will validate, and it stays here rather
- * than in the shared parser so the settle/pull-through consumers see every id a
- * legacy turn actually cites.
+ * The grammar itself is uncapped and `cap` is required: it is the caller's own
+ * ceiling on pathological content, and there is no longer a milestone-display
+ * default to inherit — the arc view takes its `↳` rows from the structured
+ * pull-through set (spec §C ⑤), not from a re-parse of prose.
  */
 export function parseContentReferences(
   content: string | null,
-  cap: number = MILESTONE_REFERENCE_CAP,
+  cap: number,
 ): number[] {
   return parseInlineCitations(content, cap);
-}
-
-/**
- * Resolves each kept milestone's `[T<dbid>]` causal references (≤2) against the
- * DB and attaches them as `references`. Resolution goes through `getTurnById`
- * (the durable DB id), NOT the in-memory window, so a kept milestone in a
- * ranged view can still cite a driver outside that window. A cite is rejected —
- * staying buried as raw `[T<n>]` in the undisplayed content — when it does not
- * resolve, resolves to a different session (session-id guard), or is not an
- * earlier turn in the same session (predecessor guard: a causal reference must
- * point backward, so self/future cites are inert). Candidates are parsed up to
- * `MILESTONE_REFERENCE_PARSE_CAP`, validated, then capped at the first
- * `MILESTONE_REFERENCE_CAP` survivors so invalid leading refs don't hide valid
- * predecessors. Mutates the milestones in place and returns them.
- */
-export function resolveMilestoneReferences(
-  db: Database,
-  kept: KeptMilestone[],
-): KeptMilestone[] {
-  const keptPromptsByDay = new Map<string, Set<number>>();
-  for (const milestone of kept) {
-    const day = formatLocalDate(milestone.turn.createdAtEpoch);
-    const prompts = keptPromptsByDay.get(day) ?? new Set<number>();
-    prompts.add(milestone.turn.promptNumber);
-    keptPromptsByDay.set(day, prompts);
-  }
-
-  for (const milestone of kept) {
-    const ids = parseContentReferences(
-      milestone.turn.content,
-      MILESTONE_REFERENCE_PARSE_CAP,
-    );
-    if (ids.length === 0) {
-      continue;
-    }
-
-    const references: CitedReference[] = [];
-    for (const id of ids) {
-      const cited = getTurnById(db, id);
-      if (
-        cited === null ||
-        // Session-id guard: a cross-session (or missing) cite renders inert.
-        cited.sessionId !== milestone.turn.sessionId ||
-        // Predecessor guard: a causal reference points backward; a self/future
-        // cite is not a driver and renders inert.
-        cited.promptNumber >= milestone.turn.promptNumber
-      ) {
-        continue;
-      }
-      const milestoneDay = formatLocalDate(milestone.turn.createdAtEpoch);
-      if (keptPromptsByDay.get(milestoneDay)?.has(cited.promptNumber) === true) {
-        continue;
-      }
-      references.push({
-        promptNumber: cited.promptNumber,
-        title: cited.title ?? "(untitled)",
-        marker: milestoneMarker(cited),
-      });
-      // Stop once we have enough valid survivors (display cap).
-      if (references.length >= MILESTONE_REFERENCE_CAP) {
-        break;
-      }
-    }
-
-    if (references.length > 0) {
-      milestone.references = references;
-    }
-  }
-
-  return kept;
 }
 
 function sortTurnsForAnalysis(turns: TurnRecord[]): TurnRecord[] {
@@ -1743,13 +1766,6 @@ export function buildTimelineView(
     // pull-through all consume this map (spec §B).
     citations: getSessionEffectiveCitations(db, session.id),
   });
-  // Resolve each kept milestone's `[T<dbid>]` causal references here, in the
-  // query layer where `db` is available, so the renderer stays pure. Goes
-  // through `getTurnById`, not the in-memory window, so a ranged view's kept
-  // milestone can still resolve a driver that sits outside its window.
-  if (viewKind === "milestones") {
-    resolveMilestoneReferences(db, milestoneSelection.kept);
-  }
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
   const pagedTurns =
@@ -1808,6 +1824,7 @@ export function buildTimelineView(
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
     milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
+    turnEffGrades: milestoneSelection.effGradeByTurnId,
     milestoneDayGroups,
     pagedPhases: pagedPhases.items,
     viewItemTotal,
@@ -2023,14 +2040,15 @@ function formatShowingLine(view: TimelineView): string | null {
 
 function renderTurnTable(
   view: TimelineView,
-  promptCap: number = PROMPT_COLUMN_CAP,
+  promptCap: number,
+  titleCap: number,
 ): string[] {
   const renderedTurns = view.pageTurns.map((turn) => ({
     turn,
     marker: null as string | null,
   }));
 
-  return renderTurnRows(view, renderedTurns, promptCap);
+  return renderTurnRows(view, renderedTurns, promptCap, titleCap);
 }
 
 const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
@@ -2040,59 +2058,801 @@ const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
 };
 
 /**
- * Renders a kept milestone's pre-resolved causal references as `↳` sub-lines,
- * indented to match the overflow-hint gutter. The cited turn is shown by its
- * prompt number (mapped from the stored DB id in the query layer); an
- * invalidated/reversed cause is prefixed with its marker glyph. Pure: it only
- * formats data already resolved in `resolveMilestoneReferences`.
+ * Han-aware token-level truncation: the longest code-point prefix of `text`
+ * whose rendering (plus an ellipsis) costs at most `maxTokens` under
+ * `estimateDiaryTokens`. This is what makes the per-unit token cap a HARD cap —
+ * `titleCap` only bounds characters, and 100 Han characters cost ~132 tokens.
+ * Returns "" when not even the ellipsis fits.
  */
-function renderMilestoneReferenceLines(references: CitedReference[]): string[] {
-  return references.map((ref) => {
-    const markerGlyph =
-      ref.marker === "invalidated" || ref.marker === "reversed"
-        ? `${MILESTONE_MARKER_GLYPH[ref.marker]} `
-        : "";
-    const title = sanitizeTimelineField(
-      truncateText(ref.title, MILESTONE_TITLE_CAP),
-    );
-    return `      ↳ ${markerGlyph}T${ref.promptNumber} ${title}`;
-  });
-}
-
-function renderMilestoneDigest(view: TimelineView): string[] {
-  if (view.milestoneDayGroups.length === 0) {
-    return [];
+export function truncateToTokens(text: string, maxTokens: number): string {
+  if (maxTokens <= 0) {
+    return "";
+  }
+  if (estimateDiaryTokens(text) <= maxTokens) {
+    return text;
   }
 
-  const lines: string[] = [""];
-  for (const group of view.milestoneDayGroups) {
-    const contSuffix = group.continued ? " (cont.)" : "";
-    lines.push(
-      `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${group.promptHi} · ${group.keptCount} kept${contSuffix} ──`,
-    );
-    for (const milestone of group.rows) {
-      const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-      const emoji = typeEmoji(milestone.turn.type);
-      const title = sanitizeTimelineField(
-        truncateText(milestone.turn.title ?? "(untitled)", MILESTONE_TITLE_CAP),
-      );
-      lines.push(`   ${glyph} T${milestone.turn.promptNumber} ${emoji} ${title}`);
-      lines.push(...renderMilestoneReferenceLines(milestone.references ?? []));
+  const points = [...text];
+  let low = 0;
+  let high = points.length;
+  let best = "";
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = `${points.slice(0, mid).join("")}…`;
+    if (estimateDiaryTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
     }
-    if (group.overflow !== null) {
-      lines.push(
-        `        … +${group.overflow.count} more → timeline(id="S${view.session.id}", view="turns") @ T${group.overflow.firstPrompt}–T${group.overflow.lastPrompt}`,
-      );
+  }
+  return best;
+}
+
+/**
+ * Greedy soft wrap on code points, preferring a space break inside the window so
+ * Latin prose does not split mid-word; a CJK run with no spaces breaks at the
+ * width. Display width is approximated by code-point count.
+ */
+function wrapPlainText(text: string, width: number): string[] {
+  const points = [...text];
+  const lines: string[] = [];
+  let start = 0;
+
+  while (start < points.length) {
+    if (points.length - start <= width) {
+      lines.push(points.slice(start).join(""));
+      break;
+    }
+    const hardEnd = start + width;
+    let breakAt = -1;
+    for (let index = hardEnd; index > start; index -= 1) {
+      if (points[index] === " ") {
+        breakAt = index;
+        break;
+      }
+    }
+    if (breakAt > start) {
+      lines.push(points.slice(start, breakAt).join(""));
+      start = breakAt + 1;
+    } else {
+      lines.push(points.slice(start, hardEnd).join(""));
+      start = hardEnd;
     }
   }
 
   return lines;
 }
 
+function pathBasename(path: string): string {
+  const parts = path.split("/");
+  return parts[parts.length - 1] || path;
+}
+
+/**
+ * The `✏️` tail of a spine row: basenames of the files the turn modified, capped
+ * at `MILESTONE_FILE_BASENAME_CAP` with a `+N` remainder. Basenames, not paths —
+ * the row is a pointer, and the full paths are one `recall` away.
+ */
+function renderModifiedFilesTail(turn: TurnRecord): string {
+  if (turn.filesModified.length === 0) {
+    return "";
+  }
+  const shown = turn.filesModified
+    .slice(0, MILESTONE_FILE_BASENAME_CAP)
+    .map(pathBasename);
+  const hidden = turn.filesModified.length - shown.length;
+  return `  ✏️${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
+}
+
+/**
+ * The user's own words on a spine row (spec §D user story 6). A harness-injected
+ * prompt — task notification, `⏺ Ran ` echo — collapses to
+ * `MILESTONE_NOTIFICATION_MARKER` rather than spending row budget on envelope
+ * text the user never typed. Detection is the shared
+ * `isKnownSystemInjectedContent`, the same predicate prompt counting uses.
+ *
+ * A slash-command envelope is the one exception (spec §D): it is injected XML,
+ * but `/compact` or `/review-pr` is a real user act and the reader needs to see
+ * WHICH command ran. The command name is extracted with the same label cleaning
+ * the turns view uses, so both surfaces agree; only an envelope with no command
+ * name left in it falls through to the marker.
+ */
+function milestonePromptPrefix(turn: TurnRecord): string {
+  const raw = turn.userPrompt;
+  if (raw === null) {
+    return "";
+  }
+  const commandName = extractCommandName(raw);
+  if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
+    return MILESTONE_NOTIFICATION_MARKER;
+  }
+  return truncateText(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
+}
+
+/** One spine row plus the `↳` antecedents homed under it — the budget unit (spec §D). */
+interface MilestoneRenderUnit {
+  milestone: KeptMilestone;
+  pulled: PulledAntecedent[];
+}
+
+/**
+ * How far one unit has been cut back. `null` on a token field means "uncut"; the
+ * fields are applied in the spec's termination order by `fitUnitTrim`.
+ */
+interface MilestoneUnitTrim {
+  showDesc: boolean;
+  descTokens: number | null;
+  pulledShown: number;
+  pulledTitleTokens: number | null;
+  titleTokens: number | null;
+  promptTokens: number | null;
+  showFiles: boolean;
+}
+
+function initialUnitTrim(unit: MilestoneRenderUnit): MilestoneUnitTrim {
+  return {
+    showDesc: true,
+    descTokens: null,
+    pulledShown: Math.min(unit.pulled.length, MILESTONE_UNIT_PULLED_CAP),
+    pulledTitleTokens: null,
+    titleTokens: null,
+    promptTokens: null,
+    showFiles: true,
+  };
+}
+
+function milestoneDescText(turn: TurnRecord): string {
+  return (turn.content ?? "").replace(/\s+/g, " ").trim();
+}
+
+function renderUnitLines(
+  unit: MilestoneRenderUnit,
+  trim: MilestoneUnitTrim,
+  titleCap: number,
+): string[] {
+  const { milestone } = unit;
+  const glyph =
+    milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
+
+  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn));
+  if (trim.promptTokens !== null) {
+    prompt = truncateToTokens(prompt, trim.promptTokens);
+  }
+  let title = sanitizeTimelineField(
+    truncateText(milestone.turn.title ?? "(untitled)", titleCap),
+  );
+  if (trim.titleTokens !== null) {
+    title = truncateToTokens(title, trim.titleTokens);
+  }
+  const head =
+    prompt !== "" && title !== ""
+      ? `${prompt} → ${title}`
+      : `${prompt}${title}`;
+  const filesTail = trim.showFiles ? renderModifiedFilesTail(milestone.turn) : "";
+
+  const lines = [
+    `   ${glyph} T${milestone.turn.promptNumber} ${typeEmoji(milestone.turn.type)} G${milestone.effGrade} ${head}${filesTail}`.trimEnd(),
+  ];
+
+  if (trim.showDesc) {
+    const raw = milestoneDescText(milestone.turn);
+    const desc =
+      trim.descTokens === null ? raw : truncateToTokens(raw, trim.descTokens);
+    if (desc !== "") {
+      for (const line of wrapPlainText(desc, MILESTONE_DESC_WRAP_CHARS)) {
+        lines.push(`${MILESTONE_DESC_INDENT}${line}`);
+      }
+    }
+  }
+
+  for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
+    const superseded = antecedent.supersededBy.length > 0;
+    const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
+    let label = sanitizeTimelineField(truncateText(antecedent.label, titleCap));
+    if (trim.pulledTitleTokens !== null) {
+      label = truncateToTokens(label, trim.pulledTitleTokens);
+    }
+    const backLink = superseded
+      ? ` →被T${antecedent.supersededBy.join("/T")}推翻`
+      : "";
+    lines.push(
+      `      ↳ ${reversalGlyph}T${antecedent.turn.promptNumber} ${typeEmoji(antecedent.turn.type)} G${antecedent.effGrade} ${label}${backLink}`,
+    );
+  }
+
+  const foldedPulled = unit.pulled.length - trim.pulledShown;
+  if (foldedPulled > 0) {
+    lines.push(`      ↳ +${foldedPulled} 前件`);
+  }
+
+  return lines;
+}
+
+function unitTokens(
+  unit: MilestoneRenderUnit,
+  trim: MilestoneUnitTrim,
+  titleCap: number,
+): number {
+  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap).join("\n"));
+}
+
+/**
+ * Largest value of one trim knob that still fits `cap`, by binary search over
+ * `[0, cap]`. Every knob is monotone (more tokens allowed → a longer render), so
+ * the search is well defined; -1 means not even 0 fits.
+ */
+function largestFittingTokens(
+  unit: MilestoneRenderUnit,
+  trim: MilestoneUnitTrim,
+  titleCap: number,
+  cap: number,
+  apply: (value: number) => void,
+): number {
+  let low = 0;
+  let high = cap;
+  let best = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    apply(mid);
+    if (unitTokens(unit, trim, titleCap) <= cap) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  apply(best < 0 ? 0 : best);
+  return best;
+}
+
+/**
+ * The per-unit hard cap (spec §D). The full ladder, in order:
+ *
+ *   ① truncate the desc (drop it outright if trimming cannot fit)
+ *   ② fold `↳` rows into `+N 前件` until it fits
+ *   ③ token-truncate the title lines, `↳` titles before the spine title
+ *   ④ token-truncate the user-prompt prefix — the one step where the title is
+ *      protected ahead of the prefix
+ *   ⑤ drop the `✏️` files tail
+ *   ⑥ (in `renderUnitFitted`) clamp the head line itself
+ *
+ * `titleCap` is a character ceiling; ③-④ are what make the token cap a ceiling
+ * that a wall of Han characters cannot breach. ⑤ exists because a single
+ * pathological basename can outweigh everything the row is actually about; the
+ * files are a pointer and one `recall` away, so they go before the head line is
+ * cut. ⑥ is the backstop for a row whose fixed scaffolding alone would overrun.
+ */
+function fitUnitTrim(
+  unit: MilestoneRenderUnit,
+  titleCap: number,
+  cap: number,
+  base: MilestoneUnitTrim,
+): MilestoneUnitTrim {
+  const trim = { ...base };
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+
+  // ① truncate the desc, then drop it outright if trimming it is not enough.
+  if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
+    const best = largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+      trim.descTokens = value;
+    });
+    if (best <= 0) {
+      trim.showDesc = false;
+      trim.descTokens = null;
+    } else {
+      return trim;
+    }
+  }
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+
+  // ② fold ↳ rows into `+N 前件` until it fits.
+  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap) > cap) {
+    trim.pulledShown -= 1;
+  }
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+
+  // ③ token-truncate the title lines: surviving ↳ titles first, then the spine's.
+  if (trim.pulledShown > 0) {
+    largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+      trim.pulledTitleTokens = value;
+    });
+    if (unitTokens(unit, trim, titleCap) <= cap) {
+      return trim;
+    }
+  }
+  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+    trim.titleTokens = value;
+  });
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  // ④ token-truncate the user-prompt prefix.
+  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
+    trim.promptTokens = value;
+  });
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+  // ⑤ drop the `✏️` files tail: a pathological basename is worth less than the
+  // title and prefix it would otherwise push into the head-line clamp.
+  trim.showFiles = false;
+  return trim;
+}
+
+function renderUnitFitted(
+  unit: MilestoneRenderUnit,
+  titleCap: number,
+  descOff: boolean,
+): string[] {
+  const base = initialUnitTrim(unit);
+  if (descOff) {
+    base.showDesc = false;
+  }
+  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base);
+  const lines = renderUnitLines(unit, trim, titleCap);
+  if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
+    return lines;
+  }
+  // Backstop: a spine row whose scaffolding alone overruns still cannot breach
+  // the hard cap — everything below the head line goes and the head is clamped.
+  return [truncateToTokens(lines[0] ?? "", MILESTONE_UNIT_TOKEN_CAP)];
+}
+
+/**
+ * Per-code-point token weight in TENTHS of a token, before the ×1.2 scale
+ * `estimateDiaryTokens` applies. Integers on purpose: the budget fitter adds
+ * thousands of these incrementally, and integer arithmetic makes the running
+ * total independent of addition order.
+ *
+ * `estimateDiaryTokens` (diary/domain.ts) owns the 1.1/0.6 weights; these are
+ * that scale ×10. The budget sweep test is what would catch them drifting apart.
+ */
+const HAN_WEIGHT_TENTHS = 11;
+const OTHER_WEIGHT_TENTHS = 6;
+/** One `\n` joins each body line to the rest of the output. */
+const NEWLINE_WEIGHT_TENTHS = OTHER_WEIGHT_TENTHS;
+
+function textWeightTenths(text: string): number {
+  let total = 0;
+  for (const codePoint of text) {
+    total += /\p{Script=Han}/u.test(codePoint) ? HAN_WEIGHT_TENTHS : OTHER_WEIGHT_TENTHS;
+  }
+  return total;
+}
+
+/**
+ * `estimateDiaryTokens` reconstructed from an already-summed weight. It is a
+ * LOWER bound on the real thing: never above it, and at most one token below —
+ * `estimateDiaryTokens` accumulates in floating point, so a total that lands
+ * exactly on an integer rounds one token up there and not here. The fitter
+ * therefore uses this to reject steps cheaply and confirms every stop with the
+ * real measure.
+ */
+function tokensFromWeightTenths(tenths: number): number {
+  return Math.ceil((tenths * 12) / 100);
+}
+
+/**
+ * One rendered day block: an existing day group, or a synthetic day that exists
+ * only to carry hidden-turn counts.
+ *
+ * The synthetic kind is what keeps `+N more` conservation total. A pulled
+ * antecedent can live on a day that owns no main row on this page; when the
+ * budget removes every citer that was hosting it, the antecedent renders
+ * nowhere, and with only paged-row day groups to iterate there would be no
+ * bucket left to count it in — the turn would silently vanish from the ledger.
+ */
+interface MilestoneBodySection {
+  date: string;
+  labelEpoch: number;
+  /** null for a synthetic day: it has no rows, only a hidden count. */
+  group: MilestoneDayGroup | null;
+}
+
+interface MilestoneSectionState {
+  section: MilestoneBodySection;
+  /** Rows still rendered, in page order. */
+  rows: KeptMilestone[];
+  /** Prompt numbers of this day's rows the budget dropped. */
+  droppedPrompts: number[];
+  /** Prompt numbers of antecedents homed on this day that now render nowhere. */
+  orphanPrompts: number[];
+  /** Weight of the day header + `+N more` hint, in tenths. */
+  frameTenths: number;
+  /** Summed weight of the rendered units, in tenths. */
+  unitTenths: number;
+}
+
+interface MilestoneUnitEntry {
+  lines: string[];
+  tenths: number;
+}
+
+/**
+ * Mutable model of the arc body: the single place that knows how a milestones
+ * page turns into lines, driven both by the plain render (no budget) and by the
+ * budget fitter.
+ *
+ * The fitter takes thousands of degradation steps on a long session, so every
+ * step is incremental: a step re-fits at most the units it actually touched,
+ * updates one day's header/hint, and adds the delta into a running token weight.
+ * Re-rendering and re-measuring the whole body per step is quadratic in the page
+ * milestone count and was measurably slow at SessionStart.
+ *
+ * Antecedent homing follows the same rule as a from-scratch pass: an antecedent
+ * lives under the earliest retained row that cites it. A home depends only on
+ * the retained set and the retained set never depends on a home, so re-homing
+ * the antecedents of the row just removed is already the fixpoint.
+ */
+interface MilestoneBodyModel {
+  /** Strip one unit's desc block. */
+  disableDesc(milestone: KeptMilestone): void;
+  /** Drop one unit, re-homing only the antecedents it was hosting. */
+  removeUnit(milestone: KeptMilestone): void;
+  /** Body weight in tenths, including the `\n` that joins each line. */
+  weightTenths(): number;
+  lines(): string[];
+}
+
+function createMilestoneBodyModel(
+  view: TimelineView,
+  titleCap: number,
+): MilestoneBodyModel {
+  const pagedPrompts = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.promptNumber),
+  );
+  const milestoneByPrompt = new Map(
+    view.pagedMilestones.map((milestone) => [milestone.turn.promptNumber, milestone]),
+  );
+  // A turn holding a main row must never ALSO render as a ↳ row: `ranked` and
+  // `pulled` overlap in the G2 band, so this guard is what keeps a G2 antecedent
+  // that is itself kept from being drawn twice.
+  const mainRowTurnIds = new Set(
+    view.pagedMilestones.map((milestone) => milestone.turn.id),
+  );
+  const pullable = view.milestonePulled.filter(
+    (antecedent) => !mainRowTurnIds.has(antecedent.turn.id),
+  );
+  // Selection order, so a re-homed antecedent lands where a from-scratch pass
+  // would have put it rather than at the end of its new host's list.
+  const pullOrder = new Map(
+    pullable.map((antecedent, index) => [antecedent, index] as const),
+  );
+  // `formatLocalDate` builds an `Intl.DateTimeFormat` per call, so every date a
+  // degradation step needs is resolved once here, never inside the step.
+  const antecedentDates = new Map(
+    pullable.map(
+      (antecedent) =>
+        [antecedent, formatLocalDate(antecedent.turn.createdAtEpoch)] as const,
+    ),
+  );
+
+  const retainedPrompts = new Set(pagedPrompts);
+  const removed = new Set<KeptMilestone>();
+  const descOff = new Set<KeptMilestone>();
+  const homedPulled = new Map<number, PulledAntecedent[]>();
+  const unitEntries = new Map<KeptMilestone, MilestoneUnitEntry>();
+
+  const sections: MilestoneBodySection[] = view.milestoneDayGroups.map((group) => ({
+    date: group.date,
+    labelEpoch: group.labelEpoch,
+    group,
+  }));
+  const groupedDates = new Set(sections.map((section) => section.date));
+  const syntheticEpochs = new Map<string, number>();
+  for (const antecedent of pullable) {
+    const date = antecedentDates.get(antecedent)!;
+    if (groupedDates.has(date)) {
+      continue;
+    }
+    const known = syntheticEpochs.get(date);
+    if (known === undefined || antecedent.turn.createdAtEpoch < known) {
+      syntheticEpochs.set(date, antecedent.turn.createdAtEpoch);
+    }
+  }
+  for (const [date, labelEpoch] of syntheticEpochs) {
+    sections.push({ date, labelEpoch, group: null });
+  }
+  // Stable sort: the real groups are already chronological, so only the
+  // synthetic days move, into their place in the day sequence.
+  sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
+
+  const orderedStates: MilestoneSectionState[] = sections.map((section) => ({
+    section,
+    rows: section.group === null ? [] : [...section.group.rows],
+    droppedPrompts: [],
+    orphanPrompts: [],
+    frameTenths: 0,
+    unitTenths: 0,
+  }));
+  const stateByDate = new Map(
+    orderedStates.map((state) => [state.section.date, state] as const),
+  );
+  const stateOfMilestone = new Map<KeptMilestone, MilestoneSectionState>();
+  for (const state of orderedStates) {
+    for (const milestone of state.rows) {
+      stateOfMilestone.set(milestone, state);
+    }
+  }
+
+  let totalTenths = 0;
+  let priced = false;
+
+  function lineTenths(line: string): number {
+    return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
+  }
+
+  function unitEntryFor(milestone: KeptMilestone): MilestoneUnitEntry {
+    const cached = unitEntries.get(milestone);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const pulled = [...(homedPulled.get(milestone.turn.promptNumber) ?? [])].sort(
+      (left, right) => (pullOrder.get(left) ?? 0) - (pullOrder.get(right) ?? 0),
+    );
+    const lines = renderUnitFitted(
+      { milestone, pulled },
+      titleCap,
+      descOff.has(milestone),
+    );
+    const entry: MilestoneUnitEntry = {
+      lines,
+      tenths: lines.reduce((sum, line) => sum + lineTenths(line), 0),
+    };
+    unitEntries.set(milestone, entry);
+    return entry;
+  }
+
+  /** Re-fit one unit and fold the size change into the running totals. */
+  function invalidateUnit(milestone: KeptMilestone): void {
+    const previous = unitEntries.get(milestone);
+    unitEntries.delete(milestone);
+    const state = stateOfMilestone.get(milestone);
+    if (!priced || state === undefined || removed.has(milestone)) {
+      return;
+    }
+    const delta = unitEntryFor(milestone).tenths - (previous?.tenths ?? 0);
+    state.unitTenths += delta;
+    totalTenths += delta;
+  }
+
+  /**
+   * The day header and, when the day hides anything, the `+N more` hint. The
+   * empty second slot means "header only" — kept as a slot so the weight and
+   * the line emitter read the same shape.
+   */
+  function sectionFrameLines(state: MilestoneSectionState): string[] {
+    const { group } = state.section;
+    const extraPrompts = [...state.droppedPrompts, ...state.orphanPrompts];
+    const base = group?.overflow ?? null;
+    const hiddenCount = (base?.count ?? 0) + extraPrompts.length;
+    if (group === null && hiddenCount === 0) {
+      // A synthetic day with nothing hidden has nothing to say.
+      return [];
+    }
+
+    const header =
+      group === null
+        ? `── ${formatLocalDateWithWeekday(state.section.labelEpoch)} · T${Math.min(
+            ...extraPrompts,
+          )}–T${Math.max(...extraPrompts)} · 0 kept ──`
+        : `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${
+            group.promptHi
+          } · ${group.keptCount - state.droppedPrompts.length} kept${
+            group.continued ? " (cont.)" : ""
+          } ──`;
+    if (hiddenCount === 0) {
+      return [header, ""];
+    }
+    const prompts = [
+      ...(base === null ? [] : [base.firstPrompt, base.lastPrompt]),
+      ...extraPrompts,
+    ];
+    // `within` and not a dash range on purpose: the hidden set is sparse, so
+    // these are its min and max, not the ends of a contiguous run.
+    return [
+      header,
+      `        … +${hiddenCount} more → timeline(id="S${view.session.id}", view="turns") @ within T${Math.min(
+        ...prompts,
+      )}..T${Math.max(...prompts)}`,
+    ];
+  }
+
+  function refreshFrame(state: MilestoneSectionState): void {
+    const tenths = sectionFrameLines(state)
+      .filter((line) => line !== "")
+      .reduce((sum, line) => sum + lineTenths(line), 0);
+    totalTenths += tenths - state.frameTenths;
+    state.frameTenths = tenths;
+  }
+
+  function homeAntecedent(antecedent: PulledAntecedent): void {
+    const home = antecedent.citerPromptNumbers.find((promptNumber) =>
+      retainedPrompts.has(promptNumber),
+    );
+    if (home !== undefined) {
+      homedPulled.set(home, [...(homedPulled.get(home) ?? []), antecedent]);
+      const host = milestoneByPrompt.get(home);
+      if (host !== undefined) {
+        invalidateUnit(host);
+      }
+      return;
+    }
+    if (
+      !antecedent.citerPromptNumbers.some((promptNumber) => pagedPrompts.has(promptNumber))
+    ) {
+      // Cited only from off-page rows: it was never this page's to render.
+      return;
+    }
+    // Every citer of this antecedent on the page is gone, so it renders nowhere
+    // and folds into its own day's hidden count — which is why that day gets a
+    // section even when it owns no main row on this page.
+    const state = stateByDate.get(antecedentDates.get(antecedent)!);
+    if (state === undefined) {
+      return;
+    }
+    state.orphanPrompts.push(antecedent.turn.promptNumber);
+    refreshFrame(state);
+  }
+
+  for (const antecedent of pullable) {
+    homeAntecedent(antecedent);
+  }
+  for (const state of orderedStates) {
+    state.unitTenths = state.rows.reduce(
+      (sum, milestone) => sum + unitEntryFor(milestone).tenths,
+      0,
+    );
+    totalTenths += state.unitTenths;
+    refreshFrame(state);
+  }
+  // The blank line the body opens with.
+  totalTenths += NEWLINE_WEIGHT_TENTHS;
+  priced = true;
+
+  return {
+    disableDesc(milestone: KeptMilestone): void {
+      if (descOff.has(milestone) || removed.has(milestone)) {
+        return;
+      }
+      descOff.add(milestone);
+      invalidateUnit(milestone);
+    },
+    removeUnit(milestone: KeptMilestone): void {
+      if (removed.has(milestone)) {
+        return;
+      }
+      const promptNumber = milestone.turn.promptNumber;
+      const state = stateOfMilestone.get(milestone);
+      if (state !== undefined) {
+        const entry = unitEntryFor(milestone);
+        state.unitTenths -= entry.tenths;
+        totalTenths -= entry.tenths;
+        state.rows = state.rows.filter((row) => row !== milestone);
+        state.droppedPrompts.push(promptNumber);
+      }
+      removed.add(milestone);
+      retainedPrompts.delete(promptNumber);
+      unitEntries.delete(milestone);
+      const orphaned = homedPulled.get(promptNumber) ?? [];
+      homedPulled.delete(promptNumber);
+      for (const antecedent of orphaned) {
+        homeAntecedent(antecedent);
+      }
+      if (state !== undefined) {
+        refreshFrame(state);
+      }
+    },
+    weightTenths(): number {
+      return totalTenths;
+    },
+    lines(): string[] {
+      const out: string[] = [""];
+      for (const state of orderedStates) {
+        const frame = sectionFrameLines(state);
+        if (frame.length === 0) {
+          continue;
+        }
+        out.push(frame[0]!);
+        for (const milestone of state.rows) {
+          out.push(...unitEntryFor(milestone).lines);
+        }
+        if (frame[1] !== undefined && frame[1] !== "") {
+          out.push(frame[1]!);
+        }
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * Renders the arc body with no budget applied: every selected unit in full.
+ * `createMilestoneBodyModel` is the single implementation — the budget path is
+ * the same model with degradation steps applied.
+ */
+function renderMilestoneBody(view: TimelineView, titleCap: number): string[] {
+  if (view.milestoneDayGroups.length === 0) {
+    return [];
+  }
+  return createMilestoneBodyModel(view, titleCap).lines();
+}
+
+/**
+ * Score-ascending degradation order over the rows on this page: the same
+ * comparator that orders `MilestoneSelection.ranked`, reversed, so the row the
+ * selection ranks last is the first one a budget cuts. Ties resolve stably
+ * (score → tool count → prompt number) rather than by page position.
+ */
+function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
+  return [...view.pagedMilestones]
+    .sort(compareMilestoneRank)
+    .reverse();
+}
+
+/**
+ * Fits the arc body into `tokenBudget` (spec §D). Lowest-score units lose their
+ * desc first; if that is not enough, whole units go, lowest score first, and
+ * always-keep units are exempt from removal however low they score. When the
+ * anchors alone still overrun, the body is rendered in full with one overflow
+ * note — an anchor is never dropped silently.
+ *
+ * Two-tier measurement. The model's running weight prices every step in O(1),
+ * but it is a LOWER bound on `estimateDiaryTokens` (that function's float
+ * accumulation can round one token higher). So the cheap number gates the
+ * expensive one: a step whose cheap price still overruns cannot possibly fit,
+ * and the first step that might fit is confirmed with `measure`, which reports
+ * the token cost of the WHOLE assembled output — header and signal blocks
+ * included. The stopping point is therefore identical to re-measuring the full
+ * output on every step, at a fraction of the work.
+ */
+function fitMilestoneBodyToBudget(
+  view: TimelineView,
+  titleCap: number,
+  tokenBudget: number,
+  fixedWeightTenths: number,
+  measure: (bodyLines: string[]) => number,
+): string[] {
+  const body = createMilestoneBodyModel(view, titleCap);
+  const fits = (): boolean =>
+    tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget &&
+    measure(body.lines()) <= tokenBudget;
+
+  if (fits()) {
+    return body.lines();
+  }
+
+  for (const milestone of milestoneDegradationOrder(view)) {
+    body.disableDesc(milestone);
+    if (fits()) {
+      return body.lines();
+    }
+  }
+
+  for (const milestone of milestoneDegradationOrder(view)) {
+    if (milestone.alwaysKeep) {
+      continue;
+    }
+    body.removeUnit(milestone);
+    if (fits()) {
+      return body.lines();
+    }
+  }
+
+  return [...body.lines(), MILESTONE_OVER_BUDGET_NOTE];
+}
 function renderTurnRows(
   view: TimelineView,
   renderedTurns: Array<{ turn: TurnRecord; marker: string | null }>,
   promptCap: number,
+  titleCap: number,
 ): string[] {
   if (renderedTurns.length === 0) {
     return [];
@@ -2108,7 +2868,7 @@ function renderTurnRows(
 
   const lines = [
     "",
-    "T# | line | time | gap | stats | prompt → title",
+    TURN_TABLE_HEADER,
   ];
 
   let previousRenderedEpoch: number | null = null;
@@ -2128,6 +2888,8 @@ function renderTurnRows(
         previousEpochByPrompt.get(turn.promptNumber) ?? null,
         brokenPromptCandidates.has(turn.promptNumber),
         promptCap,
+        titleCap,
+        view.turnEffGrades.get(turn.id),
         marker,
       ),
     );
@@ -2158,6 +2920,8 @@ function renderTurnRow(
   prevEpoch: number | null,
   isBrokenPromptCandidate: boolean,
   promptCap: number,
+  titleCap: number,
+  effGrade: number | undefined,
   marker: string | null = null,
 ): string {
   const isUndone = turn.status === "undone";
@@ -2176,7 +2940,7 @@ function renderTurnRow(
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "⨯ " : "";
   const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, marker),
+    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker),
   );
 
   return [
@@ -2185,6 +2949,10 @@ function renderTurnRow(
     formatLocalTime(turn.createdAtEpoch),
     `${formatGap(turn.createdAtEpoch, prevEpoch)}${gapSuffix}`,
     renderStats(turn),
+    // Grade column (spec §D): the arc view and the turn table print the same
+    // effGrade, so "how important" is read off the row instead of inferred from
+    // the type icon. `—` is a turn with no main-row candidacy (a compact marker).
+    effGrade === undefined ? MISSING_GRADE_CELL : `G${effGrade}`,
     `${renderedPrompt} → ${titleText}`,
   ].join(" | ");
 }
@@ -2210,6 +2978,7 @@ function renderTitleCell(
   turn: TurnRecord,
   isUndone: boolean,
   compactMetadata: { preTokens: number; trigger: string } | null,
+  titleCap: number,
   marker: string | null = null,
 ): string {
   const markerPrefix = marker ? `${marker} ` : "";
@@ -2222,14 +2991,14 @@ function renderTitleCell(
 
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap)}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}⨯`.trim();
   }
 
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, TITLE_COLUMN_CAP - 3)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap)}`;
   }
 
   return `${markerPrefix}⏳`.trim();
@@ -2245,6 +3014,7 @@ function isTimelineLiveTurn(turn: TurnRecord): boolean {
 
 function renderPhases(
   view: TimelineView,
+  titleCap: number,
 ): string[] {
   if (view.pagedPhases.length === 0) {
     return [];
@@ -2302,12 +3072,7 @@ function renderPhases(
       cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText =
       leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(
-      truncateText(
-        leadText,
-        TITLE_COLUMN_CAP,
-      ),
-    );
+    const leadTitle = sanitizeTimelineField(truncateText(leadText, titleCap));
 
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
@@ -2426,20 +3191,40 @@ export function renderTimeline(
   options: RenderTimelineOptions = {},
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
-  const body =
-    view.view === "phases"
-      ? renderPhases(view)
-      : view.view === "milestones"
-        ? renderMilestoneDigest(view)
-        : renderTurnTable(view, promptCap);
+  const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  const assemble = (bodyLines: string[]): string =>
+    [
+      ...renderSessionHeader(view),
+      ...bodyLines,
+      ...renderShapeSignals(view),
+      ...renderEarlierHint(view, options),
+      ...renderLineagePointer(view),
+    ].join("\n");
 
-  return [
-    ...renderSessionHeader(view),
-    ...body,
-    ...renderShapeSignals(view),
-    ...renderEarlierHint(view, options),
-    ...renderLineagePointer(view),
-  ].join("\n");
+  if (view.view === "phases") {
+    return assemble(renderPhases(view, titleCap));
+  }
+  if (view.view !== "milestones") {
+    return assemble(renderTurnTable(view, promptCap, titleCap));
+  }
+
+  // Milestones. A budget is measured against the WHOLE assembled output, so the
+  // header and signal blocks count against it too; without one (every MCP view)
+  // the body renders in full and pagination is the only sizing mechanism.
+  if (options.tokenBudget === undefined) {
+    return assemble(renderMilestoneBody(view, titleCap));
+  }
+  // Everything outside the body is fixed, so its weight is measured once and the
+  // fitter only has to price what it changes.
+  return assemble(
+    fitMilestoneBodyToBudget(
+      view,
+      titleCap,
+      options.tokenBudget,
+      textWeightTenths(assemble([])),
+      (bodyLines) => estimateDiaryTokens(assemble(bodyLines)),
+    ),
+  );
 }
 
 export function timelineQuery(db: Database, input: TimelineInput): string {
