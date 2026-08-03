@@ -1,5 +1,7 @@
 # 02 — effGrade 词典序选择与拉入
 
+**Status: done** — 见 feat(selection) 提交（含 codex 审查轮 3 项修复、mutation 验证；门禁 1320/0）。给 03 的两个接缝注意：`ranked` 与 `pulled` 在 G2 带上**不相交集**（渲染器必须去重否则双渲染）；overflow 的 firstPrompt/lastPrompt 是稀疏隐藏集的 min/max、不是连续区间。
+
 **What to build:** 里程碑选择改为等级主轴：effGrade 真值表（era 门控修复——基础分与内容分同门控，legacy 按 type 映射封顶 G3、永不为锚）＋六步优先级（受害降级先于 corrector 晋升 → always-keep → 脊柱准入 effGrade≥3 → 拉入 → 预算排序）＋supersedes 边直接派生受害降级与反链数据（不再依赖 rolled-back tag 前置）＋拉入集计算（被脊柱引用的 ≤G2 与 skipped turn）＋删除 type 基础分表/tag-family 权重/files 空守卫/日预算常数族。完成后 fixture 会话（覆盖 era 边界、corrector-as-victim、被引用 skipped、legacy 端点）的 kept/pulled 集逐一可断言。
 
 **Blocked by:** 01 — cites 引用基础设施。

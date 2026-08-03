@@ -83,7 +83,7 @@
   | era 内已评级 | 原值 |
   | era 内未评级 | 0（不入池，待评） |
   | era 前（legacy） | type 映射 {decision:3, feature/refactor/bugfix:2, change/discovery:1, 其余:0}；artifact 类无文件→0；有 insight +1；**封顶 3**，永不为 4，永不 always-keep 锚 |
-- **优先级（按序应用）**：① 受害者降级：被 supersedes 边指向 → effGrade=min(effGrade,1)，失去脊柱资格（**先于**②，corrector 自己又被推翻不保锚）；② corrector 晋升：effGrade=max(effGrade,3)；③ always-keep：端点 ∪ 非受害 corrector ∪ 无 corrector 的被推翻者 ∪ era 内 effGrade=4；`type='compact'` 不入 always-keep 与 kept 槽位；④ 脊柱准入：effGrade≥3；⑤ 拉入：被已准入脊柱经引用边（era 前经行内适配）引用的 effGrade≤2 turn（**含 skipped**），渲染为 ↳；⑥ 预算降级排序作用于以上结果集。
+- **优先级（按序应用）**：① 受害者降级：被 supersedes 边指向 → effGrade=min(effGrade,1)，失去脊柱资格（**先于**②，corrector 自己又被推翻不保锚；**窗口外受害者同样降级**——降级后的等级决定其拉入资格与 🚫 渲染，ranged 视图里窗口外被推翻的 G4 才能以 corrector 的 ↳ 🚫 行出现）；② corrector 晋升：effGrade=max(effGrade,3)；③ always-keep：端点 ∪ 非受害 corrector ∪ 无 corrector 的被推翻者 ∪ era 内 effGrade=4；`type='compact'` 不入 always-keep 与 kept 槽位；④ 脊柱准入：effGrade≥3；⑤ 拉入：被**任一保留主行**（脊柱、端点、无 corrector 被推翻者）经引用边（era 前经行内适配）引用的 effGrade≤2 turn（**含 skipped**），渲染为 ↳——前件挂在被渲染的行上，不挂在全图上（仅被未保留 turn 引用者不拉入）；⑥ 预算降级排序作用于以上结果集（选择层物化为 score 有序的 `ranked` 超集＝池门槛 effGrade≥2 的候选带＋always-keep，渲染层的降级顺序取自它；always-keep 以标志位表达、不再用 Infinity 分数）。
 - 交叉情形：legacy 端点→按③保留（结构性、与等级无关），渲染为紧凑行；G0 corrector→②晋升（除非①先命中）；被引用 skipped→↳ 行，新数据有最小标题（见 §E），存量以 ≤60 字符 prompt 前缀充当伪标题；被推翻的 G4→①降级，锚由其 corrector/再奠基承接。
 - 删除：type 基础分表（仅存于 legacy 回退）、tag-family 权重、files 空守卫、日预算一族常数。tie-break 维持现有次序（分数→工具数→更早 prompt）。
 
@@ -100,7 +100,7 @@
 ```
 
 - title=结论（~10 token）；desc=过程与证据（~50 token 可伸缩）；desc 不重述 title；↳ 行只含 title（🚫 追加 ~20 字符反链）。task-notification 前缀塌缩为标记。
-- **渲染单元与预算**：单元 = 脊柱行＋归属它的 ↳ 行；**每单元 ↳ 上限 4**，超出渲染为 `↳ +N 前件`（recall 可查）；被多个脊柱引用的前件在**时间最早的引用方**名下渲染一次，其余引用方行内保留 `[T<n>]`；任何单元被移除后，其名下共享前件**重归属**到仍保留的最早引用方（沿用稳定 tie 序，迭代至不动点）。单元上限 100 token 为**硬上限**，终止规则依序：截 desc → ↳ 折叠入 `+N 前件` 直至适配 → 对标题行（↳ 标题先于 spine 标题）做 token 级截断（Han 感知、带省略号）——titleCap 是字符上限，token 硬帽由此步保证；全局预算（注入默认 2500）不足时按分数从低到高先「desc→title」再移除整单元；always-keep 单元可降 desc 但**不可移除**——若降无可降的锚集合仍超全局预算，照常渲染并附一行超预算注记（绝不静默丢锚）；`+N more` = 当日未作主行渲染的 turn 数（↳ 不计入）。token 计量用 `estimateDiaryTokens`（Han 感知、确定性）；「~50 token」指 desc 正文，完整脊柱行含标签约 70-85 token，100 为上限而非均值。
+- **渲染单元与预算**：单元 = 脊柱行＋归属它的 ↳ 行；**每单元 ↳ 上限 4**，超出渲染为 `↳ +N 前件`（recall 可查）；被多个脊柱引用的前件在**时间最早的引用方**名下渲染一次，其余引用方行内保留 `[T<n>]`；任何单元被移除后，其名下共享前件**重归属**到仍保留的最早引用方（沿用稳定 tie 序，迭代至不动点）。单元上限 100 token 为**硬上限**，终止规则依序：截 desc → ↳ 折叠入 `+N 前件` 直至适配 → 对标题行（↳ 标题先于 spine 标题）做 token 级截断（Han 感知、带省略号）——titleCap 是字符上限，token 硬帽由此步保证；全局预算（注入默认 2500）不足时按分数从低到高先「desc→title」再移除整单元；always-keep 单元可降 desc 但**不可移除**——若降无可降的锚集合仍超全局预算，照常渲染并附一行超预算注记（绝不静默丢锚）；`+N more` = 当日**完全无行渲染**的 turn 数——被 ↳ 渲染的 turn 已对读者可见、不算「more」，不计入。token 计量用 `estimateDiaryTokens`（Han 感知、确定性）；「~50 token」指 desc 正文，完整脊柱行含标签约 70-85 token，100 为上限而非均值。
 - **视图契约保全矩阵**：`view` 名称不变（turns/milestones/phases）；phases 不动；pageSize 继续按主行计数、↳ 随行不占页槽（现行为保留）；turns 视图保留 line/time/gap/stats 列并新增等级列；shape signals 各视图保留；`titleCap`（默认 100 字符）与 `tokenBudget` 为注入内部参数，**不进公开 MCP schema**（公开视图以分页为唯一尺寸机制）。旧四档降级与渲染后字符串手术删除。
 
 ### E. rubric 修法包（提取提示词）
