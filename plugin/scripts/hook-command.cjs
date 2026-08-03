@@ -2379,7 +2379,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-msdc9lt4" : "dev";
+var BUILD_ID = true ? "0.8.3-msdec07w" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3762,6 +3762,71 @@ function parseInlineCitations(content, maxRefs) {
   }
   return ids;
 }
+function dedupeCitedIds(edges) {
+  const citedTurnIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const edge of edges) {
+    if (seen.has(edge.citedTurnId)) {
+      continue;
+    }
+    seen.add(edge.citedTurnId);
+    citedTurnIds.push(edge.citedTurnId);
+  }
+  return citedTurnIds;
+}
+function getSessionEffectiveCitations(db, sessionId) {
+  const turns = db.query(
+    `SELECT id, content, cites_recorded AS citesRecorded
+       FROM turns
+       WHERE session_id = ?
+       ORDER BY prompt_number ASC, id ASC`
+  ).all(sessionId);
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const edgesByCiter = /* @__PURE__ */ new Map();
+  const edgeRows = db.query(
+    `SELECT
+         c.citing_turn_id AS citingTurnId,
+         c.cited_turn_id AS citedTurnId,
+         c.relation,
+         c.created_at_epoch AS createdAtEpoch
+       FROM turn_citations c
+       JOIN turns citing ON citing.id = c.citing_turn_id
+       JOIN turns cited ON cited.id = c.cited_turn_id
+       WHERE citing.session_id = ? AND cited.session_id = ?
+       ORDER BY c.citing_turn_id ASC, c.cited_turn_id ASC, c.relation ASC`
+  ).all(sessionId, sessionId);
+  for (const edge of edgeRows) {
+    if (edge.citedTurnId === edge.citingTurnId) {
+      continue;
+    }
+    const bucket = edgesByCiter.get(edge.citingTurnId);
+    if (bucket) {
+      bucket.push(edge);
+    } else {
+      edgesByCiter.set(edge.citingTurnId, [edge]);
+    }
+  }
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    if (turn.citesRecorded === 1) {
+      const edges = edgesByCiter.get(turn.id) ?? [];
+      effective.set(turn.id, {
+        source: "structured",
+        citedTurnIds: dedupeCitedIds(edges),
+        edges
+      });
+      continue;
+    }
+    effective.set(turn.id, {
+      source: "inline",
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      ),
+      edges: []
+    });
+  }
+  return effective;
+}
 
 // src/mcp/timeline.ts
 var DEFAULT_TIMELINE_PAGE_SIZE = 30;
@@ -3773,7 +3838,6 @@ var TOOL_BURST_TOP_N = 3;
 var MILESTONE_TITLE_CAP = 90;
 var MILESTONE_REFERENCE_CAP = 2;
 var MILESTONE_REFERENCE_PARSE_CAP = 8;
-var MILESTONE_DAY_BUDGET_MAX = 7;
 var OUTCOME_TAGS = /* @__PURE__ */ new Set([
   "merged",
   "shipped",
@@ -4065,52 +4129,45 @@ function milestoneMarker(turn, options = {}) {
   }
   return null;
 }
-var MILESTONE_BASE_SCORE = {
-  decision: 4,
+var MILESTONE_LEGACY_TYPE_GRADE = {
+  decision: 3,
   feature: 2,
   refactor: 2,
   bugfix: 2,
   change: 1,
   discovery: 1
 };
-var MILESTONE_GRADE_BASE_SCORE = {
-  0: 0,
-  1: 1,
-  2: 2,
-  3: 3,
-  4: 4
-};
-var MILESTONE_POOL_MIN_SCORE = 2;
-var MILESTONE_INSIGHT_WEIGHT = 2;
-var MILESTONE_PURE_SPEC_WEIGHT = 3;
-var MILESTONE_TAG_FAMILY_WEIGHT = 1;
-var MILESTONE_IMPORTANCE_TAG_RE = /design|architecture|spec|simulat|review|audit|verif|bug|root|regress|correction|pivot|hotfix|misfire|decision/;
+var MILESTONE_LEGACY_GRADE_CAP = 3;
+var MILESTONE_SPINE_MIN_EFF_GRADE = 3;
+var MILESTONE_POOL_MIN_EFF_GRADE = 2;
+var MILESTONE_PULL_MAX_EFF_GRADE = 2;
+var MILESTONE_TIE_CITED_WEIGHT = 0.25;
+var MILESTONE_TIE_CITED_CAP = 2;
+var MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
+var MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
+var MILESTONE_TIE_BREAK_MAX = 0.9;
 var MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
-var MILESTONE_DEV_ARTIFACT_RE = /(^|\/)(?:src|tests|scripts|plugin|docs\/(?:plans|specs|superpowers))\//;
-var MILESTONE_DEV_ARTIFACT_MIN_TURNS = 3;
 var MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-var MILESTONE_CITATION_CAP_SPARSE = 2;
-var MILESTONE_CITATION_CAP_DENSE = 4;
-var MILESTONE_DENSE_CITATION_SHARE = 0.25;
-var MILESTONE_TARGET_RETENTION_RATIO = 0.22;
-var MILESTONE_MIN_TARGET_COUNT = 4;
-var MILESTONE_DAY_COVERAGE_MIN_TURNS = 3;
-var MILESTONE_CALIBRATED_DAY_BUDGET_BASE = 4;
-var MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR = 8;
-var MILESTONE_SMALL_DAY_MAX_FLOOR = 5;
-var MILESTONE_SPARSE_DAY_DENSITY = 0.6;
-var MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
-var MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
-var MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
-function milestoneBaseScore(turn) {
-  if (turn.significanceGrade !== null && turn.significanceGrade !== void 0) {
-    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+var MILESTONE_PULLED_LABEL_CAP = 60;
+function milestoneEffGrade(turn, taskCausalityEraCutoffEpoch) {
+  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
+    const grade = turn.significanceGrade;
+    if (grade === null || grade === void 0) {
+      return 0;
+    }
+    return Math.max(0, Math.min(4, grade));
   }
-  const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
+  return legacyEffGrade(turn);
+}
+function legacyEffGrade(turn) {
+  let grade = MILESTONE_LEGACY_TYPE_GRADE[turn.type ?? ""] ?? 0;
   if ((turn.type === "feature" || turn.type === "refactor" || turn.type === "change") && turn.filesModified.length === 0) {
-    return 0;
+    grade = 0;
   }
-  return score;
+  if (hasMilestoneInsight(turn)) {
+    grade += 1;
+  }
+  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
 }
 function hasMilestoneInsight(turn) {
   return typeof turn.insight === "string" && turn.insight.trim() !== "" && turn.insight !== "[]";
@@ -4118,93 +4175,36 @@ function hasMilestoneInsight(turn) {
 function isPureSpecTurn(turn) {
   return turn.filesModified.length > 0 && turn.filesModified.every((path2) => MILESTONE_PURE_SPEC_RE.test(path2));
 }
-function hasMilestoneDevArtifact(turn) {
-  return turn.filesModified.some(
-    (path2) => MILESTONE_DEV_ARTIFACT_RE.test(path2.replaceAll("\\", "/"))
-  );
+function milestoneTieBreak(turn, citedBy = 0) {
+  const raw = MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) + (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) + (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
+  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
 }
-function hasMilestoneTagFamily(turn) {
-  return turn.tags.filter((tag) => !tag.includes(":")).some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
-}
-function milestoneContentScore(turn, taskCausalityEraCutoffEpoch) {
-  if (turn.significanceGrade !== null && turn.significanceGrade <= 1 && isTaskCausalityEra(
-    turn.createdAtEpoch,
-    taskCausalityEraCutoffEpoch
-  )) {
-    return 0;
+function inlineCitationFallback(turns) {
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const effective = /* @__PURE__ */ new Map();
+  for (const turn of turns) {
+    if (turn.citesRecorded) {
+      effective.set(turn.id, { source: "structured", citedTurnIds: [], edges: [] });
+      continue;
+    }
+    effective.set(turn.id, {
+      source: "inline",
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id)
+      ),
+      edges: []
+    });
   }
-  return Math.max(
-    hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
-    isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
-    hasMilestoneTagFamily(turn) ? MILESTONE_TAG_FAMILY_WEIGHT : 0
-  );
+  return effective;
 }
-function milestoneWeightedScore(turn, citedBy = 0, citationCap = 2, taskCausalityEraCutoffEpoch) {
-  return milestoneBaseScore(turn) + milestoneContentScore(turn, taskCausalityEraCutoffEpoch) + Math.min(citedBy, citationCap);
-}
-function buildMilestoneCitationInDegree(turns) {
-  const seq = sortTurnsForAnalysis(turns).filter((turn) => turn.status !== "skipped");
-  const byDbId = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    byDbId.set(turn.id, turn);
-  }
-  const citedByPrompt = /* @__PURE__ */ new Map();
-  for (const citer of seq) {
-    for (const id of parseContentReferences(citer.content, MILESTONE_REFERENCE_PARSE_CAP)) {
-      const cited = byDbId.get(id);
-      if (cited === void 0 || cited.sessionId !== citer.sessionId || cited.promptNumber >= citer.promptNumber) {
-        continue;
-      }
-      citedByPrompt.set(
-        cited.promptNumber,
-        (citedByPrompt.get(cited.promptNumber) ?? 0) + 1
-      );
+function citationInDegree(citations) {
+  const inDegree = /* @__PURE__ */ new Map();
+  for (const entry of citations.values()) {
+    for (const citedTurnId of entry.citedTurnIds) {
+      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
     }
   }
-  const citedShare = seq.length === 0 ? 0 : citedByPrompt.size / seq.length;
-  return {
-    citedByPrompt,
-    citationCap: citedShare >= MILESTONE_DENSE_CITATION_SHARE ? MILESTONE_CITATION_CAP_DENSE : MILESTONE_CITATION_CAP_SPARSE
-  };
-}
-function adaptiveMilestoneDayCap(day, totalCandidateCount, totalNonSkippedCount, useScaledFloor) {
-  if (day.candidates.length === 0) {
-    return 0;
-  }
-  const targetTotal = Math.max(
-    MILESTONE_MIN_TARGET_COUNT,
-    Math.round(totalNonSkippedCount * MILESTONE_TARGET_RETENTION_RATIO)
-  );
-  const proportional = totalCandidateCount === 0 ? targetTotal : Math.ceil(targetTotal * day.candidates.length / totalCandidateCount);
-  const calibratedCap = Math.min(
-    MILESTONE_DAY_BUDGET_MAX,
-    MILESTONE_CALIBRATED_DAY_BUDGET_BASE + Math.floor(day.candidates.length / MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR)
-  );
-  const coverageFloor = day.seqTurns.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS ? 1 : 0;
-  const candidateDensity = day.candidates.length / day.seqTurns.length;
-  const scaledFloor = !useScaledFloor || day.seqTurns.length < MILESTONE_DAY_COVERAGE_MIN_TURNS ? 0 : day.seqTurns.length <= 10 ? Math.min(day.candidates.length, MILESTONE_SMALL_DAY_MAX_FLOOR) : candidateDensity < MILESTONE_SPARSE_DAY_DENSITY ? Math.min(
-    day.candidates.length,
-    MILESTONE_SPARSE_DAY_MAX_FLOOR,
-    Math.ceil(day.seqTurns.length / MILESTONE_SPARSE_DAY_FLOOR_DIVISOR)
-  ) : Math.min(
-    day.candidates.length,
-    calibratedCap,
-    Math.ceil(day.seqTurns.length / MILESTONE_DENSE_DAY_FLOOR_DIVISOR)
-  );
-  const structuralFloor = useScaledFloor && day.structuralCount >= MILESTONE_CALIBRATED_DAY_BUDGET_BASE ? Math.min(
-    day.candidates.length,
-    MILESTONE_DAY_BUDGET_MAX,
-    day.structuralCount + 2
-  ) : 0;
-  return Math.min(
-    day.candidates.length,
-    Math.max(
-      coverageFloor,
-      Math.min(proportional, calibratedCap),
-      scaledFloor,
-      structuralFloor
-    )
-  );
+  return inDegree;
 }
 function extractMilestoneVersion(title) {
   if (!title) return null;
@@ -4251,33 +4251,55 @@ function demotedOutcomePrompts(seq) {
   }
   return demoted;
 }
-function buildCorrectionGraph(seq, resolveCited) {
+function buildCorrectionGraph(turns, options = {}) {
   const correctors = /* @__PURE__ */ new Set();
   const supersededVictims = /* @__PURE__ */ new Set();
+  const supersedersByVictim = /* @__PURE__ */ new Map();
   const byDbId = /* @__PURE__ */ new Map();
-  for (const t of seq) {
-    byDbId.set(t.id, t);
+  for (const turn of turns) {
+    byDbId.set(turn.id, turn);
   }
-  for (const corrector of seq) {
-    const citedIds = parseContentReferences(
-      corrector.content,
-      MILESTONE_REFERENCE_PARSE_CAP
-    );
-    for (const id of citedIds) {
-      const inWindow = byDbId.get(id);
-      const victim = inWindow ?? resolveCited?.(id) ?? void 0;
-      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
-      victim.promptNumber >= corrector.promptNumber || // Only reversal pairs drive promotion/demotion.
-      milestoneMarker(victim) !== "reversed") {
-        continue;
-      }
-      correctors.add(corrector.promptNumber);
-      if (inWindow !== void 0) {
-        supersededVictims.add(victim.promptNumber);
+  const citations = options.citations ?? inlineCitationFallback(turns);
+  for (const corrector of turns) {
+    const entry = citations.get(corrector.id);
+    if (entry === void 0) {
+      continue;
+    }
+    const supersededIds = /* @__PURE__ */ new Set();
+    for (const edge of entry.edges) {
+      if (edge.relation === "supersedes") {
+        supersededIds.add(edge.citedTurnId);
       }
     }
+    if (entry.source === "inline" && !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
+      for (const citedTurnId of entry.citedTurnIds) {
+        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
+        if (cited && milestoneMarker(cited) === "reversed") {
+          supersededIds.add(citedTurnId);
+        }
+      }
+    }
+    for (const citedTurnId of supersededIds) {
+      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
+      if (!victim || victim.sessionId !== corrector.sessionId || // Predecessor guard: a causal reference points backward.
+      victim.promptNumber >= corrector.promptNumber) {
+        continue;
+      }
+      correctors.add(corrector.id);
+      supersededVictims.add(victim.id);
+      const bucket = supersedersByVictim.get(victim.id) ?? [];
+      bucket.push(corrector);
+      supersedersByVictim.set(victim.id, bucket);
+    }
   }
-  return { correctors, supersededVictims };
+  const supersededBy = /* @__PURE__ */ new Map();
+  for (const [victimId, superseders] of supersedersByVictim) {
+    supersededBy.set(
+      victimId,
+      [...superseders].sort((left, right) => left.promptNumber - right.promptNumber).map((turn) => turn.id)
+    );
+  }
+  return { correctors, supersededVictims, supersededBy };
 }
 function getCompactMetadata(tags) {
   let preTokens = 0;
@@ -4492,174 +4514,146 @@ function detectShapeSignals(turns) {
   };
 }
 function selectMilestoneTurns(view) {
+  const eraCutoff = view.taskCausalityEraCutoffEpoch;
+  const universe = view.sessionTurns ?? view.windowTurns;
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => turn.status !== "skipped"
+    (turn) => turn.status !== "skipped" && turn.type !== "compact"
   );
   if (seq.length === 0) {
-    return { kept: [], overflowByDay: [] };
+    return { kept: [], ranked: [], pulled: [], overflowByDay: [] };
   }
-  const endpoints = /* @__PURE__ */ new Set();
-  endpoints.add(seq[0].promptNumber);
+  const citations = view.citations ?? inlineCitationFallback(universe);
+  const inDegree = citationInDegree(citations);
+  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
+  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
+  const graph = buildCorrectionGraph(seq, {
+    citations,
+    resolveCited: (id) => universeById.get(id),
+    taskCausalityEraCutoffEpoch: eraCutoff
+  });
+  const effGradeOf = (turn) => {
+    const raw = milestoneEffGrade(turn, eraCutoff);
+    if (graph.supersededVictims.has(turn.id)) {
+      return Math.min(raw, 1);
+    }
+    return graph.correctors.has(turn.id) ? Math.max(raw, 3) : raw;
+  };
+  const endpoints = /* @__PURE__ */ new Set([seq[0].id]);
   const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]).promptNumber);
-  const sessionById = view.sessionTurns ? new Map(view.sessionTurns.map((t) => [t.id, t])) : void 0;
-  const { correctors, supersededVictims } = buildCorrectionGraph(
-    seq,
-    sessionById ? (id) => sessionById.get(id) : void 0
-  );
-  const { citedByPrompt, citationCap } = buildMilestoneCitationInDegree(
-    view.sessionTurns ?? seq
-  );
+  endpoints.add((lastTitled ?? seq[seq.length - 1]).id);
   const demotedOutcomes = demotedOutcomePrompts(seq);
   const markerForSelection = (turn) => {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const usesDevBudgetFloor = seq.some((turn) => markerForSelection(turn) === "outcome") || seq.filter(hasMilestoneDevArtifact).length >= MILESTONE_DEV_ARTIFACT_MIN_TURNS;
-  const alwaysKeep = (turn) => {
-    if (correctors.has(turn.promptNumber)) {
+  const isVictim = (turn) => graph.supersededVictims.has(turn.id);
+  const isAlwaysKeep = (turn) => {
+    if (endpoints.has(turn.id)) {
       return true;
     }
-    const structuralKeep = turn.type === "compact" || endpoints.has(turn.promptNumber);
-    if (supersededVictims.has(turn.promptNumber)) {
-      return structuralKeep;
+    if (isVictim(turn)) {
+      return false;
     }
-    const marker = markerForSelection(turn);
-    return marker !== null || structuralKeep;
+    if (graph.correctors.has(turn.id)) {
+      return true;
+    }
+    if (milestoneMarker(turn) === "reversed") {
+      return true;
+    }
+    return isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4;
   };
-  const significance = (turn) => {
-    if (alwaysKeep(turn)) {
-      return Number.POSITIVE_INFINITY;
+  const promptNumbersOf = (turnIds) => turnIds.map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber).filter((promptNumber) => promptNumber !== void 0);
+  const keptIds = /* @__PURE__ */ new Set();
+  const rows = [];
+  const poolRows = [];
+  for (const turn of seq) {
+    const effGrade = effGradeOf(turn);
+    const alwaysKeep = isAlwaysKeep(turn);
+    const spine = !isVictim(turn) && effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
+      continue;
     }
-    return milestoneWeightedScore(
+    const superseders = graph.supersededBy.get(turn.id);
+    const row = {
       turn,
-      citedByPrompt.get(turn.promptNumber) ?? 0,
-      citationCap,
-      view.taskCausalityEraCutoffEpoch
-    );
-  };
-  const runIds = /* @__PURE__ */ new Map();
-  let currentRunId = 0;
-  let currentRunType = void 0;
-  for (const turn of seq) {
-    if (turn.type !== currentRunType) {
-      currentRunId += 1;
-      currentRunType = turn.type;
+      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
+      effGrade,
+      alwaysKeep,
+      spine,
+      marker: markerForSelection(turn),
+      ...superseders ? { supersededBy: promptNumbersOf(superseders) } : {}
+    };
+    poolRows.push(row);
+    if (alwaysKeep || spine) {
+      keptIds.add(turn.id);
+      rows.push(row);
     }
-    runIds.set(turn.promptNumber, currentRunId);
   }
-  const pool = seq.filter(
-    (turn) => alwaysKeep(turn) || !supersededVictims.has(turn.promptNumber) && significance(turn) >= MILESTONE_POOL_MIN_SCORE
-  );
-  const seqByDay = /* @__PURE__ */ new Map();
-  for (const turn of seq) {
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = seqByDay.get(day) ?? [];
-    bucket.push(turn);
-    seqByDay.set(day, bucket);
-  }
-  const poolByDay = /* @__PURE__ */ new Map();
-  for (const turn of pool) {
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = poolByDay.get(day) ?? [];
-    bucket.push(turn);
-    poolByDay.set(day, bucket);
-  }
-  const rankBySignificance = (a, b) => {
-    const sa = significance(a);
-    const sb = significance(b);
-    if (sa !== sb) return sb - sa;
-    const ta = a.toolCallCount ?? 0;
-    const tb = b.toolCallCount ?? 0;
-    if (ta !== tb) return tb - ta;
-    return a.promptNumber - b.promptNumber;
-  };
-  const dayCandidateEntries = [];
-  for (const [date5, daySeq] of seqByDay) {
-    const dayTurns = poolByDay.get(date5) ?? [];
-    const structural = dayTurns.filter((turn) => significance(turn) === Number.POSITIVE_INFINITY);
-    const weightedByRun = /* @__PURE__ */ new Map();
-    for (const turn of dayTurns) {
-      if (significance(turn) === Number.POSITIVE_INFINITY) {
+  const ranked = [...poolRows].sort((left, right) => {
+    if (left.score !== right.score) return right.score - left.score;
+    const leftTools = left.turn.toolCallCount ?? 0;
+    const rightTools = right.turn.toolCallCount ?? 0;
+    if (leftTools !== rightTools) return rightTools - leftTools;
+    return left.turn.promptNumber - right.turn.promptNumber;
+  });
+  const pulled = [];
+  const pulledIds = /* @__PURE__ */ new Set();
+  for (const row of rows) {
+    const entry = citations.get(row.turn.id);
+    if (entry === void 0) {
+      continue;
+    }
+    for (const citedTurnId of entry.citedTurnIds) {
+      if (pulledIds.has(citedTurnId) || keptIds.has(citedTurnId)) {
         continue;
       }
-      const runId = runIds.get(turn.promptNumber) ?? turn.promptNumber;
-      const bucket = weightedByRun.get(runId) ?? [];
-      bucket.push(turn);
-      weightedByRun.set(runId, bucket);
-    }
-    const runRepresentatives = [];
-    for (const members of weightedByRun.values()) {
-      const byPrompt = [...members].sort((a, b) => a.promptNumber - b.promptNumber);
-      const last = byPrompt[byPrompt.length - 1];
-      runRepresentatives.push(last);
-      const others = members.filter((turn) => turn.promptNumber !== last.promptNumber);
-      if (others.length > 0) {
-        runRepresentatives.push([...others].sort(rankBySignificance)[0]);
+      const cited = universeById.get(citedTurnId);
+      if (cited === void 0 || cited.type === "compact" || cited.sessionId !== row.turn.sessionId || // Predecessor guard: a causal reference points backward.
+      cited.promptNumber >= row.turn.promptNumber) {
+        continue;
       }
-    }
-    const seenCandidates = /* @__PURE__ */ new Set();
-    const dayCandidates = [...structural, ...runRepresentatives].filter((turn) => {
-      if (seenCandidates.has(turn.promptNumber)) {
-        return false;
+      const effGrade = effGradeOf(cited);
+      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
+        continue;
       }
-      seenCandidates.add(turn.promptNumber);
-      return true;
-    });
-    if (dayCandidates.length === 0 && daySeq.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS) {
-      const coverageCandidate = [...daySeq].filter(
-        (turn) => !supersededVictims.has(turn.promptNumber) || turn.type === "compact" || endpoints.has(turn.promptNumber)
-      ).sort((a, b) => {
-        const ranked = rankBySignificance(a, b);
-        return ranked !== 0 ? ranked : b.promptNumber - a.promptNumber;
-      })[0];
-      if (coverageCandidate) {
-        dayCandidates.push(coverageCandidate);
-      }
-    }
-    dayCandidateEntries.push({
-      date: date5,
-      seqTurns: daySeq,
-      candidates: dayCandidates,
-      structuralCount: structural.length
-    });
-  }
-  const finalPrompts = /* @__PURE__ */ new Set();
-  const overflowByDay = [];
-  const totalCandidateCount = dayCandidateEntries.reduce(
-    (sum, day) => sum + day.candidates.length,
-    0
-  );
-  for (const day of dayCandidateEntries) {
-    const cap = adaptiveMilestoneDayCap(
-      day,
-      totalCandidateCount,
-      seq.length,
-      usesDevBudgetFloor
-    );
-    const ranked = [...day.candidates].sort(rankBySignificance);
-    const top = ranked.slice(0, cap);
-    for (const turn of top) finalPrompts.add(turn.promptNumber);
-    for (const turn of ranked.slice(cap)) {
-      if (alwaysKeep(turn)) finalPrompts.add(turn.promptNumber);
-    }
-    const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
-    if (dropped.length > 0) {
-      const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      overflowByDay.push({
-        date: day.date,
-        count: dropped.length,
-        firstPrompt: byPrompt[0].promptNumber,
-        lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
+      pulledIds.add(citedTurnId);
+      pulled.push({
+        turn: cited,
+        effGrade,
+        citedByPromptNumber: row.turn.promptNumber,
+        label: pulledAntecedentLabel(cited),
+        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? [])
       });
     }
   }
-  const kept = seq.filter((turn) => finalPrompts.has(turn.promptNumber)).map((turn) => ({
-    turn,
-    score: significance(turn),
-    marker: markerForSelection(turn)
-  }));
-  return { kept, overflowByDay };
+  const overflowByDay = [];
+  const droppedByDay = /* @__PURE__ */ new Map();
+  for (const turn of seq) {
+    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+      continue;
+    }
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = droppedByDay.get(day) ?? [];
+    bucket.push(turn);
+    droppedByDay.set(day, bucket);
+  }
+  for (const [date5, dropped] of droppedByDay) {
+    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
+    overflowByDay.push({
+      date: date5,
+      count: byPrompt.length,
+      firstPrompt: byPrompt[0].promptNumber,
+      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
+    });
+  }
+  return { kept: rows, ranked, pulled, overflowByDay };
+}
+function pulledAntecedentLabel(turn) {
+  if (turn.title !== null && turn.title.trim() !== "") {
+    return turn.title;
+  }
+  const prompt = cleanPromptForLabel(turn.userPrompt);
+  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP);
 }
 function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
   return parseInlineCitations(content, cap);
@@ -4793,7 +4787,10 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowTurns,
     windowSignals,
     compactBoundaries,
-    sessionTurns: allTurns
+    sessionTurns: allTurns,
+    // One read for the whole selection: in-degree, victim demotion and
+    // pull-through all consume this map (spec §B).
+    citations: getSessionEffectiveCitations(db, session.id)
   });
   if (viewKind === "milestones") {
     resolveMilestoneReferences(db, milestoneSelection.kept);
@@ -4825,6 +4822,7 @@ function buildTimelineView(db, input, preloadedTurns) {
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
+    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
     milestoneDayGroups,
     pagedPhases: pagedPhases.items,
     viewItemTotal,

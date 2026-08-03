@@ -1,5 +1,9 @@
 import type { Database } from "bun:sqlite";
-import { parseInlineCitations } from "../db/citations";
+import {
+  getSessionEffectiveCitations,
+  parseInlineCitations,
+  type EffectiveCitations,
+} from "../db/citations";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { resolveTranscriptPath } from "../shared/paths";
@@ -34,6 +38,13 @@ export interface TimelineView {
   windowTurns: TurnRecord[];
   pageTurns: TurnRecord[];
   pagedMilestones: KeptMilestone[];
+  /**
+   * Every ↳ antecedent the kept rows pull in (spec §C ⑤), for the whole selection
+   * rather than the current page — a renderer places one under its
+   * `citedByPromptNumber` row when that row is on the page. Empty outside the
+   * milestones view.
+   */
+  milestonePulled: PulledAntecedent[];
   milestoneDayGroups: MilestoneDayGroup[];
   pagedPhases: Phase[];
   viewItemTotal: number;
@@ -83,8 +94,6 @@ export const MILESTONE_REFERENCE_CAP = 2;
  * `MILESTONE_REFERENCE_CAP` that survive. Bounds work on pathological content.
  */
 export const MILESTONE_REFERENCE_PARSE_CAP = 8;
-export const MILESTONE_DAY_BUDGET_MAX = 7;
-export const FOLD_FIRST_MIN_RUN = 4;
 
 export const OUTCOME_TAGS = new Set([
   "merged",
@@ -221,14 +230,56 @@ export interface CitedReference {
 
 export interface KeptMilestone {
   turn: TurnRecord;
+  /** effGrade + tie-break (spec §C). Ordering only; never crosses a grade tier. */
   score: number;
+  /** The truth-table grade AFTER victim demotion / corrector promotion. */
+  effGrade: number;
+  /** Kept for a structural reason, so a budget may degrade it but never drop it. */
+  alwaysKeep: boolean;
+  /** Admitted on grade alone (effGrade ≥ 3), as opposed to structurally. */
+  spine: boolean;
   marker: MilestoneMarker;
+  /**
+   * Prompt numbers of the turns that superseded this one, ascending. Present
+   * only on a kept row that is itself a victim (a victim can still be kept as a
+   * window endpoint); the renderer turns it into the `→被T<n>推翻` back-link.
+   */
+  supersededBy?: number[];
   /**
    * Resolved causal references parsed from `turn.content` (`[T<dbid>]`), ≤2.
    * Populated in the query layer via `resolveMilestoneReferences`; absent (or
    * empty) when the milestone cites nothing resolvable in-session.
+   *
+   * INTERIM: this is the pre-redesign ↳ path that the current renderer still
+   * consumes. `MilestoneSelection.pulled` is the systematic replacement (spec
+   * §C ⑤); the unified row renderer (ticket 03) switches over and this field
+   * goes away with it.
    */
   references?: CitedReference[];
+}
+
+/**
+ * A turn pulled in under a kept main row because that row cites it (spec §C ⑤):
+ * effGrade ≤ 2 — including `status = 'skipped'` rows, which have no main-row
+ * candidacy at all — rendered as an indented `↳` line beneath its citer.
+ */
+export interface PulledAntecedent {
+  turn: TurnRecord;
+  effGrade: number;
+  /**
+   * Prompt number of the main row this antecedent renders under: the EARLIEST
+   * citer among the kept rows, so a shared antecedent appears exactly once.
+   */
+  citedByPromptNumber: number;
+  /**
+   * Render-ready one-line label: the stored title when there is one, else a
+   * ≤`MILESTONE_PULLED_LABEL_CAP`-char prefix of the user prompt. Existing
+   * skipped rows carry no title at all (extraction only starts titling them in
+   * ticket 05), and a pulled row that renders as `(untitled)` is dead weight.
+   */
+  label: string;
+  /** Prompt numbers of the turns that superseded this one, ascending; empty when it is not a victim. */
+  supersededBy: number[];
 }
 
 export interface OverflowHint {
@@ -239,7 +290,21 @@ export interface OverflowHint {
 }
 
 export interface MilestoneSelection {
+  /**
+   * The main rows, in prompt order: spine (effGrade ≥ 3) ∪ always-keep. There is
+   * no budget here — cutting is the unified renderer's job (spec §D / ticket 03),
+   * which reads `ranked` for its degradation order.
+   */
   kept: KeptMilestone[];
+  /**
+   * The scored pool, best first: every turn clearing the pool gate
+   * (effGrade ≥ 2) plus the always-keep rows. A superset of `kept` — the G2 band
+   * is scored and ordered but not admitted to the spine. Shares object identity
+   * with `kept` for the rows in both.
+   */
+  ranked: KeptMilestone[];
+  /** ↳ antecedents pulled in by the kept rows, in citer order then cite order. */
+  pulled: PulledAntecedent[];
   overflowByDay: OverflowHint[];
 }
 
@@ -610,8 +675,15 @@ export function milestoneMarker(
   return null;
 }
 
-const MILESTONE_BASE_SCORE: Record<string, number> = {
-  decision: 4,
+/**
+ * Legacy type→grade map. This is the ONLY surviving use of the old type base
+ * score table: it exists solely inside the pre-era effGrade fallback, because a
+ * turn created before the task-causality cutoff carries a grade written under
+ * the old "significance" semantics that must not be read as a task-causality
+ * grade. Post-era turns never touch it.
+ */
+const MILESTONE_LEGACY_TYPE_GRADE: Readonly<Record<string, number>> = {
+  decision: 3,
   feature: 2,
   refactor: 2,
   bugfix: 2,
@@ -619,59 +691,77 @@ const MILESTONE_BASE_SCORE: Record<string, number> = {
   discovery: 1,
 };
 
-export const MILESTONE_GRADE_BASE_SCORE: Readonly<Record<number, number>> = {
-  0: 0,
-  1: 1,
-  2: 2,
-  3: 3,
-  4: 4,
-};
+/**
+ * A legacy effGrade is capped here and therefore can never be 4 — G4 is the
+ * always-keep anchor tier, and a pre-era turn must never claim it on the
+ * strength of a type map alone.
+ */
+export const MILESTONE_LEGACY_GRADE_CAP = 3;
 
-const MILESTONE_POOL_MIN_SCORE = 2;
-const MILESTONE_INSIGHT_WEIGHT = 2;
-const MILESTONE_PURE_SPEC_WEIGHT = 3;
-const MILESTONE_TAG_FAMILY_WEIGHT = 1;
-const MILESTONE_IMPORTANCE_TAG_RE =
-  /design|architecture|spec|simulat|review|audit|verif|bug|root|regress|correction|pivot|hotfix|misfire|decision/;
+/** Spine admission (spec §C ④). */
+export const MILESTONE_SPINE_MIN_EFF_GRADE = 3;
+/**
+ * Scored-pool gate (spec §C). On effGrade, NOT on the composite score: the
+ * bonuses used to be able to lift a G2 turn past a G3 one, which is exactly the
+ * inversion the redesign removes. Nothing a turn's content can do admits it to
+ * a tier its grade did not earn.
+ */
+export const MILESTONE_POOL_MIN_EFF_GRADE = 2;
+/** Pull-through ceiling (spec §C ⑤): antecedents are what the spine outranks. */
+export const MILESTONE_PULL_MAX_EFF_GRADE = 2;
+
+const MILESTONE_TIE_CITED_WEIGHT = 0.25;
+const MILESTONE_TIE_CITED_CAP = 2;
+const MILESTONE_TIE_INSIGHT_WEIGHT = 0.25;
+const MILESTONE_TIE_PURE_SPEC_WEIGHT = 0.15;
+/** Ceiling on the whole tie-break, so a score can never cross a grade tier. */
+const MILESTONE_TIE_BREAK_MAX = 0.9;
+
 const MILESTONE_PURE_SPEC_RE = /^docs\/(?:plans|specs|superpowers)\/.*\.md$/;
-const MILESTONE_DEV_ARTIFACT_RE =
-  /(^|\/)(?:src|tests|scripts|plugin|docs\/(?:plans|specs|superpowers))\//;
-const MILESTONE_DEV_ARTIFACT_MIN_TURNS = 3;
 const MILESTONE_VERSION_RE = /\b0\.\d+\.\d+\b/g;
-const MILESTONE_CITATION_CAP_SPARSE = 2;
-const MILESTONE_CITATION_CAP_DENSE = 4;
-const MILESTONE_DENSE_CITATION_SHARE = 0.25;
-const MILESTONE_TARGET_RETENTION_RATIO = 0.22;
-const MILESTONE_MIN_TARGET_COUNT = 4;
-const MILESTONE_DAY_COVERAGE_MIN_TURNS = 3;
-const MILESTONE_CALIBRATED_DAY_BUDGET_BASE = 4;
-const MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR = 8;
-const MILESTONE_SMALL_DAY_MAX_FLOOR = 5;
-const MILESTONE_SPARSE_DAY_DENSITY = 0.6;
-const MILESTONE_SPARSE_DAY_MAX_FLOOR = 6;
-const MILESTONE_SPARSE_DAY_FLOOR_DIVISOR = 5;
-const MILESTONE_DENSE_DAY_FLOOR_DIVISOR = 3;
 
-interface MilestoneDayCandidates {
-  date: string;
-  seqTurns: TurnRecord[];
-  candidates: TurnRecord[];
-  structuralCount: number;
-}
+/** Character budget for the prompt-prefix pseudo-title of an untitled ↳ row. */
+export const MILESTONE_PULLED_LABEL_CAP = 60;
 
-export function milestoneBaseScore(turn: TurnRecord): number {
-  if (turn.significanceGrade !== null && turn.significanceGrade !== undefined) {
-    return MILESTONE_GRADE_BASE_SCORE[turn.significanceGrade] ?? 0;
+/**
+ * The effGrade truth table (spec §C).
+ *
+ *   - era turn, graded    → that grade (0-4)
+ *   - era turn, ungraded  → 0, i.e. out of the pool until the settle pass grades it
+ *   - pre-era (legacy)    → type map, zeroed for an artifact type that touched no
+ *                           file, +1 for an insight, capped at 3
+ *
+ * Both halves are era-gated. The half-gate that shipped before this (base score
+ * ungated, content score gated) let 761 stored legacy grades feed the base score
+ * with pre-era semantics.
+ */
+export function milestoneEffGrade(
+  turn: TurnRecord,
+  taskCausalityEraCutoffEpoch?: number,
+): number {
+  if (isTaskCausalityEra(turn.createdAtEpoch, taskCausalityEraCutoffEpoch)) {
+    const grade = turn.significanceGrade;
+    if (grade === null || grade === undefined) {
+      return 0;
+    }
+    return Math.max(0, Math.min(4, grade));
   }
 
-  const score = MILESTONE_BASE_SCORE[turn.type ?? ""] ?? 0;
+  return legacyEffGrade(turn);
+}
+
+function legacyEffGrade(turn: TurnRecord): number {
+  let grade = MILESTONE_LEGACY_TYPE_GRADE[turn.type ?? ""] ?? 0;
   if (
     (turn.type === "feature" || turn.type === "refactor" || turn.type === "change") &&
     turn.filesModified.length === 0
   ) {
-    return 0;
+    grade = 0;
   }
-  return score;
+  if (hasMilestoneInsight(turn)) {
+    grade += 1;
+  }
+  return Math.min(grade, MILESTONE_LEGACY_GRADE_CAP);
 }
 
 function hasMilestoneInsight(turn: TurnRecord): boolean {
@@ -685,151 +775,70 @@ function isPureSpecTurn(turn: TurnRecord): boolean {
   );
 }
 
-function hasMilestoneDevArtifact(turn: TurnRecord): boolean {
-  return turn.filesModified.some((path) =>
-    MILESTONE_DEV_ARTIFACT_RE.test(path.replaceAll("\\", "/")),
-  );
+/**
+ * Sub-unit ordering signal, bounded by `MILESTONE_TIE_BREAK_MAX` (< 1) so that
+ * `effGrade + tieBreak` sorts strictly within a grade tier and never across one.
+ * `citedBy` is the session-local DISTINCT-citer in-degree.
+ */
+export function milestoneTieBreak(turn: TurnRecord, citedBy = 0): number {
+  const raw =
+    MILESTONE_TIE_CITED_WEIGHT * Math.min(Math.max(citedBy, 0), MILESTONE_TIE_CITED_CAP) +
+    (hasMilestoneInsight(turn) ? MILESTONE_TIE_INSIGHT_WEIGHT : 0) +
+    (isPureSpecTurn(turn) ? MILESTONE_TIE_PURE_SPEC_WEIGHT : 0);
+  return Math.min(raw, MILESTONE_TIE_BREAK_MAX);
 }
 
-function hasMilestoneTagFamily(turn: TurnRecord): boolean {
-  return turn.tags
-    .filter((tag) => !tag.includes(":"))
-    .some((tag) => MILESTONE_IMPORTANCE_TAG_RE.test(tag));
-}
+/**
+ * The in-memory stand-in for `getSessionEffectiveCitations` (spec §B), for
+ * callers that hold turn records but no `Database` — the pure-function selection
+ * seam the tests use. It reproduces the DB reader's contract exactly for a
+ * session with no edge rows: `cites_recorded = 1` means the extractor spoke and
+ * an empty edge set is authoritative; `0` falls back to the inline grammar,
+ * dropping dangling, cross-session and self citations.
+ *
+ * Production always passes the real map, so structured edges are never lost to
+ * this fallback.
+ */
+function inlineCitationFallback(
+  turns: readonly TurnRecord[],
+): Map<number, EffectiveCitations> {
+  const sessionTurnIds = new Set(turns.map((turn) => turn.id));
+  const effective = new Map<number, EffectiveCitations>();
 
-function milestoneContentScore(
-  turn: TurnRecord,
-  taskCausalityEraCutoffEpoch?: number,
-): number {
-  if (
-    turn.significanceGrade !== null &&
-    turn.significanceGrade <= 1 &&
-    isTaskCausalityEra(
-      turn.createdAtEpoch,
-      taskCausalityEraCutoffEpoch,
-    )
-  ) {
-    return 0;
+  for (const turn of turns) {
+    if (turn.citesRecorded) {
+      effective.set(turn.id, { source: "structured", citedTurnIds: [], edges: [] });
+      continue;
+    }
+    effective.set(turn.id, {
+      source: "inline",
+      citedTurnIds: parseInlineCitations(turn.content).filter(
+        (id) => id !== turn.id && sessionTurnIds.has(id),
+      ),
+      edges: [],
+    });
   }
 
-  return Math.max(
-    hasMilestoneInsight(turn) ? MILESTONE_INSIGHT_WEIGHT : 0,
-    isPureSpecTurn(turn) ? MILESTONE_PURE_SPEC_WEIGHT : 0,
-    hasMilestoneTagFamily(turn) ? MILESTONE_TAG_FAMILY_WEIGHT : 0,
-  );
+  return effective;
 }
 
-function milestoneWeightedScore(
-  turn: TurnRecord,
-  citedBy = 0,
-  citationCap = 2,
-  taskCausalityEraCutoffEpoch?: number,
-): number {
-  return (
-    milestoneBaseScore(turn) +
-    milestoneContentScore(turn, taskCausalityEraCutoffEpoch) +
-    Math.min(citedBy, citationCap)
-  );
-}
-
-function buildMilestoneCitationInDegree(turns: TurnRecord[]): {
-  citedByPrompt: Map<number, number>;
-  citationCap: number;
-} {
-  const seq = sortTurnsForAnalysis(turns).filter((turn) => turn.status !== "skipped");
-  const byDbId = new Map<number, TurnRecord>();
-  for (const turn of seq) {
-    byDbId.set(turn.id, turn);
-  }
-
-  const citedByPrompt = new Map<number, number>();
-  for (const citer of seq) {
-    for (const id of parseContentReferences(citer.content, MILESTONE_REFERENCE_PARSE_CAP)) {
-      const cited = byDbId.get(id);
-      if (
-        cited === undefined ||
-        cited.sessionId !== citer.sessionId ||
-        cited.promptNumber >= citer.promptNumber
-      ) {
-        continue;
-      }
-      citedByPrompt.set(
-        cited.promptNumber,
-        (citedByPrompt.get(cited.promptNumber) ?? 0) + 1,
-      );
+/**
+ * Session-local DISTINCT-citer in-degree, derived from the citation map the
+ * caller already holds. Same result as `getSessionCitationInDegree`, without a
+ * second pass over the DB — selection reads the map once and reuses it for
+ * in-degree, victim demotion and pull-through alike.
+ */
+function citationInDegree(
+  citations: ReadonlyMap<number, EffectiveCitations>,
+): Map<number, number> {
+  const inDegree = new Map<number, number>();
+  for (const entry of citations.values()) {
+    // citedTurnIds is de-duplicated per citer, so each citer contributes ≤ 1.
+    for (const citedTurnId of entry.citedTurnIds) {
+      inDegree.set(citedTurnId, (inDegree.get(citedTurnId) ?? 0) + 1);
     }
   }
-
-  const citedShare = seq.length === 0 ? 0 : citedByPrompt.size / seq.length;
-  return {
-    citedByPrompt,
-    citationCap:
-      citedShare >= MILESTONE_DENSE_CITATION_SHARE
-        ? MILESTONE_CITATION_CAP_DENSE
-        : MILESTONE_CITATION_CAP_SPARSE,
-  };
-}
-
-function adaptiveMilestoneDayCap(
-  day: MilestoneDayCandidates,
-  totalCandidateCount: number,
-  totalNonSkippedCount: number,
-  useScaledFloor: boolean,
-): number {
-  if (day.candidates.length === 0) {
-    return 0;
-  }
-
-  const targetTotal = Math.max(
-    MILESTONE_MIN_TARGET_COUNT,
-    Math.round(totalNonSkippedCount * MILESTONE_TARGET_RETENTION_RATIO),
-  );
-  const proportional =
-    totalCandidateCount === 0
-      ? targetTotal
-      : Math.ceil((targetTotal * day.candidates.length) / totalCandidateCount);
-  const calibratedCap = Math.min(
-    MILESTONE_DAY_BUDGET_MAX,
-    MILESTONE_CALIBRATED_DAY_BUDGET_BASE +
-      Math.floor(day.candidates.length / MILESTONE_CALIBRATED_DAY_BUDGET_DIVISOR),
-  );
-  const coverageFloor =
-    day.seqTurns.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS ? 1 : 0;
-  const candidateDensity = day.candidates.length / day.seqTurns.length;
-  const scaledFloor =
-    !useScaledFloor || day.seqTurns.length < MILESTONE_DAY_COVERAGE_MIN_TURNS
-      ? 0
-      : day.seqTurns.length <= 10
-        ? Math.min(day.candidates.length, MILESTONE_SMALL_DAY_MAX_FLOOR)
-        : candidateDensity < MILESTONE_SPARSE_DAY_DENSITY
-          ? Math.min(
-            day.candidates.length,
-            MILESTONE_SPARSE_DAY_MAX_FLOOR,
-            Math.ceil(day.seqTurns.length / MILESTONE_SPARSE_DAY_FLOOR_DIVISOR),
-          )
-          : Math.min(
-            day.candidates.length,
-            calibratedCap,
-            Math.ceil(day.seqTurns.length / MILESTONE_DENSE_DAY_FLOOR_DIVISOR),
-          );
-  const structuralFloor =
-    useScaledFloor && day.structuralCount >= MILESTONE_CALIBRATED_DAY_BUDGET_BASE
-      ? Math.min(
-        day.candidates.length,
-        MILESTONE_DAY_BUDGET_MAX,
-        day.structuralCount + 2,
-      )
-      : 0;
-
-  return Math.min(
-    day.candidates.length,
-    Math.max(
-      coverageFloor,
-      Math.min(proportional, calibratedCap),
-      scaledFloor,
-      structuralFloor,
-    ),
-  );
+  return inDegree;
 }
 
 function extractMilestoneVersion(title: string | null): string | null {
@@ -884,114 +893,119 @@ function demotedOutcomePrompts(seq: TurnRecord[]): Set<number> {
   return demoted;
 }
 
-export function isMilestoneAlwaysKeep(turn: TurnRecord, endpoints: Set<number>): boolean {
-  return (
-    milestoneMarker(turn) !== null ||
-    turn.type === "compact" ||
-    endpoints.has(turn.promptNumber)
-  );
-}
-
-const FOLD_RUN_TYPES = new Set(["decision", "feature", "change", "refactor", "bugfix"]);
-const FOLD_FIRST_TYPES = new Set(["decision", "feature", "change", "refactor"]); // bugfix: last only
-
-export function foldMilestoneRuns(
-  seq: TurnRecord[],
-  endpoints: Set<number>,
-  alwaysKeep: (turn: TurnRecord) => boolean = (turn) =>
-    isMilestoneAlwaysKeep(turn, endpoints),
-): Set<number> {
-  const kept = new Set<number>();
-  let runType: string | null | undefined = undefined;
-  let runMembers: TurnRecord[] = [];
-
-  const flush = (): void => {
-    if (typeof runType === "string" && FOLD_RUN_TYPES.has(runType)) {
-      const foldable = runMembers.filter(
-        (t) => milestoneBaseScore(t) > 0 && !alwaysKeep(t),
-      );
-      if (foldable.length > 0) {
-        kept.add(foldable[foldable.length - 1]!.promptNumber);
-        if (FOLD_FIRST_TYPES.has(runType) && foldable.length >= FOLD_FIRST_MIN_RUN) {
-          kept.add(foldable[0]!.promptNumber);
-        }
-      }
-    }
-    runMembers = [];
-  };
-
-  for (const turn of seq) {
-    if (turn.type !== runType) {
-      flush();
-      runType = turn.type;
-    }
-    runMembers.push(turn);
-  }
-  flush();
-
-  return kept;
+export interface CorrectionGraph {
+  /** DB ids of turns that supersede at least one resolvable predecessor. */
+  correctors: Set<number>;
+  /**
+   * DB ids of superseded turns. A victim resolved from OUTSIDE the window is
+   * included: it holds no main-row slot to lose, but its demoted grade still
+   * decides whether pull-through revives it as a `↳` antecedent.
+   */
+  supersededVictims: Set<number>;
+  /** Victim DB id → superseding DB ids, ascending by the superseder's prompt number. */
+  supersededBy: Map<number, number[]>;
 }
 
 /**
- * Builds the in-window linear-correction graph from causal citations. A turn is
- * a *corrector* when its `content` cites `[T<dbid>]` of an earlier same-session
- * turn whose milestone marker is `reversed` (a `rolled-back` role tag or the
- * rewind column). That cited turn is the *superseded victim*: it is already
- * represented by the corrector's `↳` casualty sub-row, so it should not also
- * claim a first-class always-keep slot just for being reversed.
+ * Builds the supersession graph (spec §B/§C). A turn is a *corrector* when it
+ * carries a `supersedes` edge to an earlier same-session turn; that turn is the
+ * *victim*, which selection demotes to effGrade ≤ 1 and strips of spine
+ * eligibility, and which the renderer marks with a `→被T<n>推翻` back-link.
  *
- * Promotion/demotion keys on the *existence of a corrector*, which leaves the
- * pure-rewind case (no later turn cites the rewound turn) force-kept exactly as
- * before. A plain "building on `[T<n>]`" cite of a non-reversed predecessor is
- * not a correction and is ignored.
+ * Victimhood comes off the EDGE, not off the victim's tags. The previous model
+ * required the victim to already carry a `rolled-back` tag before any of this
+ * fired, which meant a partial reversal (the common case — the corrector knows
+ * what it overturned, the victim does not know it was overturned) produced
+ * neither a demotion nor a back-link.
  *
- * A cited victim is matched first against the in-window `seq`, then via the
- * optional `resolveCited` lookup (the full-session set) so a ranged view whose
- * corrector cites a reversed victim *outside* the window still promotes that
- * corrector. Only an in-window victim is added to `supersededVictims` — an
- * out-of-window victim is not a selection candidate, so it cannot be demoted
- * from a slot it never held; only its corrector's promotion matters.
+ * The legacy adapter covers pre-era citers whose citations came from INLINE
+ * prose, which carries no relation: for those, citing a turn that is *marked*
+ * reversed (rolled-back tag or the rewind column) is read as a supersession,
+ * which is precisely the old rule — an additional signal for pre-era turns only,
+ * so era turns are governed by edges alone.
+ *
+ * BOTH gates are load-bearing. Era alone is not enough: a structured edge is
+ * authoritative wherever it exists (spec §B), including on a turn created before
+ * the cutoff and extracted after it. Such a turn's `builds-on` / `evidence-for`
+ * edge states a relation, and that relation is not `supersedes`; reading the
+ * victim's tag over it would invent a correction the extractor declined to
+ * record, demoting the target and promoting a mere consumer.
+ *
+ * A cited victim is matched first against `turns`, then via `resolveCited` (the
+ * full-session set), so a ranged view whose corrector cites a victim OUTSIDE the
+ * window still promotes that corrector and still demotes that victim.
  */
 export function buildCorrectionGraph(
-  seq: TurnRecord[],
-  resolveCited?: (dbId: number) => TurnRecord | null | undefined,
-): {
-  correctors: Set<number>;
-  supersededVictims: Set<number>;
-} {
+  turns: readonly TurnRecord[],
+  options: {
+    citations?: ReadonlyMap<number, EffectiveCitations>;
+    resolveCited?: (dbId: number) => TurnRecord | null | undefined;
+    taskCausalityEraCutoffEpoch?: number;
+  } = {},
+): CorrectionGraph {
   const correctors = new Set<number>();
   const supersededVictims = new Set<number>();
-  const byDbId = new Map<number, TurnRecord>();
-  for (const t of seq) {
-    byDbId.set(t.id, t);
-  }
+  const supersedersByVictim = new Map<number, TurnRecord[]>();
 
-  for (const corrector of seq) {
-    const citedIds = parseContentReferences(
-      corrector.content,
-      MILESTONE_REFERENCE_PARSE_CAP,
-    );
-    for (const id of citedIds) {
-      const inWindow = byDbId.get(id);
-      const victim = inWindow ?? resolveCited?.(id) ?? undefined;
+  const byDbId = new Map<number, TurnRecord>();
+  for (const turn of turns) {
+    byDbId.set(turn.id, turn);
+  }
+  const citations = options.citations ?? inlineCitationFallback(turns);
+
+  for (const corrector of turns) {
+    const entry = citations.get(corrector.id);
+    if (entry === undefined) {
+      continue;
+    }
+
+    const supersededIds = new Set<number>();
+    for (const edge of entry.edges) {
+      if (edge.relation === "supersedes") {
+        supersededIds.add(edge.citedTurnId);
+      }
+    }
+    if (
+      entry.source === "inline" &&
+      !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)
+    ) {
+      for (const citedTurnId of entry.citedTurnIds) {
+        const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
+        if (cited && milestoneMarker(cited) === "reversed") {
+          supersededIds.add(citedTurnId);
+        }
+      }
+    }
+
+    for (const citedTurnId of supersededIds) {
+      const victim = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
       if (
         !victim ||
         victim.sessionId !== corrector.sessionId ||
         // Predecessor guard: a causal reference points backward.
-        victim.promptNumber >= corrector.promptNumber ||
-        // Only reversal pairs drive promotion/demotion.
-        milestoneMarker(victim) !== "reversed"
+        victim.promptNumber >= corrector.promptNumber
       ) {
         continue;
       }
-      correctors.add(corrector.promptNumber);
-      if (inWindow !== undefined) {
-        supersededVictims.add(victim.promptNumber);
-      }
+      correctors.add(corrector.id);
+      supersededVictims.add(victim.id);
+      const bucket = supersedersByVictim.get(victim.id) ?? [];
+      bucket.push(corrector);
+      supersedersByVictim.set(victim.id, bucket);
     }
   }
 
-  return { correctors, supersededVictims };
+  const supersededBy = new Map<number, number[]>();
+  for (const [victimId, superseders] of supersedersByVictim) {
+    supersededBy.set(
+      victimId,
+      [...superseders]
+        .sort((left, right) => left.promptNumber - right.promptNumber)
+        .map((turn) => turn.id),
+    );
+  }
+
+  return { correctors, supersededVictims, supersededBy };
 }
 
 function getCompactMetadata(tags: string[]): {
@@ -1279,233 +1293,227 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
   };
 }
 
+/**
+ * Grade-first milestone selection (spec §C). The six steps run in this order and
+ * the order is load-bearing:
+ *
+ *   ① victim demotion (effGrade → ≤1, spine eligibility revoked)
+ *   ② corrector promotion (effGrade → ≥3) — AFTER ①, so a corrector that was
+ *     itself later overturned stays demoted rather than anchoring the arc
+ *   ③ always-keep: endpoints ∪ non-victim correctors ∪ reversed-with-no-corrector
+ *     ∪ era G4; `type='compact'` is in none of it and holds no kept slot
+ *   ④ spine admission: effGrade ≥ 3
+ *   ⑤ pull-through: effGrade ≤ 2 turns (INCLUDING skipped ones) cited by a kept
+ *     row become its ↳ antecedents
+ *   ⑥ budget/degradation — NOT here. Selection returns the whole eligible set
+ *     plus `ranked`; the unified renderer (ticket 03) does the cutting.
+ */
 export function selectMilestoneTurns(view: {
   session?: SessionRecord;
   windowTurns: TurnRecord[];
   windowSignals: ShapeSignals;
   compactBoundaries: number[];
   /**
-   * Full-session turns, used only to resolve a corrector's `[T<dbid>]` cite of a
-   * reversed victim that sits *outside* a ranged `windowTurns`. Omit for a
-   * full-window view (every cite is already in-window).
+   * Full-session turns, used to resolve a citation whose target sits *outside* a
+   * ranged `windowTurns` and to give pull-through the skipped rows the window
+   * filter would hide. Omit for a full-window view.
    */
   sessionTurns?: TurnRecord[];
   taskCausalityEraCutoffEpoch?: number;
+  /**
+   * Session-local effective citations, read ONCE per selection by the caller
+   * (`getSessionEffectiveCitations`) and reused here for in-degree, victim
+   * derivation and pull-through. Omitted, selection falls back to the in-memory
+   * inline-grammar reader — correct for legacy turns, blind to structured edges.
+   */
+  citations?: ReadonlyMap<number, EffectiveCitations>;
 }): MilestoneSelection {
+  const eraCutoff = view.taskCausalityEraCutoffEpoch;
+  const universe = view.sessionTurns ?? view.windowTurns;
+  // Main-row candidates: a skipped turn has no candidacy (it can still be pulled
+  // in as an antecedent), and a compact marker is structural noise that the arc
+  // view no longer spends a row on.
   const seq = sortTurnsForAnalysis(view.windowTurns).filter(
-    (turn) => turn.status !== "skipped",
+    (turn) => turn.status !== "skipped" && turn.type !== "compact",
   );
   if (seq.length === 0) {
-    return { kept: [], overflowByDay: [] };
+    return { kept: [], ranked: [], pulled: [], overflowByDay: [] };
   }
 
-  // D4 endpoints: window first live + window last *titled* live.
-  const endpoints = new Set<number>();
-  endpoints.add(seq[0]!.promptNumber);
-  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
-  endpoints.add((lastTitled ?? seq[seq.length - 1]!).promptNumber);
+  const citations = view.citations ?? inlineCitationFallback(universe);
+  const inDegree = citationInDegree(citations);
+  const universeById = new Map(universe.map((turn) => [turn.id, turn]));
+  const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
 
-  // Linear-correction reweighting: when a surviving turn cites a reversed
-  // predecessor (`[T<dbid>]`), the citing *corrector* becomes the always-keep
-  // anchor and the cited *victim* loses its reversed-marker guarantee — it falls
-  // back to its base score and survives only as the corrector's `↳` casualty
-  // sub-row (resolved post-selection). A rewound turn with no in-window corrector
-  // is untouched (still force-kept). Structural keeps (endpoint/compact) stand.
-  const sessionById = view.sessionTurns
-    ? new Map(view.sessionTurns.map((t) => [t.id, t]))
-    : undefined;
-  const { correctors, supersededVictims } = buildCorrectionGraph(
-    seq,
-    sessionById ? (id) => sessionById.get(id) : undefined,
-  );
-  const { citedByPrompt, citationCap } = buildMilestoneCitationInDegree(
-    view.sessionTurns ?? seq,
-  );
+  const graph = buildCorrectionGraph(seq, {
+    citations,
+    resolveCited: (id) => universeById.get(id),
+    taskCausalityEraCutoffEpoch: eraCutoff,
+  });
+
+  // ① + ②, in that order: a corrector that is itself a victim keeps the demotion.
+  const effGradeOf = (turn: TurnRecord): number => {
+    const raw = milestoneEffGrade(turn, eraCutoff);
+    if (graph.supersededVictims.has(turn.id)) {
+      return Math.min(raw, 1);
+    }
+    return graph.correctors.has(turn.id) ? Math.max(raw, 3) : raw;
+  };
+
+  // ③ endpoints: window first candidate + window last *titled* candidate.
+  const endpoints = new Set<number>([seq[0]!.id]);
+  const lastTitled = [...seq].reverse().find((t) => t.title !== null && t.title !== "");
+  endpoints.add((lastTitled ?? seq[seq.length - 1]!).id);
+
   const demotedOutcomes = demotedOutcomePrompts(seq);
   const markerForSelection = (turn: TurnRecord): MilestoneMarker => {
     const marker = milestoneMarker(turn);
     return marker === "outcome" && demotedOutcomes.has(turn.promptNumber) ? null : marker;
   };
-  const usesDevBudgetFloor =
-    seq.some((turn) => markerForSelection(turn) === "outcome") ||
-    seq.filter(hasMilestoneDevArtifact).length >= MILESTONE_DEV_ARTIFACT_MIN_TURNS;
-  const alwaysKeep = (turn: TurnRecord): boolean => {
-    if (correctors.has(turn.promptNumber)) {
+
+  const isVictim = (turn: TurnRecord): boolean => graph.supersededVictims.has(turn.id);
+  const isAlwaysKeep = (turn: TurnRecord): boolean => {
+    if (endpoints.has(turn.id)) {
       return true;
     }
-    const structuralKeep =
-      turn.type === "compact" || endpoints.has(turn.promptNumber);
-    if (supersededVictims.has(turn.promptNumber)) {
-      return structuralKeep;
+    if (isVictim(turn)) {
+      // A victim is already carried by its corrector's ↳ row; it never anchors.
+      return false;
     }
-    const marker = markerForSelection(turn);
-    return marker !== null || structuralKeep;
-  };
-  const significance = (turn: TurnRecord): number => {
-    if (alwaysKeep(turn)) {
-      return Number.POSITIVE_INFINITY;
+    if (graph.correctors.has(turn.id)) {
+      return true;
     }
-    return milestoneWeightedScore(
-      turn,
-      citedByPrompt.get(turn.promptNumber) ?? 0,
-      citationCap,
-      view.taskCausalityEraCutoffEpoch,
+    if (milestoneMarker(turn) === "reversed") {
+      // Reversed with nobody correcting it: the dead end IS the record.
+      return true;
+    }
+    return (
+      isTaskCausalityEra(turn.createdAtEpoch, eraCutoff) && effGradeOf(turn) === 4
     );
   };
 
-  const runIds = new Map<number, number>();
-  let currentRunId = 0;
-  let currentRunType: string | null | undefined = undefined;
+  const promptNumbersOf = (turnIds: readonly number[]): number[] =>
+    turnIds
+      .map((id) => universeById.get(id)?.promptNumber ?? inWindowById.get(id)?.promptNumber)
+      .filter((promptNumber): promptNumber is number => promptNumber !== undefined);
+
+  // ③ + ④: the eligible main rows, plus the wider scored pool for ticket 03.
+  const keptIds = new Set<number>();
+  const rows: KeptMilestone[] = [];
+  const poolRows: KeptMilestone[] = [];
   for (const turn of seq) {
-    if (turn.type !== currentRunType) {
-      currentRunId += 1;
-      currentRunType = turn.type;
+    const effGrade = effGradeOf(turn);
+    const alwaysKeep = isAlwaysKeep(turn);
+    const spine = !isVictim(turn) && effGrade >= MILESTONE_SPINE_MIN_EFF_GRADE;
+    if (!alwaysKeep && !spine && effGrade < MILESTONE_POOL_MIN_EFF_GRADE) {
+      continue;
     }
-    runIds.set(turn.promptNumber, currentRunId);
+
+    const superseders = graph.supersededBy.get(turn.id);
+    const row: KeptMilestone = {
+      turn,
+      score: effGrade + milestoneTieBreak(turn, inDegree.get(turn.id) ?? 0),
+      effGrade,
+      alwaysKeep,
+      spine,
+      marker: markerForSelection(turn),
+      ...(superseders ? { supersededBy: promptNumbersOf(superseders) } : {}),
+    };
+    poolRows.push(row);
+    if (alwaysKeep || spine) {
+      keptIds.add(turn.id);
+      rows.push(row);
+    }
   }
 
-  // Weighted pool: structural milestones always enter; non-structural turns
-  // compete only when their multi-signal score clears the pool floor.
-  const pool = seq.filter(
-    (turn) =>
-      alwaysKeep(turn) ||
-      (!supersededVictims.has(turn.promptNumber) &&
-        significance(turn) >= MILESTONE_POOL_MIN_SCORE),
-  );
+  const ranked = [...poolRows].sort((left, right) => {
+    if (left.score !== right.score) return right.score - left.score;
+    const leftTools = left.turn.toolCallCount ?? 0;
+    const rightTools = right.turn.toolCallCount ?? 0;
+    if (leftTools !== rightTools) return rightTools - leftTools;
+    return left.turn.promptNumber - right.turn.promptNumber;
+  });
 
-  const seqByDay = new Map<string, TurnRecord[]>();
-  for (const turn of seq) {
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = seqByDay.get(day) ?? [];
-    bucket.push(turn);
-    seqByDay.set(day, bucket);
-  }
-
-  const poolByDay = new Map<string, TurnRecord[]>();
-  for (const turn of pool) {
-    const day = formatLocalDate(turn.createdAtEpoch);
-    const bucket = poolByDay.get(day) ?? [];
-    bucket.push(turn);
-    poolByDay.set(day, bucket);
-  }
-
-  const rankBySignificance = (a: TurnRecord, b: TurnRecord): number => {
-    const sa = significance(a);
-    const sb = significance(b);
-    if (sa !== sb) return sb - sa;
-    const ta = a.toolCallCount ?? 0;
-    const tb = b.toolCallCount ?? 0;
-    if (ta !== tb) return tb - ta;
-    return a.promptNumber - b.promptNumber;
-  };
-
-  const dayCandidateEntries: MilestoneDayCandidates[] = [];
-  for (const [date, daySeq] of seqByDay) {
-    const dayTurns = poolByDay.get(date) ?? [];
-    const structural = dayTurns.filter((turn) => significance(turn) === Number.POSITIVE_INFINITY);
-    const weightedByRun = new Map<number, TurnRecord[]>();
-    for (const turn of dayTurns) {
-      if (significance(turn) === Number.POSITIVE_INFINITY) {
+  // ⑤ pull-through. Rows are already in prompt order, so the first row to claim
+  // an antecedent IS its earliest citer — a shared antecedent renders once.
+  const pulled: PulledAntecedent[] = [];
+  const pulledIds = new Set<number>();
+  for (const row of rows) {
+    const entry = citations.get(row.turn.id);
+    if (entry === undefined) {
+      continue;
+    }
+    for (const citedTurnId of entry.citedTurnIds) {
+      if (pulledIds.has(citedTurnId) || keptIds.has(citedTurnId)) {
         continue;
       }
-      const runId = runIds.get(turn.promptNumber) ?? turn.promptNumber;
-      const bucket = weightedByRun.get(runId) ?? [];
-      bucket.push(turn);
-      weightedByRun.set(runId, bucket);
-    }
-
-    const runRepresentatives: TurnRecord[] = [];
-    for (const members of weightedByRun.values()) {
-      const byPrompt = [...members].sort((a, b) => a.promptNumber - b.promptNumber);
-      const last = byPrompt[byPrompt.length - 1]!;
-      runRepresentatives.push(last);
-      const others = members.filter((turn) => turn.promptNumber !== last.promptNumber);
-      if (others.length > 0) {
-        runRepresentatives.push([...others].sort(rankBySignificance)[0]!);
+      const cited = universeById.get(citedTurnId);
+      if (
+        cited === undefined ||
+        cited.type === "compact" ||
+        cited.sessionId !== row.turn.sessionId ||
+        // Predecessor guard: a causal reference points backward.
+        cited.promptNumber >= row.turn.promptNumber
+      ) {
+        continue;
       }
-    }
-
-    const seenCandidates = new Set<number>();
-    const dayCandidates = [...structural, ...runRepresentatives].filter((turn) => {
-      if (seenCandidates.has(turn.promptNumber)) {
-        return false;
+      const effGrade = effGradeOf(cited);
+      if (effGrade > MILESTONE_PULL_MAX_EFF_GRADE) {
+        continue;
       }
-      seenCandidates.add(turn.promptNumber);
-      return true;
-    });
-
-    if (
-      dayCandidates.length === 0 &&
-      daySeq.length >= MILESTONE_DAY_COVERAGE_MIN_TURNS
-    ) {
-      const coverageCandidate = [...daySeq]
-        .filter(
-          (turn) =>
-            !supersededVictims.has(turn.promptNumber) ||
-            turn.type === "compact" ||
-            endpoints.has(turn.promptNumber),
-        )
-        .sort((a, b) => {
-          const ranked = rankBySignificance(a, b);
-          return ranked !== 0 ? ranked : b.promptNumber - a.promptNumber;
-        })[0];
-      if (coverageCandidate) {
-        dayCandidates.push(coverageCandidate);
-      }
-    }
-
-    dayCandidateEntries.push({
-      date,
-      seqTurns: daySeq,
-      candidates: dayCandidates,
-      structuralCount: structural.length,
-    });
-  }
-
-  const finalPrompts = new Set<number>();
-  const overflowByDay: OverflowHint[] = [];
-  const totalCandidateCount = dayCandidateEntries.reduce(
-    (sum, day) => sum + day.candidates.length,
-    0,
-  );
-
-  for (const day of dayCandidateEntries) {
-    const cap = adaptiveMilestoneDayCap(
-      day,
-      totalCandidateCount,
-      seq.length,
-      usesDevBudgetFloor,
-    );
-    const ranked = [...day.candidates].sort(rankBySignificance);
-
-    const top = ranked.slice(0, cap);
-    for (const turn of top) finalPrompts.add(turn.promptNumber);
-    // Always-keep beyond the cap are force-kept (the spine is never dropped).
-    for (const turn of ranked.slice(cap)) {
-      if (alwaysKeep(turn)) finalPrompts.add(turn.promptNumber);
-    }
-
-    const dropped = ranked.filter((turn) => !finalPrompts.has(turn.promptNumber));
-    if (dropped.length > 0) {
-      const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
-      overflowByDay.push({
-        date: day.date,
-        count: dropped.length,
-        firstPrompt: byPrompt[0]!.promptNumber,
-        lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
+      pulledIds.add(citedTurnId);
+      pulled.push({
+        turn: cited,
+        effGrade,
+        citedByPromptNumber: row.turn.promptNumber,
+        label: pulledAntecedentLabel(cited),
+        supersededBy: promptNumbersOf(graph.supersededBy.get(citedTurnId) ?? []),
       });
     }
   }
 
-  const kept: KeptMilestone[] = seq
-    .filter((turn) => finalPrompts.has(turn.promptNumber))
-    .map((turn) => ({
-      turn,
-      score: significance(turn),
-      marker: markerForSelection(turn),
-    }));
+  // `+N more` = this day's candidate turns that got NO rendered row at all
+  // (spec §D). A pulled antecedent holds a ↳ row and is therefore already
+  // visible to the reader: counting it here would both inflate `+N` and claim
+  // a turn is hidden while it sits two lines above the hint.
+  const overflowByDay: OverflowHint[] = [];
+  const droppedByDay = new Map<string, TurnRecord[]>();
+  for (const turn of seq) {
+    if (keptIds.has(turn.id) || pulledIds.has(turn.id)) {
+      continue;
+    }
+    const day = formatLocalDate(turn.createdAtEpoch);
+    const bucket = droppedByDay.get(day) ?? [];
+    bucket.push(turn);
+    droppedByDay.set(day, bucket);
+  }
+  for (const [date, dropped] of droppedByDay) {
+    const byPrompt = [...dropped].sort((a, b) => a.promptNumber - b.promptNumber);
+    overflowByDay.push({
+      date,
+      count: byPrompt.length,
+      firstPrompt: byPrompt[0]!.promptNumber,
+      lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
+    });
+  }
 
-  return { kept, overflowByDay };
+  return { kept: rows, ranked, pulled, overflowByDay };
+}
+
+/**
+ * One-line label for a ↳ row. Existing skipped turns have no title at all — the
+ * extraction prompt only starts titling them in ticket 05 — so a prompt prefix
+ * stands in; without it a revived antecedent would render as `(untitled)` and
+ * carry no information at all.
+ */
+function pulledAntecedentLabel(turn: TurnRecord): string {
+  if (turn.title !== null && turn.title.trim() !== "") {
+    return turn.title;
+  }
+  const prompt = cleanPromptForLabel(turn.userPrompt);
+  return prompt === ""
+    ? "(untitled)"
+    : truncateText(prompt, MILESTONE_PULLED_LABEL_CAP);
 }
 
 /**
@@ -1731,6 +1739,9 @@ export function buildTimelineView(
     windowSignals,
     compactBoundaries,
     sessionTurns: allTurns,
+    // One read for the whole selection: in-degree, victim demotion and
+    // pull-through all consume this map (spec §B).
+    citations: getSessionEffectiveCitations(db, session.id),
   });
   // Resolve each kept milestone's `[T<dbid>]` causal references here, in the
   // query layer where `db` is available, so the renderer stays pure. Goes
@@ -1796,6 +1807,7 @@ export function buildTimelineView(
     windowTurns,
     pageTurns: pagedTurns.items,
     pagedMilestones: pagedMilestones.items,
+    milestonePulled: viewKind === "milestones" ? milestoneSelection.pulled : [],
     milestoneDayGroups,
     pagedPhases: pagedPhases.items,
     viewItemTotal,

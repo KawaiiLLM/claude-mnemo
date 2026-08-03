@@ -14,7 +14,6 @@ import {
   detectBrokenPromptPairs,
   buildCorrectionGraph,
   detectShapeSignals,
-  foldMilestoneRuns,
   formatDuration,
   formatGap,
   formatLocalDate,
@@ -22,9 +21,9 @@ import {
   getSystemTimezone,
   extractSourceTags,
   isVersionBumpTurn,
-  MILESTONE_GRADE_BASE_SCORE,
-  milestoneBaseScore,
+  milestoneEffGrade,
   milestoneMarker,
+  milestoneTieBreak,
   OUTCOME_TAGS,
   parseContentReferences,
   parseTimelineId,
@@ -276,20 +275,53 @@ function seedTimelineSession(
   return session;
 }
 
-function selectionFor(turns: TurnRecord[]): MilestoneSelection {
-  const selectionView = {
-    windowTurns: turns,
-    windowSignals: detectShapeSignals(turns),
-    compactBoundaries: turns
-      .filter((row) => row.type === "compact")
-      .map((row) => row.promptNumber),
-  } as unknown as TimelineView;
-
-  return selectMilestoneTurns(selectionView) as unknown as MilestoneSelection;
+/**
+ * Hand-built stand-in for `getSessionEffectiveCitations`: `{ citingId: [[citedId,
+ * relation], ...] }`. Turns absent from the map cite nothing, which is what the
+ * real reader returns for a turn with no edges and no inline `[T<n>]`.
+ */
+function structuredCitations(
+  spec: Record<number, Array<[number, string]>>,
+): Map<number, { source: "structured"; citedTurnIds: number[]; edges: unknown[] }> {
+  const map = new Map<
+    number,
+    { source: "structured"; citedTurnIds: number[]; edges: unknown[] }
+  >();
+  for (const [citing, edges] of Object.entries(spec)) {
+    const citingTurnId = Number(citing);
+    map.set(citingTurnId, {
+      source: "structured",
+      citedTurnIds: [...new Set(edges.map(([citedTurnId]) => citedTurnId))],
+      edges: edges.map(([citedTurnId, relation]) => ({
+        citingTurnId,
+        citedTurnId,
+        relation,
+        createdAtEpoch: 0,
+      })),
+    });
+  }
+  return map;
 }
 
-function keptPromptNumbers(selection: MilestoneSelection): number[] {
-  return selection.kept.map((item) => item.turn.promptNumber);
+/**
+ * The legacy half of the same seam: `cites_recorded = 0`, so the ids came out of
+ * the inline `[T<n>]` grammar and carry no relation at all.
+ */
+function inlineCitations(
+  spec: Record<number, number[]>,
+): Map<number, { source: "inline"; citedTurnIds: number[]; edges: unknown[] }> {
+  const map = new Map<
+    number,
+    { source: "inline"; citedTurnIds: number[]; edges: unknown[] }
+  >();
+  for (const [citing, citedTurnIds] of Object.entries(spec)) {
+    map.set(Number(citing), {
+      source: "inline",
+      citedTurnIds: [...new Set(citedTurnIds)],
+      edges: [],
+    });
+  }
+  return map;
 }
 
 describe("parseTimelineId", () => {
@@ -1081,195 +1113,235 @@ describe("detectShapeSignals", () => {
   });
 });
 
-describe("milestoneBaseScore", () => {
-  it("scores by type, requiring files for deliverables", () => {
-    expect(milestoneBaseScore(turn({ type: "decision" }))).toBe(4);
-    expect(milestoneBaseScore(turn({ type: "feature", filesModified: ["a.ts"] }))).toBe(2);
-    expect(milestoneBaseScore(turn({ type: "refactor", filesModified: ["a.ts"] }))).toBe(2);
-    expect(milestoneBaseScore(turn({ type: "feature", filesModified: [] }))).toBe(0);
-    expect(milestoneBaseScore(turn({ type: "change", filesModified: [] }))).toBe(0);
-    expect(milestoneBaseScore(turn({ type: "bugfix" }))).toBe(2);
-    expect(milestoneBaseScore(turn({ type: "discovery" }))).toBe(1);
+describe("milestoneEffGrade", () => {
+  const era = 1_784_711_427;
+  const legacy = (overrides: Partial<TurnRecord>) =>
+    milestoneEffGrade(turn({ createdAtEpoch: era - 1, ...overrides }), era);
+  const current = (overrides: Partial<TurnRecord>) =>
+    milestoneEffGrade(turn({ createdAtEpoch: era, ...overrides }), era);
+
+  it("takes an era turn's grade verbatim", () => {
+    expect(current({ type: "discovery", significanceGrade: 4 })).toBe(4);
+    expect(current({ type: "decision", significanceGrade: 1 })).toBe(1);
+    expect(current({ type: "feature", significanceGrade: 0, filesModified: ["a.ts"] })).toBe(0);
   });
 
-  it("maps a present significance grade directly onto the existing score scale", () => {
-    expect(MILESTONE_GRADE_BASE_SCORE).toEqual({
-      0: 0,
-      1: 1,
-      2: 2,
-      3: 3,
-      4: 4,
-    });
-    expect(
-      milestoneBaseScore(
-        turn({
-          type: "discovery",
-          significanceGrade: 4,
-        }),
-      ),
-    ).toBe(4);
-    expect(
-      milestoneBaseScore(
-        turn({
-          type: "decision",
-          significanceGrade: 1,
-        }),
-      ),
-    ).toBe(1);
+  it("treats an ungraded era turn as 0 (pool-ineligible until it is graded)", () => {
+    expect(current({ type: "decision", significanceGrade: null })).toBe(0);
+    expect(current({ type: "feature", significanceGrade: null, filesModified: ["a.ts"] })).toBe(0);
   });
 
-  it("keeps the pre-grade type fallback byte-for-byte for NULL grades", () => {
-    expect(
-      milestoneBaseScore(
-        turn({
-          type: "feature",
-          significanceGrade: null,
-          filesModified: [],
-        }),
-      ),
-    ).toBe(0);
-    expect(
-      milestoneBaseScore(
-        turn({
-          type: "feature",
-          significanceGrade: null,
-          filesModified: ["a.ts"],
-        }),
-      ),
-    ).toBe(2);
-    expect(
-      milestoneBaseScore(
-        turn({
-          type: "decision",
-          significanceGrade: null,
-        }),
-      ),
-    ).toBe(4);
+  it("maps a legacy turn by type and ignores its stored grade entirely", () => {
+    expect(legacy({ type: "decision" })).toBe(3);
+    expect(legacy({ type: "feature", filesModified: ["a.ts"] })).toBe(2);
+    expect(legacy({ type: "refactor", filesModified: ["a.ts"] })).toBe(2);
+    expect(legacy({ type: "bugfix" })).toBe(2);
+    expect(legacy({ type: "change", filesModified: ["a.ts"] })).toBe(1);
+    expect(legacy({ type: "discovery" })).toBe(1);
+    expect(legacy({ type: null })).toBe(0);
+    // A stored grade on a pre-era turn carries pre-era semantics: never read.
+    expect(legacy({ type: "discovery", significanceGrade: 4 })).toBe(1);
+    expect(legacy({ type: "decision", significanceGrade: 0 })).toBe(3);
+  });
+
+  it("zeroes a legacy artifact type that modified no file", () => {
+    expect(legacy({ type: "feature", filesModified: [] })).toBe(0);
+    expect(legacy({ type: "refactor", filesModified: [] })).toBe(0);
+    expect(legacy({ type: "change", filesModified: [] })).toBe(0);
+    // bugfix/discovery/decision are not artifact types and keep their mapping.
+    expect(legacy({ type: "bugfix", filesModified: [] })).toBe(2);
+  });
+
+  it("adds one for an insight but caps legacy at 3, so no legacy turn is ever an anchor", () => {
+    expect(legacy({ type: "discovery", insight: "- finding" })).toBe(2);
+    expect(legacy({ type: "bugfix", insight: "- finding" })).toBe(3);
+    expect(legacy({ type: "decision", insight: "- finding" })).toBe(3);
+  });
+
+  it("flips at the era boundary for two otherwise identical turns", () => {
+    const shape = { type: "decision" as const, significanceGrade: null };
+    expect(legacy(shape)).toBe(3);
+    expect(current(shape)).toBe(0);
   });
 });
 
-describe("foldMilestoneRuns", () => {
-  const noEndpoints = new Set<number>();
-  const decisions = (count: number) =>
-    Array.from({ length: count }, (_, i) =>
-      turn({ promptNumber: i + 1, type: "decision", title: `d${i + 1}` }),
+describe("milestoneTieBreak", () => {
+  it("never reaches a whole grade tier even with every signal maxed", () => {
+    const maxed = milestoneTieBreak(
+      turn({ insight: "- x", filesModified: ["docs/plans/a.md"] }),
+      99,
     );
-
-  it("keeps only the last of a short decision run", () => {
-    const kept = foldMilestoneRuns(decisions(3), noEndpoints);
-    expect([...kept].sort((a, b) => a - b)).toEqual([3]);
+    expect(maxed).toBeLessThan(1);
+    expect(maxed).toBeCloseTo(0.9, 6);
   });
 
-  it("keeps first + last of a >=4 decision run", () => {
-    const kept = foldMilestoneRuns(decisions(5), noEndpoints);
-    expect([...kept].sort((a, b) => a - b)).toEqual([1, 5]);
+  it("counts distinct citers up to two", () => {
+    const plain = turn({});
+    expect(milestoneTieBreak(plain, 0)).toBe(0);
+    expect(milestoneTieBreak(plain, 1)).toBeCloseTo(0.25, 6);
+    expect(milestoneTieBreak(plain, 2)).toBeCloseTo(0.5, 6);
+    expect(milestoneTieBreak(plain, 9)).toBeCloseTo(0.5, 6);
   });
 
-  it("keeps bugfix runs at last-only regardless of length", () => {
-    const bugs = Array.from({ length: 5 }, (_, i) =>
-      turn({ promptNumber: i + 1, type: "bugfix", title: `b${i + 1}` }),
-    );
-    expect([...foldMilestoneRuns(bugs, noEndpoints)]).toEqual([5]);
-  });
-
-  it("a non-candidate type between two decision groups splits the runs", () => {
-    const rows = [
-      turn({ promptNumber: 1, type: "decision" }),
-      turn({ promptNumber: 2, type: "decision" }),
-      turn({ promptNumber: 3, type: "discovery" }),
-      turn({ promptNumber: 4, type: "decision" }),
-      turn({ promptNumber: 5, type: "decision" }),
-    ];
-    expect([...foldMilestoneRuns(rows, noEndpoints)].sort((a, b) => a - b)).toEqual([2, 5]);
-  });
-
-  it("excludes always-keep members from the fold so the converged member survives", () => {
-    const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "open" }),
-      turn({ promptNumber: 2, type: "decision", title: "converged" }),
-      turn({ promptNumber: 3, type: "decision", title: "shipped", tags: ["merged"] }),
-    ];
-    // T3 is always-keep (outcome); fold keeps the last *foldable* = T2.
-    expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([2]);
-  });
-
-  it("keeps nothing for an empty sequence", () => {
-    expect([...foldMilestoneRuns([], noEndpoints)]).toEqual([]);
-  });
-
-  it("keeps nothing when every run member scores zero", () => {
-    // A fold-type run (feature) whose members all score 0 (no files modified)
-    // exercises the foldable.length === 0 branch — nothing is kept.
-    const rows = Array.from({ length: 5 }, (_, i) =>
-      turn({ promptNumber: i + 1, type: "feature", filesModified: [] }),
-    );
-    expect([...foldMilestoneRuns(rows, noEndpoints)]).toEqual([]);
-  });
-
-  it("honors an injected always-keep predicate over the default", () => {
-    const rows = decisions(4);
-    // Default predicate: a >=4 decision run keeps first + last = [1, 4].
-    expect([...foldMilestoneRuns(rows, noEndpoints)].sort((a, b) => a - b)).toEqual([1, 4]);
-    // Injecting "T1 is always-keep" pulls it out of the foldable pool, leaving 3
-    // foldable members (< FOLD_FIRST_MIN_RUN) → last-only = [4]. (The union that
-    // re-adds the always-kept T1 lives in selectMilestoneTurns, not here.)
-    const kept = foldMilestoneRuns(rows, noEndpoints, (t) => t.promptNumber === 1);
-    expect([...kept].sort((a, b) => a - b)).toEqual([4]);
+  it("weights insight and pure-spec independently", () => {
+    expect(milestoneTieBreak(turn({ insight: "- x" }))).toBeCloseTo(0.25, 6);
+    expect(milestoneTieBreak(turn({ filesModified: ["docs/plans/a.md"] }))).toBeCloseTo(0.15, 6);
+    // `[]` is the empty-insight sentinel, not an insight.
+    expect(milestoneTieBreak(turn({ insight: "[]" }))).toBe(0);
   });
 });
 
 describe("buildCorrectionGraph", () => {
-  const base = 1_779_782_400;
+  const era = 1_784_711_427;
+  const base = 1_779_782_400; // pre-era: the inline/tag adapter is live here
 
-  it("links a corrector to the reversed victim it cites", () => {
+  it("derives victimhood from a supersedes edge alone, with no tag on the victim", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "decision", title: "first conclusion", createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "decision", title: "overturns it", citesRecorded: true, createdAtEpoch: era + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect([...g.correctors]).toEqual([30]);
+    expect([...g.supersededVictims]).toEqual([20]);
+    // Back-link data rides along: victim id → superseding turn ids.
+    expect(g.supersededBy.get(20)).toEqual([30]);
+  });
+
+  it("ignores a non-supersedes relation (builds-on is consumption, not correction)", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "feature", citesRecorded: true, createdAtEpoch: era + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
+  it("orders multiple superseders of one victim by prompt number", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
+      turn({ id: 90, promptNumber: 9, type: "decision", citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 30, promptNumber: 3, type: "decision", citesRecorded: true, createdAtEpoch: era + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({
+        30: [[20, "supersedes"]],
+        90: [[20, "supersedes"]],
+      }),
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect(g.supersededBy.get(20)).toEqual([30, 90]);
+  });
+
+  it("reads a pre-era citer's rolled-back victim through the legacy inline adapter", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
       turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T20]", createdAtEpoch: base + 60 }),
     ];
-    const g = buildCorrectionGraph(seq);
-    expect([...g.correctors]).toEqual([3]);
-    expect([...g.supersededVictims]).toEqual([2]);
+    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
+    expect([...g.correctors]).toEqual([30]);
+    expect([...g.supersededVictims]).toEqual([20]);
   });
 
-  it("ignores cites of a non-reversed predecessor (plain causal reference)", () => {
+  it("does NOT apply the tag adapter to an era citer — edges are its only signal", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T20]", createdAtEpoch: era + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
+  it("does NOT apply the tag adapter to a pre-era citer whose edges are structured", () => {
+    // Created pre-era, extracted post-deployment: `cites_recorded = 1` makes the
+    // edge table authoritative (spec §B), and the stated relation is consumption.
+    // Era gating alone would misread this as a correction.
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", citesRecorded: true, createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 30: [[20, "builds-on"], [20, "evidence-for"]] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+    expect(g.supersededBy.size).toBe(0);
+  });
+
+  it("still applies the tag adapter to the same shape when the source is inline", () => {
+    // Identical turns and identical cited ids; only the provenance differs.
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", createdAtEpoch: base + 60 }),
+    ];
+    const g = buildCorrectionGraph(seq, {
+      citations: inlineCitations({ 30: [20] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect([...g.correctors]).toEqual([30]);
+    expect([...g.supersededVictims]).toEqual([20]);
+    expect(g.supersededBy.get(20)).toEqual([30]);
+  });
+
+  it("ignores a legacy cite of a non-reversed predecessor (plain causal reference)", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: base }),
       turn({ id: 30, promptNumber: 3, type: "feature", content: "builds on [T20]", createdAtEpoch: base + 60 }),
     ];
-    const g = buildCorrectionGraph(seq);
+    const g = buildCorrectionGraph(seq, { taskCausalityEraCutoffEpoch: era });
     expect(g.correctors.size).toBe(0);
     expect(g.supersededVictims.size).toBe(0);
   });
 
-  it("ignores forward cites (predecessor guard: a correction points backward)", () => {
+  it("ignores forward edges (predecessor guard: a correction points backward)", () => {
     const seq = [
-      turn({ id: 20, promptNumber: 2, type: "bugfix", content: "see [T30]", createdAtEpoch: base }),
-      turn({ id: 30, promptNumber: 3, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base + 60 }),
+      turn({ id: 20, promptNumber: 2, type: "bugfix", citesRecorded: true, createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "discovery", createdAtEpoch: era + 60 }),
     ];
-    const g = buildCorrectionGraph(seq);
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 20: [[30, "supersedes"]] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
     expect(g.correctors.size).toBe(0);
     expect(g.supersededVictims.size).toBe(0);
   });
 
-  it("ignores a cite that does not resolve to an in-window turn", () => {
+  it("ignores an edge that resolves to no turn at all", () => {
     const seq = [
-      turn({ id: 30, promptNumber: 3, type: "bugfix", content: "fixes [T999]", createdAtEpoch: base }),
+      turn({ id: 30, promptNumber: 3, type: "bugfix", citesRecorded: true, createdAtEpoch: era }),
     ];
-    const g = buildCorrectionGraph(seq);
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 30: [[999, "supersedes"]] }),
+      taskCausalityEraCutoffEpoch: era,
+    });
     expect(g.correctors.size).toBe(0);
     expect(g.supersededVictims.size).toBe(0);
   });
 
-  it("promotes a corrector that cites an out-of-window reversed victim via the resolver", () => {
-    // Ranged view: the victim sits OUTSIDE seq and is resolved from the full session.
-    const victim = turn({ id: 5, promptNumber: 5, type: "discovery", tags: ["rolled-back"], createdAtEpoch: base });
+  it("promotes a corrector and demotes its victim even when the victim is out of window", () => {
+    // Ranged view: the victim is resolved from the full session, not from `turns`.
+    const victim = turn({ id: 5, promptNumber: 5, type: "decision", createdAtEpoch: era });
     const seq = [
-      turn({ id: 15, promptNumber: 15, type: "bugfix", content: "fixes the earlier figure [T5]", createdAtEpoch: base + 60 }),
+      turn({ id: 15, promptNumber: 15, type: "bugfix", citesRecorded: true, createdAtEpoch: era + 60 }),
     ];
-    const g = buildCorrectionGraph(seq, (id) => (id === 5 ? victim : undefined));
+    const g = buildCorrectionGraph(seq, {
+      citations: structuredCitations({ 15: [[5, "supersedes"]] }),
+      resolveCited: (id) => (id === 5 ? victim : undefined),
+      taskCausalityEraCutoffEpoch: era,
+    });
     expect([...g.correctors]).toEqual([15]);
-    // The out-of-window victim is not a selection candidate, so it is not demoted here.
-    expect(g.supersededVictims.size).toBe(0);
+    // It holds no main-row slot to lose, but the demotion still governs whether
+    // pull-through revives it as a ↳ row.
+    expect([...g.supersededVictims]).toEqual([5]);
+    expect(g.supersededBy.get(5)).toEqual([15]);
   });
 });
 
@@ -1366,192 +1438,198 @@ describe("isVersionBumpTurn", () => {
   });
 });
 
-describe("selectMilestoneTurns (narrative digest)", () => {
+describe("selectMilestoneTurns (grade-first arc)", () => {
+  const era = 1_784_711_427;
+  const legacyBase = 1_779_782_400;
+
   const select = (
     rows: TurnRecord[],
-    taskCausalityEraCutoffEpoch?: number,
+    options: Record<string, unknown> = {},
   ): MilestoneSelection =>
     selectMilestoneTurns({
       windowTurns: rows,
       windowSignals: detectShapeSignals(rows),
       compactBoundaries: [],
-      taskCausalityEraCutoffEpoch,
+      taskCausalityEraCutoffEpoch: era,
+      ...options,
+    } as Parameters<typeof selectMilestoneTurns>[0]);
+
+  const kept = (selection: MilestoneSelection): number[] =>
+    selection.kept.map((row) => row.turn.promptNumber);
+  const rankedPrompts = (selection: MilestoneSelection): number[] =>
+    selection.ranked.map((row) => row.turn.promptNumber);
+  const rowFor = (selection: MilestoneSelection, promptNumber: number) =>
+    selection.kept.find((row) => row.turn.promptNumber === promptNumber);
+
+  it("admits era turns on grade alone; an ungraded era turn is out and G2 is scored but not admitted", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "arc origin", significanceGrade: 4, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "not yet graded", significanceGrade: null, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "locked the mechanism", significanceGrade: 3, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "supporting evidence", significanceGrade: 2, createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "change", title: "end", significanceGrade: 1, filesModified: ["a.ts"], createdAtEpoch: era + 240 }),
+    ];
+
+    const result = select(rows);
+    // T5 is the window's last titled row → structural endpoint despite G1.
+    expect(kept(result)).toEqual([1, 3, 5]);
+    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    expect(rowFor(result, 1)?.alwaysKeep).toBe(true);
+    // G2 clears the pool gate and is ranked, but the spine bar is G3.
+    expect(rankedPrompts(result)).toContain(4);
+    expect(rankedPrompts(result)).not.toContain(2);
+  });
+
+  it("flips selection at the era boundary for two identically shaped decisions", () => {
+    const build = (createdAtEpoch: number): TurnRecord[] => [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era + 1_000 }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "subject", significanceGrade: null, createdAtEpoch }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 2_000 }),
+    ];
+
+    // Pre-era: the type map says decision = G3 → spine.
+    expect(kept(select(build(era - 1)))).toContain(2);
+    // Era: ungraded means ungraded, not "infer from type".
+    expect(kept(select(build(era)))).not.toContain(2);
+  });
+
+  it("keeps legacy window endpoints structurally, whatever their grade", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: null, title: "legacy start", createdAtEpoch: legacyBase }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "legacy noise", createdAtEpoch: legacyBase + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "change", title: "legacy end", filesModified: [], createdAtEpoch: legacyBase + 120 }),
+    ];
+
+    const result = select(rows);
+    expect(kept(result)).toEqual([1, 3]);
+    expect(rowFor(result, 1)?.effGrade).toBe(0);
+    expect(rowFor(result, 1)?.alwaysKeep).toBe(true);
+    expect(rowFor(result, 1)?.spine).toBe(false);
+  });
+
+  it("gives a compact marker no kept slot and no endpoint claim", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "compact", title: "/compact", createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "graded work", significanceGrade: 3, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "compact", title: "/compact", createdAtEpoch: era + 120 }),
+    ];
+
+    const result = select(rows);
+    expect(kept(result)).toEqual([2]);
+    expect(result.ranked.map((row) => row.turn.type)).not.toContain("compact");
+  });
+
+  it("promotes a G0 corrector to the spine and demotes what it supersedes into a ↳ antecedent", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "first conclusion", significanceGrade: 3, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "the correction", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
     });
-  const kept = (s: MilestoneSelection) => s.kept.map((k) => k.turn.promptNumber).sort((a, b) => a - b);
 
-  it("era-gates content-bonus admission for G0/G1 while preserving legacy and G2 ranking", () => {
-    const cutoff = 200;
-    const rows = [
-      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 4, createdAtEpoch: 100 }),
-      turn({ id: 2, promptNumber: 2, type: "discovery", title: "legacy insight", insight: "- legacy", significanceGrade: 1, createdAtEpoch: cutoff - 1 }),
-      turn({ id: 3, promptNumber: 3, type: "refactor", title: "boundary spec", filesModified: ["docs/plans/boundary.md"], significanceGrade: 1, createdAtEpoch: cutoff }),
-      turn({ id: 4, promptNumber: 4, type: "discovery", title: "durable conclusion", insight: "- durable", significanceGrade: 2, createdAtEpoch: cutoff + 1 }),
-      turn({ id: 5, promptNumber: 5, type: "decision", title: "end", tags: ["shipped"], significanceGrade: 4, createdAtEpoch: cutoff + 2 }),
-    ];
-
-    const result = select(rows, cutoff);
-    expect(kept(result)).toContain(2);
-    expect(kept(result)).not.toContain(3);
-    expect(kept(result)).toContain(4);
-    expect(
-      result.kept.find((milestone) => milestone.turn.promptNumber === 4)?.score,
-    ).toBe(4);
+    expect(kept(result)).toEqual([1, 3, 4]);
+    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
+    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
+      [2, 3],
+    ]);
+    expect(result.pulled[0]!.effGrade).toBe(1);
+    expect(result.pulled[0]!.supersededBy).toEqual([3]);
   });
 
-  it("flips otherwise-identical G1-with-insight pool membership exactly at the cutoff", () => {
-    const cutoff = 200;
-    const selectedAt = (createdAtEpoch: number): number[] =>
-      kept(select([
-        turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 4, createdAtEpoch: 100 }),
-        turn({ id: 2, promptNumber: 2, type: "discovery", title: "same insight", insight: "- same", significanceGrade: 1, createdAtEpoch }),
-        turn({ id: 3, promptNumber: 3, type: "decision", title: "end", significanceGrade: 4, createdAtEpoch: cutoff + 1 }),
-      ], cutoff));
-
-    expect(selectedAt(cutoff - 1)).toContain(2);
-    expect(selectedAt(cutoff)).not.toContain(2);
-  });
-
-  it("keeps structural rows in both eras despite low grades", () => {
-    const cutoff = 200;
+  it("leaves a corrector demoted when it is itself superseded (① runs before ②)", () => {
     const rows = [
-      turn({ id: 10, promptNumber: 1, type: "discovery", title: "legacy endpoint", significanceGrade: 0, createdAtEpoch: 100 }),
-      turn({ id: 20, promptNumber: 2, type: "discovery", title: "legacy casualty", content: "old premise", tags: ["rolled-back"], significanceGrade: 0, createdAtEpoch: 150 }),
-      turn({ id: 30, promptNumber: 3, type: "bugfix", title: "legacy corrector", content: "fixes [T20]", significanceGrade: 0, createdAtEpoch: 160 }),
-      turn({ id: 40, promptNumber: 4, type: "feature", title: "new outcome", tags: ["shipped"], significanceGrade: 0, createdAtEpoch: cutoff }),
-      turn({ id: 50, promptNumber: 5, type: "compact", title: "new compact", significanceGrade: 0, createdAtEpoch: cutoff + 1 }),
-      turn({ id: 60, promptNumber: 6, type: "discovery", title: "new casualty", tags: ["rolled-back"], significanceGrade: 0, createdAtEpoch: cutoff + 2 }),
-      turn({ id: 70, promptNumber: 7, type: "bugfix", title: "new corrector", content: "fixes [T60]", significanceGrade: 0, createdAtEpoch: cutoff + 3 }),
-      turn({ id: 80, promptNumber: 8, type: "discovery", title: "new endpoint", significanceGrade: 0, createdAtEpoch: cutoff + 4 }),
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "first answer", significanceGrade: 2, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "second answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "decision", title: "final answer", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
     ];
 
-    const result = selectMilestoneTurns({
-      windowTurns: rows,
-      windowSignals: detectShapeSignals(rows),
-      compactBoundaries: [5],
-      taskCausalityEraCutoffEpoch: cutoff,
+    const result = select(rows, {
+      citations: structuredCitations({
+        3: [[2, "supersedes"]],
+        4: [[3, "supersedes"]],
+      }),
     });
-    expect(kept(result)).toEqual([1, 3, 4, 5, 7, 8]);
+
+    // T3 corrected T2 but was itself overturned. Its own G3 is floored to 1 —
+    // demotion runs first, so the promotion it would otherwise earn never lands.
+    expect(kept(result)).toEqual([1, 4, 5]);
+    expect(rowFor(result, 4)?.alwaysKeep).toBe(true);
+    const antecedent = result.pulled.find((p) => p.turn.promptNumber === 3);
+    expect(antecedent?.effGrade).toBe(1);
+    expect(antecedent?.supersededBy).toEqual([4]);
+    // T2's only citer (T3) is not a kept row, so T2 is not pulled either: ↳ rows
+    // hang off admitted rows, not off the whole citation graph.
+    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([3]);
   });
 
-  it("lets a high-grade low-type turn beat a low-grade high-type turn", () => {
-    const base = 1_779_782_400;
+  it("moves the anchor from a superseded G4 to its corrector", () => {
     const rows = [
-      turn({
-        promptNumber: 1,
-        type: "discovery",
-        title: "start",
-        significanceGrade: 1,
-        createdAtEpoch: base,
-      }),
-      turn({
-        promptNumber: 2,
-        type: "decision",
-        title: "routine decision",
-        significanceGrade: 1,
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "discovery",
-        title: "major root cause",
-        significanceGrade: 4,
-        createdAtEpoch: base + 120,
-      }),
-      turn({
-        promptNumber: 4,
-        type: "feature",
-        title: "end",
-        significanceGrade: 1,
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 180,
-      }),
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "arc origin, later refounded", significanceGrade: 4, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "refoundation", significanceGrade: 2, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 180 }),
     ];
 
-    const result = select(rows);
-    expect(kept(result)).toContain(3);
-    expect(kept(result)).not.toContain(2);
-    expect(
-      result.kept.find((milestone) => milestone.turn.promptNumber === 3)?.score,
-    ).toBe(4);
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "supersedes"]] }),
+    });
+
+    expect(kept(result)).toEqual([1, 3, 4]);
+    // The G4 anchor claim dies with the demotion; the G2 corrector inherits it.
+    expect(rowFor(result, 3)?.effGrade).toBe(3);
+    expect(rowFor(result, 3)?.alwaysKeep).toBe(true);
+    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([2]);
   });
 
-  it("folds a long decision run to its first+last (run interior dropped)", () => {
-    const base = 1_779_782_400;
-    // Bracket the 6-decision run (T2–T7) with a leading discovery + trailing feature
-    // so the run's first/last are NOT the window endpoints.
+  it("keeps a victim that is also a window endpoint and hands it the back-link", () => {
     const rows = [
-      turn({ promptNumber: 1, type: "discovery", title: "intro", toolCallCount: 1, createdAtEpoch: base }),
-      ...Array.from({ length: 6 }, (_, i) =>
-        turn({ promptNumber: i + 2, type: "decision", title: `d${i + 2}`, createdAtEpoch: base + (i + 1) * 60 }),
-      ),
-      turn({ promptNumber: 8, type: "feature", title: "done", filesModified: ["a.ts"], createdAtEpoch: base + 7 * 60 }),
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "opening premise", significanceGrade: 4, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "decision", title: "overturns the premise", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 60 }),
     ];
-    const k = kept(select(rows));
-    expect(k).toContain(2); // run-first foldable
-    expect(k).toContain(7); // run-last foldable
-    expect(k).not.toContain(4); // interior folded away
-    expect(k).not.toContain(5);
+
+    const result = select(rows, {
+      citations: structuredCitations({ 2: [[1, "supersedes"]] }),
+    });
+
+    expect(kept(result)).toEqual([1, 2]);
+    expect(rowFor(result, 1)?.effGrade).toBe(1);
+    expect(rowFor(result, 1)?.spine).toBe(false);
+    expect(rowFor(result, 1)?.supersededBy).toEqual([2]);
+    // Already a main row, so it is not ALSO pulled in as its corrector's ↳.
+    expect(result.pulled).toHaveLength(0);
   });
 
-  it("marks rolled-back as reversed and outcome-tagged as outcome, force-keeping both", () => {
-    const base = 1_779_782_400;
+  it("keeps a reversed turn nobody corrected, and marks it", () => {
     const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({ promptNumber: 2, type: "decision", title: "pivot", wasRolledBack: true, createdAtEpoch: base + 60 }),
-      turn({ promptNumber: 3, type: "discovery", title: "ship", tags: ["merged"], createdAtEpoch: base + 120 }),
-      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: legacyBase }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "rewound direction", tags: ["rolled-back"], createdAtEpoch: legacyBase + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "end", createdAtEpoch: legacyBase + 120 }),
     ];
+
     const result = select(rows);
     expect(kept(result)).toContain(2);
-    expect(kept(result)).toContain(3); // outcome on a discovery is still force-kept
-    expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
-    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("outcome");
+    expect(rowFor(result, 2)?.marker).toBe("reversed");
+    expect(rowFor(result, 2)?.alwaysKeep).toBe(true);
   });
 
-  it("force-keeps rolled-back-tagged casualties but still filters skipped tag-only rows", () => {
-    const base = 1_779_782_400;
+  it("demotes a pre-era rolled-back victim through the legacy inline adapter", () => {
     const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        status: "skipped",
-        type: null,
-        title: null,
-        tags: ["rolled-back"],
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "discovery",
-        title: "rejected discussion-only direction",
-        tags: ["rolled-back"],
-        toolCallCount: 0,
-        createdAtEpoch: base + 120,
-      }),
-      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
-    ];
-
-    const result = select(rows);
-    expect(kept(result)).not.toContain(2);
-    expect(kept(result)).toContain(3);
-    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBe("reversed");
-  });
-
-  it("promotes the corrector and demotes a trivial cited victim to a ↳-only casualty", () => {
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      // Low-value reversed victim (discovery → base score 0).
+      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: legacyBase }),
       turn({
         id: 20,
         promptNumber: 2,
         type: "discovery",
         title: "concluded overhead is 2.5%",
         tags: ["rolled-back"],
-        toolCallCount: 0,
-        createdAtEpoch: base + 60,
+        createdAtEpoch: legacyBase + 60,
       }),
-      // Corrector cites the victim by its DB id and overturns it.
       turn({
         id: 30,
         promptNumber: 3,
@@ -1559,283 +1637,266 @@ describe("selectMilestoneTurns (narrative digest)", () => {
         title: "pricing bug fixed; overhead is 7-10%",
         content: "Corrected the earlier figure [T20].",
         filesModified: ["a.ts"],
-        createdAtEpoch: base + 120,
+        createdAtEpoch: legacyBase + 120,
       }),
-      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: legacyBase + 180 }),
     ];
+
     const result = select(rows);
-    // The surviving corrector is force-kept as the anchor...
-    expect(kept(result)).toContain(3);
-    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.score).toBe(Number.POSITIVE_INFINITY);
-    // ...and carries no reversal glyph itself (it is the truth, not the casualty).
-    expect(result.kept.find((k) => k.turn.promptNumber === 3)?.marker).toBeNull();
-    // The trivial reversed victim no longer claims a first-class slot.
+    expect(kept(result)).toEqual([1, 3, 4]);
+    expect(rowFor(result, 3)?.effGrade).toBe(3); // legacy bugfix G2, promoted
+    expect(rowFor(result, 3)?.marker).toBeNull();
+    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([2]);
+    expect(result.pulled[0]!.supersededBy).toEqual([3]);
+  });
+
+  it("revives a cited skipped turn as an antecedent with a prompt-prefix pseudo-title", () => {
+    const longPrompt =
+      "why does the extractor drop the boundary marker when the wrapper lands first and the turn is already claimed";
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        status: "skipped",
+        type: null,
+        title: null,
+        userPrompt: longPrompt,
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+    });
+
+    expect(kept(result)).toEqual([1, 3]);
+    const antecedent = result.pulled[0]!;
+    expect(antecedent.turn.promptNumber).toBe(2);
+    expect(antecedent.effGrade).toBe(0);
+    expect(antecedent.label).toBe(`${longPrompt.slice(0, 60)}…`);
+  });
+
+  it("prefers a stored title over the prompt prefix for a ↳ label", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        status: "skipped",
+        type: null,
+        title: "minimal title for a skipped turn",
+        userPrompt: "raw prompt text that must not win",
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "the answer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 3: [[2, "evidence-for"]] }),
+    });
+    expect(result.pulled[0]!.label).toBe("minimal title for a skipped turn");
+  });
+
+  it("assigns a shared antecedent to its earliest kept citer only", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "shared evidence", significanceGrade: 2, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "decision", title: "first consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "decision", title: "second consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 180 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({
+        3: [[2, "evidence-for"]],
+        4: [[2, "evidence-for"]],
+      }),
+    });
+
+    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
+      [2, 3],
+    ]);
+  });
+
+  it("gates the pool on effGrade, so content bonuses cannot lift a G1 turn into it", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({
+        id: 2,
+        promptNumber: 2,
+        type: "change",
+        title: "G1 carrying every bonus the old model scored",
+        significanceGrade: 1,
+        insight: "- a real insight",
+        filesModified: ["docs/plans/scoring.md"],
+        createdAtEpoch: era + 60,
+      }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "plain G2", significanceGrade: 2, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "citer a", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "discovery", title: "citer b", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 240 }),
+      turn({ id: 6, promptNumber: 6, type: "discovery", title: "end", significanceGrade: 3, createdAtEpoch: era + 300 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({
+        4: [[2, "builds-on"]],
+        5: [[2, "builds-on"]],
+      }),
+    });
+
+    // Old model: 1 base + 3 spec bonus + 2 citations = 6, well past any G3.
+    expect(rankedPrompts(result)).not.toContain(2);
     expect(kept(result)).not.toContain(2);
+    // A bare G2 with no bonuses at all still clears the gate.
+    expect(rankedPrompts(result)).toContain(3);
   });
 
-  it("hard-excludes a superseded victim even when its own score is high", () => {
-    const base = 1_779_782_400;
+  it("ranks by score, then tool count, then the earlier prompt", () => {
     const rows = [
-      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        id: 20,
-        promptNumber: 2,
-        type: "discovery",
-        title: "appealing but wrong discovery",
-        insight: "- looked important before correction",
-        tags: ["rolled-back"],
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        id: 30,
-        promptNumber: 3,
-        type: "bugfix",
-        title: "corrected the wrong discovery",
-        content: "Corrects [T20].",
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 120,
-      }),
-      turn({ id: 40, promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+      turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, toolCallCount: 0, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "discovery", title: "five tools", significanceGrade: 3, toolCallCount: 5, createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "discovery", title: "five tools too", significanceGrade: 3, toolCallCount: 5, createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "discovery", title: "nine tools", significanceGrade: 3, toolCallCount: 9, createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "discovery", title: "insight tie-break", significanceGrade: 3, insight: "- finding", toolCallCount: 0, createdAtEpoch: era + 240 }),
+      turn({ id: 6, promptNumber: 6, type: "discovery", title: "end", significanceGrade: 3, toolCallCount: 0, createdAtEpoch: era + 300 }),
     ];
 
     const result = select(rows);
-    expect(kept(result)).toContain(3);
-    expect(kept(result)).not.toContain(2);
+    expect(rankedPrompts(result)).toEqual([5, 4, 2, 3, 1, 6]);
+    // The tie-break rides inside the tier: everything is still a G3.
+    expect(result.ranked.every((row) => row.effGrade === 3)).toBe(true);
+    expect(result.ranked[0]!.score).toBeLessThan(4);
   });
 
-  it("still force-keeps a reversed victim that has no in-window corrector (rewind case)", () => {
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ id: 10, promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
+  it("keeps every graded row on a heavy day — the budget moved to the renderer", () => {
+    const rows = Array.from({ length: 30 }, (_, index) =>
       turn({
-        id: 20,
-        promptNumber: 2,
-        type: "discovery",
-        title: "rewound direction",
-        tags: ["rolled-back"],
-        toolCallCount: 0,
-        createdAtEpoch: base + 60,
+        id: index + 1,
+        promptNumber: index + 1,
+        type: "decision",
+        title: `m${index + 1}`,
+        significanceGrade: 3,
+        createdAtEpoch: era + index * 60,
       }),
-      // Cites the victim but does NOT overturn-marker it; still, no corrector edge
-      // is needed — what matters is a later turn citing the reversed victim. Here
-      // nothing cites it, so it stays force-kept.
-      turn({ id: 30, promptNumber: 3, type: "decision", title: "end", createdAtEpoch: base + 120 }),
-    ];
+    );
+
     const result = select(rows);
-    expect(kept(result)).toContain(2);
-    expect(result.kept.find((k) => k.turn.promptNumber === 2)?.marker).toBe("reversed");
+    expect(result.kept).toHaveLength(30);
+    expect(result.overflowByDay).toHaveLength(0);
   });
 
-  it("coalesces same-day outcome chains so only the tail renders the outcome marker", () => {
-    const base = 1_779_782_400;
+  it("reports the day's unrendered turns as the overflow hint, excluding pulled rows", () => {
+    const day = 24 * 60 * 60;
     const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "feature",
-        title: "0.2.38 implementation complete",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "feature",
-        title: "0.2.38 verified",
-        tags: ["released"],
-        filesModified: ["b.ts"],
-        createdAtEpoch: base + 120,
-      }),
-      turn({
-        promptNumber: 4,
-        type: "feature",
-        title: "0.2.38 merged",
-        tags: ["merged"],
-        filesModified: ["c.ts"],
-        createdAtEpoch: base + 180,
-      }),
-      turn({ promptNumber: 5, type: "decision", title: "end", createdAtEpoch: base + 240 }),
+      // Day one: plain noise, nothing cited — every dropped row is invisible.
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      ...Array.from({ length: 5 }, (_, index) =>
+        turn({
+          id: index + 2,
+          promptNumber: index + 2,
+          type: "discovery",
+          title: `noise ${index + 1}`,
+          significanceGrade: 1,
+          createdAtEpoch: era + (index + 1) * 60,
+        }),
+      ),
+      turn({ id: 7, promptNumber: 7, type: "decision", title: "end of day one", significanceGrade: 3, createdAtEpoch: era + 360 }),
+      // Day two: T8 gets no main row but IS rendered as T9's ↳ antecedent, so it
+      // is visible and must not also be counted as hidden. T10 is the only turn
+      // on that day with no row of any kind.
+      turn({ id: 8, promptNumber: 8, type: "discovery", title: "cited evidence", significanceGrade: 2, createdAtEpoch: era + day }),
+      turn({ id: 9, promptNumber: 9, type: "decision", title: "consumer", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + day + 60 }),
+      turn({ id: 10, promptNumber: 10, type: "discovery", title: "day two noise", significanceGrade: 1, createdAtEpoch: era + day + 120 }),
+      turn({ id: 11, promptNumber: 11, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + day + 180 }),
+    ];
+
+    const result = select(rows, {
+      citations: structuredCitations({ 9: [[8, "evidence-for"]] }),
+    });
+    expect(kept(result)).toEqual([1, 7, 9, 11]);
+    expect(result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
+      [8, 9],
+    ]);
+
+    expect(result.overflowByDay).toHaveLength(2);
+    expect(result.overflowByDay[0]!.count).toBe(5);
+    expect(result.overflowByDay[0]!.firstPrompt).toBe(2);
+    expect(result.overflowByDay[0]!.lastPrompt).toBe(6);
+    // 2 non-kept turns on day two, but only T10 is unrendered.
+    expect(result.overflowByDay[1]!.count).toBe(1);
+    expect(result.overflowByDay[1]!.firstPrompt).toBe(10);
+    expect(result.overflowByDay[1]!.lastPrompt).toBe(10);
+  });
+
+  it("coalesces a same-day outcome chain so only its tail carries the outcome marker", () => {
+    const rows = [
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "feature", title: "0.2.38 implementation complete", significanceGrade: 3, tags: ["release"], filesModified: ["a.ts"], createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "feature", title: "0.2.38 verified", significanceGrade: 3, tags: ["released"], filesModified: ["b.ts"], createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 4, type: "feature", title: "0.2.38 merged", significanceGrade: 3, tags: ["merged"], filesModified: ["c.ts"], createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 5, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
     ];
 
     const result = select(rows);
     expect(
-      result.kept
-        .filter((milestone) => milestone.marker === "outcome")
-        .map((milestone) => milestone.turn.promptNumber),
+      result.kept.filter((row) => row.marker === "outcome").map((row) => row.turn.promptNumber),
     ).toEqual([4]);
   });
 
-  it("keeps separate outcome anchors when version or prompt-gap breaks the chain", () => {
-    const base = 1_779_782_400;
+  it("keeps separate outcome markers when version or prompt gap breaks the chain", () => {
     const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "feature",
-        title: "0.2.38 released",
-        tags: ["release"],
-        filesModified: ["a.ts"],
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "feature",
-        title: "0.2.39 released",
-        tags: ["release"],
-        filesModified: ["b.ts"],
-        createdAtEpoch: base + 120,
-      }),
-      turn({
-        promptNumber: 10,
-        type: "feature",
-        title: "0.2.39 follow-up release",
-        tags: ["release"],
-        filesModified: ["c.ts"],
-        createdAtEpoch: base + 180,
-      }),
-      turn({ promptNumber: 11, type: "decision", title: "end", createdAtEpoch: base + 240 }),
+      turn({ id: 1, promptNumber: 1, type: "decision", title: "start", significanceGrade: 3, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "feature", title: "0.2.38 released", significanceGrade: 3, tags: ["release"], filesModified: ["a.ts"], createdAtEpoch: era + 60 }),
+      turn({ id: 3, promptNumber: 3, type: "feature", title: "0.2.39 released", significanceGrade: 3, tags: ["release"], filesModified: ["b.ts"], createdAtEpoch: era + 120 }),
+      turn({ id: 4, promptNumber: 10, type: "feature", title: "0.2.39 follow-up release", significanceGrade: 3, tags: ["release"], filesModified: ["c.ts"], createdAtEpoch: era + 180 }),
+      turn({ id: 5, promptNumber: 11, type: "decision", title: "end", significanceGrade: 3, createdAtEpoch: era + 240 }),
     ];
 
     const result = select(rows);
     expect(
-      result.kept
-        .filter((milestone) => milestone.marker === "outcome")
-        .map((milestone) => milestone.turn.promptNumber),
+      result.kept.filter((row) => row.marker === "outcome").map((row) => row.turn.promptNumber),
     ).toEqual([2, 3, 10]);
   });
 
-  it("keeps insight discoveries by score and does not readmit pure tool bursts", () => {
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "discovery",
-        title: "found the actual root cause",
-        insight: "- root cause is prompt drift",
-        toolCallCount: 1,
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "discovery",
-        title: "large noisy tool sweep",
-        insight: null,
-        toolCallCount: 100,
-        createdAtEpoch: base + 120,
-      }),
-      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
+  it("resolves a corrector's out-of-window victim from the full-session set", () => {
+    const victim = turn({ id: 5, promptNumber: 5, type: "decision", title: "early premise", significanceGrade: 4, createdAtEpoch: era });
+    const windowRows = [
+      turn({ id: 15, promptNumber: 15, type: "decision", title: "overturns it", significanceGrade: 0, citesRecorded: true, createdAtEpoch: era + 600 }),
+      turn({ id: 16, promptNumber: 16, type: "discovery", title: "end", significanceGrade: 0, createdAtEpoch: era + 660 }),
     ];
 
-    const k = kept(select(rows));
-    expect(k).toContain(2);
-    expect(k).not.toContain(3);
+    const result = select(windowRows, {
+      sessionTurns: [victim, ...windowRows],
+      citations: structuredCitations({ 15: [[5, "supersedes"]] }),
+    });
+
+    expect(rowFor(result, 15)?.effGrade).toBe(3);
+    // The out-of-window victim is still pulled in as the corrector's ↳ row.
+    expect(result.pulled.map((p) => p.turn.promptNumber)).toEqual([5]);
+    expect(result.pulled[0]!.effGrade).toBe(1);
   });
 
-  it("uses the max content signal and ignores topic tags for milestone scoring", () => {
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ promptNumber: 1, type: "decision", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "change",
-        title: "spec-only implementation plan",
-        insight: "- also has an insight",
-        tags: ["design", "topic:architecture"],
-        filesModified: ["docs/plans/scoring.md"],
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "discovery",
-        title: "topic-only discovery",
-        tags: ["topic:design"],
-        createdAtEpoch: base + 120,
-      }),
-      turn({ promptNumber: 4, type: "decision", title: "end", createdAtEpoch: base + 180 }),
-    ];
-
-    const result = select(rows);
-    const scored = result.kept.find((milestone) => milestone.turn.promptNumber === 2);
-    expect(scored?.score).toBe(4); // change base 1 + max(spec 3, insight 2, bare tagFam 1)
-    expect(kept(result)).not.toContain(3);
-  });
-
-  it("keeps a run's final turn plus the highest-scored other candidate", () => {
-    const base = 1_779_782_400;
-    const rows = [
-      turn({ promptNumber: 1, type: "discovery", title: "start", createdAtEpoch: base }),
-      turn({
-        promptNumber: 2,
-        type: "decision",
-        title: "early insight decision",
-        insight: "- useful but not final",
-        createdAtEpoch: base + 60,
-      }),
-      turn({
-        promptNumber: 3,
-        type: "decision",
-        title: "tagged design decision",
-        tags: ["design"],
-        createdAtEpoch: base + 120,
-      }),
-      turn({
-        promptNumber: 4,
-        type: "decision",
-        title: "highest scored spec decision",
-        filesModified: ["docs/plans/final.md"],
-        createdAtEpoch: base + 180,
-      }),
-      turn({
-        promptNumber: 5,
-        type: "decision",
-        title: "final decision in the run",
-        createdAtEpoch: base + 240,
-      }),
-      turn({ promptNumber: 6, type: "feature", title: "end", filesModified: ["a.ts"], createdAtEpoch: base + 300 }),
-    ];
-
-    const k = kept(select(rows));
-    expect(k).toContain(4); // highest-scored other
-    expect(k).toContain(5); // finality wins even with lower score
-    expect(k).not.toContain(2);
-    expect(k).not.toContain(3);
-  });
-
-  it("caps a heavy day and emits exactly one overflow hint", () => {
-    const base = 1_779_782_400;
-    // 30 alternating turns on one day. Low-score change rows are filtered before
-    // overflow; only score-gated candidates that lose the adaptive budget count.
-    const rows = Array.from({ length: 30 }, (_, i) =>
-      turn({
-        promptNumber: i + 1,
-        type: i % 2 === 0 ? "decision" : "change",
-        title: `m${i + 1}`,
-        filesModified: i % 2 === 0 ? [] : ["a.ts"],
-        toolCallCount: 30 - i,
-        createdAtEpoch: base + i * 60,
-      }),
-    );
-    const result = select(rows);
-    // 16 candidates, calibrated cap 6 -> 10 budget drops, exactly one overflow entry.
-    expect(result.overflowByDay).toHaveLength(1);
-    expect(result.kept).toHaveLength(6);
-    expect(result.overflowByDay[0]!.count).toBe(10);
+  it("returns an empty selection for a window with no candidate rows", () => {
+    const result = select([
+      turn({ id: 1, promptNumber: 1, status: "skipped", type: null, title: null, createdAtEpoch: era }),
+      turn({ id: 2, promptNumber: 2, type: "compact", title: "/compact", createdAtEpoch: era + 60 }),
+    ]);
+    expect(result).toEqual({ kept: [], ranked: [], pulled: [], overflowByDay: [] });
   });
 });
 
 function milestoneFixtureTurns(): TurnRecord[] {
   const day = 24 * 60 * 60;
-  const base = 1_779_782_400; // fixed; never Date.now()
+  const base = 1_779_782_400; // fixed; never Date.now(). Pre-era on purpose.
   const rows: TurnRecord[] = [];
   let pn = 0;
   const add = (over: Partial<TurnRecord>, epoch: number) => {
     pn += 1;
-    rows.push(turn({ promptNumber: pn, createdAtEpoch: epoch, title: `t${pn}`, ...over }));
+    rows.push(turn({ id: pn, promptNumber: pn, createdAtEpoch: epoch, title: `t${pn}`, ...over }));
   };
-  // 6 days × 20 turns = 120. Each day: 14 discovery (noise, tool_call_count 0 → dropped,
-  // and 0 keeps the burst threshold at 0 so none are re-admitted) + a 5-long decision run
-  // (folds to first+last = 2) + 1 merged feature (outcome → always-keep). Lands ~15.8%.
+  // 6 days × 20 turns = 120. Each day: 14 discovery (legacy G1) + a 5-long
+  // decision run (legacy G3) + 1 merged feature with files (legacy G2).
   for (let d = 0; d < 6; d += 1) {
     const dayBase = base + d * day;
     for (let i = 0; i < 14; i += 1) add({ type: "discovery", toolCallCount: 0 }, dayBase + i * 60);
@@ -1845,280 +1906,266 @@ function milestoneFixtureTurns(): TurnRecord[] {
   return rows;
 }
 
-function researchMilestoneFixtureTurns(): TurnRecord[] {
+describe("milestone selection on a multi-day legacy fixture", () => {
+  const result = selectMilestoneTurns({
+    windowTurns: milestoneFixtureTurns(),
+    windowSignals: detectShapeSignals(milestoneFixtureTurns()),
+    compactBoundaries: [],
+  });
+  const rows = milestoneFixtureTurns();
+  const keptPrompts = new Set(result.kept.map((row) => row.turn.promptNumber));
+
+  it("keeps every legacy decision (G3) and no bare discovery (G1)", () => {
+    for (const row of rows) {
+      if (row.type === "decision") {
+        expect(keptPrompts.has(row.promptNumber)).toBe(true);
+      }
+      if (row.type === "discovery" && row.promptNumber !== 1) {
+        expect(keptPrompts.has(row.promptNumber)).toBe(false);
+      }
+    }
+  });
+
+  it("keeps both window endpoints and nothing else off-grade", () => {
+    // T1 (first row) and T120 (last titled row) are structural; the other five
+    // merged features are G2 and no longer force-kept by their outcome tag.
+    expect(keptPrompts.has(1)).toBe(true);
+    expect(keptPrompts.has(120)).toBe(true);
+    expect(keptPrompts.has(20)).toBe(false);
+    expect(result.kept).toHaveLength(32);
+  });
+
+  it("accounts for every non-kept day row in the overflow hints", () => {
+    const overflowTotal = result.overflowByDay.reduce((sum, day) => sum + day.count, 0);
+    expect(overflowTotal).toBe(rows.length - result.kept.length);
+  });
+});
+
+/**
+ * The end-to-end guard: one hand-built session that puts every §C rule on the
+ * same board at once — two legacy days read through the inline adapter, two era
+ * days read through structured edges, a supersession on each side, a shared
+ * antecedent, a skipped turn revived by a citation, and three classes of
+ * always-keep anchor (endpoint, corrector, reversed-with-no-corrector).
+ *
+ * Frozen by construction: fixed epochs, no `Date.now()`, `citesRecorded` set
+ * explicitly on every row so the source of each turn's citations is stated
+ * rather than inferred.
+ */
+function mixedArcFixtureTurns(): TurnRecord[] {
   const day = 24 * 60 * 60;
-  const base = 1_779_782_400;
+  const legacy = 1_779_782_400; // pre-era: the inline/tag adapter is live
+  const era = 1_784_711_427; // task-causality cutoff: grades are authoritative
   const rows: TurnRecord[] = [];
-  let pn = 0;
-  const add = (over: Partial<TurnRecord>, epoch: number) => {
-    pn += 1;
-    rows.push(turn({ id: pn, promptNumber: pn, createdAtEpoch: epoch, title: `r${pn}`, ...over }));
-  };
-
-  for (let d = 0; d < 5; d += 1) {
-    const dayBase = base + d * day;
-    for (let i = 0; i < 4; i += 1) {
-      add({ type: "discovery", insight: "- research finding" }, dayBase + i * 60);
-    }
-    for (let i = 0; i < 4; i += 1) {
-      add({ type: "decision" }, dayBase + (4 + i) * 60);
-    }
-    for (let i = 0; i < 4; i += 1) {
-      add({ type: "discovery", insight: "- follow-up finding" }, dayBase + (8 + i) * 60);
-    }
-    for (let i = 0; i < 4; i += 1) {
-      add({ type: "bugfix" }, dayBase + (12 + i) * 60);
-    }
-  }
-
-  return rows;
-}
-
-function citationDenseMilestoneFixtureTurns(): TurnRecord[] {
-  const base = 1_779_782_400;
-  const rows: TurnRecord[] = [];
-  for (let promptNumber = 1; promptNumber <= 16; promptNumber += 1) {
-    rows.push(
-      turn({
-        id: promptNumber,
-        promptNumber,
-        type:
-          promptNumber === 1 || (promptNumber >= 6 && promptNumber <= 12) || promptNumber === 16
-            ? "decision"
-            : "discovery",
-        title: `c${promptNumber}`,
-        content:
-          promptNumber >= 13
-            ? "Cites [T2], [T3], [T4], and [T5]."
-            : null,
-        createdAtEpoch: base + promptNumber * 60,
-      }),
-    );
-  }
-  return rows;
-}
-
-function calibratedBudgetFixtureTurns(): TurnRecord[] {
-  const day = 24 * 60 * 60;
-  const base = 1_779_782_400;
-  const rows: TurnRecord[] = [];
-  const used = new Set<number>();
   const add = (
     promptNumber: number,
-    dayIndex: number,
-    minute: number,
-    overrides: Partial<TurnRecord> = {},
+    epoch: number,
+    over: Partial<TurnRecord>,
   ) => {
-    if (used.has(promptNumber)) {
-      throw new Error(`duplicate prompt ${promptNumber}`);
-    }
-    used.add(promptNumber);
-    rows.push(
-      turn({
-        id: promptNumber,
-        promptNumber,
-        createdAtEpoch: base + dayIndex * day + minute * 60,
-        title: `calibrated ${promptNumber}`,
-        type: "discovery",
-        ...overrides,
-      }),
-    );
-  };
-  const candidate = (
-    promptNumber: number,
-    dayIndex: number,
-    minute: number,
-    score: "high" | "medium" | "low" = "medium",
-    overrides: Partial<TurnRecord> = {},
-  ) => {
-    const byScore =
-      score === "high"
-        ? { type: "decision", insight: "- calibrated high" }
-        : score === "medium"
-          ? { type: "feature", filesModified: ["src/a.ts"], insight: "- calibrated medium" }
-          : { type: "discovery", insight: "- calibrated low" };
-    add(promptNumber, dayIndex, minute, { ...byScore, ...overrides });
-  };
-  const noise = (promptNumber: number, dayIndex: number, minute: number) => {
-    add(promptNumber, dayIndex, minute, { type: "discovery", insight: null, toolCallCount: 0 });
+    rows.push(turn({ id: promptNumber, promptNumber, createdAtEpoch: epoch, ...over }));
   };
 
-  add(1, 0, 0, { type: "decision", title: "session start" });
-  for (const promptNumber of [2, 3, 4, 5]) {
-    candidate(promptNumber, 0, promptNumber, "high");
-  }
-  candidate(16, 0, 16, "medium", { title: "sparse-day gold spec" });
-  for (const promptNumber of [17, 18, 19, 20, 21, 22, 23, 24]) {
-    candidate(promptNumber, 0, promptNumber, "low");
-  }
-  for (let promptNumber = 25; promptNumber <= 27; promptNumber += 1) {
-    noise(promptNumber, 0, promptNumber);
-  }
+  // ── Day A (legacy) ── an inline citation that is NOT a correction.
+  add(1, legacy, { type: "discovery", title: "legacy kickoff" });
+  add(2, legacy + 60, { type: "discovery", title: "legacy measurement" });
+  add(3, legacy + 120, { type: "discovery", title: "legacy noise a" });
+  add(4, legacy + 180, { type: "discovery", title: "legacy noise b" });
+  add(5, legacy + 240, { type: "decision", title: "legacy conclusion" });
+  add(6, legacy + 300, {
+    type: "discovery",
+    title: "legacy dead end nobody corrected",
+    tags: ["rolled-back"],
+  });
 
-  for (const [index, promptNumber] of [130, 131, 132, 133, 134, 135].entries()) {
-    candidate(
-      promptNumber,
-      1,
-      promptNumber - 130,
-      "high",
-      index % 2 === 0
-        ? {}
-        : { type: "feature", filesModified: ["docs/plans/calibration.md"] },
-    );
-  }
-  candidate(143, 1, 13, "medium", { title: "high-candidate mud" });
-  for (let promptNumber = 144; promptNumber <= 158; promptNumber += 1) {
-    candidate(promptNumber, 1, promptNumber - 130, "low");
-  }
-  for (let promptNumber = 159; promptNumber <= 165; promptNumber += 1) {
-    noise(promptNumber, 1, promptNumber - 130);
-  }
+  // ── Day B (legacy) ── the tag adapter fires for inline provenance and stays
+  // silent for a structured `builds-on`, on two turns of identical shape.
+  add(7, legacy + day, {
+    type: "discovery",
+    title: "legacy hypothesis",
+    tags: ["rolled-back"],
+  });
+  add(8, legacy + day + 60, { type: "bugfix", title: "legacy correction" });
+  add(9, legacy + day + 120, {
+    type: "discovery",
+    title: "legacy parallel dead end",
+    tags: ["rolled-back"],
+  });
+  add(10, legacy + day + 180, {
+    type: "decision",
+    title: "legacy consumer with structured edges",
+    citesRecorded: true,
+  });
+  add(11, legacy + day + 240, { type: "discovery", title: "legacy noise c" });
 
-  for (const promptNumber of [501, 502, 503]) {
-    candidate(promptNumber, 2, promptNumber - 500, "high");
-  }
-  candidate(504, 2, 4, "low", { title: "short-day gold audit" });
-  candidate(505, 2, 5, "low");
-  for (let promptNumber = 506; promptNumber <= 509; promptNumber += 1) {
-    noise(promptNumber, 2, promptNumber - 500);
-  }
+  // ── Day C (era) ── graded rows, a pulled G2, and a revived skipped probe.
+  add(12, era, { type: "decision", title: "arc origin", significanceGrade: 4 });
+  add(13, era + 60, { type: "discovery", title: "supporting measurement", significanceGrade: 2 });
+  add(14, era + 120, {
+    type: "decision",
+    title: "mechanism locked",
+    significanceGrade: 3,
+    citesRecorded: true,
+  });
+  add(15, era + 180, { type: "discovery", title: "era noise a", significanceGrade: 1 });
+  add(16, era + 240, { type: "discovery", title: "era noise b", significanceGrade: 1 });
+  add(17, era + 300, {
+    status: "skipped",
+    type: null,
+    title: null,
+    userPrompt: "check whether the watchdog ever observes a frozen timestamp",
+  });
+  add(18, era + 360, {
+    type: "decision",
+    title: "consumes a skipped probe",
+    significanceGrade: 3,
+    citesRecorded: true,
+  });
+  add(19, era + 420, { type: "discovery", title: "era noise c", significanceGrade: 1 });
 
-  for (const promptNumber of [515, 516, 517, 518]) {
-    candidate(promptNumber, 3, promptNumber - 514, "high");
-  }
-  candidate(519, 3, 5, "medium", { title: "medium-day gold decision" });
-  for (let promptNumber = 520; promptNumber <= 526; promptNumber += 1) {
-    candidate(promptNumber, 3, promptNumber - 514, "low");
-  }
-  for (let promptNumber = 527; promptNumber <= 529; promptNumber += 1) {
-    noise(promptNumber, 3, promptNumber - 514);
-  }
-
-  for (const promptNumber of [560, 561, 562, 563]) {
-    candidate(promptNumber, 4, promptNumber - 560, "high");
-  }
-  candidate(564, 4, 4, "low", { title: "short-day gold tag audit" });
-  for (const promptNumber of [565, 566]) {
-    candidate(promptNumber, 4, promptNumber - 560, "low");
-  }
-  for (const promptNumber of [567, 568]) {
-    noise(promptNumber, 4, promptNumber - 560);
-  }
-
-  candidate(581, 5, 1, "high");
-  candidate(582, 5, 2, "low", { title: "two-candidate gold fork finding" });
-  for (let promptNumber = 590; promptNumber <= 596; promptNumber += 1) {
-    noise(promptNumber, 5, promptNumber - 580);
-  }
-
-  for (const promptNumber of [5830, 5831, 5832]) {
-    candidate(promptNumber, 6, promptNumber - 5830, "high");
-  }
-  candidate(585, 6, 5, "medium", { title: "short-day gold context audit" });
-  for (let promptNumber = 586; promptNumber <= 589; promptNumber += 1) {
-    noise(promptNumber, 6, promptNumber - 580);
-  }
-
-  for (let promptNumber = 700; promptNumber < 750; promptNumber += 1) {
-    candidate(
-      promptNumber,
-      7,
-      promptNumber - 700,
-      promptNumber % 3 === 0 ? "high" : "low",
-    );
-  }
-  for (let promptNumber = 750; promptNumber < 760; promptNumber += 1) {
-    noise(promptNumber, 7, promptNumber - 700);
-  }
+  // ── Day D (era) ── a structured supersession that moves the anchor off a G4,
+  // plus an antecedent shared by two kept rows.
+  add(20, era + day, { type: "decision", title: "second premise", significanceGrade: 4 });
+  add(21, era + day + 60, { type: "discovery", title: "shared evidence", significanceGrade: 2 });
+  add(22, era + day + 120, {
+    type: "decision",
+    title: "refoundation",
+    significanceGrade: 2,
+    citesRecorded: true,
+  });
+  add(23, era + day + 180, {
+    type: "decision",
+    title: "second consumer of the shared evidence",
+    significanceGrade: 3,
+    citesRecorded: true,
+  });
+  add(24, era + day + 240, { type: "discovery", title: "era noise d", significanceGrade: 1 });
+  add(25, era + day + 300, { type: "discovery", title: "era noise e", significanceGrade: 1 });
+  add(26, era + day + 360, { type: "decision", title: "final wrap", significanceGrade: 3 });
 
   return rows;
 }
 
-function withDenseBackgroundCitations(rows: TurnRecord[]): TurnRecord[] {
-  const assertedPrompts = new Set([16, 143, 504, 519, 564, 582, 585]);
-  const citedTargets = rows
-    .filter((row) => row.promptNumber < 700 && !assertedPrompts.has(row.promptNumber))
-    .slice(0, Math.ceil(rows.length * 0.3));
-  const citeRows = rows.filter((row) => row.promptNumber >= 700);
-  return rows.map((row) => {
-    const citeIndex = citeRows.findIndex((candidate) => candidate.promptNumber === row.promptNumber);
-    if (citeIndex < 0 || citeIndex >= citedTargets.length) {
-      return row;
-    }
-    return {
-      ...row,
-      content: `Background calibration cites [T${citedTargets[citeIndex]!.id}].`,
-    };
-  });
+function mixedArcCitations() {
+  return new Map<number, unknown>([
+    // Legacy prose: ids with no relation attached.
+    ...inlineCitations({ 5: [2], 8: [7] }),
+    // Structured edges: the relation is stated and authoritative.
+    ...structuredCitations({
+      10: [[9, "builds-on"]],
+      14: [[13, "evidence-for"]],
+      18: [[17, "builds-on"]],
+      22: [
+        [20, "supersedes"],
+        [21, "evidence-for"],
+      ],
+      23: [[21, "evidence-for"]],
+    }),
+  ]);
 }
 
-function assertCalibratedBudgetQuality(rows: TurnRecord[]): void {
+describe("milestone selection on a mixed-era, multi-day arc (frozen fixture)", () => {
+  const rows = mixedArcFixtureTurns();
   const result = selectMilestoneTurns({
     windowTurns: rows,
     windowSignals: detectShapeSignals(rows),
     compactBoundaries: [],
-  });
-  const kept = new Set(result.kept.map((k) => k.turn.promptNumber));
-  for (const promptNumber of [16, 504, 519, 564, 582, 585]) {
-    expect(kept.has(promptNumber)).toBe(true);
-  }
-  expect(kept.has(143)).toBe(false);
-  const ratio = result.kept.length / rows.filter((t) => t.status !== "skipped").length;
-  expect(ratio).toBeGreaterThanOrEqual(0.15);
-  expect(ratio).toBeLessThanOrEqual(0.25);
-}
+    taskCausalityEraCutoffEpoch: 1_784_711_427,
+    citations: mixedArcCitations(),
+  } as Parameters<typeof selectMilestoneTurns>[0]);
+  const rowFor = (promptNumber: number) =>
+    result.kept.find((row) => row.turn.promptNumber === promptNumber);
 
-function assertMilestoneRetentionBand(rows: TurnRecord[]): MilestoneSelection {
-  const result = selectMilestoneTurns({
-    windowTurns: rows,
-    windowSignals: detectShapeSignals(rows),
-    compactBoundaries: [],
-  });
-  const ratio = result.kept.length / rows.filter((t) => t.status !== "skipped").length;
-  expect(ratio).toBeGreaterThanOrEqual(0.15);
-  expect(ratio).toBeLessThanOrEqual(0.25);
-  return result;
-}
-
-describe("milestone retention guard (frozen fixture)", () => {
-  it("preserves calibrated gold-like turns while rejecting high-candidate mud", () => {
-    assertCalibratedBudgetQuality(calibratedBudgetFixtureTurns());
+  it("pins the exact set of main rows", () => {
+    expect(result.kept.map((row) => row.turn.promptNumber)).toEqual([
+      1, 5, 6, 8, 9, 10, 12, 14, 18, 22, 23, 26,
+    ]);
   });
 
-  it("preserves calibrated gold-like turns when citation density is high", () => {
-    assertCalibratedBudgetQuality(
-      withDenseBackgroundCitations(calibratedBudgetFixtureTurns()),
+  it("keeps each class of always-keep anchor for its own reason", () => {
+    // Endpoints: legacy G1 first row, G3 last titled row — structural, off-grade.
+    expect(rowFor(1)?.alwaysKeep).toBe(true);
+    expect(rowFor(1)?.effGrade).toBe(1);
+    expect(rowFor(1)?.spine).toBe(false);
+    expect(rowFor(26)?.alwaysKeep).toBe(true);
+    // Reversed with nobody correcting it: the dead end is the record.
+    expect(rowFor(6)?.marker).toBe("reversed");
+    expect(rowFor(6)?.alwaysKeep).toBe(true);
+    expect(rowFor(6)?.spine).toBe(false);
+    // Era G4.
+    expect(rowFor(12)?.effGrade).toBe(4);
+    expect(rowFor(12)?.alwaysKeep).toBe(true);
+    // Correctors, promoted from legacy G2 and era G2 respectively.
+    expect(rowFor(8)?.effGrade).toBe(3);
+    expect(rowFor(8)?.alwaysKeep).toBe(true);
+    expect(rowFor(22)?.effGrade).toBe(3);
+    expect(rowFor(22)?.alwaysKeep).toBe(true);
+  });
+
+  it("demotes only the turns an actual supersession names", () => {
+    // T7 fell to the legacy inline adapter; T9 carries the same tag and the same
+    // citer shape but its edge says `builds-on`, so it keeps its own row.
+    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(7);
+    expect(rowFor(9)?.marker).toBe("reversed");
+    expect(rowFor(9)?.alwaysKeep).toBe(true);
+    // T20's G4 anchor claim dies with the demotion; T22 inherits it.
+    expect(result.kept.map((row) => row.turn.promptNumber)).not.toContain(20);
+    expect(rowFor(22)?.spine).toBe(true);
+  });
+
+  it("pins the ↳ antecedents, their owners and their back-links", () => {
+    expect(
+      result.pulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber, p.effGrade]),
+    ).toEqual([
+      [2, 5, 1], // plain legacy causal reference
+      [7, 8, 1], // demoted victim, legacy adapter
+      [13, 14, 2], // era G2 evidence
+      [17, 18, 0], // skipped probe revived
+      [20, 22, 1], // demoted G4 victim, structured edge
+      [21, 22, 2], // shared antecedent: earliest kept citer only
+    ]);
+    // Back-links ride on the victims and on nobody else.
+    expect(result.pulled.filter((p) => p.supersededBy.length > 0).map((p) => [
+      p.turn.promptNumber,
+      p.supersededBy,
+    ])).toEqual([
+      [7, [8]],
+      [20, [22]],
+    ]);
+    // T23 also cites T21, but a shared antecedent renders once.
+    expect(result.pulled.filter((p) => p.citedByPromptNumber === 23)).toHaveLength(0);
+    // A skipped turn has no title, so the ↳ label falls back to its prompt.
+    expect(result.pulled[3]!.label).toBe(
+      "check whether the watchdog ever observes a frozen timestamp",
     );
   });
 
-  it("keeps 15-25% of non-skipped turns on the release-heavy fixture", () => {
-    assertMilestoneRetentionBand(milestoneFixtureTurns());
+  it("counts only turns with no rendered row at all in `+N more`", () => {
+    expect(result.overflowByDay.map((d) => [d.count, d.firstPrompt, d.lastPrompt])).toEqual([
+      [2, 3, 4], // day A: T2 is pulled, so only the two noise rows are hidden
+      [1, 11, 11], // day B: T7 is pulled
+      [3, 15, 19], // day C: T13 is pulled, T17 is skipped (never a candidate)
+      [2, 24, 25], // day D: T20 and T21 are pulled
+    ]);
   });
 
-  it("keeps 15-25% of non-skipped turns on the no-outcome research fixture", () => {
-    assertMilestoneRetentionBand(researchMilestoneFixtureTurns());
+  it("conserves every candidate turn across kept, pulled and overflow", () => {
+    const candidates = rows.filter((row) => row.status !== "skipped" && row.type !== "compact");
+    const pulledInWindow = result.pulled.filter((p) => p.turn.status !== "skipped").length;
+    const overflowTotal = result.overflowByDay.reduce((sum, d) => sum + d.count, 0);
+    expect(result.kept.length + pulledInWindow + overflowTotal).toBe(candidates.length);
+    expect(candidates).toHaveLength(25);
   });
 
-  it("keeps 15-25% of non-skipped turns on the short citation-dense fixture", () => {
-    const rows = citationDenseMilestoneFixtureTurns();
-    const result = assertMilestoneRetentionBand(rows);
-    expect(result.kept.map((k) => k.turn.promptNumber)).toContain(2);
-  });
-
-  it("surfaces every outcome-only fixture turn with the outcome marker", () => {
-    const rows = milestoneFixtureTurns();
-    const result = selectMilestoneTurns({
-      windowTurns: rows,
-      windowSignals: detectShapeSignals(rows),
-      compactBoundaries: [],
-    });
-    const outcomeOnly = rows.filter(
-      (t) => t.tags.some((tag) => OUTCOME_TAGS.has(tag)) && !t.wasRolledBack && !t.wasInterrupted && t.status !== "undone",
-    );
-    for (const t of outcomeOnly) {
-      const k = result.kept.find((k) => k.turn.promptNumber === t.promptNumber);
-      expect(k?.marker).toBe("outcome");
+  it("ranks the pool as kept rows plus the G2 band, and nothing below it", () => {
+    const ranked = result.ranked.map((row) => row.turn.promptNumber);
+    expect(ranked).toHaveLength(14);
+    expect(ranked).toContain(13);
+    expect(ranked).toContain(21);
+    for (const promptNumber of [3, 4, 7, 11, 15, 16, 19, 20, 24, 25]) {
+      expect(ranked).not.toContain(promptNumber);
     }
+    // Score order never crosses a grade tier: the G4 anchor leads.
+    expect(result.ranked[0]!.turn.promptNumber).toBe(12);
   });
 });
 
@@ -2207,18 +2254,16 @@ describe("buildTimelineView", () => {
 
   it("paginates the milestones view over kept milestones, not raw turns", () => {
     const db = createDatabase(":memory:");
-    // 10 consecutive decisions on one day. Under the narrative-digest model this
-    // is a single decision run: T1/T10 are window endpoints (always-keep), and the
-    // interior run folds to its first+last foldable (T2, T9). So the kept set is
-    // {1, 2, 9, 10} — 4 milestones over 10 raw turns, which is exactly the point of
-    // paginating over kept milestones rather than raw turns.
+    // 10 legacy turns on one day: decisions at T1/T4/T7/T10 (effGrade 3 → spine),
+    // discoveries elsewhere (effGrade 1 → no row). The kept set is {1, 4, 7, 10} —
+    // 4 milestones over 10 raw turns, which is the point of paginating over kept.
     seedTimelineSession(
       db,
       Array.from({ length: 10 }, (_, index) =>
         turn({
           promptNumber: index + 1,
-          type: "decision",
-          title: `decision ${index + 1}`,
+          type: index % 3 === 0 ? "decision" : "discovery",
+          title: `row ${index + 1}`,
           createdAtEpoch: 1_779_782_400 + index * 60,
         }),
       ),
@@ -2381,8 +2426,9 @@ describe("buildContextTimelineView milestone tail", () => {
   it("shows only the trailing pageSize kept milestones with an earlier hint", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 40 alternating decision/change on one local day → full-session kept
-    // {1,3,5,7,9,11,40} (cap 7). Trailing 3 = {9,11,40}.
+    // 40 alternating legacy rows on one local day: the 20 odd decisions are
+    // effGrade 3 (spine) and T40 is the last titled row (endpoint) → 21 kept.
+    // Trailing 3 = {37, 39, 40}.
     const rows = Array.from({ length: 40 }, (_, i) =>
       turn({
         promptNumber: i + 1,
@@ -2402,17 +2448,17 @@ describe("buildContextTimelineView milestone tail", () => {
       milestoneTail: true,
     });
 
-    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([7, 9, 40]);
-    expect(view.viewItemTotal).toBe(6);
+    expect(view.pagedMilestones.map((m) => m.turn.promptNumber)).toEqual([37, 39, 40]);
+    expect(view.viewItemTotal).toBe(21);
     expect(view.hasEarlier).toBe(true);
     expect(view.milestoneTail).toBe(true);
 
     const output = renderTimeline(view, { showEarlierHint: true });
     // honest tail label (not "page X/Y"), earlier hint bounded by the first
     // shown milestone, and the day header still reports full-day kept + cont.
-    expect(output).toContain("showing: milestones · last 3/6");
-    expect(output).toContain('earlier: timeline(id="S1/T1..6") or recall(id="S1")');
-    expect(output).toContain("· 6 kept (cont.) ──");
+    expect(output).toContain("showing: milestones · last 3/21");
+    expect(output).toContain('earlier: timeline(id="S1/T1..36") or recall(id="S1")');
+    expect(output).toContain("· 21 kept (cont.) ──");
   });
 });
 
@@ -2420,8 +2466,8 @@ describe("milestoneDayGroups (pagination)", () => {
   it("splits a day across a page boundary, repeats the day header, overflow once on final slice", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 40 alternating turns on one local day → 21 score-gated candidates;
-    // calibrated cap 6 keeps the digest split across two pages.
+    // 40 alternating legacy turns on one local day → 21 kept rows (20 decisions
+    // + the last titled row), split across two pages at pageSize 15.
     const rows = Array.from({ length: 40 }, (_, i) =>
       turn({
         promptNumber: i + 1,
@@ -2434,18 +2480,18 @@ describe("milestoneDayGroups (pagination)", () => {
     );
     seedTimelineSession(db, rows);
 
-    const page1 = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 5 });
-    const page2 = buildTimelineView(db, { id: "S1", view: "milestones", page: 2, pageSize: 5 });
+    const page1 = buildTimelineView(db, { id: "S1", view: "milestones", page: 1, pageSize: 15 });
+    const page2 = buildTimelineView(db, { id: "S1", view: "milestones", page: 2, pageSize: 15 });
 
     expect(page1.milestoneDayGroups).toHaveLength(1);
     expect(page2.milestoneDayGroups).toHaveLength(1);
     const g1 = page1.milestoneDayGroups[0]!;
     const g2 = page2.milestoneDayGroups[0]!;
 
-    // Full-day metadata is identical across both slices (kept {1,3,5,7,9,40}).
+    // Full-day metadata is identical across both slices.
     expect(g1.date).toBe(g2.date);
-    expect(g1.keptCount).toBe(6);
-    expect(g2.keptCount).toBe(6);
+    expect(g1.keptCount).toBe(21);
+    expect(g2.keptCount).toBe(21);
     expect(g1.promptLo).toBe(1);
     expect(g1.promptHi).toBe(40);
     expect(g2.promptLo).toBe(g1.promptLo);
@@ -2460,7 +2506,8 @@ describe("milestoneDayGroups (pagination)", () => {
     expect(g2.continued).toBe(true);
     expect(g2.isFinalSliceForDay).toBe(true);
     expect(g2.overflow).not.toBeNull();
-    expect(g2.overflow!.count).toBe(15);
+    // `+N more` = the day's turns that got no main row: 40 − 21 kept.
+    expect(g2.overflow!.count).toBe(19);
 
     // Overflow appears on exactly one slice across the whole day.
     const overflowSlices = [g1, g2].filter((g) => g.overflow !== null);
@@ -2470,8 +2517,8 @@ describe("milestoneDayGroups (pagination)", () => {
   it("keeps a single-page day's overflow on its only (final) slice", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
-    // 10 alternating turns on one day with no dev artifact path → proportional
-    // budget keeps 4 candidates and drops 2 remaining score-gated candidates.
+    // 10 alternating legacy turns on one day → 6 kept (5 decisions + the last
+    // titled row) and 4 turns with no main row.
     // A large pageSize fits all kept on one page, so the single group is BOTH the first
     // and final slice for the day: continued=false, isFinalSliceForDay=true, overflow!=null.
     const rows = Array.from({ length: 10 }, (_, i) =>
@@ -2490,13 +2537,13 @@ describe("milestoneDayGroups (pagination)", () => {
 
     expect(view.milestoneDayGroups).toHaveLength(1);
     const g = view.milestoneDayGroups[0]!;
-    expect(g.keptCount).toBe(4);
+    expect(g.keptCount).toBe(6);
     expect(g.promptLo).toBe(1);
     expect(g.promptHi).toBe(10);
     expect(g.continued).toBe(false);
     expect(g.isFinalSliceForDay).toBe(true);
     expect(g.overflow).not.toBeNull();
-    expect(g.overflow!.count).toBe(2);
+    expect(g.overflow!.count).toBe(4);
   });
 });
 
@@ -3234,7 +3281,7 @@ describe("milestone causal references (Component 3)", () => {
     ).run(content, sessionId, promptNumber);
   }
 
-  it("keeps a low-base discovery when later turns cite it densely", () => {
+  it("does not let dense citations promote a low-grade turn, but pulls it in as a ↳ antecedent", () => {
     const db = createDatabase(":memory:");
     const base = 1_779_782_400;
     const rows = [
@@ -3242,10 +3289,10 @@ describe("milestone causal references (Component 3)", () => {
       turn({
         promptNumber: 2,
         type: "discovery",
-        title: "low-base finding later proven important",
+        title: "low-grade finding that later work leans on",
         createdAtEpoch: base + 60,
       }),
-      ...Array.from({ length: 4 }, (_, i) =>
+      ...Array.from({ length: 3 }, (_, i) =>
         turn({
           promptNumber: i + 3,
           type: "discovery",
@@ -3253,6 +3300,7 @@ describe("milestone causal references (Component 3)", () => {
           createdAtEpoch: base + (i + 2) * 60,
         }),
       ),
+      turn({ promptNumber: 6, type: "decision", title: "the decision it fed", createdAtEpoch: base + 300 }),
       turn({ promptNumber: 7, type: "decision", title: "end", createdAtEpoch: base + 360 }),
     ];
     seedTimelineSession(db, rows);
@@ -3262,7 +3310,12 @@ describe("milestone causal references (Component 3)", () => {
     }
 
     const view = buildTimelineView(db, { id: "S1", view: "milestones" });
-    expect(view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)).toContain(2);
+    // Four citers no longer buy a main row: the pool gate is on effGrade alone.
+    expect(view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)).not.toContain(2);
+    // It survives under the earliest kept row that cites it (T6, a decision).
+    expect(view.milestonePulled.map((p) => [p.turn.promptNumber, p.citedByPromptNumber])).toEqual([
+      [2, 6],
+    ]);
   });
 
   it("renders a ↳ sub-line for an in-session [T<dbid>] reference, mapped to its prompt number", () => {
@@ -3544,7 +3597,7 @@ describe("milestone causal references (Component 3)", () => {
     rows.push(
       turn({
         promptNumber: 10,
-        type: "feature",
+        type: "decision",
         title: "release with invalid leading cites",
         tags: ["release"],
         filesModified: ["a.ts"],
