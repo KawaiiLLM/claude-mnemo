@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { CITATION_RELATIONS } from "../db/citations";
+
 export const MNEMO_TOOL_DESCRIPTIONS = {
   recall:
     "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections — the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
@@ -34,6 +36,27 @@ export const rememberInputShape = {
       grade: z.number().int().min(0).max(4),
     })
     .strict()
+    .optional(),
+  // Structured causal edges for a turn (spec §B). Replace-set: the array given
+  // here becomes the turn's ENTIRE citation set, so a re-sent turn converges
+  // instead of accumulating. Omitted = leave the existing edges alone; an
+  // explicit `[]` clears them and records "this turn genuinely cites nothing".
+  // `id` is the bare DB turn id (8501), not the `T8501` selector form.
+  //
+  // The shape check stops at "integer" on purpose (spec §B): a wrong TYPE is a
+  // caller bug worth rejecting the call over, but a merely INVALID id — zero,
+  // negative, a typo that names no turn, the turn citing itself — is dropped
+  // per edge with a log line so one bad id cannot discard a whole extraction's
+  // good edges. See replaceTurnCitations.
+  cites: z
+    .array(
+      z
+        .object({
+          id: z.number().int(),
+          relation: z.enum(CITATION_RELATIONS),
+        })
+        .strict(),
+    )
     .optional(),
   type: z.string().optional(),
   title: z.string().optional(),

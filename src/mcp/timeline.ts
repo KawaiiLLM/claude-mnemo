@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { parseInlineCitations } from "../db/citations";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { resolveTranscriptPath } from "../shared/paths";
@@ -1508,37 +1509,29 @@ export function selectMilestoneTurns(view: {
 }
 
 /**
- * Parses bare DB-id causal references (`[T<n>]`) out of a milestone's content.
- * Returns the cited DB turn ids in order, de-duplicated, capped at
- * `MILESTONE_REFERENCE_CAP`. These are DB turn ids (the agent's id space, the
- * same id passed to `remember()`), NOT user-facing prompt numbers — the caller
- * resolves them via `getTurnById` and maps id → prompt number for display.
+ * Parses inline DB-id causal references out of a milestone's content, in order,
+ * de-duplicated, capped at `MILESTONE_REFERENCE_CAP`. These are DB turn ids (the
+ * agent's id space, the same id passed to `remember()`), NOT user-facing prompt
+ * numbers — the caller resolves them via `getTurnById` and maps id → prompt
+ * number for display.
+ *
+ * The grammar lives in db/citations.ts (`parseInlineCitations`) and is shared
+ * with the structured-citation fallback, so the milestone view and the settle
+ * path can never disagree about what a legacy turn cites. It covers the single
+ * `[T8501]` form this function used to handle plus the comma-list, inclusive
+ * range, and annotated forms — a strict superset, so no previously-recognised
+ * citation stops resolving.
+ *
+ * The grammar itself is uncapped; `cap` is this consumer's own ceiling on how
+ * many raw candidates the milestone path will validate, and it stays here rather
+ * than in the shared parser so the settle/pull-through consumers see every id a
+ * legacy turn actually cites.
  */
 export function parseContentReferences(
   content: string | null,
   cap: number = MILESTONE_REFERENCE_CAP,
 ): number[] {
-  if (!content) {
-    return [];
-  }
-
-  const ids: number[] = [];
-  const seen = new Set<number>();
-  const pattern = /\[T(\d+)\]/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(content)) !== null) {
-    const id = Number(match[1]);
-    if (!Number.isInteger(id) || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    ids.push(id);
-    if (ids.length >= cap) {
-      break;
-    }
-  }
-
-  return ids;
+  return parseInlineCitations(content, cap);
 }
 
 /**

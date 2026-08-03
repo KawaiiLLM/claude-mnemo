@@ -7620,6 +7620,7 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureTurnCitationsSchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -7734,6 +7735,13 @@ function ensureTurnSignificanceGradeColumn(db) {
      ADD COLUMN significance_grade INTEGER
      CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
   );
+}
+function ensureTurnCitationsSchema(db) {
+  if (!hasColumn(db, "turns", "cites_recorded")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -7878,6 +7886,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS turns");
   db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
@@ -7963,10 +7972,24 @@ var init_schema = __esm({
     files_modified TEXT,
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
+    cites_recorded INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
   );
+
+  CREATE TABLE IF NOT EXISTS turn_citations (
+    citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL CHECK (
+      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
+    ON turn_citations(cited_turn_id);
 
   CREATE TABLE IF NOT EXISTS session_run_state (
     session_db_id INTEGER PRIMARY KEY
@@ -31565,6 +31588,177 @@ var StdioServerTransport = class {
   }
 };
 
+// src/db/citations.ts
+var CITATION_RELATIONS = [
+  "builds-on",
+  "implements",
+  "supersedes",
+  "evidence-for"
+];
+function isCitationRelation(value) {
+  return typeof value === "string" && CITATION_RELATIONS.includes(value);
+}
+var INLINE_RANGE_EXPANSION_CAP = 8;
+var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+var LIST_ELEMENT_PATTERN = /T(\d+)/g;
+var SINGLE_PATTERN = /^T(\d+)$/;
+var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
+function parsePositiveId(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open = content.indexOf("[", index);
+    if (open === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
+  }
+}
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId(range[1]);
+    const end = parsePositiveId(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
+}
+var REPLACE_SAVEPOINT = "mnemo_replace_turn_citations";
+function replaceTurnCitations(db, citingTurnId, cites, nowEpoch) {
+  const turnExists = db.query(
+    "SELECT id FROM turns WHERE id = ?"
+  );
+  const written = [];
+  const droppedIds = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const cite of cites) {
+    const citedTurnId = cite?.id;
+    if (!Number.isSafeInteger(citedTurnId) || citedTurnId <= 0 || citedTurnId === citingTurnId || !isCitationRelation(cite.relation) || turnExists.get(citedTurnId) == null) {
+      droppedIds.push(citedTurnId);
+      continue;
+    }
+    const key = `${citedTurnId}:${cite.relation}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    written.push({
+      citingTurnId,
+      citedTurnId,
+      relation: cite.relation,
+      createdAtEpoch: nowEpoch
+    });
+  }
+  if (droppedIds.length > 0) {
+    console.warn(
+      `[claude-mnemo] remember T${citingTurnId}: dropped ${droppedIds.length} unresolvable cite(s): ${droppedIds.join(", ")}`
+    );
+  }
+  db.exec(`SAVEPOINT ${REPLACE_SAVEPOINT}`);
+  try {
+    db.query(
+      "DELETE FROM turn_citations WHERE citing_turn_id = ?"
+    ).run(citingTurnId);
+    const insert = db.query(
+      `INSERT INTO turn_citations
+         (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+       VALUES (?, ?, ?, ?)`
+    );
+    for (const edge of written) {
+      insert.run(
+        edge.citingTurnId,
+        edge.citedTurnId,
+        edge.relation,
+        edge.createdAtEpoch
+      );
+    }
+    db.query(
+      "UPDATE turns SET cites_recorded = 1 WHERE id = ?"
+    ).run(citingTurnId);
+  } catch (error48) {
+    db.exec(`ROLLBACK TO ${REPLACE_SAVEPOINT}`);
+    db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
+    throw error48;
+  }
+  db.exec(`RELEASE ${REPLACE_SAVEPOINT}`);
+  return { written, droppedIds };
+}
+
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
@@ -31591,6 +31785,23 @@ var rememberInputShape = {
     id: external_exports3.string(),
     grade: external_exports3.number().int().min(0).max(4)
   }).strict().optional(),
+  // Structured causal edges for a turn (spec §B). Replace-set: the array given
+  // here becomes the turn's ENTIRE citation set, so a re-sent turn converges
+  // instead of accumulating. Omitted = leave the existing edges alone; an
+  // explicit `[]` clears them and records "this turn genuinely cites nothing".
+  // `id` is the bare DB turn id (8501), not the `T8501` selector form.
+  //
+  // The shape check stops at "integer" on purpose (spec §B): a wrong TYPE is a
+  // caller bug worth rejecting the call over, but a merely INVALID id — zero,
+  // negative, a typo that names no turn, the turn citing itself — is dropped
+  // per edge with a log line so one bad id cannot discard a whole extraction's
+  // good edges. See replaceTurnCitations.
+  cites: external_exports3.array(
+    external_exports3.object({
+      id: external_exports3.number().int(),
+      relation: external_exports3.enum(CITATION_RELATIONS)
+    }).strict()
+  ).optional(),
   type: external_exports3.string().optional(),
   title: external_exports3.string().optional(),
   content: external_exports3.string().optional(),
@@ -31883,6 +32094,7 @@ var TURN_SELECT = `
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
+    cites_recorded AS citesRecorded,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -31907,7 +32119,8 @@ function mapTurnRow(row) {
     tags: parseJsonArray2(row.tags),
     filesRead: parseJsonArray2(row.filesRead),
     filesModified: parseJsonArray2(row.filesModified),
-    parentTurnId: row.parentTurnId ?? null
+    parentTurnId: row.parentTurnId ?? null,
+    citesRecorded: row.citesRecorded === 1
   };
 }
 function mergeTags(existingTags, nextTags) {
@@ -31990,6 +32203,7 @@ function updateTurnById(db, turnId, input) {
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
+            cites_recorded AS citesRecorded,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -33515,6 +33729,9 @@ function recallMemory(db, input) {
   );
 }
 
+// src/mcp/remember.ts
+init_database();
+
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
 function estimateDiaryTokens(text) {
@@ -34431,25 +34648,7 @@ function selectMilestoneTurns(view) {
   return { kept, overflowByDay };
 }
 function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
-  if (!content) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  const pattern = /\[T(\d+)\]/g;
-  let match;
-  while ((match = pattern.exec(content)) !== null) {
-    const id = Number(match[1]);
-    if (!Number.isInteger(id) || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    ids.push(id);
-    if (ids.length >= cap) {
-      break;
-    }
-  }
-  return ids;
+  return parseInlineCitations(content, cap);
 }
 function resolveMilestoneReferences(db, kept) {
   const keptPromptsByDay = /* @__PURE__ */ new Map();
@@ -35227,6 +35426,14 @@ function deriveTurnStatusForUpdate(current, input) {
   }
   return deriveTurnStatus(input);
 }
+var RegradeTargetMissingError = class extends Error {
+  constructor(targetId) {
+    super(`regrade target T${targetId} no longer exists`);
+    this.targetId = targetId;
+    this.name = "RegradeTargetMissingError";
+  }
+  targetId;
+};
 function handleTurnRemember(db, turnId, input) {
   const statusError = validateStatusForRoute(
     input.status,
@@ -35273,28 +35480,56 @@ function handleTurnRemember(db, turnId, input) {
     const cited = getTurnById(db, candidateId);
     return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
   };
-  const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatusForUpdate(current, input),
-    title: input.title ?? null,
-    content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
-    insight: input.insight ?? null,
-    type: input.type ?? null,
-    significanceGrade: input.grade,
-    tags: input.tags ?? [],
-    updatedAtEpoch: Math.floor(Date.now() / 1e3)
-  });
-  if (!turn) {
+  const nowEpoch = Math.floor(Date.now() / 1e3);
+  let written;
+  try {
+    written = runWriteTransaction(db, () => {
+      const turn = updateTurnById(db, turnId, {
+        status: deriveTurnStatusForUpdate(current, input),
+        title: input.title ?? null,
+        content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
+        insight: input.insight ?? null,
+        type: input.type ?? null,
+        significanceGrade: input.grade,
+        tags: input.tags ?? [],
+        updatedAtEpoch: nowEpoch
+      });
+      if (!turn) {
+        return null;
+      }
+      const citations = input.cites === void 0 ? null : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
+      if (regradeTarget && input.regrade) {
+        const regraded = updateTurnById(db, regradeTarget.id, {
+          significanceGrade: input.regrade.grade
+        });
+        if (!regraded) {
+          throw new RegradeTargetMissingError(regradeTarget.id);
+        }
+      }
+      return { turn, citations };
+    });
+  } catch (error48) {
+    if (error48 instanceof RegradeTargetMissingError) {
+      return parameterError(
+        `regrade target T${error48.targetId} no longer exists; nothing was written.`
+      );
+    }
+    throw error48;
+  }
+  if (!written) {
     return textResult(`Turn T${turnId} not found.`);
   }
+  let message = `Updated turn T${turnId} with status ${written.turn.status}.`;
   if (regradeTarget && input.regrade) {
-    updateTurnById(db, regradeTarget.id, {
-      significanceGrade: input.regrade.grade
-    });
-    return textResult(
-      `Updated turn T${turnId} with status ${turn.status}. Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`
-    );
+    message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
   }
-  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
+  if (written.citations) {
+    message += ` Recorded ${written.citations.written.length} citation(s).`;
+    if (written.citations.droppedIds.length > 0) {
+      message += ` Dropped unresolvable: ${written.citations.droppedIds.map((id) => `T${id}`).join(", ")}.`;
+    }
+  }
+  return textResult(message);
 }
 function handleObservationRemember(db, observationId, input) {
   const statusError = validateStatusForRoute(
@@ -35305,7 +35540,7 @@ function handleObservationRemember(db, observationId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
+  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
     return parameterError(
       "observation remember only accepts title, content, and status."
     );
@@ -35325,8 +35560,10 @@ function handleSessionRemember(db, sessionId, input) {
   if (statusError) {
     return parameterError(statusError);
   }
-  if (input.grade !== void 0 || input.regrade !== void 0) {
-    return parameterError("session remember does not accept grade or regrade.");
+  if (input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0) {
+    return parameterError(
+      "session remember does not accept grade, regrade, or cites."
+    );
   }
   const session = getSession(db, sessionId);
   if (!session) {

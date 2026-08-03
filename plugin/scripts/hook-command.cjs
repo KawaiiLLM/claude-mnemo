@@ -389,10 +389,24 @@ var SCHEMA_SQL = `
     files_modified TEXT,
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
+    cites_recorded INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
   );
+
+  CREATE TABLE IF NOT EXISTS turn_citations (
+    citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL CHECK (
+      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
+    ON turn_citations(cited_turn_id);
 
   CREATE TABLE IF NOT EXISTS session_run_state (
     session_db_id INTEGER PRIMARY KEY
@@ -667,6 +681,7 @@ function initializeSchema(db) {
   ensureTurnInvalidationColumns(db);
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureTurnCitationsSchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -781,6 +796,13 @@ function ensureTurnSignificanceGradeColumn(db) {
      ADD COLUMN significance_grade INTEGER
      CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
   );
+}
+function ensureTurnCitationsSchema(db) {
+  if (!hasColumn(db, "turns", "cites_recorded")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -934,6 +956,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS turns");
   db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
@@ -2298,7 +2321,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-ms5rwlms" : "dev";
+var BUILD_ID = true ? "0.8.3-msd7r6ci" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3300,6 +3323,7 @@ var TURN_SELECT = `
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
+    cites_recorded AS citesRecorded,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -3324,7 +3348,8 @@ function mapTurnRow(row) {
     tags: parseJsonArray(row.tags),
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
-    parentTurnId: row.parentTurnId ?? null
+    parentTurnId: row.parentTurnId ?? null,
+    citesRecorded: row.citesRecorded === 1
   };
 }
 function mergeTags(existingTags, nextTags) {
@@ -3400,6 +3425,7 @@ function updateTurnById(db, turnId, input) {
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
+            cites_recorded AS citesRecorded,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -3567,6 +3593,108 @@ function estimateDiaryTokens(text) {
 var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
 function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
   return createdAtEpoch >= cutoffEpoch;
+}
+
+// src/db/citations.ts
+var INLINE_RANGE_EXPANSION_CAP = 8;
+var RANGE_PATTERN = /^T(\d+)\s*-\s*T(\d+)$/;
+var LIST_PATTERN = /^T\d+(?:\s*,\s*T\d+)+$/;
+var LIST_ELEMENT_PATTERN = /T(\d+)/g;
+var SINGLE_PATTERN = /^T(\d+)$/;
+var ANNOTATED_PATTERN = /^T(\d+)\s+(?![,\-])\S/;
+function parsePositiveId(digits) {
+  const id = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+function* citationBracketBodies(content) {
+  let index = 0;
+  while (index < content.length) {
+    const open2 = content.indexOf("[", index);
+    if (open2 === -1) {
+      return;
+    }
+    const close = content.indexOf("]", open2 + 1);
+    if (close === -1) {
+      return;
+    }
+    const body = content.slice(open2 + 1, close);
+    index = close + 1;
+    if (body.includes("[")) {
+      continue;
+    }
+    yield body;
+  }
+}
+function expandBracketBody(body) {
+  if (/[\n\r]/.test(body)) {
+    return [];
+  }
+  const inner = body.trim();
+  const range = RANGE_PATTERN.exec(inner);
+  if (range) {
+    const start = parsePositiveId(range[1]);
+    const end = parsePositiveId(range[2]);
+    if (start === null || end === null || end < start) {
+      return [];
+    }
+    const span = end - start + 1;
+    if (span > INLINE_RANGE_EXPANSION_CAP) {
+      return [start, end];
+    }
+    const ids = [];
+    for (let id = start; id <= end; id += 1) {
+      ids.push(id);
+    }
+    return ids;
+  }
+  if (LIST_PATTERN.test(inner)) {
+    const ids = [];
+    LIST_ELEMENT_PATTERN.lastIndex = 0;
+    let element;
+    while ((element = LIST_ELEMENT_PATTERN.exec(inner)) !== null) {
+      const id = parsePositiveId(element[1]);
+      if (id === null) {
+        return [];
+      }
+      ids.push(id);
+    }
+    return ids;
+  }
+  const single = SINGLE_PATTERN.exec(inner);
+  if (single) {
+    const id = parsePositiveId(single[1]);
+    return id === null ? [] : [id];
+  }
+  const annotated = ANNOTATED_PATTERN.exec(inner);
+  if (annotated) {
+    const id = parsePositiveId(annotated[1]);
+    return id === null ? [] : [id];
+  }
+  return [];
+}
+function parseInlineCitations(content, maxRefs) {
+  if (!content) {
+    return [];
+  }
+  const cap = maxRefs ?? Number.POSITIVE_INFINITY;
+  if (cap <= 0) {
+    return [];
+  }
+  const ids = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const body of citationBracketBodies(content)) {
+    for (const id of expandBracketBody(body)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      ids.push(id);
+      if (ids.length >= cap) {
+        return ids;
+      }
+    }
+  }
+  return ids;
 }
 
 // src/mcp/timeline.ts
@@ -4468,25 +4596,7 @@ function selectMilestoneTurns(view) {
   return { kept, overflowByDay };
 }
 function parseContentReferences(content, cap = MILESTONE_REFERENCE_CAP) {
-  if (!content) {
-    return [];
-  }
-  const ids = [];
-  const seen = /* @__PURE__ */ new Set();
-  const pattern = /\[T(\d+)\]/g;
-  let match;
-  while ((match = pattern.exec(content)) !== null) {
-    const id = Number(match[1]);
-    if (!Number.isInteger(id) || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    ids.push(id);
-    if (ids.length >= cap) {
-      break;
-    }
-  }
-  return ids;
+  return parseInlineCitations(content, cap);
 }
 function resolveMilestoneReferences(db, kept) {
   const keptPromptsByDay = /* @__PURE__ */ new Map();

@@ -153,6 +153,8 @@ describe("release artifacts", () => {
       '"release"', // release tag → 🏁 milestone
       "REVERSED_ROLE_TAGS", // literal rolled-back role tag → ↩️ milestone
       "parseContentReferences", // [T<n>] causal-ref resolver
+      "parseInlineCitations", // shared literal inline-citation grammar
+      "turn_citations", // structured citation edge table
       "bracketBareTurnReferences", // bare-id → [T<n>] write-side backstop
       "buildCorrectionGraph", // corrector-promotion / victim-demotion selection
       "json_each", // tag: facet — json_each exact-match clause

@@ -1,8 +1,19 @@
 import type { Database } from "bun:sqlite";
 
+import {
+  replaceTurnCitations,
+  type CitationInput,
+  type ReplaceTurnCitationsResult,
+} from "../db/citations";
+import { runWriteTransaction } from "../db/database";
 import { updateObservation } from "../db/observations";
 import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
-import { getTurnById, updateTurnById, type TurnStatus } from "../db/turns";
+import {
+  getTurnById,
+  updateTurnById,
+  type TurnRecord,
+  type TurnStatus,
+} from "../db/turns";
 import {
   CURRENT_SESSION_STATE_TOKEN_BUDGET,
   measureSessionStateTokens,
@@ -38,6 +49,7 @@ export interface RememberToolInput {
     id: string;
     grade: number;
   };
+  cites?: CitationInput[];
   type?: string;
   title?: string;
   content?: string;
@@ -250,6 +262,22 @@ function deriveTurnStatusForUpdate(
   return deriveTurnStatus(input);
 }
 
+interface TurnRememberWrite {
+  turn: TurnRecord;
+  citations: ReplaceTurnCitationsResult | null;
+}
+
+/**
+ * Raised from inside the write transaction when the nested regrade's target has
+ * vanished since it was validated, so the transaction rolls back whole.
+ */
+class RegradeTargetMissingError extends Error {
+  constructor(readonly targetId: number) {
+    super(`regrade target T${targetId} no longer exists`);
+    this.name = "RegradeTargetMissingError";
+  }
+}
+
 function handleTurnRemember(
   db: Database,
   turnId: number,
@@ -322,34 +350,80 @@ function handleTurnRemember(
     );
   };
 
-  const turn = updateTurnById(db, turnId, {
-    status: deriveTurnStatusForUpdate(current, input),
-    title: input.title ?? null,
-    content:
-      input.content != null
-        ? bracketBareTurnReferences(input.content, isValidPredecessor)
-        : null,
-    insight: input.insight ?? null,
-    type: input.type ?? null,
-    significanceGrade: input.grade,
-    tags: input.tags ?? [],
-    updatedAtEpoch: Math.floor(Date.now() / 1000),
-  });
+  // One transaction for the turn fields, the replace-set edge write, and the
+  // nested regrade (spec §B). Split writes could publish a turn whose narrated
+  // causality and whose citation edges disagree — the settle pass reads the
+  // edges as fact, so a half-write is worse than a rejected write.
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  let written: TurnRememberWrite | null;
+  try {
+    written = runWriteTransaction(db, () => {
+      const turn = updateTurnById(db, turnId, {
+        status: deriveTurnStatusForUpdate(current, input),
+        title: input.title ?? null,
+        content:
+          input.content != null
+            ? bracketBareTurnReferences(input.content, isValidPredecessor)
+            : null,
+        insight: input.insight ?? null,
+        type: input.type ?? null,
+        significanceGrade: input.grade,
+        tags: input.tags ?? [],
+        updatedAtEpoch: nowEpoch,
+      });
 
-  if (!turn) {
+      if (!turn) {
+        return null;
+      }
+
+      // Field absent = leave the edge set alone; present (even empty) = replace.
+      const citations =
+        input.cites === undefined
+          ? null
+          : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
+
+      if (regradeTarget && input.regrade) {
+        // Re-checked INSIDE the transaction: the pre-validation above ran before
+        // BEGIN, so a concurrent delete of the target in between would otherwise
+        // commit the turn and its edges while silently skipping the regrade.
+        // Throwing aborts the whole write instead of publishing that half.
+        const regraded = updateTurnById(db, regradeTarget.id, {
+          significanceGrade: input.regrade.grade,
+        });
+        if (!regraded) {
+          throw new RegradeTargetMissingError(regradeTarget.id);
+        }
+      }
+
+      return { turn, citations };
+    });
+  } catch (error) {
+    if (error instanceof RegradeTargetMissingError) {
+      return parameterError(
+        `regrade target T${error.targetId} no longer exists; nothing was written.`,
+      );
+    }
+    throw error;
+  }
+
+  if (!written) {
     return textResult(`Turn T${turnId} not found.`);
   }
 
+  let message = `Updated turn T${turnId} with status ${written.turn.status}.`;
   if (regradeTarget && input.regrade) {
-    updateTurnById(db, regradeTarget.id, {
-      significanceGrade: input.regrade.grade,
-    });
-    return textResult(
-      `Updated turn T${turnId} with status ${turn.status}. Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`,
-    );
+    message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
+  }
+  if (written.citations) {
+    message += ` Recorded ${written.citations.written.length} citation(s).`;
+    if (written.citations.droppedIds.length > 0) {
+      message += ` Dropped unresolvable: ${written.citations.droppedIds
+        .map((id) => `T${id}`)
+        .join(", ")}.`;
+    }
   }
 
-  return textResult(`Updated turn T${turnId} with status ${turn.status}.`);
+  return textResult(message);
 }
 
 function handleObservationRemember(
@@ -371,6 +445,7 @@ function handleObservationRemember(
     input.type !== undefined ||
     input.grade !== undefined ||
     input.regrade !== undefined ||
+    input.cites !== undefined ||
     input.insight !== undefined ||
     input.tags !== undefined ||
     input.next_steps !== undefined ||
@@ -407,8 +482,14 @@ function handleSessionRemember(
   if (statusError) {
     return parameterError(statusError);
   }
-  if (input.grade !== undefined || input.regrade !== undefined) {
-    return parameterError("session remember does not accept grade or regrade.");
+  if (
+    input.grade !== undefined ||
+    input.regrade !== undefined ||
+    input.cites !== undefined
+  ) {
+    return parameterError(
+      "session remember does not accept grade, regrade, or cites.",
+    );
   }
 
   const session = getSession(db, sessionId);

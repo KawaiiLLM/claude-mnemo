@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
+import { getTurnCitations } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import { getObservation, getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { searchMemory } from "../../src/db/search";
 import { getSession, upsertSession } from "../../src/db/sessions";
-import { getTurn } from "../../src/db/turns";
+import { getTurn, getTurnById } from "../../src/db/turns";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { rememberInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
@@ -748,5 +749,375 @@ describe("bracketBareTurnReferences", () => {
 
   test("no-ops on empty content", () => {
     expect(bracketBareTurnReferences("", () => true)).toBe("");
+  });
+});
+
+describe("remember cites (structured citation edges)", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnIds: number[];
+
+  const insertTurn = (promptNumber: number, status = "extracted"): number =>
+    db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, title, significance_grade, created_at_epoch
+         ) VALUES (?, ?, ?, 'prompt', 'seed title', 2, 100) RETURNING id`,
+      )
+      .get(sessionId, promptNumber, status)!.id;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "remember-cites",
+      project: "claude-mnemo",
+      title: "cites",
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+    turnIds = [1, 2, 3, 4].map((promptNumber) => insertTurn(promptNumber));
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("writes the edge set and records the flag", () => {
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Locked the slicing axis",
+      content: "Reverses the volume-anchoring decision.",
+      grade: 3,
+      cites: [
+        { id: turnIds[0]!, relation: "supersedes" },
+        { id: turnIds[1]!, relation: "evidence-for" },
+      ],
+    });
+
+    expect(result.content[0]?.text).toContain("Recorded 2 citation(s).");
+    expect(
+      getTurnCitations(db, turnIds[2]!).map((edge) => [
+        edge.citedTurnId,
+        edge.relation,
+      ]),
+    ).toEqual([
+      [turnIds[0]!, "supersedes"],
+      [turnIds[1]!, "evidence-for"],
+    ]);
+    expect(getTurnById(db, turnIds[2]!)?.citesRecorded).toBe(true);
+  });
+
+  test("replace-set: a resend replaces the previous edge set whole", () => {
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "First pass",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+    });
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Second pass",
+      grade: 3,
+      cites: [{ id: turnIds[1]!, relation: "implements" }],
+    });
+
+    expect(
+      getTurnCitations(db, turnIds[2]!).map((edge) => edge.citedTurnId),
+    ).toEqual([turnIds[1]!]);
+  });
+
+  test("an omitted cites field leaves the edge set alone", () => {
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "First pass",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+    });
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Retitled only",
+      grade: 3,
+    });
+
+    expect(result.content[0]?.text).not.toContain("citation(s)");
+    expect(
+      getTurnCitations(db, turnIds[2]!).map((edge) => edge.citedTurnId),
+    ).toEqual([turnIds[0]!]);
+    expect(getTurnById(db, turnIds[2]!)?.citesRecorded).toBe(true);
+  });
+
+  test("an explicit empty array clears the edges and still records the flag", () => {
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "First pass",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+    });
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Cites nothing after all",
+      grade: 3,
+      cites: [],
+    });
+
+    expect(result.content[0]?.text).toContain("Recorded 0 citation(s).");
+    expect(getTurnCitations(db, turnIds[2]!)).toEqual([]);
+    expect(getTurnById(db, turnIds[2]!)?.citesRecorded).toBe(true);
+  });
+
+  test("drops unresolvable ids with a log line and writes the rest", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = rememberTool(db, {
+        id: `T${turnIds[2]!}`,
+        title: "Cites a typo",
+        grade: 3,
+        cites: [
+          { id: turnIds[0]!, relation: "builds-on" },
+          { id: 987_654, relation: "supersedes" },
+        ],
+      });
+
+      expect(result.content[0]?.text).toContain("Recorded 1 citation(s).");
+      expect(result.content[0]?.text).toContain("Dropped unresolvable: T987654.");
+      expect(warn.mock.calls.at(0)?.[0]).toContain("987654");
+      expect(
+        getTurnCitations(db, turnIds[2]!).map((edge) => edge.citedTurnId),
+      ).toEqual([turnIds[0]!]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("de-duplicates repeated edges", () => {
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Says it twice",
+      grade: 3,
+      cites: [
+        { id: turnIds[0]!, relation: "builds-on" },
+        { id: turnIds[0]!, relation: "builds-on" },
+      ],
+    });
+
+    expect(result.content[0]?.text).toContain("Recorded 1 citation(s).");
+    expect(getTurnCitations(db, turnIds[2]!)).toHaveLength(1);
+  });
+
+  test("drops invalid ids per edge and writes the valid remainder", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // One call carrying every class of semantically invalid id the schema
+      // deliberately lets through: non-positive, dangling, self.
+      const result = rememberTool(db, {
+        id: `T${turnIds[2]!}`,
+        title: "One good cite among the bad",
+        grade: 3,
+        cites: [
+          { id: 0, relation: "builds-on" },
+          { id: 987_654, relation: "evidence-for" },
+          { id: turnIds[2]!, relation: "supersedes" },
+          { id: turnIds[0]!, relation: "implements" },
+        ],
+      });
+
+      expect(result.content[0]?.text).toContain("Recorded 1 citation(s).");
+      expect(result.content[0]?.text).toContain(
+        `Dropped unresolvable: T0, T987654, T${turnIds[2]!}.`,
+      );
+      expect(
+        getTurnCitations(db, turnIds[2]!).map((edge) => [
+          edge.citedTurnId,
+          edge.relation,
+        ]),
+      ).toEqual([[turnIds[0]!, "implements"]]);
+      expect(getTurnById(db, turnIds[2]!)?.citesRecorded).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("a failed edge insert rolls back the turn update and restores the prior edge set", () => {
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "First pass",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+    });
+    const before = getTurnById(db, turnIds[2]!)!;
+    const victimBefore = getTurnById(db, turnIds[0]!)!;
+
+    // Fail the edge insert mid-write; the turn update that already ran, the
+    // regrade that would follow, and the DELETE half of the replace-set must all
+    // disappear — a cleared edge set is as wrong as a half-written one.
+    db.exec(`
+      CREATE TRIGGER block_citation BEFORE INSERT ON turn_citations
+      WHEN NEW.cited_turn_id = ${turnIds[1]!}
+      BEGIN SELECT RAISE(ABORT, 'citation write blocked'); END;
+    `);
+
+    expect(() =>
+      rememberTool(db, {
+        id: `T${turnIds[2]!}`,
+        title: "Never lands",
+        content: "Never lands either.",
+        grade: 4,
+        cites: [{ id: turnIds[1]!, relation: "builds-on" }],
+        regrade: { id: `T${turnIds[0]!}`, grade: 0 },
+      }),
+    ).toThrow();
+
+    expect(getTurnById(db, turnIds[2]!)).toEqual(before);
+    expect(getTurnById(db, turnIds[0]!)).toEqual(victimBefore);
+    expect(
+      getTurnCitations(db, turnIds[2]!).map((edge) => edge.citedTurnId),
+    ).toEqual([turnIds[0]!]);
+  });
+
+  test("rolls back after the nested regrade has already executed", () => {
+    rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "First pass",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+    });
+    const before = getTurnById(db, turnIds[2]!)!;
+    const victimBefore = getTurnById(db, turnIds[0]!)!;
+
+    // AFTER UPDATE: the regrade's row change is applied and visible to the
+    // trigger before it aborts, so the failure lands strictly after the nested
+    // regrade ran — the other half of the "one transaction" claim.
+    db.exec(`
+      CREATE TRIGGER block_after_regrade AFTER UPDATE ON turns
+      WHEN NEW.id = ${turnIds[0]!} AND NEW.significance_grade = 0
+      BEGIN SELECT RAISE(ABORT, 'regrade blocked'); END;
+    `);
+
+    expect(() =>
+      rememberTool(db, {
+        id: `T${turnIds[2]!}`,
+        title: "Never lands",
+        grade: 4,
+        cites: [{ id: turnIds[1]!, relation: "implements" }],
+        regrade: { id: `T${turnIds[0]!}`, grade: 0 },
+      }),
+    ).toThrow();
+
+    expect(getTurnById(db, turnIds[2]!)).toEqual(before);
+    expect(getTurnById(db, turnIds[0]!)).toEqual(victimBefore);
+    expect(
+      getTurnCitations(db, turnIds[2]!).map((edge) => edge.citedTurnId),
+    ).toEqual([turnIds[0]!]);
+  });
+
+  test("aborts the whole write when the regrade target vanishes after validation", () => {
+    // The regrade target is validated before BEGIN; this trigger deletes it as
+    // soon as the transaction touches the citing turn, standing in for another
+    // connection winning that race. Nothing may commit.
+    db.exec(`
+      CREATE TRIGGER vanish_regrade_target AFTER UPDATE ON turns
+      WHEN NEW.id = ${turnIds[2]!} AND NEW.title = 'Races a delete'
+      BEGIN DELETE FROM turns WHERE id = ${turnIds[0]!}; END;
+    `);
+    const before = getTurnById(db, turnIds[2]!)!;
+
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Races a delete",
+      grade: 3,
+      cites: [{ id: turnIds[1]!, relation: "builds-on" }],
+      regrade: { id: `T${turnIds[0]!}`, grade: 1 },
+    });
+
+    expect(result.content[0]?.text).toContain(
+      `regrade target T${turnIds[0]!} no longer exists`,
+    );
+    expect(getTurnById(db, turnIds[2]!)).toEqual(before);
+    // The delete itself was part of the aborted transaction.
+    expect(getTurnById(db, turnIds[0]!)).not.toBeNull();
+    expect(getTurnCitations(db, turnIds[2]!)).toEqual([]);
+  });
+
+  test("records edges alongside a nested regrade in the same call", () => {
+    const result = rememberTool(db, {
+      id: `T${turnIds[2]!}`,
+      title: "Reverses the earlier call",
+      grade: 3,
+      cites: [{ id: turnIds[0]!, relation: "supersedes" }],
+      regrade: { id: `T${turnIds[0]!}`, grade: 1 },
+    });
+
+    expect(result.content[0]?.text).toContain(
+      `Regraded turn T${turnIds[0]!} to 1.`,
+    );
+    expect(result.content[0]?.text).toContain("Recorded 1 citation(s).");
+    expect(getTurnById(db, turnIds[0]!)?.significanceGrade).toBe(1);
+    expect(getTurnCitations(db, turnIds[2]!)).toHaveLength(1);
+  });
+
+  test("public schema enforces the strict cites element shape", () => {
+    expect(
+      rememberInputSchema.parse({
+        id: "T1",
+        cites: [{ id: 8501, relation: "supersedes" }],
+      }),
+    ).toEqual({ id: "T1", cites: [{ id: 8501, relation: "supersedes" }] });
+
+    // A wrong TYPE rejects the call …
+    for (const cites of [
+      [{ id: 8501, relation: "supersedes", note: "why" }],
+      [{ id: "T8501", relation: "supersedes" }],
+      [{ id: 8501.5, relation: "supersedes" }],
+      [{ id: 8501, relation: "mentions" }],
+      [{ id: 8501 }],
+      [{ relation: "supersedes" }],
+      [8501],
+    ]) {
+      expect(() => rememberInputSchema.parse({ id: "T1", cites })).toThrow();
+    }
+
+    // … but a merely INVALID integer id passes the shape gate and is dropped
+    // per edge downstream, so one bad id cannot discard the good ones.
+    expect(() =>
+      rememberInputSchema.parse({
+        id: "T1",
+        cites: [
+          { id: 0, relation: "supersedes" },
+          { id: -3, relation: "builds-on" },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  test("rejects cites on the observation and session routes", () => {
+    const observationId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO observations (turn_id, tool_name, status, created_at_epoch)
+         VALUES (?, 'Read', 'pending', 100) RETURNING id`,
+      )
+      .get(turnIds[0]!)!.id;
+
+    expect(
+      rememberTool(db, {
+        id: `O${observationId}`,
+        cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      }).content[0]?.text,
+    ).toContain("Parameter error");
+    expect(
+      rememberTool(db, {
+        id: `S${sessionId}`,
+        title: "t",
+        content: "c",
+        decision: "d",
+        done: "d",
+        current: "c",
+        next_steps: "n",
+        reference: "r",
+        cites: [{ id: turnIds[0]!, relation: "builds-on" }],
+      }).content[0]?.text,
+    ).toContain("does not accept grade, regrade, or cites");
   });
 });

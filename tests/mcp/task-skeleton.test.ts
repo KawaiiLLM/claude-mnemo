@@ -36,6 +36,7 @@ function turn(overrides: Partial<TurnRecord>): TurnRecord {
     filesModified: [],
     toolCallCount: 0,
     parentTurnId: null,
+    citesRecorded: false,
     createdAtEpoch: 200,
     updatedAtEpoch: null,
     ...overrides,

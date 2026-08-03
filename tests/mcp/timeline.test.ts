@@ -26,8 +26,11 @@ import {
   milestoneBaseScore,
   milestoneMarker,
   OUTCOME_TAGS,
+  parseContentReferences,
   parseTimelineId,
   renderTimeline,
+  MILESTONE_REFERENCE_CAP,
+  MILESTONE_REFERENCE_PARSE_CAP,
   resolveWindow,
   segmentPhases,
   selectMilestoneTurns,
@@ -59,6 +62,7 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     filesModified: [],
     toolCallCount: 0,
     parentTurnId: null,
+    citesRecorded: false,
     createdAtEpoch: 1000,
     updatedAtEpoch: null,
     ...overrides,
@@ -3575,5 +3579,26 @@ describe("milestone causal references (Component 3)", () => {
 
     const out = renderTimeline(view);
     expect(out).toContain("      ↳ T1 the real driver");
+  });
+});
+
+describe("parseContentReferences", () => {
+  const twelveRefs = Array.from({ length: 12 }, (_, i) => `[T${i + 1}]`).join(" ");
+
+  it("keeps the milestone caps even though the shared grammar is uncapped", () => {
+    // The cap lives with this consumer, not in db/citations' grammar: the
+    // settle/pull-through readers must see every id a legacy turn cites.
+    expect(
+      parseContentReferences(twelveRefs, MILESTONE_REFERENCE_PARSE_CAP),
+    ).toHaveLength(MILESTONE_REFERENCE_PARSE_CAP);
+    expect(parseContentReferences(twelveRefs)).toHaveLength(
+      MILESTONE_REFERENCE_CAP,
+    );
+  });
+
+  it("resolves the wider shared forms too", () => {
+    expect(
+      parseContentReferences("[T8075, T9824]", MILESTONE_REFERENCE_PARSE_CAP),
+    ).toEqual([8075, 9824]);
   });
 });

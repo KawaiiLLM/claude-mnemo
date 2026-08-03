@@ -39,6 +39,12 @@ export interface TurnRecord {
   filesModified: string[];
   toolCallCount: number | null;
   parentTurnId: number | null;
+  /**
+   * True once an extraction supplied a structured `cites` array for this turn
+   * (see db/citations.ts). It is the from-absent vs recorded-empty predicate:
+   * false ⇒ fall back to parsing inline `[T<n>]` out of `content`.
+   */
+  citesRecorded: boolean;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -69,6 +75,7 @@ interface TurnRow {
   filesModified: string | null;
   toolCallCount: number | null;
   parentTurnId: number | null;
+  citesRecorded: number;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -100,6 +107,7 @@ const TURN_SELECT = `
     files_modified AS filesModified,
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
+    cites_recorded AS citesRecorded,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -130,6 +138,7 @@ function mapTurnRow(row: TurnRow | null): TurnRecord | null {
     filesRead: parseJsonArray(row.filesRead),
     filesModified: parseJsonArray(row.filesModified),
     parentTurnId: row.parentTurnId ?? null,
+    citesRecorded: row.citesRecorded === 1,
   };
 }
 
@@ -385,6 +394,7 @@ export function updateTurnById(
             files_modified AS filesModified,
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
+            cites_recorded AS citesRecorded,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `,

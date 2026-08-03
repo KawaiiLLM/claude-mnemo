@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { getEffectiveCitations } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
 import {
   backfillAllIntraChains,
@@ -1129,6 +1133,112 @@ describe("initializeSchema", () => {
       )
       .get()!;
     expect(ftsCount.n).toBe(1);
+  });
+
+  test("creates the citation edge table with its cited-id index", () => {
+    initializeSchema(db);
+
+    const tableNames = db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'table'",
+      )
+      .all()
+      .map((row) => row.name);
+    expect(tableNames).toContain("turn_citations");
+
+    const indexNames = db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'turn_citations'",
+      )
+      .all()
+      .map((row) => row.name);
+    expect(indexNames).toContain("idx_turn_citations_cited");
+
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(turns)")
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("cites_recorded");
+  });
+
+  test("reopening a pre-citations database adds the edge table and flag without touching rows", () => {
+    // A REAL pre-ticket database, not a toy schema: the current schema minus
+    // exactly the two things this ticket adds, written to a file, closed, then
+    // reopened through the production open path (initializeDatabase).
+    const directory = mkdtempSync(join(tmpdir(), "mnemo-cites-migration-"));
+    const path = join(directory, "memory.db");
+
+    try {
+      const before = createDatabase(path);
+      initializeSchema(before);
+      before.exec("DROP TABLE turn_citations");
+      before.exec("ALTER TABLE turns DROP COLUMN cites_recorded");
+      const sessionId = upsertSession(before, {
+        contentSessionId: "cites-migration",
+        project: "claude-mnemo",
+        title: "legacy session",
+        insight: null,
+        createdAtEpoch: 1,
+        updatedAtEpoch: 1,
+        completedAtEpoch: null,
+      }).id;
+      const citedId = before
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+           VALUES (?, 1, 'extracted', 'the cited decision', 2) RETURNING id`,
+        )
+        .get(sessionId)!.id;
+      const citerId = before
+        .query<{ id: number }, [number, string]>(
+          `INSERT INTO turns (session_id, prompt_number, status, title, content, created_at_epoch)
+           VALUES (?, 2, 'extracted', 'legacy turn', ?, 3) RETURNING id`,
+        )
+        .get(sessionId, `reverses [T${citedId}]`)!.id;
+      before.close();
+
+      const migrated = createDatabase(path);
+      try {
+        initializeDatabase(migrated);
+        // Idempotent: a second open must not re-migrate or throw.
+        initializeDatabase(migrated);
+
+        // Old rows land on 0, never NULL — the legacy inline fallback stays on —
+        // and no extraction field is rewritten.
+        const row = getTurnById(migrated, citerId);
+        expect(row?.citesRecorded).toBe(false);
+        expect(row?.title).toBe("legacy turn");
+        expect(row?.content).toBe(`reverses [T${citedId}]`);
+
+        // The predicate works end to end on the migrated database …
+        expect(getEffectiveCitations(migrated, row!)).toEqual({
+          source: "inline",
+          citedTurnIds: [citedId],
+          edges: [],
+        });
+
+        // … and the edge table is usable, with its foreign keys live.
+        expect(() =>
+          migrated
+            .query(
+              `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+               VALUES (?, ?, 'supersedes', 4)`,
+            )
+            .run(citerId, citedId),
+        ).not.toThrow();
+        expect(() =>
+          migrated
+            .query(
+              `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+               VALUES (?, 999999, 'supersedes', 4)`,
+            )
+            .run(citerId),
+        ).toThrow();
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("lineage columns exist with defaults", () => {

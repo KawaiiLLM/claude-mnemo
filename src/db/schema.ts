@@ -68,10 +68,24 @@ const SCHEMA_SQL = `
     files_modified TEXT,
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
+    cites_recorded INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
   );
+
+  CREATE TABLE IF NOT EXISTS turn_citations (
+    citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    relation TEXT NOT NULL CHECK (
+      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (citing_turn_id, cited_turn_id, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
+    ON turn_citations(cited_turn_id);
 
   CREATE TABLE IF NOT EXISTS session_run_state (
     session_db_id INTEGER PRIMARY KEY
@@ -347,6 +361,7 @@ export function initializeSchema(db: Database): void {
   ensureTurnInvalidationColumns(db);
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
+  ensureTurnCitationsSchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -493,6 +508,21 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
      ADD COLUMN significance_grade INTEGER
      CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`,
   );
+}
+
+// Structured citation edges (spec §B). The table itself comes from SCHEMA_SQL
+// (`CREATE TABLE IF NOT EXISTS`), so an old database gets it on open; only the
+// `turns.cites_recorded` flag needs an ALTER. The flag — not a created-at epoch
+// — is the "from-absent vs recorded-empty" predicate: a turn created before this
+// deployment but extracted after it must still count as recorded, and a turn
+// that genuinely cites nothing must be distinguishable from one that predates
+// the edge table. Old rows land on 0 (never NULL) → legacy inline fallback.
+function ensureTurnCitationsSchema(db: Database): void {
+  if (!hasColumn(db, "turns", "cites_recorded")) {
+    db.exec(
+      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 }
 
 function ensureForkLineageColumns(db: Database): void {
@@ -693,6 +723,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS turns");
   db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
