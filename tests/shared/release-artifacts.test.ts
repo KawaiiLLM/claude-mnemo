@@ -149,6 +149,11 @@ describe("release artifacts", () => {
       "last_successful_date", // durable dream completion marker
       "recordDreamFailure", // retryable dream queue path
       "exceedsG3EvidenceGate", // actual-vs-target calibration deviation gate
+      "settlement_jobs", // two-phase grading: the durable settle work unit
+      "frozen_member_ids", // cohort frozen at enqueue — retries grade one set
+      "claim_generation", // lease ownership fence — a stale worker commits nothing
+      "parseSettlementBatch", // strict whole-batch settle validation
+      "This message is a SETTLEMENT", // the settle message class contract
       "Origin duty, arc-scoped", // arc-scoped provisional Grade-4 rubric rule
       // The [T<n>] inline parser moved here alone: the arc renderer takes its ↳
       // rows from structured pull-through now, so task-skeleton (worker-side) is

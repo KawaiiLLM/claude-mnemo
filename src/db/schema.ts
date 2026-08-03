@@ -90,6 +90,38 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
     ON turn_citations(cited_turn_id);
 
+  CREATE TABLE IF NOT EXISTS settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    boundary INTEGER NOT NULL,
+    frozen_member_ids TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence. Bumped on EVERY successful claim, including a lease
+    -- reclaim, so a worker whose lease expired can be told apart from the one
+    -- that holds the row now: completion and failure both CAS on the generation
+    -- they were claimed under, and a stale owner's write matches nothing.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    change_summary TEXT,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, boundary)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_settlement_jobs_session_status
+    ON settlement_jobs(session_id, status, boundary);
+
+  CREATE TABLE IF NOT EXISTS settlement_cursors (
+    session_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    last_settled_boundary INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS session_run_state (
     session_db_id INTEGER PRIMARY KEY
       REFERENCES sessions(id) ON DELETE CASCADE,
@@ -372,7 +404,20 @@ export function initializeSchema(db: Database): void {
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+  ensureSettlementClaimGenerationColumn(db);
   dropLegacyMemoriesTable(db);
+}
+
+// `settlement_jobs` shipped for exactly one build without an ownership fence.
+// A worker that already created the table keeps it across restarts (CREATE TABLE
+// IF NOT EXISTS is a no-op), so the column has to arrive by migration or every
+// claim on that database throws.
+function ensureSettlementClaimGenerationColumn(db: Database): void {
+  if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
+    db.exec(
+      "ALTER TABLE settlement_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 }
 
 function ensureDiaryDayStateTerminalColumn(db: Database): void {
@@ -766,6 +811,8 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
+  db.exec("DROP TABLE IF EXISTS settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS settlement_cursors");
   db.exec("DROP TABLE IF EXISTS turns");
   db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");

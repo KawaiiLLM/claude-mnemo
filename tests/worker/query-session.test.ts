@@ -745,10 +745,15 @@ describe("worker query session", () => {
     expect(prompt).toContain("a `remember()` without an id is rejected");
     expect(prompt).not.toContain('remember({status:"skipped"})');
 
+    // `timeline` joined the agent's surface for settlement (spec §A): a settle
+    // re-grades a trailing window against the arc it belongs to. Read-only.
     expect(capturedAllowedTools).toEqual([
       "mcp__mnemo__remember",
       "mcp__mnemo__recall",
+      "mcp__mnemo__timeline",
     ]);
+    expect(prompt).toContain("## Settlement messages");
+    expect(prompt).toContain("Do NOT call `remember()` in a settlement");
 
     // Tool scope rules — the memory-creation boundary must be present, and the
     // dead obs-extraction guidance must be gone (D6).

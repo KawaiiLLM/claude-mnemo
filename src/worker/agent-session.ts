@@ -13,6 +13,7 @@ import {
   MNEMO_TOOL_DESCRIPTIONS,
   workerRecallInputShape,
   rememberInputShape,
+  timelineInputShape,
 } from "../mcp/definitions";
 import {
   createDatabaseBackedHandlers,
@@ -77,9 +78,10 @@ export function createMnemoSdkServer(
     defaultProject,
     audience: "worker",
   });
-  const handlers: Pick<MnemoToolHandlers, "recall" | "remember"> = {
+  const handlers: Pick<MnemoToolHandlers, "recall" | "remember" | "timeline"> = {
     recall: partialHandlers.recall ?? missingHandler("recall"),
     remember: partialHandlers.remember ?? missingHandler("remember"),
+    timeline: partialHandlers.timeline ?? missingHandler("timeline"),
   };
 
   return deps.createSdkMcpServerImpl({
@@ -104,6 +106,14 @@ export function createMnemoSdkServer(
         MNEMO_TOOL_DESCRIPTIONS.recall,
         workerRecallInputShape,
         async (args) => handlers.recall(args as Record<string, unknown>),
+      ),
+      // Read-only, and the settle message class depends on it: a frozen window
+      // is re-graded against the arc it belongs to (spec §A).
+      deps.toolImpl(
+        "timeline",
+        MNEMO_TOOL_DESCRIPTIONS.timeline,
+        timelineInputShape,
+        async (args) => handlers.timeline(args as Record<string, unknown>),
       ),
     ],
   });

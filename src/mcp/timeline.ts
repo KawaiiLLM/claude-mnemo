@@ -1717,6 +1717,14 @@ export function buildTimelineView(
   db: Database,
   input: TimelineInput,
   preloadedTurns?: TurnRecord[],
+  /**
+   * Citation snapshot to render against, alongside the preloaded-turns seam.
+   * Settlement derives its mechanical signals from one read of this map and then
+   * renders the arc; passing that same map here is what keeps the two halves of
+   * one settle describing the same graph when a citation write lands between
+   * them.
+   */
+  preloadedCitations?: ReadonlyMap<number, EffectiveCitations>,
 ): TimelineView {
   const parsed = parseTimelineId(input.id);
   const viewKind = input.view ?? "turns";
@@ -1770,8 +1778,9 @@ export function buildTimelineView(
     compactBoundaries,
     sessionTurns: allTurns,
     // One read for the whole selection: in-degree, victim demotion and
-    // pull-through all consume this map (spec §B).
-    citations: getSessionEffectiveCitations(db, session.id),
+    // pull-through all consume this map (spec §B). A caller that already read it
+    // (settlement) hands its own snapshot in rather than paying for a second.
+    citations: preloadedCitations ?? getSessionEffectiveCitations(db, session.id),
   });
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");

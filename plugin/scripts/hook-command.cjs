@@ -411,6 +411,38 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turn_citations_cited
     ON turn_citations(cited_turn_id);
 
+  CREATE TABLE IF NOT EXISTS settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    boundary INTEGER NOT NULL,
+    frozen_member_ids TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence. Bumped on EVERY successful claim, including a lease
+    -- reclaim, so a worker whose lease expired can be told apart from the one
+    -- that holds the row now: completion and failure both CAS on the generation
+    -- they were claimed under, and a stale owner's write matches nothing.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    change_summary TEXT,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, boundary)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_settlement_jobs_session_status
+    ON settlement_jobs(session_id, status, boundary);
+
+  CREATE TABLE IF NOT EXISTS settlement_cursors (
+    session_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    last_settled_boundary INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS session_run_state (
     session_db_id INTEGER PRIMARY KEY
       REFERENCES sessions(id) ON DELETE CASCADE,
@@ -692,7 +724,15 @@ function initializeSchema(db) {
   ensureSearchIndexSchema(db);
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
+  ensureSettlementClaimGenerationColumn(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureSettlementClaimGenerationColumn(db) {
+  if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
+    db.exec(
+      "ALTER TABLE settlement_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureDiaryDayStateTerminalColumn(db) {
   if (hasColumn(db, "diary_day_state", "terminal")) {
@@ -984,6 +1024,8 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
+  db.exec("DROP TABLE IF EXISTS settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS settlement_cursors");
   db.exec("DROP TABLE IF EXISTS turns");
   db.exec("DROP TABLE IF EXISTS session_run_state");
   db.exec("DROP TABLE IF EXISTS sessions");
@@ -2379,7 +2421,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-msdk7ivs" : "dev";
+var BUILD_ID = true ? "0.8.3-msdn032o" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5055,7 +5097,7 @@ function deriveTimelineBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function buildTimelineView(db, input, preloadedTurns) {
+function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const parsed = parseTimelineId(input.id);
   const viewKind = input.view ?? "turns";
   const session = getSession(db, parsed.sessionId);
@@ -5096,8 +5138,9 @@ function buildTimelineView(db, input, preloadedTurns) {
     compactBoundaries,
     sessionTurns: allTurns,
     // One read for the whole selection: in-degree, victim demotion and
-    // pull-through all consume this map (spec §B).
-    citations: getSessionEffectiveCitations(db, session.id)
+    // pull-through all consume this map (spec §B). A caller that already read it
+    // (settlement) hands its own snapshot in rather than paying for a second.
+    citations: preloadedCitations ?? getSessionEffectiveCitations(db, session.id)
   });
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
@@ -21162,6 +21205,101 @@ function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
   return processedCount;
 }
 
+// src/db/settlement.ts
+var SETTLEMENT_WINDOW_TURNS = 100;
+var SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
+var SETTLEMENT_JOB_COLUMNS = `
+    id,
+    session_id AS sessionId,
+    boundary,
+    frozen_member_ids AS frozenMemberIds,
+    status,
+    attempts,
+    claimed_at_epoch AS claimedAtEpoch,
+    claim_generation AS claimGeneration,
+    change_summary AS changeSummary,
+    last_error AS lastError,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch`;
+var SETTLEMENT_JOB_SELECT = `
+  SELECT${SETTLEMENT_JOB_COLUMNS}
+  FROM settlement_jobs
+`;
+function mapJobRow(row) {
+  if (!row) {
+    return null;
+  }
+  let frozenMemberIds = [];
+  try {
+    const parsed = JSON.parse(row.frozenMemberIds);
+    if (Array.isArray(parsed)) {
+      frozenMemberIds = parsed.filter(
+        (value) => Number.isSafeInteger(value) && value > 0
+      );
+    }
+  } catch {
+    frozenMemberIds = [];
+  }
+  return { ...row, frozenMemberIds };
+}
+function countSettlementTerminalTurns(db, sessionId) {
+  return db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ? AND status IN ('extracted', 'skipped')`
+  ).get(sessionId)?.count ?? 0;
+}
+function listSettlementCohortIds(db, sessionId, boundary, windowTurns = SETTLEMENT_WINDOW_TURNS) {
+  const offset = Math.max(0, boundary - windowTurns);
+  const limit = Math.min(boundary, windowTurns);
+  if (limit <= 0) {
+    return [];
+  }
+  return db.query(
+    `SELECT id FROM turns
+       WHERE session_id = ? AND status IN ('extracted', 'skipped')
+       ORDER BY prompt_number ASC, id ASC
+       LIMIT ? OFFSET ?`
+  ).all(sessionId, limit, offset).map((row) => row.id);
+}
+function getSettlementCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_settled_boundary AS boundary FROM settlement_cursors
+         WHERE session_id = ?`
+  ).get(sessionId)?.boundary ?? 0;
+}
+function insertJob(db, sessionId, boundary, memberIds, nowEpoch) {
+  const inserted = db.query(
+    `INSERT OR IGNORE INTO settlement_jobs (
+         session_id, boundary, frozen_member_ids, status, attempts,
+         created_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'pending', 0, ?, ?)
+       RETURNING${SETTLEMENT_JOB_COLUMNS}`
+  ).get(sessionId, boundary, JSON.stringify(memberIds), nowEpoch, nowEpoch);
+  return mapJobRow(inserted ?? null);
+}
+function enqueueSessionEndSettlementJob(db, sessionId, nowEpoch, hadActivity, options = {}) {
+  if (!hadActivity) {
+    return null;
+  }
+  const windowTurns = options.windowTurns ?? SETTLEMENT_WINDOW_TURNS;
+  return runWriteTransaction(db, () => {
+    const terminalCount = countSettlementTerminalTurns(db, sessionId);
+    if (terminalCount <= 0) {
+      return null;
+    }
+    if (terminalCount <= getSettlementCursor(db, sessionId)) {
+      return null;
+    }
+    const memberIds = listSettlementCohortIds(
+      db,
+      sessionId,
+      terminalCount,
+      windowTurns
+    );
+    return insertJob(db, sessionId, terminalCount, memberIds, nowEpoch);
+  });
+}
+
 // src/hooks/transcript-scan.ts
 var import_node_fs5 = require("node:fs");
 var DEFAULT_SCAN_MAX_LINES = 5e3;
@@ -21798,6 +21936,18 @@ function createSessionEndHandler(dependencies) {
           skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
       }
+    }
+    try {
+      enqueueSessionEndSettlementJob(
+        dependencies.db,
+        session.id,
+        now(),
+        hadNewTurnBeforeRepair
+      );
+    } catch (error48) {
+      repairLog(
+        `session-end settlement enqueue failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
+      );
     }
     return {
       continue: true,

@@ -50,10 +50,14 @@ describe("workerRecallInputShape", () => {
 });
 
 describe("tool surface", () => {
-  it("keeps the worker allowlist at two tools and exposes timeline descriptions", () => {
+  // `timeline` joined the worker allowlist for settlement (spec §A): a settle
+  // re-grades a trailing window against the arc it belongs to, and that arc is
+  // a timeline call. Still read-only — no new write surface.
+  it("keeps the worker allowlist at the three read/write tools and exposes timeline descriptions", () => {
     expect(MNEMO_ALLOWED_TOOLS).toEqual([
       "mcp__mnemo__remember",
       "mcp__mnemo__recall",
+      "mcp__mnemo__timeline",
     ]);
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
       "recall",

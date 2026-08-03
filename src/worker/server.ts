@@ -47,6 +47,20 @@ import {
   type PendingQueueItem,
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
+import { MNEMO_ALLOWED_TOOLS } from "../mcp/definitions";
+import { getSessionEffectiveCitations } from "../db/citations";
+import {
+  claimNextSettlementJob,
+  enqueueSettlementBoundaries,
+  failSettlementJob,
+  type SettlementJob,
+} from "../db/settlement";
+import {
+  applySettlementBatch,
+  buildSettlementPrompt,
+  computeSettlementSignals,
+  parseSettlementBatch,
+} from "./settlement";
 import {
   DATA_DIR,
   WORKER_PID_PATH,
@@ -100,6 +114,7 @@ import {
   classifyWorkerError,
   createWorkerAbortError,
   resolveWorkerRetryDelayMs,
+  WorkerAbortError,
 } from "./error-classifier";
 import {
   completionFloorStatus,
@@ -263,7 +278,17 @@ export interface SessionState {
   needsReprime?: boolean;
   processingLock: Promise<void>;
   closing?: Promise<void>;
-  pushMessage: (prompt: string) => Promise<void>;
+  /**
+   * `withEnvelopes: false` sends the prompt WITHOUT the reminder / subagent
+   * envelopes. Those envelopes ask the agent to re-extract invalidated turns,
+   * and they are marked notified once delivered — attaching them to a settle
+   * message (which is answered with JSON and no tool call) would consume the
+   * notice while nothing acts on it.
+   */
+  pushMessage: (
+    prompt: string,
+    options?: { withEnvelopes?: boolean },
+  ) => Promise<void>;
   // Transient per-work-unit signal accumulation (one outgoing message → its
   // result). Reset before each unit and after a cold-start (D1). The SDK
   // onMessage stream populates these; sendWorkUnit reads them to classify.
@@ -273,6 +298,14 @@ export interface SessionState {
     hadSubstantiveText: boolean;
     hadIllegalTool: boolean;
     retryableError: Error | null;
+    /**
+     * Assistant text blocks of the current work unit, in arrival order. Every
+     * other message class discards prose; the settle class (spec §A) answers
+     * with a JSON batch instead of a tool call, because its grades, back-links,
+     * change summary and cursor have to commit in one transaction — which no
+     * per-record remember() could do.
+     */
+    assistantText: string[];
   };
 }
 
@@ -284,6 +317,7 @@ function resetUnitSignals(state: SessionState): void {
   state.unitSignals.hadSubstantiveText = false;
   state.unitSignals.hadIllegalTool = false;
   state.unitSignals.retryableError = null;
+  state.unitSignals.assistantText.length = 0;
 }
 
 export interface WorkerCoreDeps {
@@ -401,6 +435,12 @@ export interface WorkerCore {
   flushSession(sessionDbId: number): Promise<void>;
   finishSession(sessionDbId: number): Promise<void>;
   drainSessionCompletely(sessionDbId: number): Promise<void>;
+  /**
+   * Enqueue newly crossed boundaries and drain this session's settlement jobs
+   * (spec §A). Runs after the extraction queue is empty; exposed so the two-phase
+   * grade pass can be driven directly in tests.
+   */
+  settleSession(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
   abortAllExtractionSessionsForShutdown(): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
@@ -1156,27 +1196,31 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         hadSubstantiveText: false,
         hadIllegalTool: false,
         retryableError: null,
+        assistantText: [],
       },
-      async pushMessage(prompt: string): Promise<void> {
+      async pushMessage(
+        prompt: string,
+        options: { withEnvelopes?: boolean } = {},
+      ): Promise<void> {
         const runtime = ensureQuerySession(state!);
+        const withEnvelopes = options.withEnvelopes !== false;
         const mainTranscriptPath =
           state!.contentSessionId && state!.project
             ? resolveTranscriptPath(state!.project, state!.contentSessionId)
             : undefined;
-        const pendingSubagentTurns = getPendingSubagentTurns(
-          deps.db,
-          state!.sessionDbId,
-        );
-        const reminderItems = getReminderItems(
-          deps.db,
-          state!.sessionDbId,
-          mainTranscriptPath,
-        );
-        const silencedReminderItems = getSilencedReminderItems(
-          deps.db,
-          state!.sessionDbId,
-          mainTranscriptPath,
-        );
+        const pendingSubagentTurns = withEnvelopes
+          ? getPendingSubagentTurns(deps.db, state!.sessionDbId)
+          : [];
+        const reminderItems = withEnvelopes
+          ? getReminderItems(deps.db, state!.sessionDbId, mainTranscriptPath)
+          : [];
+        const silencedReminderItems = withEnvelopes
+          ? getSilencedReminderItems(
+              deps.db,
+              state!.sessionDbId,
+              mainTranscriptPath,
+            )
+          : [];
         const envelopeBlocks: string[] = [];
         if (pendingSubagentTurns.length > 0) {
           envelopeBlocks.push(
@@ -1352,6 +1396,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
                 block.text.trim().length > 0
               ) {
                 state!.unitSignals.hadSubstantiveText = true;
+                state!.unitSignals.assistantText.push(block.text);
                 state!.lastMessageAt = nowMs();
                 state!.lastActivity = nowMs();
               } else if (
@@ -1363,8 +1408,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
               } else if (
                 block.type === "tool_use" &&
                 typeof block.name === "string" &&
-                block.name !== "mcp__mnemo__remember" &&
-                block.name !== "mcp__mnemo__recall"
+                !(MNEMO_ALLOWED_TOOLS as readonly string[]).includes(block.name)
               ) {
                 state!.unitSignals.hadIllegalTool = true;
               }
@@ -2040,6 +2084,298 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       state.sessionDbId,
       error instanceof Error ? error : undefined,
     );
+  }
+
+  /** A settlement pass may carry a hard wall-clock ceiling; see `finishSession`. */
+  interface SettlementPassOptions {
+    /** Absolute `nowMs()` past which the pass abandons its wait. */
+    deadlineMs?: number;
+  }
+
+  /**
+   * Settlement's cancellation boundary (spec §A, SessionEnd tail).
+   *
+   * `finishSession` bounds the tail with `sessionEndTailTimeoutMs`, but on
+   * timeout it still awaits the drain it raced — so without a bound INSIDE the
+   * drain, one settle `sendPrompt` that never returns holds SessionEnd open
+   * forever, and the tail budget describes nothing. The deadline is the same
+   * clock finishSession races on, pushed down to the only unbounded await in the
+   * settle path.
+   *
+   * Abandoning the WAIT is all this does. The job stays `claimed` and the
+   * ten-minute lease recovers it, which is the correct disposition for an answer
+   * that never arrived — and the claim-generation fence makes the abandoned
+   * attempt's late reply, if one ever lands, a no-op.
+   */
+  class SettlementDeadlineError extends Error {
+    constructor() {
+      super("settlement wait exceeded the SessionEnd tail deadline");
+      this.name = "SettlementDeadlineError";
+    }
+  }
+
+  async function awaitWithSettlementDeadline(
+    work: Promise<void>,
+    deadlineMs: number | undefined,
+  ): Promise<void> {
+    if (deadlineMs === undefined) {
+      await work;
+      return;
+    }
+    const remainingMs = Math.max(0, deadlineMs - nowMs());
+    let timeoutHandle: unknown;
+    // The abandoned push keeps running; `Promise.race` already subscribed to it,
+    // so a later rejection is handled, and this second handler makes that
+    // independent of how the race is implemented.
+    work.catch(() => {});
+    try {
+      await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeoutImpl(
+            () => reject(new SettlementDeadlineError()),
+            remainingMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeoutImpl(timeoutHandle);
+      }
+    }
+  }
+
+  /**
+   * Outcome of one settlement attempt.
+   *
+   *   - `settled` — the batch was applied and committed;
+   *   - `failed`  — a MODEL-side fault (bad batch, apply error). The claim's
+   *     attempt is spent and the job is durably `failed`, retryable until three;
+   *   - `abandoned` — nothing was decided and the row was deliberately left
+   *     `claimed`: shutdown cut the push off, the tail deadline expired, or the
+   *     lease was reclaimed under this worker. All three are INFRASTRUCTURE
+   *     events, not the model's answer, and the ten-minute lease is what
+   *     resolves them. Marking them `failed` would spend an attempt on a
+   *     question the model never got to answer.
+   */
+  type SettlementOutcome = "settled" | "failed" | "abandoned";
+
+  function isShutdownAbort(error: unknown): boolean {
+    return (
+      error instanceof WorkerAbortError && error.workerAbortReason === "shutdown"
+    );
+  }
+
+  /**
+   * Run one settlement job end to end (spec §A).
+   *
+   * The job's cohort is read from `frozen_member_ids`, never recomputed: a turn
+   * that finalized after this boundary was enqueued belongs to the NEXT window,
+   * and re-deriving the cohort here would let a retry grade a different set than
+   * the attempt before it.
+   *
+   * Model-side failure paths land on `failed` rather than throwing: the claim
+   * already consumed an attempt, so a job fails at most three times before it is
+   * terminal, and a bad settle can never wedge the flush loop behind it.
+   */
+  async function runSettlementJobLocked(
+    state: SessionState,
+    job: SettlementJob,
+    options: SettlementPassOptions = {},
+  ): Promise<SettlementOutcome> {
+    const sessionDbId = state.sessionDbId;
+    const failJob = (reason: string): void => {
+      failSettlementJob(deps.db, job.id, reason, now(), job.claimGeneration);
+    };
+    const cohort = job.frozenMemberIds
+      .map((turnId) => getTurnById(deps.db, turnId))
+      .filter((turn): turn is NonNullable<typeof turn> => turn !== null);
+
+    if (cohort.length === 0) {
+      failJob("frozen cohort is empty");
+      logger.warn?.("settlement job has no surviving members", {
+        sessionDbId,
+        boundary: job.boundary,
+      });
+      return "failed";
+    }
+
+    // ONE citation read for the whole job. The mechanical signals and the arc
+    // view the model reads are two descriptions of the same graph; deriving them
+    // from two separate reads lets a citation landing in between put an edge in
+    // one and not the other.
+    const citations = getSessionEffectiveCitations(deps.db, sessionDbId);
+    const signals = computeSettlementSignals(deps.db, sessionDbId, cohort, {
+      citations,
+    });
+    const prompt = buildSettlementPrompt({
+      db: deps.db,
+      sessionId: sessionDbId,
+      job,
+      cohort,
+      signals,
+      citations,
+    });
+
+    resetUnitSignals(state);
+    try {
+      // No reminder/subagent envelopes: this message is answered with JSON, so
+      // an attached turn-work notice would be marked delivered and then ignored.
+      await awaitWithSettlementDeadline(
+        state.pushMessage(prompt, { withEnvelopes: false }),
+        options.deadlineMs,
+      );
+    } catch (error) {
+      if (error instanceof SettlementDeadlineError || isShutdownAbort(error)) {
+        // The push never reached the model. Leave the row `claimed` and let the
+        // lease recover it: with the claim-generation fence a late reply from
+        // this attempt writes nothing, so waiting costs only latency.
+        logger.warn?.("settlement push abandoned, left for lease reclaim", {
+          sessionDbId,
+          boundary: job.boundary,
+          reason:
+            error instanceof SettlementDeadlineError ? "tail-deadline" : "shutdown",
+        });
+        return "abandoned";
+      }
+      failJob(
+        `settle push failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      logger.error?.("settlement push failed", {
+        sessionDbId,
+        boundary: job.boundary,
+        error,
+      });
+      return "failed";
+    }
+    if (state.unitSignals.retryableError) {
+      failJob(
+        `settle transport error: ${state.unitSignals.retryableError.message}`,
+      );
+      return "failed";
+    }
+
+    const parsed = parseSettlementBatch(
+      state.unitSignals.assistantText.join("\n"),
+      new Set(job.frozenMemberIds),
+    );
+    resetUnitSignals(state);
+    if (!parsed.ok) {
+      failJob(`settle batch rejected: ${parsed.reason}`);
+      logger.warn?.("settlement batch rejected whole", {
+        sessionDbId,
+        boundary: job.boundary,
+        reason: parsed.reason,
+      });
+      return "failed";
+    }
+
+    try {
+      const applied = applySettlementBatch(
+        deps.db,
+        job,
+        parsed.items,
+        signals,
+        now(),
+      );
+      if (applied === null) {
+        logger.warn?.("settlement result discarded, job was reclaimed", {
+          sessionDbId,
+          boundary: job.boundary,
+        });
+        return "abandoned";
+      }
+    } catch (error) {
+      failJob(
+        `settle apply failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      logger.error?.("settlement apply failed", {
+        sessionDbId,
+        boundary: job.boundary,
+        error,
+      });
+      return "failed";
+    }
+    return "settled";
+  }
+
+  /**
+   * Enqueue any boundary this session has crossed, then drain its settlement
+   * jobs in ascending boundary order.
+   *
+   * A job is attempted at most ONCE per pass (`attempted`): a failed job returns
+   * to pending for a later pass rather than being retried inside this loop,
+   * which would burn all three attempts on one transient fault.
+   */
+  async function settleSessionLocked(
+    state: SessionState,
+    options: SettlementPassOptions = {},
+  ): Promise<void> {
+    try {
+      enqueueSettlementBoundaries(deps.db, state.sessionDbId, now());
+    } catch (error) {
+      logger.error?.("settlement enqueue failed", {
+        sessionDbId: state.sessionDbId,
+        error,
+      });
+      return;
+    }
+
+    const attempted = new Set<number>();
+    while (true) {
+      // Checked before the CLAIM, not just around the wait: a pass that is
+      // already out of budget must not spend an attempt it cannot finish.
+      if (
+        options.deadlineMs !== undefined &&
+        nowMs() >= options.deadlineMs
+      ) {
+        return;
+      }
+      let job: SettlementJob | null = null;
+      try {
+        job = claimNextSettlementJob(
+          deps.db,
+          state.sessionDbId,
+          now(),
+          nowMs(),
+          { excludeJobIds: attempted },
+        );
+      } catch (error) {
+        logger.error?.("settlement claim failed", {
+          sessionDbId: state.sessionDbId,
+          error,
+        });
+        return;
+      }
+      if (!job) {
+        return;
+      }
+      attempted.add(job.id);
+      const outcome = await runSettlementJobLocked(state, job, options);
+      if (outcome !== "settled") {
+        // A failure leaves a gap: the cursor cannot advance past this boundary
+        // within the pass, and settling a LATER window first would grade against
+        // an arc whose earlier half is still provisional. An abandon means this
+        // worker no longer owns the queue at all. Stop the pass either way.
+        return;
+      }
+    }
+  }
+
+  async function settleSession(
+    sessionDbId: number,
+    options: SettlementPassOptions = {},
+  ): Promise<void> {
+    if (isSessionRetryGated(sessionDbId)) {
+      return;
+    }
+    try {
+      await withSessionProcessingLock(sessionDbId, async (state) => {
+        await settleSessionLocked(state, options);
+      });
+    } catch (error) {
+      logger.error?.("settlement pass failed", { sessionDbId, error });
+    }
   }
 
   async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
@@ -2754,7 +3090,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await scanAndDrainGlobalQueue(sessionDbId);
   }
 
-  async function drainSessionCompletely(sessionDbId: number): Promise<void> {
+  async function drainSessionCompletely(
+    sessionDbId: number,
+    options: SettlementPassOptions = {},
+  ): Promise<void> {
     let previousCount = Number.POSITIVE_INFINITY;
 
     while (true) {
@@ -2795,6 +3134,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       const remaining = countQueueItemsForSession(deps.db, sessionDbId);
       if (remaining === 0) {
+        // Settle only once the session's extraction queue is empty: a boundary
+        // crossed by work still in flight would freeze a cohort whose last
+        // members have no grades yet.
+        await settleSession(sessionDbId, options);
         return;
       }
 
@@ -2815,10 +3158,20 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await withSessionProcessingLock(sessionDbId, async (state) => {
       await flushAllBatchesLocked(state);
     });
+    if (countQueueItemsForSession(deps.db, sessionDbId) === 0) {
+      await settleSession(sessionDbId);
+    }
   }
 
   async function finishSession(sessionDbId: number): Promise<void> {
-    const drainPromise = drainSessionCompletely(sessionDbId);
+    // The SAME deadline the race below uses, handed to the drain so its
+    // settlement leg is bounded from the inside. Without it the timeout branch
+    // still `await`s this drain, and a settle push that never returns holds
+    // SessionEnd open past the budget it just declared.
+    const tailDeadlineMs = nowMs() + config.sessionEndTailTimeoutMs;
+    const drainPromise = drainSessionCompletely(sessionDbId, {
+      deadlineMs: tailDeadlineMs,
+    });
     let timeoutHandle: unknown;
     let outcome: "drained" | "timeout";
     try {
@@ -3082,6 +3435,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     flushSession,
     finishSession,
     drainSessionCompletely,
+    settleSession,
     closeSessionQuery,
     abortAllExtractionSessionsForShutdown,
     handleCompact,

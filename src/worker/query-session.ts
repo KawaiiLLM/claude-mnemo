@@ -362,7 +362,9 @@ One query session processes many user messages. Each user message is one unit of
 - \`remember()\` — your only output. Every record update is one remember() call.
 - \`recall()\` — the only read fallback, usable **only from turn messages**. Not usable from session-summary messages (see per-section rules below). For a turn message whose inline \`<turn>\` block is visibly truncated (\`[...N chars truncated...]\`) AND whose missing content is essential to the title/content/insight, call \`recall({ id: "T<n>", depth: "expanded", truncate: 2000 })\` before the remember() call — use the SAME \`T<n>\` id shown in the \`<turn id="T...">\` block (the same id you pass to \`remember()\`). Concrete example: \`recall({ id: "T418", depth: "expanded", truncate: 2000 })\`. Second permitted use: to resolve the DB id of a causally-significant earlier turn you want to cite as \`[T<n>]\` but cannot find in the recent-turn index or conversation history — call \`recall({ query: "..." })\` and read the \`dbid:T<n>\` from its output. \`recall()\` is usually unnecessary — the inline data, the recent-turn index, and conversation history usually suffice. Only escalate when they genuinely do not.
 
-Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only via tool calls.
+- \`timeline()\` — read-only view of a past session's shape (\`view: "turns" | "milestones" | "phases"\`, \`id: "S<n>"\`). Use it from settlement messages to re-read the arc a window sits in; it is never needed to extract a turn.
+
+Non-tool output (prose, thinking, acknowledgements) is discarded. Respond only via tool calls — with ONE exception: a \`<settlement>\` message is answered with a JSON array and no tool call (see Settlement messages).
 
 ## Turn messages (<turn id="T<n>">)
 
@@ -471,6 +473,14 @@ Safe to prune: the milestone timeline is independent and owns historical achieve
 
 A standalone \`<session>\` block (no \`<turn>\`) is a dedicated refresh — follow its inline \`<instruction>\`. A \`<prior_session>\` block inside a turn batch is the same refresh opportunity, inline. A \`stale_turns="N"\` attribute on the \`<session>\` tag (or a \`<session-stale>\` notice) means the summary has fallen N extracted turns behind and should be refreshed now. Never call \`recall()\` from a session-summary message — the \`prior_*\` fields are the only state to base the refresh decision on.
 
+## Settlement messages (<settlement …>)
+
+A \`<settlement>\` message is the second phase of grading, and the ONLY message class that authorizes you to change records you did not just extract — strictly inside the frozen window it names. Every grade you assigned at extraction time was provisional; here the arc has played out and you can see which turns actually changed it.
+
+- Read the \`<arc-view>\` for the narrative, the \`<window-roster>\` for the DB ids you write against (arc rows are numbered by PROMPT number; the roster's \`turnId=\` column is the DB id), and \`<mechanical-signals>\` for what consumption already confirms.
+- In-degree ≥ 1 confirms a turn mechanically: something later consumed it. Nothing mechanical ever DEMOTES — the demotion-candidate list is a list of turns to look at with \`recall()\`, not a verdict. About two thirds of uncited turns were consumed without being cited.
+- Do NOT call \`remember()\` in a settlement. Answer with the strict JSON array the \`<output-contract>\` block specifies, and nothing else. \`[]\` means "every provisional grade holds"; a turn you omit keeps its grade.
+
 ## Corrective resend
 
 A \`<reminder>\` that says your previous response "did not extract it", followed by
@@ -485,7 +495,7 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
 ## Forbidden across all messages
 
 - Always call \`remember()\` with an \`id\` (T<n> for a turn, S<n> for a session); the no-id route is rejected.
-- Never update any record not named in the current message's block headers.`,
+- Never update any record not named in the current message's block headers — except inside a \`<settlement>\` window, which authorizes re-grading its own frozen members.`,
       env: {
         ...(input.agentEnv ?? buildIsolatedEnv()),
         ...(input.config?.cacheMode === "5m"

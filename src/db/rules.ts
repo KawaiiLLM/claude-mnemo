@@ -136,6 +136,152 @@ const RULE_RETURNING = `
   last_evidence_at_epoch AS lastEvidenceAtEpoch
 `;
 
+/**
+ * The rule subsystem's canonical reference namespace (spec §B): `S<session_id>`
+ * plus `T<prompt_number>` — NOT the `[T<db-id>]` form the extractor writes.
+ */
+const RULE_TURN_REF_PATTERN = /^S(\d+)\/T(\d+)$/;
+
+/**
+ * Distinct resolved evidence turns a rule needs before its evidence exempts
+ * anything (spec §B). Mirrors `propose_rule`'s own ≥2 requirement, re-checked at
+ * read time because the resolver also sees records that path never validated.
+ */
+const RULE_EXEMPTION_MIN_EVIDENCE = 2;
+
+/**
+ * Turns the rule pipeline treats as load-bearing, resolved to DB turn ids.
+ *
+ * Settlement uses this as an EXEMPTION set (spec §B): a persistent rule's source
+ * turn is routinely never cited by a later turn — rules are consumed by the
+ * dispatcher, not by prose — so a zero-in-degree demotion nomination would
+ * mechanically kill exactly the turns that produced durable knowledge. The
+ * exemption blocks only that nomination; an explicit model or user re-grade
+ * still applies.
+ *
+ * Two sources, both required by spec:
+ *   - MULTI-EVIDENCE proposals — `propose_rule` demands ≥2 evidence refs, and
+ *     those refs live on the rule (the `proposed` event carries none), so the
+ *     rule's evidence array is read for rules that actually have a proposal or
+ *     evidence-addition event behind them. A singular `turn_ref` on some other
+ *     event is deliberately NOT a source: one incidental mention is not the
+ *     multi-evidence signal the exemption is priced for.
+ *   - JUDGMENTS traced through `source_event_id` to their originating `hit`
+ *     event, whose `turn_ref` names the turn where the rule actually fired.
+ *
+ * The ≥2 requirement is RE-CHECKED here, not trusted from the writer. Only the
+ * `propose_rule` path enforces it; a malformed, legacy or hand-edited
+ * `evidence_added` record can leave a rule with one usable ref, and honouring
+ * that would exempt a turn on exactly the single incidental mention the previous
+ * paragraph rules out. Cardinality is counted over DISTINCT turns the refs
+ * actually resolve to, so a duplicated ref is one piece of evidence, not two.
+ *
+ * Dangling refs (naming no turn) do not exempt. `sessionId`, when given, scopes
+ * the RESULT to one session — the settlement caller only cares about its own
+ * cohort — but the cardinality count deliberately spans sessions: a rule with
+ * evidence in two different sessions is genuinely multi-evidence, and its one
+ * in-scope turn is exactly as load-bearing as if both refs were local.
+ */
+export function getRuleExemptTurnIds(
+  db: Database,
+  sessionId?: number,
+): Set<number> {
+  const exempt = new Set<number>();
+  const resolve = db.query<{ id: number }, [number, number]>(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?",
+  );
+
+  /** Resolves a ref to a turn id, or null; does NOT apply the session scope. */
+  const resolveRef = (
+    ref: string | null | undefined,
+  ): { sessionId: number; turnId: number } | null => {
+    if (typeof ref !== "string") {
+      return null;
+    }
+    const match = RULE_TURN_REF_PATTERN.exec(ref.trim());
+    if (!match) {
+      return null;
+    }
+    const refSessionId = Number(match[1]);
+    const promptNumber = Number(match[2]);
+    if (
+      !Number.isSafeInteger(refSessionId) ||
+      !Number.isSafeInteger(promptNumber)
+    ) {
+      return null;
+    }
+    const turn = resolve.get(refSessionId, promptNumber);
+    return turn ? { sessionId: refSessionId, turnId: turn.id } : null;
+  };
+
+  const addRef = (ref: string | null): void => {
+    const resolved = resolveRef(ref);
+    if (!resolved) {
+      return;
+    }
+    if (sessionId !== undefined && resolved.sessionId !== sessionId) {
+      return;
+    }
+    exempt.add(resolved.turnId);
+  };
+
+  const proposedEvidence = db
+    .query<{ evidence: string }, []>(
+      `SELECT r.evidence AS evidence
+       FROM rules r
+       WHERE EXISTS (
+         SELECT 1 FROM rule_events e
+         WHERE e.rule_id = r.id
+           AND e.event_kind IN ('proposed', 'evidence_added')
+       )`,
+    )
+    .all();
+  for (const row of proposedEvidence) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.evidence);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parsed)) {
+      continue;
+    }
+    // Resolve the WHOLE rule first: the ≥2 test is a property of the rule, so a
+    // ref cannot be admitted until every sibling ref has been counted.
+    const resolvedByRule = new Map<number, number>();
+    for (const item of parsed) {
+      if (item && typeof item === "object" && "ref" in item) {
+        const resolved = resolveRef((item as { ref?: unknown }).ref as string);
+        if (resolved) {
+          resolvedByRule.set(resolved.turnId, resolved.sessionId);
+        }
+      }
+    }
+    if (resolvedByRule.size < RULE_EXEMPTION_MIN_EVIDENCE) {
+      continue;
+    }
+    for (const [turnId, refSessionId] of resolvedByRule) {
+      if (sessionId === undefined || refSessionId === sessionId) {
+        exempt.add(turnId);
+      }
+    }
+  }
+
+  const judgmentSources = db
+    .query<{ turnRef: string | null }, []>(
+      `SELECT source.turn_ref AS turnRef
+       FROM rule_events judgment
+       JOIN rule_events source ON source.id = judgment.source_event_id
+       WHERE judgment.event_kind = 'judgment'`,
+    )
+    .all();
+  for (const row of judgmentSources) {
+    addRef(row.turnRef);
+  }
+
+  return exempt;
+}
+
 function assertEpoch(value: number, field: string): void {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${field} must be a non-negative epoch-second integer`);
