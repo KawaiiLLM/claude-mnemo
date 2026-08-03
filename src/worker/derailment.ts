@@ -83,7 +83,7 @@ export function buildCorrectiveResend(
   const instruction =
     kind === "session-summary"
       ? "Re-process the <session> block below now: either respond with remember({ id: \"S<n>\", ... }) re-supplying ALL summary fields, or — if nothing material changed — respond with no tool calls."
-      : "Re-process the block below now: respond ONLY with remember() for its id(s) (or remember({status:\"skipped\"}) if there is nothing to extract).";
+      : "Re-process the block below now: respond ONLY with remember() for its id(s) — if there is nothing to extract, use remember({ id: \"T<n>\", status: \"skipped\", grade: 0, title }) with that turn's own id; a remember() without an id is rejected.";
   const reminder =
     "<reminder>\n" +
     "Your previous response to the block below did not extract it (you answered " +

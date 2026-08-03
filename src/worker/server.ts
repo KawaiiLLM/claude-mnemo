@@ -1468,7 +1468,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     // Only a standalone session summary has an empty required set; its
     // corrective resend must point the agent at the session route (re-supply
-    // all summary fields), never remember({status:"skipped"}) (turn-only).
+    // all summary fields), never the turn-only skipped form
+    // (remember({ id: "T<n>", status: "skipped", grade: 0, title })).
     const resendKind = requiredIds.size === 0 ? "session-summary" : "turn";
 
     resetUnitSignals(state);

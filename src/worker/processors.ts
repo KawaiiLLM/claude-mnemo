@@ -225,7 +225,103 @@ export function buildObsBlock(
 // D5: a session whose summary is this many extracted turns behind is flagged
 // stale, and the next injected batch nudges a full refresh.
 export const STALE_TURN_THRESHOLD = 10;
-export const G3_DENSITY_ALARM_TURNS_PER_GRADE = 10;
+
+// Standing target distribution the extraction agent grades against (spec §A).
+// Not a quota: it is the reference the actual window is rendered beside.
+export const SIGNIFICANCE_TARGET_SHARES = {
+  4: 0.02,
+  3: 0.1,
+  2: 0.25,
+} as const;
+// Under this many rows a window's shares are noise — no percentage is rendered
+// and the deviation gate cannot fire (a 6-turn window is trivially "50% G3").
+export const CALIBRATION_MIN_WINDOW = 30;
+// Grade-3 share above this ceiling (target + 5pp) turns on the
+// strengthened-evidence gate. Evidence gate only: never a mechanical floor,
+// because the ceiling simulation put mis-hits to true hits at ~2:1.
+export const G3_EVIDENCE_GATE_SHARE = 0.15;
+
+export interface GradeWindow {
+  /** Row counts by grade, indexed 0-4. */
+  counts: number[];
+  /** Rows with no grade yet (NULL significance_grade). */
+  ungraded: number;
+  /** EVERY row in the window — graded, skipped, and ungraded alike. */
+  total: number;
+}
+
+export function summarizeGradeWindow(
+  rows: Array<{ grade: number | null; count: number }>,
+): GradeWindow {
+  const counts = [0, 0, 0, 0, 0];
+  let ungraded = 0;
+  for (const row of rows) {
+    if (row.grade === null) {
+      ungraded += row.count;
+    } else if (row.grade >= 0 && row.grade <= 4) {
+      counts[row.grade] = row.count;
+    }
+  }
+  const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
+  return { counts, ungraded, total };
+}
+
+/**
+ * Whether the window's Grade-3 share has drifted far enough above target that a
+ * new Grade 3 must name the design artifact it moved. Strictly greater than the
+ * ceiling — a window sitting exactly at 15% is compliant.
+ */
+export function exceedsG3EvidenceGate(window: GradeWindow): boolean {
+  return (
+    window.total >= CALIBRATION_MIN_WINDOW &&
+    (window.counts[3] ?? 0) > window.total * G3_EVIDENCE_GATE_SHARE
+  );
+}
+
+function sharePercent(count: number, total: number): string {
+  return `${Math.round((count / total) * 100)}%`;
+}
+
+/**
+ * Renders the actual-vs-target calibration block. Pure: settlement (spec §A)
+ * renders the same block over its frozen window by passing a different label.
+ */
+export function renderSignificanceCalibration(
+  window: GradeWindow,
+  windowLabel = "previous 100 turns",
+): string {
+  const { counts, ungraded, total } = window;
+  const smallSample = total < CALIBRATION_MIN_WINDOW;
+  const grades = [4, 3, 2, 1, 0]
+    .map(
+      (grade) =>
+        `grade ${grade}=${counts[grade]}${
+          smallSample ? "" : ` (${sharePercent(counts[grade] ?? 0, total)})`
+        }`,
+    )
+    .join(", ");
+  const ungradedCell = `ungraded=${ungraded}${
+    smallSample ? "" : ` (${sharePercent(ungraded, total)})`
+  }`;
+  const targetLine = smallSample
+    ? "Window under 30 turns — too small to read as a distribution, so no share and no target comparison is drawn. Most turns should still be trivial, repetitive, or intermediate work: grade 0/1 is the expected majority."
+    : `Target: grade 4 ≈ ${Math.round(
+        SIGNIFICANCE_TARGET_SHARES[4] * 100,
+      )}%, grade 3 ≈ ${Math.round(
+        SIGNIFICANCE_TARGET_SHARES[3] * 100,
+      )}%, grade 2 ≈ ${Math.round(
+        SIGNIFICANCE_TARGET_SHARES[2] * 100,
+      )}%. Most turns should be trivial, repetitive, or intermediate work — grade 0/1 is the expected majority, not a failure to find significance.`;
+  const deviationLine = exceedsG3EvidenceGate(window)
+    ? `\nDeviation: grade 3 holds ${counts[3]} of the last ${total} turns, above the 15% ceiling. Until it comes back down, a new Grade 3 is admissible ONLY if its content names the design artifact it changed — a named file, spec, schema, or interface; a named evaluation method; or a prior conclusion cited with \`supersedes\` — together with that artifact's before→after. If you cannot name one, grade 2.`
+    : "";
+
+  return `<significance-calibration window="${windowLabel}">
+Actual over ${total} turns (denominator = every turn in the window, including skipped and ungraded): ${grades}, ${ungradedCell}.
+${targetLine}
+Structural self-checks: one Grade 4 per arc unless a radical re-foundation cites it; every Grade 3 must pass the deletion test; Troubleshooting chains resolve to Grade 2 conclusions, not Grade 3 chains; No-change polls are Grade 0.${deviationLine}
+</significance-calibration>`;
+}
 
 export function buildTurnSignificanceCalibration(
   db: Database,
@@ -252,25 +348,8 @@ export function buildTurnSignificanceCalibration(
        GROUP BY significance_grade`,
     )
     .all(sessionId, promptNumber);
-  const counts = [0, 0, 0, 0, 0];
-  let ungraded = 0;
-  for (const row of rows) {
-    if (row.grade === null) {
-      ungraded += row.count;
-    } else if (row.grade >= 0 && row.grade <= 4) {
-      counts[row.grade] = row.count;
-    }
-  }
-  const total = counts.reduce((sum, count) => sum + count, 0) + ungraded;
-  const densityAlarm =
-    total > 0 && counts[3]! * G3_DENSITY_ALARM_TURNS_PER_GRADE > total
-      ? `\n${counts[3]} G3 grades in the last ${total} turns — re-run the deletion test on each.`
-      : "";
 
-  return `<significance-calibration window="previous 100 turns">
-Recent distribution (${total} turns): grade 4=${counts[4]}, grade 3=${counts[3]}, grade 2=${counts[2]}, grade 1=${counts[1]}, grade 0=${counts[0]}, ungraded=${ungraded}.
-Structural self-checks: one Grade 4 per arc unless a radical re-foundation cites it; every Grade 3 must pass the deletion test; Troubleshooting chains resolve to Grade 2 conclusions, not Grade 3 chains; No-change polls are Grade 0.${densityAlarm}
-</significance-calibration>`;
+  return renderSignificanceCalibration(summarizeGradeWindow(rows));
 }
 
 export function buildBatchPrompt(args: {

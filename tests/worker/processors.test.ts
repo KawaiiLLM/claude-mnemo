@@ -13,7 +13,22 @@ import {
   cleanInput,
   cleanOutput,
   createWorkerProcessors,
+  exceedsG3EvidenceGate,
+  renderSignificanceCalibration,
+  summarizeGradeWindow,
+  type GradeWindow,
 } from "../../src/worker/processors";
+
+function gradeWindow(
+  counts: [number, number, number, number, number],
+  ungraded = 0,
+): GradeWindow {
+  return {
+    counts,
+    ungraded,
+    total: counts.reduce((sum, count) => sum + count, 0) + ungraded,
+  };
+}
 
 describe("worker processors", () => {
   let db: Database;
@@ -516,7 +531,7 @@ describe("worker processors", () => {
     expect(prompt).not.toContain("current_prompt: Diagnose auth race");
   });
 
-  test("buildTurnSignificanceCalibration keeps cadence, observed distribution, invariants, and one conditional alarm", () => {
+  test("buildTurnSignificanceCalibration keeps cadence and renders actual-vs-target with the deviation gate", () => {
     const insert = db.query(
       `INSERT INTO turns (
          session_id, prompt_number, status, significance_grade, created_at_epoch
@@ -535,44 +550,126 @@ describe("worker processors", () => {
     const calibration = buildTurnSignificanceCalibration(db, sessionId, 110);
 
     expect(calibration).toContain("previous 100 turns");
-    expect(calibration).toContain("grade 4=");
+    expect(calibration).toContain("Actual over 100 turns");
+    expect(calibration).toContain(
+      "denominator = every turn in the window, including skipped and ungraded",
+    );
+    // T1 is ungraded and T2-T9 are old grade-4 rows outside T10-T109.
+    expect(calibration).toContain("grade 4=21 (21%)");
+    expect(calibration).toContain("grade 3=20 (20%)");
+    expect(calibration).toContain("ungraded=0 (0%)");
+    expect(calibration).toContain(
+      "Target: grade 4 ≈ 2%, grade 3 ≈ 10%, grade 2 ≈ 25%",
+    );
+    expect(calibration).toContain(
+      "Most turns should be trivial, repetitive, or intermediate work",
+    );
     expect(calibration).toContain("one Grade 4 per arc");
     expect(calibration).toContain("deletion test");
     expect(calibration).toContain("Troubleshooting chains");
     expect(calibration).toContain("No-change polls are Grade 0");
-    expect(calibration).not.toContain("Reference baseline");
-    expect(calibration).not.toContain("%");
-    // T1 is ungraded and T2-T9 are old grade-4 rows outside T10-T109.
-    expect(calibration).toContain("grade 4=21");
-    const alarms = calibration
-      .split("\n")
-      .filter((line) => line.includes("re-run the deletion test on each"));
-    expect(alarms).toEqual([
-      "20 G3 grades in the last 100 turns — re-run the deletion test on each.",
-    ]);
+    // Deviation gate: 20% G3 is above the 15% ceiling.
+    expect(calibration).toContain(
+      "Deviation: grade 3 holds 20 of the last 100 turns, above the 15% ceiling",
+    );
+    expect(calibration).toContain(
+      "names the design artifact it changed — a named file, spec, schema, or interface; a named evaluation method; or a prior conclusion cited with `supersedes`",
+    );
+    expect(calibration).toContain("before→after");
+    // The old density alarm is gone for good.
+    expect(calibration).not.toContain("re-run the deletion test on each");
+    expect(calibration).not.toContain("G3 grades in the last");
+    expect(calibration).not.toContain("Recent distribution");
   });
 
-  test("buildTurnSignificanceCalibration omits every density number for a compliant window", () => {
+  test("buildTurnSignificanceCalibration counts skipped and ungraded rows in the denominator", () => {
     const insert = db.query(
       `INSERT INTO turns (
          session_id, prompt_number, status, significance_grade, created_at_epoch
-       ) VALUES (?, ?, 'extracted', ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?)`,
     );
-    for (let promptNumber = 2; promptNumber <= 10; promptNumber += 1) {
-      insert.run(
-        sessionId,
-        promptNumber,
-        2,
-        120 + promptNumber,
-      );
+    // 5 ungraded + 10 skipped(grade 0) + 15 graded-2, plus the ungraded T1 the
+    // fixture already inserted → 31 rows in the window.
+    for (let promptNumber = 2; promptNumber <= 6; promptNumber += 1) {
+      insert.run(sessionId, promptNumber, "extracted", null, 120 + promptNumber);
+    }
+    for (let promptNumber = 7; promptNumber <= 16; promptNumber += 1) {
+      insert.run(sessionId, promptNumber, "skipped", 0, 120 + promptNumber);
+    }
+    for (let promptNumber = 17; promptNumber <= 31; promptNumber += 1) {
+      insert.run(sessionId, promptNumber, "extracted", 2, 120 + promptNumber);
     }
 
-    const calibration = buildTurnSignificanceCalibration(db, sessionId, 10);
-    expect(calibration).toContain("Recent distribution (9 turns)");
-    expect(calibration).not.toContain("G3 grades in the last");
-    expect(calibration).not.toContain("1 per 10");
-    expect(calibration).not.toContain("10 turns per");
-    expect(calibration).not.toContain("%");
+    const calibration = buildTurnSignificanceCalibration(db, sessionId, 40);
+
+    expect(calibration).toContain("Actual over 31 turns");
+    expect(calibration).toContain("grade 2=15 (48%)");
+    expect(calibration).toContain("grade 0=10 (32%)");
+    expect(calibration).toContain("ungraded=6 (19%)");
+    expect(calibration).not.toContain("Deviation:");
+  });
+
+  test("renderSignificanceCalibration drops every percentage below the 30-turn floor", () => {
+    const small = renderSignificanceCalibration(gradeWindow([2, 3, 4, 6, 1], 2));
+
+    expect(small).toContain("Actual over 18 turns");
+    expect(small).toContain("grade 3=6, grade 2=4, grade 1=3, grade 0=2");
+    expect(small).toContain("ungraded=2.");
+    expect(small).toContain("Window under 30 turns");
+    expect(small).toContain("grade 0/1 is the expected majority");
+    expect(small).not.toContain("%");
+    // A 33% G3 share cannot arm the gate on a sample this small.
+    expect(small).not.toContain("Deviation:");
+    expect(exceedsG3EvidenceGate(gradeWindow([2, 3, 4, 6, 1], 2))).toBe(false);
+  });
+
+  test("exceedsG3EvidenceGate opens strictly above a 15% grade-3 share", () => {
+    // 6/40 = exactly 15% → compliant; 7/40 = 17.5% → gated.
+    const atCeiling = gradeWindow([20, 10, 4, 6, 0]);
+    const overCeiling = gradeWindow([19, 10, 4, 7, 0]);
+
+    expect(atCeiling.total).toBe(40);
+    expect(exceedsG3EvidenceGate(atCeiling)).toBe(false);
+    expect(exceedsG3EvidenceGate(overCeiling)).toBe(true);
+    expect(renderSignificanceCalibration(atCeiling)).not.toContain("Deviation:");
+    expect(renderSignificanceCalibration(overCeiling)).toContain(
+      "Deviation: grade 3 holds 7 of the last 40 turns, above the 15% ceiling",
+    );
+    // Exactly 30 rows is the first window the gate may fire on.
+    expect(exceedsG3EvidenceGate(gradeWindow([10, 10, 4, 6, 0]))).toBe(true);
+    expect(exceedsG3EvidenceGate(gradeWindow([9, 10, 4, 6, 0]))).toBe(false);
+  });
+
+  test("renderSignificanceCalibration rounds a non-integral share to the nearest integer", () => {
+    // Shares are Math.round, not floor/ceil: 7/40 = 17.5% renders 18%, and
+    // 19/40 = 47.5% renders 48%. 6/40 is exactly 15% and renders unrounded.
+    const overCeiling = renderSignificanceCalibration(gradeWindow([19, 10, 4, 7, 0]));
+
+    expect(overCeiling).toContain("grade 3=7 (18%)");
+    expect(overCeiling).toContain("grade 0=19 (48%)");
+    expect(renderSignificanceCalibration(gradeWindow([20, 10, 4, 6, 0]))).toContain(
+      "grade 3=6 (15%)",
+    );
+  });
+
+  test("summarizeGradeWindow and renderSignificanceCalibration are reusable over any window", () => {
+    const window = summarizeGradeWindow([
+      { grade: null, count: 3 },
+      { grade: 3, count: 5 },
+      { grade: 2, count: 12 },
+      { grade: 1, count: 20 },
+      { grade: 0, count: 10 },
+      { grade: 9, count: 4 },
+    ]);
+
+    // Out-of-range grades are dropped rather than counted anywhere.
+    expect(window).toEqual({ counts: [10, 20, 12, 5, 0], ungraded: 3, total: 50 });
+    expect(
+      renderSignificanceCalibration(window, "frozen settlement window"),
+    ).toContain('<significance-calibration window="frozen settlement window">');
+    expect(renderSignificanceCalibration(window)).toContain(
+      '<significance-calibration window="previous 100 turns">',
+    );
   });
 
   test("renderMiniTurn wraps turn prompt in <source_prompt> data envelope (D2)", () => {

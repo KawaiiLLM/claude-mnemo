@@ -143,6 +143,8 @@ describe("release artifacts", () => {
       "memory/archive.md", // dream curation workspace
       "last_successful_date", // durable dream completion marker
       "recordDreamFailure", // retryable dream queue path
+      "exceedsG3EvidenceGate", // actual-vs-target calibration deviation gate
+      "Origin duty, arc-scoped", // arc-scoped provisional Grade-4 rubric rule
     ]) {
       expect(worker).toContain(marker);
     }

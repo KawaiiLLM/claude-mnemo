@@ -145,12 +145,21 @@ describe("buildCorrectiveResend", () => {
     expect(out).toContain(original); // original message resent verbatim
   });
 
-  test('default/"turn" variant keeps the turn-only remember({status:"skipped"}) guidance', () => {
+  test('default/"turn" variant pins the id-bearing skip form (a bare skip is rejected by the remember route)', () => {
     const original = `<turn id="T42">\n  prompt: do X\n</turn>`;
     const def = buildCorrectiveResend(original);
     const turn = buildCorrectiveResend(original, "turn");
-    expect(def).toContain('status:"skipped"');
-    expect(turn).toContain('status:"skipped"');
+    for (const out of [def, turn]) {
+      // Must match the system prompt's skip contract verbatim: an id-less
+      // remember() is rejected (src/mcp/remember.ts) and the work unit only
+      // resolves once the CURRENT turn id is remembered (deriveRequiredTargetIds).
+      expect(out).toContain(
+        'remember({ id: "T<n>", status: "skipped", grade: 0, title })',
+      );
+      expect(out).toContain("that turn's own id");
+      expect(out).toContain("without an id is rejected");
+      expect(out).not.toContain('remember({status:"skipped"})');
+    }
   });
 
   test("session-summary variant points the agent at the session route, not status:skipped", () => {
@@ -163,7 +172,8 @@ describe("buildCorrectiveResend", () => {
     expect(out).toContain("did not extract it");
     expect(out).toContain("DATA");
     expect(out).toContain(original); // original message resent verbatim
-    // Must NOT use the turn-only invalid session call.
+    // Must NOT use the turn-only skip call, in either spacing.
     expect(out).not.toContain('status:"skipped"');
+    expect(out).not.toContain('status: "skipped"');
   });
 });

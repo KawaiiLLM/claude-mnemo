@@ -660,6 +660,91 @@ describe("worker query session", () => {
     expect(prompt).toContain("Grade-4 re-foundation");
     expect(prompt).toContain('regrade: { id: "T<n>", grade: 0|1|2|3|4 }');
 
+    // Rubric repair pack (spec §E). Each pin is one rule; if a rule is dropped
+    // the grades drift back to the audited failure mode it was written against.
+    // (1) Chain rule — only the landing turn of a diagnose→decide→formalize
+    // chain is Grade 3.
+    expect(prompt).toContain("only the turn that LANDS the change is Grade 3");
+    expect(prompt).toContain("named the diagnosis are Grade 2");
+    // (4) Counter-examples: shipping and dispatching are not Grade 3.
+    expect(prompt).toContain("a release or a commit is Grade 2");
+    expect(prompt).toContain("dispatching a worker or starting a run is Grade 1");
+    // (2) Arc-scoped Grade-4 origin duty, provisional until settlement.
+    expect(prompt).toContain("Origin duty, arc-scoped");
+    expect(prompt).toContain("delimited by the re-prime skeleton");
+    expect(prompt).toContain("even when it called no tools and touched no files");
+    expect(prompt).toContain("This grading is PROVISIONAL");
+    expect(prompt).toContain(
+      "Never withhold the Grade 4 now for fear of that demotion",
+    );
+    // (3) Worked example, generalized.
+    expect(prompt).toContain("Worked example, generalized shape of a design arc");
+    expect(prompt).toContain("the opening ask that framed the problem = Grade 4");
+    expect(prompt).toContain(
+      "the spec finalized and the core mechanism locked = Grade 3",
+    );
+    expect(prompt).toContain("a repeated attempt and an inconclusive poll = Grade 0");
+    expect(prompt).toContain("the release or commit itself = Grade 2");
+    // (4) Positive example: the DISCOVERY of an eval-validity defect is Grade 3.
+    expect(prompt).toContain("Grade 3 at its DISCOVERY");
+    // (6) Final over draft.
+    expect(prompt).toContain("Final over draft");
+    expect(prompt).toContain("the grade lands on the FINAL resubmission's turn");
+    // (5) Skip discipline: not a tool-count decision, a complete knowledge
+    // answer is NOT skippable, and skipped rows still carry a title so a
+    // citation can revive them as a ↳ row.
+    expect(prompt).toContain(
+      '`remember({ id: "T<n>", status: "skipped", grade: 0, title })`',
+    );
+    expect(prompt).toContain("Never decide this from the tool-call count alone");
+    expect(prompt).toContain("complete knowledge-answer delivery");
+    expect(prompt).toContain("that founds an arc, settles a direction");
+    expect(prompt).toContain("is NOT skippable");
+    expect(prompt).toContain(
+      "Every skipped turn STILL gets a one-line minimal title",
+    );
+    // (7) title = conclusion, content = process/evidence, no restatement.
+    expect(prompt).toContain("title: the turn's CONCLUSION in ~10 tokens");
+    expect(prompt).toContain(
+      "content: the process and the evidence behind that conclusion",
+    );
+    expect(prompt).toContain(
+      "MUST NOT restate the title's conclusion sentence",
+    );
+    expect(prompt).not.toContain("5-15 words summarizing the turn's outcome");
+    expect(prompt).not.toContain("100-300 chars, what happened and why");
+    // (8) Structured cites: shape, replace-set, and the two mandatory relations.
+    expect(prompt).toContain(
+      '`remember({ id: "T<n>", title, content, insight, type, tags, grade, cites })`',
+    );
+    expect(prompt).toContain(
+      'relation: "builds-on" | "implements" | "supersedes" | "evidence-for"',
+    );
+    expect(prompt).toContain('"this turn genuinely consumes nothing"');
+    expect(prompt).toContain(
+      "MUST cite the victim with `supersedes`",
+    );
+    expect(prompt).toContain(
+      "MUST cite that decision with `implements`",
+    );
+    expect(prompt).toContain(
+      "Citing the IMMEDIATELY preceding turn is explicitly encouraged",
+    );
+    expect(prompt).toContain("`cites` is the machine source");
+    // Replace-set survives the streamed-slice merge rules.
+    expect(prompt).toContain(
+      "`cites` is the exception to field-level merge: it is a replace-set",
+    );
+    // (9) Rev-4 reconciliation clause: a discovery is Grade 2 unless it
+    // invalidates the arc's own conclusions (the eval-validity exception).
+    expect(prompt).toContain(
+      "rises to Grade 3 only when it invalidates the arc's own conclusions",
+    );
+    // (10) Corrective resend must name the id-bearing skip form; the bare
+    // no-id call is rejected by the real remember route.
+    expect(prompt).toContain("a `remember()` without an id is rejected");
+    expect(prompt).not.toContain('remember({status:"skipped"})');
+
     expect(capturedAllowedTools).toEqual([
       "mcp__mnemo__remember",
       "mcp__mnemo__recall",
@@ -778,6 +863,100 @@ describe("worker query session", () => {
     // Sanity: none of the default markers should leak through when overridden.
     expect(capturedSystemPrompt).not.toContain("long-lived memory worker");
     expect(capturedSystemPrompt).not.toContain("## Tools");
+
+    await session.close();
+  });
+
+  test("a streamed slice rides the same prompt stream and the same rubric system prompt", async () => {
+    let capturedSystemPrompt: string | undefined;
+    const seenPromptTexts: string[] = [];
+    const queryImpl = mock(
+      (args: {
+        prompt: AsyncIterable<{
+          session_id: string;
+          message: { content: Array<{ text: string }> };
+        }>;
+        options?: { systemPrompt?: string };
+      }) => {
+        capturedSystemPrompt = args.options?.systemPrompt;
+        return (async function* () {
+          let turn = 0;
+          for await (const message of args.prompt) {
+            turn += 1;
+            seenPromptTexts.push(
+              message.message.content.map((block) => block.text).join(""),
+            );
+            yield {
+              type: "result",
+              subtype: "success",
+              duration_ms: 10,
+              duration_api_ms: 10,
+              is_error: false,
+              num_turns: turn,
+              result: "",
+              total_cost_usd: 0,
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                server_tool_use: { web_search_requests: 0 },
+                service_tier: "standard",
+              },
+              modelUsage: {},
+              permission_denials: [],
+              uuid: `result-${turn}`,
+              session_id: "agent-session-1",
+            };
+          }
+        })();
+      },
+    );
+
+    const session = createWorkerQuerySession(
+      {
+        db,
+        sessionDbId,
+        contentSessionId: "content-session-1",
+        project: "/tmp/project",
+      },
+      {
+        queryImpl: queryImpl as never,
+        spawnImpl:
+          (mock(() => ({ pid: 1 })) as unknown) as typeof import("node:child_process").spawn,
+        mkdirSyncImpl: mock(() => undefined),
+        isProcessAliveImpl: () => false,
+      },
+    );
+
+    const ordinaryTurn = `<turn id="T6">\n  prompt: ship the fix\n</turn>`;
+    const slice = `<turn id="T7" slice="2">\n  prompt: keep going\n  <obs id="O3">ran the verifier</obs>\n</turn>\n<prior_turn id="T7">\n  title: prior title\n</prior_turn>`;
+
+    await session.sendPrompt(ordinaryTurn);
+    const result = await session.sendPrompt(slice);
+
+    // Both flows go through the one promptStream — a slice is not a separate
+    // query with its own (possibly stale) system prompt.
+    expect(result.session_id).toBe("agent-session-1");
+    expect(seenPromptTexts).toEqual([ordinaryTurn, slice]);
+    expect(queryImpl).toHaveBeenCalledTimes(1);
+
+    // …so the slice is graded against the same rubric package as a fresh turn.
+    const prompt = capturedSystemPrompt ?? "";
+    expect(prompt).toContain("grade: REQUIRED integer 0-4");
+    expect(prompt).toContain("Origin duty, arc-scoped");
+    expect(prompt).toContain("only the turn that LANDS the change is Grade 3");
+    expect(prompt).toContain(
+      "rises to Grade 3 only when it invalidates the arc's own conclusions",
+    );
+    expect(prompt).toContain("complete knowledge-answer delivery");
+    expect(prompt).toContain(
+      'relation: "builds-on" | "implements" | "supersedes" | "evidence-for"',
+    );
+    expect(prompt).toContain(
+      "`cites` is the exception to field-level merge: it is a replace-set",
+    );
+    expect(prompt).toContain("EVERY slice");
 
     await session.close();
   });
