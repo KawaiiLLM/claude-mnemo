@@ -31,6 +31,8 @@ const SCHEMA_SQL = `
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
+    scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
+    scan_cursor_line INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -69,6 +71,7 @@ const SCHEMA_SQL = `
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
     cites_recorded INTEGER NOT NULL DEFAULT 0,
+    compact_boundary_uuid TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -362,6 +365,8 @@ export function initializeSchema(db: Database): void {
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
+  ensureSessionScanCursorColumns(db);
+  ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -523,6 +528,43 @@ function ensureTurnCitationsSchema(db: Database): void {
       "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
     );
   }
+}
+
+// Spec §F capture repair. The incremental transcript scan resumes from a
+// persisted cursor = byte offset + last FULLY COMMITTED line number. Both halves
+// are needed: the byte offset makes the seek O(new bytes) instead of rescanning
+// (and bounds the read), while the line number keeps emitted `lineNumber`s
+// identical to the whole-file reader's 1-based split index so transcript_line_start
+// stays comparable across the two paths. Old rows land on 0/0 → first scan reads
+// from the top exactly once.
+function ensureSessionScanCursorColumns(db: Database): void {
+  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0",
+    );
+  }
+}
+
+// The compact-boundary UUID is the identity key that makes claiming idempotent:
+// re-scanning a transcript region cannot mint a second marker for a boundary that
+// already owns one. Scoped per session, NOT globally: a forked/resumed session
+// inherits the parent's transcript prefix verbatim, so the same boundary UUID
+// legitimately appears in two sessions and each needs its own marker.
+function ensureTurnCompactBoundarySchema(db: Database): void {
+  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
+    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
+  }
+
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+      ON turns(session_id, compact_boundary_uuid)
+      WHERE compact_boundary_uuid IS NOT NULL
+  `);
 }
 
 function ensureForkLineageColumns(db: Database): void {

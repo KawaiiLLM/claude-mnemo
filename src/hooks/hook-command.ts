@@ -17,7 +17,6 @@ import {
   createReadOnlyContextHandler,
   type ContextHandlerDependencies,
 } from "./handlers/context";
-import { createPostCompactHandler } from "./handlers/post-compact";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createMilestoneContextHandler } from "./handlers/context-milestones";
 import { createSessionEndHandler } from "./handlers/session-end";
@@ -104,7 +103,6 @@ export function createDefaultHookHandlers({
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
     PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
-    PostCompact: createPostCompactHandler({ db }),
     PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({ db, workerClientDeps, workerEnv }),
@@ -265,8 +263,6 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
       return "UserPromptSubmit";
     case "result-dispatch":
       return "PostToolUse";
-    case "post-compact":
-      return "PostCompact";
     case "compact":
       return "PreCompact";
     case "session-init":

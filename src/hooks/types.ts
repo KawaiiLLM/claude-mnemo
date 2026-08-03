@@ -1,7 +1,6 @@
 export type HookEventName =
   | "PreToolUse"
   | "PostToolUse"
-  | "PostCompact"
   | "SessionStart"
   | "SessionEnd"
   | "PreCompact"

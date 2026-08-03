@@ -446,16 +446,9 @@ function collectInterruptedPromptIds(entries) {
   }
   return interruptedPromptIds;
 }
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
+function parseTranscriptLineWindow(lines, firstLineNumber) {
   const entries = [];
-  rawTranscript.split("\n").forEach((line, index) => {
+  lines.forEach((line, index) => {
     const trimmedLine = line.trim();
     if (!trimmedLine) {
       return;
@@ -471,9 +464,12 @@ function readAllTranscriptEntries(transcriptPath) {
     }
     entries.push({
       ...entry,
-      lineNumber: index + 1
+      lineNumber: firstLineNumber + index
     });
   });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
   const uuidToIndex = /* @__PURE__ */ new Map();
   const deduped = [];
   for (const entry of entries) {
@@ -491,6 +487,18 @@ function readAllTranscriptEntries(transcriptPath) {
     deduped.push(entry);
   }
   return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
 }
 function mergeUsage(first, later) {
   if (!first && !later) {

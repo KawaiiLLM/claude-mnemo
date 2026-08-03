@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path15 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-msd7r6ci" : "dev";
+var BUILD_ID = true ? "0.8.3-msdc9lt4" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1439,6 +1439,8 @@ var SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
@@ -1476,6 +1478,8 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
@@ -1636,6 +1640,7 @@ var TURN_SELECT = `
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
     cites_recorded AS citesRecorded,
+    compact_boundary_uuid AS compactBoundaryUuid,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -1811,6 +1816,7 @@ function updateTurnById(db, turnId, input) {
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
             cites_recorded AS citesRecorded,
+            compact_boundary_uuid AS compactBoundaryUuid,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -1954,16 +1960,9 @@ function collectInterruptedPromptIds(entries) {
   }
   return interruptedPromptIds;
 }
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
+function parseTranscriptLineWindow(lines, firstLineNumber) {
   const entries = [];
-  rawTranscript.split("\n").forEach((line, index) => {
+  lines.forEach((line, index) => {
     const trimmedLine = line.trim();
     if (!trimmedLine) {
       return;
@@ -1979,9 +1978,12 @@ function readAllTranscriptEntries(transcriptPath) {
     }
     entries.push({
       ...entry,
-      lineNumber: index + 1
+      lineNumber: firstLineNumber + index
     });
   });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
   const uuidToIndex = /* @__PURE__ */ new Map();
   const deduped = [];
   for (const entry of entries) {
@@ -1999,6 +2001,18 @@ function readAllTranscriptEntries(transcriptPath) {
     deduped.push(entry);
   }
   return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs3.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs3.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
 }
 function mergeUsage(first, later) {
   if (!first && !later) {
@@ -2267,6 +2281,8 @@ var SCHEMA_SQL = `
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
+    scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
+    scan_cursor_line INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -2305,6 +2321,7 @@ var SCHEMA_SQL = `
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
     cites_recorded INTEGER NOT NULL DEFAULT 0,
+    compact_boundary_uuid TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -2597,6 +2614,8 @@ function initializeSchema(db) {
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
+  ensureSessionScanCursorColumns(db);
+  ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -2718,6 +2737,28 @@ function ensureTurnCitationsSchema(db) {
       "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureSessionScanCursorColumns(db) {
+  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+}
+function ensureTurnCompactBoundarySchema(db) {
+  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
+    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+      ON turns(session_id, compact_boundary_uuid)
+      WHERE compact_boundary_uuid IS NOT NULL
+  `);
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {

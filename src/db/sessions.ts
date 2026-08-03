@@ -21,6 +21,10 @@ export interface SessionRecord {
   lastCompactTurn: number | null;
   lastAgentSessionId: string | null;
   summaryUpdatedAtEpoch: number | null;
+  /** Byte offset of the first not-yet-scanned transcript byte (spec §F). */
+  scanCursorByteOffset: number;
+  /** 1-based number of the last fully committed transcript line scanned. */
+  scanCursorLine: number;
   parentSessionId: number | null;
   lineageStatus: string;
   createdAtEpoch: number;
@@ -63,6 +67,8 @@ const SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
@@ -117,6 +123,8 @@ export function upsertSession(
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
@@ -215,6 +223,8 @@ export function updateSessionSummaryRewrite(
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
@@ -297,6 +307,78 @@ export function updateCompactAnchor(db: Database, sessionId: number): void {
      )
      WHERE id = ?`,
   ).run(sessionId, sessionId);
+}
+
+function compareAndSetScanCursor(
+  db: Database,
+  sessionId: number,
+  byteOffset: number,
+  lineNumber: number,
+  observedByteOffset: number,
+): boolean {
+  const result = db
+    .query<unknown, [number, number, number, number]>(
+      `UPDATE sessions
+       SET scan_cursor_byte_offset = ?,
+           scan_cursor_line = ?
+       WHERE id = ?
+         AND scan_cursor_byte_offset = ?`,
+    )
+    .run(byteOffset, lineNumber, sessionId, observedByteOffset);
+
+  return result.changes > 0;
+}
+
+/**
+ * Advance the persisted transcript scan cursor (spec §F) by compare-and-set on
+ * the offset this scan actually observed.
+ *
+ * UserPromptSubmit and SessionEnd can scan concurrently. Without the CAS the
+ * loser commits its older result last and the high-water mark regresses, which
+ * re-reads the same region on every future event (claiming stays correct — it is
+ * UUID-idempotent — but the bounded-work guarantee is lost). With it, a writer
+ * whose observed cursor has already moved on simply no-ops; the winner's cursor
+ * stands. Returns false when that happened, so the caller can log rather than
+ * assume it advanced.
+ */
+export function updateSessionScanCursor(
+  db: Database,
+  sessionId: number,
+  byteOffset: number,
+  lineNumber: number,
+  observedByteOffset: number,
+): boolean {
+  return compareAndSetScanCursor(
+    db,
+    sessionId,
+    byteOffset,
+    lineNumber,
+    observedByteOffset,
+  );
+}
+
+/**
+ * Deliberately pull the cursor BACKWARDS (spec §F pending-boundary rewind, and
+ * the file-shrank restart). Separate from the advance path because a backwards
+ * write is otherwise indistinguishable from the stale write the CAS exists to
+ * reject; keeping it explicit means the guard never has to guess. Still
+ * CAS-guarded on the observed value: a rewind computed from a stale snapshot is
+ * exactly as wrong as a stale advance.
+ */
+export function rewindSessionScanCursor(
+  db: Database,
+  sessionId: number,
+  byteOffset: number,
+  lineNumber: number,
+  observedByteOffset: number,
+): boolean {
+  return compareAndSetScanCursor(
+    db,
+    sessionId,
+    byteOffset,
+    lineNumber,
+    observedByteOffset,
+  );
 }
 
 export function updateLastAgentSessionId(

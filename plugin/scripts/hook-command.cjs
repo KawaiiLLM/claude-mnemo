@@ -35,7 +35,7 @@ __export(hook_command_exports, {
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 var import_bun_sqlite2 = require("bun:sqlite");
 
 // src/shared/hook-constants.ts
@@ -352,6 +352,8 @@ var SCHEMA_SQL = `
     last_compact_turn INTEGER,
     last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
+    scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
+    scan_cursor_line INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     completed_at_epoch INTEGER
@@ -390,6 +392,7 @@ var SCHEMA_SQL = `
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
     cites_recorded INTEGER NOT NULL DEFAULT 0,
+    compact_boundary_uuid TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
     UNIQUE(session_id, prompt_number)
@@ -682,6 +685,8 @@ function initializeSchema(db) {
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
+  ensureSessionScanCursorColumns(db);
+  ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
   ensureForkLineageColumns(db);
   ensureSearchIndexSchema(db);
@@ -803,6 +808,28 @@ function ensureTurnCitationsSchema(db) {
       "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
     );
   }
+}
+function ensureSessionScanCursorColumns(db) {
+  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
+    db.exec(
+      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+}
+function ensureTurnCompactBoundarySchema(db) {
+  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
+    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
+      ON turns(session_id, compact_boundary_uuid)
+      WHERE compact_boundary_uuid IS NOT NULL
+  `);
 }
 function ensureForkLineageColumns(db) {
   if (!hasColumn(db, "turns", "parent_turn_id")) {
@@ -2150,7 +2177,6 @@ function resolveEventName(raw) {
   switch (eventName) {
     case "PreToolUse":
     case "PostToolUse":
-    case "PostCompact":
     case "SessionStart":
     case "SessionEnd":
     case "PreCompact":
@@ -2211,6 +2237,8 @@ var SESSION_SELECT = `
     last_compact_turn AS lastCompactTurn,
     last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+    scan_cursor_byte_offset AS scanCursorByteOffset,
+    scan_cursor_line AS scanCursorLine,
     parent_session_id AS parentSessionId,
     lineage_status AS lineageStatus,
     created_at_epoch AS createdAtEpoch,
@@ -2259,6 +2287,8 @@ function upsertSession(db, input) {
         last_compact_turn AS lastCompactTurn,
         last_agent_session_id AS lastAgentSessionId,
         summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+        scan_cursor_byte_offset AS scanCursorByteOffset,
+        scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
         lineage_status AS lineageStatus,
         created_at_epoch AS createdAtEpoch,
@@ -2304,6 +2334,34 @@ function getRecentSessions(db, options = {}) {
     `${SESSION_SELECT}${whereClause} ORDER BY created_at_epoch DESC LIMIT ?`
   ).all(...params, limit);
 }
+function compareAndSetScanCursor(db, sessionId, byteOffset, lineNumber, observedByteOffset) {
+  const result = db.query(
+    `UPDATE sessions
+       SET scan_cursor_byte_offset = ?,
+           scan_cursor_line = ?
+       WHERE id = ?
+         AND scan_cursor_byte_offset = ?`
+  ).run(byteOffset, lineNumber, sessionId, observedByteOffset);
+  return result.changes > 0;
+}
+function updateSessionScanCursor(db, sessionId, byteOffset, lineNumber, observedByteOffset) {
+  return compareAndSetScanCursor(
+    db,
+    sessionId,
+    byteOffset,
+    lineNumber,
+    observedByteOffset
+  );
+}
+function rewindSessionScanCursor(db, sessionId, byteOffset, lineNumber, observedByteOffset) {
+  return compareAndSetScanCursor(
+    db,
+    sessionId,
+    byteOffset,
+    lineNumber,
+    observedByteOffset
+  );
+}
 function setSessionParent(db, sessionId, parentSessionId) {
   db.query(
     `UPDATE sessions SET parent_session_id = ? WHERE id = ?`
@@ -2321,7 +2379,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.3-msd7r6ci" : "dev";
+var BUILD_ID = true ? "0.8.3-msdc9lt4" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3324,6 +3382,7 @@ var TURN_SELECT = `
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
     cites_recorded AS citesRecorded,
+    compact_boundary_uuid AS compactBoundaryUuid,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -3426,6 +3485,7 @@ function updateTurnById(db, turnId, input) {
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
             cites_recorded AS citesRecorded,
+            compact_boundary_uuid AS compactBoundaryUuid,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `
@@ -3517,6 +3577,12 @@ function setTurnParent(db, turnId, parentTurnId) {
 function getMaxPromptNumber(db, sessionId) {
   const row = db.query(
     "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
+  ).get(sessionId);
+  return row?.max ?? null;
+}
+function getMaxTurnId(db, sessionId) {
+  const row = db.query(
+    "SELECT MAX(id) AS max FROM turns WHERE session_id = ?"
   ).get(sessionId);
   return row?.max ?? null;
 }
@@ -19967,446 +20033,6 @@ function createContextHandler(dependencies, section = "sessions") {
   };
 }
 
-// src/shared/transcript-parser.ts
-var import_node_fs4 = require("node:fs");
-function normalizeAssistantText(text) {
-  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
-}
-function getContentBlocks(entry) {
-  return Array.isArray(entry.content) ? entry.content : [];
-}
-function getFirstTextContent(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
-  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
-}
-function extractUserPrompt(entry) {
-  if (typeof entry.content === "string") {
-    return entry.content.trim();
-  }
-  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-}
-function isCountedUserPrompt(entry) {
-  return entry.role === "user" && isRealUserPrompt(entry);
-}
-function isInterruptedUserMarker(entry) {
-  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
-}
-function isKnownSystemInjectedContent(content) {
-  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
-}
-function isRealUserPrompt(entry) {
-  const promptText = extractUserPrompt(entry);
-  if (entry.permissionMode) {
-    return true;
-  }
-  if (isKnownSystemInjectedContent(promptText)) {
-    return false;
-  }
-  return promptText !== "";
-}
-function extractAssistantParts(entry) {
-  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
-    name: block.name,
-    input: block.input
-  }));
-  const assistantText = normalizeAssistantText(
-    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
-  );
-  return { assistantText, toolCalls };
-}
-function stringifyToolResultContent(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((item) => {
-      if (typeof item === "string") {
-        return item;
-      }
-      if (item && typeof item === "object" && "text" in item) {
-        const text = item.text;
-        return typeof text === "string" ? text : JSON.stringify(item);
-      }
-      return JSON.stringify(item);
-    }).join("\n");
-  }
-  if (content === void 0) {
-    return "";
-  }
-  return JSON.stringify(content);
-}
-function isChainParticipant(entry) {
-  return entry.type !== "progress";
-}
-function collectInterruptedPromptIds(entries) {
-  const interruptedPromptIds = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    if (entry.promptId && isInterruptedUserMarker(entry)) {
-      interruptedPromptIds.add(entry.promptId);
-    }
-  }
-  return interruptedPromptIds;
-}
-function detectInterruptedPromptIdsInEntries(entries) {
-  return collectInterruptedPromptIds(entries);
-}
-function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
-    return [];
-  }
-  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-  const entries = [];
-  rawTranscript.split("\n").forEach((line, index) => {
-    const trimmedLine = line.trim();
-    if (!trimmedLine) {
-      return;
-    }
-    let entry;
-    try {
-      entry = normalizeEntry(JSON.parse(trimmedLine));
-    } catch {
-      return;
-    }
-    if (entry.isApiErrorMessage) {
-      return;
-    }
-    entries.push({
-      ...entry,
-      lineNumber: index + 1
-    });
-  });
-  const uuidToIndex = /* @__PURE__ */ new Map();
-  const deduped = [];
-  for (const entry of entries) {
-    if (entry.uuid) {
-      const existingIndex = uuidToIndex.get(entry.uuid);
-      if (existingIndex !== void 0) {
-        deduped[existingIndex] = mergeTranscriptEntries(
-          deduped[existingIndex],
-          entry
-        );
-        continue;
-      }
-      uuidToIndex.set(entry.uuid, deduped.length);
-    }
-    deduped.push(entry);
-  }
-  return deduped;
-}
-function mergeUsage(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    inputTokens: later?.inputTokens ?? first?.inputTokens,
-    outputTokens: later?.outputTokens ?? first?.outputTokens,
-    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
-    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
-  };
-}
-function mergeCompactMetadata(first, later) {
-  if (!first && !later) {
-    return void 0;
-  }
-  return {
-    trigger: later?.trigger ?? first?.trigger,
-    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
-    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
-  };
-}
-function mergeTranscriptEntries(first, later) {
-  return {
-    type: later.type ?? first.type,
-    subtype: later.subtype ?? first.subtype,
-    role: later.role ?? first.role,
-    content: later.content ?? first.content,
-    promptId: first.promptId ?? later.promptId,
-    permissionMode: later.permissionMode ?? first.permissionMode,
-    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
-    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
-    isSidechain: later.isSidechain ?? first.isSidechain,
-    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
-    uuid: first.uuid ?? later.uuid,
-    parentUuid: later.parentUuid ?? first.parentUuid,
-    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
-    timestamp: first.timestamp ?? later.timestamp,
-    usage: mergeUsage(first.usage, later.usage),
-    durationMs: later.durationMs ?? first.durationMs,
-    messageCount: later.messageCount ?? first.messageCount,
-    compactMetadata: mergeCompactMetadata(
-      first.compactMetadata,
-      later.compactMetadata
-    ),
-    lineNumber: first.lineNumber
-  };
-}
-function normalizeEntry(raw) {
-  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
-  return {
-    type: typeof raw.type === "string" ? raw.type : void 0,
-    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
-    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
-    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
-    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
-    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
-    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
-    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
-    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
-    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
-    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
-    // an earlier true flag only because mergeTranscriptEntries uses ??.
-    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
-    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
-    usage: message?.usage && typeof message.usage === "object" ? {
-      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
-      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
-      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
-      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
-    } : void 0,
-    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
-    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
-    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
-      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
-      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
-      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
-    } : void 0
-  };
-}
-function collectOrderedPromptIds(entries) {
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  entries.forEach((entry, index) => {
-    if (entry.promptId && !seen.has(entry.promptId)) {
-      seen.add(entry.promptId);
-      out.push({ promptId: entry.promptId, index });
-    }
-  });
-  return out;
-}
-function startsNewTurn(entry, currentPromptId) {
-  if (!isCountedUserPrompt(entry)) {
-    return false;
-  }
-  if (entry.promptId) {
-    return entry.promptId !== currentPromptId;
-  }
-  return extractUserPrompt(entry) !== "";
-}
-function parseReplayTranscript(transcriptPath, preloadedEntries) {
-  const turns = [];
-  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
-  const interruptedPromptIds = collectInterruptedPromptIds(entries);
-  let promptNumber = 0;
-  let currentTurn = null;
-  let currentPromptId = null;
-  for (const entry of entries) {
-    if (startsNewTurn(entry, currentPromptId)) {
-      const userPrompt = extractUserPrompt(entry);
-      promptNumber += 1;
-      currentPromptId = entry.promptId ?? null;
-      currentTurn = {
-        promptNumber,
-        promptId: entry.promptId ?? null,
-        transcriptLineStart: entry.lineNumber,
-        userPrompt,
-        assistantText: "",
-        toolCalls: [],
-        isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
-      };
-      turns.push(currentTurn);
-      continue;
-    }
-    if (entry.role === "user") {
-      if (!currentTurn) {
-        continue;
-      }
-      const unresolvedToolCalls = currentTurn.toolCalls.filter(
-        (toolCall) => toolCall.result === ""
-      );
-      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
-      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
-        unresolvedToolCalls[index].result = toolResults[index] ?? "";
-      }
-      continue;
-    }
-    if (entry.role !== "assistant" || !currentTurn) {
-      continue;
-    }
-    const { assistantText, toolCalls } = extractAssistantParts(entry);
-    if (assistantText) {
-      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
-
-${assistantText}` : assistantText;
-    }
-    currentTurn.toolCalls.push(
-      ...toolCalls.map((toolCall) => ({
-        ...toolCall,
-        result: ""
-      }))
-    );
-  }
-  return turns.map((turn) => ({
-    ...turn,
-    assistantText: normalizeAssistantText(turn.assistantText)
-  }));
-}
-function countUserPromptsInEntries(entries) {
-  const seenPromptIds = /* @__PURE__ */ new Set();
-  let count = 0;
-  for (const entry of entries) {
-    if (!isCountedUserPrompt(entry)) {
-      continue;
-    }
-    if (entry.promptId) {
-      if (seenPromptIds.has(entry.promptId)) {
-        continue;
-      }
-      seenPromptIds.add(entry.promptId);
-      count += 1;
-      continue;
-    }
-    if (extractUserPrompt(entry) !== "") {
-      count += 1;
-    }
-  }
-  return count;
-}
-
-// src/hooks/handlers/post-compact.ts
-function getRawContentText(content) {
-  if (typeof content === "string") {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return "";
-  }
-  return content.filter((block) => {
-    return Boolean(block) && typeof block === "object";
-  }).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
-}
-function findLatestCompactBoundary(entries) {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
-    const entry = entries[index];
-    if (entry?.type === "system" && entry.subtype === "compact_boundary" && entry.uuid) {
-      return {
-        uuid: entry.uuid,
-        index,
-        compactMetadata: entry.compactMetadata
-      };
-    }
-  }
-  return null;
-}
-function findSummaryWrapper(entries, boundary) {
-  const nextEntry = entries[boundary.index + 1];
-  if (!nextEntry || nextEntry.role !== "user" || nextEntry.parentUuid !== boundary.uuid || !nextEntry.promptId) {
-    return null;
-  }
-  const content = getRawContentText(nextEntry.content);
-  if (!content) {
-    return null;
-  }
-  return {
-    promptId: nextEntry.promptId,
-    lineNumber: nextEntry.lineNumber,
-    content
-  };
-}
-function resolvePreCompactTokens(input, boundary) {
-  const rawMetadata = input.raw.compact_metadata && typeof input.raw.compact_metadata === "object" ? input.raw.compact_metadata : null;
-  if (typeof rawMetadata?.preCompactTokenCount === "number") {
-    return rawMetadata.preCompactTokenCount;
-  }
-  if (typeof rawMetadata?.pre_tokens === "number") {
-    return rawMetadata.pre_tokens;
-  }
-  if (typeof boundary.compactMetadata?.preCompactTokenCount === "number") {
-    return boundary.compactMetadata.preCompactTokenCount;
-  }
-  if (typeof boundary.compactMetadata?.pre_tokens === "number") {
-    return boundary.compactMetadata.pre_tokens;
-  }
-  return null;
-}
-function resolveTrigger(input, boundary) {
-  if (input.trigger === "auto" || input.trigger === "manual") {
-    return input.trigger;
-  }
-  if (boundary.compactMetadata?.trigger === "auto" || boundary.compactMetadata?.trigger === "manual") {
-    return boundary.compactMetadata.trigger;
-  }
-  return "manual";
-}
-function createPostCompactHandler(dependencies) {
-  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
-  return async function handlePostCompactHook(input) {
-    if (!input.sessionId || !input.transcriptPath) {
-      return { continue: true };
-    }
-    const session = getSessionByContentId(dependencies.db, input.sessionId);
-    if (!session) {
-      return { continue: true };
-    }
-    const entries = readAllTranscriptEntries(input.transcriptPath);
-    const boundary = findLatestCompactBoundary(entries);
-    if (!boundary) {
-      return { continue: true };
-    }
-    const summaryWrapper = findSummaryWrapper(entries, boundary);
-    if (!summaryWrapper) {
-      return { continue: true };
-    }
-    const parsedTurns = parseReplayTranscript(input.transcriptPath, entries);
-    const promptNumber = parsedTurns.find((turn) => turn.promptId === summaryWrapper.promptId)?.promptNumber ?? null;
-    if (promptNumber === null) {
-      return { continue: true };
-    }
-    const preCompactTokens = resolvePreCompactTokens(input, boundary);
-    const trigger = resolveTrigger(input, boundary);
-    const tags = [
-      `compact:pre_tokens=${preCompactTokens ?? 0}`,
-      `compact:trigger=${trigger}`
-    ];
-    dependencies.db.query(
-      `INSERT OR IGNORE INTO turns (
-          session_id,
-          prompt_number,
-          content_prompt_id,
-          status,
-          title,
-          content,
-          type,
-          transcript_line_start,
-          tags,
-          files_read,
-          files_modified,
-          tool_call_count,
-          created_at_epoch
-        ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?, ?, ?, ?, 0, ?)`
-    ).run(
-      session.id,
-      promptNumber,
-      summaryWrapper.promptId,
-      "/compact",
-      summaryWrapper.content,
-      "compact",
-      summaryWrapper.lineNumber,
-      JSON.stringify(tags),
-      "[]",
-      "[]",
-      now()
-    );
-    return { continue: true };
-  };
-}
-
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -20789,14 +20415,882 @@ function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
   return processedCount;
 }
 
+// src/shared/transcript-parser.ts
+var import_node_fs4 = require("node:fs");
+function normalizeAssistantText(text) {
+  return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
+}
+function getContentBlocks(entry) {
+  return Array.isArray(entry.content) ? entry.content : [];
+}
+function getFirstTextContent(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  const textBlock = getContentBlocks(entry).find((block) => block.type === "text");
+  return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
+}
+function extractUserPrompt(entry) {
+  if (typeof entry.content === "string") {
+    return entry.content.trim();
+  }
+  return getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
+}
+function isCountedUserPrompt(entry) {
+  return entry.role === "user" && isRealUserPrompt(entry);
+}
+function isInterruptedUserMarker(entry) {
+  return entry.role === "user" && getFirstTextContent(entry).startsWith("[Request interrupted by user");
+}
+function isKnownSystemInjectedContent(content) {
+  return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+function isRealUserPrompt(entry) {
+  const promptText = extractUserPrompt(entry);
+  if (entry.permissionMode) {
+    return true;
+  }
+  if (isKnownSystemInjectedContent(promptText)) {
+    return false;
+  }
+  return promptText !== "";
+}
+function extractAssistantParts(entry) {
+  const toolCalls = getContentBlocks(entry).filter((block) => block.type === "tool_use" && typeof block.name === "string").map((block) => ({
+    name: block.name,
+    input: block.input
+  }));
+  const assistantText = normalizeAssistantText(
+    getContentBlocks(entry).filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n")
+  );
+  return { assistantText, toolCalls };
+}
+function stringifyToolResultContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (typeof item === "string") {
+        return item;
+      }
+      if (item && typeof item === "object" && "text" in item) {
+        const text = item.text;
+        return typeof text === "string" ? text : JSON.stringify(item);
+      }
+      return JSON.stringify(item);
+    }).join("\n");
+  }
+  if (content === void 0) {
+    return "";
+  }
+  return JSON.stringify(content);
+}
+function isChainParticipant(entry) {
+  return entry.type !== "progress";
+}
+function collectInterruptedPromptIds(entries) {
+  const interruptedPromptIds = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.promptId && isInterruptedUserMarker(entry)) {
+      interruptedPromptIds.add(entry.promptId);
+    }
+  }
+  return interruptedPromptIds;
+}
+function detectInterruptedPromptIdsInEntries(entries) {
+  return collectInterruptedPromptIds(entries);
+}
+function parseTranscriptLineWindow(lines, firstLineNumber) {
+  const entries = [];
+  lines.forEach((line, index) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) {
+      return;
+    }
+    let entry;
+    try {
+      entry = normalizeEntry(JSON.parse(trimmedLine));
+    } catch {
+      return;
+    }
+    if (entry.isApiErrorMessage) {
+      return;
+    }
+    entries.push({
+      ...entry,
+      lineNumber: firstLineNumber + index
+    });
+  });
+  return entries;
+}
+function dedupeTranscriptEntries(entries) {
+  const uuidToIndex = /* @__PURE__ */ new Map();
+  const deduped = [];
+  for (const entry of entries) {
+    if (entry.uuid) {
+      const existingIndex = uuidToIndex.get(entry.uuid);
+      if (existingIndex !== void 0) {
+        deduped[existingIndex] = mergeTranscriptEntries(
+          deduped[existingIndex],
+          entry
+        );
+        continue;
+      }
+      uuidToIndex.set(entry.uuid, deduped.length);
+    }
+    deduped.push(entry);
+  }
+  return deduped;
+}
+function readAllTranscriptEntries(transcriptPath) {
+  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
+    return [];
+  }
+  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1)
+  );
+}
+function mergeUsage(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    inputTokens: later?.inputTokens ?? first?.inputTokens,
+    outputTokens: later?.outputTokens ?? first?.outputTokens,
+    cacheReadTokens: later?.cacheReadTokens ?? first?.cacheReadTokens,
+    cacheCreationTokens: later?.cacheCreationTokens ?? first?.cacheCreationTokens
+  };
+}
+function mergeCompactMetadata(first, later) {
+  if (!first && !later) {
+    return void 0;
+  }
+  return {
+    trigger: later?.trigger ?? first?.trigger,
+    preCompactTokenCount: later?.preCompactTokenCount ?? first?.preCompactTokenCount,
+    pre_tokens: later?.pre_tokens ?? first?.pre_tokens
+  };
+}
+function mergeTranscriptEntries(first, later) {
+  return {
+    type: later.type ?? first.type,
+    subtype: later.subtype ?? first.subtype,
+    role: later.role ?? first.role,
+    content: later.content ?? first.content,
+    promptId: first.promptId ?? later.promptId,
+    permissionMode: later.permissionMode ?? first.permissionMode,
+    // These flags must stay undefined when absent. mergeTranscriptEntries relies on
+    // ?? so that a later partial snapshot cannot silently overwrite an earlier true.
+    isSidechain: later.isSidechain ?? first.isSidechain,
+    isApiErrorMessage: later.isApiErrorMessage ?? first.isApiErrorMessage,
+    uuid: first.uuid ?? later.uuid,
+    parentUuid: later.parentUuid ?? first.parentUuid,
+    logicalParentUuid: later.logicalParentUuid ?? first.logicalParentUuid,
+    timestamp: first.timestamp ?? later.timestamp,
+    usage: mergeUsage(first.usage, later.usage),
+    durationMs: later.durationMs ?? first.durationMs,
+    messageCount: later.messageCount ?? first.messageCount,
+    compactMetadata: mergeCompactMetadata(
+      first.compactMetadata,
+      later.compactMetadata
+    ),
+    lineNumber: first.lineNumber
+  };
+}
+function normalizeEntry(raw) {
+  const message = raw.message && typeof raw.message === "object" ? raw.message : void 0;
+  return {
+    type: typeof raw.type === "string" ? raw.type : void 0,
+    subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
+    role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
+    promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
+    uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
+    parentUuid: typeof raw.parentUuid === "string" ? raw.parentUuid : void 0,
+    logicalParentUuid: typeof raw.logicalParentUuid === "string" ? raw.logicalParentUuid : void 0,
+    timestamp: typeof raw.timestamp === "string" ? raw.timestamp : void 0,
+    permissionMode: typeof raw.permissionMode === "string" ? raw.permissionMode : void 0,
+    // Preserve "absent" as undefined rather than false. The last-wins merge keeps
+    // an earlier true flag only because mergeTranscriptEntries uses ??.
+    isSidechain: typeof raw.isSidechain === "boolean" ? raw.isSidechain : void 0,
+    isApiErrorMessage: typeof raw.isApiErrorMessage === "boolean" ? raw.isApiErrorMessage : void 0,
+    usage: message?.usage && typeof message.usage === "object" ? {
+      inputTokens: typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : void 0,
+      outputTokens: typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : void 0,
+      cacheReadTokens: typeof message.usage.cache_read_input_tokens === "number" ? message.usage.cache_read_input_tokens : void 0,
+      cacheCreationTokens: typeof message.usage.cache_creation_input_tokens === "number" ? message.usage.cache_creation_input_tokens : void 0
+    } : void 0,
+    durationMs: typeof raw.durationMs === "number" ? raw.durationMs : void 0,
+    messageCount: typeof raw.messageCount === "number" ? raw.messageCount : void 0,
+    compactMetadata: raw.compactMetadata && typeof raw.compactMetadata === "object" ? {
+      trigger: typeof raw.compactMetadata.trigger === "string" ? raw.compactMetadata.trigger : void 0,
+      preCompactTokenCount: typeof raw.compactMetadata.preCompactTokenCount === "number" ? raw.compactMetadata.preCompactTokenCount : void 0,
+      pre_tokens: typeof raw.compactMetadata.pre_tokens === "number" ? raw.compactMetadata.pre_tokens : void 0
+    } : void 0
+  };
+}
+function collectOrderedPromptIds(entries) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  entries.forEach((entry, index) => {
+    if (entry.promptId && !seen.has(entry.promptId)) {
+      seen.add(entry.promptId);
+      out.push({ promptId: entry.promptId, index });
+    }
+  });
+  return out;
+}
+function startsNewTurn(entry, currentPromptId) {
+  if (!isCountedUserPrompt(entry)) {
+    return false;
+  }
+  if (entry.promptId) {
+    return entry.promptId !== currentPromptId;
+  }
+  return extractUserPrompt(entry) !== "";
+}
+function parseReplayTranscript(transcriptPath, preloadedEntries) {
+  const turns = [];
+  const entries = preloadedEntries ?? readAllTranscriptEntries(transcriptPath);
+  const interruptedPromptIds = collectInterruptedPromptIds(entries);
+  let promptNumber = 0;
+  let currentTurn = null;
+  let currentPromptId = null;
+  for (const entry of entries) {
+    if (startsNewTurn(entry, currentPromptId)) {
+      const userPrompt = extractUserPrompt(entry);
+      promptNumber += 1;
+      currentPromptId = entry.promptId ?? null;
+      currentTurn = {
+        promptNumber,
+        promptId: entry.promptId ?? null,
+        transcriptLineStart: entry.lineNumber,
+        userPrompt,
+        assistantText: "",
+        toolCalls: [],
+        isSidechain: Boolean(entry.isSidechain),
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
+      };
+      turns.push(currentTurn);
+      continue;
+    }
+    if (entry.role === "user") {
+      if (!currentTurn) {
+        continue;
+      }
+      const unresolvedToolCalls = currentTurn.toolCalls.filter(
+        (toolCall) => toolCall.result === ""
+      );
+      const toolResults = getContentBlocks(entry).filter((block) => block.type === "tool_result").map((block) => stringifyToolResultContent(block.content));
+      for (let index = 0; index < unresolvedToolCalls.length; index += 1) {
+        unresolvedToolCalls[index].result = toolResults[index] ?? "";
+      }
+      continue;
+    }
+    if (entry.role !== "assistant" || !currentTurn) {
+      continue;
+    }
+    const { assistantText, toolCalls } = extractAssistantParts(entry);
+    if (assistantText) {
+      currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
+
+${assistantText}` : assistantText;
+    }
+    currentTurn.toolCalls.push(
+      ...toolCalls.map((toolCall) => ({
+        ...toolCall,
+        result: ""
+      }))
+    );
+  }
+  return turns.map((turn) => ({
+    ...turn,
+    assistantText: normalizeAssistantText(turn.assistantText)
+  }));
+}
+function countUserPromptsInEntries(entries) {
+  const seenPromptIds = /* @__PURE__ */ new Set();
+  let count = 0;
+  for (const entry of entries) {
+    if (!isCountedUserPrompt(entry)) {
+      continue;
+    }
+    if (entry.promptId) {
+      if (seenPromptIds.has(entry.promptId)) {
+        continue;
+      }
+      seenPromptIds.add(entry.promptId);
+      count += 1;
+      continue;
+    }
+    if (extractUserPrompt(entry) !== "") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// src/hooks/transcript-scan.ts
+var import_node_fs5 = require("node:fs");
+var DEFAULT_SCAN_MAX_LINES = 5e3;
+var DEFAULT_SCAN_MAX_BYTES = 5 * 1024 * 1024;
+var NEWLINE_BYTE = 10;
+function readRange(transcriptPath, start, length) {
+  if (length <= 0) {
+    return Buffer.alloc(0);
+  }
+  let fd = null;
+  try {
+    fd = (0, import_node_fs5.openSync)(transcriptPath, "r");
+    const buffer = Buffer.alloc(length);
+    const bytesRead = (0, import_node_fs5.readSync)(fd, buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      (0, import_node_fs5.closeSync)(fd);
+    }
+  }
+}
+function scanTranscriptIncrementally(transcriptPath, cursor, options = {}) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+    return null;
+  }
+  const maxLines = options.maxLines ?? DEFAULT_SCAN_MAX_LINES;
+  const maxBytes = options.maxBytes ?? DEFAULT_SCAN_MAX_BYTES;
+  let fileSize;
+  try {
+    fileSize = (0, import_node_fs5.statSync)(transcriptPath).size;
+  } catch {
+    return null;
+  }
+  const restarted = cursor.byteOffset > fileSize;
+  const startOffset = restarted ? 0 : Math.max(0, cursor.byteOffset);
+  const startLineNumber = restarted ? 0 : Math.max(0, cursor.lineNumber);
+  if (startOffset >= fileSize) {
+    return {
+      entries: [],
+      nextCursor: { byteOffset: startOffset, lineNumber: startLineNumber },
+      truncated: false,
+      restarted,
+      lineStartOffsets: [],
+      oversizedRecord: false
+    };
+  }
+  const remaining = fileSize - startOffset;
+  const buffer = readRange(
+    transcriptPath,
+    startOffset,
+    Math.min(remaining, maxBytes)
+  );
+  if (buffer === null) {
+    return null;
+  }
+  const oversizedRecord = !buffer.includes(NEWLINE_BYTE) && buffer.length < remaining;
+  if (oversizedRecord) {
+    options.log?.(
+      `transcript scan: record at byte ${startOffset} exceeds the ${maxBytes}-byte window cap; holding the cursor before it and deferring`
+    );
+  }
+  const newlineOffsets = [];
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === NEWLINE_BYTE) {
+      newlineOffsets.push(index);
+      if (newlineOffsets.length >= maxLines) {
+        break;
+      }
+    }
+  }
+  if (newlineOffsets.length === 0) {
+    return {
+      entries: [],
+      nextCursor: { byteOffset: startOffset, lineNumber: startLineNumber },
+      truncated: false,
+      restarted,
+      lineStartOffsets: [],
+      oversizedRecord
+    };
+  }
+  const lastNewline = newlineOffsets[newlineOffsets.length - 1];
+  const committedBytes = lastNewline + 1;
+  const committed = buffer.subarray(0, committedBytes).toString("utf8");
+  const lines = committed.split("\n");
+  lines.pop();
+  const lineStartOffsets = [];
+  let lineStart = 0;
+  for (const newlineOffset of newlineOffsets) {
+    lineStartOffsets.push(startOffset + lineStart);
+    lineStart = newlineOffset + 1;
+  }
+  const truncated = startOffset + buffer.length < fileSize || buffer.subarray(committedBytes).includes(NEWLINE_BYTE);
+  return {
+    entries: dedupeTranscriptEntries(
+      parseTranscriptLineWindow(lines, startLineNumber + 1)
+    ),
+    nextCursor: {
+      byteOffset: startOffset + committedBytes,
+      lineNumber: startLineNumber + lines.length
+    },
+    truncated,
+    restarted,
+    lineStartOffsets,
+    oversizedRecord
+  };
+}
+function rewindCursorToLine(result, windowFirstLineNumber, lineNumber) {
+  const index = lineNumber - windowFirstLineNumber;
+  const byteOffset = result.lineStartOffsets[index];
+  if (byteOffset === void 0) {
+    return result.nextCursor;
+  }
+  return { byteOffset, lineNumber: lineNumber - 1 };
+}
+
+// src/hooks/capture-repair.ts
+var defaultLog = (message) => {
+  process.stderr.write(`[claude-mnemo] ${message}
+`);
+};
+function rawContentText(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content.filter((block) => {
+    return Boolean(block) && typeof block === "object";
+  }).filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
+}
+function collectCompactBoundaryClaims(entries) {
+  const claims = [];
+  let pendingBoundaryLine = null;
+  entries.forEach((entry, index) => {
+    if (entry.type !== "system" || entry.subtype !== "compact_boundary" || !entry.uuid) {
+      return;
+    }
+    const wrapper = entries[index + 1];
+    if (!wrapper) {
+      pendingBoundaryLine = entry.lineNumber;
+      return;
+    }
+    if (wrapper.role !== "user" || wrapper.parentUuid !== entry.uuid || !wrapper.promptId) {
+      return;
+    }
+    const summary = rawContentText(wrapper.content);
+    if (!summary) {
+      return;
+    }
+    const metadata = entry.compactMetadata;
+    claims.push({
+      uuid: entry.uuid,
+      boundaryLineNumber: entry.lineNumber,
+      promptId: wrapper.promptId,
+      wrapperLineNumber: wrapper.lineNumber,
+      summary,
+      trigger: metadata?.trigger === "auto" ? "auto" : "manual",
+      preCompactTokenCount: typeof metadata?.preCompactTokenCount === "number" ? metadata.preCompactTokenCount : typeof metadata?.pre_tokens === "number" ? metadata.pre_tokens : null
+    });
+  });
+  return { claims, pendingBoundaryLine };
+}
+function compactMetadataTags(claim) {
+  return [
+    `compact:pre_tokens=${claim.preCompactTokenCount ?? 0}`,
+    `compact:trigger=${claim.trigger}`
+  ];
+}
+function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
+  db.query(
+    `UPDATE turns
+     SET type = 'compact',
+         status = 'extracted',
+         title = '/compact',
+         compact_boundary_uuid = ?,
+         updated_at_epoch = ?,
+         tags = ?,
+         cites_recorded = 1,
+         content = NULL,
+         insight = NULL,
+         significance_grade = NULL,
+         assistant_response = NULL,
+         assistant_transcript = NULL,
+         files_read = NULL,
+         files_modified = NULL,
+         tool_call_count = NULL,
+         was_interrupted = 0,
+         was_rolled_back = 0,
+         extraction_stall_attempts = 0,
+         extraction_stall_retry_at_ms = NULL,
+         extraction_stall_retry_after_seq = NULL,
+         extraction_stall_retry_mode = NULL
+     WHERE id = ?`
+  ).run(
+    claim.uuid,
+    nowEpoch,
+    JSON.stringify(compactMetadataTags(claim)),
+    turnId
+  );
+  db.query(
+    "DELETE FROM turn_citations WHERE citing_turn_id = ?"
+  ).run(turnId);
+  db.query(
+    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
+  ).run(turnId);
+  db.query(
+    `UPDATE observations SET status = 'skipped'
+     WHERE turn_id = ? AND status = 'pending'`
+  ).run(turnId);
+  db.query(
+    `DELETE FROM pending_queue
+     WHERE kind = 'obs' AND target_id IN (
+       SELECT id FROM observations WHERE turn_id = ?
+     )`
+  ).run(turnId);
+  db.query(
+    "DELETE FROM pending_queue WHERE kind = 'turn-stop' AND target_id = ?"
+  ).run(turnId);
+}
+function claimCompactBoundaries(db, sessionId, claims, nowEpoch, log) {
+  const outcome = {
+    inserted: 0,
+    converted: 0,
+    adopted: 0,
+    skipped: 0
+  };
+  for (const claim of claims) {
+    const alreadyClaimed = db.query(
+      `SELECT id FROM turns
+         WHERE session_id = ? AND compact_boundary_uuid = ? LIMIT 1`
+    ).get(sessionId, claim.uuid);
+    if (alreadyClaimed) {
+      outcome.skipped += 1;
+      continue;
+    }
+    const owner = db.query(
+      `SELECT id, type, compact_boundary_uuid AS compactBoundaryUuid
+         FROM turns
+         WHERE session_id = ? AND content_prompt_id = ? LIMIT 1`
+    ).get(sessionId, claim.promptId);
+    if (owner) {
+      if (owner.compactBoundaryUuid !== null) {
+        outcome.skipped += 1;
+        log(
+          `compact boundary ${claim.uuid}: promptId ${claim.promptId} already marks boundary ${owner.compactBoundaryUuid}; skipped`
+        );
+        continue;
+      }
+      if (owner.type === "compact") {
+        db.query(
+          `UPDATE turns SET compact_boundary_uuid = ?
+           WHERE id = ? AND compact_boundary_uuid IS NULL`
+        ).run(claim.uuid, owner.id);
+        outcome.adopted += 1;
+        continue;
+      }
+      convertOccupiedTurnToMarker(db, owner.id, claim, nowEpoch);
+      outcome.converted += 1;
+      log(
+        `compact boundary ${claim.uuid}: converted turn ${owner.id} that had claimed promptId ${claim.promptId}`
+      );
+      continue;
+    }
+    const maxPromptNumber = getMaxPromptNumber(db, sessionId) ?? 0;
+    const tags = compactMetadataTags(claim);
+    db.query(
+      `INSERT OR IGNORE INTO turns (
+         session_id,
+         prompt_number,
+         content_prompt_id,
+         status,
+         title,
+         content,
+         type,
+         transcript_line_start,
+         tags,
+         files_read,
+         files_modified,
+         tool_call_count,
+         compact_boundary_uuid,
+         created_at_epoch
+       ) VALUES (?, ?, ?, 'extracted', '/compact', ?, 'compact', ?, ?, '[]', '[]', 0, ?, ?)`
+    ).run(
+      sessionId,
+      maxPromptNumber + 1,
+      claim.promptId,
+      claim.summary,
+      claim.wrapperLineNumber,
+      JSON.stringify(tags),
+      claim.uuid,
+      nowEpoch
+    );
+    outcome.inserted += 1;
+  }
+  return outcome;
+}
+function collectLinkCandidates(entries) {
+  const candidates = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.role !== "user" || entry.isSidechain === true || !isChainParticipant(entry) || !entry.promptId || seen.has(entry.promptId) || isInterruptedUserMarker(entry) || !isRealUserPrompt(entry)) {
+      continue;
+    }
+    const text = extractUserPrompt(entry);
+    if (text === "") {
+      continue;
+    }
+    seen.add(entry.promptId);
+    candidates.push({
+      promptId: entry.promptId,
+      lineNumber: entry.lineNumber,
+      text
+    });
+  }
+  return candidates;
+}
+function reconcileTurnLinks(db, sessionId, entries, log) {
+  const outcome = { linked: 0, skipped: 0 };
+  const candidates = collectLinkCandidates(entries);
+  if (candidates.length === 0) {
+    return outcome;
+  }
+  const nullLinkTurns = db.query(
+    `SELECT
+         id,
+         prompt_number AS promptNumber,
+         user_prompt AS userPrompt,
+         content_prompt_id AS contentPromptId,
+         transcript_line_start AS transcriptLineStart
+       FROM turns
+       WHERE session_id = ?
+         AND (content_prompt_id IS NULL OR transcript_line_start IS NULL)
+       ORDER BY prompt_number ASC`
+  ).all(sessionId);
+  if (nullLinkTurns.length === 0) {
+    return outcome;
+  }
+  const ownedPromptIds = new Set(
+    db.query(
+      `SELECT content_prompt_id AS contentPromptId FROM turns
+         WHERE session_id = ? AND content_prompt_id IS NOT NULL`
+    ).all(sessionId).map((row) => row.contentPromptId)
+  );
+  const writeLink = db.query(
+    `UPDATE turns
+     SET content_prompt_id = COALESCE(content_prompt_id, ?),
+         transcript_line_start = COALESCE(transcript_line_start, ?)
+     WHERE id = ?`
+  );
+  const candidateByPromptId = new Map(
+    candidates.map((candidate) => [candidate.promptId, candidate])
+  );
+  const resolvedTurnIds = /* @__PURE__ */ new Set();
+  for (const turn of nullLinkTurns) {
+    if (turn.contentPromptId === null || turn.transcriptLineStart !== null) {
+      continue;
+    }
+    const candidate = candidateByPromptId.get(turn.contentPromptId);
+    if (!candidate) {
+      continue;
+    }
+    writeLink.run(null, candidate.lineNumber, turn.id);
+    resolvedTurnIds.add(turn.id);
+    outcome.linked += 1;
+  }
+  const unlinkedTurns = nullLinkTurns.filter(
+    (turn) => turn.contentPromptId === null && !resolvedTurnIds.has(turn.id)
+  );
+  if (unlinkedTurns.length === 0) {
+    return outcome;
+  }
+  const turnTextCounts = /* @__PURE__ */ new Map();
+  for (const turn of unlinkedTurns) {
+    if (turn.userPrompt === null) {
+      continue;
+    }
+    turnTextCounts.set(
+      turn.userPrompt,
+      (turnTextCounts.get(turn.userPrompt) ?? 0) + 1
+    );
+  }
+  const candidateTextCounts = /* @__PURE__ */ new Map();
+  for (const candidate of candidates) {
+    candidateTextCounts.set(
+      candidate.text,
+      (candidateTextCounts.get(candidate.text) ?? 0) + 1
+    );
+  }
+  const consumedTurnIds = /* @__PURE__ */ new Set();
+  let lastLinkedPromptNumber = -1;
+  for (const candidate of candidates) {
+    if (ownedPromptIds.has(candidate.promptId)) {
+      outcome.skipped += 1;
+      log(
+        `link reconcile: promptId ${candidate.promptId} (line ${candidate.lineNumber}) already owned by another turn; skipped`
+      );
+      continue;
+    }
+    const matches = unlinkedTurns.filter(
+      (turn2) => turn2.userPrompt === candidate.text && !consumedTurnIds.has(turn2.id)
+    );
+    if (matches.length === 0) {
+      continue;
+    }
+    if (matches.length > 1 || (turnTextCounts.get(candidate.text) ?? 0) > 1 || (candidateTextCounts.get(candidate.text) ?? 0) > 1) {
+      outcome.skipped += 1;
+      log(
+        `link reconcile: ambiguous prompt text for promptId ${candidate.promptId} (line ${candidate.lineNumber}); skipped`
+      );
+      continue;
+    }
+    const turn = matches[0];
+    if (turn.promptNumber <= lastLinkedPromptNumber) {
+      outcome.skipped += 1;
+      log(
+        `link reconcile: transcript order and prompt order disagree for turn ${turn.id} (T${turn.promptNumber}); skipped`
+      );
+      continue;
+    }
+    writeLink.run(
+      candidate.promptId,
+      turn.transcriptLineStart === null ? candidate.lineNumber : null,
+      turn.id
+    );
+    ownedPromptIds.add(candidate.promptId);
+    consumedTurnIds.add(turn.id);
+    lastLinkedPromptNumber = turn.promptNumber;
+    outcome.linked += 1;
+  }
+  return outcome;
+}
+function applyCaptureRepair(db, sessionId, scan, observedCursor, options) {
+  const log = options.log ?? defaultLog;
+  const windowFirstLineNumber = (scan.restarted ? 0 : observedCursor.lineNumber) + 1;
+  const { claims, pendingBoundaryLine } = collectCompactBoundaryClaims(
+    scan.entries
+  );
+  const compact = claimCompactBoundaries(
+    db,
+    sessionId,
+    claims,
+    options.nowEpoch,
+    log
+  );
+  const links = reconcileTurnLinks(db, sessionId, scan.entries, log);
+  const cursor = pendingBoundaryLine === null ? scan.nextCursor : rewindCursorToLine(scan, windowFirstLineNumber, pendingBoundaryLine);
+  const isRewind = pendingBoundaryLine !== null || scan.restarted;
+  const writeCursor = isRewind ? rewindSessionScanCursor : updateSessionScanCursor;
+  const committed = writeCursor(
+    db,
+    sessionId,
+    cursor.byteOffset,
+    cursor.lineNumber,
+    observedCursor.byteOffset
+  );
+  if (!committed) {
+    log(
+      `capture repair: scan cursor for session ${sessionId} moved under us (observed ${observedCursor.byteOffset}); dropped this window's cursor write`
+    );
+  }
+  return {
+    compact,
+    links,
+    scannedEntries: scan.entries.length,
+    truncated: scan.truncated,
+    cursor,
+    stoppedForDeadline: false
+  };
+}
+function mergeOutcomes(first, next) {
+  if (!first) {
+    return next;
+  }
+  return {
+    compact: {
+      inserted: first.compact.inserted + next.compact.inserted,
+      converted: first.compact.converted + next.compact.converted,
+      adopted: first.compact.adopted + next.compact.adopted,
+      skipped: first.compact.skipped + next.compact.skipped
+    },
+    links: {
+      linked: first.links.linked + next.links.linked,
+      skipped: first.links.skipped + next.links.skipped
+    },
+    scannedEntries: first.scannedEntries + next.scannedEntries,
+    truncated: next.truncated,
+    cursor: next.cursor,
+    stoppedForDeadline: next.stoppedForDeadline
+  };
+}
+function runCaptureRepair(db, session, transcriptPath, options) {
+  if (!transcriptPath) {
+    return null;
+  }
+  const log = options.log ?? defaultLog;
+  const nowMs = options.nowMs ?? Date.now;
+  const maxLines = options.maxLines ?? DEFAULT_SCAN_MAX_LINES;
+  const batchLines = Math.max(1, options.batchLines ?? maxLines);
+  let cursor = {
+    byteOffset: session.scanCursorByteOffset ?? 0,
+    lineNumber: session.scanCursorLine ?? 0
+  };
+  let remainingLines = maxLines;
+  let aggregate = null;
+  while (remainingLines > 0) {
+    if (options.deadlineMs !== void 0 && nowMs() >= options.deadlineMs) {
+      if (aggregate) {
+        aggregate.stoppedForDeadline = true;
+      }
+      return aggregate;
+    }
+    const scan = scanTranscriptIncrementally(transcriptPath, cursor, {
+      maxLines: Math.min(batchLines, remainingLines),
+      maxBytes: options.maxBytes,
+      log
+    });
+    if (!scan || scan.entries.length === 0 && scan.nextCursor.byteOffset === cursor.byteOffset && !scan.restarted) {
+      return aggregate;
+    }
+    const observedCursor = cursor;
+    const apply = () => applyCaptureRepair(db, session.id, scan, observedCursor, options);
+    const outcome = options.writeTransaction ? options.writeTransaction(db, apply) : apply();
+    aggregate = mergeOutcomes(aggregate, outcome);
+    remainingLines -= Math.max(
+      0,
+      outcome.cursor.lineNumber - (scan.restarted ? 0 : cursor.lineNumber)
+    );
+    if (outcome.cursor.byteOffset <= cursor.byteOffset && !scan.restarted) {
+      return aggregate;
+    }
+    cursor = outcome.cursor;
+    if (!scan.truncated) {
+      return aggregate;
+    }
+  }
+  return aggregate;
+}
+
 // src/hooks/handlers/session-end.ts
+var SESSION_END_SCAN_MAX_LINES = 500;
+var SESSION_END_REPAIR_BUDGET_MS = 400;
+var SESSION_END_SCAN_BATCH_LINES = 50;
+var SESSION_END_REPAIR_MIN_BUDGET_MS = 40;
 function createSessionEndHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const nowMs = dependencies.nowMs ?? Date.now;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const captureRepairRunner = dependencies.captureRepairRunner ?? runCaptureRepair;
   return async function handleSessionEndHook(input) {
     if (!input.sessionId) {
       return { continue: true };
     }
+    const repairDeadlineMs = nowMs() + SESSION_END_REPAIR_BUDGET_MS;
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
       return {
@@ -20813,8 +21307,65 @@ function createSessionEndHandler(dependencies) {
         }
       };
     }
-    if (hasNewTurnSinceSessionRunStart(dependencies.db, session.id)) {
-      const orphanTurns = getOrphanTurns(dependencies.db, session.id);
+    const hadNewTurnBeforeRepair = hasNewTurnSinceSessionRunStart(
+      dependencies.db,
+      session.id
+    );
+    const maxTurnIdSnapshot = getMaxTurnId(dependencies.db, session.id);
+    const transcriptPath = input.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
+    const repairLog = dependencies.captureRepairLog ?? ((message) => process.stderr.write(`[claude-mnemo] ${message}
+`));
+    const maxLines = dependencies.captureRepairMaxLines ?? SESSION_END_SCAN_MAX_LINES;
+    let repairTruncated = false;
+    let repairStoppedForDeadline = false;
+    const budgetBeforeRepairMs = repairDeadlineMs - nowMs();
+    if (budgetBeforeRepairMs < SESSION_END_REPAIR_MIN_BUDGET_MS) {
+      repairLog(
+        `session-end capture repair skipped for session ${session.id}: only ${budgetBeforeRepairMs}ms of the ${SESSION_END_REPAIR_BUDGET_MS}ms budget left; deferred to the next resume`
+      );
+    } else {
+      try {
+        const outcome = captureRepairRunner(
+          dependencies.db,
+          session,
+          transcriptPath,
+          {
+            nowEpoch: now(),
+            log: repairLog,
+            maxLines,
+            batchLines: dependencies.captureRepairBatchLines ?? SESSION_END_SCAN_BATCH_LINES,
+            deadlineMs: repairDeadlineMs,
+            nowMs,
+            writeTransaction: (db, work) => writeTransaction(db, work, {
+              // The busy-retry budget is the SAME wall clock, not a second
+              // one: a lock fight cannot push past the repair deadline.
+              budgetMs: Math.max(0, repairDeadlineMs - nowMs())
+            })
+          }
+        );
+        repairTruncated = outcome?.truncated ?? false;
+        repairStoppedForDeadline = outcome?.stoppedForDeadline ?? false;
+      } catch (error48) {
+        repairLog(
+          `session-end capture repair failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
+        );
+      }
+    }
+    if (repairStoppedForDeadline) {
+      repairLog(
+        `session-end capture repair hit its ${SESSION_END_REPAIR_BUDGET_MS}ms budget for session ${session.id}; remainder deferred to the next resume`
+      );
+    } else if (repairTruncated) {
+      repairLog(
+        `session-end capture repair hit its ${maxLines}-line budget for session ${session.id}; remainder deferred to the next resume`
+      );
+    }
+    if (hadNewTurnBeforeRepair && maxTurnIdSnapshot !== null) {
+      const orphanTurns = getOrphanTurns(
+        dependencies.db,
+        session.id,
+        maxTurnIdSnapshot + 1
+      );
       if (orphanTurns.length > 0) {
         writeTransaction(dependencies.db, () => {
           skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
@@ -21155,6 +21706,14 @@ function createSessionInitHandler(dependencies) {
     const invalidationSets = transcriptEntries ? computeInvalidationSets(transcriptEntries) : null;
     const parsedTurns = transcriptEntries ? parseReplayTranscript(input.transcriptPath ?? "", transcriptEntries) : null;
     const transcriptPromptCount = transcriptEntries ? countUserPromptsInEntries(transcriptEntries) : null;
+    const repairCursor = {
+      byteOffset: existingSession?.scanCursorByteOffset ?? 0,
+      lineNumber: existingSession?.scanCursorLine ?? 0
+    };
+    const repairScan = input.transcriptPath ? scanTranscriptIncrementally(input.transcriptPath, repairCursor, {
+      maxLines: dependencies.captureRepairMaxLines ?? DEFAULT_SCAN_MAX_LINES,
+      log: dependencies.captureRepairLog
+    }) : null;
     writeTransaction(dependencies.db, () => {
       const session = upsertSession(dependencies.db, {
         contentSessionId,
@@ -21179,6 +21738,12 @@ function createSessionInitHandler(dependencies) {
           parsedTurns,
           epoch
         );
+      }
+      if (repairScan && (repairScan.entries.length > 0 || repairScan.restarted || repairScan.nextCursor.byteOffset !== repairCursor.byteOffset)) {
+        applyCaptureRepair(dependencies.db, session.id, repairScan, repairCursor, {
+          nowEpoch: epoch,
+          log: dependencies.captureRepairLog
+        });
       }
       const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
       const promptNumber = dbMaxPromptNumber !== null ? dbMaxPromptNumber + 1 : transcriptPromptCount !== null ? transcriptPromptCount + 1 : 1;
@@ -21419,7 +21984,7 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
   const replayTurns = transcriptTurns ?? (transcriptPath ? parseReplayTranscript(transcriptPath) : []);
   const lastPendingPromptNumber = pendingTurns[pendingTurns.length - 1]?.promptNumber;
   for (const pendingTurn of pendingTurns) {
-    if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
+    if (pendingTurn.type === "compact" || pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
       continue;
     }
     const isLatestPendingTurn = pendingTurn.promptNumber === lastPendingPromptNumber;
@@ -21590,13 +22155,13 @@ function createStopHandler(dependencies) {
 }
 
 // src/rules/pretooluse-dispatcher.ts
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var import_node_crypto3 = require("node:crypto");
 var import_node_path13 = require("node:path");
 
 // src/rules/sidecar-protocol.ts
 var import_node_crypto2 = require("node:crypto");
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var import_node_path12 = require("node:path");
 var INPUT_SUMMARY_LIMIT = 200;
 var SIDECAR_LOCK_WAIT_MS = 5e3;
@@ -21614,7 +22179,7 @@ function summarizeToolInput(value) {
 function readLockOwner(path2) {
   try {
     const value = JSON.parse(
-      (0, import_node_fs5.readFileSync)(path2, "utf8")
+      (0, import_node_fs6.readFileSync)(path2, "utf8")
     );
     return Number.isInteger(value.pid) && value.pid > 0 && typeof value.token === "string" ? { pid: value.pid, token: value.token } : null;
   } catch {
@@ -21623,20 +22188,20 @@ function readLockOwner(path2) {
 }
 function withHitSidecarLock(dataRoot, operation, options = {}) {
   const path2 = resolveHitSidecarLockPath(dataRoot);
-  (0, import_node_fs5.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
+  (0, import_node_fs6.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
   const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new Error("waitMs must be a non-negative finite number");
   }
   const owner = { pid: process.pid, token: (0, import_node_crypto2.randomUUID)() };
   const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
-  (0, import_node_fs5.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
+  (0, import_node_fs6.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
   const deadline = performance.now() + waitMs;
   let acquired = false;
   try {
     while (performance.now() <= deadline) {
       try {
-        (0, import_node_fs5.linkSync)(temporary, path2);
+        (0, import_node_fs6.linkSync)(temporary, path2);
         acquired = true;
         break;
       } catch (error48) {
@@ -21650,13 +22215,13 @@ function withHitSidecarLock(dataRoot, operation, options = {}) {
     return operation();
   } finally {
     try {
-      (0, import_node_fs5.unlinkSync)(temporary);
+      (0, import_node_fs6.unlinkSync)(temporary);
     } catch (error48) {
       if (!isErrorCode(error48, "ENOENT")) throw error48;
     }
     if (acquired && readLockOwner(path2)?.token === owner.token) {
       try {
-        (0, import_node_fs5.unlinkSync)(path2);
+        (0, import_node_fs6.unlinkSync)(path2);
       } catch (error48) {
         if (!isErrorCode(error48, "ENOENT")) throw error48;
       }
@@ -21692,7 +22257,7 @@ function sessionStatePath(dataRoot, sessionId) {
 function readIndex(dataRoot) {
   try {
     return triggerIndexSchema.parse(
-      JSON.parse((0, import_node_fs6.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
+      JSON.parse((0, import_node_fs7.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
     );
   } catch {
     return void 0;
@@ -21701,7 +22266,7 @@ function readIndex(dataRoot) {
 function readState(dataRoot, sessionId) {
   try {
     const parsed = JSON.parse(
-      (0, import_node_fs6.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
+      (0, import_node_fs7.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
     );
     if (parsed.version !== 1 || !Array.isArray(parsed.rule_ids)) return /* @__PURE__ */ new Set();
     return new Set(
@@ -21715,9 +22280,9 @@ function readState(dataRoot, sessionId) {
 }
 function writeState(dataRoot, sessionId, ruleIds) {
   const path2 = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
   const temporary = `${path2}.${process.pid}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
-  (0, import_node_fs6.writeFileSync)(
+  (0, import_node_fs7.writeFileSync)(
     temporary,
     `${JSON.stringify({
       version: 1,
@@ -21726,19 +22291,19 @@ function writeState(dataRoot, sessionId, ruleIds) {
 `,
     { mode: 384 }
   );
-  (0, import_node_fs6.renameSync)(temporary, path2);
+  (0, import_node_fs7.renameSync)(temporary, path2);
 }
 function acquireSessionLock(dataRoot, sessionId) {
   const statePath = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
   const path2 = `${statePath}.lock`;
   const deadline = performance.now() + SESSION_LOCK_WAIT_MS;
   while (performance.now() <= deadline) {
     try {
       return {
-        descriptor: (0, import_node_fs6.openSync)(
+        descriptor: (0, import_node_fs7.openSync)(
           path2,
-          import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_EXCL | import_node_fs6.constants.O_WRONLY,
+          import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_EXCL | import_node_fs7.constants.O_WRONLY,
           384
         ),
         path: path2
@@ -21748,8 +22313,8 @@ function acquireSessionLock(dataRoot, sessionId) {
         throw error48;
       }
       try {
-        if (Date.now() - (0, import_node_fs6.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
-          (0, import_node_fs6.unlinkSync)(path2);
+        if (Date.now() - (0, import_node_fs7.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
+          (0, import_node_fs7.unlinkSync)(path2);
           continue;
         }
       } catch {
@@ -21761,27 +22326,27 @@ function acquireSessionLock(dataRoot, sessionId) {
   return void 0;
 }
 function releaseSessionLock(lock) {
-  (0, import_node_fs6.closeSync)(lock.descriptor);
+  (0, import_node_fs7.closeSync)(lock.descriptor);
   try {
-    (0, import_node_fs6.unlinkSync)(lock.path);
+    (0, import_node_fs7.unlinkSync)(lock.path);
   } catch {
   }
 }
 function appendHits(path2, hits) {
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
-  const descriptor = (0, import_node_fs6.openSync)(
+  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  const descriptor = (0, import_node_fs7.openSync)(
     path2,
-    import_node_fs6.constants.O_APPEND | import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_WRONLY,
+    import_node_fs7.constants.O_APPEND | import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_WRONLY,
     384
   );
   try {
-    (0, import_node_fs6.writeFileSync)(
+    (0, import_node_fs7.writeFileSync)(
       descriptor,
       `${hits.map((hit) => JSON.stringify(hit)).join("\n")}
 `
     );
   } finally {
-    (0, import_node_fs6.closeSync)(descriptor);
+    (0, import_node_fs7.closeSync)(descriptor);
   }
 }
 function hasOwnParameter(input, parameter) {
@@ -22008,7 +22573,6 @@ function createDefaultHookHandlers({
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
     PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
-    PostCompact: createPostCompactHandler({ db }),
     PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({ db, workerClientDeps, workerEnv })
@@ -22038,7 +22602,7 @@ function getDefaultRecentContextHandler() {
     return defaultRecentContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs7.existsSync)(databasePath)) {
+  if (!(0, import_node_fs8.existsSync)(databasePath)) {
     defaultRecentContextHandler = async () => ({ continue: true });
     return defaultRecentContextHandler;
   }
@@ -22057,7 +22621,7 @@ function getDefaultMilestoneContextHandler() {
     return defaultMilestoneContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs7.existsSync)(databasePath)) {
+  if (!(0, import_node_fs8.existsSync)(databasePath)) {
     defaultMilestoneContextHandler = async () => ({ continue: true });
     return defaultMilestoneContextHandler;
   }
@@ -22073,7 +22637,7 @@ function getDefaultDigestContextHandler() {
     return defaultDigestContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs7.existsSync)(databasePath)) {
+  if (!(0, import_node_fs8.existsSync)(databasePath)) {
     defaultDigestContextHandler = async () => ({ continue: true });
     return defaultDigestContextHandler;
   }
@@ -22127,7 +22691,7 @@ function getDefaultHandler(handlerKey) {
   return getDefaultHandlers()[handlerKey];
 }
 function readJsonFromStdin() {
-  const input = (0, import_node_fs7.readFileSync)(0, "utf8").trim();
+  const input = (0, import_node_fs8.readFileSync)(0, "utf8").trim();
   if (input === "") {
     return {};
   }
@@ -22147,8 +22711,6 @@ function eventNameFromCommandArgument(arg) {
       return "UserPromptSubmit";
     case "result-dispatch":
       return "PostToolUse";
-    case "post-compact":
-      return "PostCompact";
     case "compact":
       return "PreCompact";
     case "session-init":

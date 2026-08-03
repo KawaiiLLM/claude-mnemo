@@ -14,6 +14,18 @@ describe("normalizeClaudeCodeHookInput", () => {
     expect(normalized.sessionId).toBe("session-end-1");
   });
 
+  test("rejects a PostCompact payload", () => {
+    // The event is no longer part of the supported matrix; normalization must
+    // reject it rather than fall through to a handler lookup.
+    expect(() =>
+      normalizeClaudeCodeHookInput({
+        hook_event_name: "PostCompact",
+        session_id: "post-compact-1",
+        cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      }),
+    ).toThrow("Unsupported Claude Code hook event: PostCompact");
+  });
+
   test("normalizes child-agent identity while preserving the raw payload", () => {
     const raw = {
       hook_event_name: "PostToolUse",

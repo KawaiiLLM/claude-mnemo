@@ -114,7 +114,7 @@ function getFirstTextContent(entry: TranscriptEntry): string {
   return typeof textBlock?.text === "string" ? textBlock.text.trim() : "";
 }
 
-function extractUserPrompt(entry: TranscriptEntry): string {
+export function extractUserPrompt(entry: TranscriptEntry): string {
   if (typeof entry.content === "string") {
     return entry.content.trim();
   }
@@ -148,7 +148,14 @@ function isKnownSystemInjectedContent(content: string): boolean {
   );
 }
 
-function isRealUserPrompt(entry: TranscriptEntry): boolean {
+/**
+ * A user entry that represents an actual human prompt rather than a harness
+ * injection (task-notification / local-command / slash-command envelopes).
+ * Exported because the capture-repair link reconciler must use the SAME filter
+ * as prompt counting — a divergence there would pair a turn against an injected
+ * entry and write a wrong promptId link.
+ */
+export function isRealUserPrompt(entry: TranscriptEntry): boolean {
   const promptText = extractUserPrompt(entry);
 
   if (entry.permissionMode) {
@@ -270,22 +277,19 @@ export function detectInterruptedPromptIds(transcriptPath: string): Set<string> 
   );
 }
 
-export function readAllTranscriptEntries(
-  transcriptPath: string,
+/**
+ * Parse a contiguous window of raw JSONL lines. `firstLineNumber` is the 1-based
+ * whole-file line number of `lines[0]`, so a window parsed from a byte cursor
+ * emits exactly the same `lineNumber` values the whole-file reader would.
+ * Unparseable and api-error lines are dropped (they still consume a number).
+ */
+export function parseTranscriptLineWindow(
+  lines: string[],
+  firstLineNumber: number,
 ): TranscriptEntryWithLineNumber[] {
-  if (!existsSync(transcriptPath)) {
-    return [];
-  }
-
-  const rawTranscript = readFileSync(transcriptPath, "utf8");
-
-  if (rawTranscript.trim() === "") {
-    return [];
-  }
-
   const entries: TranscriptEntryWithLineNumber[] = [];
 
-  rawTranscript.split("\n").forEach((line, index) => {
+  lines.forEach((line, index) => {
     const trimmedLine = line.trim();
 
     if (!trimmedLine) {
@@ -305,10 +309,17 @@ export function readAllTranscriptEntries(
 
     entries.push({
       ...entry,
-      lineNumber: index + 1,
+      lineNumber: firstLineNumber + index,
     });
   });
 
+  return entries;
+}
+
+/** Collapse repeated uuids (streaming re-emits) into one merged entry. */
+export function dedupeTranscriptEntries(
+  entries: TranscriptEntryWithLineNumber[],
+): TranscriptEntryWithLineNumber[] {
   const uuidToIndex = new Map<string, number>();
   const deduped: TranscriptEntryWithLineNumber[] = [];
 
@@ -329,6 +340,24 @@ export function readAllTranscriptEntries(
   }
 
   return deduped;
+}
+
+export function readAllTranscriptEntries(
+  transcriptPath: string,
+): TranscriptEntryWithLineNumber[] {
+  if (!existsSync(transcriptPath)) {
+    return [];
+  }
+
+  const rawTranscript = readFileSync(transcriptPath, "utf8");
+
+  if (rawTranscript.trim() === "") {
+    return [];
+  }
+
+  return dedupeTranscriptEntries(
+    parseTranscriptLineWindow(rawTranscript.split("\n"), 1),
+  );
 }
 
 function mergeUsage(

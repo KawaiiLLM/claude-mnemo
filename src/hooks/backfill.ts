@@ -25,7 +25,17 @@ export function backfillFromTranscript(
     pendingTurns[pendingTurns.length - 1]?.promptNumber;
 
   for (const pendingTurn of pendingTurns) {
-    if (pendingTurn.assistantResponse || !pendingTurn.userPrompt) {
+    // A compact marker is immutable once claimed (spec §F). It normally has no
+    // user_prompt and so falls out here anyway — but the occupied-promptId
+    // CONVERSION deliberately preserves user_prompt while clearing
+    // assistant_response, which is exactly this predicate's "backfillable"
+    // shape. Without the type guard the next Stop would write a derived
+    // response and tool count back onto the marker.
+    if (
+      pendingTurn.type === "compact" ||
+      pendingTurn.assistantResponse ||
+      !pendingTurn.userPrompt
+    ) {
       continue;
     }
 

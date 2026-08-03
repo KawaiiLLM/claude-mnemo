@@ -45,6 +45,12 @@ export interface TurnRecord {
    * false ⇒ fall back to parsing inline `[T<n>]` out of `content`.
    */
   citesRecorded: boolean;
+  /**
+   * Identity key of the `compact_boundary` transcript entry this marker turn
+   * claims (spec §F). NULL on every ordinary turn; unique per session, which is
+   * what makes boundary claiming idempotent across re-scans.
+   */
+  compactBoundaryUuid: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -76,6 +82,7 @@ interface TurnRow {
   toolCallCount: number | null;
   parentTurnId: number | null;
   citesRecorded: number;
+  compactBoundaryUuid: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number | null;
 }
@@ -108,6 +115,7 @@ const TURN_SELECT = `
     tool_call_count AS toolCallCount,
     parent_turn_id AS parentTurnId,
     cites_recorded AS citesRecorded,
+    compact_boundary_uuid AS compactBoundaryUuid,
     created_at_epoch AS createdAtEpoch,
     updated_at_epoch AS updatedAtEpoch
   FROM turns
@@ -395,6 +403,7 @@ export function updateTurnById(
             tool_call_count AS toolCallCount,
             parent_turn_id AS parentTurnId,
             cites_recorded AS citesRecorded,
+            compact_boundary_uuid AS compactBoundaryUuid,
             created_at_epoch AS createdAtEpoch,
             updated_at_epoch AS updatedAtEpoch
         `,
@@ -542,6 +551,22 @@ export function getMaxPromptNumber(
   const row = db
     .query<{ max: number | null }, [number]>(
       "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?",
+    )
+    .get(sessionId);
+
+  return row?.max ?? null;
+}
+
+/**
+ * Highest turn id in the session right now. SessionEnd snapshots it alongside
+ * the activity gate so its later orphan pass is fenced to turns that already
+ * existed — anything a concurrent UserPromptSubmit (or the repair itself)
+ * inserts afterwards gets a larger id and is out of scope by construction.
+ */
+export function getMaxTurnId(db: Database, sessionId: number): number | null {
+  const row = db
+    .query<{ max: number | null }, [number]>(
+      "SELECT MAX(id) AS max FROM turns WHERE session_id = ?",
     )
     .get(sessionId);
 
