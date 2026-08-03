@@ -1,5 +1,7 @@
 # 05 — 提取提示词与校准包
 
+**Status: done** — 见 feat(rubric) 提交（含 codex 审查轮 1 blocker＋2 minor 修复；门禁 1325/0；prompt 增量 ~1.1K token 经审查判为相称）。给 06 的 seam：`summarizeGradeWindow`→`renderSignificanceCalibration(window,label)`＋`exceedsG3EvidenceGate`（纯函数，结算自带 label 调用，别走带 %10 cadence 的 `buildTurnSignificanceCalibration`）；分母=全部行（含 skipped/ungraded），06 的冻结 cohort 必须同口径否则 15% 门在不同点触发；<30 窗口整个门失效（含结算窗，若不想要此行为需显式改）。
+
 **What to build:** 提取端的评分与写作纪律升级：rubric 六条修法（链条规则；G4 弧作用域起源义务——暂定、结算按弧规模确认；worked example；发布/派发反例与 eval-validity 正例；skip 不得只看工具数且 skipped turn 须给最小标题；等级落终稿不落草稿）；title=结论 ~10 token / desc=过程与证据 ~50 token、互不重复；强制引用类（supersedes/implements/紧邻允许）写入结构化 cites；校准块改造为 actual-vs-target（G4/G3/G2 ≈ 2/10/25、分母含 skipped 与 ungraded、样本 <30 不出百分比、G3 >15% 触发指名工件 before→after 举证门、删除密度警报）。完成后 fixture 提取产出新风格字段、cites 与暂定等级，校准块渲染可断言。
 
 **Blocked by:** 01 — cites 引用基础设施。
