@@ -129,6 +129,11 @@ describe("release artifacts", () => {
     const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
     expect(hookCommand).toContain("renderPersonaDocumentInjection");
     expect(hookCommand).toContain("pre-tool-dispatch");
+    // The SessionStart milestones section is the unified renderer's budget
+    // fitter now, not the old four-stage cap ladder; a stale bundle would still
+    // carry the ladder and re-render the whole view once per candidate count.
+    expect(hookCommand).toContain("fitMilestoneBodyToBudget");
+    expect(hookCommand).not.toContain("REDUCED_PROMPT_CAP");
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [
@@ -170,7 +175,10 @@ describe("release artifacts", () => {
       // incremental body model: memoized unit fits + running token weight, so a
       // long session's budget search is linear rather than quadratic
       "createMilestoneBodyModel",
-      "orphanPrompts", // `+N more` conservation for a day with no rendered rows
+      // Day frames degrade with the units: a day that loses its last row folds
+      // into a collapsed run, and consecutive collapsed days cost one line.
+      "collapseState",
+      "noteHidden", // `+N more` conservation for a day with no rendered rows
       // esbuild writes the bundle ASCII-escaped, so the CJK render literals are
       // matched in their escaped form: `前件` (↳ fold counter past the
       // 4-antecedent cap) and `被T` (🚫 back-link on a superseded ↳ row).

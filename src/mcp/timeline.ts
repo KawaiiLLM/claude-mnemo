@@ -322,6 +322,12 @@ export interface OverflowHint {
   count: number;
   firstPrompt: number;
   lastPrompt: number;
+  /**
+   * Epoch of the day's first hidden turn. A day whose turns were ALL hidden owns
+   * no kept row to take a label epoch from, and it still has to render its count
+   * — so the hint carries its own anchor for the weekday format.
+   */
+  labelEpoch: number;
 }
 
 export interface MilestoneSelection {
@@ -1585,6 +1591,7 @@ export function selectMilestoneTurns(view: {
       count: byPrompt.length,
       firstPrompt: byPrompt[0]!.promptNumber,
       lastPrompt: byPrompt[byPrompt.length - 1]!.promptNumber,
+      labelEpoch: byPrompt[0]!.createdAtEpoch,
     });
   }
 
@@ -1941,6 +1948,42 @@ function buildMilestoneDayGroups(
       groups.push(group);
     }
     group.rows.push(m);
+  }
+
+  // A calendar day inside the page's span whose every candidate turn was hidden
+  // owns no kept row, so the loop above gives it no group — and without one its
+  // `+N` has nowhere to render and the turns vanish from the ledger. Materialize
+  // it as a row-less group; the body model collapses it like any other zero-row
+  // day. Bounded to the page's own date span on purpose: days outside it belong
+  // to another page, and dumping the whole session's day inventory onto every
+  // page is what `hasEarlier` already answers.
+  if (groups.length > 0) {
+    const spanFrom = groups[0]!.date;
+    const spanTo = groups[groups.length - 1]!.date;
+    const groupedDates = new Set(groups.map((group) => group.date));
+    let materialized = false;
+    for (const hint of overflowByDay) {
+      if (groupedDates.has(hint.date) || hint.date < spanFrom || hint.date > spanTo) {
+        continue;
+      }
+      groups.push({
+        date: hint.date,
+        labelEpoch: hint.labelEpoch,
+        promptLo: hint.firstPrompt,
+        promptHi: hint.lastPrompt,
+        keptCount: 0,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null,
+      });
+      materialized = true;
+    }
+    if (materialized) {
+      // Stable sort: the row-bearing groups are already chronological, so only
+      // the materialized days move into their place in the day sequence.
+      groups.sort((left, right) => left.labelEpoch - right.labelEpoch);
+    }
   }
 
   // continued = this page-slice does not start at the day's overall-first kept milestone;
@@ -2311,17 +2354,19 @@ function largestFittingTokens(
  *
  *   ① truncate the desc (drop it outright if trimming cannot fit)
  *   ② fold `↳` rows into `+N 前件` until it fits
- *   ③ token-truncate the title lines, `↳` titles before the spine title
- *   ④ token-truncate the user-prompt prefix — the one step where the title is
- *      protected ahead of the prefix
- *   ⑤ drop the `✏️` files tail
- *   ⑥ (in `renderUnitFitted`) clamp the head line itself
+ *   ③ drop the `✏️` files tail
+ *   ④ token-truncate the surviving `↳` titles
+ *   ⑤ token-truncate the spine title
+ *   ⑥ token-truncate the user-prompt prefix
+ *   → (in `renderUnitFitted`) clamp the head line itself
  *
- * `titleCap` is a character ceiling; ③-④ are what make the token cap a ceiling
- * that a wall of Han characters cannot breach. ⑤ exists because a single
- * pathological basename can outweigh everything the row is actually about; the
- * files are a pointer and one `recall` away, so they go before the head line is
- * cut. ⑥ is the backstop for a row whose fixed scaffolding alone would overrun.
+ * Decorative elements are sacrificed before load-bearing text, which is why ③
+ * sits above the title steps: the file list is a pointer one `recall` away, its
+ * basenames are uncapped in length, and a single pathological generated name can
+ * outweigh everything the row is actually about. `titleCap` is a character
+ * ceiling; ④-⑥ are what make the token cap a ceiling that a wall of Han
+ * characters cannot breach, and the final clamp is the backstop for a row whose
+ * fixed scaffolding alone would overrun.
  */
 function fitUnitTrim(
   unit: MilestoneRenderUnit,
@@ -2358,7 +2403,14 @@ function fitUnitTrim(
     return trim;
   }
 
-  // ③ token-truncate the title lines: surviving ↳ titles first, then the spine's.
+  // ③ drop the `✏️` files tail: decoration goes before any load-bearing text is
+  // cut, so a pathological basename can never cost the row its title.
+  trim.showFiles = false;
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
+
+  // ④ token-truncate the surviving ↳ titles, ⑤ then the spine's.
   if (trim.pulledShown > 0) {
     largestFittingTokens(unit, trim, titleCap, cap, (value) => {
       trim.pulledTitleTokens = value;
@@ -2373,16 +2425,10 @@ function fitUnitTrim(
   if (unitTokens(unit, trim, titleCap) <= cap) {
     return trim;
   }
-  // ④ token-truncate the user-prompt prefix.
+  // ⑥ token-truncate the user-prompt prefix.
   largestFittingTokens(unit, trim, titleCap, cap, (value) => {
     trim.promptTokens = value;
   });
-  if (unitTokens(unit, trim, titleCap) <= cap) {
-    return trim;
-  }
-  // ⑤ drop the `✏️` files tail: a pathological basename is worth less than the
-  // title and prefix it would otherwise push into the head-line clamp.
-  trim.showFiles = false;
   return trim;
 }
 
@@ -2448,6 +2494,9 @@ function tokensFromWeightTenths(tenths: number): number {
  * budget removes every citer that was hosting it, the antecedent renders
  * nowhere, and with only paged-row day groups to iterate there would be no
  * bucket left to count it in — the turn would silently vanish from the ledger.
+ * (The other row-less case — a day whose every candidate turn was hidden —
+ * arrives already materialized as a row-less group from
+ * `buildMilestoneDayGroups`, which is where the base overflow count lives.)
  */
 interface MilestoneBodySection {
   date: string;
@@ -2458,16 +2507,49 @@ interface MilestoneBodySection {
 
 interface MilestoneSectionState {
   section: MilestoneBodySection;
+  /** Position in `orderedStates`. A collapsed run is a contiguous index span. */
+  index: number;
   /** Rows still rendered, in page order. */
   rows: KeptMilestone[];
-  /** Prompt numbers of this day's rows the budget dropped. */
-  droppedPrompts: number[];
-  /** Prompt numbers of antecedents homed on this day that now render nowhere. */
-  orphanPrompts: number[];
-  /** Weight of the day header + `+N more` hint, in tenths. */
+  /** How many of this day's rows the budget dropped. */
+  droppedCount: number;
+  /**
+   * Turns of this day that render nowhere at all: the day's base overflow, plus
+   * every row the budget dropped, plus every antecedent homed here that lost all
+   * its citers. `Lo`/`Hi` are that set's min and max prompt number, maintained
+   * incrementally so refreshing a frame never rescans the set.
+   */
+  hiddenCount: number;
+  hiddenLo: number;
+  hiddenHi: number;
+  /** Weight of the day header + `+N more` hint while the day still shows rows. */
   frameTenths: number;
   /** Summed weight of the rendered units, in tenths. */
   unitTenths: number;
+  /** Set once the day holds no row: the collapsed run it belongs to. */
+  run: CollapsedRun | null;
+}
+
+/**
+ * A maximal run of consecutive zero-row days, rendered as ONE combined line
+ * (spec §D: 日框架参与降级). Day frames have to be degradable for the same reason
+ * units are — a month-long session pays ~2,400 tokens for 31 headers and 31
+ * hints, so an un-collapsible frame would spend the whole injection budget on
+ * scaffolding rather than content.
+ *
+ * The aggregates are maintained incrementally rather than recomputed from
+ * `members`: the fitter re-prices a run on every removal step, and rebuilding
+ * one per step would make the removal ladder quadratic in the day count.
+ */
+interface CollapsedRun {
+  members: MilestoneSectionState[];
+  /** Lowest- and highest-index member: the run's date-range endpoints. */
+  first: MilestoneSectionState;
+  last: MilestoneSectionState;
+  hidden: number;
+  promptLo: number;
+  promptHi: number;
+  tenths: number;
 }
 
 interface MilestoneUnitEntry {
@@ -2564,14 +2646,21 @@ function createMilestoneBodyModel(
   // synthetic days move, into their place in the day sequence.
   sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
 
-  const orderedStates: MilestoneSectionState[] = sections.map((section) => ({
-    section,
-    rows: section.group === null ? [] : [...section.group.rows],
-    droppedPrompts: [],
-    orphanPrompts: [],
-    frameTenths: 0,
-    unitTenths: 0,
-  }));
+  const orderedStates: MilestoneSectionState[] = sections.map((section, index) => {
+    const overflow = section.group?.overflow ?? null;
+    return {
+      section,
+      index,
+      rows: section.group === null ? [] : [...section.group.rows],
+      droppedCount: 0,
+      hiddenCount: overflow?.count ?? 0,
+      hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
+      hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
+      frameTenths: 0,
+      unitTenths: 0,
+      run: null,
+    };
+  });
   const stateByDate = new Map(
     orderedStates.map((state) => [state.section.date, state] as const),
   );
@@ -2584,6 +2673,7 @@ function createMilestoneBodyModel(
 
   let totalTenths = 0;
   let priced = false;
+  let framed = false;
 
   function lineTenths(line: string): number {
     return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
@@ -2623,54 +2713,148 @@ function createMilestoneBodyModel(
     totalTenths += delta;
   }
 
-  /**
-   * The day header and, when the day hides anything, the `+N more` hint. The
-   * empty second slot means "header only" — kept as a slot so the weight and
-   * the line emitter read the same shape.
-   */
-  function sectionFrameLines(state: MilestoneSectionState): string[] {
-    const { group } = state.section;
-    const extraPrompts = [...state.droppedPrompts, ...state.orphanPrompts];
-    const base = group?.overflow ?? null;
-    const hiddenCount = (base?.count ?? 0) + extraPrompts.length;
-    if (group === null && hiddenCount === 0) {
-      // A synthetic day with nothing hidden has nothing to say.
-      return [];
-    }
+  function linesTenths(lines: string[]): number {
+    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
+  }
 
-    const header =
-      group === null
-        ? `── ${formatLocalDateWithWeekday(state.section.labelEpoch)} · T${Math.min(
-            ...extraPrompts,
-          )}–T${Math.max(...extraPrompts)} · 0 kept ──`
-        : `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${
-            group.promptHi
-          } · ${group.keptCount - state.droppedPrompts.length} kept${
-            group.continued ? " (cont.)" : ""
-          } ──`;
-    if (hiddenCount === 0) {
-      return [header, ""];
+  /**
+   * The pointer every hidden-turn count carries. `within` and not a dash range
+   * on purpose: the hidden set is sparse, so these are its min and max, not the
+   * ends of a contiguous run.
+   */
+  function hiddenHint(hidden: number, promptLo: number, promptHi: number): string {
+    return `… +${hidden} more → timeline(id="S${view.session.id}", view="turns") @ within T${promptLo}..T${promptHi}`;
+  }
+
+  /** The frame of a day that still shows rows: header, plus its hint if it hides anything. */
+  function expandedFrameLines(state: MilestoneSectionState): string[] {
+    // A row-less section never takes this path, and only a section with a group
+    // can hold rows.
+    const group = state.section.group!;
+    const header = `── ${formatLocalDateWithWeekday(group.labelEpoch)} · T${group.promptLo}–T${
+      group.promptHi
+    } · ${group.keptCount - state.droppedCount} kept${
+      group.continued ? " (cont.)" : ""
+    } ──`;
+    if (state.hiddenCount === 0) {
+      return [header];
     }
-    const prompts = [
-      ...(base === null ? [] : [base.firstPrompt, base.lastPrompt]),
-      ...extraPrompts,
-    ];
-    // `within` and not a dash range on purpose: the hidden set is sparse, so
-    // these are its min and max, not the ends of a contiguous run.
     return [
       header,
-      `        … +${hiddenCount} more → timeline(id="S${view.session.id}", view="turns") @ within T${Math.min(
-        ...prompts,
-      )}..T${Math.max(...prompts)}`,
+      `        ${hiddenHint(state.hiddenCount, state.hiddenLo, state.hiddenHi)}`,
     ];
   }
 
-  function refreshFrame(state: MilestoneSectionState): void {
-    const tenths = sectionFrameLines(state)
-      .filter((line) => line !== "")
-      .reduce((sum, line) => sum + lineTenths(line), 0);
+  /**
+   * The single line a whole run of consecutive zero-row days collapses to: the
+   * run's date range and the summed count, with the standard hint pointer. A run
+   * of one day is still one line — a header saying `0 kept` above a hint saying
+   * how much is hidden is two lines making one statement.
+   */
+  function runLines(run: CollapsedRun): string[] {
+    if (run.hidden === 0) {
+      // Nothing hidden anywhere in the run: it has nothing to say.
+      return [];
+    }
+    const from = formatLocalDateWithWeekday(run.first.section.labelEpoch);
+    const to = formatLocalDateWithWeekday(run.last.section.labelEpoch);
+    const span = run.first === run.last ? from : `${from}–${to}`;
+    return [
+      `── ${span} · 0 kept · ${hiddenHint(run.hidden, run.promptLo, run.promptHi)} ──`,
+    ];
+  }
+
+  function refreshExpandedFrame(state: MilestoneSectionState): void {
+    const tenths = linesTenths(expandedFrameLines(state));
     totalTenths += tenths - state.frameTenths;
     state.frameTenths = tenths;
+  }
+
+  function priceRun(run: CollapsedRun): void {
+    const tenths = linesTenths(runLines(run));
+    totalTenths += tenths - run.tenths;
+    run.tenths = tenths;
+  }
+
+  /**
+   * Fold a day that holds no row into the collapsed run beside it, merging the
+   * runs on either side when it closes the gap between them. The surviving
+   * record is the larger of the two (union by size), so re-pointing members
+   * stays near-linear across a whole removal ladder.
+   */
+  function collapseState(state: MilestoneSectionState): void {
+    totalTenths -= state.frameTenths;
+    state.frameTenths = 0;
+    const left = state.index > 0 ? orderedStates[state.index - 1]!.run : null;
+    const right =
+      state.index + 1 < orderedStates.length
+        ? orderedStates[state.index + 1]!.run
+        : null;
+    const absorbed: CollapsedRun[] = [];
+    let run: CollapsedRun;
+    if (left === null && right === null) {
+      run = {
+        members: [],
+        first: state,
+        last: state,
+        hidden: 0,
+        promptLo: Number.POSITIVE_INFINITY,
+        promptHi: Number.NEGATIVE_INFINITY,
+        tenths: 0,
+      };
+    } else if (left !== null && right !== null) {
+      run = left.members.length >= right.members.length ? left : right;
+      absorbed.push(run === left ? right : left);
+    } else {
+      run = (left ?? right)!;
+    }
+    run.members.push(state);
+    state.run = run;
+    for (const other of absorbed) {
+      totalTenths -= other.tenths;
+      for (const member of other.members) {
+        member.run = run;
+        run.members.push(member);
+      }
+      run.hidden += other.hidden;
+      run.promptLo = Math.min(run.promptLo, other.promptLo);
+      run.promptHi = Math.max(run.promptHi, other.promptHi);
+      if (other.first.index < run.first.index) {
+        run.first = other.first;
+      }
+      if (other.last.index > run.last.index) {
+        run.last = other.last;
+      }
+    }
+    run.hidden += state.hiddenCount;
+    run.promptLo = Math.min(run.promptLo, state.hiddenLo);
+    run.promptHi = Math.max(run.promptHi, state.hiddenHi);
+    if (state.index < run.first.index) {
+      run.first = state;
+    }
+    if (state.index > run.last.index) {
+      run.last = state;
+    }
+    priceRun(run);
+  }
+
+  /** One more turn of this day renders nowhere; re-price whichever frame owns it. */
+  function noteHidden(state: MilestoneSectionState, promptNumber: number): void {
+    state.hiddenCount += 1;
+    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+    if (!framed) {
+      return;
+    }
+    const { run } = state;
+    if (run === null) {
+      refreshExpandedFrame(state);
+      return;
+    }
+    run.hidden += 1;
+    run.promptLo = Math.min(run.promptLo, promptNumber);
+    run.promptHi = Math.max(run.promptHi, promptNumber);
+    priceRun(run);
   }
 
   function homeAntecedent(antecedent: PulledAntecedent): void {
@@ -2693,13 +2877,13 @@ function createMilestoneBodyModel(
     }
     // Every citer of this antecedent on the page is gone, so it renders nowhere
     // and folds into its own day's hidden count — which is why that day gets a
-    // section even when it owns no main row on this page.
+    // section even when it owns no main row on this page. It is never also in
+    // that day's base overflow: `overflowByDay` skips every pulled turn.
     const state = stateByDate.get(antecedentDates.get(antecedent)!);
     if (state === undefined) {
       return;
     }
-    state.orphanPrompts.push(antecedent.turn.promptNumber);
-    refreshFrame(state);
+    noteHidden(state, antecedent.turn.promptNumber);
   }
 
   for (const antecedent of pullable) {
@@ -2711,11 +2895,21 @@ function createMilestoneBodyModel(
       0,
     );
     totalTenths += state.unitTenths;
-    refreshFrame(state);
   }
+  priced = true;
+  // Frames last, and in index order: `collapseState` reads its neighbours' runs,
+  // so every day to its left has already settled and every day to its right is
+  // still uncollapsed — each fold is a single left-append, never a merge.
+  for (const state of orderedStates) {
+    if (state.rows.length === 0) {
+      collapseState(state);
+    } else {
+      refreshExpandedFrame(state);
+    }
+  }
+  framed = true;
   // The blank line the body opens with.
   totalTenths += NEWLINE_WEIGHT_TENTHS;
-  priced = true;
 
   return {
     disableDesc(milestone: KeptMilestone): void {
@@ -2730,24 +2924,32 @@ function createMilestoneBodyModel(
         return;
       }
       const promptNumber = milestone.turn.promptNumber;
+      removed.add(milestone);
+      retainedPrompts.delete(promptNumber);
       const state = stateOfMilestone.get(milestone);
       if (state !== undefined) {
         const entry = unitEntryFor(milestone);
         state.unitTenths -= entry.tenths;
         totalTenths -= entry.tenths;
         state.rows = state.rows.filter((row) => row !== milestone);
-        state.droppedPrompts.push(promptNumber);
+        state.droppedCount += 1;
+        state.hiddenCount += 1;
+        state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+        state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+        // Settle the day's own frame BEFORE re-homing: an antecedent orphaned by
+        // this removal can be homed on this very day, and it must land on the
+        // frame the day now has, not the one it is about to lose.
+        if (state.rows.length === 0) {
+          collapseState(state);
+        } else {
+          refreshExpandedFrame(state);
+        }
       }
-      removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
       unitEntries.delete(milestone);
       const orphaned = homedPulled.get(promptNumber) ?? [];
       homedPulled.delete(promptNumber);
       for (const antecedent of orphaned) {
         homeAntecedent(antecedent);
-      }
-      if (state !== undefined) {
-        refreshFrame(state);
       }
     },
     weightTenths(): number {
@@ -2756,16 +2958,21 @@ function createMilestoneBodyModel(
     lines(): string[] {
       const out: string[] = [""];
       for (const state of orderedStates) {
-        const frame = sectionFrameLines(state);
-        if (frame.length === 0) {
+        if (state.rows.length === 0) {
+          // A collapsed run emits its one line at its first member, once.
+          const { run } = state;
+          if (run !== null && run.first === state) {
+            out.push(...runLines(run));
+          }
           continue;
         }
+        const frame = expandedFrameLines(state);
         out.push(frame[0]!);
         for (const milestone of state.rows) {
           out.push(...unitEntryFor(milestone).lines);
         }
-        if (frame[1] !== undefined && frame[1] !== "") {
-          out.push(frame[1]!);
+        if (frame[1] !== undefined) {
+          out.push(frame[1]);
         }
       }
       return out;
@@ -2800,9 +3007,12 @@ function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
 /**
  * Fits the arc body into `tokenBudget` (spec §D). Lowest-score units lose their
  * desc first; if that is not enough, whole units go, lowest score first, and
- * always-keep units are exempt from removal however low they score. When the
- * anchors alone still overrun, the body is rendered in full with one overflow
- * note — an anchor is never dropped silently.
+ * always-keep units are exempt from removal however low they score. Day frames
+ * follow the units down: a day that loses its last row collapses, and a run of
+ * consecutive collapsed days costs one combined hint line rather than two lines
+ * per day. When the anchors alone still overrun — frames already collapsed
+ * around them — the body is rendered in full with one overflow note; an anchor
+ * is never dropped silently.
  *
  * Two-tier measurement. The model's running weight prices every step in O(1),
  * but it is a LOWER bound on `estimateDiaryTokens` (that function's float

@@ -34698,7 +34698,8 @@ function selectMilestoneTurns(view) {
       date: date5,
       count: byPrompt.length,
       firstPrompt: byPrompt[0].promptNumber,
-      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber
+      lastPrompt: byPrompt[byPrompt.length - 1].promptNumber,
+      labelEpoch: byPrompt[0].createdAtEpoch
     });
   }
   const effGradeByTurnId = /* @__PURE__ */ new Map();
@@ -34880,6 +34881,32 @@ function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) 
       groups.push(group);
     }
     group.rows.push(m);
+  }
+  if (groups.length > 0) {
+    const spanFrom = groups[0].date;
+    const spanTo = groups[groups.length - 1].date;
+    const groupedDates = new Set(groups.map((group) => group.date));
+    let materialized = false;
+    for (const hint of overflowByDay) {
+      if (groupedDates.has(hint.date) || hint.date < spanFrom || hint.date > spanTo) {
+        continue;
+      }
+      groups.push({
+        date: hint.date,
+        labelEpoch: hint.labelEpoch,
+        promptLo: hint.firstPrompt,
+        promptHi: hint.lastPrompt,
+        keptCount: 0,
+        rows: [],
+        continued: false,
+        isFinalSliceForDay: false,
+        overflow: null
+      });
+      materialized = true;
+    }
+    if (materialized) {
+      groups.sort((left, right) => left.labelEpoch - right.labelEpoch);
+    }
   }
   for (const group of groups) {
     const full = fullByDay.get(group.date) ?? [];
@@ -35142,6 +35169,10 @@ function fitUnitTrim(unit, titleCap, cap, base) {
   if (unitTokens(unit, trim, titleCap) <= cap) {
     return trim;
   }
+  trim.showFiles = false;
+  if (unitTokens(unit, trim, titleCap) <= cap) {
+    return trim;
+  }
   if (trim.pulledShown > 0) {
     largestFittingTokens(unit, trim, titleCap, cap, (value) => {
       trim.pulledTitleTokens = value;
@@ -35159,10 +35190,6 @@ function fitUnitTrim(unit, titleCap, cap, base) {
   largestFittingTokens(unit, trim, titleCap, cap, (value) => {
     trim.promptTokens = value;
   });
-  if (unitTokens(unit, trim, titleCap) <= cap) {
-    return trim;
-  }
-  trim.showFiles = false;
   return trim;
 }
 function renderUnitFitted(unit, titleCap, descOff) {
@@ -35237,14 +35264,21 @@ function createMilestoneBodyModel(view, titleCap) {
     sections.push({ date: date5, labelEpoch, group: null });
   }
   sections.sort((left, right) => left.labelEpoch - right.labelEpoch);
-  const orderedStates = sections.map((section) => ({
-    section,
-    rows: section.group === null ? [] : [...section.group.rows],
-    droppedPrompts: [],
-    orphanPrompts: [],
-    frameTenths: 0,
-    unitTenths: 0
-  }));
+  const orderedStates = sections.map((section, index) => {
+    const overflow = section.group?.overflow ?? null;
+    return {
+      section,
+      index,
+      rows: section.group === null ? [] : [...section.group.rows],
+      droppedCount: 0,
+      hiddenCount: overflow?.count ?? 0,
+      hiddenLo: overflow?.firstPrompt ?? Number.POSITIVE_INFINITY,
+      hiddenHi: overflow?.lastPrompt ?? Number.NEGATIVE_INFINITY,
+      frameTenths: 0,
+      unitTenths: 0,
+      run: null
+    };
+  });
   const stateByDate = new Map(
     orderedStates.map((state) => [state.section.date, state])
   );
@@ -35256,6 +35290,7 @@ function createMilestoneBodyModel(view, titleCap) {
   }
   let totalTenths = 0;
   let priced = false;
+  let framed = false;
   function lineTenths(line) {
     return textWeightTenths(line) + NEWLINE_WEIGHT_TENTHS;
   }
@@ -35290,35 +35325,112 @@ function createMilestoneBodyModel(view, titleCap) {
     state.unitTenths += delta;
     totalTenths += delta;
   }
-  function sectionFrameLines(state) {
-    const { group } = state.section;
-    const extraPrompts = [...state.droppedPrompts, ...state.orphanPrompts];
-    const base = group?.overflow ?? null;
-    const hiddenCount = (base?.count ?? 0) + extraPrompts.length;
-    if (group === null && hiddenCount === 0) {
-      return [];
+  function linesTenths(lines) {
+    return lines.reduce((sum, line) => sum + lineTenths(line), 0);
+  }
+  function hiddenHint(hidden, promptLo, promptHi) {
+    return `\u2026 +${hidden} more \u2192 timeline(id="S${view.session.id}", view="turns") @ within T${promptLo}..T${promptHi}`;
+  }
+  function expandedFrameLines(state) {
+    const group = state.section.group;
+    const header = `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedCount} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
+    if (state.hiddenCount === 0) {
+      return [header];
     }
-    const header = group === null ? `\u2500\u2500 ${formatLocalDateWithWeekday(state.section.labelEpoch)} \xB7 T${Math.min(
-      ...extraPrompts
-    )}\u2013T${Math.max(...extraPrompts)} \xB7 0 kept \u2500\u2500` : `\u2500\u2500 ${formatLocalDateWithWeekday(group.labelEpoch)} \xB7 T${group.promptLo}\u2013T${group.promptHi} \xB7 ${group.keptCount - state.droppedPrompts.length} kept${group.continued ? " (cont.)" : ""} \u2500\u2500`;
-    if (hiddenCount === 0) {
-      return [header, ""];
-    }
-    const prompts = [
-      ...base === null ? [] : [base.firstPrompt, base.lastPrompt],
-      ...extraPrompts
-    ];
     return [
       header,
-      `        \u2026 +${hiddenCount} more \u2192 timeline(id="S${view.session.id}", view="turns") @ within T${Math.min(
-        ...prompts
-      )}..T${Math.max(...prompts)}`
+      `        ${hiddenHint(state.hiddenCount, state.hiddenLo, state.hiddenHi)}`
     ];
   }
-  function refreshFrame(state) {
-    const tenths = sectionFrameLines(state).filter((line) => line !== "").reduce((sum, line) => sum + lineTenths(line), 0);
+  function runLines(run) {
+    if (run.hidden === 0) {
+      return [];
+    }
+    const from = formatLocalDateWithWeekday(run.first.section.labelEpoch);
+    const to = formatLocalDateWithWeekday(run.last.section.labelEpoch);
+    const span = run.first === run.last ? from : `${from}\u2013${to}`;
+    return [
+      `\u2500\u2500 ${span} \xB7 0 kept \xB7 ${hiddenHint(run.hidden, run.promptLo, run.promptHi)} \u2500\u2500`
+    ];
+  }
+  function refreshExpandedFrame(state) {
+    const tenths = linesTenths(expandedFrameLines(state));
     totalTenths += tenths - state.frameTenths;
     state.frameTenths = tenths;
+  }
+  function priceRun(run) {
+    const tenths = linesTenths(runLines(run));
+    totalTenths += tenths - run.tenths;
+    run.tenths = tenths;
+  }
+  function collapseState(state) {
+    totalTenths -= state.frameTenths;
+    state.frameTenths = 0;
+    const left = state.index > 0 ? orderedStates[state.index - 1].run : null;
+    const right = state.index + 1 < orderedStates.length ? orderedStates[state.index + 1].run : null;
+    const absorbed = [];
+    let run;
+    if (left === null && right === null) {
+      run = {
+        members: [],
+        first: state,
+        last: state,
+        hidden: 0,
+        promptLo: Number.POSITIVE_INFINITY,
+        promptHi: Number.NEGATIVE_INFINITY,
+        tenths: 0
+      };
+    } else if (left !== null && right !== null) {
+      run = left.members.length >= right.members.length ? left : right;
+      absorbed.push(run === left ? right : left);
+    } else {
+      run = left ?? right;
+    }
+    run.members.push(state);
+    state.run = run;
+    for (const other of absorbed) {
+      totalTenths -= other.tenths;
+      for (const member of other.members) {
+        member.run = run;
+        run.members.push(member);
+      }
+      run.hidden += other.hidden;
+      run.promptLo = Math.min(run.promptLo, other.promptLo);
+      run.promptHi = Math.max(run.promptHi, other.promptHi);
+      if (other.first.index < run.first.index) {
+        run.first = other.first;
+      }
+      if (other.last.index > run.last.index) {
+        run.last = other.last;
+      }
+    }
+    run.hidden += state.hiddenCount;
+    run.promptLo = Math.min(run.promptLo, state.hiddenLo);
+    run.promptHi = Math.max(run.promptHi, state.hiddenHi);
+    if (state.index < run.first.index) {
+      run.first = state;
+    }
+    if (state.index > run.last.index) {
+      run.last = state;
+    }
+    priceRun(run);
+  }
+  function noteHidden(state, promptNumber) {
+    state.hiddenCount += 1;
+    state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+    state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+    if (!framed) {
+      return;
+    }
+    const { run } = state;
+    if (run === null) {
+      refreshExpandedFrame(state);
+      return;
+    }
+    run.hidden += 1;
+    run.promptLo = Math.min(run.promptLo, promptNumber);
+    run.promptHi = Math.max(run.promptHi, promptNumber);
+    priceRun(run);
   }
   function homeAntecedent(antecedent) {
     const home = antecedent.citerPromptNumbers.find(
@@ -35339,8 +35451,7 @@ function createMilestoneBodyModel(view, titleCap) {
     if (state === void 0) {
       return;
     }
-    state.orphanPrompts.push(antecedent.turn.promptNumber);
-    refreshFrame(state);
+    noteHidden(state, antecedent.turn.promptNumber);
   }
   for (const antecedent of pullable) {
     homeAntecedent(antecedent);
@@ -35351,10 +35462,17 @@ function createMilestoneBodyModel(view, titleCap) {
       0
     );
     totalTenths += state.unitTenths;
-    refreshFrame(state);
   }
-  totalTenths += NEWLINE_WEIGHT_TENTHS;
   priced = true;
+  for (const state of orderedStates) {
+    if (state.rows.length === 0) {
+      collapseState(state);
+    } else {
+      refreshExpandedFrame(state);
+    }
+  }
+  framed = true;
+  totalTenths += NEWLINE_WEIGHT_TENTHS;
   return {
     disableDesc(milestone) {
       if (descOff.has(milestone) || removed.has(milestone)) {
@@ -35368,24 +35486,29 @@ function createMilestoneBodyModel(view, titleCap) {
         return;
       }
       const promptNumber = milestone.turn.promptNumber;
+      removed.add(milestone);
+      retainedPrompts.delete(promptNumber);
       const state = stateOfMilestone.get(milestone);
       if (state !== void 0) {
         const entry = unitEntryFor(milestone);
         state.unitTenths -= entry.tenths;
         totalTenths -= entry.tenths;
         state.rows = state.rows.filter((row) => row !== milestone);
-        state.droppedPrompts.push(promptNumber);
+        state.droppedCount += 1;
+        state.hiddenCount += 1;
+        state.hiddenLo = Math.min(state.hiddenLo, promptNumber);
+        state.hiddenHi = Math.max(state.hiddenHi, promptNumber);
+        if (state.rows.length === 0) {
+          collapseState(state);
+        } else {
+          refreshExpandedFrame(state);
+        }
       }
-      removed.add(milestone);
-      retainedPrompts.delete(promptNumber);
       unitEntries.delete(milestone);
       const orphaned = homedPulled.get(promptNumber) ?? [];
       homedPulled.delete(promptNumber);
       for (const antecedent of orphaned) {
         homeAntecedent(antecedent);
-      }
-      if (state !== void 0) {
-        refreshFrame(state);
       }
     },
     weightTenths() {
@@ -35394,15 +35517,19 @@ function createMilestoneBodyModel(view, titleCap) {
     lines() {
       const out = [""];
       for (const state of orderedStates) {
-        const frame = sectionFrameLines(state);
-        if (frame.length === 0) {
+        if (state.rows.length === 0) {
+          const { run } = state;
+          if (run !== null && run.first === state) {
+            out.push(...runLines(run));
+          }
           continue;
         }
+        const frame = expandedFrameLines(state);
         out.push(frame[0]);
         for (const milestone of state.rows) {
           out.push(...unitEntryFor(milestone).lines);
         }
-        if (frame[1] !== void 0 && frame[1] !== "") {
+        if (frame[1] !== void 0) {
           out.push(frame[1]);
         }
       }

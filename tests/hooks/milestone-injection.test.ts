@@ -7,160 +7,52 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import {
-  renderMilestoneInjection,
+  MILESTONE_INJECTION_TOKEN_BUDGET,
   renderSessionMilestoneInjection,
-  type MilestoneTimelineRenderer,
 } from "../../src/hooks/milestone-injection";
-import type {
-  KeptMilestone,
-  MilestoneDayGroup,
-  TimelineView,
+import {
+  buildTimelineView,
+  compareMilestoneRank,
+  renderTimeline,
+  DEFAULT_TITLE_CAP,
+  MILESTONE_OVER_BUDGET_NOTE,
+  type KeptMilestone,
+  type TimelineView,
 } from "../../src/mcp/timeline";
-
-function kept(promptNumber: number): KeptMilestone {
-  return {
-    turn: { promptNumber } as KeptMilestone["turn"],
-    score: 1,
-    marker: null,
-  };
-}
-
-function milestoneView(groups: number[][]): TimelineView {
-  const milestoneDayGroups: MilestoneDayGroup[] = groups.map(
-    (promptNumbers, index) => ({
-      date: `2026-07-${String(index + 1).padStart(2, "0")}`,
-      labelEpoch: 1_700_000_000 + index * 86_400,
-      promptLo: promptNumbers[0]!,
-      promptHi: promptNumbers.at(-1)!,
-      keptCount: promptNumbers.length,
-      rows: promptNumbers.map(kept),
-      continued: false,
-      isFinalSliceForDay: true,
-      overflow: null,
-    }),
-  );
-  const pagedMilestones = milestoneDayGroups.flatMap((group) => group.rows);
-
-  return {
-    session: { id: 42 },
-    milestoneDayGroups,
-    pagedMilestones,
-  } as TimelineView;
-}
-
-const pointer = '（更多里程碑见 timeline(id="S42")）';
-
-describe("renderMilestoneInjection degradation", () => {
-  test("drops shape signals first", () => {
-    const renderer: MilestoneTimelineRenderer = {
-      renderTimeline: () => [
-        "milestone core",
-        "",
-        "  shape signals (window T1-T4):",
-        `    - tool bursts: ${"shape ".repeat(200)}`,
-      ].join("\n"),
-    };
-    const budget = estimateDiaryTokens(`milestone core\n\n${pointer}`);
-
-    const output = renderMilestoneInjection(milestoneView([[1, 2, 3, 4]]), {
-      renderer,
-      tokenBudget: budget,
-    });
-
-    expect(output).toBe(`milestone core\n\n${pointer}`);
-  });
-
-  test("drops casualty rows only after shape signals", () => {
-    const renderer: MilestoneTimelineRenderer = {
-      renderTimeline: () => [
-        "milestone core",
-        `      ↳ T1 ${"casualty ".repeat(200)}`,
-        "",
-        "  shape signals (window T1-T4):",
-        "    - fastest gap: after T1 (+1s)",
-      ].join("\n"),
-    };
-    const budget = estimateDiaryTokens(`milestone core\n\n${pointer}`);
-
-    const output = renderMilestoneInjection(milestoneView([[1, 2, 3, 4]]), {
-      renderer,
-      tokenBudget: budget,
-    });
-
-    expect(output).toBe(`milestone core\n\n${pointer}`);
-  });
-
-  test("reduces milestone labels from 80 to 50 even when the renderer ignores promptCap", () => {
-    const promptCaps: number[] = [];
-    const longTitle = "x".repeat(80);
-    const renderer: MilestoneTimelineRenderer = {
-      renderTimeline: (_view, options) => {
-        promptCaps.push(options.promptCap);
-        return [1, 2, 3, 4]
-          .map((promptNumber) => `   T${promptNumber} 🟣 ${longTitle}`)
-          .join("\n");
-      },
-    };
-    const cappedTitle = `${"x".repeat(50)}…`;
-    const expectedCore = [1, 2, 3, 4]
-      .map((promptNumber) => `   T${promptNumber} 🟣 ${cappedTitle}`)
-      .join("\n");
-    const budget = estimateDiaryTokens(`${expectedCore}\n\n${pointer}`);
-
-    const output = renderMilestoneInjection(milestoneView([[1, 2, 3, 4]]), {
-      renderer,
-      tokenBudget: budget,
-    });
-
-    expect(output).toBe(`${expectedCore}\n\n${pointer}`);
-    expect(promptCaps).toEqual([80, 80, 80, 50]);
-  });
-
-  test("uniformly reduces kept turns last while retaining the oldest day", () => {
-    let lastView: TimelineView | undefined;
-    const renderer: MilestoneTimelineRenderer = {
-      renderTimeline: (view) => {
-        lastView = view;
-        const prompts = view.pagedMilestones.map(
-          (milestone) => `T${milestone.turn.promptNumber}`,
-        );
-        return `${prompts.join(",")} ${"row ".repeat(prompts.length * 20)}`;
-      },
-    };
-    const expectedCore = `T1,T4 ${"row ".repeat(40)}`.trimEnd();
-    const budget = estimateDiaryTokens(`${expectedCore}\n\n${pointer}`);
-
-    const output = renderMilestoneInjection(milestoneView([[1, 2], [3, 4]]), {
-      renderer,
-      tokenBudget: budget,
-    });
-
-    expect(output).toBe(`${expectedCore}\n\n${pointer}`);
-    expect(output).toContain("T1");
-    expect(output).toContain("T4");
-    expect(lastView?.milestoneDayGroups.map((group) => ({
-      keptCount: group.keptCount,
-      promptLo: group.promptLo,
-      promptHi: group.promptHi,
-    }))).toEqual([
-      { keptCount: 1, promptLo: 1, promptHi: 1 },
-      { keptCount: 1, promptLo: 4, promptHi: 4 },
-    ]);
-  });
-});
 
 const ERA_BASE = 1_785_000_000;
 
-/** A four-row arc with one pulled antecedent, seeded straight into SQLite. */
-function seedInjectionArc(db: ReturnType<typeof createDatabase>): number {
+interface SeedRow {
+  promptNumber: number;
+  status?: "extracted" | "skipped";
+  prompt: string;
+  title: string;
+  content?: string | null;
+  type: string;
+  grade: number;
+  toolCalls?: number;
+  filesModified?: string[];
+  epoch: number;
+}
+
+/**
+ * Seeds an era-internal session straight into SQLite. `cites_recorded = 1` on
+ * every row so an empty edge set is authoritative and the legacy inline
+ * `[T<n>]` fallback stays out of the way.
+ */
+function seedSession(
+  db: ReturnType<typeof createDatabase>,
+  contentSessionId: string,
+  rows: SeedRow[],
+): number {
   initializeSchema(db);
   const session = upsertSession(db, {
-    contentSessionId: "injection-arc",
+    contentSessionId,
     project: "/tmp/claude-mnemo-test",
-    title: "injection arc",
+    title: contentSessionId,
     insight: null,
     createdAtEpoch: ERA_BASE,
-    updatedAtEpoch: ERA_BASE + 240,
+    updatedAtEpoch: rows.at(-1)?.epoch ?? ERA_BASE,
     completedAtEpoch: null,
   });
   const insert = db.query(
@@ -170,59 +62,345 @@ function seedInjectionArc(db: ReturnType<typeof createDatabase>): number {
        tags, files_read, files_modified
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, '[]', '[]', ?)`,
   );
-  const rows: Array<[number, string, string, string, string | null, string, number, number, string]> = [
-    [1, "extracted", "卷号锚定要解决什么", "Framed the slicing problem", "Opened the arc and named the downstream consumer.", "decision", 4, 0, '["src/slicing.md"]'],
-    [2, "skipped", "取证", "Measured a 12-14% error", null, "discovery", 2, 3, "[]"],
-    [3, "extracted", "没有卷数怎么办", "Adopted cursor slicing", "Weighed the evidence and switched the anchor.", "decision", 3, 5, '["src/cursor.ts"]'],
-    [4, "extracted", "发布", "0.9.0 released", "Cut the release.", "feature", 2, 1, '["package.json"]'],
-  ];
-  for (const [promptNumber, status, prompt, title, content, type, grade, tools, files] of rows) {
-    insert.run(
-      session.id, promptNumber, status, prompt, title, content, type, grade, tools,
-      ERA_BASE + promptNumber * 60, files,
-    );
-  }
-  const turnId = (promptNumber: number) => getTurn(db, session.id, promptNumber)!.id;
-  replaceTurnCitations(db, turnId(3), [{ id: turnId(2), relation: "evidence-for" }], ERA_BASE);
+  db.transaction(() => {
+    for (const row of rows) {
+      insert.run(
+        session.id,
+        row.promptNumber,
+        row.status ?? "extracted",
+        row.prompt,
+        row.title,
+        row.content ?? null,
+        row.type,
+        row.grade,
+        row.toolCalls ?? 0,
+        row.epoch,
+        JSON.stringify(row.filesModified ?? []),
+      );
+    }
+  })();
   return session.id;
 }
 
+function turnDbId(
+  db: ReturnType<typeof createDatabase>,
+  sessionId: number,
+  promptNumber: number,
+): number {
+  const record = getTurn(db, sessionId, promptNumber);
+  if (record === null) throw new Error(`no turn S${sessionId}/T${promptNumber}`);
+  return record.id;
+}
+
+function cite(
+  db: ReturnType<typeof createDatabase>,
+  sessionId: number,
+  citingPrompt: number,
+  citedPrompts: number[],
+): void {
+  replaceTurnCitations(
+    db,
+    turnDbId(db, sessionId, citingPrompt),
+    citedPrompts.map((promptNumber) => ({
+      id: turnDbId(db, sessionId, promptNumber),
+      relation: "evidence-for" as const,
+    })),
+    ERA_BASE,
+  );
+}
+
+// A spine row is `   <glyph> T<n> <emoji> G<g> …`; ↳ rows, desc lines and the
+// `… +N more` hint all sit further in and never match.
+const SPINE_ROW_RE = /^ {3}(?:.{1,2} )?T\d+ /u;
+
+function spinePromptNumbers(output: string): number[] {
+  return output
+    .split("\n")
+    .filter((line) => SPINE_ROW_RE.test(line))
+    .map((line) => Number(line.match(/T(\d+)/)![1]));
+}
+
+function milestoneView(
+  db: ReturnType<typeof createDatabase>,
+  sessionId: number,
+): TimelineView {
+  return buildTimelineView(db, {
+    id: `S${sessionId}`,
+    view: "milestones",
+    pageSize: Number.MAX_SAFE_INTEGER,
+  });
+}
+
+function anchors(view: TimelineView): KeptMilestone[] {
+  return view.pagedMilestones.filter((milestone) => milestone.alwaysKeep);
+}
+
+/** A four-row arc with one pulled antecedent, seeded straight into SQLite. */
+function seedInjectionArc(db: ReturnType<typeof createDatabase>): number {
+  const sessionId = seedSession(db, "injection-arc", [
+    {
+      promptNumber: 1,
+      prompt: "卷号锚定要解决什么",
+      title: "Framed the slicing problem",
+      content: "Opened the arc and named the downstream consumer.",
+      type: "decision",
+      grade: 4,
+      filesModified: ["src/slicing.md"],
+      epoch: ERA_BASE + 60,
+    },
+    {
+      promptNumber: 2,
+      status: "skipped",
+      prompt: "取证",
+      title: "Measured a 12-14% error",
+      type: "discovery",
+      grade: 2,
+      toolCalls: 3,
+      epoch: ERA_BASE + 120,
+    },
+    {
+      promptNumber: 3,
+      prompt: "没有卷数怎么办",
+      title: "Adopted cursor slicing",
+      content: "Weighed the evidence and switched the anchor.",
+      type: "decision",
+      grade: 3,
+      toolCalls: 5,
+      filesModified: ["src/cursor.ts"],
+      epoch: ERA_BASE + 180,
+    },
+    {
+      promptNumber: 4,
+      prompt: "发布",
+      title: "0.9.0 released",
+      content: "Cut the release.",
+      type: "feature",
+      grade: 2,
+      toolCalls: 1,
+      filesModified: ["package.json"],
+      epoch: ERA_BASE + 240,
+    },
+  ]);
+  cite(db, sessionId, 3, [2]);
+  return sessionId;
+}
+
+/** 72 characters: long enough to be worth cutting, well under `DEFAULT_TITLE_CAP`. */
+function arcTitle(promptNumber: number): string {
+  const stem = `Decision ${promptNumber}: locked the slicing rule for this batch`;
+  return stem.padEnd(72, "·").slice(0, 72);
+}
+
 /**
- * Before-state for ticket 04. The hook's DEFAULT renderer is already the unified
- * one, so SessionStart emits the new row shape today — an accepted deviation,
- * not a regression to undo. Every other test in this file injects a fake
- * renderer and therefore says nothing about what actually ships; this one pins
- * the real combined behavior shallowly, so ticket 04's replacement has something
- * to diff against. It stays deliberately small: the ladder re-renders the whole
- * view once per candidate count, which is quadratic in the milestone count.
+ * A long session shaped like the one SessionStart actually meets. `anchorEvery`
+ * controls how many G4 always-keep rows it carries: a sparse arc fits the
+ * budget, a dense one cannot and must exercise the anchor exemption.
  */
-describe("renderMilestoneInjection with the real renderer (ticket 04 before-state)", () => {
-  test("emits unified spine rows and still walks the degradation ladder", () => {
+function seedLongArc(
+  db: ReturnType<typeof createDatabase>,
+  options: { mainRows: number; anchorEvery: number; contentSessionId: string },
+): number {
+  const rows: SeedRow[] = [];
+  const antecedentOf = new Map<number, number>();
+  let promptNumber = 0;
+  let epoch = ERA_BASE;
+
+  for (let index = 0; index < options.mainRows; index += 1) {
+    if (index % 10 === 9) {
+      promptNumber += 1;
+      epoch += 300;
+      rows.push({
+        promptNumber,
+        status: "skipped",
+        prompt: `证据 ${promptNumber}`,
+        title: `evidence sample ${promptNumber} for the slicing survey`,
+        type: "discovery",
+        grade: 2,
+        epoch,
+      });
+      antecedentOf.set(promptNumber + 1, promptNumber);
+    }
+    promptNumber += 1;
+    epoch += 300;
+    const anchor =
+      options.anchorEvery > 0 && index % options.anchorEvery === 0;
+    rows.push({
+      promptNumber,
+      prompt: `第 ${promptNumber} 轮的提问，问题描述有一点长`,
+      title: arcTitle(promptNumber),
+      content:
+        `Weighed the alternatives for batch ${promptNumber} and recorded why the cursor form wins. `.repeat(
+          3,
+        ),
+      type: anchor ? "decision" : "feature",
+      grade: anchor ? 4 : 3,
+      toolCalls: index % 7,
+      filesModified: [
+        `src/batch/${promptNumber}.ts`,
+        `tests/batch/${promptNumber}.test.ts`,
+      ],
+      epoch,
+    });
+  }
+
+  const sessionId = seedSession(db, options.contentSessionId, rows);
+  for (const [citing, cited] of antecedentOf) {
+    cite(db, sessionId, citing, [cited]);
+  }
+  return sessionId;
+}
+
+describe("SessionStart milestone injection = the arc view", () => {
+  test("is the milestones view rendered with titleCap 100 and the 2500 budget", () => {
     const db = createDatabase(":memory:");
     const sessionId = seedInjectionArc(db);
 
-    const roomy = renderSessionMilestoneInjection(db, sessionId, {
-      tokenBudget: 4_000,
+    const injected = renderSessionMilestoneInjection(db, sessionId);
+
+    // The whole contract: one call into the unified renderer, no post-render
+    // string surgery on top of it.
+    expect(injected).toBe(
+      renderTimeline(milestoneView(db, sessionId), {
+        titleCap: DEFAULT_TITLE_CAP,
+        tokenBudget: MILESTONE_INJECTION_TOKEN_BUDGET,
+        showEarlierHint: false,
+      }),
+    );
+    expect(MILESTONE_INJECTION_TOKEN_BUDGET).toBe(2_500);
+    db.close();
+  });
+
+  test("emits unified rows: grade column, desc block, ↳ antecedent, ✏️ tail", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedInjectionArc(db);
+
+    const injected = renderSessionMilestoneInjection(db, sessionId);
+
+    expect(injected).toContain(
+      "T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem",
+    );
+    expect(injected).toContain("↳ T2 🔵 G2 Measured a 12-14% error");
+    expect(injected).toContain("Weighed the evidence and switched the anchor.");
+    expect(injected).toContain("✏️cursor.ts");
+    // Shape signals survive: the old stage-2 strip is gone.
+    expect(injected).toContain("shape signals");
+    // …and so are the other post-render artifacts of the four-stage ladder.
+    expect(injected).not.toContain("更多里程碑见");
+    expect(injected).not.toContain("earlier: timeline(");
+    db.close();
+  });
+
+  test("bounds a long arc at 2500 tokens without char-halving any title", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedLongArc(db, {
+      mainRows: 300,
+      anchorEvery: 0,
+      contentSessionId: "long-sparse-arc",
     });
 
-    // Unified rows: T# · type emoji · grade · prompt → title, plus a ↳ row for
-    // the pulled antecedent and the ✏️ file tail. None of this existed on the
-    // pre-ticket-03 injection path.
-    expect(roomy).toContain("T1 ⚖️ G4 卷号锚定要解决什么 → Framed the slicing problem");
-    expect(roomy).toContain("↳ T2 🔵 G2 Measured a 12-14% error");
-    expect(roomy).toContain("✏️");
-    // Stage 1 fits, so nothing is stripped and no pointer is appended.
-    expect(roomy).toContain("shape signals");
-    expect(roomy).not.toContain("更多里程碑见");
+    const injected = renderSessionMilestoneInjection(db, sessionId);
 
-    // A budget that stage 1 cannot meet drops the shape signals and appends the
-    // pointer — the ladder is still the outer mechanism.
-    const tight = renderSessionMilestoneInjection(db, sessionId, {
-      tokenBudget: 400,
+    expect(estimateDiaryTokens(injected)).toBeLessThanOrEqual(
+      MILESTONE_INJECTION_TOKEN_BUDGET,
+    );
+    expect(injected).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
+    const survivors = spinePromptNumbers(injected);
+    expect(survivors.length).toBeGreaterThan(0);
+    // Every surviving row carries its title WHOLE. The deleted four-stage ladder
+    // cut all of them to 50 characters at exactly this pressure.
+    for (const promptNumber of survivors) {
+      expect(injected).toContain(arcTitle(promptNumber));
+    }
+    // Turns the budget could not fit are conserved into the day hints, not lost.
+    expect(injected).toContain('more → timeline(id="S1", view="turns")');
+    db.close();
+  });
+
+  test("removes the lowest-ranked unit first, never an anchor", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedLongArc(db, {
+      mainRows: 12,
+      anchorEvery: 2,
+      contentSessionId: "anchor-heavy-arc",
     });
-    expect(tight).not.toContain("shape signals");
-    expect(tight).toContain('（更多里程碑见 timeline(id="S1")）');
-    expect(tight).toContain("T1 ⚖️ G4");
-    expect(estimateDiaryTokens(tight)).toBeLessThanOrEqual(400);
+    const view = milestoneView(db, sessionId);
+    const removable = [...view.pagedMilestones]
+      .filter((milestone) => !milestone.alwaysKeep)
+      .sort(compareMilestoneRank);
+    expect(removable.length).toBeGreaterThan(1);
+    const lowest = removable.at(-1)!;
+
+    const full = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: 100_000,
+    });
+    const allRows = spinePromptNumbers(full);
+    let firstDrop: number[] | null = null;
+    for (let budget = estimateDiaryTokens(full); budget >= 1; budget -= 1) {
+      const rows = spinePromptNumbers(
+        renderSessionMilestoneInjection(db, sessionId, { tokenBudget: budget }),
+      );
+      if (rows.length < allRows.length) {
+        firstDrop = allRows.filter((promptNumber) => !rows.includes(promptNumber));
+        break;
+      }
+    }
+
+    expect(firstDrop).toEqual([lowest.turn.promptNumber]);
+    db.close();
+  });
+
+  test("keeps every anchor in full under an impossible budget, with one note", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedLongArc(db, {
+      mainRows: 12,
+      anchorEvery: 2,
+      contentSessionId: "anchor-heavy-arc",
+    });
+    const view = milestoneView(db, sessionId);
+    const anchorPrompts = anchors(view).map(
+      (milestone) => milestone.turn.promptNumber,
+    );
+    expect(anchorPrompts.length).toBeGreaterThan(1);
+
+    const starved = renderSessionMilestoneInjection(db, sessionId, {
+      tokenBudget: 1,
+    });
+
+    expect(spinePromptNumbers(starved)).toEqual(anchorPrompts);
+    expect(starved).toContain(MILESTONE_OVER_BUDGET_NOTE);
+    // Anchors lose their desc, never their title.
+    for (const promptNumber of anchorPrompts) {
+      expect(starved).toContain(arcTitle(promptNumber));
+    }
+    db.close();
+  });
+
+  test("renders a 900-row session in well under a second", () => {
+    const db = createDatabase(":memory:");
+    const sessionId = seedLongArc(db, {
+      mainRows: 900,
+      anchorEvery: 6,
+      contentSessionId: "long-dense-arc",
+    });
+    const view = milestoneView(db, sessionId);
+    expect(view.pagedMilestones.length).toBe(900);
+    const anchorPrompts = anchors(view).map(
+      (milestone) => milestone.turn.promptNumber,
+    );
+    expect(anchorPrompts.length).toBeGreaterThan(140);
+
+    const started = Bun.nanoseconds();
+    const injected = renderSessionMilestoneInjection(db, sessionId);
+    const elapsedMs = (Bun.nanoseconds() - started) / 1_000_000;
+
+    // The deleted four-stage ladder re-rendered the whole view once per
+    // candidate count: ~57s on this fixture. The bound is deliberately generous
+    // — it exists to fail loudly if anything quadratic comes back.
+    expect(elapsedMs).toBeLessThan(1_500);
+    // 150 anchors cannot fit 2500 tokens, so this walks the ENTIRE ladder and
+    // still ends over budget — and the anchors survive it.
+    expect(injected).toContain(MILESTONE_OVER_BUDGET_NOTE);
+    expect(spinePromptNumbers(injected)).toEqual(anchorPrompts);
+    db.close();
   });
 });

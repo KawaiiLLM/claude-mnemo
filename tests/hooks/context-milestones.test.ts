@@ -5,6 +5,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { createMilestoneContextHandler } from "../../src/hooks/handlers/context-milestones";
+import { MILESTONE_INJECTION_TOKEN_BUDGET } from "../../src/hooks/milestone-injection";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 function sessionStartInput(sessionId: string): NormalizedHookInput {
@@ -90,7 +91,7 @@ describe("createMilestoneContextHandler", () => {
     db.close();
   });
 
-  test("bounds a long real milestone timeline and points to timeline()", async () => {
+  test("bounds a long real milestone timeline at the injection budget", async () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const session = upsertSession(db, {
@@ -132,21 +133,48 @@ describe("createMilestoneContextHandler", () => {
     );
 
     expect(result.hookSpecificOutput).toBeDefined();
-    expect(estimateDiaryTokens(result.hookSpecificOutput!)).toBeLessThanOrEqual(
-      2_000,
+    const injected = result.hookSpecificOutput!;
+    const lines = injected.split("\n");
+
+    // Measured on the WHOLE block, day frames included. This is the shape that
+    // used to escape the budget: 31 day headers plus 31 `+N more` hints were
+    // 2464 of 3053 tokens, and only render units could degrade, so the arc blew
+    // its budget on scaffolding rather than content. Day frames degrade too now
+    // (spec §D), which is why the anchors fit and the over-budget note — whose
+    // only meaning is "the anchors alone do not fit" — must be absent.
+    expect(estimateDiaryTokens(injected)).toBeLessThanOrEqual(
+      MILESTONE_INJECTION_TOKEN_BUDGET,
     );
-    expect(result.hookSpecificOutput).toContain('timeline(id="S1")');
-    expect(result.hookSpecificOutput).toContain("T1");
-    const renderedMilestoneTitles = result.hookSpecificOutput!
-      .split("\n")
-      .filter((line) => /^\s+(?:(?:🚫|↩️|🏁)\s+)?T\d+\s+\S+\s+/.test(line))
-      .map((line) =>
-        line.replace(/^\s+(?:(?:🚫|↩️|🏁)\s+)?T\d+\s+\S+\s+/, "")
-      );
-    expect(renderedMilestoneTitles.length).toBeGreaterThan(0);
-    expect(
-      renderedMilestoneTitles.every((title) => [...title].length <= 51),
-    ).toBe(true);
+    expect(injected).not.toContain("⚠ over budget");
+
+    // The days the fitter emptied are consecutive, so they cost ONE line, and
+    // that line carries the run's date range and the summed count.
+    const collapsed = lines.filter((line) =>
+      /^── .+ · 0 kept · … \+\d+ more → timeline\(id="S1", view="turns"\) @ within T\d+\.\.T\d+ ──$/u
+        .test(line),
+    );
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0]).toMatch(
+      /^── \d{4}-\d{2}-\d{2} \w{3}–\d{4}-\d{2}-\d{2} \w{3} · 0 kept · /u,
+    );
+
+    // Conservation: this fixture has no citations, so every one of its 120 turns
+    // either renders as a row or is counted in some `+N more` — the collapsed
+    // run's combined count included.
+    const renderedRows = lines.filter((line) => /^ {3}(?:.{1,2} )?T\d+ /u.test(line));
+    const hiddenTotal = lines
+      .map((line) => line.match(/… \+(\d+) more/u))
+      .filter((match): match is RegExpMatchArray => match !== null)
+      .reduce((sum, match) => sum + Number(match[1]), 0);
+    expect(renderedRows.length).toBeGreaterThan(0);
+    expect(renderedRows.length + hiddenTotal).toBe(120);
+
+    // Every rendered row keeps its full 90-character title: the budget removes
+    // whole units, it never halves a title.
+    for (const row of renderedRows) {
+      const promptNumber = Number(row.match(/T(\d+)/)![1]);
+      expect(row).toContain(`${"重大里程碑".repeat(18)} ${promptNumber}`);
+    }
     expect(totalChanges(db)).toBe(before);
     db.close();
   });

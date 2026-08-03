@@ -3423,6 +3423,9 @@ function citeTurns(
 const SPINE_ROW_RE = /^ {3}(?:.{1,2} )?T\d+ /u;
 const PULLED_ROW_RE = /^\s+↳ /u;
 const OVERFLOW_HINT_RE = /^\s+… \+(\d+) more/u;
+// The same count also rides the one line a run of zero-row days collapses to,
+// which is a day frame and so starts at column 0 — hence no leading anchor here.
+const HIDDEN_COUNT_RE = /… \+(\d+) more/u;
 
 function spineRowLines(output: string): string[] {
   return output.split("\n").filter((line) => SPINE_ROW_RE.test(line));
@@ -3446,7 +3449,7 @@ function pulledPromptNumbers(output: string): number[] {
 function hiddenTurnTotal(output: string): number {
   return output
     .split("\n")
-    .map((line) => line.match(OVERFLOW_HINT_RE))
+    .map((line) => line.match(HIDDEN_COUNT_RE))
     .filter((match): match is RegExpMatchArray => match !== null)
     .reduce((sum, match) => sum + Number(match[1]), 0);
 }
@@ -3953,19 +3956,19 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
     const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
     const block = unitBlockFor(out, 2);
 
-    // Step ⑤ of the ladder: the file count is capped but a basename is not, so a
+    // Step ③ of the ladder: the file count is capped but a basename is not, so a
     // single generated name can outweigh the row. It goes whole — no half name,
-    // no `+N` stub — and the ⑥ clamp never has to cut the head line.
+    // no `+N` stub.
     expect(estimateDiaryTokens(block.join("\n"))).toBeLessThanOrEqual(
       MILESTONE_UNIT_TOKEN_CAP,
     );
     expect(block[0]).not.toContain("✏️");
     expect(block[0]).not.toContain("generated-fixture-");
     expect(block).toHaveLength(1);
-    // The cost of the ladder's order, frozen so it stays visible: ③ and ④ zero
-    // the title and the prefix BEFORE ⑤ reaches the tail, so a row that reaches
-    // step ⑤ arrives there already stripped to its identity columns.
-    expect(block[0]).toBe("      T2 🟣 G3");
+    // The point of the reorder: the decorative tail is sacrificed BEFORE the
+    // title steps, so the row keeps the text it exists to carry instead of
+    // arriving at the tail already stripped to its identity columns.
+    expect(block[0]).toBe("      T2 🟣 G3 生成 → Generated the fixture set");
   });
 
   it("caps rendered ↳ rows at four and folds the rest into +N 前件", () => {
@@ -4373,7 +4376,8 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     const starved = renderTimeline(view, { tokenBudget: 60 });
 
     // Both citers are gone, so T2 renders nowhere — and the day it belongs to
-    // gets a header of its own purely to carry the count.
+    // gets a frame of its own purely to carry the count (a collapsed one: the
+    // day holds no row, so its header and its hint are one line).
     expect(spinePromptNumbers(starved)).not.toContain(3);
     expect(spinePromptNumbers(starved)).not.toContain(4);
     expect(pulledPromptNumbers(starved)).not.toContain(2);
@@ -4389,6 +4393,104 @@ describe("unified row renderer — global token budget (spec §D)", () => {
         foldedAntecedentTotal(starved) +
         hiddenTurnTotal(starved),
     ).toBe(candidateTotal);
+  });
+
+  it("gives a day whose every candidate turn was hidden a section of its own", () => {
+    const db = createDatabase(":memory:");
+    const day = 86_400;
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "开题",
+        title: "arc origin",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "change",
+        significanceGrade: 1,
+        userPrompt: "再跑一次查询",
+        title: "ran the query again",
+        createdAtEpoch: ERA_BASE + day,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "定稿",
+        title: "locked the rule",
+        createdAtEpoch: ERA_BASE + 2 * day,
+      }),
+    ]);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+
+    const out = renderTimeline(view);
+
+    // T2 is too low to keep and nothing cites it, so its calendar day owns no
+    // row at all. Day sections used to be built from kept rows alone, which left
+    // that day with nowhere to render its `+1` — the turn vanished silently.
+    expect(spinePromptNumbers(out)).toEqual([1, 3]);
+    expect(out).toContain(
+      '… +1 more → timeline(id="S1", view="turns") @ within T2..T2',
+    );
+    expect(hiddenTurnTotal(out)).toBe(1);
+    expect(spinePromptNumbers(out).length + hiddenTurnTotal(out)).toBe(3);
+  });
+
+  /**
+   * Tight enough that only the two endpoint anchors survive, loose enough that
+   * they fit once the days between them collapse — which is precisely the window
+   * that did not exist while frames were fixed cost.
+   */
+  const COLLAPSE_RUN_BUDGET = 600;
+
+  it("collapses a run of consecutive zero-row days into one combined line", () => {
+    const db = createDatabase(":memory:");
+    const day = 86_400;
+    seedArcSession(
+      db,
+      [1, 2, 3, 4, 5, 6, 7].map((promptNumber) =>
+        turn({
+          promptNumber,
+          type: "decision",
+          significanceGrade: promptNumber === 1 ? 4 : 3,
+          userPrompt: `第 ${promptNumber} 天要解决的问题`,
+          title: `day ${promptNumber} decision on the slicing rule`,
+          content: `Weighed the alternatives for day ${promptNumber} and recorded why. `.repeat(
+            3,
+          ),
+          createdAtEpoch: ERA_BASE + (promptNumber - 1) * day,
+        }),
+      ),
+    );
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const full = renderTimeline(view);
+    // Precondition: one day per row, so seven frames and nothing hidden.
+    expect(dayHeaderLines(full)).toHaveLength(7);
+    expect(hiddenTurnTotal(full)).toBe(0);
+
+    const starved = renderTimeline(view, { tokenBudget: COLLAPSE_RUN_BUDGET });
+
+    // Endpoint anchors hold both ends; every day between them lost its only row.
+    // Those five days cost ONE line together — a header saying `0 kept` above a
+    // hint saying what is hidden is two lines making a single statement, and at
+    // 31 days that scaffolding alone outweighs the content it frames.
+    expect(spinePromptNumbers(starved)).toEqual([1, 7]);
+    const collapsed = starved
+      .split("\n")
+      .filter((line) => /· 0 kept · … \+\d+ more/u.test(line));
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0]).toMatch(
+      /^── .+–.+ · 0 kept · … \+5 more → timeline\(id="S1", view="turns"\) @ within T2\.\.T6 ──$/u,
+    );
+    expect(dayHeaderLines(starved)).toHaveLength(3);
+    expect(spinePromptNumbers(starved).length + hiddenTurnTotal(starved)).toBe(7);
+    // Collapsing the frames is what makes this budget reachable at all: the
+    // anchors fit, so the over-budget note — "the anchors alone do not" — is out.
+    expect(estimateDiaryTokens(starved)).toBeLessThanOrEqual(COLLAPSE_RUN_BUDGET);
+    expect(starved).not.toContain(MILESTONE_OVER_BUDGET_NOTE);
   });
 
   it("degrades but never removes an always-keep unit, and notes the overrun", () => {
