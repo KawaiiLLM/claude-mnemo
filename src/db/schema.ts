@@ -20,6 +20,7 @@ const SCHEMA_SQL = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
     project TEXT NOT NULL,
+    transcript_path TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -183,6 +184,34 @@ const SCHEMA_SQL = `
       retry_disposition IN ('transient', 'permanent')
     ),
     last_error TEXT
+  );
+
+  -- Ledger for one-time, resumable data repairs. Keyed by a VERSIONED name so a
+  -- future revision of the same repair is a new row rather than a re-run of the
+  -- old one. The cursor is a session-id high-water mark: every examined row
+  -- crosses it, including the ones the repair could not fix, so nothing is
+  -- permanently re-selected and no row is counted twice.
+  --
+  -- The row doubles as the repair's lock. claim_generation / claimed_at_epoch
+  -- are the same lease-and-fence idiom settlement_jobs uses: claiming bumps the
+  -- generation, every later write CASes on it, so a displaced runner writes
+  -- nothing instead of double-counting. deferred_until_epoch /
+  -- deferral_attempts hold the backoff for a repair that cannot run yet (an
+  -- unreadable transcript root) WITHOUT marking it done — the one-shot repair
+  -- stays available for whenever the environment recovers.
+  CREATE TABLE IF NOT EXISTS repair_ledger (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'done')),
+    cursor_id INTEGER NOT NULL DEFAULT 0,
+    filled_count INTEGER NOT NULL DEFAULT 0,
+    unresolved_count INTEGER NOT NULL DEFAULT 0,
+    ambiguous_count INTEGER NOT NULL DEFAULT 0,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    deferred_until_epoch INTEGER,
+    deferral_attempts INTEGER NOT NULL DEFAULT 0,
+    started_at_epoch INTEGER NOT NULL,
+    completed_at_epoch INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
@@ -389,6 +418,7 @@ export function initializeSchema(db: Database): void {
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
@@ -405,7 +435,26 @@ export function initializeSchema(db: Database): void {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
+  ensureRepairLedgerClaimColumns(db);
   dropLegacyMemoriesTable(db);
+}
+
+// `repair_ledger` reached a dev build before it carried a claim fence or a
+// deferral backoff, and CREATE TABLE IF NOT EXISTS is a no-op on a database that
+// already has the table — so the columns have to arrive by migration or every
+// claim on that database throws "no such column".
+function ensureRepairLedgerClaimColumns(db: Database): void {
+  const columns: Array<[string, string]> = [
+    ["claim_generation", "INTEGER NOT NULL DEFAULT 0"],
+    ["claimed_at_epoch", "INTEGER"],
+    ["deferred_until_epoch", "INTEGER"],
+    ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"],
+  ];
+  for (const [column, definition] of columns) {
+    if (!hasColumn(db, "repair_ledger", column)) {
+      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 
 // `settlement_jobs` shipped for exactly one build without an ownership fence.
@@ -464,6 +513,22 @@ function ensureSessionLastAgentSessionIdColumn(db: Database): void {
   }
 
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+
+// `project` is overwritten with the latest cwd on every hook upsert, but the
+// transcript directory is fixed at the session's starting cwd — so deriving the
+// transcript path from `project` silently misses the file for any session that
+// `cd`ed. The authoritative path now comes from the hook input and lives here.
+// Old rows land on NULL (readers fall back to the derivation); the one-time
+// backfill that fills what it can is deliberately NOT bound to this ALTER — it
+// runs from its own resumable ledger, so a crash mid-scan cannot leave the
+// column "migrated" but the repair half-done and unrepeatable.
+function ensureSessionTranscriptPathColumn(db: Database): void {
+  if (hasColumn(db, "sessions", "transcript_path")) {
+    return;
+  }
+
+  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
 }
 
 function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
@@ -807,6 +872,9 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS diary_state");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  // Sessions are about to be dropped, so a completed repair over the old rows
+  // must not stop the repair from running against whatever replaces them.
+  db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
@@ -830,4 +898,10 @@ export function initializeDatabase(db: Database): void {
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
+
+  // NOTE: data repairs that touch the filesystem do NOT belong here. Every hook
+  // process opens the database through this function, so anything hosted here
+  // is on the hook critical path and runs in as many processes at once as there
+  // are hooks. `repair_ledger`-driven repairs (transcript-path-backfill) run in
+  // the worker's watchdog tick instead — see src/worker/server.ts.
 }

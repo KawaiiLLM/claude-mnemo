@@ -1,6 +1,6 @@
 # 01 — sessions.project 被最新 cwd 覆盖，导致 transcript 解析失败
 
-**Status:** ready-for-agent
+**Status: done** — 见 fix(transcript-path) 提交（codex 审查轮 3 major＋2 minor 修复；门禁 1446/0）。三个 major 同一根因：回填挂在 `initializeDatabase` 上，而每个 hook 进程与 worker 都走那条路径 → 并发写台账、hook 关键路径上无界 FS 扫描、根不可读时无限重试。裁决＝修宿主：回填移入 worker 现有 watchdog tick（10s，自退休闩，无新调度器）；台账加租约＋`claim_generation` 栅栏（复用 settlement 写法）、计数改用实际 `changes`、游标 `MAX()` 防回退；工作预算 scanBudgetMs 2000／maxDirEntries 50000／rowBudgetMs 250，超预算＝正常部分完成按游标续跑；deferred 持久化退避 60s×2 封顶 24h、status 永不置 done（根目录以后出现仍能修）。**设计取舍**：索引宁缺勿残——枚举超预算则不提交任何索引而是 deferred，因为残缺索引会把真实会话永久推过高水位标记为不可解析。已知：`context.ts` 的 `jsonlPath` 当前在输出中是死字段（两个消费者都不渲染 `raw:`），接线正确但不可观测；SessionStart 是否该暴露 `raw:` 是独立决定。
 **Rev:** 3 — 二轮评审吸收：可恢复修复台账、稳定平局规则、双注册路径写入
 
 **What to fix:** 会话表的 project 字段在每次 hook upsert 时被最新 cwd 覆盖，而 Claude Code 的 transcript 目录固定在会话起点的 cwd。会话中途 cd 过的会话（实测 3 例中 2 例已解析失败），凡**由 DB 推导 transcript 路径**的读取面（recall、timeline、SessionStart context、worker 端修复路径）都会找不到文件且静默失败。replay CLI 接收显式 JSONL 路径、不受影响——波及面以 DB 推导路径的调用点为准。

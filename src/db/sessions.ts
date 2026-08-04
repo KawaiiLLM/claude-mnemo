@@ -10,6 +10,14 @@ export interface SessionRecord {
   id: number;
   contentSessionId: string;
   project: string;
+  /**
+   * The transcript JSONL this session actually writes to, captured from the
+   * hook input at registration and never overwritten (`project` drifts to the
+   * latest cwd; the transcript directory does not). NULL on rows that predate
+   * the column or whose one-time repair found no file — readers fall back to
+   * deriving the path from `project`.
+   */
+  transcriptPath: string | null;
   title: string | null;
   content: string | null;
   insight: string | null;
@@ -35,6 +43,8 @@ export interface SessionRecord {
 export interface UpsertSessionInput {
   contentSessionId: string;
   project: string;
+  /** First-non-NULL: written when absent, never overwritten once set. */
+  transcriptPath?: string | null;
   title: string | null;
   content?: string | null;
   insight: string | null;
@@ -56,6 +66,7 @@ const SESSION_SELECT = `
     id,
     content_session_id AS contentSessionId,
     project,
+    transcript_path AS transcriptPath,
     title,
     content,
     insight,
@@ -83,10 +94,11 @@ export function upsertSession(
 ): SessionRecord {
   const session =
   db
-    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, number | null, number | null, number, number | null, number | null]>(`
+    .query<SessionRecord, [string, string, string | null, string | null, string | null, string | null, string | null, number | null, number | null, number, number | null, number | null]>(`
       INSERT INTO sessions (
         content_session_id,
         project,
+        transcript_path,
         title,
         content,
         insight,
@@ -96,9 +108,13 @@ export function upsertSession(
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
+        -- First-non-NULL, and deliberately the reverse of project's
+        -- last-writer-wins: the transcript directory is fixed at the session's
+        -- STARTING cwd, so a later upsert from a different cwd must not move it.
+        transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
         title = COALESCE(excluded.title, sessions.title),
         content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
@@ -112,6 +128,7 @@ export function upsertSession(
         id,
         content_session_id AS contentSessionId,
         project,
+        transcript_path AS transcriptPath,
         title,
         content,
         insight,
@@ -134,6 +151,7 @@ export function upsertSession(
     .get(
       input.contentSessionId,
       input.project,
+      input.transcriptPath ?? null,
       input.title,
       input.content ?? null,
       input.insight,
@@ -212,6 +230,7 @@ export function updateSessionSummaryRewrite(
         id,
         content_session_id AS contentSessionId,
         project,
+        transcript_path AS transcriptPath,
         title,
         content,
         insight,
@@ -378,6 +397,29 @@ export function rewindSessionScanCursor(
     byteOffset,
     lineNumber,
     observedByteOffset,
+  );
+}
+
+/**
+ * First-non-NULL write for the registration path that does NOT go through
+ * `upsertSession` (SessionStart on an already-registered session). The
+ * `IS NULL` guard is the whole semantics: a session that already knows its
+ * transcript keeps it, so a resume from a different cwd cannot move the path.
+ * Returns true when this call is the one that filled it.
+ */
+export function setSessionTranscriptPathIfAbsent(
+  db: Database,
+  sessionId: number,
+  transcriptPath: string,
+): boolean {
+  return (
+    db
+      .query<unknown, [string, number]>(
+        `UPDATE sessions
+         SET transcript_path = ?
+         WHERE id = ? AND transcript_path IS NULL`,
+      )
+      .run(transcriptPath, sessionId).changes > 0
   );
 }
 

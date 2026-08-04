@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { getEffectiveCitations } from "../../src/db/citations";
@@ -12,8 +12,13 @@ import {
   initializeSchema,
 } from "../../src/db/schema";
 import { getSession, upsertSession } from "../../src/db/sessions";
+import { runTranscriptPathBackfill } from "../../src/db/transcript-path-backfill";
 import { getTurnById } from "../../src/db/turns";
 import * as searchModule from "../../src/db/search";
+import {
+  resolveSessionTranscriptPath,
+  resolveTranscriptPath,
+} from "../../src/shared/paths";
 
 describe("initializeSchema", () => {
   let db: Database;
@@ -75,6 +80,7 @@ describe("initializeSchema", () => {
       "id",
       "content_session_id",
       "project",
+      "transcript_path",
       "title",
       "content",
       "insight",
@@ -529,6 +535,7 @@ describe("initializeSchema", () => {
       "id",
       "content_session_id",
       "project",
+      "transcript_path",
       "title",
       "content",
       "insight",
@@ -1242,6 +1249,106 @@ describe("initializeSchema", () => {
       }
     } finally {
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("reopening a pre-transcript-path database adds the column, and the worker-hosted repair fills what it can", () => {
+    // A real pre-ticket database — the current schema minus exactly what this
+    // ticket adds — reopened through the production path (initializeDatabase).
+    const directory = mkdtempSync(join(tmpdir(), "mnemo-transcript-path-"));
+    const path = join(directory, "memory.db");
+    const transcriptDir = join(
+      homedir(),
+      ".claude",
+      "projects",
+      "-Users-me-alpha",
+    );
+    mkdirSync(transcriptDir, { recursive: true });
+    const transcript = join(transcriptDir, "drifted-uuid.jsonl");
+    writeFileSync(transcript, "{}\n");
+
+    const insertLegacySession = (
+      database: Database,
+      contentSessionId: string,
+    ): number =>
+      database
+        .query<{ id: number }, [string]>(
+          `INSERT INTO sessions (content_session_id, project, created_at_epoch)
+           VALUES (?, '/Users/me/beta', 1) RETURNING id`,
+        )
+        .get(contentSessionId)!.id;
+
+    try {
+      const before = createDatabase(path);
+      initializeSchema(before);
+      before.exec("ALTER TABLE sessions DROP COLUMN transcript_path");
+      before.exec("DROP TABLE repair_ledger");
+      // Registered in alpha, `project` later overwritten with the beta cwd.
+      const driftedId = insertLegacySession(before, "drifted-uuid");
+      const missingId = insertLegacySession(before, "no-transcript-uuid");
+      before.close();
+
+      const migrated = createDatabase(path);
+      try {
+        initializeDatabase(migrated);
+        // Idempotent: a second open must not re-migrate or throw.
+        initializeDatabase(migrated);
+
+        // Opening the database must NOT repair. Every hook process runs this,
+        // so a filesystem scan hosted here would sit on the hook critical path
+        // and race itself across processes; the worker owns the repair instead.
+        expect(getSession(migrated, driftedId)?.transcriptPath).toBeNull();
+        expect(
+          migrated
+            .query<{ count: number }, []>(
+              "SELECT COUNT(*) AS count FROM repair_ledger",
+            )
+            .get()?.count,
+        ).toBe(0);
+
+        // Reader fallback holds while the repair has not run.
+        expect(
+          resolveSessionTranscriptPath(getSession(migrated, driftedId)!),
+        ).toBe(resolveTranscriptPath("/Users/me/beta", "drifted-uuid"));
+
+        // What the worker tick does, driven directly.
+        runTranscriptPathBackfill(migrated);
+
+        expect(getSession(migrated, driftedId)?.transcriptPath).toBe(transcript);
+        // No file anywhere under the root → stays NULL, and the reader falls
+        // back to the legacy derivation instead of throwing.
+        const missing = getSession(migrated, missingId)!;
+        expect(missing.transcriptPath).toBeNull();
+        expect(resolveSessionTranscriptPath(missing)).toBe(
+          resolveTranscriptPath("/Users/me/beta", "no-transcript-uuid"),
+        );
+
+        const ledger = migrated
+          .query<{ status: string; filled_count: number; unresolved_count: number }, []>(
+            "SELECT * FROM repair_ledger WHERE name = 'transcript-path-backfill-v1'",
+          )
+          .get()!;
+        expect(ledger).toMatchObject({
+          status: "done",
+          filled_count: 1,
+          unresolved_count: 1,
+        });
+
+        // Completed means completed: a later run does not rescan, even when a
+        // row it already crossed goes back to NULL.
+        migrated
+          .query<unknown, [number]>(
+            "UPDATE sessions SET transcript_path = NULL WHERE id = ?",
+          )
+          .run(driftedId);
+        expect(runTranscriptPathBackfill(migrated).status).toBe("skipped");
+        expect(getSession(migrated, driftedId)?.transcriptPath).toBeNull();
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+      rmSync(transcriptDir, { recursive: true, force: true });
     }
   });
 

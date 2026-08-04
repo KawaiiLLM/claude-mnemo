@@ -47,12 +47,12 @@ __export(server_exports, {
   shutdownGracefully: () => shutdownGracefully
 });
 module.exports = __toCommonJS(server_exports);
-var import_node_fs10 = require("node:fs");
+var import_node_fs11 = require("node:fs");
 var import_node_os3 = require("node:os");
-var import_node_path15 = require("node:path");
+var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.4-mse4v19y" : "dev";
+var BUILD_ID = true ? "0.8.4-mse708te" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -76,14 +76,18 @@ function resolveDatabasePath(explicitPath) {
 function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
+function transcriptRootPath() {
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
+}
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
-    (0, import_node_os.homedir)(),
-    ".claude",
-    "projects",
+    transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
   );
+}
+function resolveSessionTranscriptPath(session) {
+  return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
 
 // src/db/database.ts
@@ -1428,6 +1432,7 @@ var SESSION_SELECT = `
     id,
     content_session_id AS contentSessionId,
     project,
+    transcript_path AS transcriptPath,
     title,
     content,
     insight,
@@ -1467,6 +1472,7 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
         id,
         content_session_id AS contentSessionId,
         project,
+        transcript_path AS transcriptPath,
         title,
         content,
         insight,
@@ -2270,6 +2276,7 @@ var SCHEMA_SQL = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
     project TEXT NOT NULL,
+    transcript_path TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -2433,6 +2440,34 @@ var SCHEMA_SQL = `
       retry_disposition IN ('transient', 'permanent')
     ),
     last_error TEXT
+  );
+
+  -- Ledger for one-time, resumable data repairs. Keyed by a VERSIONED name so a
+  -- future revision of the same repair is a new row rather than a re-run of the
+  -- old one. The cursor is a session-id high-water mark: every examined row
+  -- crosses it, including the ones the repair could not fix, so nothing is
+  -- permanently re-selected and no row is counted twice.
+  --
+  -- The row doubles as the repair's lock. claim_generation / claimed_at_epoch
+  -- are the same lease-and-fence idiom settlement_jobs uses: claiming bumps the
+  -- generation, every later write CASes on it, so a displaced runner writes
+  -- nothing instead of double-counting. deferred_until_epoch /
+  -- deferral_attempts hold the backoff for a repair that cannot run yet (an
+  -- unreadable transcript root) WITHOUT marking it done \u2014 the one-shot repair
+  -- stays available for whenever the environment recovers.
+  CREATE TABLE IF NOT EXISTS repair_ledger (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'done')),
+    cursor_id INTEGER NOT NULL DEFAULT 0,
+    filled_count INTEGER NOT NULL DEFAULT 0,
+    unresolved_count INTEGER NOT NULL DEFAULT 0,
+    ambiguous_count INTEGER NOT NULL DEFAULT 0,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    deferred_until_epoch INTEGER,
+    deferral_attempts INTEGER NOT NULL DEFAULT 0,
+    started_at_epoch INTEGER NOT NULL,
+    completed_at_epoch INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
@@ -2638,6 +2673,7 @@ function initializeSchema(db) {
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
@@ -2654,7 +2690,21 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
+  ensureRepairLedgerClaimColumns(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureRepairLedgerClaimColumns(db) {
+  const columns = [
+    ["claim_generation", "INTEGER NOT NULL DEFAULT 0"],
+    ["claimed_at_epoch", "INTEGER"],
+    ["deferred_until_epoch", "INTEGER"],
+    ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"]
+  ];
+  for (const [column, definition] of columns) {
+    if (!hasColumn(db, "repair_ledger", column)) {
+      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 function ensureSettlementClaimGenerationColumn(db) {
   if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
@@ -2696,6 +2746,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureSessionTranscriptPathColumn(db) {
+  if (hasColumn(db, "sessions", "transcript_path")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
@@ -2949,6 +3005,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_state");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
@@ -2969,6 +3026,366 @@ function initializeDatabase(db) {
   if (shouldRebuildSearchIndex(db)) {
     rebuildSearchIndex(db);
   }
+}
+
+// src/db/transcript-path-backfill.ts
+var import_node_fs4 = require("node:fs");
+var import_node_path4 = require("node:path");
+var TRANSCRIPT_PATH_BACKFILL_NAME = "transcript-path-backfill-v1";
+var DEFAULT_BACKFILL_BATCH_SIZE = 200;
+var DEFAULT_BACKFILL_MAX_ROWS = 2e3;
+var DEFAULT_BACKFILL_ROW_BUDGET_MS = 250;
+var DEFAULT_BACKFILL_SCAN_BUDGET_MS = 2e3;
+var DEFAULT_BACKFILL_MAX_DIR_ENTRIES = 5e4;
+var BACKFILL_LEASE_MS = 5 * 6e4;
+var BACKFILL_DEFERRAL_BASE_MS = 6e4;
+var BACKFILL_DEFERRAL_MAX_MS = 24 * 60 * 6e4;
+var FencedOutError = class extends Error {
+};
+function defaultLog(message) {
+  process.stderr.write(`[claude-mnemo] ${message}
+`);
+}
+var LEDGER_COLUMNS = `status,
+        cursor_id AS cursorId,
+        filled_count AS filledCount,
+        unresolved_count AS unresolvedCount,
+        ambiguous_count AS ambiguousCount,
+        claim_generation AS claimGeneration,
+        claimed_at_epoch AS claimedAtEpoch,
+        deferred_until_epoch AS deferredUntilEpoch,
+        deferral_attempts AS deferralAttempts`;
+function readLedger(db, name) {
+  return db.query(
+    `SELECT ${LEDGER_COLUMNS} FROM repair_ledger WHERE name = ?`
+  ).get(name) ?? null;
+}
+function claimLedger(db, name, nowEpoch, leaseCutoffEpoch) {
+  return runWriteTransaction(db, () => {
+    db.query(
+      `INSERT OR IGNORE INTO repair_ledger (name, status, started_at_epoch)
+       VALUES (?, 'running', ?)`
+    ).run(name, nowEpoch);
+    const claimed = db.query(
+      `UPDATE repair_ledger
+         SET claim_generation = claim_generation + 1,
+             claimed_at_epoch = ?
+         WHERE name = ?
+           AND status = 'running'
+           AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+         RETURNING claim_generation AS claimGeneration`
+    ).get(nowEpoch, name, leaseCutoffEpoch);
+    return claimed?.claimGeneration ?? null;
+  });
+}
+function indexTranscriptFiles(root2, limits) {
+  let projectDirs;
+  try {
+    projectDirs = (0, import_node_fs4.readdirSync)(root2, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => (0, import_node_path4.join)(root2, entry.name));
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  const index = /* @__PURE__ */ new Map();
+  let entriesSeen = projectDirs.length;
+  for (const dir of projectDirs) {
+    if (entriesSeen > limits.maxEntries || limits.nowMs() >= limits.deadlineMs) {
+      return { ok: false, reason: "over-budget" };
+    }
+    let files;
+    try {
+      files = (0, import_node_fs4.readdirSync)(dir);
+    } catch {
+      continue;
+    }
+    entriesSeen += files.length;
+    for (const file2 of files) {
+      if (!file2.endsWith(".jsonl")) {
+        continue;
+      }
+      const uuid5 = file2.slice(0, -".jsonl".length);
+      const paths = index.get(uuid5);
+      if (paths) {
+        paths.push((0, import_node_path4.join)(dir, file2));
+      } else {
+        index.set(uuid5, [(0, import_node_path4.join)(dir, file2)]);
+      }
+    }
+  }
+  if (entriesSeen > limits.maxEntries) {
+    return { ok: false, reason: "over-budget" };
+  }
+  return { ok: true, index };
+}
+function modifiedAtMs(path2) {
+  try {
+    return (0, import_node_fs4.statSync)(path2).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+function orderTranscriptCandidates(candidates, mtimeOf = modifiedAtMs) {
+  if (candidates.length <= 1) {
+    return candidates.map((path2) => (0, import_node_path4.resolve)(path2));
+  }
+  return candidates.map((path2) => ({ path: (0, import_node_path4.resolve)(path2), mtimeMs: mtimeOf(path2) })).sort(
+    (a, b) => b.mtimeMs !== a.mtimeMs ? b.mtimeMs - a.mtimeMs : a.path < b.path ? -1 : a.path > b.path ? 1 : 0
+  ).map((candidate) => candidate.path);
+}
+function deferralDelayMs(attempts) {
+  const exponent = Math.max(0, attempts - 1);
+  if (exponent >= 32) {
+    return BACKFILL_DEFERRAL_MAX_MS;
+  }
+  return Math.min(
+    BACKFILL_DEFERRAL_MAX_MS,
+    BACKFILL_DEFERRAL_BASE_MS * 2 ** exponent
+  );
+}
+function runTranscriptPathBackfill(db, options = {}) {
+  const name = TRANSCRIPT_PATH_BACKFILL_NAME;
+  const log = options.log ?? defaultLog;
+  const now = options.now ?? (() => Math.floor(Date.now() / 1e3));
+  const nowMs = options.nowMs ?? (() => Date.now());
+  const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BACKFILL_BATCH_SIZE);
+  const maxRows = Math.max(1, options.maxRows ?? DEFAULT_BACKFILL_MAX_ROWS);
+  const rowBudgetMs = Math.max(
+    0,
+    options.rowBudgetMs ?? DEFAULT_BACKFILL_ROW_BUDGET_MS
+  );
+  const scanBudgetMs = Math.max(
+    0,
+    options.scanBudgetMs ?? DEFAULT_BACKFILL_SCAN_BUDGET_MS
+  );
+  const maxDirEntries = Math.max(
+    1,
+    options.maxDirEntries ?? DEFAULT_BACKFILL_MAX_DIR_ENTRIES
+  );
+  const leaseMs = Math.max(0, options.leaseMs ?? BACKFILL_LEASE_MS);
+  const existing = readLedger(db, name);
+  const idle = (status, overrides = {}) => ({
+    status,
+    examined: 0,
+    filled: 0,
+    unresolved: 0,
+    ambiguous: 0,
+    totals: {
+      filled: existing?.filledCount ?? 0,
+      unresolved: existing?.unresolvedCount ?? 0,
+      ambiguous: existing?.ambiguousCount ?? 0
+    },
+    cursorId: existing?.cursorId ?? 0,
+    deferredUntilEpoch: existing?.deferredUntilEpoch ?? null,
+    deferralAttempts: existing?.deferralAttempts ?? 0,
+    ...overrides
+  });
+  if (existing?.status === "done") {
+    return idle("skipped");
+  }
+  const startEpoch = now();
+  if (existing?.deferredUntilEpoch != null && startEpoch < existing.deferredUntilEpoch) {
+    return idle("deferred");
+  }
+  const startMs = nowMs();
+  const generation = claimLedger(
+    db,
+    name,
+    startEpoch,
+    Math.floor((startMs - leaseMs) / 1e3)
+  );
+  if (generation === null) {
+    return idle("busy");
+  }
+  const releaseClaim = () => {
+    db.query(
+      `UPDATE repair_ledger
+       SET claimed_at_epoch = NULL
+       WHERE name = ? AND claim_generation = ?`
+    ).run(name, generation);
+  };
+  const root2 = options.transcriptRoot ?? transcriptRootPath();
+  const outcome = indexTranscriptFiles(root2, {
+    maxEntries: maxDirEntries,
+    deadlineMs: startMs + scanBudgetMs,
+    nowMs
+  });
+  if (!outcome.ok) {
+    const attempts = (existing?.deferralAttempts ?? 0) + 1;
+    const untilEpoch = startEpoch + Math.ceil(deferralDelayMs(attempts) / 1e3);
+    db.query(
+      `UPDATE repair_ledger
+       SET claimed_at_epoch = NULL,
+           deferral_attempts = ?,
+           deferred_until_epoch = ?
+       WHERE name = ? AND claim_generation = ?`
+    ).run(attempts, untilEpoch, name, generation);
+    if (existing && existing.cursorId > 0) {
+      log(
+        `transcript-path backfill deferred: transcript root ${root2} is ${outcome.reason === "unreadable" ? "not readable" : "too large to index within the scan budget"}; retry ${attempts} not before epoch ${untilEpoch}`
+      );
+    }
+    return idle("deferred", {
+      deferredUntilEpoch: untilEpoch,
+      deferralAttempts: attempts
+    });
+  }
+  const index = outcome.index;
+  if (existing?.deferralAttempts || existing?.deferredUntilEpoch != null) {
+    db.query(
+      `UPDATE repair_ledger
+       SET deferral_attempts = 0, deferred_until_epoch = NULL
+       WHERE name = ? AND claim_generation = ?`
+    ).run(name, generation);
+  }
+  let cursorId = existing?.cursorId ?? 0;
+  let examined = 0;
+  let filled = 0;
+  let unresolved = 0;
+  let ambiguous = 0;
+  let exhausted = false;
+  let fenced = false;
+  const rowDeadlineMs = startMs + rowBudgetMs;
+  while (examined < maxRows) {
+    const limit = Math.min(batchSize, maxRows - examined);
+    const rows = db.query(
+      `SELECT id, content_session_id AS contentSessionId
+         FROM sessions
+         WHERE id > ? AND transcript_path IS NULL
+         ORDER BY id ASC
+         LIMIT ?`
+    ).all(cursorId, limit);
+    if (rows.length === 0) {
+      exhausted = true;
+      break;
+    }
+    const picks = [];
+    let batchUnresolved = 0;
+    for (const row of rows) {
+      const candidates = index.get(row.contentSessionId) ?? [];
+      if (candidates.length === 0) {
+        batchUnresolved += 1;
+        continue;
+      }
+      const ordered = orderTranscriptCandidates(candidates);
+      const pick3 = ordered[0];
+      picks.push({ id: row.id, path: pick3, ambiguous: ordered.length > 1 });
+      if (ordered.length > 1) {
+        log(
+          `transcript-path backfill: session ${row.id} (${row.contentSessionId}) matched ${ordered.length} transcripts [${ordered.join(", ")}]; picked ${pick3} by (mtime DESC, path ASC)`
+        );
+      }
+    }
+    const batchCursorId = rows[rows.length - 1].id;
+    let batchFilled = 0;
+    let batchAmbiguous = 0;
+    try {
+      runWriteTransaction(db, () => {
+        batchFilled = 0;
+        batchAmbiguous = 0;
+        for (const pick3 of picks) {
+          const written = db.query(
+            `UPDATE sessions
+               SET transcript_path = ?
+               WHERE id = ? AND transcript_path IS NULL`
+          ).run(pick3.path, pick3.id).changes;
+          if (written === 0) {
+            continue;
+          }
+          batchFilled += 1;
+          if (pick3.ambiguous) {
+            batchAmbiguous += 1;
+          }
+        }
+        const ledgerWrite = db.query(
+          `UPDATE repair_ledger
+             SET cursor_id = MAX(cursor_id, ?),
+                 filled_count = filled_count + ?,
+                 unresolved_count = unresolved_count + ?,
+                 ambiguous_count = ambiguous_count + ?
+             WHERE name = ? AND claim_generation = ?`
+        ).run(
+          batchCursorId,
+          batchFilled,
+          batchUnresolved,
+          batchAmbiguous,
+          name,
+          generation
+        );
+        if (ledgerWrite.changes === 0) {
+          throw new FencedOutError();
+        }
+      });
+    } catch (error49) {
+      if (!(error49 instanceof FencedOutError)) {
+        throw error49;
+      }
+      fenced = true;
+      break;
+    }
+    cursorId = Math.max(cursorId, batchCursorId);
+    examined += rows.length;
+    filled += batchFilled;
+    unresolved += batchUnresolved;
+    ambiguous += batchAmbiguous;
+    if (rows.length < limit) {
+      exhausted = true;
+      break;
+    }
+    if (nowMs() >= rowDeadlineMs) {
+      break;
+    }
+  }
+  if (fenced) {
+    const afterFence = readLedger(db, name);
+    return {
+      status: "busy",
+      examined,
+      filled,
+      unresolved,
+      ambiguous,
+      totals: {
+        filled: afterFence?.filledCount ?? filled,
+        unresolved: afterFence?.unresolvedCount ?? unresolved,
+        ambiguous: afterFence?.ambiguousCount ?? ambiguous
+      },
+      cursorId: afterFence?.cursorId ?? cursorId,
+      deferredUntilEpoch: afterFence?.deferredUntilEpoch ?? null,
+      deferralAttempts: afterFence?.deferralAttempts ?? 0
+    };
+  }
+  if (exhausted) {
+    const completion = db.query(
+      `UPDATE repair_ledger
+         SET status = 'done', completed_at_epoch = ?, claimed_at_epoch = NULL
+         WHERE name = ? AND claim_generation = ?`
+    ).run(now(), name, generation);
+    if (completion.changes === 0) {
+      fenced = true;
+    }
+  } else {
+    releaseClaim();
+  }
+  const after = readLedger(db, name);
+  const summary = {
+    status: fenced ? "busy" : exhausted ? "completed" : "progressed",
+    examined,
+    filled,
+    unresolved,
+    ambiguous,
+    totals: {
+      filled: after?.filledCount ?? filled,
+      unresolved: after?.unresolvedCount ?? unresolved,
+      ambiguous: after?.ambiguousCount ?? ambiguous
+    },
+    cursorId,
+    deferredUntilEpoch: after?.deferredUntilEpoch ?? null,
+    deferralAttempts: after?.deferralAttempts ?? 0
+  };
+  if (examined > 0 || exhausted) {
+    log(
+      `transcript-path backfill ${summary.status}: examined ${examined}, filled ${filled} (${ambiguous} multi-candidate), left NULL ${unresolved}; cursor at session ${cursorId}; totals filled ${summary.totals.filled}, left NULL ${summary.totals.unresolved}, multi-candidate ${summary.totals.ambiguous}`
+    );
+  }
+  return summary;
 }
 
 // node_modules/zod/v4/classic/external.js
@@ -17293,7 +17710,7 @@ function recordSettlementChangeSummary(db, jobId, changeSummary, nowEpoch) {
 }
 
 // src/db/rules.ts
-var import_node_path4 = require("node:path");
+var import_node_path5 = require("node:path");
 
 // src/rules/schema.ts
 var TRIGGER_INDEX_SLOT_LIMIT = 10;
@@ -17369,7 +17786,7 @@ var RULE_TURN_REF_PATTERN = /^S(\d+)\/T(\d+)$/;
 var RULE_EXEMPTION_MIN_EVIDENCE = 2;
 function getRuleExemptTurnIds(db, sessionId) {
   const exempt = /* @__PURE__ */ new Set();
-  const resolve6 = db.query(
+  const resolve7 = db.query(
     "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
   );
   const resolveRef2 = (ref) => {
@@ -17385,7 +17802,7 @@ function getRuleExemptTurnIds(db, sessionId) {
     if (!Number.isSafeInteger(refSessionId) || !Number.isSafeInteger(promptNumber)) {
       return null;
     }
-    const turn = resolve6.get(refSessionId, promptNumber);
+    const turn = resolve7.get(refSessionId, promptNumber);
     return turn ? { sessionId: refSessionId, turnId: turn.id } : null;
   };
   const addRef = (ref) => {
@@ -17457,7 +17874,7 @@ function validateRule(input) {
     throw new Error("claim must contain at most 300 characters");
   }
   if (input.rationale.length === 0) throw new Error("rationale is required");
-  if (input.scope !== "global" && !(0, import_node_path4.isAbsolute)(input.scope)) {
+  if (input.scope !== "global" && !(0, import_node_path5.isAbsolute)(input.scope)) {
     throw new Error("scope must be global or an absolute project path");
   }
   ruleStatusSchema.parse(input.status);
@@ -18670,7 +19087,7 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
     compactBoundaries.push(session.lastCompactTurn);
   }
-  const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
+  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
@@ -19714,7 +20131,7 @@ function timelineQuery(db, input) {
 }
 
 // src/shared/file-tree.ts
-var import_node_path5 = __toESM(require("node:path"), 1);
+var import_node_path6 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -19811,7 +20228,7 @@ function renderFileTree(paths, opts) {
   const root2 = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative4 = import_node_path5.default.posix.relative(root2, value);
+    const relative4 = import_node_path6.default.posix.relative(root2, value);
     if (!relative4 || relative4 === "") {
       continue;
     }
@@ -20695,8 +21112,8 @@ function applySettlementBatchLocked(db, job, items, signals, nowEpoch) {
 }
 
 // src/shared/logger.ts
-var import_node_fs4 = require("node:fs");
-var import_node_path6 = require("node:path");
+var import_node_fs5 = require("node:fs");
+var import_node_path7 = require("node:path");
 
 // src/shared/error-sanitizer.ts
 var REDACTED = "[REDACTED]";
@@ -20867,11 +21284,11 @@ function formatErrorForPersistence(error49, sensitiveEnv = process.env) {
 }
 
 // src/shared/logger.ts
-var LOG_PATH = (0, import_node_path6.join)(DATA_DIR, "claude-mnemo.log");
+var LOG_PATH = (0, import_node_path7.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
   if (!dirEnsured) {
-    (0, import_node_fs4.mkdirSync)(DATA_DIR, { recursive: true });
+    (0, import_node_fs5.mkdirSync)(DATA_DIR, { recursive: true });
     dirEnsured = true;
   }
 }
@@ -20885,7 +21302,7 @@ function writeLog(level, component, message, context, sensitiveEnv = process.env
   });
   try {
     ensureLogDir();
-    (0, import_node_fs4.appendFileSync)(LOG_PATH, `${line}
+    (0, import_node_fs5.appendFileSync)(LOG_PATH, `${line}
 `);
   } catch {
     process.stderr.write(`${line}
@@ -21333,7 +21750,7 @@ function markSubagentTurnsNotified(db, turns, updatedAtEpoch) {
 }
 
 // src/worker/cache-ttl.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs6 = require("node:fs");
 var DEFAULT_TAIL_LINES = 30;
 function detectCacheTtlFromLines(lines) {
   for (const line of [...lines].reverse()) {
@@ -21355,8 +21772,8 @@ function detectCacheTtlFromLines(lines) {
   return null;
 }
 async function detectCacheTtl(agentSessionId, projectPath, tailLines = DEFAULT_TAIL_LINES, deps = {}) {
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs5.existsSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs5.readFileSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs6.existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs6.readFileSync;
   const resolveTranscriptPathImpl = deps.resolveTranscriptPathImpl ?? resolveTranscriptPath;
   const transcriptPath = resolveTranscriptPathImpl(projectPath, agentSessionId);
   if (!existsSyncImpl(transcriptPath)) {
@@ -21372,7 +21789,7 @@ async function detectCacheTtl(agentSessionId, projectPath, tailLines = DEFAULT_T
 
 // src/worker/query-session.ts
 var import_node_child_process2 = require("node:child_process");
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_path = require("path");
@@ -24232,7 +24649,7 @@ var require_compile = __commonJS((exports2) => {
     const schOrFunc = root2.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve6.call(this, root2, ref);
+    let _sch = resolve7.call(this, root2, ref);
     if (_sch === void 0) {
       const schema = (_a2 = root2.localRefs) === null || _a2 === void 0 ? void 0 : _a2[ref];
       const { schemaId } = this.opts;
@@ -24259,7 +24676,7 @@ var require_compile = __commonJS((exports2) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve6(root2, ref) {
+  function resolve7(root2, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -24757,7 +25174,7 @@ var require_fast_uri = __commonJS((exports2, module2) => {
     }
     return uri;
   }
-  function resolve6(baseURI, relativeURI, options) {
+  function resolve7(baseURI, relativeURI, options) {
     const schemelessOptions = Object.assign({ scheme: "null" }, options);
     const resolved = resolveComponents(parse6(baseURI, schemelessOptions), parse6(relativeURI, schemelessOptions), schemelessOptions, true);
     return serialize(resolved, { ...schemelessOptions, skipEscape: true });
@@ -24990,7 +25407,7 @@ var require_fast_uri = __commonJS((exports2, module2) => {
   var fastUri = {
     SCHEMES,
     normalize,
-    resolve: resolve6,
+    resolve: resolve7,
     resolveComponents,
     equal,
     serialize,
@@ -28971,7 +29388,7 @@ var ProcessTransport = class {
       }
       return;
     }
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const exitHandler = (code, signal) => {
         if (this.abortController.signal.aborted) {
           reject(new AbortError("Operation aborted"));
@@ -28981,7 +29398,7 @@ var ProcessTransport = class {
         if (error49) {
           reject(error49);
         } else {
-          resolve6();
+          resolve7();
         }
       };
       this.process.once("exit", exitHandler);
@@ -29031,17 +29448,17 @@ var Stream = class {
     if (this.hasError) {
       return Promise.reject(this.hasError);
     }
-    return new Promise((resolve6, reject) => {
-      this.readResolve = resolve6;
+    return new Promise((resolve7, reject) => {
+      this.readResolve = resolve7;
       this.readReject = reject;
     });
   }
   enqueue(value) {
     if (this.readResolve) {
-      const resolve6 = this.readResolve;
+      const resolve7 = this.readResolve;
       this.readResolve = void 0;
       this.readReject = void 0;
-      resolve6({ done: false, value });
+      resolve7({ done: false, value });
     } else {
       this.queue.push(value);
     }
@@ -29049,10 +29466,10 @@ var Stream = class {
   done() {
     this.isDone = true;
     if (this.readResolve) {
-      const resolve6 = this.readResolve;
+      const resolve7 = this.readResolve;
       this.readResolve = void 0;
       this.readReject = void 0;
-      resolve6({ done: true, value: void 0 });
+      resolve7({ done: true, value: void 0 });
     }
   }
   error(error49) {
@@ -29385,10 +29802,10 @@ var Query = class {
       type: "control_request",
       request
     };
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       this.pendingControlResponses.set(requestId, (response) => {
         if (response.subtype === "success") {
-          resolve6(response);
+          resolve7(response);
         } else {
           reject(new Error(response.error));
           if (response.pending_permission_requests) {
@@ -29478,15 +29895,15 @@ var Query = class {
       logForDebugging(`[Query.waitForFirstResult] Result already received, returning immediately`);
       return Promise.resolve();
     }
-    return new Promise((resolve6) => {
+    return new Promise((resolve7) => {
       if (this.abortController?.signal.aborted) {
-        resolve6();
+        resolve7();
         return;
       }
-      this.abortController?.signal.addEventListener("abort", () => resolve6(), {
+      this.abortController?.signal.addEventListener("abort", () => resolve7(), {
         once: true
       });
-      this.firstResultReceivedResolve = resolve6;
+      this.firstResultReceivedResolve = resolve7;
     });
   }
   handleHookCallbacks(callbackId, input, toolUseID, abortSignal) {
@@ -29537,13 +29954,13 @@ var Query = class {
   handleMcpControlRequest(serverName, mcpRequest, transport) {
     const messageId = "id" in mcpRequest.message ? mcpRequest.message.id : null;
     const key = `${serverName}:${messageId}`;
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       const cleanup = () => {
         this.pendingMcpResponses.delete(key);
       };
       const resolveAndCleanup = (response) => {
         cleanup();
-        resolve6(response);
+        resolve7(response);
       };
       const rejectAndCleanup = (error49) => {
         cleanup();
@@ -40394,7 +40811,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = (_c = (_a2 = task2.pollInterval) !== null && _a2 !== void 0 ? _a2 : (_b = this._options) === null || _b === void 0 ? void 0 : _b.defaultTaskPollInterval) !== null && _c !== void 0 ? _c : 1e3;
-        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+        await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
         (_d = options === null || options === void 0 ? void 0 : options.signal) === null || _d === void 0 || _d.throwIfAborted();
       }
     } catch (error210) {
@@ -40406,7 +40823,7 @@ var Protocol = class {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options !== null && options !== void 0 ? options : {};
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       var _a2, _b, _c, _d, _e, _f, _g;
       const earlyReject = (error210) => {
         reject(error210);
@@ -40487,7 +40904,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve6(parseResult.data);
+            resolve7(parseResult.data);
           }
         } catch (error210) {
           reject(error210);
@@ -40684,12 +41101,12 @@ var Protocol = class {
       }
     } catch (_d) {
     }
-    return new Promise((resolve6, reject) => {
+    return new Promise((resolve7, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve6, interval);
+      const timeoutId = setTimeout(resolve7, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -41488,7 +41905,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = (_a2 = task.pollInterval) !== null && _a2 !== void 0 ? _a2 : 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
+      await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -42177,7 +42594,7 @@ function query({
 }
 
 // src/worker/agent-session.ts
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 
 // src/mcp/format.ts
@@ -42912,7 +43329,7 @@ function buildSessionView(db, session) {
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0
     ),
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
+    jsonlPath: resolveSessionTranscriptPath(session),
     turns
   };
 }
@@ -44322,7 +44739,7 @@ function findClaudeOnPath() {
   return candidate || null;
 }
 function resolveClaudeCodeExecutablePath(sourceEnv = process.env, deps = {
-  existsSync: import_node_fs6.existsSync,
+  existsSync: import_node_fs7.existsSync,
   findOnPath: findClaudeOnPath
 }) {
   const explicitPath = sourceEnv.CLAUDE_CODE_PATH || sourceEnv.CLAUDE_CODE_EXECUTABLE;
@@ -44512,13 +44929,13 @@ function isExtractionAgentActivity(message) {
   return false;
 }
 function createDeferred() {
-  let resolve6;
+  let resolve7;
   let reject;
   const promise2 = new Promise((innerResolve, innerReject) => {
-    resolve6 = innerResolve;
+    resolve7 = innerResolve;
     reject = innerReject;
   });
-  return { promise: promise2, resolve: resolve6, reject };
+  return { promise: promise2, resolve: resolve7, reject };
 }
 function createPushableAsyncIterable() {
   const queue = [];
@@ -44557,8 +44974,8 @@ function createPushableAsyncIterable() {
               done: true
             };
           }
-          return new Promise((resolve6) => {
-            waiters.push(resolve6);
+          return new Promise((resolve7) => {
+            waiters.push(resolve7);
           });
         }
       };
@@ -44597,8 +45014,8 @@ function createWorkerQuerySession(inputOrDb, sessionDbIdOrDeps, project, depsMay
   const createSdkMcpServerImpl = deps.createSdkMcpServerImpl ?? createSdkMcpServer;
   const toolImpl = deps.toolImpl ?? tool;
   const spawnImpl = deps.spawnImpl ?? import_node_child_process2.spawn;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs7.existsSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs7.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs8.existsSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs8.mkdirSync;
   const killImpl = deps.killImpl ?? process.kill;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
   const promptStream = createPushableAsyncIterable();
@@ -44907,8 +45324,8 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
         try {
           await Promise.race([
             loopPromise,
-            new Promise((resolve6) => {
-              setTimeout(resolve6, 5e3);
+            new Promise((resolve7) => {
+              setTimeout(resolve7, 5e3);
             })
           ]);
         } catch {
@@ -44962,7 +45379,7 @@ ${originalMessage}`;
 // src/diary/memory-store.ts
 var import_node_crypto2 = require("node:crypto");
 var import_promises2 = require("node:fs/promises");
-var import_node_path7 = require("node:path");
+var import_node_path8 = require("node:path");
 
 // src/shared/markdown-sections.ts
 var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
@@ -45159,8 +45576,8 @@ function assertSafeId(id) {
   }
 }
 function isWithin(root2, target) {
-  const pathFromRoot = (0, import_node_path7.relative)(root2, target);
-  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path7.sep}`) && !pathFromRoot.startsWith(import_node_path7.sep);
+  const pathFromRoot = (0, import_node_path8.relative)(root2, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path8.sep}`) && !pathFromRoot.startsWith(import_node_path8.sep);
 }
 var DreamMemoryStore = class {
   constructor(dataRoot, options = {}) {
@@ -45329,28 +45746,28 @@ var DreamMemoryStore = class {
     await this.faultInjector?.(point);
   }
   memoryRoot() {
-    return (0, import_node_path7.join)(this.dataRoot, "memory");
+    return (0, import_node_path8.join)(this.dataRoot, "memory");
   }
   memoryPath(filename) {
-    return (0, import_node_path7.join)(this.memoryRoot(), filename);
+    return (0, import_node_path8.join)(this.memoryRoot(), filename);
   }
   historyRoot() {
-    return (0, import_node_path7.join)(this.memoryRoot(), "history");
+    return (0, import_node_path8.join)(this.memoryRoot(), "history");
   }
   transactionsRoot() {
-    return (0, import_node_path7.join)(this.memoryRoot(), ".transactions");
+    return (0, import_node_path8.join)(this.memoryRoot(), ".transactions");
   }
   successMarkerPath() {
-    return (0, import_node_path7.join)(this.memoryRoot(), "last-successful.json");
+    return (0, import_node_path8.join)(this.memoryRoot(), "last-successful.json");
   }
   migrationStatePath() {
-    return (0, import_node_path7.join)(this.memoryRoot(), "migration-state.json");
+    return (0, import_node_path8.join)(this.memoryRoot(), "migration-state.json");
   }
   async assertWorkspaceRootsAreSafe(options = {}) {
     if (options.createDataRoot !== false) {
       await (0, import_promises2.mkdir)(this.dataRoot, { recursive: true });
     }
-    for (const root2 of [this.dataRoot, this.memoryRoot(), (0, import_node_path7.join)(this.dataRoot, "diary")]) {
+    for (const root2 of [this.dataRoot, this.memoryRoot(), (0, import_node_path8.join)(this.dataRoot, "diary")]) {
       try {
         const metadata = await (0, import_promises2.lstat)(root2);
         if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -45362,8 +45779,8 @@ var DreamMemoryStore = class {
     }
   }
   async assertFileIsSafe(path2) {
-    const absoluteRoot = (0, import_node_path7.resolve)(this.dataRoot);
-    const absolutePath = (0, import_node_path7.resolve)(path2);
+    const absoluteRoot = (0, import_node_path8.resolve)(this.dataRoot);
+    const absolutePath = (0, import_node_path8.resolve)(path2);
     if (!isWithin(absoluteRoot, absolutePath)) {
       throw new Error(`Dream workspace path is outside data root: ${path2}`);
     }
@@ -45398,15 +45815,15 @@ var DreamMemoryStore = class {
     const createdAt = this.now().toISOString();
     const id = snapshotId(new Date(createdAt));
     const historyRoot = this.historyRoot();
-    const finalRoot = (0, import_node_path7.join)(historyRoot, id);
-    const temporaryRoot = (0, import_node_path7.join)(historyRoot, `.${id}.tmp`);
+    const finalRoot = (0, import_node_path8.join)(historyRoot, id);
+    const temporaryRoot = (0, import_node_path8.join)(historyRoot, `.${id}.tmp`);
     await (0, import_promises2.mkdir)(historyRoot, { recursive: true });
     await (0, import_promises2.mkdir)(temporaryRoot);
     try {
       const files = {};
       for (const filename of MEMORY_FILES) {
         const bytes = encoder.encode(documentForFilename(documents, filename));
-        await this.writeFileSynced((0, import_node_path7.join)(temporaryRoot, filename), bytes);
+        await this.writeFileSynced((0, import_node_path8.join)(temporaryRoot, filename), bytes);
         files[filename] = sha256(bytes);
       }
       const manifest = {
@@ -45417,7 +45834,7 @@ var DreamMemoryStore = class {
         files
       };
       await this.writeFileSynced(
-        (0, import_node_path7.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
+        (0, import_node_path8.join)(temporaryRoot, SNAPSHOT_MANIFEST_FILE),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
@@ -45459,7 +45876,7 @@ var DreamMemoryStore = class {
   }
   async readSnapshotManifest(id) {
     assertSafeId(id);
-    const root2 = (0, import_node_path7.join)(this.historyRoot(), id);
+    const root2 = (0, import_node_path8.join)(this.historyRoot(), id);
     const metadata = await (0, import_promises2.lstat)(root2);
     if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
       throw new Error(`Memory snapshot is not a real directory: ${id}`);
@@ -45468,7 +45885,7 @@ var DreamMemoryStore = class {
     try {
       manifest = JSON.parse(
         decodeUtf8(
-          await (0, import_promises2.readFile)((0, import_node_path7.join)(root2, SNAPSHOT_MANIFEST_FILE)),
+          await (0, import_promises2.readFile)((0, import_node_path8.join)(root2, SNAPSHOT_MANIFEST_FILE)),
           `memory snapshot manifest ${id}`
         )
       );
@@ -45491,10 +45908,10 @@ var DreamMemoryStore = class {
   }
   async verifySnapshotWithoutRecovery(id) {
     const manifest = await this.readSnapshotManifest(id);
-    const root2 = (0, import_node_path7.join)(this.historyRoot(), id);
+    const root2 = (0, import_node_path8.join)(this.historyRoot(), id);
     const loaded = {};
     for (const filename of MEMORY_FILES) {
-      const path2 = (0, import_node_path7.join)(root2, filename);
+      const path2 = (0, import_node_path8.join)(root2, filename);
       const metadata = await (0, import_promises2.lstat)(path2);
       if (metadata.isSymbolicLink() || !metadata.isFile()) {
         throw new Error(`Invalid memory snapshot document: ${id}/${filename}`);
@@ -45532,7 +45949,7 @@ var DreamMemoryStore = class {
     }
     for (const snapshot of snapshots) {
       if (!keep.has(snapshot.id)) {
-        await (0, import_promises2.rm)((0, import_node_path7.join)(this.historyRoot(), snapshot.id), {
+        await (0, import_promises2.rm)((0, import_node_path8.join)(this.historyRoot(), snapshot.id), {
           recursive: true,
           force: true
         });
@@ -45543,32 +45960,32 @@ var DreamMemoryStore = class {
   async prepareTransaction(kind, date6, documents) {
     if (date6 !== null) assertDiaryDate(date6);
     const id = (0, import_node_crypto2.randomUUID)();
-    const root2 = (0, import_node_path7.join)(this.transactionsRoot(), id);
-    await (0, import_promises2.mkdir)((0, import_node_path7.join)(root2, "backups"), { recursive: true });
-    await (0, import_promises2.mkdir)((0, import_node_path7.join)(root2, "staged"), { recursive: true });
+    const root2 = (0, import_node_path8.join)(this.transactionsRoot(), id);
+    await (0, import_promises2.mkdir)((0, import_node_path8.join)(root2, "backups"), { recursive: true });
+    await (0, import_promises2.mkdir)((0, import_node_path8.join)(root2, "staged"), { recursive: true });
     const targets = [];
     try {
       for (const [relativePath, document] of Object.entries(documents)) {
         this.assertTransactionPath(relativePath);
-        const finalPath = (0, import_node_path7.join)(this.dataRoot, relativePath);
+        const finalPath = (0, import_node_path8.join)(this.dataRoot, relativePath);
         await this.assertFileIsSafe(finalPath);
         let existed = true;
         try {
           const bytes = await (0, import_promises2.readFile)(finalPath);
-          await this.writeFileSynced((0, import_node_path7.join)(root2, "backups", relativePath), bytes);
+          await this.writeFileSynced((0, import_node_path8.join)(root2, "backups", relativePath), bytes);
         } catch (error49) {
           if (error49.code !== "ENOENT") throw error49;
           existed = false;
         }
         await this.writeFileSynced(
-          (0, import_node_path7.join)(root2, "staged", relativePath),
+          (0, import_node_path8.join)(root2, "staged", relativePath),
           encoder.encode(document)
         );
         targets.push({ path: relativePath, existed });
       }
       const manifest = { version: 1, id, kind, date: date6, targets };
       await this.writeFileSynced(
-        (0, import_node_path7.join)(root2, "manifest.json"),
+        (0, import_node_path8.join)(root2, "manifest.json"),
         encoder.encode(`${JSON.stringify(manifest, null, 2)}
 `)
       );
@@ -45581,23 +45998,23 @@ var DreamMemoryStore = class {
   }
   async publishTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path7.join)(this.dataRoot, target.path);
-      await (0, import_promises2.mkdir)((0, import_node_path7.dirname)(finalPath), { recursive: true });
-      await (0, import_promises2.rename)((0, import_node_path7.join)(transaction.root, "staged", target.path), finalPath);
-      await this.syncDirectory((0, import_node_path7.dirname)(finalPath));
+      const finalPath = (0, import_node_path8.join)(this.dataRoot, target.path);
+      await (0, import_promises2.mkdir)((0, import_node_path8.dirname)(finalPath), { recursive: true });
+      await (0, import_promises2.rename)((0, import_node_path8.join)(transaction.root, "staged", target.path), finalPath);
+      await this.syncDirectory((0, import_node_path8.dirname)(finalPath));
     }
   }
   async rollbackTransaction(transaction) {
     for (const target of transaction.manifest.targets) {
-      const finalPath = (0, import_node_path7.join)(this.dataRoot, target.path);
+      const finalPath = (0, import_node_path8.join)(this.dataRoot, target.path);
       if (target.existed) {
-        const backup = await (0, import_promises2.readFile)((0, import_node_path7.join)(transaction.root, "backups", target.path));
+        const backup = await (0, import_promises2.readFile)((0, import_node_path8.join)(transaction.root, "backups", target.path));
         await this.writeAtomically(finalPath, backup);
       } else {
         await (0, import_promises2.unlink)(finalPath).catch((error49) => {
           if (error49.code !== "ENOENT") throw error49;
         });
-        await this.syncDirectory((0, import_node_path7.dirname)(finalPath)).catch(() => void 0);
+        await this.syncDirectory((0, import_node_path8.dirname)(finalPath)).catch(() => void 0);
       }
     }
     await (0, import_promises2.rm)(transaction.root, { recursive: true, force: true });
@@ -45633,11 +46050,11 @@ var DreamMemoryStore = class {
       if (!entry.isDirectory() || entry.isSymbolicLink()) {
         throw new Error(`Invalid dream transaction entry: ${entry.name}`);
       }
-      const root2 = (0, import_node_path7.join)(this.transactionsRoot(), entry.name);
+      const root2 = (0, import_node_path8.join)(this.transactionsRoot(), entry.name);
       let manifest;
       try {
         manifest = JSON.parse(
-          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path7.join)(root2, "manifest.json")), "dream transaction manifest")
+          decodeUtf8(await (0, import_promises2.readFile)((0, import_node_path8.join)(root2, "manifest.json")), "dream transaction manifest")
         );
       } catch (error49) {
         if (error49.code === "ENOENT") {
@@ -45669,7 +46086,7 @@ var DreamMemoryStore = class {
     }
   }
   assertTransactionPath(path2) {
-    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path7.resolve)(this.dataRoot), (0, import_node_path7.resolve)(this.dataRoot, path2))) {
+    if (path2.includes("\0") || path2.startsWith("/") || !path2.startsWith("memory/") && !path2.startsWith("diary/") || !isWithin((0, import_node_path8.resolve)(this.dataRoot), (0, import_node_path8.resolve)(this.dataRoot, path2))) {
       throw new Error(`Invalid dream transaction path: ${path2}`);
     }
   }
@@ -45744,10 +46161,10 @@ var DreamMemoryStore = class {
     );
   }
   async loadLegacyCurrentPersona() {
-    const personaRoot = (0, import_node_path7.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path8.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
     const currentBytes = await this.readLegacyFile(
-      (0, import_node_path7.join)(personaRoot, "CURRENT"),
+      (0, import_node_path8.join)(personaRoot, "CURRENT"),
       "persona CURRENT"
     );
     let current;
@@ -45761,15 +46178,15 @@ var DreamMemoryStore = class {
     if (!Number.isSafeInteger(current.generation) || current.generation < 1) {
       throw new LegacyPersonaUnavailableError("Invalid legacy persona CURRENT generation");
     }
-    const generationRoot = (0, import_node_path7.join)(
+    const generationRoot = (0, import_node_path8.join)(
       personaRoot,
       "generations",
       String(current.generation)
     );
     const [manifestBytes, profileBytes, experienceBytes] = await Promise.all([
-      this.readLegacyFile((0, import_node_path7.join)(generationRoot, "manifest.json"), "generation manifest"),
-      this.readLegacyFile((0, import_node_path7.join)(generationRoot, "user-profile.md"), "user profile"),
-      this.readLegacyFile((0, import_node_path7.join)(generationRoot, "experience.md"), "experience")
+      this.readLegacyFile((0, import_node_path8.join)(generationRoot, "manifest.json"), "generation manifest"),
+      this.readLegacyFile((0, import_node_path8.join)(generationRoot, "user-profile.md"), "user profile"),
+      this.readLegacyFile((0, import_node_path8.join)(generationRoot, "experience.md"), "experience")
     ]);
     if (manifestBytes.length !== currentBytes.length || !manifestBytes.every((byte, index) => byte === currentBytes[index])) {
       throw new LegacyPersonaUnavailableError(
@@ -45804,10 +46221,10 @@ var DreamMemoryStore = class {
     };
   }
   async retireLegacyPersonaLayout() {
-    const personaRoot = (0, import_node_path7.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path8.join)(this.dataRoot, "persona");
     await this.assertLegacyPersonaRootIsSafe();
-    await (0, import_promises2.rm)((0, import_node_path7.join)(personaRoot, "generations"), { recursive: true, force: true });
-    await (0, import_promises2.unlink)((0, import_node_path7.join)(personaRoot, "CURRENT")).catch((error49) => {
+    await (0, import_promises2.rm)((0, import_node_path8.join)(personaRoot, "generations"), { recursive: true, force: true });
+    await (0, import_promises2.unlink)((0, import_node_path8.join)(personaRoot, "CURRENT")).catch((error49) => {
       if (error49.code !== "ENOENT") throw error49;
     });
     if (await this.pathExists(personaRoot)) {
@@ -45815,7 +46232,7 @@ var DreamMemoryStore = class {
     }
   }
   async assertLegacyPersonaRootIsSafe() {
-    const personaRoot = (0, import_node_path7.join)(this.dataRoot, "persona");
+    const personaRoot = (0, import_node_path8.join)(this.dataRoot, "persona");
     try {
       const metadata = await (0, import_promises2.lstat)(personaRoot);
       if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
@@ -45854,7 +46271,7 @@ var DreamMemoryStore = class {
     }
   }
   async writeFileSynced(path2, bytes) {
-    await (0, import_promises2.mkdir)((0, import_node_path7.dirname)(path2), { recursive: true });
+    await (0, import_promises2.mkdir)((0, import_node_path8.dirname)(path2), { recursive: true });
     const file2 = await (0, import_promises2.open)(path2, "wx");
     try {
       await file2.writeFile(bytes);
@@ -45865,10 +46282,10 @@ var DreamMemoryStore = class {
   }
   async writeAtomically(path2, bytes) {
     await this.assertFileIsSafe(path2);
-    const parent = (0, import_node_path7.dirname)(path2);
-    const temporary = (0, import_node_path7.join)(
+    const parent = (0, import_node_path8.dirname)(path2);
+    const temporary = (0, import_node_path8.join)(
       parent,
-      `.${(0, import_node_path7.basename)(path2)}.${process.pid}.${(0, import_node_crypto2.randomUUID)()}.tmp`
+      `.${(0, import_node_path8.basename)(path2)}.${process.pid}.${(0, import_node_crypto2.randomUUID)()}.tmp`
     );
     await (0, import_promises2.mkdir)(parent, { recursive: true });
     try {
@@ -46230,8 +46647,8 @@ function createDiaryAgentRunner(options) {
       let finished = false;
       let watchdog;
       let finish;
-      const completion = new Promise((resolve6) => {
-        finish = resolve6;
+      const completion = new Promise((resolve7) => {
+        finish = resolve7;
       });
       const current = {
         controller,
@@ -47366,17 +47783,17 @@ function renderDiaryMaterialLines(rows, turnReferences) {
 // src/worker/dream-job.ts
 var import_node_crypto7 = require("node:crypto");
 var import_promises5 = require("node:fs/promises");
-var import_node_path14 = require("node:path");
+var import_node_path15 = require("node:path");
 
 // src/rules/sidecar-ingest.ts
 var import_node_crypto5 = require("node:crypto");
-var import_node_fs9 = require("node:fs");
-var import_node_path9 = require("node:path");
+var import_node_fs10 = require("node:fs");
+var import_node_path10 = require("node:path");
 
 // src/rules/sidecar-protocol.ts
 var import_node_crypto4 = require("node:crypto");
-var import_node_fs8 = require("node:fs");
-var import_node_path8 = require("node:path");
+var import_node_fs9 = require("node:fs");
+var import_node_path9 = require("node:path");
 var INPUT_SUMMARY_LIMIT = 200;
 var SIDECAR_LOCK_WAIT_MS = 5e3;
 var lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
@@ -47384,7 +47801,7 @@ function isErrorCode(error49, code) {
   return error49 instanceof Error && "code" in error49 && error49.code === code;
 }
 function resolveHitSidecarLockPath(dataRoot) {
-  return (0, import_node_path8.join)(dataRoot, "rules", "hits.lock");
+  return (0, import_node_path9.join)(dataRoot, "rules", "hits.lock");
 }
 function summarizeToolInput(value) {
   const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
@@ -47393,7 +47810,7 @@ function summarizeToolInput(value) {
 function readLockOwner(path2) {
   try {
     const value = JSON.parse(
-      (0, import_node_fs8.readFileSync)(path2, "utf8")
+      (0, import_node_fs9.readFileSync)(path2, "utf8")
     );
     return Number.isInteger(value.pid) && value.pid > 0 && typeof value.token === "string" ? { pid: value.pid, token: value.token } : null;
   } catch {
@@ -47414,7 +47831,7 @@ function recoverDeadHitSidecarLock(dataRoot) {
   const owner = readLockOwner(path2);
   if (ownerIsAlive(owner)) return false;
   try {
-    (0, import_node_fs8.unlinkSync)(path2);
+    (0, import_node_fs9.unlinkSync)(path2);
     return true;
   } catch (error49) {
     if (isErrorCode(error49, "ENOENT")) return false;
@@ -47423,20 +47840,20 @@ function recoverDeadHitSidecarLock(dataRoot) {
 }
 function withHitSidecarLock(dataRoot, operation, options = {}) {
   const path2 = resolveHitSidecarLockPath(dataRoot);
-  (0, import_node_fs8.mkdirSync)((0, import_node_path8.dirname)(path2), { recursive: true });
+  (0, import_node_fs9.mkdirSync)((0, import_node_path9.dirname)(path2), { recursive: true });
   const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new Error("waitMs must be a non-negative finite number");
   }
   const owner = { pid: process.pid, token: (0, import_node_crypto4.randomUUID)() };
   const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
-  (0, import_node_fs8.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
+  (0, import_node_fs9.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
   const deadline = performance.now() + waitMs;
   let acquired = false;
   try {
     while (performance.now() <= deadline) {
       try {
-        (0, import_node_fs8.linkSync)(temporary, path2);
+        (0, import_node_fs9.linkSync)(temporary, path2);
         acquired = true;
         break;
       } catch (error49) {
@@ -47450,13 +47867,13 @@ function withHitSidecarLock(dataRoot, operation, options = {}) {
     return operation();
   } finally {
     try {
-      (0, import_node_fs8.unlinkSync)(temporary);
+      (0, import_node_fs9.unlinkSync)(temporary);
     } catch (error49) {
       if (!isErrorCode(error49, "ENOENT")) throw error49;
     }
     if (acquired && readLockOwner(path2)?.token === owner.token) {
       try {
-        (0, import_node_fs8.unlinkSync)(path2);
+        (0, import_node_fs9.unlinkSync)(path2);
       } catch (error49) {
         if (!isErrorCode(error49, "ENOENT")) throw error49;
       }
@@ -47469,10 +47886,10 @@ var SUMMARY_LIMIT = 200;
 var ACTIVE_SIDECAR = /^hits-\d{4}-\d{2}-\d{2}\.jsonl$/u;
 var ROTATED_SIDECAR = /^hits-\d{4}-\d{2}-\d{2}\.[a-zA-Z0-9_-]+\.rotated\.jsonl$/u;
 function rulesDirectory(dataRoot) {
-  return (0, import_node_path9.join)(dataRoot, "rules");
+  return (0, import_node_path10.join)(dataRoot, "rules");
 }
 function resolveHitIngestCheckpointPath(dataRoot) {
-  return (0, import_node_path9.join)(rulesDirectory(dataRoot), "hit-ingest-checkpoint.json");
+  return (0, import_node_path10.join)(rulesDirectory(dataRoot), "hit-ingest-checkpoint.json");
 }
 function isErrorCode2(error49, code) {
   return error49 instanceof Error && "code" in error49 && error49.code === code;
@@ -47481,12 +47898,12 @@ function listSidecars(dataRoot, pattern) {
   const directory = rulesDirectory(dataRoot);
   let names;
   try {
-    names = (0, import_node_fs9.readdirSync)(directory);
+    names = (0, import_node_fs10.readdirSync)(directory);
   } catch (error49) {
     if (isErrorCode2(error49, "ENOENT")) return [];
     throw error49;
   }
-  return names.filter((name) => pattern.test(name)).sort().map((name) => (0, import_node_path9.join)(directory, name));
+  return names.filter((name) => pattern.test(name)).sort().map((name) => (0, import_node_path10.join)(directory, name));
 }
 function rotateHitSidecars(dataRoot, options = {}) {
   return withHitSidecarLock(dataRoot, () => {
@@ -47496,7 +47913,7 @@ function rotateHitSidecars(dataRoot, options = {}) {
       const suffix = ".jsonl";
       const rotatedPath = `${activePath.slice(0, -suffix.length)}.${rotationId()}.rotated${suffix}`;
       try {
-        (0, import_node_fs9.renameSync)(activePath, rotatedPath);
+        (0, import_node_fs10.renameSync)(activePath, rotatedPath);
         rotated.push(rotatedPath);
       } catch (error49) {
         if (!isErrorCode2(error49, "ENOENT")) throw error49;
@@ -47598,7 +48015,7 @@ function parseHit(value) {
 function readHits(paths) {
   const hits = [];
   for (const path2 of paths) {
-    const content = (0, import_node_fs9.readFileSync)(path2, "utf8");
+    const content = (0, import_node_fs10.readFileSync)(path2, "utf8");
     const lines = content.split("\n");
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index].trim();
@@ -47607,7 +48024,7 @@ function readHits(paths) {
         hits.push(parseHit(JSON.parse(line)));
       } catch (error49) {
         const reason = error49 instanceof Error ? error49.message : String(error49);
-        throw new Error(`${(0, import_node_path9.basename)(path2)}:${index + 1}: ${reason}`);
+        throw new Error(`${(0, import_node_path10.basename)(path2)}:${index + 1}: ${reason}`);
       }
     }
   }
@@ -47615,19 +48032,19 @@ function readHits(paths) {
 }
 function writeCheckpoint(dataRoot, rotatedPaths, committedAtEpoch) {
   const path2 = resolveHitIngestCheckpointPath(dataRoot);
-  (0, import_node_fs9.mkdirSync)((0, import_node_path9.dirname)(path2), { recursive: true });
+  (0, import_node_fs10.mkdirSync)((0, import_node_path10.dirname)(path2), { recursive: true });
   const temporary = `${path2}.${process.pid}.${(0, import_node_crypto5.randomUUID)()}.tmp`;
-  (0, import_node_fs9.writeFileSync)(
+  (0, import_node_fs10.writeFileSync)(
     temporary,
     `${JSON.stringify({
       version: 1,
-      rotated_files: rotatedPaths.map((rotatedPath) => (0, import_node_path9.basename)(rotatedPath)),
+      rotated_files: rotatedPaths.map((rotatedPath) => (0, import_node_path10.basename)(rotatedPath)),
       committed_at_epoch: committedAtEpoch
     })}
 `,
     { mode: 384 }
   );
-  (0, import_node_fs9.renameSync)(temporary, path2);
+  (0, import_node_fs10.renameSync)(temporary, path2);
   return path2;
 }
 function ingestHitSidecars(db, dataRoot, options = {}) {
@@ -47692,7 +48109,7 @@ function ingestHitSidecars(db, dataRoot, options = {}) {
   options.afterCheckpoint?.();
   for (const path2 of rotatedFiles) {
     try {
-      (0, import_node_fs9.unlinkSync)(path2);
+      (0, import_node_fs10.unlinkSync)(path2);
     } catch (error49) {
       if (!isErrorCode2(error49, "ENOENT")) throw error49;
     }
@@ -47708,15 +48125,15 @@ function ingestHitSidecars(db, dataRoot, options = {}) {
 }
 
 // src/rules/pretooluse-dispatcher.ts
-var import_node_path10 = require("node:path");
+var import_node_path11 = require("node:path");
 var lockWaitArray2 = new Int32Array(new SharedArrayBuffer(4));
 function resolveTriggerIndexPath(dataRoot = DATA_DIR) {
-  return (0, import_node_path10.join)(dataRoot, "rules", "trigger-index.json");
+  return (0, import_node_path11.join)(dataRoot, "rules", "trigger-index.json");
 }
 
 // src/rules/trigger-index.ts
 var import_node_crypto6 = require("node:crypto");
-var import_node_path11 = require("node:path");
+var import_node_path12 = require("node:path");
 function priorPushStatus(db, rule) {
   if (rule.status !== "digest_only") return rule.status;
   const row = db.query(
@@ -47743,7 +48160,7 @@ function comparePriority(left, right, pushStatuses) {
   return 0;
 }
 function evictionEventUid(project, rule, nextStatus, createdAtEpoch) {
-  const digest = (0, import_node_crypto6.createHash)("sha256").update(`${(0, import_node_path11.resolve)(project)}\0${rule.id}\0${rule.status}\0${nextStatus}\0${createdAtEpoch}`).digest("hex");
+  const digest = (0, import_node_crypto6.createHash)("sha256").update(`${(0, import_node_path12.resolve)(project)}\0${rule.id}\0${rule.status}\0${nextStatus}\0${createdAtEpoch}`).digest("hex");
   return `trigger-index:${digest}`;
 }
 function renderSharedTriggerIndex(db, options) {
@@ -47760,14 +48177,14 @@ function renderSharedTriggerIndex(db, options) {
     );
     const projects = Array.from(
       new Set(
-        candidates.filter((rule) => rule.scope !== "global").map((rule) => (0, import_node_path11.resolve)(rule.scope))
+        candidates.filter((rule) => rule.scope !== "global").map((rule) => (0, import_node_path12.resolve)(rule.scope))
       )
     ).sort();
     const pools = [
       candidates.filter((rule) => rule.scope === "global"),
       ...projects.map(
         (project) => candidates.filter(
-          (rule) => rule.scope === "global" || (0, import_node_path11.resolve)(rule.scope) === project
+          (rule) => rule.scope === "global" || (0, import_node_path12.resolve)(rule.scope) === project
         )
       )
     ];
@@ -47813,29 +48230,29 @@ function serializeTriggerIndex(index) {
 
 // src/worker/diary-agent-tools.ts
 var import_promises4 = require("node:fs/promises");
-var import_node_path13 = require("node:path");
+var import_node_path14 = require("node:path");
 
 // src/worker/dream-staging.ts
 var import_promises3 = require("node:fs/promises");
-var import_node_path12 = require("node:path");
+var import_node_path13 = require("node:path");
 var DREAM_STAGING_DIRNAME = ".dream-staging";
 function dreamStagingPaths(dataRoot, date6) {
-  const root2 = (0, import_node_path12.join)(dataRoot, DREAM_STAGING_DIRNAME, date6);
+  const root2 = (0, import_node_path13.join)(dataRoot, DREAM_STAGING_DIRNAME, date6);
   return {
     root: root2,
-    userProfile: (0, import_node_path12.join)(root2, "memory", "user-profile.md"),
-    archive: (0, import_node_path12.join)(root2, "memory", "archive.md"),
-    diary: (0, import_node_path12.join)(root2, "diary", `${date6}.md`),
-    diaryIndex: (0, import_node_path12.join)(root2, "diary", "INDEX.md")
+    userProfile: (0, import_node_path13.join)(root2, "memory", "user-profile.md"),
+    archive: (0, import_node_path13.join)(root2, "memory", "archive.md"),
+    diary: (0, import_node_path13.join)(root2, "diary", `${date6}.md`),
+    diaryIndex: (0, import_node_path13.join)(root2, "diary", "INDEX.md")
   };
 }
 function isWithin2(root2, target) {
-  const pathFromRoot = (0, import_node_path12.relative)(root2, target);
-  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path12.sep}`) && !(0, import_node_path12.isAbsolute)(pathFromRoot);
+  const pathFromRoot = (0, import_node_path13.relative)(root2, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path13.sep}`) && !(0, import_node_path13.isAbsolute)(pathFromRoot);
 }
 async function assertStagingRootWithinDataRoot(dataRoot, stagingRoot) {
-  const resolvedDataRoot = (0, import_node_path12.resolve)(dataRoot);
-  const resolvedStaging = (0, import_node_path12.resolve)(stagingRoot);
+  const resolvedDataRoot = (0, import_node_path13.resolve)(dataRoot);
+  const resolvedStaging = (0, import_node_path13.resolve)(stagingRoot);
   if (!isWithin2(resolvedDataRoot, resolvedStaging)) {
     throw new Error(`Dream staging root is outside the data root: ${stagingRoot}`);
   }
@@ -47843,7 +48260,7 @@ async function assertStagingRootWithinDataRoot(dataRoot, stagingRoot) {
     if (error49.code === "ENOENT") return resolvedDataRoot;
     throw error49;
   });
-  for (const path2 of [(0, import_node_path12.join)(resolvedDataRoot, DREAM_STAGING_DIRNAME), resolvedStaging]) {
+  for (const path2 of [(0, import_node_path13.join)(resolvedDataRoot, DREAM_STAGING_DIRNAME), resolvedStaging]) {
     let real;
     try {
       real = await (0, import_promises3.realpath)(path2);
@@ -47883,17 +48300,17 @@ async function seedDreamStaging(options) {
   await assertStagingRootWithinDataRoot(options.dataRoot, paths.root);
   await (0, import_promises3.rm)(paths.root, { recursive: true, force: true });
   await Promise.all([
-    (0, import_promises3.mkdir)((0, import_node_path12.join)(paths.root, "memory"), { recursive: true }),
-    (0, import_promises3.mkdir)((0, import_node_path12.join)(paths.root, "diary"), { recursive: true })
+    (0, import_promises3.mkdir)((0, import_node_path13.join)(paths.root, "memory"), { recursive: true }),
+    (0, import_promises3.mkdir)((0, import_node_path13.join)(paths.root, "diary"), { recursive: true })
   ]);
   const memory = await options.store.readCurrentMemory();
   const [diaryDraft, diaryIndex] = await Promise.all([
     readOrDefault(
-      (0, import_node_path12.join)(options.dataRoot, "diary", `${options.date}.md`),
+      (0, import_node_path13.join)(options.dataRoot, "diary", `${options.date}.md`),
       `# ${options.date}
 `
     ),
-    readOrDefault((0, import_node_path12.join)(options.dataRoot, "diary", "INDEX.md"), "# Diary Index\n")
+    readOrDefault((0, import_node_path13.join)(options.dataRoot, "diary", "INDEX.md"), "# Diary Index\n")
   ]);
   await Promise.all([
     (0, import_promises3.writeFile)(paths.userProfile, memory.userProfile),
@@ -47928,8 +48345,8 @@ async function cleanupDreamStaging(dataRoot, date6) {
 var AGENT_READ_DOC_MAX_BYTES = 1048576;
 var DREAM_AGENT_DOCUMENT_SUBTREES = /* @__PURE__ */ new Set(["diary", "memory"]);
 function isWithin3(root2, target) {
-  const pathFromRoot = (0, import_node_path13.relative)(root2, target);
-  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path13.sep}`) && !(0, import_node_path13.isAbsolute)(pathFromRoot);
+  const pathFromRoot = (0, import_node_path14.relative)(root2, target);
+  return pathFromRoot === "" || pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${import_node_path14.sep}`) && !(0, import_node_path14.isAbsolute)(pathFromRoot);
 }
 async function assertNotSymlink(path2, label) {
   const metadata = await (0, import_promises4.lstat)(path2);
@@ -47959,23 +48376,23 @@ function createAgentWorkspacePermissionGuard(options) {
   const allowedSubtrees = [...new Set(options.allowedDocumentSubtrees)];
   const allowedRoots = allowedSubtrees.map((subtree) => ({
     subtree,
-    path: (0, import_node_path13.resolve)(options.dataRoot, subtree),
+    path: (0, import_node_path14.resolve)(options.dataRoot, subtree),
     writable: false
   }));
   if (options.stagingRoot) {
     allowedRoots.push({
       subtree: "staging",
-      path: (0, import_node_path13.resolve)(options.stagingRoot),
+      path: (0, import_node_path14.resolve)(options.stagingRoot),
       writable: true
     });
   }
   const assertWorkspacePath = async (requestedPath, pathOptions) => {
-    if (requestedPath.length === 0 || requestedPath.includes("\0") || !pathOptions.allowAbsolute && (0, import_node_path13.isAbsolute)(requestedPath)) {
+    if (requestedPath.length === 0 || requestedPath.includes("\0") || !pathOptions.allowAbsolute && (0, import_node_path14.isAbsolute)(requestedPath)) {
       throw new Error(`Document path is outside the allowed scope: ${requestedPath}`);
     }
     const normalized = requestedPath.replaceAll("\\", "/");
-    const targetPath = (0, import_node_path13.resolve)(options.dataRoot, normalized);
-    const requestedSubtree = (0, import_node_path13.isAbsolute)(normalized) ? void 0 : normalized.split("/", 1)[0];
+    const targetPath = (0, import_node_path14.resolve)(options.dataRoot, normalized);
+    const requestedSubtree = (0, import_node_path14.isAbsolute)(normalized) ? void 0 : normalized.split("/", 1)[0];
     const allowedRoot = allowedRoots.find(
       ({ subtree, path: path2 }) => (requestedSubtree === void 0 || subtree === requestedSubtree) && isWithin3(path2, targetPath)
     );
@@ -47988,7 +48405,7 @@ function createAgentWorkspacePermissionGuard(options) {
     if (pathOptions.markdownOnly && !normalized.endsWith(".md")) {
       throw new Error(`Document must be a Markdown file: ${requestedPath}`);
     }
-    const pathFromRoot = (0, import_node_path13.relative)(allowedRoot.path, targetPath);
+    const pathFromRoot = (0, import_node_path14.relative)(allowedRoot.path, targetPath);
     assertNotExcludedArtifactPath(
       allowedRoot.subtree,
       pathFromRoot,
@@ -48008,7 +48425,7 @@ function createAgentWorkspacePermissionGuard(options) {
     }
     assertNotExcludedArtifactPath(
       allowedRoot.subtree,
-      (0, import_node_path13.relative)(realRoot, realTarget),
+      (0, import_node_path14.relative)(realRoot, realTarget),
       requestedPath
     );
     return realTarget;
@@ -48182,8 +48599,8 @@ function buildDreamPrompt(date6, dataRoot, staging, rows, turnReferences = /* @_
     "",
     "# \u672C\u591C\u56FA\u5B9A\u53C2\u6570",
     `date: ${date6}`,
-    `archive Grep path: ${(0, import_node_path14.join)(dataRoot, "memory", "archive.md")}`,
-    `diary Grep path: ${(0, import_node_path14.join)(dataRoot, "diary")}`,
+    `archive Grep path: ${(0, import_node_path15.join)(dataRoot, "memory", "archive.md")}`,
+    `diary Grep path: ${(0, import_node_path15.join)(dataRoot, "diary")}`,
     "staging \u5DE5\u4F5C\u533A\uFF08\u7528 Read \u6253\u5F00\u3001Write/Edit \u4FEE\u6539\uFF0C\u53EA\u80FD\u5199\u8FD9\u4E9B\u8DEF\u5F84\uFF09\uFF1A",
     `- staging user-profile: ${staging.userProfile}`,
     `- staging archive: ${staging.archive}`,
@@ -48202,7 +48619,7 @@ function buildDreamPrompt(date6, dataRoot, staging, rows, turnReferences = /* @_
 }
 async function readDiaryIndex(dataRoot) {
   try {
-    return await (0, import_promises5.readFile)((0, import_node_path14.join)(dataRoot, "diary", "INDEX.md"), "utf8");
+    return await (0, import_promises5.readFile)((0, import_node_path15.join)(dataRoot, "diary", "INDEX.md"), "utf8");
   } catch (error49) {
     if (error49.code === "ENOENT") {
       return "# Diary Index\n";
@@ -48265,7 +48682,7 @@ async function compileTriggerIndex(db, dataRoot) {
   const content = serializeTriggerIndex(renderSharedTriggerIndex(db, {
     createdAtEpoch: Math.floor(Date.now() / 1e3)
   }));
-  await (0, import_promises5.mkdir)((0, import_node_path14.dirname)(path2), { recursive: true });
+  await (0, import_promises5.mkdir)((0, import_node_path15.dirname)(path2), { recursive: true });
   try {
     await (0, import_promises5.writeFile)(temporary, content, { mode: 384 });
     await (0, import_promises5.rename)(temporary, path2);
@@ -48293,7 +48710,7 @@ function createDreamJobProcessor(options) {
       ingestHitSidecars(options.db, options.dataRoot);
       await store.migrateLegacyPersona();
       const initialFullFill = await store.requiresInitialFullFill();
-      await (0, import_promises5.mkdir)((0, import_node_path14.join)(options.dataRoot, "diary"), { recursive: true });
+      await (0, import_promises5.mkdir)((0, import_node_path15.join)(options.dataRoot, "diary"), { recursive: true });
       const rows = loadDiaryMaterial(
         options.db,
         date6,
@@ -48942,6 +49359,7 @@ function createWorkerCore(deps) {
   let diaryContinuationTimer = null;
   let pendingDiaryTriggerSessionDbId;
   let globalScanInFlight = null;
+  let transcriptRepairRetired = false;
   const createWorkerQuerySessionImpl = deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
   const readAgentContextTokensImpl = deps.readAgentContextTokensImpl ?? ((agentSessionId) => readLatestContextTokens(resolveTranscriptPath(DATA_DIR, agentSessionId)));
@@ -49214,6 +49632,7 @@ function createWorkerCore(deps) {
       querySession: null,
       contentSessionId: null,
       project: null,
+      transcriptPath: null,
       batchQueue: [],
       streamedParts: /* @__PURE__ */ new Map(),
       cacheTtlMs: 3e5,
@@ -49236,7 +49655,7 @@ function createWorkerCore(deps) {
       async pushMessage(prompt, options = {}) {
         const runtime = ensureQuerySession(state);
         const withEnvelopes = options.withEnvelopes !== false;
-        const mainTranscriptPath = state.contentSessionId && state.project ? resolveTranscriptPath(state.project, state.contentSessionId) : void 0;
+        const mainTranscriptPath = state.transcriptPath ?? (state.contentSessionId && state.project ? resolveTranscriptPath(state.project, state.contentSessionId) : void 0);
         const pendingSubagentTurns = withEnvelopes ? getPendingSubagentTurns(deps.db, state.sessionDbId) : [];
         const reminderItems = withEnvelopes ? getReminderItems(deps.db, state.sessionDbId, mainTranscriptPath) : [];
         const silencedReminderItems = withEnvelopes ? getSilencedReminderItems(
@@ -49318,6 +49737,7 @@ ${prompt}` : prompt;
     }
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    state.transcriptPath = session.transcriptPath;
     state.nextBatchNeedsSessionContext = state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
     if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
@@ -49537,8 +49957,8 @@ ${coldStart}
       try {
         await Promise.race([
           state.querySession?.close(abortError) ?? Promise.resolve(),
-          new Promise((resolve6) => {
-            setTimeout(resolve6, 5e3);
+          new Promise((resolve7) => {
+            setTimeout(resolve7, 5e3);
           })
         ]);
         if (state.queryPid && isProcessAliveImpl(state.queryPid)) {
@@ -49562,8 +49982,8 @@ ${coldStart}
     const queryPid = state.queryPid;
     await Promise.race([
       runtime.close(),
-      new Promise((resolve6) => {
-        setTimeout(resolve6, 5e3);
+      new Promise((resolve7) => {
+        setTimeout(resolve7, 5e3);
       })
     ]);
     if (queryPid && isProcessAliveImpl(queryPid)) {
@@ -49662,8 +50082,8 @@ ${coldStart}
     const state = getOrCreateSessionState(sessionDbId);
     const myTurn = state.processingLock;
     let release;
-    state.processingLock = new Promise((resolve6) => {
-      release = resolve6;
+    state.processingLock = new Promise((resolve7) => {
+      release = resolve7;
     });
     await myTurn;
     const workPromise = Promise.resolve(work(state));
@@ -50659,9 +51079,9 @@ ${coldStart}
     try {
       outcome = await Promise.race([
         drainPromise.then(() => "drained"),
-        new Promise((resolve6) => {
+        new Promise((resolve7) => {
           timeoutHandle = setTimeoutImpl(
-            () => resolve6("timeout"),
+            () => resolve7("timeout"),
             config3.sessionEndTailTimeoutMs
           );
         })
@@ -50972,6 +51392,22 @@ ${coldStart}
           }
         });
       }
+    },
+    runTranscriptRepairTick() {
+      if (transcriptRepairRetired) {
+        return;
+      }
+      try {
+        const summary = runTranscriptPathBackfill(deps.db, {
+          log: (message) => logger.warn?.(message)
+        });
+        if (summary.status === "completed" || summary.status === "skipped") {
+          transcriptRepairRetired = true;
+        }
+      } catch (error49) {
+        logger.error?.("transcript-path backfill failed", { error: error49 });
+        transcriptRepairRetired = true;
+      }
     }
   };
 }
@@ -50979,14 +51415,14 @@ function acquireWorkerSingleton(deps = {}) {
   const now = deps.now ?? Date.now;
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs10.existsSync;
-  const statSyncImpl = deps.statSyncImpl ?? import_node_fs10.statSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs10.readFileSync;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs10.writeFileSync;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs10.unlinkSync;
-  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs10.mkdirSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs11.existsSync;
+  const statSyncImpl = deps.statSyncImpl ?? import_node_fs11.statSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs11.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs11.writeFileSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs11.unlinkSync;
+  const mkdirSyncImpl = deps.mkdirSyncImpl ?? import_node_fs11.mkdirSync;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive2;
-  const dataDir = (0, import_node_path15.join)((0, import_node_os3.homedir)(), ".claude-mnemo");
+  const dataDir = (0, import_node_path16.join)((0, import_node_os3.homedir)(), ".claude-mnemo");
   if (!existsSyncImpl(dataDir)) {
     mkdirSyncImpl(dataDir, { recursive: true });
   }
@@ -51016,9 +51452,9 @@ function acquireWorkerSingleton(deps = {}) {
 }
 function ensureWorkerPidFile(deps = {}) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs10.existsSync;
-  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs10.readFileSync;
-  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs10.writeFileSync;
+  const existsSyncImpl = deps.existsSyncImpl ?? import_node_fs11.existsSync;
+  const readFileSyncImpl = deps.readFileSyncImpl ?? import_node_fs11.readFileSync;
+  const writeFileSyncImpl = deps.writeFileSyncImpl ?? import_node_fs11.writeFileSync;
   const processImpl = deps.processImpl ?? process;
   const ownPid = String(processImpl.pid);
   if (existsSyncImpl(pidPath)) {
@@ -51065,8 +51501,8 @@ function createWorkerFetchHandler(deps = {}, state = createWorkerServerState(dep
   let resolveGlobalWork = null;
   function trackGlobalWork(work) {
     if (activeGlobalWork === 0) {
-      state.globalScanInFlight = new Promise((resolve6) => {
-        resolveGlobalWork = resolve6;
+      state.globalScanInFlight = new Promise((resolve7) => {
+        resolveGlobalWork = resolve7;
       });
     }
     activeGlobalWork += 1;
@@ -51248,7 +51684,7 @@ function createHardExitCleanup(deps) {
 }
 function exitWorkerProcess(deps) {
   const pidPath = deps.pidPath ?? WORKER_PID_PATH;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs10.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs11.unlinkSync;
   const processImpl = deps.processImpl ?? process;
   deps.hardExitTimerImpl?.cancel();
   try {
@@ -51335,7 +51771,7 @@ async function main(deps = {}) {
   }
   const BunServeImpl = deps.BunServeImpl ?? Bun.serve;
   const startingPath = deps.startingPath ?? WORKER_STARTING_PATH;
-  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs10.unlinkSync;
+  const unlinkSyncImpl = deps.unlinkSyncImpl ?? import_node_fs11.unlinkSync;
   const db = deps.db ?? createDatabase();
   const serverState = createWorkerServerState(deps.nowMs?.() ?? Date.now());
   const config3 = deps.config ?? loadConfig();
@@ -51456,6 +51892,7 @@ async function main(deps = {}) {
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
     void core.runRetryTick();
+    core.runTranscriptRepairTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void (async () => {

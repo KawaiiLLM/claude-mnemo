@@ -7,6 +7,7 @@ import {
   getRecentSessions,
   getSession,
   getSessionByContentId,
+  setSessionTranscriptPathIfAbsent,
   updateCompactAnchor,
   updateLastAgentSessionId,
   upsertSession,
@@ -77,6 +78,74 @@ describe("session queries", () => {
     expect(updated.updatedAtEpoch).toBe(260);
     expect(updated.completedAtEpoch).toBe(300);
     expect(rowCount).toBe(1);
+  });
+
+  test("keeps the first transcript path across a cwd change while project follows the latest cwd", () => {
+    const created = upsertSession(db, {
+      contentSessionId: "content-drift",
+      project: "/Users/me/alpha",
+      transcriptPath: "/Users/me/.claude/projects/-Users-me-alpha/content-drift.jsonl",
+      title: null,
+      insight: null,
+      createdAtEpoch: 400,
+      updatedAtEpoch: 400,
+      completedAtEpoch: null,
+    });
+
+    // Same session, later prompt, different cwd — and Claude Code keeps writing
+    // the transcript into the STARTING cwd's directory.
+    const afterCd = upsertSession(db, {
+      contentSessionId: "content-drift",
+      project: "/Users/me/beta",
+      transcriptPath: "/Users/me/.claude/projects/-Users-me-beta/content-drift.jsonl",
+      title: null,
+      insight: null,
+      createdAtEpoch: 400,
+      updatedAtEpoch: 410,
+      completedAtEpoch: null,
+    });
+
+    expect(afterCd.id).toBe(created.id);
+    expect(afterCd.project).toBe("/Users/me/beta");
+    expect(afterCd.transcriptPath).toBe(
+      "/Users/me/.claude/projects/-Users-me-alpha/content-drift.jsonl",
+    );
+
+    // An upsert that carries no transcript path at all cannot clear it either.
+    const withoutPath = upsertSession(db, {
+      contentSessionId: "content-drift",
+      project: "/Users/me/gamma",
+      title: null,
+      insight: null,
+      createdAtEpoch: 400,
+      updatedAtEpoch: 420,
+      completedAtEpoch: null,
+    });
+
+    expect(withoutPath.transcriptPath).toBe(
+      "/Users/me/.claude/projects/-Users-me-alpha/content-drift.jsonl",
+    );
+  });
+
+  test("fills the transcript path only while it is absent", () => {
+    const created = upsertSession(db, {
+      contentSessionId: "content-late-path",
+      project: "/Users/me/alpha",
+      title: null,
+      insight: null,
+      createdAtEpoch: 500,
+      updatedAtEpoch: 500,
+      completedAtEpoch: null,
+    });
+
+    expect(created.transcriptPath).toBeNull();
+    expect(setSessionTranscriptPathIfAbsent(db, created.id, "/first.jsonl")).toBe(
+      true,
+    );
+    expect(setSessionTranscriptPathIfAbsent(db, created.id, "/second.jsonl")).toBe(
+      false,
+    );
+    expect(getSession(db, created.id)?.transcriptPath).toBe("/first.jsonl");
   });
 
   test("preserves nextSteps when an update omits it", () => {

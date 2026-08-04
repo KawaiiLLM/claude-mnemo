@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   getRecentSessions,
   getSessionByContentId,
+  setSessionTranscriptPathIfAbsent,
   upsertSession,
   type SessionRecord,
 } from "../../db/sessions";
@@ -14,7 +15,7 @@ import type {
 } from "../../mcp/format";
 import { renderCurrentSessionStateOutput } from "../../mcp/session-output";
 import { parseMarkdownSections } from "../../shared/markdown-sections";
-import { resolveTranscriptPath } from "../../shared/paths";
+import { resolveSessionTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
 import { recoverStrandedTurns } from "../../db/recover-stranded";
 import type { DiaryFileStore } from "../../diary/file-store";
@@ -174,7 +175,11 @@ function buildSessionMetricMap(
   return metrics;
 }
 
-function buildSessionView(
+// Exported for the reader-seam test: `jsonlPath` is the only field here that is
+// derived rather than copied, and the renderers this feeds (collapsed session
+// list, current-session state) both drop it, so the returned view is the only
+// place the resolution is observable.
+export function buildSessionView(
   db: Database,
   session: SessionRecord,
   metrics: { turnCount: number; observationCount: number } | undefined,
@@ -193,7 +198,7 @@ function buildSessionView(
     reference: session.reference,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
+    jsonlPath: resolveSessionTranscriptPath(session),
   };
 }
 
@@ -339,6 +344,7 @@ function buildContextOutput(
     upsertSession(db, {
       contentSessionId: input.sessionId,
       project: input.cwd ?? "",
+      transcriptPath: input.transcriptPath ?? null,
       title: null,
       content: null,
       insight: null,
@@ -351,6 +357,16 @@ function buildContextOutput(
   const currentSession = input.sessionId
     ? getSessionByContentId(db, input.sessionId)
     : null;
+  // Registration path #1. Covers the already-registered case too (resume of a
+  // session whose row predates the column), and the IS NULL guard keeps it
+  // first-non-NULL: a resume from a different cwd cannot move the path.
+  if (currentSession && input.transcriptPath) {
+    setSessionTranscriptPathIfAbsent(
+      db,
+      currentSession.id,
+      input.transcriptPath,
+    );
+  }
   if (currentSession) {
     recoverStrandedTurns(
       db,

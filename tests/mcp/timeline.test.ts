@@ -2221,6 +2221,31 @@ describe("buildTimelineView", () => {
     expect(view.tz.offsetLabel).toMatch(/^[+-]\d{2}:\d{2}$/);
   });
 
+  it("prefers the recorded transcript path over the cwd-derived one", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+    // The session cd'ed after it started: `project` moved, the transcript did
+    // not. Deriving from project would point at a file that does not exist.
+    const recorded =
+      "/Users/me/.claude/projects/-tmp-claude-mnemo-test/abc-uuid-timeline.jsonl";
+    db.query<unknown, [string, string]>(
+      "UPDATE sessions SET transcript_path = ?, project = ? WHERE id = 1",
+    ).run(recorded, "/tmp/somewhere-else");
+
+    expect(buildTimelineView(db, { id: "S1" }).jsonlPath).toBe(recorded);
+  });
+
+  it("falls back to deriving from project when no transcript path is recorded", () => {
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+
+    expect(buildTimelineView(db, { id: "S1" }).jsonlPath).toBe(
+      resolveTranscriptPath("/tmp/claude-mnemo-test", "abc-uuid-timeline"),
+    );
+  });
+
   it("respects closed range", () => {
     const db = createDatabase(":memory:");
 

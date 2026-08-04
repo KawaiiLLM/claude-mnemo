@@ -21,6 +21,7 @@ import { createSessionInitHandler } from "../../src/hooks/handlers/session-init"
 import { createContextHandler } from "../../src/hooks/handlers/context";
 import { runHookCommand } from "../../src/hooks/hook-command";
 import { scanTranscriptIncrementally } from "../../src/hooks/transcript-scan";
+import { resolveTranscriptPath } from "../../src/shared/paths";
 import type { HookHandler, NormalizedHookInput } from "../../src/hooks/types";
 
 const PROJECT = "/Users/zhaoqixuan/Projects/claude-mnemo";
@@ -1047,6 +1048,68 @@ describe("capture repairs", () => {
         raw: {},
       });
     }
+
+    test("repairs against the session's recorded transcript path, not the cwd-derived one", async () => {
+      const path = writeTranscript("session-end-recorded.jsonl", [
+        boundary("boundary-1", 128, "auto"),
+        wrapper("summary-1", "boundary-1", "prompt-1"),
+      ]);
+      // The session cd'ed after it started: `project` no longer names the
+      // transcript's directory, so only the recorded path finds the file.
+      db.query<unknown, [string, string, number]>(
+        "UPDATE sessions SET transcript_path = ?, project = ? WHERE id = ?",
+      ).run(path, "/Users/me/moved-away", sessionId);
+      await markRunStart();
+      const seen: Array<string | undefined> = [];
+      const handler = createSessionEndHandler({
+        db,
+        now: () => 300,
+        captureRepairLog: log,
+        captureRepairRunner: (database, sess, transcriptPath, options) => {
+          seen.push(transcriptPath);
+          return runCaptureRepair(database, sess, transcriptPath, options);
+        },
+      });
+
+      // No transcriptPath on the hook input — the DB is the only source.
+      await handler({
+        eventName: "SessionEnd",
+        sessionId: CONTENT_SESSION_ID,
+        cwd: "/Users/me/moved-away",
+        stopHookActive: false,
+        raw: {},
+      });
+
+      expect(seen).toEqual([path]);
+      expect(
+        getTurnsForSession(db, sessionId).some((turn) => turn.type === "compact"),
+      ).toBe(true);
+    });
+
+    test("derives the transcript path from project when the session records none", async () => {
+      await markRunStart();
+      expect(session().transcriptPath).toBeNull();
+      const seen: Array<string | undefined> = [];
+      const handler = createSessionEndHandler({
+        db,
+        now: () => 300,
+        captureRepairLog: log,
+        captureRepairRunner: (database, sess, transcriptPath, options) => {
+          seen.push(transcriptPath);
+          return runCaptureRepair(database, sess, transcriptPath, options);
+        },
+      });
+
+      await handler({
+        eventName: "SessionEnd",
+        sessionId: CONTENT_SESSION_ID,
+        cwd: PROJECT,
+        stopHookActive: false,
+        raw: {},
+      });
+
+      expect(seen).toEqual([resolveTranscriptPath(PROJECT, CONTENT_SESSION_ID)]);
+    });
 
     test("a repair-created marker does not make a glance look like a live run", async () => {
       // Orphan from a PREVIOUS run — must stay untouched.

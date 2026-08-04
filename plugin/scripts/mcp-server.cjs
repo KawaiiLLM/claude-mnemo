@@ -7450,14 +7450,18 @@ function resolveDatabasePath(explicitPath) {
 function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
+function transcriptRootPath() {
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
+}
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
-    (0, import_node_os.homedir)(),
-    ".claude",
-    "projects",
+    transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
   );
+}
+function resolveSessionTranscriptPath(session) {
+  return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
 var import_node_os, import_node_path, DATA_DIR, DEFAULT_DB_PATH, WORKER_PID_PATH, WORKER_STARTING_PATH;
 var init_paths = __esm({
@@ -7613,6 +7617,7 @@ function initializeSchema(db) {
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
@@ -7629,7 +7634,21 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
+  ensureRepairLedgerClaimColumns(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureRepairLedgerClaimColumns(db) {
+  const columns = [
+    ["claim_generation", "INTEGER NOT NULL DEFAULT 0"],
+    ["claimed_at_epoch", "INTEGER"],
+    ["deferred_until_epoch", "INTEGER"],
+    ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"]
+  ];
+  for (const [column, definition] of columns) {
+    if (!hasColumn(db, "repair_ledger", column)) {
+      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 function ensureSettlementClaimGenerationColumn(db) {
   if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
@@ -7671,6 +7690,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureSessionTranscriptPathColumn(db) {
+  if (hasColumn(db, "sessions", "transcript_path")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
@@ -7915,6 +7940,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_state");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
@@ -7958,6 +7984,7 @@ var init_schema = __esm({
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
     project TEXT NOT NULL,
+    transcript_path TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -8121,6 +8148,34 @@ var init_schema = __esm({
       retry_disposition IN ('transient', 'permanent')
     ),
     last_error TEXT
+  );
+
+  -- Ledger for one-time, resumable data repairs. Keyed by a VERSIONED name so a
+  -- future revision of the same repair is a new row rather than a re-run of the
+  -- old one. The cursor is a session-id high-water mark: every examined row
+  -- crosses it, including the ones the repair could not fix, so nothing is
+  -- permanently re-selected and no row is counted twice.
+  --
+  -- The row doubles as the repair's lock. claim_generation / claimed_at_epoch
+  -- are the same lease-and-fence idiom settlement_jobs uses: claiming bumps the
+  -- generation, every later write CASes on it, so a displaced runner writes
+  -- nothing instead of double-counting. deferred_until_epoch /
+  -- deferral_attempts hold the backoff for a repair that cannot run yet (an
+  -- unreadable transcript root) WITHOUT marking it done \u2014 the one-shot repair
+  -- stays available for whenever the environment recovers.
+  CREATE TABLE IF NOT EXISTS repair_ledger (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'done')),
+    cursor_id INTEGER NOT NULL DEFAULT 0,
+    filled_count INTEGER NOT NULL DEFAULT 0,
+    unresolved_count INTEGER NOT NULL DEFAULT 0,
+    ambiguous_count INTEGER NOT NULL DEFAULT 0,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    deferred_until_epoch INTEGER,
+    deferral_attempts INTEGER NOT NULL DEFAULT 0,
+    started_at_epoch INTEGER NOT NULL,
+    completed_at_epoch INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
@@ -32052,6 +32107,7 @@ var SESSION_SELECT = `
     id,
     content_session_id AS contentSessionId,
     project,
+    transcript_path AS transcriptPath,
     title,
     content,
     insight,
@@ -32091,6 +32147,7 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
         id,
         content_session_id AS contentSessionId,
         project,
+        transcript_path AS transcriptPath,
         title,
         content,
         insight,
@@ -33262,7 +33319,7 @@ function buildSessionView(db, session) {
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0
     ),
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
+    jsonlPath: resolveSessionTranscriptPath(session),
     turns
   };
 }
@@ -34834,7 +34891,7 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
     compactBoundaries.push(session.lastCompactTurn);
   }
-  const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
+  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({

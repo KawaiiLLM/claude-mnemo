@@ -66,14 +66,18 @@ function resolveDatabasePath(explicitPath) {
 function encodeProjectPath(projectPath) {
   return projectPath.replace(/[/:\\.]/g, "-");
 }
+function transcriptRootPath() {
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".claude", "projects");
+}
 function resolveTranscriptPath(projectPath, sessionId) {
   return (0, import_node_path.join)(
-    (0, import_node_os.homedir)(),
-    ".claude",
-    "projects",
+    transcriptRootPath(),
     encodeProjectPath(projectPath),
     `${sessionId}.jsonl`
   );
+}
+function resolveSessionTranscriptPath(session) {
+  return session.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
 }
 
 // src/db/database.ts
@@ -341,6 +345,7 @@ var SCHEMA_SQL = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content_session_id TEXT UNIQUE NOT NULL,
     project TEXT NOT NULL,
+    transcript_path TEXT,
     title TEXT,
     content TEXT,
     insight TEXT,
@@ -504,6 +509,34 @@ var SCHEMA_SQL = `
       retry_disposition IN ('transient', 'permanent')
     ),
     last_error TEXT
+  );
+
+  -- Ledger for one-time, resumable data repairs. Keyed by a VERSIONED name so a
+  -- future revision of the same repair is a new row rather than a re-run of the
+  -- old one. The cursor is a session-id high-water mark: every examined row
+  -- crosses it, including the ones the repair could not fix, so nothing is
+  -- permanently re-selected and no row is counted twice.
+  --
+  -- The row doubles as the repair's lock. claim_generation / claimed_at_epoch
+  -- are the same lease-and-fence idiom settlement_jobs uses: claiming bumps the
+  -- generation, every later write CASes on it, so a displaced runner writes
+  -- nothing instead of double-counting. deferred_until_epoch /
+  -- deferral_attempts hold the backoff for a repair that cannot run yet (an
+  -- unreadable transcript root) WITHOUT marking it done \u2014 the one-shot repair
+  -- stays available for whenever the environment recovers.
+  CREATE TABLE IF NOT EXISTS repair_ledger (
+    name TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'done')),
+    cursor_id INTEGER NOT NULL DEFAULT 0,
+    filled_count INTEGER NOT NULL DEFAULT 0,
+    unresolved_count INTEGER NOT NULL DEFAULT 0,
+    ambiguous_count INTEGER NOT NULL DEFAULT 0,
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    deferred_until_epoch INTEGER,
+    deferral_attempts INTEGER NOT NULL DEFAULT 0,
+    started_at_epoch INTEGER NOT NULL,
+    completed_at_epoch INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS diary_state (
@@ -709,6 +742,7 @@ function initializeSchema(db) {
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
   ensureSessionLastAgentSessionIdColumn(db);
+  ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
@@ -725,7 +759,21 @@ function initializeSchema(db) {
   ensureSessionProjectIndex(db);
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
+  ensureRepairLedgerClaimColumns(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureRepairLedgerClaimColumns(db) {
+  const columns = [
+    ["claim_generation", "INTEGER NOT NULL DEFAULT 0"],
+    ["claimed_at_epoch", "INTEGER"],
+    ["deferred_until_epoch", "INTEGER"],
+    ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"]
+  ];
+  for (const [column, definition] of columns) {
+    if (!hasColumn(db, "repair_ledger", column)) {
+      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 function ensureSettlementClaimGenerationColumn(db) {
   if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
@@ -767,6 +815,12 @@ function ensureSessionLastAgentSessionIdColumn(db) {
     return;
   }
   db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+}
+function ensureSessionTranscriptPathColumn(db) {
+  if (hasColumn(db, "sessions", "transcript_path")) {
+    return;
+  }
+  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
   if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
@@ -1020,6 +1074,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_state");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS pending_queue");
+  db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS observations");
@@ -2268,6 +2323,7 @@ var SESSION_SELECT = `
     id,
     content_session_id AS contentSessionId,
     project,
+    transcript_path AS transcriptPath,
     title,
     content,
     insight,
@@ -2293,6 +2349,7 @@ function upsertSession(db, input) {
       INSERT INTO sessions (
         content_session_id,
         project,
+        transcript_path,
         title,
         content,
         insight,
@@ -2302,9 +2359,13 @@ function upsertSession(db, input) {
         created_at_epoch,
         updated_at_epoch,
         completed_at_epoch
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(content_session_id) DO UPDATE SET
         project = excluded.project,
+        -- First-non-NULL, and deliberately the reverse of project's
+        -- last-writer-wins: the transcript directory is fixed at the session's
+        -- STARTING cwd, so a later upsert from a different cwd must not move it.
+        transcript_path = COALESCE(sessions.transcript_path, excluded.transcript_path),
         title = COALESCE(excluded.title, sessions.title),
         content = COALESCE(excluded.content, sessions.content),
         insight = COALESCE(excluded.insight, sessions.insight),
@@ -2318,6 +2379,7 @@ function upsertSession(db, input) {
         id,
         content_session_id AS contentSessionId,
         project,
+        transcript_path AS transcriptPath,
         title,
         content,
         insight,
@@ -2339,6 +2401,7 @@ function upsertSession(db, input) {
     `).get(
     input.contentSessionId,
     input.project,
+    input.transcriptPath ?? null,
     input.title,
     input.content ?? null,
     input.insight,
@@ -2404,6 +2467,13 @@ function rewindSessionScanCursor(db, sessionId, byteOffset, lineNumber, observed
     observedByteOffset
   );
 }
+function setSessionTranscriptPathIfAbsent(db, sessionId, transcriptPath) {
+  return db.query(
+    `UPDATE sessions
+         SET transcript_path = ?
+         WHERE id = ? AND transcript_path IS NULL`
+  ).run(transcriptPath, sessionId).changes > 0;
+}
 function setSessionParent(db, sessionId, parentSessionId) {
   db.query(
     `UPDATE sessions SET parent_session_id = ? WHERE id = ?`
@@ -2421,7 +2491,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.4-mse4v19y" : "dev";
+var BUILD_ID = true ? "0.8.4-mse708te" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5128,7 +5198,7 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   if (compactBoundaries.length === 0 && session.lastCompactTurn !== null) {
     compactBoundaries.push(session.lastCompactTurn);
   }
-  const jsonlPath = resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
+  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
@@ -20744,7 +20814,7 @@ function buildSessionView(db, session, metrics) {
     reference: session.reference,
     turnCount: metrics?.turnCount ?? 0,
     observationCount: metrics?.observationCount ?? 0,
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId)
+    jsonlPath: resolveSessionTranscriptPath(session)
   };
 }
 function classifyTimeGroup(epochSeconds, now) {
@@ -20845,6 +20915,7 @@ function buildContextOutput(db, input) {
     upsertSession(db, {
       contentSessionId: input.sessionId,
       project: input.cwd ?? "",
+      transcriptPath: input.transcriptPath ?? null,
       title: null,
       content: null,
       insight: null,
@@ -20854,6 +20925,13 @@ function buildContextOutput(db, input) {
     });
   }
   const currentSession = input.sessionId ? getSessionByContentId(db, input.sessionId) : null;
+  if (currentSession && input.transcriptPath) {
+    setSessionTranscriptPathIfAbsent(
+      db,
+      currentSession.id,
+      input.transcriptPath
+    );
+  }
   if (currentSession) {
     recoverStrandedTurns(
       db,
@@ -21877,7 +21955,7 @@ function createSessionEndHandler(dependencies) {
       session.id
     );
     const maxTurnIdSnapshot = getMaxTurnId(dependencies.db, session.id);
-    const transcriptPath = input.transcriptPath ?? resolveTranscriptPath(session.project, session.contentSessionId);
+    const transcriptPath = input.transcriptPath ?? resolveSessionTranscriptPath(session);
     const repairLog = dependencies.captureRepairLog ?? ((message) => process.stderr.write(`[claude-mnemo] ${message}
 `));
     const maxLines = dependencies.captureRepairMaxLines ?? SESSION_END_SCAN_MAX_LINES;
@@ -22295,6 +22373,9 @@ function createSessionInitHandler(dependencies) {
       const session = upsertSession(dependencies.db, {
         contentSessionId,
         project,
+        // Registration path #2. First-non-NULL inside upsertSession, so a
+        // prompt submitted after a `cd` updates project but never the path.
+        transcriptPath: input.transcriptPath ?? null,
         title: existingSession?.title ?? null,
         content: existingSession?.content ?? null,
         insight: existingSession?.insight ?? null,

@@ -47,6 +47,7 @@ import {
   type PendingQueueItem,
 } from "../db/pending-queue";
 import { initializeDatabase } from "../db/schema";
+import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
 import { MNEMO_ALLOWED_TOOLS } from "../mcp/definitions";
 import { getSessionEffectiveCitations } from "../db/citations";
 import {
@@ -255,6 +256,8 @@ export interface SessionState {
   querySession: WorkerQuerySession | null;
   contentSessionId: string | null;
   project: string | null;
+  /** Authoritative transcript path from the session row; null → derive. */
+  transcriptPath: string | null;
   batchQueue: BatchEntry[];
   // turnId -> next streaming partIndex. Presence means the turn has streamed
   // at least one slice this process lifetime (D2/D6). Lost on restart; the
@@ -448,6 +451,14 @@ export interface WorkerCore {
   abortStalledSessions(nowMs?: number): Promise<void>;
   runKeepaliveTick(nowMs?: number): Promise<void>;
   runRetryTick(nowMs?: number): Promise<void>;
+  /**
+   * One bounded slice of the `sessions.transcript_path` repair. The worker is
+   * the only long-lived process, so it is the only place this belongs — hosting
+   * it in `initializeDatabase` put an unbounded filesystem scan on every hook's
+   * critical path and let several processes drive one ledger. Self-retiring:
+   * once the repair completes there is nothing left to call.
+   */
+  runTranscriptRepairTick(): void;
   /** Ticket 02 calls this when a fresh session env capture is registered. */
   clearBlockedSession(sessionDbId: number): void;
   registerSessionEnv(
@@ -801,6 +812,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   let diaryContinuationTimer: unknown | null = null;
   let pendingDiaryTriggerSessionDbId: number | null | undefined;
   let globalScanInFlight: Promise<void> | null = null;
+  // Latches once the transcript-path repair reports it has nothing left to do,
+  // so the steady state costs zero — not even the ledger's indexed read.
+  let transcriptRepairRetired = false;
   const createWorkerQuerySessionImpl =
     deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
   const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
@@ -1179,6 +1193,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       querySession: null,
       contentSessionId: null,
       project: null,
+      transcriptPath: null,
       batchQueue: [],
       streamedParts: new Map<number, number>(),
       cacheTtlMs: 300_000,
@@ -1204,10 +1219,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       ): Promise<void> {
         const runtime = ensureQuerySession(state!);
         const withEnvelopes = options.withEnvelopes !== false;
+        // Prefer the session's recorded transcript path; the cwd-derived form is
+        // the legacy fallback and misses the file for any session that `cd`ed.
         const mainTranscriptPath =
-          state!.contentSessionId && state!.project
+          state!.transcriptPath ??
+          (state!.contentSessionId && state!.project
             ? resolveTranscriptPath(state!.project, state!.contentSessionId)
-            : undefined;
+            : undefined);
         const pendingSubagentTurns = withEnvelopes
           ? getPendingSubagentTurns(deps.db, state!.sessionDbId)
           : [];
@@ -1306,6 +1324,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     state.contentSessionId = session.contentSessionId;
     state.project = session.project;
+    state.transcriptPath = session.transcriptPath;
     state.nextBatchNeedsSessionContext =
       state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
     if (!options.forceFresh && session.lastAgentSessionId) {
@@ -3571,6 +3590,25 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         });
       }
     },
+    runTranscriptRepairTick(): void {
+      if (transcriptRepairRetired) {
+        return;
+      }
+
+      try {
+        const summary = runTranscriptPathBackfill(deps.db, {
+          log: (message) => logger.warn?.(message),
+        });
+        if (summary.status === "completed" || summary.status === "skipped") {
+          transcriptRepairRetired = true;
+        }
+      } catch (error) {
+        // A data repair must never become a per-tick error loop. The next
+        // worker start gets one more attempt from the same ledger cursor.
+        logger.error?.("transcript-path backfill failed", { error });
+        transcriptRepairRetired = true;
+      }
+    },
   };
 }
 
@@ -4217,6 +4255,10 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     void core.abortStalledSessions();
     void core.runKeepaliveTick();
     void core.runRetryTick();
+    // Off the startup path and off every request path: the first slice runs one
+    // watchdog interval after boot, each slice is budget-bounded, and the tick
+    // retires itself once the repair is done.
+    core.runTranscriptRepairTick();
   }, WATCHDOG_INTERVAL_MS);
   setInterval(() => {
     void (async () => {

@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { getObservationsForTurn } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
+import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import { recallMemory } from "../../src/mcp/recall";
@@ -268,6 +268,35 @@ describe("recallMemory", () => {
 
     expect(observationOutput).toContain(`[O${authObservationId}] Auth mutex`);
     expect(observationOutput).toContain("desc: Guards refresh");
+  });
+
+  test("prefers a session's recorded transcript path over the cwd-derived one", () => {
+    // Registered under alpha, later cd'ed to beta: `project` follows the cwd,
+    // the transcript file does not move.
+    const recorded =
+      "/Users/me/.claude/projects/-Users-me-alpha/session-drift.jsonl";
+    const drifted = upsertSession(db, {
+      contentSessionId: "session-drift",
+      project: "/Users/me/beta",
+      transcriptPath: recorded,
+      title: "Drifted session",
+      insight: null,
+      createdAtEpoch: 90_000,
+      updatedAtEpoch: 90_010,
+      completedAtEpoch: null,
+    });
+
+    expect(
+      recallMemory(db, { id: `S${drifted.id}`, depth: "expanded" }),
+    ).toContain(`raw: ${recorded}`);
+  });
+
+  test("falls back to deriving the transcript path when the session has none", () => {
+    expect(getSessionByContentId(db, "session-2")?.transcriptPath).toBeNull();
+
+    expect(
+      recallMemory(db, { id: `S${authSessionId}`, depth: "expanded" }),
+    ).toContain(`raw: ${resolveTranscriptPath("claude-mnemo", "session-2")}`);
   });
 
   test("renders anchored and legacy turn ids in routed turn listings", () => {

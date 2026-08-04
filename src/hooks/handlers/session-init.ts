@@ -102,6 +102,9 @@ export function createSessionInitHandler(
       const session = upsertSession(dependencies.db, {
         contentSessionId,
         project,
+        // Registration path #2. First-non-NULL inside upsertSession, so a
+        // prompt submitted after a `cd` updates project but never the path.
+        transcriptPath: input.transcriptPath ?? null,
         title: existingSession?.title ?? null,
         content: existingSession?.content ?? null,
         insight: existingSession?.insight ?? null,

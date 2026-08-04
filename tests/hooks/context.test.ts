@@ -3,8 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
-import { upsertSession } from "../../src/db/sessions";
-import { createContextHandler } from "../../src/hooks/handlers/context";
+import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
+import {
+  buildSessionView,
+  createContextHandler,
+} from "../../src/hooks/handlers/context";
 import * as formatModule from "../../src/mcp/format";
 import * as sessionsModule from "../../src/db/sessions";
 import type { NormalizedHookInput } from "../../src/hooks/types";
@@ -223,6 +226,129 @@ describe("handleContextHook", () => {
     ).get()?.count).toBe(1);
 
     emptyDb.close();
+  });
+
+  test("SessionStart records the transcript path and never moves it after a cd", async () => {
+    const freshDb = createDatabase(":memory:");
+    initializeSchema(freshDb);
+    const handler = createContextHandler({ db: freshDb });
+    const started =
+      "/Users/me/.claude/projects/-Users-me-alpha/drifting-session.jsonl";
+
+    await handler(
+      createInput({
+        sessionId: "drifting-session",
+        source: "startup",
+        cwd: "/Users/me/alpha",
+        transcriptPath: started,
+      }),
+    );
+
+    expect(
+      getSessionByContentId(freshDb, "drifting-session")?.transcriptPath,
+    ).toBe(started);
+
+    // A resume after the session cd'ed: Claude Code reports the new cwd, and the
+    // transcript path it derives from that cwd is a file that does not exist.
+    await handler(
+      createInput({
+        sessionId: "drifting-session",
+        source: "resume",
+        cwd: "/Users/me/beta",
+        transcriptPath:
+          "/Users/me/.claude/projects/-Users-me-beta/drifting-session.jsonl",
+      }),
+    );
+
+    // (SessionStart only registers a missing row, so `project` still reads
+    // alpha here — the cwd drift itself lands via UserPromptSubmit.)
+    expect(
+      getSessionByContentId(freshDb, "drifting-session")?.transcriptPath,
+    ).toBe(started);
+
+    freshDb.close();
+  });
+
+  test("SessionStart fills the transcript path of a session registered before the column existed", async () => {
+    const freshDb = createDatabase(":memory:");
+    initializeSchema(freshDb);
+    const legacy = upsertSession(freshDb, {
+      contentSessionId: "legacy-session",
+      project: "/Users/me/alpha",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    expect(legacy.transcriptPath).toBeNull();
+
+    const recorded =
+      "/Users/me/.claude/projects/-Users-me-alpha/legacy-session.jsonl";
+    await createContextHandler({ db: freshDb })(
+      createInput({
+        sessionId: "legacy-session",
+        source: "resume",
+        cwd: "/Users/me/alpha",
+        transcriptPath: recorded,
+      }),
+    );
+
+    expect(getSessionByContentId(freshDb, "legacy-session")?.transcriptPath).toBe(
+      recorded,
+    );
+
+    freshDb.close();
+  });
+
+  // The SessionStart reader seam. Assert what buildSessionView RETURNS, not
+  // what the row holds: `jsonlPath` is the one derived field in the view, and
+  // the drift bug was a derivation bug.
+  test("buildSessionView reads the recorded transcript path, and derives one only when it is NULL", () => {
+    const freshDb = createDatabase(":memory:");
+    initializeSchema(freshDb);
+    const recorded =
+      "/Users/me/.claude/projects/-Users-me-alpha/view-drifted.jsonl";
+
+    upsertSession(freshDb, {
+      contentSessionId: "view-drifted",
+      project: "/Users/me/beta",
+      transcriptPath: recorded,
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    upsertSession(freshDb, {
+      contentSessionId: "view-legacy",
+      project: "/Users/me/beta",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    // Field hit: the starting cwd's transcript, not the one `project` implies.
+    expect(
+      buildSessionView(
+        freshDb,
+        getSessionByContentId(freshDb, "view-drifted")!,
+        undefined,
+      ).jsonlPath,
+    ).toBe(recorded);
+
+    // NULL fallback: byte-identical to the legacy cwd derivation.
+    expect(
+      buildSessionView(
+        freshDb,
+        getSessionByContentId(freshDb, "view-legacy")!,
+        undefined,
+      ).jsonlPath,
+    ).toBe(resolveTranscriptPath("/Users/me/beta", "view-legacy"));
+
+    freshDb.close();
   });
 
   test("startup is silent and does not query or render the state document", async () => {

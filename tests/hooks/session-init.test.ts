@@ -79,6 +79,31 @@ describe("handleSessionInitHook", () => {
     expect(turn?.userPrompt).toBe("Diagnose the auth race");
   });
 
+  test("a prompt after a cd updates project but keeps the first transcript path", async () => {
+    const handler = createSessionInitHandler({ db });
+    const started =
+      "/Users/me/.claude/projects/-Users-me-alpha/session-1.jsonl";
+
+    await handler(
+      createInput({ cwd: "/Users/me/alpha", transcriptPath: started }),
+    );
+    // Second prompt from a new cwd. Even if a later event carried a path
+    // derived from the new cwd, the recorded one must not move — only `project`
+    // may follow the cwd.
+    await handler(
+      createInput({
+        cwd: "/Users/me/beta",
+        prompt: "after cd",
+        transcriptPath:
+          "/Users/me/.claude/projects/-Users-me-beta/session-1.jsonl",
+      }),
+    );
+
+    const session = getSessionByContentId(db, "session-1");
+    expect(session?.project).toBe("/Users/me/beta");
+    expect(session?.transcriptPath).toBe(started);
+  });
+
   test("runs session creation and prompt-number selection through the bounded hook transaction runner", async () => {
     const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
       expect(runnerDb).toBe(db);

@@ -7,7 +7,7 @@ import {
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
-import { resolveTranscriptPath } from "../shared/paths";
+import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 
@@ -1767,8 +1767,7 @@ export function buildTimelineView(
   ) {
     compactBoundaries.push(session.lastCompactTurn);
   }
-  const jsonlPath =
-    resolveTranscriptPath(session.project, session.contentSessionId) ?? null;
+  const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({

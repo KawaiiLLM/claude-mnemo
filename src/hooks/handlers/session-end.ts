@@ -14,7 +14,7 @@ import {
 } from "../../worker/client";
 import { getMaxTurnId } from "../../db/turns";
 import { enqueueSessionEndSettlementJob } from "../../db/settlement";
-import { resolveTranscriptPath } from "../../shared/paths";
+import { resolveSessionTranscriptPath } from "../../shared/paths";
 import { runCaptureRepair, type CaptureRepairLog } from "../capture-repair";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -114,8 +114,7 @@ export function createSessionEndHandler(
     // resume event for this content session; if no later event ever arrives the
     // remainder is accepted as lost — the explicit completeness limit.
     const transcriptPath =
-      input.transcriptPath ??
-      resolveTranscriptPath(session.project, session.contentSessionId);
+      input.transcriptPath ?? resolveSessionTranscriptPath(session);
     const repairLog =
       dependencies.captureRepairLog ??
       ((message: string) => process.stderr.write(`[claude-mnemo] ${message}\n`));

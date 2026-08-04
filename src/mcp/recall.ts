@@ -10,7 +10,7 @@ import {
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
-import { resolveTranscriptPath } from "../shared/paths";
+import { resolveSessionTranscriptPath } from "../shared/paths";
 
 import {
   DEFAULT_TRUNCATE,
@@ -327,7 +327,7 @@ function buildSessionView(
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0,
     ),
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
+    jsonlPath: resolveSessionTranscriptPath(session),
     turns,
   };
 }
@@ -439,7 +439,7 @@ export function buildFormattedSession(
       (sum, turn) => sum + (turn.observationCount ?? 0),
       0,
     ),
-    jsonlPath: resolveTranscriptPath(session.project, session.contentSessionId),
+    jsonlPath: resolveSessionTranscriptPath(session),
     turns: turns.map((turn) =>
       expandTurns.includes(turn.promptNumber)
         ? turn
