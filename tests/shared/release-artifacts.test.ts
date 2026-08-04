@@ -19,7 +19,7 @@ describe("release artifacts", () => {
     expect(manifest.author?.name?.trim().length).toBeGreaterThan(0);
   });
 
-  test("release metadata is consistently bumped to 0.8.4", () => {
+  test("release metadata is consistently bumped to 0.8.5", () => {
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       version?: string;
     };
@@ -40,11 +40,11 @@ describe("release artifacts", () => {
       "utf8",
     );
 
-    expect(packageJson.version).toBe("0.8.4");
-    expect(pluginManifest.version).toBe("0.8.4");
-    expect(marketplace.metadata?.version).toBe("0.8.4");
-    expect(marketplace.plugins?.[0]?.version).toBe("0.8.4");
-    expect(diarySdkQuery).toContain('version: "0.8.4"');
+    expect(packageJson.version).toBe("0.8.5");
+    expect(pluginManifest.version).toBe("0.8.5");
+    expect(marketplace.metadata?.version).toBe("0.8.5");
+    expect(marketplace.plugins?.[0]?.version).toBe("0.8.5");
+    expect(diarySdkQuery).toContain('version: "0.8.5"');
   });
 
   test("plugin scripts declare local ESM module type for bun-runner", () => {
