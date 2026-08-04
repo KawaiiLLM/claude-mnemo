@@ -2491,7 +2491,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.5-mse74cqu" : "dev";
+var BUILD_ID = true ? "0.8.5-msebb9vl" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4958,9 +4958,6 @@ function detectShapeSignals(turns) {
 }
 function compareMilestoneRank(left, right) {
   if (left.score !== right.score) return right.score - left.score;
-  const leftTools = left.turn.toolCallCount ?? 0;
-  const rightTools = right.turn.toolCallCount ?? 0;
-  if (leftTools !== rightTools) return rightTools - leftTools;
   return left.turn.promptNumber - right.turn.promptNumber;
 }
 function selectMilestoneTurns(view) {

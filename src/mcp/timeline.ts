@@ -1359,20 +1359,30 @@ export function detectShapeSignals(turns: TurnRecord[]): ShapeSignals {
 }
 
 /**
- * The one retention ordering, best first: score, then tool count, then the
- * earlier prompt (spec §C tie-break). `MilestoneSelection.ranked` sorts with it
- * and the renderer's budget degrades in its reverse, so "least valuable" means
+ * The one retention ordering, best first: score, then the earlier prompt
+ * (spec §C tie-break). `MilestoneSelection.ranked` sorts with it and the
+ * renderer's budget degrades in its reverse, so "least valuable" means
  * exactly one thing across selection and rendering — and equal-score rows keep a
  * stable order instead of drifting with page position.
+ *
+ * A `toolCallCount` tier used to sit between score and prompt number. Removed:
+ * measured AUC 0.63 against a gold set that had been shown the tool-call count
+ * when labeling, i.e. partly self-fulfilling; against a control gold blind to
+ * it, AUC collapsed to 0.53 — chance. A count of tool calls measures mechanical
+ * volume, not decision value, and should not steer which rows survive budget
+ * degradation. Do not re-add it as an "obvious" improvement without a gold set
+ * that was blind to it.
+ *
+ * Total order: `promptNumber` is unique per session, so once score ties the
+ * prompt-number comparison is a strict, antisymmetric, transitive tiebreak —
+ * the two-tier comparator never returns 0 for distinct rows and is consistent
+ * across all pairs (deterministic sort, no dependence on input order).
  */
 export function compareMilestoneRank(
   left: KeptMilestone,
   right: KeptMilestone,
 ): number {
   if (left.score !== right.score) return right.score - left.score;
-  const leftTools = left.turn.toolCallCount ?? 0;
-  const rightTools = right.turn.toolCallCount ?? 0;
-  if (leftTools !== rightTools) return rightTools - leftTools;
   return left.turn.promptNumber - right.turn.promptNumber;
 }
 
@@ -3004,7 +3014,7 @@ function renderMilestoneBody(view: TimelineView, titleCap: number): string[] {
  * Score-ascending degradation order over the rows on this page: the same
  * comparator that orders `MilestoneSelection.ranked`, reversed, so the row the
  * selection ranks last is the first one a budget cuts. Ties resolve stably
- * (score → tool count → prompt number) rather than by page position.
+ * (score → prompt number) rather than by page position.
  */
 function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
   return [...view.pagedMilestones]

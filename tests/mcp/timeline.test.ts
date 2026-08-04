@@ -1766,7 +1766,7 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     expect(rankedPrompts(result)).toContain(3);
   });
 
-  it("ranks by score, then tool count, then the earlier prompt", () => {
+  it("ranks by score, then the earlier prompt (tool count is not a tie-break)", () => {
     const rows = [
       turn({ id: 1, promptNumber: 1, type: "discovery", title: "start", significanceGrade: 3, toolCallCount: 0, createdAtEpoch: era }),
       turn({ id: 2, promptNumber: 2, type: "discovery", title: "five tools", significanceGrade: 3, toolCallCount: 5, createdAtEpoch: era + 60 }),
@@ -1777,7 +1777,10 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     ];
 
     const result = select(rows);
-    expect(rankedPrompts(result)).toEqual([5, 4, 2, 3, 1, 6]);
+    // id5 wins on score alone (its insight bonus). Everyone else ties at the
+    // bare G3 score, so prompt number alone orders them — id4's tool count
+    // (9, the highest of the set) no longer buys it a place ahead of id1-3.
+    expect(rankedPrompts(result)).toEqual([5, 1, 2, 3, 4, 6]);
     // The tie-break rides inside the tier: everything is still a G3.
     expect(result.ranked.every((row) => row.effGrade === 3)).toBe(true);
     expect(result.ranked[0]!.score).toBeLessThan(4);
@@ -4076,9 +4079,12 @@ describe("unified row renderer — per-unit hard cap (spec §D)", () => {
 });
 
 /**
- * Two spine rows consume one shared antecedent. T4 carries more tool calls than
- * T3, so the rank comparator puts T4 ahead — which makes T3, the EARLIER citer
- * and the antecedent's initial home, the first unit a budget removes.
+ * Two spine rows consume one shared antecedent. T4 carries an insight bonus
+ * that T3 lacks, so it out-scores T3 outright (tool count is no longer a
+ * ranking signal — a bare tie now favors the earlier prompt, so an actual
+ * score edge is required to make the LATER citer the one the budget keeps).
+ * That makes T3, the EARLIER citer and the antecedent's initial home, the
+ * first unit a budget removes.
  */
 function seedSharedAntecedentArc(db: Database) {
   const rows = [
@@ -4117,6 +4123,7 @@ function seedSharedAntecedentArc(db: Database) {
       userPrompt: "第二处消费",
       title: "second consumer",
       content: "second consumer desc ".repeat(4),
+      insight: "- second consumer outranks the first",
       toolCallCount: 9,
       createdAtEpoch: ERA_BASE + 180,
     }),
@@ -4328,8 +4335,8 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     }
 
     expect(firstDrop).not.toBeNull();
-    // T3 and T4 are both G3; T4 has more tool calls, so the tie-break ranks T4
-    // higher and T3 is the first unit the budget gives up.
+    // T3 and T4 are both G3, but T4 carries an insight bonus T3 lacks, so T4
+    // out-scores T3 outright and T3 is the first unit the budget gives up.
     expect(firstDrop!.missing).toEqual([3]);
     expect(hiddenTurnTotal(firstDrop!.output)).toBe(hiddenTurnTotal(full) + 1);
   });
@@ -4591,7 +4598,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     }
   });
 
-  it("orders equal-score rows stably by tool count then prompt number", () => {
+  it("orders equal-score rows by prompt number alone — tool count is no longer a signal", () => {
     const left = {
       turn: { toolCallCount: 3, promptNumber: 10 },
       score: 3,
@@ -4600,18 +4607,26 @@ describe("unified row renderer — global token budget (spec §D)", () => {
       turn: { toolCallCount: 3, promptNumber: 4 },
       score: 3,
     } as unknown as KeptMilestone;
+    // Under the old three-tier comparator (score, tool count, prompt), this
+    // row's tool count (9) would have ranked it ABOVE both `left` and
+    // `right` despite its prompt (99) being the latest of the three. That
+    // tier was removed (measured at chance, AUC 0.53, against a gold set
+    // blind to it — see compareMilestoneRank's comment), so prompt number
+    // alone decides once score ties: the earlier prompt wins regardless of
+    // tool count.
     const busier = {
       turn: { toolCallCount: 9, promptNumber: 99 },
       score: 3,
     } as unknown as KeptMilestone;
 
     expect([left, right, busier].sort(compareMilestoneRank)).toEqual([
-      busier,
       right,
       left,
+      busier,
     ]);
-    // Degradation walks this order backwards, so the later prompt goes first.
-    expect([left, right, busier].sort(compareMilestoneRank).reverse()[0]).toBe(left);
+    // Degradation walks this order backwards, so the latest prompt is cut
+    // first — even though it has by far the highest tool count.
+    expect([left, right, busier].sort(compareMilestoneRank).reverse()[0]).toBe(busier);
   });
 });
 

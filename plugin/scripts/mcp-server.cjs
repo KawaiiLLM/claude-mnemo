@@ -34651,9 +34651,6 @@ function detectShapeSignals(turns) {
 }
 function compareMilestoneRank(left, right) {
   if (left.score !== right.score) return right.score - left.score;
-  const leftTools = left.turn.toolCallCount ?? 0;
-  const rightTools = right.turn.toolCallCount ?? 0;
-  if (leftTools !== rightTools) return rightTools - leftTools;
   return left.turn.promptNumber - right.turn.promptNumber;
 }
 function selectMilestoneTurns(view) {

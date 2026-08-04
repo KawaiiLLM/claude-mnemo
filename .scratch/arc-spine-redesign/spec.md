@@ -85,7 +85,7 @@
   | era 前（legacy） | type 映射 {decision:3, feature/refactor/bugfix:2, change/discovery:1, 其余:0}；artifact 类无文件→0；有 insight +1；**封顶 3**，永不为 4，永不 always-keep 锚 |
 - **优先级（按序应用）**：① 受害者降级：被 supersedes 边指向 → effGrade=min(effGrade,1)，失去脊柱资格（**先于**②，corrector 自己又被推翻不保锚；**窗口外受害者同样降级**——降级后的等级决定其拉入资格与 🚫 渲染，ranged 视图里窗口外被推翻的 G4 才能以 corrector 的 ↳ 🚫 行出现）；② corrector 晋升：effGrade=max(effGrade,3)；③ always-keep：端点 ∪ 非受害 corrector ∪ 无 corrector 的被推翻者 ∪ era 内 effGrade=4；`type='compact'` 不入 always-keep 与 kept 槽位；④ 脊柱准入：effGrade≥3；⑤ 拉入：被**任一保留主行**（脊柱、端点、无 corrector 被推翻者）经引用边（era 前经行内适配）引用的 effGrade≤2 turn（**含 skipped**），渲染为 ↳——前件挂在被渲染的行上，不挂在全图上（仅被未保留 turn 引用者不拉入）；⑥ 预算降级排序作用于以上结果集（选择层物化为 score 有序的 `ranked` 超集＝池门槛 effGrade≥2 的候选带＋always-keep，渲染层的降级顺序取自它；always-keep 以标志位表达、不再用 Infinity 分数）。
 - 交叉情形：legacy 端点→按③保留（结构性、与等级无关），渲染为紧凑行；G0 corrector→②晋升（除非①先命中）；被引用 skipped→↳ 行，新数据有最小标题（见 §E），存量以 ≤60 字符 prompt 前缀充当伪标题；被推翻的 G4→①降级，锚由其 corrector/再奠基承接。
-- 删除：type 基础分表（仅存于 legacy 回退）、tag-family 权重、files 空守卫、日预算一族常数。tie-break 维持现有次序（分数→工具数→更早 prompt）。
+- 删除：type 基础分表（仅存于 legacy 回退）、tag-family 权重、files 空守卫、日预算一族常数。tie-break 维持现有次序（分数→工具数→更早 prompt）。**2026-08-04 修订**：工具数一档删除——实测它作为价值信号得 0.63 AUC 的那个盲选基准**见过工具数本身**，对不可见它的对照基准塌到 0.53（约等于随机）。工具调用数量度的是机械体量、不是决策价值，不该左右预算压力下谁先死。现为两级全序：分数→更早 prompt（prompt 号会话内唯一，故为严格全序）。带内评分公式本身的替换另案（见 `.scratch/milestone-scoring/`），未定案。
 
 ### D. 统一行渲染器与预算
 
