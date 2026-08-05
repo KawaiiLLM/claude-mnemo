@@ -36,6 +36,28 @@ interface Pricing {
 
 const PRICING_TABLE: Array<{ match: RegExp; price: Pricing }> = [
   {
+    // Opus 5 / Fable 5 — same pricing tier
+    match: /^claude-(?:opus|fable)-5/,
+    price: {
+      input: 5,
+      output: 25,
+      cacheWrite5m: 6.25,
+      cacheWrite1h: 10,
+      cacheRead: 0.5,
+    },
+  },
+  {
+    // Sonnet 5
+    match: /^claude-sonnet-5/,
+    price: {
+      input: 3,
+      output: 15,
+      cacheWrite5m: 3.75,
+      cacheWrite1h: 6,
+      cacheRead: 0.3,
+    },
+  },
+  {
     // Opus 4.5 / 4.6 — same pricing tier
     match: /^claude-opus-4-[56]/,
     price: {
