@@ -147,6 +147,15 @@ const AGENT_CONTEXT_WINDOW_TOKENS = 1_000_000;
 // 100K; the ratio only re-engages if the window is set below 200K.
 const AGENT_COMPACT_MAX_TOKENS = 100_000;
 
+// Wall-clock budget for one worker-driven /compact. Compaction time scales with
+// the context being compacted, so too tight a budget is self-defeating: the
+// sessions that most need compacting are exactly the ones that time out.
+const COMPACT_BUDGET_MS = 300_000;
+// Once every content session has exited, an in-flight compact is the only thing
+// keeping the worker alive; a graceful exit must not wait out the full budget.
+const SHUTDOWN_COMPACT_BUDGET_MS = 60_000;
+const COMPACT_POLL_MS = 1_000;
+
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
 }
@@ -279,6 +288,16 @@ export interface SessionState {
   // clears this flag. The worker-driven compact path re-primes synchronously and
   // never sets this (see handleCompact / query-session compact_boundary gating).
   needsReprime?: boolean;
+  /**
+   * Set when this session's agent transcript must NOT be resumed again — today
+   * only after a compact that never landed, which leaves a context too large to
+   * ever compact. The next `ensureQuerySession` opens a fresh agent and clears
+   * the flag; until then the session simply has no runtime, so a session that
+   * never gets more work never pays for one.
+   */
+  forceFreshNextQuery?: boolean;
+  /** Bumped per runtime build; callbacks from older runtimes are ignored. */
+  queryGeneration?: number;
   processingLock: Promise<void>;
   closing?: Promise<void>;
   /**
@@ -445,6 +464,12 @@ export interface WorkerCore {
    */
   settleSession(sessionDbId: number): Promise<void>;
   closeSessionQuery(sessionDbId: number): Promise<void>;
+  /**
+   * Build (or return) this session's agent runtime. Exposed so the
+   * failed-compact recovery — which must open a runtime that does NOT resume
+   * the abandoned transcript — can be driven directly in tests.
+   */
+  ensureQuerySession(state: SessionState): WorkerQuerySession;
   abortAllExtractionSessionsForShutdown(): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   triggerManualDream(date: unknown): ManualDreamResult;
@@ -1317,6 +1342,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return state.querySession;
     }
 
+    // A session marked by the failed-compact path must not resume its old
+    // transcript, whoever asks for the runtime next. The flag is cleared only
+    // once a runtime actually exists: every step below can throw (missing
+    // session row, missing captured env, a factory that fails to spawn), and a
+    // flag dropped on the way out would let the retry resume the transcript we
+    // just abandoned.
+    const mustOpenFresh = options.forceFresh === true || state.forceFreshNextQuery === true;
+    options = { ...options, forceFresh: mustOpenFresh };
+
     const session = getSession(deps.db, state.sessionDbId);
     if (!session) {
       throw new Error(`Missing session ${state.sessionDbId} for worker query setup.`);
@@ -1330,6 +1364,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
+    // Callbacks below capture `state`, which outlives the runtime they belong
+    // to (recycle nulls the runtime, keeps the state). A message arriving from
+    // an ALREADY-ABANDONED runtime must touch nothing: the worst case is the
+    // one this whole change exists to prevent — the dead runtime's session id
+    // being written back as the resume target.
+    const generation = (state.queryGeneration ?? 0) + 1;
+    state.queryGeneration = generation;
+    const isStaleRuntime = (): boolean => state.queryGeneration !== generation;
+
     const capturedSessionEnv = getRegisteredSessionEnv(state.sessionDbId);
     if (enforceSessionEnvPresence && !capturedSessionEnv) {
       throw new Error(`Missing captured env for worker session ${state.sessionDbId}.`);
@@ -1353,6 +1396,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       },
       {
         onMessage: (message) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           const messageClassification = classifyWorkerError(message);
           const isRetryableSignal =
             messageClassification === "connection" ||
@@ -1435,15 +1481,24 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           }
         },
         onPid: (pid) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           state!.queryPid = pid;
         },
         // SDK-auto compact: an unsolicited compact_boundary wiped the agent's
         // history. Re-prime can't be injected mid-stream, so flag it; the next
         // work unit re-primes before its turn batch and clears the flag.
         onCompactBoundary: () => {
+          if (isStaleRuntime()) {
+            return;
+          }
           state!.needsReprime = true;
         },
         onRemember: (id: string) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           const activityAt = nowMs();
           state!.lastMessageAt = activityAt;
           state!.lastAgentActivityAt = activityAt;
@@ -1461,6 +1516,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       },
     );
 
+    state.forceFreshNextQuery = false;
     return state.querySession;
   }
 
@@ -1684,6 +1740,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
     state.querySession = null;
     state.queryPid = undefined;
+    // Retire the generation here, not at the next build: between the two, the
+    // torn-down runtime can still emit, and until something invalidates its
+    // callbacks they are indistinguishable from the live ones.
+    state.queryGeneration = (state.queryGeneration ?? 0) + 1;
     state.lastPushAt = 0;
     state.lastMessageAt = 0;
     state.lastAgentActivityAt = 0;
@@ -3317,6 +3377,69 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   // context gauge; we only compact once it reaches config.compactContextRatio of
   // the window, so a small agent session is never needlessly compressed. When
   // the context can't be read we default to compacting (prior behavior).
+  // Wait for the agent's /compact, but never longer than the worker's own
+  // lifetime needs. While content sessions are live the budget is generous —
+  // compacting a large context genuinely takes minutes. Once every content
+  // session has exited, this call is the only thing keeping the worker alive,
+  // and a graceful exit must not be held for five minutes by a compaction whose
+  // session we discard on failure anyway. Re-evaluated as we wait, so a session
+  // that exits mid-compact still shortens it.
+  async function awaitCompactWithinBudget(
+    runtime: WorkerQuerySession,
+  ): Promise<void> {
+    if (!runtime.compact) {
+      return;
+    }
+
+    const startedAt = nowMs();
+    let sessionsGoneAt: number | null =
+      sessionEnvRegistry.size === 0 ? startedAt : null;
+    let timer: unknown = null;
+    let expired = false;
+
+    const budgetExceeded = new Promise<never>((_resolve, reject) => {
+      const poll = (): void => {
+        if (expired) {
+          return;
+        }
+        const currentMs = nowMs();
+        if (sessionEnvRegistry.size === 0) {
+          sessionsGoneAt ??= currentMs;
+        } else {
+          sessionsGoneAt = null;
+        }
+        const overallBudgetSpent = currentMs - startedAt >= COMPACT_BUDGET_MS;
+        const shutdownBudgetSpent =
+          sessionsGoneAt !== null &&
+          currentMs - sessionsGoneAt >= SHUTDOWN_COMPACT_BUDGET_MS;
+        if (overallBudgetSpent || shutdownBudgetSpent) {
+          expired = true;
+          reject(
+            new Error(
+              shutdownBudgetSpent && !overallBudgetSpent
+                ? `Worker query session compact abandoned after ${SHUTDOWN_COMPACT_BUDGET_MS}ms: every content session exited and the worker is shutting down.`
+                : `Worker query session compact timed out after ${COMPACT_BUDGET_MS}ms.`,
+            ),
+          );
+          return;
+        }
+        timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
+      };
+      timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
+    });
+
+    try {
+      // The runtime keeps its own COMPACT_BUDGET_MS timer; this race only ever
+      // shortens the wait, never lengthens it.
+      await Promise.race([runtime.compact(COMPACT_BUDGET_MS), budgetExceeded]);
+    } finally {
+      expired = true;
+      if (timer !== null) {
+        clearTimeoutImpl(timer);
+      }
+    }
+  }
+
   function shouldCompactAgent(state: SessionState): boolean {
     if (!state.agentSessionId) {
       return true;
@@ -3413,7 +3536,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       const compactState = sessions.get(sessionDbId);
       try {
         if (compactState?.querySession && shouldCompactAgent(compactState)) {
-          await compactState.querySession.compact?.();
+          await awaitCompactWithinBudget(compactState.querySession);
           // Worker-driven path: re-prime synchronously now that the agent's
           // history has been compacted away. The explicit compact() boundary is
           // gated out of onCompactBoundary (query-session.ts), so this is the
@@ -3430,6 +3553,33 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         // the agent on compacted-away history.
         if (compactState) {
           compactState.needsReprime = true;
+          // Compaction is the ONLY thing that bounds the resident agent's
+          // context, and its cost grows with that context — so a failure here
+          // is self-reinforcing: the session that was too big to compact stays
+          // in service, grows, and becomes even less compactable. Drop it, and
+          // make the NEXT work unit open a fresh agent that never resumes this
+          // transcript; a fresh agent is bounded by construction and the
+          // re-prime restores the session state from the DB, so nothing durable
+          // is lost. Lazy on purpose: if no more work arrives we never pay for
+          // an agent nobody asked for.
+          try {
+            // Under the session lock: `flushSession` / `drainSessionCompletely`
+            // (SessionEnd) never consult compactingSessions, so a concurrent
+            // batch can be mid-flush on this very runtime. Tearing it down from
+            // outside the lock would pull the runtime out from under it.
+            await withSessionProcessingLock(sessionDbId, async (state) => {
+              state.forceFreshNextQuery = true;
+              // Drop the stale pointer too, or shouldCompactAgent would keep
+              // sizing the NEW session against the abandoned context.
+              state.agentSessionId = undefined;
+              await recycleSessionQueryLocked(state);
+            });
+          } catch (recycleError) {
+            logger.error?.("mnemosyne compact recovery failed", {
+              sessionDbId,
+              error: recycleError,
+            });
+          }
         }
       }
     } finally {
@@ -3456,6 +3606,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     drainSessionCompletely,
     settleSession,
     closeSessionQuery,
+    ensureQuerySession: (state: SessionState) => ensureQuerySession(state),
     abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date: unknown): ManualDreamResult {

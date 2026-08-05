@@ -68,11 +68,18 @@ export interface WorkerQuerySession {
   readonly sessionId: string | null;
   readonly queryPid: number | undefined;
   sendPrompt(promptText: string): Promise<SDKResultMessage>;
-  compact?(): Promise<void>;
+  compact?(timeoutMs?: number): Promise<void>;
   close(abortError?: Error): Promise<void>;
 }
 
-const QUERY_COMPACT_TIMEOUT_MS = 120_000;
+/**
+ * Wall-clock budget for the agent's own `/compact`. Compaction cost scales with
+ * the context being compacted, so a budget that is too tight is self-defeating:
+ * the sessions that most need compacting are the ones that time out, and a
+ * session that fails to compact only grows. The caller may pass a shorter
+ * budget (worker shutdown).
+ */
+const QUERY_COMPACT_TIMEOUT_MS = 300_000;
 const MNEMO_ACTIVITY_TOOLS = new Set([
   "mcp__mnemo__remember",
   "mcp__mnemo__recall",
@@ -595,7 +602,7 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
       return deferred.promise;
     },
 
-    async compact(): Promise<void> {
+    async compact(timeoutMs = QUERY_COMPACT_TIMEOUT_MS): Promise<void> {
       if (closed) {
         throw new Error("Worker query session is closed.");
       }
@@ -615,11 +622,11 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
           pendingCompact = null;
           deferred.reject(
             new Error(
-              `Worker query session compact timed out after ${QUERY_COMPACT_TIMEOUT_MS}ms.`,
+              `Worker query session compact timed out after ${timeoutMs}ms.`,
             ),
           );
         }
-      }, QUERY_COMPACT_TIMEOUT_MS);
+      }, timeoutMs);
 
       try {
         await deferred.promise;

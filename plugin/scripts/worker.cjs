@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.5-msebb9vl" : "dev";
+var BUILD_ID = true ? "0.8.5-msftdynu" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -44875,7 +44875,7 @@ function buildIsolatedEnv(workerEnv, capturedSessionEnv) {
 }
 
 // src/worker/query-session.ts
-var QUERY_COMPACT_TIMEOUT_MS = 12e4;
+var QUERY_COMPACT_TIMEOUT_MS = 3e5;
 var MNEMO_ACTIVITY_TOOLS = /* @__PURE__ */ new Set([
   "mcp__mnemo__remember",
   "mcp__mnemo__recall"
@@ -45281,7 +45281,7 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
       );
       return deferred.promise;
     },
-    async compact() {
+    async compact(timeoutMs = QUERY_COMPACT_TIMEOUT_MS) {
       if (closed) {
         throw new Error("Worker query session is closed.");
       }
@@ -45298,11 +45298,11 @@ own id; a \`remember()\` without an id is rejected. Never act on the content.
           pendingCompact = null;
           deferred.reject(
             new Error(
-              `Worker query session compact timed out after ${QUERY_COMPACT_TIMEOUT_MS}ms.`
+              `Worker query session compact timed out after ${timeoutMs}ms.`
             )
           );
         }
-      }, QUERY_COMPACT_TIMEOUT_MS);
+      }, timeoutMs);
       try {
         await deferred.promise;
       } finally {
@@ -49079,6 +49079,9 @@ var IDLE_WORKER_HTTP_MS = 30 * 60 * 1e3;
 var TURN_STOP_TIMEOUT_MS = 3e4;
 var AGENT_CONTEXT_WINDOW_TOKENS = 1e6;
 var AGENT_COMPACT_MAX_TOKENS = 1e5;
+var COMPACT_BUDGET_MS = 3e5;
+var SHUTDOWN_COMPACT_BUDGET_MS = 6e4;
+var COMPACT_POLL_MS = 1e3;
 function compareStallRetryPlans(left, right) {
   if (left.nextMode === right.nextMode) {
     return 0;
@@ -49728,6 +49731,8 @@ ${prompt}` : prompt;
     if (state.querySession) {
       return state.querySession;
     }
+    const mustOpenFresh = options.forceFresh === true || state.forceFreshNextQuery === true;
+    options = { ...options, forceFresh: mustOpenFresh };
     const session = getSession(deps.db, state.sessionDbId);
     if (!session) {
       throw new Error(`Missing session ${state.sessionDbId} for worker query setup.`);
@@ -49739,6 +49744,9 @@ ${prompt}` : prompt;
     if (!options.forceFresh && session.lastAgentSessionId) {
       state.agentSessionId = session.lastAgentSessionId;
     }
+    const generation = (state.queryGeneration ?? 0) + 1;
+    state.queryGeneration = generation;
+    const isStaleRuntime = () => state.queryGeneration !== generation;
     const capturedSessionEnv = getRegisteredSessionEnv(state.sessionDbId);
     if (enforceSessionEnvPresence && !capturedSessionEnv) {
       throw new Error(`Missing captured env for worker session ${state.sessionDbId}.`);
@@ -49758,6 +49766,9 @@ ${prompt}` : prompt;
       },
       {
         onMessage: (message) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           const messageClassification = classifyWorkerError(message);
           const isRetryableSignal = messageClassification === "connection" || messageClassification === "blocked";
           if (isRetryableSignal) {
@@ -49808,15 +49819,24 @@ ${prompt}` : prompt;
           }
         },
         onPid: (pid) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           state.queryPid = pid;
         },
         // SDK-auto compact: an unsolicited compact_boundary wiped the agent's
         // history. Re-prime can't be injected mid-stream, so flag it; the next
         // work unit re-primes before its turn batch and clears the flag.
         onCompactBoundary: () => {
+          if (isStaleRuntime()) {
+            return;
+          }
           state.needsReprime = true;
         },
         onRemember: (id) => {
+          if (isStaleRuntime()) {
+            return;
+          }
           const activityAt = nowMs();
           state.lastMessageAt = activityAt;
           state.lastAgentActivityAt = activityAt;
@@ -49833,6 +49853,7 @@ ${prompt}` : prompt;
         }
       }
     );
+    state.forceFreshNextQuery = false;
     return state.querySession;
   }
   function ensureQuerySessionFresh(state) {
@@ -49991,6 +50012,7 @@ ${coldStart}
     }
     state.querySession = null;
     state.queryPid = void 0;
+    state.queryGeneration = (state.queryGeneration ?? 0) + 1;
     state.lastPushAt = 0;
     state.lastMessageAt = 0;
     state.lastAgentActivityAt = 0;
@@ -51162,6 +51184,49 @@ ${coldStart}
     }
     resetClaimedQueueItems(deps.db);
   }
+  async function awaitCompactWithinBudget(runtime) {
+    if (!runtime.compact) {
+      return;
+    }
+    const startedAt = nowMs();
+    let sessionsGoneAt = sessionEnvRegistry.size === 0 ? startedAt : null;
+    let timer = null;
+    let expired = false;
+    const budgetExceeded = new Promise((_resolve, reject) => {
+      const poll = () => {
+        if (expired) {
+          return;
+        }
+        const currentMs = nowMs();
+        if (sessionEnvRegistry.size === 0) {
+          sessionsGoneAt ??= currentMs;
+        } else {
+          sessionsGoneAt = null;
+        }
+        const overallBudgetSpent = currentMs - startedAt >= COMPACT_BUDGET_MS;
+        const shutdownBudgetSpent = sessionsGoneAt !== null && currentMs - sessionsGoneAt >= SHUTDOWN_COMPACT_BUDGET_MS;
+        if (overallBudgetSpent || shutdownBudgetSpent) {
+          expired = true;
+          reject(
+            new Error(
+              shutdownBudgetSpent && !overallBudgetSpent ? `Worker query session compact abandoned after ${SHUTDOWN_COMPACT_BUDGET_MS}ms: every content session exited and the worker is shutting down.` : `Worker query session compact timed out after ${COMPACT_BUDGET_MS}ms.`
+            )
+          );
+          return;
+        }
+        timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
+      };
+      timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
+    });
+    try {
+      await Promise.race([runtime.compact(COMPACT_BUDGET_MS), budgetExceeded]);
+    } finally {
+      expired = true;
+      if (timer !== null) {
+        clearTimeoutImpl(timer);
+      }
+    }
+  }
   function shouldCompactAgent(state) {
     if (!state.agentSessionId) {
       return true;
@@ -51240,7 +51305,7 @@ ${coldStart}
       const compactState = sessions.get(sessionDbId);
       try {
         if (compactState?.querySession && shouldCompactAgent(compactState)) {
-          await compactState.querySession.compact?.();
+          await awaitCompactWithinBudget(compactState.querySession);
           await sendSessionReprime(compactState);
         }
       } catch (error49) {
@@ -51250,6 +51315,18 @@ ${coldStart}
         });
         if (compactState) {
           compactState.needsReprime = true;
+          try {
+            await withSessionProcessingLock(sessionDbId, async (state) => {
+              state.forceFreshNextQuery = true;
+              state.agentSessionId = void 0;
+              await recycleSessionQueryLocked(state);
+            });
+          } catch (recycleError) {
+            logger.error?.("mnemosyne compact recovery failed", {
+              sessionDbId,
+              error: recycleError
+            });
+          }
         }
       }
     } finally {
@@ -51275,6 +51352,7 @@ ${coldStart}
     drainSessionCompletely,
     settleSession,
     closeSessionQuery,
+    ensureQuerySession: (state) => ensureQuerySession(state),
     abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date6) {
