@@ -13,3 +13,4 @@
 - [ ] pending >50 turn 在下次读取台账时转 skipped(aged)，无启动扫描
 - [ ] 提醒经同步入口返回、台账写经异步入口，两入口断言不越权
 - [ ] 曝光台账记录提醒/注入过的 id
+- [ ] writer_model 由 worker 从 transcript 机械回填（票 02 实测：MCP 进程拿不到模型名，message.model 是唯一机械来源；capture 侧解析时回填 shadow_notes.writer_model）
