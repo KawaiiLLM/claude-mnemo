@@ -14,3 +14,5 @@
 - [ ] 提醒经同步入口返回、台账写经异步入口，两入口断言不越权
 - [ ] 曝光台账记录提醒/注入过的 id
 - [ ] writer_model 由 worker 从 transcript 机械回填（票 02 实测：MCP 进程拿不到模型名，message.model 是唯一机械来源；capture 侧解析时回填 shadow_notes.writer_model）
+- [ ] 追加（交叉审查 P2-1）：note 只接受**台账中有未清债**或**已有影子笔记**的 turn，其余返回参数错误——跨会话乱写被结构性挡住，ride_turn 语义由此自洽
+- [ ] 追加（交叉审查 P2-2）：recall 的观测层不再渲染 excluded 观测（含计数）；dream 读工具的 read_turn_detail 同样过滤
