@@ -2592,7 +2592,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-msklgkme" : "dev";
+var BUILD_ID = true ? "0.8.6-mskmbd9e" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -20852,7 +20852,11 @@ function splitInsight(insight) {
 }
 function buildHeader(db, primarySessionId) {
   const sessionCount = db.query("SELECT COUNT(*) AS count FROM sessions").get()?.count ?? 0;
-  const observationCount = db.query("SELECT COUNT(*) AS count FROM observations").get()?.count ?? 0;
+  const observationCount = db.query(
+    // Excluded rows (a `note` call's observation) are captured for the raw
+    // axis only; counting them here would tell the reader a hidden call exists.
+    "SELECT COUNT(*) AS count FROM observations WHERE excluded_from_extraction = 0"
+  ).get()?.count ?? 0;
   return [
     `claude-mnemo: ${sessionCount} sessions, ${observationCount} observations${primarySessionId ? ` | current: S${primarySessionId}` : ""}`,
     "Axes: recall (content) \xB7 timeline (temporal) \xB7 mnemo-replay (raw)"
@@ -20893,6 +20897,7 @@ function buildSessionMetricMap(db, sessionIds) {
        FROM observations o
        JOIN turns t ON t.id = o.turn_id
        WHERE t.session_id IN (${placeholders})
+         AND o.excluded_from_extraction = 0
        GROUP BY t.session_id`
   ).all(...sessionIds);
   for (const row of observationRows) {

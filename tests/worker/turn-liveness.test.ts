@@ -11,6 +11,7 @@ import { createWorkerCore } from "../../src/worker/server";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 import {
   finalizeUnreachableStrandedTurns,
+  listStrandedRepairDates,
   restoreStrandedTurnStops,
 } from "../../src/worker/turn-liveness";
 
@@ -19,7 +20,7 @@ const OTHER_DATE = "2026-07-22";
 const DUE_EPOCH = Date.parse(`${DUE_DATE}T12:00:00Z`) / 1_000;
 const OTHER_EPOCH = Date.parse(`${OTHER_DATE}T12:00:00Z`) / 1_000;
 
-describe("closed-day stranded-turn liveness repair", () => {
+describe("stranded-turn liveness repair", () => {
   let db: Database;
   let sessionId: number;
 
@@ -77,9 +78,20 @@ describe("closed-day stranded-turn liveness repair", () => {
     )!.id;
   }
 
+  function derivedDates(
+    options: { boundaryHour?: number; nowEpoch?: number } = {},
+  ): string[] {
+    return listStrandedRepairDates(db, {
+      timeZone: "UTC",
+      boundaryHour: options.boundaryHour ?? 0,
+      // A day after the last seeded turn, so every seeded day is closed.
+      nowEpoch: options.nowEpoch ?? OTHER_EPOCH + 86_400,
+    });
+  }
+
   function repair(registered = new Set<number>()) {
     return restoreStrandedTurnStops(db, {
-      dueDates: [DUE_DATE],
+      dates: [DUE_DATE],
       timeZone: "UTC",
       boundaryHour: 0,
       nowEpoch: DUE_EPOCH + 100,
@@ -224,5 +236,108 @@ describe("closed-day stranded-turn liveness repair", () => {
       "SELECT COUNT(*) AS count FROM observations WHERE status != 'skipped'",
     ).get()?.count).toBe(0);
     expect(getObservation(db, 1)?.status).toBe("skipped");
+  });
+
+  test("derives one repair date per content-day holding a stranded turn", () => {
+    seedTurn({ promptNumber: 1, interrupted: true });
+    seedTurn({ promptNumber: 2, rolledBack: true });
+    seedTurn({
+      sessionDbId: makeSession("other-day-session"),
+      promptNumber: 1,
+      createdAtEpoch: OTHER_EPOCH,
+      interrupted: true,
+    });
+
+    expect(derivedDates()).toEqual([DUE_DATE, OTHER_DATE]);
+  });
+
+  test("no evidence, no response, or a terminal status derives no date", () => {
+    seedTurn({ promptNumber: 1 });
+    seedTurn({
+      sessionDbId: makeSession("no-response-session"),
+      promptNumber: 1,
+      response: null,
+      interrupted: true,
+    });
+    const terminal = seedTurn({
+      sessionDbId: makeSession("terminal-session"),
+      promptNumber: 1,
+      interrupted: true,
+    });
+    db.query("UPDATE turns SET status = 'extracted' WHERE id = ?").run(terminal);
+
+    expect(derivedDates()).toEqual([]);
+  });
+
+  test("the boundary hour rolls a small-hours turn into the previous content-day", () => {
+    seedTurn({
+      promptNumber: 1,
+      createdAtEpoch: Date.parse(`${OTHER_DATE}T02:00:00Z`) / 1_000,
+      interrupted: true,
+    });
+
+    expect(derivedDates({ boundaryHour: 4, nowEpoch: OTHER_EPOCH })).toEqual([DUE_DATE]);
+  });
+
+  test("the still-open content-day derives no date", () => {
+    // Today's queued stops include work that is merely suspended — a connection
+    // failure keeps its row for a later resume, a cleared session env gates its
+    // rows. The repair cannot tell those from strandings, so it waits out the
+    // day rather than flooring them.
+    seedTurn({ promptNumber: 1, createdAtEpoch: OTHER_EPOCH, interrupted: true });
+
+    expect(derivedDates({ nowEpoch: OTHER_EPOCH + 3_600 })).toEqual([]);
+    expect(derivedDates({ nowEpoch: OTHER_EPOCH + 86_400 })).toEqual([OTHER_DATE]);
+  });
+
+  test("derived dates cover every candidate a dream due day could contribute", () => {
+    // The old wiring scanned exactly the due days the dream reconcile returned.
+    // A due day only ever yields turns that live inside it, and each such turn
+    // puts its own content-day into the derived set, so the due-day result is
+    // always a subset — unioning the two would add nothing.
+    const onDueDay = seedTurn({ promptNumber: 1, interrupted: true });
+    const offDueDay = seedTurn({
+      sessionDbId: makeSession("off-due-day-session"),
+      promptNumber: 1,
+      createdAtEpoch: OTHER_EPOCH,
+      interrupted: true,
+    });
+    const scan = (dates: string[]) =>
+      restoreStrandedTurnStops(db, {
+        dates,
+        timeZone: "UTC",
+        boundaryHour: 0,
+        nowEpoch: DUE_EPOCH + 100,
+        hasRegisteredSessionEnv: () => false,
+      });
+
+    expect(scan([DUE_DATE]).strandedTurnIds).toEqual([onDueDay]);
+    expect(scan(derivedDates()).strandedTurnIds).toEqual([
+      onDueDay,
+      offDueDay,
+    ]);
+  });
+
+  test("the derived-date repair stays idempotent across runs", () => {
+    // The restored stop is itself completion evidence, so the turn stays in the
+    // derived set until it goes terminal; the dedup must hold every run.
+    const stranded = seedTurn({ promptNumber: 1, interrupted: true });
+    const run = () =>
+      restoreStrandedTurnStops(db, {
+        dates: derivedDates(),
+        timeZone: "UTC",
+        boundaryHour: 0,
+        nowEpoch: DUE_EPOCH + 100,
+        hasRegisteredSessionEnv: () => true,
+      });
+
+    expect(run().enqueuedTurnStopCount).toBe(1);
+    expect(run().enqueuedTurnStopCount).toBe(0);
+    expect(derivedDates()).toEqual([DUE_DATE]);
+    expect(
+      listPendingQueueItems(db).filter(
+        (item) => item.kind === "turn-stop" && item.targetId === stranded,
+      ),
+    ).toHaveLength(1);
   });
 });

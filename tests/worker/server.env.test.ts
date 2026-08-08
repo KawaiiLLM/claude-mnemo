@@ -80,6 +80,10 @@ describe("worker per-session env registry", () => {
     const sessionEnvRegistry = new Map();
     const core = createWorkerCore({
       db,
+      // Every seeded turn is stamped at epoch 100. Pin the clock there so they
+      // sit on the still-open content-day, out of the stranded repair's reach:
+      // this test is about queue gating, not about abandoned history.
+      now: () => 100,
       workerEnv: {
         HOME: "/Users/worker",
         PATH: "/usr/bin",

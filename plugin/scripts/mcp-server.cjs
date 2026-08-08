@@ -33934,7 +33934,7 @@ function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, t
 }
 function renderObservationDetail(db, observationId, depth, truncate, truncateCap) {
   const observation = getObservation(db, observationId);
-  if (!observation) {
+  if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
   const view = buildObservationView(observation);

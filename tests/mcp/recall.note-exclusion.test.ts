@@ -17,6 +17,8 @@ describe("recall withholds excluded observations", () => {
   let db: Database;
   let sessionId: number;
   let turnId: number;
+  let visibleObservationId: number;
+  let excludedObservationId: number;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
@@ -44,20 +46,26 @@ describe("recall withholds excluded observations", () => {
       )
       .get(sessionId)!.id;
 
-    db.query(
-      `INSERT INTO observations (
-         turn_id, tool_name, tool_input, tool_result, status, title, content,
-         excluded_from_extraction, created_at_epoch
-       ) VALUES (?, 'Edit', '{"file_path":"src/a.ts"}', 'ok', 'extracted',
-         'Edit src/a.ts', 'edited', 0, 121)`,
-    ).run(turnId);
-    db.query(
-      `INSERT INTO observations (
-         turn_id, tool_name, tool_input, tool_result, status, title, content,
-         excluded_from_extraction, created_at_epoch
-       ) VALUES (?, 'mcp__mnemo__note', '{"title":"secretnotetitle"}',
-         'Noted S1/T1.', 'pending', NULL, NULL, 1, 122)`,
-    ).run(turnId);
+    visibleObservationId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO observations (
+           turn_id, tool_name, tool_input, tool_result, status, title, content,
+           excluded_from_extraction, created_at_epoch
+         ) VALUES (?, 'Edit', '{"file_path":"src/a.ts"}', 'ok', 'extracted',
+           'Edit src/a.ts', 'edited', 0, 121)
+         RETURNING id`,
+      )
+      .get(turnId)!.id;
+    excludedObservationId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO observations (
+           turn_id, tool_name, tool_input, tool_result, status, title, content,
+           excluded_from_extraction, created_at_epoch
+         ) VALUES (?, 'mcp__mnemo__note', '{"title":"secretnotetitle"}',
+           'Noted S1/T1.', 'pending', NULL, NULL, 1, 122)
+         RETURNING id`,
+      )
+      .get(turnId)!.id;
   });
 
   afterEach(() => {
@@ -84,5 +92,20 @@ describe("recall withholds excluded observations", () => {
       expect(output).not.toContain("secretnotetitle");
       expect(output).toContain("Edit src/a.ts");
     }
+  });
+
+  test("addressing an excluded observation by id reads as no such row", () => {
+    // Ids are dense, so withholding a row from the listings is worth nothing if
+    // the neighbouring id still fetches it in full. The direct route answers
+    // exactly as it does for an id that was never written.
+    const excluded = recallMemory(db, { id: `O${excludedObservationId}` });
+
+    expect(excluded).toBe("Observation not found.");
+    expect(recallMemory(db, { id: `O${excludedObservationId + 1_000}` })).toBe(
+      excluded,
+    );
+    expect(recallMemory(db, { id: `O${visibleObservationId}` })).toContain(
+      "Edit src/a.ts",
+    );
   });
 });

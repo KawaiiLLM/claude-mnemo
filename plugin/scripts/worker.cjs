@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-msklgkme" : "dev";
+var BUILD_ID = true ? "0.8.6-mskmbd9e" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -43953,7 +43953,7 @@ function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, t
 }
 function renderObservationDetail(db, observationId, depth, truncate, truncateCap) {
   const observation = getObservation(db, observationId);
-  if (!observation) {
+  if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
   const view = buildObservationView(observation);
@@ -49268,6 +49268,22 @@ function createDiaryRuntime(options) {
 }
 
 // src/worker/turn-liveness.ts
+var STRANDED_TURN_PREDICATE = `
+  t.status IN ('active', 'provisional')
+  AND t.assistant_response IS NOT NULL
+  AND (
+    t.was_interrupted = 1
+    OR t.was_rolled_back = 1
+    OR EXISTS (
+      SELECT 1 FROM pending_queue q
+      WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+    )
+    OR EXISTS (
+      SELECT 1 FROM turns later
+      WHERE later.session_id = t.session_id
+        AND later.prompt_number > t.prompt_number
+    )
+  )`;
 function listCompletionEvidencedTurnsForDate(db, date6, timeZone, boundaryHour) {
   const { startEpoch, endEpoch } = calendarDayBounds(
     date6,
@@ -49275,34 +49291,44 @@ function listCompletionEvidencedTurnsForDate(db, date6, timeZone, boundaryHour) 
     boundaryHour
   );
   return db.query(
-    `SELECT
-       t.id,
-       t.session_id AS sessionDbId,
-       t.prompt_number AS promptNumber,
-       t.was_interrupted AS wasInterrupted,
-       t.was_rolled_back AS wasRolledBack,
-       EXISTS (
-         SELECT 1 FROM pending_queue q
-         WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-       ) AS hasQueuedStop,
-       EXISTS (
-         SELECT 1 FROM turns later
-         WHERE later.session_id = t.session_id
-           AND later.prompt_number > t.prompt_number
-       ) AS hasLaterTurn
+    `SELECT t.id, t.session_id AS sessionDbId
      FROM turns t
      WHERE t.created_at_epoch >= ?
        AND t.created_at_epoch < ?
-       AND t.status IN ('active', 'provisional')
-       AND t.assistant_response IS NOT NULL
+       AND ${STRANDED_TURN_PREDICATE}
      ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(startEpoch, endEpoch).filter(
-    (turn) => turn.hasQueuedStop === 1 || turn.hasLaterTurn === 1 || turn.wasInterrupted === 1 || turn.wasRolledBack === 1
+  ).all(startEpoch, endEpoch);
+}
+function listStrandedRepairDates(db, options) {
+  const openDate = contentDateAt(
+    options.nowEpoch,
+    options.timeZone,
+    options.boundaryHour
   );
+  const dates = /* @__PURE__ */ new Set();
+  for (const row of db.query(
+    `SELECT DISTINCT t.created_at_epoch AS createdAtEpoch
+       FROM turns t
+       WHERE ${STRANDED_TURN_PREDICATE}
+       ORDER BY t.created_at_epoch ASC`
+  ).all()) {
+    if (!Number.isFinite(row.createdAtEpoch)) {
+      continue;
+    }
+    const date6 = contentDateAt(
+      row.createdAtEpoch,
+      options.timeZone,
+      options.boundaryHour
+    );
+    if (date6 < openDate) {
+      dates.add(date6);
+    }
+  }
+  return [...dates];
 }
 function restoreStrandedTurnStops(db, options) {
   const candidates = /* @__PURE__ */ new Map();
-  for (const date6 of new Set(options.dueDates)) {
+  for (const date6 of new Set(options.dates)) {
     for (const candidate of listCompletionEvidencedTurnsForDate(
       db,
       date6,
@@ -51261,17 +51287,21 @@ ${coldStart}
     }
   }
   async function coordinateEndEvent(triggeringSessionDbId) {
-    let dueDates = [];
     if (config3.dreamAgentEnabled) {
       try {
-        dueDates = await deps.reconcileDreamBacklog?.(now()) ?? [];
+        await deps.reconcileDreamBacklog?.(now());
       } catch (error49) {
         logger.error?.("dream backlog reconcile failed", { error: error49 });
       }
     }
-    if (dueDates.length > 0) {
+    const repairDates = listStrandedRepairDates(deps.db, {
+      timeZone: config3.dreamAgentTimeZone,
+      boundaryHour: config3.dreamAgentHour,
+      nowEpoch: now()
+    });
+    if (repairDates.length > 0) {
       const repair = restoreStrandedTurnStops(deps.db, {
-        dueDates,
+        dates: repairDates,
         timeZone: config3.dreamAgentTimeZone,
         boundaryHour: config3.dreamAgentHour,
         nowEpoch: now(),

@@ -840,7 +840,10 @@ function renderObservationDetail(
   truncateCap?: number,
 ): string {
   const observation = getObservation(db, observationId);
-  if (!observation) {
+  // Every listing route already drops excluded rows, so direct addressing must
+  // read as "no such observation" too — otherwise the id a listing withheld is
+  // still fetchable in full by guessing it.
+  if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
 

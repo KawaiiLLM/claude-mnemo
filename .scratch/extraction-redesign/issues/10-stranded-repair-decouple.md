@@ -4,9 +4,9 @@
 
 **Blocked by:** 03 — 笔记债台账与批次提醒（串行化，避免 worker 侧同文件冲突）。
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] dream 关闭时，end-event 仍执行 stranded 修复与 completion floor（fake-clock 测试断言）
-- [ ] 候选日期只读派生，零 dream 依赖
-- [ ] dream 开启态下现有全部测试绿，修复不重复执行
-- [ ] 修复窗口内的 compact 序列化语义保持不变（compactingSessions 的排除与例外行为）
+- [x] dream 关闭时，end-event 仍执行 stranded 修复与 completion floor（fake-clock 测试断言）
+- [x] 候选日期只读派生，零 dream 依赖
+- [x] dream 开启态下现有全部测试绿，修复不重复执行
+- [x] 修复窗口内的 compact 序列化语义保持不变（compactingSessions 的排除与例外行为）

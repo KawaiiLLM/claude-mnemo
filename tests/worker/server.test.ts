@@ -4515,6 +4515,9 @@ describe("worker server", () => {
   // Config that keeps short turns un-merged budget-wise and never force-flushes
   // mid-scan, so a turn-stop lands one whole batch on the queue for flushSession.
   const FLOOR_CONFIG = {
+    // Spread the real defaults: a partial config leaves fields like
+    // dreamAgentTimeZone undefined, which any calendar reader turns into NaN.
+    ...DEFAULT_CONFIG,
     mergeThresholdChars: 100_000,
     maxQueuedBatches: 50,
     keepaliveLeadMs: 60_000,

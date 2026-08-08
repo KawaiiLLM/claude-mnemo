@@ -200,6 +200,10 @@ describe("SessionEnd bounded tail", () => {
     const closeErrors: Error[] = [];
     const core = createWorkerCore({
       db,
+      // The seeded turn is stamped at epoch 10. Pin the clock there so the
+      // suspended row sits on the still-open content-day: a real connection
+      // failure is same-day, and the stranded repair must not floor it.
+      now: () => 10,
       config: { ...DEFAULT_CONFIG, maxQueuedBatches: 0 },
       createWorkerQuerySessionImpl: (() => ({
         sessionId: "connection-agent",

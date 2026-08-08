@@ -1,11 +1,12 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
-import { calendarDayBounds } from "../diary/calendar";
+import { calendarDayBounds, contentDateAt } from "../diary/calendar";
 import { getTurnById, type TurnRecord } from "../db/turns";
 
 export interface RestoreStrandedTurnStopsOptions {
-  dueDates: string[];
+  /** Content-days to scan — see `listStrandedRepairDates`, the only producer. */
+  dates: string[];
   timeZone: string;
   boundaryHour: number;
   nowEpoch: number;
@@ -29,12 +30,31 @@ export interface FlooredTurnResult {
 interface CandidateTurnRow {
   id: number;
   sessionDbId: number;
-  promptNumber: number;
-  wasInterrupted: number;
-  wasRolledBack: number;
-  hasQueuedStop: number;
-  hasLaterTurn: number;
 }
+
+/**
+ * A turn is stranded when the client evidenced that it finished — a queued
+ * turn-stop, a later prompt in the same session, an interrupt or a rollback —
+ * yet the turn itself never reached a terminal status. One SQL fragment, shared
+ * verbatim by the per-day candidate scan and the candidate-date derivation, so
+ * the two readings of "stranded" cannot drift apart.
+ */
+const STRANDED_TURN_PREDICATE = `
+  t.status IN ('active', 'provisional')
+  AND t.assistant_response IS NOT NULL
+  AND (
+    t.was_interrupted = 1
+    OR t.was_rolled_back = 1
+    OR EXISTS (
+      SELECT 1 FROM pending_queue q
+      WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+    )
+    OR EXISTS (
+      SELECT 1 FROM turns later
+      WHERE later.session_id = t.session_id
+        AND later.prompt_number > t.prompt_number
+    )
+  )`;
 
 function listCompletionEvidencedTurnsForDate(
   db: Database,
@@ -48,34 +68,66 @@ function listCompletionEvidencedTurnsForDate(
     boundaryHour,
   );
   return db.query<CandidateTurnRow, [number, number]>(
-    `SELECT
-       t.id,
-       t.session_id AS sessionDbId,
-       t.prompt_number AS promptNumber,
-       t.was_interrupted AS wasInterrupted,
-       t.was_rolled_back AS wasRolledBack,
-       EXISTS (
-         SELECT 1 FROM pending_queue q
-         WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-       ) AS hasQueuedStop,
-       EXISTS (
-         SELECT 1 FROM turns later
-         WHERE later.session_id = t.session_id
-           AND later.prompt_number > t.prompt_number
-       ) AS hasLaterTurn
+    `SELECT t.id, t.session_id AS sessionDbId
      FROM turns t
      WHERE t.created_at_epoch >= ?
        AND t.created_at_epoch < ?
-       AND t.status IN ('active', 'provisional')
-       AND t.assistant_response IS NOT NULL
+       AND ${STRANDED_TURN_PREDICATE}
      ORDER BY t.created_at_epoch ASC, t.id ASC`,
-  ).all(startEpoch, endEpoch).filter(
-    (turn) =>
-      turn.hasQueuedStop === 1 ||
-      turn.hasLaterTurn === 1 ||
-      turn.wasInterrupted === 1 ||
-      turn.wasRolledBack === 1,
+  ).all(startEpoch, endEpoch);
+}
+
+/**
+ * The closed content-days the repair has to visit, derived read-only from the
+ * DB and the clock, from nothing else. Every stranded turn contributes its own
+ * content-day and `listCompletionEvidencedTurnsForDate` re-selects exactly the
+ * stranded turns falling inside a day, so this is by construction the smallest
+ * date set that still yields every candidate on a closed day — no external
+ * backlog can add a candidate it does not already cover.
+ *
+ * The still-open day is withheld deliberately. Not every queued turn-stop is
+ * abandoned: a connection failure suspends its row for a later resume, and a
+ * cleared session env gates its rows rather than dropping them. The repair
+ * cannot tell those apart from genuine strandings, so it only claims a day once
+ * that day is over — the same grace the dream due-day scan used to give it by
+ * accident. `contentDateAt` inverts `calendarDayBounds` for a zone without DST
+ * (the Asia/Shanghai default).
+ */
+export function listStrandedRepairDates(
+  db: Database,
+  options: { timeZone: string; boundaryHour: number; nowEpoch: number },
+): string[] {
+  const openDate = contentDateAt(
+    options.nowEpoch,
+    options.timeZone,
+    options.boundaryHour,
   );
+  const dates = new Set<string>();
+  for (
+    const row of db.query<{ createdAtEpoch: number }, []>(
+      `SELECT DISTINCT t.created_at_epoch AS createdAtEpoch
+       FROM turns t
+       WHERE ${STRANDED_TURN_PREDICATE}
+       ORDER BY t.created_at_epoch ASC`,
+    ).all()
+  ) {
+    // A turn with no usable timestamp lands in no day's bounds, so the day scan
+    // could never select it anyway — and `Intl` throws on a non-finite instant.
+    if (!Number.isFinite(row.createdAtEpoch)) {
+      continue;
+    }
+    const date = contentDateAt(
+      row.createdAtEpoch,
+      options.timeZone,
+      options.boundaryHour,
+    );
+    // ISO dates compare chronologically, so this also drops a clock-skewed
+    // future day, which is no more closed than today is.
+    if (date < openDate) {
+      dates.add(date);
+    }
+  }
+  return [...dates];
 }
 
 export function restoreStrandedTurnStops(
@@ -83,7 +135,7 @@ export function restoreStrandedTurnStops(
   options: RestoreStrandedTurnStopsOptions,
 ): StrandedTurnRepairResult {
   const candidates = new Map<number, CandidateTurnRow>();
-  for (const date of new Set(options.dueDates)) {
+  for (const date of new Set(options.dates)) {
     for (const candidate of listCompletionEvidencedTurnsForDate(
       db,
       date,

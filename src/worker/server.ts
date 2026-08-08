@@ -120,6 +120,7 @@ import {
 import {
   completionFloorStatus,
   finalizeUnreachableStrandedTurns,
+  listStrandedRepairDates,
   restoreStrandedTurnStops,
 } from "./turn-liveness";
 import {
@@ -3043,18 +3044,31 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   async function coordinateEndEvent(
     triggeringSessionDbId: number,
   ): Promise<void> {
-    let dueDates: string[] = [];
     if (config.dreamAgentEnabled) {
       try {
-        dueDates = (await deps.reconcileDreamBacklog?.(now())) ?? [];
+        // Called for its enqueue side effect only. The repair below used to
+        // reuse the due days this returns, which silently switched the whole
+        // cleanup off with the dream kill switch; it now derives its own dates.
+        await deps.reconcileDreamBacklog?.(now());
       } catch (error) {
         logger.error?.("dream backlog reconcile failed", { error });
       }
     }
 
-    if (dueDates.length > 0) {
+    // Read-only, dream-independent: the closed content-days of the stranded
+    // turns themselves. The dream only ever reconciles days that have already
+    // ended, and every turn a due day contributes puts its own (therefore
+    // closed) day into this set, so this covers the old due-day scan exactly —
+    // unioning the due days back in would add no candidate.
+    const repairDates = listStrandedRepairDates(deps.db, {
+      timeZone: config.dreamAgentTimeZone,
+      boundaryHour: config.dreamAgentHour,
+      nowEpoch: now(),
+    });
+
+    if (repairDates.length > 0) {
       const repair = restoreStrandedTurnStops(deps.db, {
-        dueDates,
+        dates: repairDates,
         timeZone: config.dreamAgentTimeZone,
         boundaryHour: config.dreamAgentHour,
         nowEpoch: now(),
