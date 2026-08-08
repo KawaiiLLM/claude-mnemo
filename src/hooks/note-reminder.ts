@@ -80,7 +80,9 @@ function pendingSuffix(pendingTurns: number): string {
 }
 
 export function renderNoteReminder(view: NoteReminderView): string {
-  const lines = ["<system-reminder>mnemo pending notes:"];
+  // No <system-reminder> wrapper here: Claude Code already wraps PostToolUse
+  // additionalContext in one, and nesting the tag would render doubled.
+  const lines = ["mnemo pending notes:"];
 
   for (const debt of view.writable) {
     lines.push(
@@ -107,6 +109,5 @@ export function renderNoteReminder(view: NoteReminderView): string {
     );
   }
 
-  lines.push("</system-reminder>");
   return lines.join("\n");
 }

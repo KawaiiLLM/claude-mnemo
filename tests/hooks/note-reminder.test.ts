@@ -133,10 +133,9 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
 
     expect(first.hookSpecificOutput).toBe(
       [
-        "<system-reminder>mnemo pending notes:",
+        "mnemo pending notes:",
         `  [S${sessionId}/T1] "下一turn无工具,但是可以等到后面的批次再补写" (pending 1 turn)`,
         `Append note(turn:"S${sessionId}/T1", ...) at the end of this batch; skip if busy.`,
-        "</system-reminder>",
       ].join("\n"),
     );
     // At most one reminder per turn, however many tool results the batch has.
@@ -267,10 +266,9 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
 
     expect(announced.hookSpecificOutput).toBe(
       [
-        "<system-reminder>mnemo pending notes:",
+        "mnemo pending notes:",
         `  [S${sessionId}/T1] rolled back — no note needed.`,
         "No notes are due.",
-        "</system-reminder>",
       ].join("\n"),
     );
     expect(getNoteDebt(db, rolledBack)).toMatchObject({
@@ -293,7 +291,7 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(lines).toContain(`  [S${sessionId}/T1] "prompt number 1" (pending 7 turns)`);
     expect(lines).toContain(`  [S${sessionId}/T5] "prompt number 5" (pending 3 turns)`);
     expect(result.hookSpecificOutput).not.toContain(`[S${sessionId}/T6]`);
-    expect(lines.at(-2)).toBe(
+    expect(lines.at(-1)).toBe(
       "Write the pending notes in this batch; skipping is no longer authorized.",
     );
     // Only what was rendered counts as exposed — P2's citation check reads this

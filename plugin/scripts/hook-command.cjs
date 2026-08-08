@@ -2592,7 +2592,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-mskl9wak" : "dev";
+var BUILD_ID = true ? "0.8.6-msklgkme" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -21993,7 +21993,7 @@ function pendingSuffix(pendingTurns) {
   return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
 }
 function renderNoteReminder(view) {
-  const lines = ["<system-reminder>mnemo pending notes:"];
+  const lines = ["mnemo pending notes:"];
   for (const debt of view.writable) {
     lines.push(
       `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`
@@ -22016,7 +22016,6 @@ function renderNoteReminder(view) {
       `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of this batch; skip if busy.`
     );
   }
-  lines.push("</system-reminder>");
   return lines.join("\n");
 }
 
