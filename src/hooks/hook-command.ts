@@ -223,11 +223,27 @@ function getDefaultUserPromptSubmitDispatcher(): HookHandler {
 // The synchronous PostToolUse entry. It needs a writable handle: rendering a
 // pending-notes reminder is also the act of recording that those ids were shown
 // (the exposure ledger), and only the renderer can know that.
+//
+// Opening that handle is allowed to fail. This runs in a fresh process on every
+// single tool call, and `initializeDatabase` takes a write lock that a
+// concurrent `tool-use` process can hold past the busy timeout. Without the
+// guard that failure escapes to runHookCommand's catch-all and the whole entry
+// answers with a bare non-blocking exit — which would drop the rule-digest
+// output too, a feature that never needed a database. So a database that cannot
+// be opened costs the reminder alone.
 function getDefaultResultDispatchHandler(): HookHandler {
   if (!defaultResultDispatchHandler) {
-    defaultResultDispatchHandler = createResultDispatchHandler({
-      db: getDefaultHookDatabase(),
-    });
+    let db: ReturnType<typeof createDatabase> | undefined;
+    try {
+      db = getDefaultHookDatabase();
+    } catch (error) {
+      process.stderr.write(
+        `[HOOK] note reminder disabled for this call: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
+    defaultResultDispatchHandler = createResultDispatchHandler({ db });
   }
   return defaultResultDispatchHandler;
 }

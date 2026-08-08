@@ -3,8 +3,10 @@ import type { Database } from "bun:sqlite";
 
 import {
   anonymizeNoteText,
+  anonymizeNoteTitle,
   collectPairCandidates,
   exportBlindPairs,
+  hasStructuralTitlePrefix,
   unblindVerdicts,
   type PairKeyRow,
 } from "../../src/metrics/p1/blind-pairs";
@@ -110,7 +112,6 @@ describe("P1 blind evaluation pairs", () => {
       [
         { pairId: key[0]!.pairId, winner: shadowSide(key[0]!) },
         { pairId: key[1]!.pairId, winner: shadowSide(key[1]!) === "A" ? "B" : "A" },
-        { pairId: "p9999", winner: "tie" },
       ],
       key,
     );
@@ -120,8 +121,97 @@ describe("P1 blind evaluation pairs", () => {
       shadowWins: 1,
       legacyWins: 1,
       ties: 0,
-      unmatched: ["p9999"],
+      complete: true,
     });
     expect(tally.shadowWinRate).toBeCloseTo(0.5, 10);
+  });
+
+  test("an incomplete or malformed verdict set yields no win rate", () => {
+    const { key } = exportBlindPairs(db, { seed: 1 });
+    const first = key[0]!.pairId;
+
+    // One key pair unanswered, one verdict for a pair that is not in the key,
+    // the same pair judged twice, and a row that is not a verdict at all. Each
+    // is a different hole; none of them may produce a number.
+    const tally = unblindVerdicts(
+      [
+        { pairId: first, winner: "A" },
+        { pairId: first, winner: "B" },
+        { pairId: "p9999", winner: "tie" },
+        { pairId: key[1]!.pairId, winner: "maybe" },
+        "not an object",
+      ],
+      key,
+    );
+
+    expect(tally.complete).toBe(false);
+    expect(tally.shadowWinRate).toBeNull();
+    expect(tally.duplicates).toEqual([first]);
+    expect(tally.unmatched).toEqual(["p9999"]);
+    expect(tally.missing).toEqual([key[1]!.pairId]);
+    expect(tally.invalid).toEqual(["line 4", "line 5"]);
+  });
+
+  test("a complete set of well-formed verdicts scores and reports a rate", () => {
+    const { key } = exportBlindPairs(db, { seed: 1 });
+
+    const tally = unblindVerdicts(
+      key.map((row) => ({
+        pairId: row.pairId,
+        winner: row.a === "shadow" ? "A" : "B",
+      })),
+      key,
+    );
+
+    expect(tally.complete).toBe(true);
+    expect(tally.missing).toEqual([]);
+    expect(tally.shadowWinRate).toBe(1);
+  });
+
+  test("the prescribed title prefix is stripped, so no regex sorts the sides", () => {
+    // The note-taking instructions prescribe "<activity>+<topic>: …" for the
+    // agent's titles and nothing at all for the legacy pipeline's, so the shape
+    // alone would name the author before a judge read a word.
+    expect(anonymizeNoteTitle("implement+note-debt: closed the ledger loop")).toBe(
+      "closed the ledger loop",
+    );
+    // Matched by shape, not by the instructions' activity vocabulary: an agent
+    // that invents an activity word produces the same tell.
+    expect(anonymizeNoteTitle("refactor+cache:  warmed the prefix")).toBe(
+      "warmed the prefix",
+    );
+    // A full-width colon is the same structure in the bilingual corpus.
+    expect(anonymizeNoteTitle("fix+recall：修好了检索")).toBe("修好了检索");
+    // An ordinary title is left alone, and a title that is nothing but the
+    // prefix is kept rather than emptied.
+    expect(anonymizeNoteTitle("Recall returns zero for CJK bigrams")).toBe(
+      "Recall returns zero for CJK bigrams",
+    );
+    expect(anonymizeNoteTitle("design+arc-spine:")).toBe("design+arc-spine:");
+
+    const { pairs } = exportBlindPairs(db, { seed: 1 });
+    for (const pair of pairs) {
+      for (const side of [pair.a, pair.b]) {
+        expect(hasStructuralTitlePrefix(side.title)).toBe(false);
+      }
+    }
+  });
+
+  test("the export declares what it normalised and what it could not", () => {
+    const exported = exportBlindPairs(db, { seed: 3 });
+
+    expect(exported.header).toMatchObject({
+      kind: "blind-pairs-header",
+      seed: 3,
+      pairCount: exported.pairs.length,
+    });
+    expect(exported.header.residualFingerprints.join(" ")).toContain(
+      "length distribution",
+    );
+    // Per-source measurements belong to the operator's report, never to the
+    // file a judge is handed.
+    expect(JSON.stringify(exported.header)).not.toContain("shadow");
+    expect(exported.stats.shadowContentMedianCharacters).toBeGreaterThan(0);
+    expect(exported.stats.legacyContentMedianCharacters).toBeGreaterThan(0);
   });
 });

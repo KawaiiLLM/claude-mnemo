@@ -86,12 +86,34 @@ export function parseJudgeArguments(argv: string[]): JudgeCliOptions {
   return options;
 }
 
+/**
+ * Read the pairs file, skipping its declaration header and rejecting anything
+ * that is neither. A silently dropped malformed line would show up later as a
+ * missing verdict with no cause attached.
+ */
 export function readPairs(path: string): BlindPair[] {
-  return readFileSync(path, "utf8")
+  const pairs: BlindPair[] = [];
+
+  readFileSync(path, "utf8")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as BlindPair);
+    .forEach((line, index) => {
+      const parsed = JSON.parse(line) as Partial<BlindPair> & {
+        kind?: unknown;
+      };
+      if (parsed.kind === "blind-pairs-header") {
+        return;
+      }
+      if (typeof parsed.pairId !== "string" || !parsed.a || !parsed.b) {
+        throw new Error(
+          `${path}: line ${index + 1} is neither a pair nor the header.`,
+        );
+      }
+      pairs.push(parsed as BlindPair);
+    });
+
+  return pairs;
 }
 
 export interface JudgeMainDependencies {
@@ -159,6 +181,8 @@ export async function judgeMain(
   }
 
   const invoke = dependencies.invoke ?? createHttpJudgeInvoke();
+  const attempted =
+    options.limit === undefined ? pairs : pairs.slice(0, options.limit);
   const result = await runJudge({
     pairs,
     config,
@@ -171,9 +195,50 @@ export async function judgeMain(
   writeFileSync(options.out, toJsonl(result.verdicts), "utf8");
 
   io.stdout(
-    `judged ${result.verdicts.length}/${pairs.length} pairs with ${config.model} ` +
+    `judged ${result.verdicts.length}/${attempted.length} pairs with ${config.model} ` +
       `(${result.failures.length} failed) -> ${options.out}`,
   );
 
-  return result.failures.length > 0 && result.verdicts.length === 0 ? 1 : 0;
+  // A run that answered most of the pairs is not a partial success, it is a
+  // failed measurement with a plausible-looking output file: the pairs a judge
+  // cannot answer are not a random sample of the pairs. So every gap — a
+  // failure, a pair with no verdict, a pairId answered twice — is listed and
+  // the exit code is non-zero, and the operator decides whether to re-run or to
+  // score a deliberately reduced set with an explicit --limit.
+  const verdictIds = result.verdicts.map((verdict) => verdict.pairId);
+  const counts = new Map<string, number>();
+  for (const pairId of verdictIds) {
+    counts.set(pairId, (counts.get(pairId) ?? 0) + 1);
+  }
+  const duplicated = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([pairId]) => pairId);
+  const unanswered = attempted
+    .map((pair) => pair.pairId)
+    .filter((pairId) => !counts.has(pairId));
+
+  const gaps: string[] = [];
+  if (result.failures.length > 0) {
+    gaps.push(
+      `failed: ${result.failures.map((failure) => failure.pairId).join(", ")}`,
+    );
+  }
+  if (unanswered.length > 0) {
+    gaps.push(`no verdict: ${unanswered.join(", ")}`);
+  }
+  if (duplicated.length > 0) {
+    gaps.push(`judged twice: ${duplicated.join(", ")}`);
+  }
+
+  if (gaps.length > 0) {
+    io.stderr(
+      `incomplete judging — ${verdictIds.length}/${attempted.length} pairs have exactly one verdict:`,
+    );
+    for (const gap of gaps) {
+      io.stderr(`  ${gap}`);
+    }
+    return 1;
+  }
+
+  return 0;
 }

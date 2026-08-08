@@ -3097,15 +3097,33 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         }
       }
 
-      for (const floored of finalizeUnreachableStrandedTurns(
+      // The environment probe is handed to the finalizer rather than read once
+      // here: the drains above are awaits, and a session that re-registers
+      // during them is being resumed. The finalizer re-asks per turn inside its
+      // write transaction and defers anything that moved.
+      const floored = finalizeUnreachableStrandedTurns(
         deps.db,
-        repair.unreachableTurnIds,
-      )) {
-        removeTurnFromBuffer(floored.sessionDbId, floored.turnId);
+        repair.unreachable,
+        {
+          hasRegisteredSessionEnv: (sessionDbId) =>
+            getRegisteredSessionEnv(sessionDbId) !== undefined,
+        },
+      );
+
+      for (const item of floored) {
+        removeTurnFromBuffer(item.sessionDbId, item.turnId);
         logger.warn?.("stranded turn completion floor applied", {
-          sessionDbId: floored.sessionDbId,
-          turnId: floored.turnId,
-          reasonCode: floored.reasonCode,
+          sessionDbId: item.sessionDbId,
+          turnId: item.turnId,
+          reasonCode: item.reasonCode,
+        });
+      }
+
+      const deferredCount = repair.unreachable.length - floored.length;
+      if (deferredCount > 0) {
+        logger.warn?.("stranded turn completion floor deferred", {
+          count: deferredCount,
+          reasonCode: "turn-changed-during-repair",
         });
       }
     }

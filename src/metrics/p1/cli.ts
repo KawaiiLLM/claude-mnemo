@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve, isAbsolute } from "node:path";
 
 import type { Database } from "bun:sqlite";
 
@@ -10,7 +10,6 @@ import {
   type PairExportStats,
   type PairKeyRow,
   type UnblindedTally,
-  type VerdictRow,
 } from "./blind-pairs";
 import {
   computeCompliance,
@@ -82,7 +81,9 @@ Options:
                          ~/.claude-mnemo/memory.db explicitly.
   --session <id>         restrict to one session: 15069, S15069 or the uuid
   --json                 emit JSON instead of tables
-  --out <prefix>         blind-eval output prefix (default ./p1-blind-eval)
+  --out <prefix>         blind-eval output prefix (default ./p1-blind-eval).
+                         Must stay inside the working directory: one of the two
+                         files it writes is the un-blinding key
   --seed <n>             blind-eval A/B randomisation seed (default 1)
   --verdicts <path>      score this verdicts JSONL against the key; makes
                          metric (b) the judged win rate instead of a pair count
@@ -276,8 +277,18 @@ export function renderPairStats(
         ["pairs exportable", stats.candidates],
         ["dropped: no legacy summary", stats.droppedMissingLegacy],
         ["dropped: a field empty on one side", stats.droppedEmptyField],
+        ["title prefixes stripped", stats.titlePrefixesStripped],
       ],
     }),
+  );
+
+  // Named here and nowhere near the pairs file: these are per-source and would
+  // themselves be the tell if a judge ever saw them.
+  lines.push("");
+  lines.push(
+    "residual length signal — median body characters after anonymisation: " +
+      `shadow ${stats.shadowContentMedianCharacters ?? "—"} · ` +
+      `legacy ${stats.legacyContentMedianCharacters ?? "—"}`,
   );
 
   if (written) {
@@ -287,6 +298,12 @@ export function renderPairStats(
   }
 
   return lines.join("\n");
+}
+
+function gapLine(label: string, ids: string[]): string {
+  return `${label}: ${ids.length} — ${ids.slice(0, 10).join(", ")}${
+    ids.length > 10 ? ", …" : ""
+  }`;
 }
 
 export function renderTally(tally: UnblindedTally): string {
@@ -304,11 +321,33 @@ export function renderTally(tally: UnblindedTally): string {
     }),
   );
 
-  if (tally.unmatched.length > 0) {
+  if (!tally.complete) {
+    lines.push("");
     lines.push(
-      `unmatched pair ids (not in the key): ${tally.unmatched.length} — ` +
-        `${tally.unmatched.slice(0, 5).join(", ")}`,
+      "INCOMPLETE — no win rate is reported. A rate over a partial verdict set " +
+        "measures the pairs the judge managed to answer, not the trial. Fill " +
+        "the gaps below and re-score.",
     );
+    if (tally.missing.length > 0) {
+      lines.push(gapLine("  key pairs with no verdict", tally.missing));
+    }
+    if (tally.unmatched.length > 0) {
+      lines.push(gapLine("  verdicts not in the key", tally.unmatched));
+    }
+    if (tally.duplicates.length > 0) {
+      lines.push(gapLine("  pair ids judged twice", tally.duplicates));
+    }
+    if (tally.invalid.length > 0) {
+      lines.push(gapLine("  malformed verdict rows", tally.invalid));
+    }
+    if (
+      tally.missing.length === 0 &&
+      tally.unmatched.length === 0 &&
+      tally.duplicates.length === 0 &&
+      tally.invalid.length === 0
+    ) {
+      lines.push("  the key file is empty — nothing to score against.");
+    }
   }
 
   return lines.join("\n");
@@ -385,6 +424,25 @@ function readJsonl<T>(path: string): T[] {
     .map((line) => JSON.parse(line) as T);
 }
 
+/**
+ * blind-eval writes two files derived from one `--out` prefix, and one of them
+ * is the key that de-anonymises the whole trial. Confining the prefix to the
+ * working directory keeps a mistyped or pasted `--out` from dropping that key
+ * into a shared location — and since this is the only writing path in an
+ * otherwise read-only tool, the confinement costs nothing else.
+ */
+export function resolveOutputPath(path: string, cwd = process.cwd()): string {
+  const root = resolve(cwd);
+  const resolved = resolve(root, path);
+  const inside = relative(root, resolved);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    throw new Error(
+      `--out must stay inside the working directory; ${path} resolves to ${resolved}.`,
+    );
+  }
+  return resolved;
+}
+
 function writeFile(path: string, contents: string): void {
   mkdirSync(dirname(resolve(path)), { recursive: true });
   writeFileSync(path, contents, "utf8");
@@ -398,10 +456,17 @@ function p1NotEnabledMessage(db: Database): string | null {
   return `P1 not enabled in this database (missing ${missing.join(", ")}).`;
 }
 
+export interface MainOptions {
+  /** The directory `--out` is confined to. Injected so tests need no chdir. */
+  cwd?: string;
+}
+
 export async function main(
   argv: string[],
   io: CliIo = DEFAULT_IO,
+  mainOptions: MainOptions = {},
 ): Promise<number> {
+  const cwd = mainOptions.cwd ?? process.cwd();
   let options: CliOptions;
 
   try {
@@ -451,6 +516,9 @@ export async function main(
 
     const sections: string[] = [];
     const jsonPayload: Record<string, unknown> = {};
+    // A gap in the verdict set is a failed measurement, not a footnote: the exit
+    // code has to say so, or a scripted run reports a win rate it never had.
+    let incompleteScoring = false;
     const wants = (command: Command): boolean =>
       options.command === "all" || options.command === command;
 
@@ -471,9 +539,10 @@ export async function main(
     if (wants("blind-eval")) {
       if (scoring) {
         const keyPath = options.key ?? `${options.out}.key.jsonl`;
-        const verdicts = readJsonl<VerdictRow>(options.verdicts!);
+        const verdicts = readJsonl<unknown>(options.verdicts!);
         const key = readJsonl<PairKeyRow>(keyPath);
         const tally = unblindVerdicts(verdicts, key);
+        incompleteScoring = !tally.complete;
         jsonPayload.blindEval = tally;
         sections.push(
           "(b) BLIND EVAL — verdicts scored against the key\n" +
@@ -495,9 +564,15 @@ export async function main(
 
           // `all` reports what is pairable; only the explicit subcommand writes.
           if (options.command === "blind-eval") {
-            const pairsPath = `${options.out}.pairs.jsonl`;
-            const keyPath = `${options.out}.key.jsonl`;
-            writeFile(pairsPath, toJsonl(exported.pairs));
+            const pairsPath = resolveOutputPath(
+              `${options.out}.pairs.jsonl`,
+              cwd,
+            );
+            const keyPath = resolveOutputPath(`${options.out}.key.jsonl`, cwd);
+            // The header rides the pairs file so the file itself states what was
+            // normalised and what was left; it is not a pair and the judge
+            // runner skips it.
+            writeFile(pairsPath, toJsonl([exported.header, ...exported.pairs]));
             writeFile(keyPath, toJsonl(exported.key));
             sections.push(
               renderPairStats(exported.stats, { pairsPath, keyPath }),
@@ -523,6 +598,13 @@ export async function main(
       io.stdout(JSON.stringify(jsonPayload, null, 2));
     } else {
       io.stdout(sections.join("\n\n"));
+    }
+
+    if (incompleteScoring) {
+      io.stderr(
+        "blind-eval scoring is incomplete — see the gap list above; no win rate was computed.",
+      );
+      return 1;
     }
 
     return 0;

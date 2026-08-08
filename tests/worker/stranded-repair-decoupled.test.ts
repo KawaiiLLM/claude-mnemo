@@ -39,6 +39,10 @@ describe("stranded repair runs with the dream disabled", () => {
     repairHasEnv?: boolean;
     strandedInTriggerSession?: boolean;
     strandedEpoch?: number;
+    /** A second stranded turn in the (registered) triggering session. */
+    strandTriggerSessionToo?: boolean;
+    /** Runs inside the drain, i.e. after the scan and before the floor. */
+    onSendPrompt?: (registry: Map<string, Record<string, string>>) => void;
   } = {}) {
     const db = createDatabase(":memory:");
     databases.push(db);
@@ -73,6 +77,16 @@ describe("stranded repair runs with the dream disabled", () => {
        RETURNING id`,
     ).get(strandedSessionId, options.strandedEpoch ?? STRANDED_EPOCH)!.id;
 
+    const triggerStrandedTurnId = options.strandTriggerSessionToo
+      ? db.query<{ id: number }, [number, number]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             was_interrupted, created_at_epoch
+           ) VALUES (?, 1, 'active', 'trigger prompt', 'trigger response', 1, ?)
+           RETURNING id`,
+        ).get(triggerSessionId, options.strandedEpoch ?? STRANDED_EPOCH)!.id
+      : null;
+
     // A day is waiting in the dream queue: with the switch off nothing may
     // claim it, and the repair must no longer need it either.
     const stateStore = createDiaryStateStore(db);
@@ -99,6 +113,7 @@ describe("stranded repair runs with the dream disabled", () => {
           sessionId: "decoupled-worker",
           queryPid: 123,
           async sendPrompt(prompt: string) {
+            options.onSendPrompt?.(registry);
             for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
               const turnId = Number(match[1]);
               updateTurnById(db, turnId, {
@@ -119,8 +134,10 @@ describe("stranded repair runs with the dream disabled", () => {
     return {
       db,
       core,
+      registry,
       triggerSessionId,
       strandedTurnId,
+      triggerStrandedTurnId,
       stateStore,
       reconcileDreamBacklog,
       processDiaryItem,
@@ -188,6 +205,32 @@ describe("stranded repair runs with the dream disabled", () => {
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("extracted");
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.title).toBe("recovered");
     expect(extractionQueue(fixture.db)).toEqual([]);
+  });
+
+  test("a session that re-registers during the drain is not floored", async () => {
+    // The scan judges reachability, then the caller AWAITS a drain, and only
+    // then does the floor run. A session that comes back inside that window is
+    // resuming: flooring it on the stale verdict would mark its live turn failed
+    // and delete the queue rows carrying the resume. The floor therefore
+    // re-asks, per turn, inside its own write transaction.
+    const fixture = setup({
+      strandTriggerSessionToo: true,
+      onSendPrompt: (registry) => registry.set("stranded-session", {}),
+    });
+
+    await fixture.core.finishSession(fixture.triggerSessionId);
+
+    // The triggering session was reachable all along and completed normally.
+    expect(getTurnById(fixture.db, fixture.triggerStrandedTurnId!)?.status).toBe(
+      "extracted",
+    );
+    // The one that came back mid-drain kept its live status and its queue row.
+    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("active");
+
+    // And it is not lost: once it is gone again, the next end event floors it.
+    fixture.registry.delete("stranded-session");
+    await fixture.core.finishSession(fixture.triggerSessionId);
+    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
   });
 
   test("a pure liveness scan still does not repair", async () => {

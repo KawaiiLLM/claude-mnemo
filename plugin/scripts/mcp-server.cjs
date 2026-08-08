@@ -7692,6 +7692,7 @@ function ensureDiaryDayStateRetryDispositionColumn(db) {
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -8209,8 +8210,16 @@ var init_schema = __esm({
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
-  CREATE INDEX IF NOT EXISTS idx_turns_status
-    ON turns(status);
+  -- Ordered (status, created_at_epoch) rather than status alone: the stranded
+  -- repair's derivation scan (worker/turn-liveness.ts listStrandedRepairDates)
+  -- has no date bound at all \u2014 it reads the whole history looking for turns
+  -- still in a live status \u2014 so without this it degrades to a table scan that
+  -- grows with the corpus. Live turns are a small minority of the table, so
+  -- seeking the two live statuses and reading created_at_epoch straight off the
+  -- index turns that scan into a bounded one. A plain (status) index is a strict
+  -- prefix of this one and would only add write cost.
+  CREATE INDEX IF NOT EXISTS idx_turns_status_created
+    ON turns(status, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_created_at
     ON turns(created_at_epoch);
@@ -8235,6 +8244,12 @@ var init_schema = __esm({
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
     ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  -- "does this turn already have a turn-stop queued" is asked once per candidate
+  -- by the stranded scan and once per Stop by the hook, and without an index each
+  -- ask scans the whole queue.
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_kind_target
+    ON pending_queue(kind, target_id);
 
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
@@ -32149,6 +32164,16 @@ function getNoteDebt(db, turnId) {
     `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
   ).get(turnId) ?? null;
 }
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "noted", null, nowEpoch);
+}
 
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
@@ -32578,9 +32603,8 @@ function noteTool(db, rawInput, options = {}) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
-  runWriteTransaction(
-    db,
-    () => upsertShadowNote(db, {
+  runWriteTransaction(db, () => {
+    upsertShadowNote(db, {
       turnId: turn.id,
       title,
       content,
@@ -32588,8 +32612,9 @@ function noteTool(db, rawInput, options = {}) {
       writerModel,
       rideTurnId,
       nowEpoch
-    })
-  );
+    });
+    closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+  });
   const parts = [
     `Noted S${turn.sessionId}/T${turn.promptNumber}${existing ? " (replaced the previous note)" : ""}.`
   ];

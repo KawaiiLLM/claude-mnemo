@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-mskmbd9e" : "dev";
+var BUILD_ID = true ? "0.8.6-msko8log" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2498,8 +2498,16 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
-  CREATE INDEX IF NOT EXISTS idx_turns_status
-    ON turns(status);
+  -- Ordered (status, created_at_epoch) rather than status alone: the stranded
+  -- repair's derivation scan (worker/turn-liveness.ts listStrandedRepairDates)
+  -- has no date bound at all \u2014 it reads the whole history looking for turns
+  -- still in a live status \u2014 so without this it degrades to a table scan that
+  -- grows with the corpus. Live turns are a small minority of the table, so
+  -- seeking the two live statuses and reading created_at_epoch straight off the
+  -- index turns that scan into a bounded one. A plain (status) index is a strict
+  -- prefix of this one and would only add write cost.
+  CREATE INDEX IF NOT EXISTS idx_turns_status_created
+    ON turns(status, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_created_at
     ON turns(created_at_epoch);
@@ -2524,6 +2532,12 @@ var SCHEMA_SQL = `
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
     ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  -- "does this turn already have a turn-stop queued" is asked once per candidate
+  -- by the stranded scan and once per Stop by the hook, and without an index each
+  -- ask scans the whole queue.
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_kind_target
+    ON pending_queue(kind, target_id);
 
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
@@ -2846,6 +2860,7 @@ function ensureDiaryDayStateRetryDispositionColumn(db) {
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -42728,6 +42743,16 @@ function getNoteDebt(db, turnId) {
     `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
   ).get(turnId) ?? null;
 }
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "noted", null, nowEpoch);
+}
 
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
@@ -42895,9 +42920,8 @@ function noteTool(db, rawInput, options = {}) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
-  runWriteTransaction(
-    db,
-    () => upsertShadowNote(db, {
+  runWriteTransaction(db, () => {
+    upsertShadowNote(db, {
       turnId: turn.id,
       title,
       content,
@@ -42905,8 +42929,9 @@ function noteTool(db, rawInput, options = {}) {
       writerModel,
       rideTurnId,
       nowEpoch
-    })
-  );
+    });
+    closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+  });
   const parts = [
     `Noted S${turn.sessionId}/T${turn.promptNumber}${existing ? " (replaced the previous note)" : ""}.`
   ];
@@ -49339,13 +49364,20 @@ function restoreStrandedTurnStops(db, options) {
     }
   }
   const strandedTurnIds = [];
-  const unreachableTurnIds = [];
+  const unreachable = [];
   const enqueuedSessionDbIds = /* @__PURE__ */ new Set();
   let enqueuedTurnStopCount = 0;
   for (const candidate of candidates.values()) {
     strandedTurnIds.push(candidate.id);
     if (!options.hasRegisteredSessionEnv(candidate.sessionDbId)) {
-      unreachableTurnIds.push(candidate.id);
+      const evidence = readStrandedTurnEvidence(db, candidate.id);
+      if (evidence) {
+        unreachable.push({
+          turnId: candidate.id,
+          sessionDbId: candidate.sessionDbId,
+          evidence
+        });
+      }
       continue;
     }
     const enqueued = runWriteTransaction(db, () => {
@@ -49374,20 +49406,53 @@ function restoreStrandedTurnStops(db, options) {
   }
   return {
     strandedTurnIds,
-    unreachableTurnIds,
+    unreachable,
     enqueuedSessionDbIds: [...enqueuedSessionDbIds],
     enqueuedTurnStopCount
   };
 }
+function readStrandedTurnEvidence(db, turnId) {
+  const turn = getTurnById(db, turnId);
+  if (!turn) {
+    return null;
+  }
+  return {
+    status: turn.status,
+    turnStopSeqs: db.query(
+      `SELECT seq FROM pending_queue
+         WHERE kind = 'turn-stop' AND target_id = ?
+         ORDER BY seq ASC`
+    ).all(turnId).map((row) => row.seq),
+    latestObservationId: db.query(
+      "SELECT MAX(id) AS maxId FROM observations WHERE turn_id = ?"
+    ).get(turnId)?.maxId ?? 0
+  };
+}
+function sameEvidence(left, right) {
+  return left.status === right.status && left.latestObservationId === right.latestObservationId && left.turnStopSeqs.length === right.turnStopSeqs.length && left.turnStopSeqs.every((seq, index) => seq === right.turnStopSeqs[index]);
+}
 function completionFloorStatus(turn) {
   return turn.title !== null || turn.content !== null ? "extracted" : "failed";
 }
-function finalizeUnreachableStrandedTurns(db, turnIds) {
+function finalizeUnreachableStrandedTurns(db, unreachableTurns, options) {
   const results = [];
-  for (const turnId of new Set(turnIds)) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of unreachableTurns) {
+    if (seen.has(candidate.turnId)) {
+      continue;
+    }
+    seen.add(candidate.turnId);
+    const turnId = candidate.turnId;
     const result = runWriteTransaction(db, () => {
       const turn = getTurnById(db, turnId);
       if (!turn || turn.status !== "active" && turn.status !== "provisional") {
+        return null;
+      }
+      if (options.hasRegisteredSessionEnv(turn.sessionId)) {
+        return null;
+      }
+      const current = readStrandedTurnEvidence(db, turnId);
+      if (!current || !sameEvidence(current, candidate.evidence)) {
         return null;
       }
       const status = completionFloorStatus(turn);
@@ -51318,15 +51383,26 @@ ${coldStart}
           });
         }
       }
-      for (const floored of finalizeUnreachableStrandedTurns(
+      const floored = finalizeUnreachableStrandedTurns(
         deps.db,
-        repair.unreachableTurnIds
-      )) {
-        removeTurnFromBuffer(floored.sessionDbId, floored.turnId);
+        repair.unreachable,
+        {
+          hasRegisteredSessionEnv: (sessionDbId) => getRegisteredSessionEnv(sessionDbId) !== void 0
+        }
+      );
+      for (const item of floored) {
+        removeTurnFromBuffer(item.sessionDbId, item.turnId);
         logger.warn?.("stranded turn completion floor applied", {
-          sessionDbId: floored.sessionDbId,
-          turnId: floored.turnId,
-          reasonCode: floored.reasonCode
+          sessionDbId: item.sessionDbId,
+          turnId: item.turnId,
+          reasonCode: item.reasonCode
+        });
+      }
+      const deferredCount = repair.unreachable.length - floored.length;
+      if (deferredCount > 0) {
+        logger.warn?.("stranded turn completion floor deferred", {
+          count: deferredCount,
+          reasonCode: "turn-changed-during-repair"
         });
       }
     }

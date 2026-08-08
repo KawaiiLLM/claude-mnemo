@@ -117,24 +117,45 @@ describe("p1-metrics CLI", () => {
   test("blind-eval writes the pairs and the key to separate files", async () => {
     const fixture = createFixtureDatabase();
     const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
-    const prefix = join(directory, "run1");
     const { io, stdout } = makeIo();
 
     const code = await main(
-      ["blind-eval", "--db", fixture.path, "--out", prefix, "--seed", "7"],
+      ["blind-eval", "--db", fixture.path, "--out", "run1", "--seed", "7"],
       io,
+      { cwd: directory },
     );
 
     expect(code).toBe(0);
+    const prefix = join(directory, "run1");
     const pairs = readFileSync(`${prefix}.pairs.jsonl`, "utf8").trim().split("\n");
     const key = readFileSync(`${prefix}.key.jsonl`, "utf8").trim().split("\n");
 
-    expect(pairs).toHaveLength(2);
+    // Line one declares the blinding; the pairs follow.
+    expect(pairs).toHaveLength(3);
+    expect(JSON.parse(pairs[0]!)).toMatchObject({ kind: "blind-pairs-header" });
     expect(key).toHaveLength(2);
     expect(pairs.join("\n")).not.toContain("shadow");
     expect(pairs.join("\n")).not.toContain("writerModel");
     expect(JSON.parse(key[0]!)).toMatchObject({ pairId: "p0001" });
     expect(stdout()).toContain("keep away from the judge");
+    expect(stdout()).toContain("residual length signal");
+  });
+
+  test("--out may not escape the working directory", async () => {
+    const fixture = createFixtureDatabase();
+    const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
+    const { io, stderr } = makeIo();
+
+    // The key file de-anonymises the whole trial; an absolute or climbing
+    // prefix would drop it wherever the string happened to point.
+    const code = await main(
+      ["blind-eval", "--db", fixture.path, "--out", join(tmpdir(), "escaped")],
+      io,
+      { cwd: directory },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr()).toContain("must stay inside the working directory");
   });
 
   test("blind-eval scores a verdicts file without touching the database", async () => {
@@ -142,7 +163,9 @@ describe("p1-metrics CLI", () => {
     const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
     const prefix = join(directory, "run2");
 
-    await main(["blind-eval", "--db", fixture.path, "--out", prefix], makeIo().io);
+    await main(["blind-eval", "--db", fixture.path, "--out", "run2"], makeIo().io, {
+      cwd: directory,
+    });
 
     const key = readFileSync(`${prefix}.key.jsonl`, "utf8")
       .trim()
@@ -172,15 +195,51 @@ describe("p1-metrics CLI", () => {
     expect(stdout()).toContain("100.0%");
   });
 
-  test("with verdicts in hand, `all` reports the judged rate for metric (b)", async () => {
+  test("a partial verdict set reports the gap and fails instead of a rate", async () => {
     const fixture = createFixtureDatabase();
     const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
     const prefix = join(directory, "run3");
 
-    await main(["blind-eval", "--db", fixture.path, "--out", prefix], makeIo().io);
+    await main(["blind-eval", "--db", fixture.path, "--out", "run3"], makeIo().io, {
+      cwd: directory,
+    });
 
+    // Two pairs were exported, one verdict answers them: the pairs a judge
+    // fails on are not a random sample, so a rate over what arrived would be a
+    // biased number wearing a clean face.
     const verdictsPath = join(directory, "verdicts.jsonl");
     await Bun.write(verdictsPath, JSON.stringify({ pairId: "p0001", winner: "A" }));
+
+    const { io, stdout, stderr } = makeIo();
+    const code = await main(
+      ["blind-eval", "--out", prefix, "--verdicts", verdictsPath],
+      io,
+    );
+
+    expect(code).toBe(1);
+    expect(stdout()).toContain("INCOMPLETE");
+    expect(stdout()).toContain("key pairs with no verdict: 1 — p0002");
+    expect(stdout()).not.toContain("%");
+    expect(stderr()).toContain("no win rate was computed");
+  });
+
+  test("with verdicts in hand, `all` reports the judged rate for metric (b)", async () => {
+    const fixture = createFixtureDatabase();
+    const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
+    const prefix = join(directory, "run4");
+
+    await main(["blind-eval", "--db", fixture.path, "--out", "run4"], makeIo().io, {
+      cwd: directory,
+    });
+
+    const verdictsPath = join(directory, "verdicts.jsonl");
+    await Bun.write(
+      verdictsPath,
+      [
+        JSON.stringify({ pairId: "p0001", winner: "A" }),
+        JSON.stringify({ pairId: "p0002", winner: "B" }),
+      ].join("\n"),
+    );
 
     const { io, stdout } = makeIo();
     const code = await main(

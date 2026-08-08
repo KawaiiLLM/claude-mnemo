@@ -207,6 +207,86 @@ describe("P1 judge CLI", () => {
     expect(out.join("\n")).toContain("SUMMARY A title");
   });
 
+  test("a judge that answers only some pairs fails, and names the gap", async () => {
+    // The pairs a judge cannot answer are not a random sample of the pairs, so a
+    // verdict file covering most of them is a biased measurement wearing a
+    // clean face. The exit code has to say so.
+    const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
+    const pairsPath = join(directory, "pairs.jsonl");
+    const outPath = join(directory, "verdicts.jsonl");
+    await Bun.write(pairsPath, toJsonl(PAIRS));
+
+    const { io, err } = makeIo();
+    const code = await judgeMain(["--pairs", pairsPath, "--out", outPath], {
+      io,
+      env: { P1_JUDGE_MODEL: "stub-model", P1_JUDGE_API_KEY: "k" },
+      invoke: async ({ user }) =>
+        user.includes("export the pairs")
+          ? "I prefer the first one, honestly"
+          : '{"winner":"A"}',
+    });
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("incomplete judging — 1/2 pairs");
+    expect(err.join("\n")).toContain("failed: p0002");
+    expect(err.join("\n")).toContain("no verdict: p0002");
+    // The partial file is still written; the operator decides what to do with it.
+    expect(readFileSync(outPath, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  test("an explicitly limited run is complete on its own terms", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
+    const pairsPath = join(directory, "pairs.jsonl");
+    const outPath = join(directory, "verdicts.jsonl");
+    await Bun.write(pairsPath, toJsonl(PAIRS));
+
+    const { io, out } = makeIo();
+    const code = await judgeMain(
+      ["--pairs", pairsPath, "--out", outPath, "--limit", "1"],
+      {
+        io,
+        env: { P1_JUDGE_MODEL: "stub-model", P1_JUDGE_API_KEY: "k" },
+        invoke: async () => '{"winner":"A"}',
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(out.join("\n")).toContain("judged 1/1 pairs");
+  });
+
+  test("the declaration header is skipped, and a stray line is not", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
+    const pairsPath = join(directory, "pairs.jsonl");
+    await Bun.write(
+      pairsPath,
+      toJsonl([{ kind: "blind-pairs-header", version: 1 }, ...PAIRS]),
+    );
+
+    const { io, out } = makeIo();
+    expect(
+      await judgeMain(["--pairs", pairsPath, "--dry-run"], {
+        io,
+        env: {},
+        invoke: async () => "{}",
+      }),
+    ).toBe(0);
+    expect(out.join("\n")).toContain("make the watchdog stop resuming forever");
+
+    // A line that is neither header nor pair would otherwise vanish and reappear
+    // later as a missing verdict with no cause attached.
+    const strayPath = join(directory, "stray.jsonl");
+    await Bun.write(strayPath, toJsonl([{ notAPair: true }]));
+    const { io: strayIo, err } = makeIo();
+    expect(
+      await judgeMain(["--pairs", strayPath, "--dry-run"], {
+        io: strayIo,
+        env: {},
+        invoke: async () => "{}",
+      }),
+    ).toBe(1);
+    expect(err.join("\n")).toContain("neither a pair nor the header");
+  });
+
   test("refuses to run without a model", async () => {
     const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
     const pairsPath = join(directory, "pairs.jsonl");

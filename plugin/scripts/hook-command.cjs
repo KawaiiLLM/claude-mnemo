@@ -558,8 +558,16 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
-  CREATE INDEX IF NOT EXISTS idx_turns_status
-    ON turns(status);
+  -- Ordered (status, created_at_epoch) rather than status alone: the stranded
+  -- repair's derivation scan (worker/turn-liveness.ts listStrandedRepairDates)
+  -- has no date bound at all \u2014 it reads the whole history looking for turns
+  -- still in a live status \u2014 so without this it degrades to a table scan that
+  -- grows with the corpus. Live turns are a small minority of the table, so
+  -- seeking the two live statuses and reading created_at_epoch straight off the
+  -- index turns that scan into a bounded one. A plain (status) index is a strict
+  -- prefix of this one and would only add write cost.
+  CREATE INDEX IF NOT EXISTS idx_turns_status_created
+    ON turns(status, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_created_at
     ON turns(created_at_epoch);
@@ -584,6 +592,12 @@ var SCHEMA_SQL = `
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
     ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  -- "does this turn already have a turn-stop queued" is asked once per candidate
+  -- by the stranded scan and once per Stop by the hook, and without an index each
+  -- ask scans the whole queue.
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_kind_target
+    ON pending_queue(kind, target_id);
 
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
@@ -906,6 +920,7 @@ function ensureDiaryDayStateRetryDispositionColumn(db) {
 }
 function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+  db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
   if (hasColumn(db, "sessions", "last_agent_session_id")) {
@@ -2592,7 +2607,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-mskmbd9e" : "dev";
+var BUILD_ID = true ? "0.8.6-msko8log" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -21236,11 +21251,20 @@ function classifyCompletedTurn(db, turn, nowEpoch) {
   return true;
 }
 function closeDebt(db, turnId, status, reason, nowEpoch) {
-  db.query(
+  return db.query(
     `UPDATE note_debt
-     SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-     WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId);
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeRolledBackNoteDebts(db, turnIds, nowEpoch) {
+  const closed = [];
+  for (const turnId of turnIds) {
+    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
+      closed.push(turnId);
+    }
+  }
+  return closed;
 }
 function reconcileNoteDebt(db, input) {
   const { sessionId, nowEpoch } = input;
@@ -21977,9 +22001,13 @@ function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIM
   );
   const writable = ordered.filter((debt) => !debt.wasRolledBack);
   const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
+  const shownWritable = writable.slice(0, Math.max(0, displayLimit));
   return {
-    writable: writable.slice(0, displayLimit),
-    rolledBack: rolledBack.slice(0, displayLimit),
+    writable: shownWritable,
+    rolledBack: rolledBack.slice(
+      0,
+      Math.max(0, displayLimit - shownWritable.length)
+    ),
     writableTotal: writable.length
   };
 }
@@ -22064,39 +22092,46 @@ function createNoteReminderHandler(dependencies) {
     if (open2.length === 0) {
       return { continue: true };
     }
-    let view = null;
+    if (hasReminderForRideTurn(dependencies.db, session.id, rideTurn.id)) {
+      return { continue: true };
+    }
+    const view = selectNoteReminderItems(open2, displayLimit);
+    const renderedTurnIds = [
+      ...view.writable.map((debt) => debt.turnId),
+      ...view.rolledBack.map((debt) => debt.turnId)
+    ];
+    const exposed = getExposedTurnIds(dependencies.db, session.id, "reminder");
+    if (renderedTurnIds.every((turnId) => exposed.has(turnId))) {
+      return { continue: true };
+    }
     try {
-      view = writeTransaction(dependencies.db, () => {
+      const claimed = writeTransaction(dependencies.db, () => {
         if (hasReminderForRideTurn(dependencies.db, session.id, rideTurn.id)) {
-          return null;
+          return false;
         }
-        const exposed = getExposedTurnIds(dependencies.db, session.id, "reminder");
-        if (open2.every((debt) => exposed.has(debt.turnId))) {
-          return null;
-        }
-        const selected = selectNoteReminderItems(open2, displayLimit);
         recordNoteIdExposure(dependencies.db, {
           sessionId: session.id,
           rideTurnId: rideTurn.id,
-          exposedTurnIds: [
-            ...selected.writable.map((debt) => debt.turnId),
-            ...selected.rolledBack.map((debt) => debt.turnId)
-          ],
+          exposedTurnIds: renderedTurnIds,
           source: "reminder",
           nowEpoch: now()
         });
-        return selected;
+        closeRolledBackNoteDebts(
+          dependencies.db,
+          view.rolledBack.map((debt) => debt.turnId),
+          now()
+        );
+        return true;
       });
+      if (!claimed) {
+        return { continue: true };
+      }
     } catch (error48) {
-      dependencies.logger?.warn?.("note reminder skipped", {
+      dependencies.logger?.warn?.("note reminder exposure not recorded", {
         sessionId: input.sessionId,
         reasonCode: "exposure-write-failed",
         error: error48 instanceof Error ? error48.message : String(error48)
       });
-      return { continue: true };
-    }
-    if (!view) {
-      return { continue: true };
     }
     return {
       continue: true,
@@ -22107,19 +22142,39 @@ function createNoteReminderHandler(dependencies) {
 
 // src/hooks/handlers/result-dispatch.ts
 function createResultDispatchHandler(dependencies = {}) {
-  const { db, now, ...dispatcherDependencies } = dependencies;
+  const { db, now, logger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createPostToolUseDispatcher(dispatcherDependencies);
-  const noteReminder = db ? createNoteReminderHandler({ db, now }) : void 0;
+  const noteReminder = db ? createNoteReminderHandler({ db, now, logger }) : void 0;
+  async function section(name, run, input) {
+    try {
+      return (await run()).hookSpecificOutput ?? null;
+    } catch (error48) {
+      (logger ?? console).warn?.("result-dispatch section failed", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: name,
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return null;
+    }
+  }
   return async function handleResultDispatch(input) {
     const sections = [];
-    const rules = await ruleDispatcher(input);
-    if (rules.hookSpecificOutput) {
-      sections.push(rules.hookSpecificOutput);
+    const rules = await section(
+      "rule-dispatch",
+      () => ruleDispatcher(input),
+      input
+    );
+    if (rules) {
+      sections.push(rules);
     }
     if (noteReminder) {
-      const reminder = await noteReminder(input);
-      if (reminder.hookSpecificOutput) {
-        sections.push(reminder.hookSpecificOutput);
+      const reminder = await section(
+        "note-reminder",
+        () => noteReminder(input),
+        input
+      );
+      if (reminder) {
+        sections.push(reminder);
       }
     }
     return sections.length > 0 ? { continue: true, hookSpecificOutput: sections.join("\n\n") } : { continue: true };
@@ -23932,9 +23987,16 @@ function getDefaultUserPromptSubmitDispatcher() {
 }
 function getDefaultResultDispatchHandler() {
   if (!defaultResultDispatchHandler) {
-    defaultResultDispatchHandler = createResultDispatchHandler({
-      db: getDefaultHookDatabase()
-    });
+    let db;
+    try {
+      db = getDefaultHookDatabase();
+    } catch (error48) {
+      process.stderr.write(
+        `[HOOK] note reminder disabled for this call: ${error48 instanceof Error ? error48.message : String(error48)}
+`
+      );
+    }
+    defaultResultDispatchHandler = createResultDispatchHandler({ db });
   }
   return defaultResultDispatchHandler;
 }

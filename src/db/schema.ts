@@ -233,8 +233,16 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
-  CREATE INDEX IF NOT EXISTS idx_turns_status
-    ON turns(status);
+  -- Ordered (status, created_at_epoch) rather than status alone: the stranded
+  -- repair's derivation scan (worker/turn-liveness.ts listStrandedRepairDates)
+  -- has no date bound at all — it reads the whole history looking for turns
+  -- still in a live status — so without this it degrades to a table scan that
+  -- grows with the corpus. Live turns are a small minority of the table, so
+  -- seeking the two live statuses and reading created_at_epoch straight off the
+  -- index turns that scan into a bounded one. A plain (status) index is a strict
+  -- prefix of this one and would only add write cost.
+  CREATE INDEX IF NOT EXISTS idx_turns_status_created
+    ON turns(status, created_at_epoch);
 
   CREATE INDEX IF NOT EXISTS idx_turns_created_at
     ON turns(created_at_epoch);
@@ -259,6 +267,12 @@ const SCHEMA_SQL = `
 
   CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_queue_diary_target
     ON pending_queue(kind, target_id) WHERE kind = 'diary';
+
+  -- "does this turn already have a turn-stop queued" is asked once per candidate
+  -- by the stranded scan and once per Stop by the hook, and without an index each
+  -- ask scans the whole queue.
+  CREATE INDEX IF NOT EXISTS idx_pending_queue_kind_target
+    ON pending_queue(kind, target_id);
 
   CREATE TABLE IF NOT EXISTS diary_day_state (
     date TEXT PRIMARY KEY,
@@ -609,6 +623,11 @@ function dropRetiredMaintenanceState(db: Database): void {
   // Installed 0.3.2 databases may still contain the old maintenance table.
   // Dropping it makes the retired terminal-state deadlock unrepresentable.
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
+
+  // idx_turns_status is a strict prefix of idx_turns_status_created, so every
+  // query it could serve the wider one serves too; keeping both would only pay
+  // a second index write on every turn insert.
+  db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 
 function ensureSessionLastAgentSessionIdColumn(db: Database): void {

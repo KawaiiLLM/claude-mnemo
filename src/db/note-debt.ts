@@ -202,18 +202,73 @@ function classifyCompletedTurn(
   return true;
 }
 
+/**
+ * Every close goes through here, and every close is `WHERE status = 'pending'`.
+ * That predicate is the whole concurrency story of the ledger: a debt has one
+ * terminal state, whoever writes it first wins, and no later reconcile can
+ * re-open a closed debt or overwrite one outcome with another.
+ */
 function closeDebt(
   db: Database,
   turnId: number,
   status: Exclude<NoteDebtStatus, "pending">,
   reason: NoteDebtReason | null,
   nowEpoch: number,
-): void {
-  db.query<unknown, [string, string | null, number, number, number]>(
-    `UPDATE note_debt
-     SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-     WHERE turn_id = ? AND status = 'pending'`,
-  ).run(status, reason, nowEpoch, nowEpoch, turnId);
+): boolean {
+  return (
+    db
+      .query<unknown, [string, string | null, number, number, number]>(
+        `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`,
+      )
+      .run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0
+  );
+}
+
+/**
+ * Close a debt because its note has just been written — called by the `note`
+ * tool itself, synchronously with the write.
+ *
+ * Age is deliberately not consulted. The 50-turn bound governs how long a debt
+ * keeps asking for attention, not whether a late answer counts: a note that
+ * arrives at turn 60 is still a real note about a real turn, and recording it as
+ * `aged` would call the trial's best-behaved case a default. The reminder path
+ * stops rendering the debt at the bound; this path keeps accepting it.
+ *
+ * Doing it here rather than leaving it to the next reconcile is what makes the
+ * ledger's durable state true at the moment it changes: a session whose last act
+ * is a note would otherwise leave that debt `pending` forever, since reconcile
+ * only ever runs from a later Stop or tool call that may never come.
+ */
+export function closeNoteDebtAsNoted(
+  db: Database,
+  turnId: number,
+  nowEpoch: number,
+): boolean {
+  return closeDebt(db, turnId, "noted", null, nowEpoch);
+}
+
+/**
+ * Close rolled-back debts at the moment the reminder renders their notice.
+ *
+ * The rule is unchanged — a rolled-back debt closes only after the agent has
+ * been told once (user story 5) — but the telling and the closing now happen in
+ * one flow instead of leaving the close to a reconcile that a session ending
+ * right here would never run.
+ */
+export function closeRolledBackNoteDebts(
+  db: Database,
+  turnIds: Iterable<number>,
+  nowEpoch: number,
+): number[] {
+  const closed: number[] = [];
+  for (const turnId of turnIds) {
+    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
+      closed.push(turnId);
+    }
+  }
+  return closed;
 }
 
 /**

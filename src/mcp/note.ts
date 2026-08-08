@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
-import { getNoteDebt } from "../db/note-debt";
+import { closeNoteDebtAsNoted, getNoteDebt } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn } from "../db/turns";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -213,7 +213,11 @@ export function noteTool(
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
 
-  runWriteTransaction(db, () =>
+  // The note and the debt's closure are one transaction: the ledger's durable
+  // state is what the trial measures, and leaving it to the next reconcile means
+  // a session whose last act is a note reports that debt as still open forever.
+  // Age is not consulted — see closeNoteDebtAsNoted.
+  runWriteTransaction(db, () => {
     upsertShadowNote(db, {
       turnId: turn.id,
       title,
@@ -222,8 +226,9 @@ export function noteTool(
       writerModel,
       rideTurnId,
       nowEpoch,
-    }),
-  );
+    });
+    closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+  });
 
   const parts = [
     `Noted S${turn.sessionId}/T${turn.promptNumber}${

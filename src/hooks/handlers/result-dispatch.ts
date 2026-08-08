@@ -23,31 +23,66 @@ export interface ResultDispatchDependencies
   extends PreToolUseDispatcherDependencies {
   db?: Database;
   now?: () => number;
+  logger?: Pick<Console, "warn">;
 }
 
 export function createResultDispatchHandler(
   dependencies: ResultDispatchDependencies = {},
 ): HookHandler {
-  const { db, now, ...dispatcherDependencies } = dependencies;
+  const { db, now, logger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createPostToolUseDispatcher(dispatcherDependencies);
   const noteReminder = db
-    ? createNoteReminderHandler({ db, now })
+    ? createNoteReminderHandler({ db, now, logger })
     : undefined;
+
+  /**
+   * Two features share one process, so they must not share one fate. The rule
+   * digest is pure file/rule state; the reminder touches a database that a
+   * concurrent `tool-use` process may hold. Letting either throw would reach
+   * runHookCommand's catch-all, which answers with a bare non-blocking exit —
+   * and that would silently regress the rule output this entry shipped with
+   * long before the reminder existed. Each section is therefore attempted
+   * independently and a failure costs only its own section.
+   */
+  async function section(
+    name: string,
+    run: () => HookResult | Promise<HookResult>,
+    input: NormalizedHookInput,
+  ): Promise<string | null> {
+    try {
+      return (await run()).hookSpecificOutput ?? null;
+    } catch (error) {
+      (logger ?? console).warn?.("result-dispatch section failed", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
 
   return async function handleResultDispatch(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
     const sections: string[] = [];
 
-    const rules = await ruleDispatcher(input);
-    if (rules.hookSpecificOutput) {
-      sections.push(rules.hookSpecificOutput);
+    const rules = await section(
+      "rule-dispatch",
+      () => ruleDispatcher(input),
+      input,
+    );
+    if (rules) {
+      sections.push(rules);
     }
 
     if (noteReminder) {
-      const reminder = await noteReminder(input);
-      if (reminder.hookSpecificOutput) {
-        sections.push(reminder.hookSpecificOutput);
+      const reminder = await section(
+        "note-reminder",
+        () => noteReminder(input),
+        input,
+      );
+      if (reminder) {
+        sections.push(reminder);
       }
     }
 

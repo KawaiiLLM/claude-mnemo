@@ -7,11 +7,15 @@ import { formatTurnAddress } from "../../hooks/note-reminder";
  * summary of the same turn, strip everything that identifies the author, and
  * hand the pair to a judge.
  *
- * The blinding is the whole product here. Three tells were found and removed:
+ * The blinding is the whole product here. Four tells were found and removed:
  *
  *   - citation syntax — the agent writes `[S15069/T332]` (spec D7), the legacy
  *     pipeline wrote bare `[T332]`, so the bracket form alone names the author;
  *     both are collapsed to `[ref]`;
+ *   - title structure — the note-taking instructions ask for a fixed
+ *     `<activity>+<topic>: …` title, which no legacy summary has, so a judge
+ *     could sort the sides on shape before reading a word. The structural prefix
+ *     is stripped from BOTH titles;
  *   - layout — notes are written as one paragraph, legacy summaries often carry
  *     bullets and hard wraps, so all whitespace runs collapse to a single space
  *     on both sides. This costs the judge any credit for good structure, which
@@ -20,6 +24,11 @@ import { formatTurnAddress } from "../../hooks/note-reminder";
  *     10-20% the spec targets), so a pair that showed insight would leak the
  *     author on the strength of an empty field. Insight travels in the key file
  *     for later analysis and never in the judged payload.
+ *
+ * The standard this is held to: no regular expression over a pair should sort
+ * the two sides by author. What remains after that standard is met is
+ * statistical, not formal — length distribution above all — and it is declared
+ * in the pairs file's header line rather than left for a reader to discover.
  *
  * Shared context (the user prompt and the turn's tool names) is neutral: neither
  * side authored it, and without it a judge can only rate prose, not faithfulness.
@@ -70,9 +79,28 @@ export interface PairExportStats {
   candidates: number;
   droppedMissingLegacy: number;
   droppedEmptyField: number;
+  /** Residual, un-blindable channels — measured so they can be stated. */
+  shadowContentMedianCharacters: number | null;
+  legacyContentMedianCharacters: number | null;
+  titlePrefixesStripped: number;
+}
+
+/**
+ * The first line of the pairs file. It is not a pair and never reaches a judge
+ * prompt; it exists so the file states, in the file, what was normalised away
+ * and what was left behind.
+ */
+export interface BlindPairsHeader {
+  kind: "blind-pairs-header";
+  version: 1;
+  seed: number;
+  pairCount: number;
+  normalised: string[];
+  residualFingerprints: string[];
 }
 
 export interface BlindPairExport {
+  header: BlindPairsHeader;
   pairs: BlindPair[];
   key: PairKeyRow[];
   stats: PairExportStats;
@@ -81,12 +109,55 @@ export interface BlindPairExport {
 const CITATION_PATTERN = /\[(?:S\d+\/)?T\d+\]|\[E\d+\]/gu;
 const DEFAULT_PROMPT_CHARACTERS = 600;
 
+/**
+ * The `<activity>+<topic>:` opening the note-taking instructions prescribe.
+ *
+ * Matched by shape rather than by the instructions' activity vocabulary: an
+ * agent that writes `refactor+cache:` instead of `fix+cache:` has produced the
+ * same tell, and a vocabulary list would leave it standing. One leading
+ * unspaced word, a `+`, a short topic, a colon — Latin or full-width, since the
+ * corpus is bilingual.
+ */
+const TITLE_STRUCTURAL_PREFIX =
+  /^[\p{L}\p{N}_-]{1,24}\s*\+\s*[^:：\n]{1,48}[:：]\s*/u;
+
 /** Remove the author's fingerprints without touching the substance. */
 export function anonymizeNoteText(text: string): string {
   return text
     .replace(CITATION_PATTERN, "[ref]")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+/**
+ * Titles get everything `anonymizeNoteText` does, then lose the structural
+ * prefix. Applied to both sides, so a legacy title that happens to open the same
+ * way is treated identically — symmetry is what makes the strip a blinding step
+ * rather than a second, subtler tell.
+ */
+export function anonymizeNoteTitle(title: string): string {
+  const normalised = anonymizeNoteText(title);
+  const stripped = normalised.replace(TITLE_STRUCTURAL_PREFIX, "").trim();
+  // A title that is nothing BUT the prefix would vanish; keep the original
+  // rather than hand the judge an empty side.
+  return stripped === "" ? normalised : stripped;
+}
+
+export function hasStructuralTitlePrefix(title: string): boolean {
+  return TITLE_STRUCTURAL_PREFIX.test(anonymizeNoteText(title));
+}
+
+function medianCharacters(texts: string[]): number | null {
+  if (texts.length === 0) {
+    return null;
+  }
+  const lengths = texts
+    .map((text) => Array.from(text).length)
+    .sort((left, right) => left - right);
+  const middle = Math.floor(lengths.length / 2);
+  return lengths.length % 2 === 1
+    ? lengths[middle]!
+    : Math.round((lengths[middle - 1]! + lengths[middle]!) / 2);
 }
 
 export function truncate(text: string, characters: number): string {
@@ -264,6 +335,20 @@ export function collectPairCandidates(
     candidates: candidates.length,
     droppedMissingLegacy,
     droppedEmptyField,
+    // Measured on the anonymised text, because that is what a judge sees. These
+    // belong to the operator's report, never to the pairs file: they are keyed
+    // by source, which is exactly the mapping the judge must not have.
+    shadowContentMedianCharacters: medianCharacters(
+      candidates.map((candidate) => anonymizeNoteText(candidate.shadowContent)),
+    ),
+    legacyContentMedianCharacters: medianCharacters(
+      candidates.map((candidate) => anonymizeNoteText(candidate.legacyContent)),
+    ),
+    titlePrefixesStripped: candidates.filter(
+      (candidate) =>
+        hasStructuralTitlePrefix(candidate.shadowTitle) ||
+        hasStructuralTitlePrefix(candidate.legacyTitle),
+    ).length,
   };
 
   return { candidates, stats };
@@ -274,7 +359,8 @@ export function buildBlindPairs(
   stats: PairExportStats,
   options: { seed?: number } = {},
 ): BlindPairExport {
-  const random = createSeededRandom(options.seed ?? 1);
+  const seed = options.seed ?? 1;
+  const random = createSeededRandom(seed);
   const pairs: BlindPair[] = [];
   const key: PairKeyRow[] = [];
 
@@ -283,11 +369,11 @@ export function buildBlindPairs(
     const shadowFirst = random() < 0.5;
 
     const shadow = {
-      title: anonymizeNoteText(candidate.shadowTitle),
+      title: anonymizeNoteTitle(candidate.shadowTitle),
       content: anonymizeNoteText(candidate.shadowContent),
     };
     const legacy = {
-      title: anonymizeNoteText(candidate.legacyTitle),
+      title: anonymizeNoteTitle(candidate.legacyTitle),
       content: anonymizeNoteText(candidate.legacyContent),
     };
 
@@ -313,7 +399,28 @@ export function buildBlindPairs(
     });
   });
 
-  return { pairs, key, stats };
+  return {
+    header: {
+      kind: "blind-pairs-header",
+      version: 1,
+      seed,
+      pairCount: pairs.length,
+      normalised: [
+        "citations collapsed to [ref] on both sides",
+        "all whitespace runs collapsed to a single space",
+        "structural '<activity>+<topic>:' title prefix stripped from both titles",
+        "insight withheld from the judged payload entirely",
+      ],
+      residualFingerprints: [
+        "length distribution: the two writers target different budgets, so body length remains a weak source signal (medians reported by `p1-metrics blind-eval`, deliberately not repeated here)",
+        "vocabulary and register: nothing normalises word choice; a judge that has read many pairs could cluster them",
+        "pair ORDER within the file follows session and prompt order, so neighbouring pairs are correlated; A/B assignment within a pair is seeded and independent",
+      ],
+    },
+    pairs,
+    key,
+    stats,
+  };
 }
 
 export function exportBlindPairs(
@@ -336,41 +443,100 @@ export interface VerdictRow {
 
 export interface UnblindedTally {
   scored: number;
+  /** Verdicts naming a pairId the key does not contain. */
   unmatched: string[];
+  /** Key pairs no verdict covers. */
+  missing: string[];
+  /** pairIds a verdict file names more than once. */
+  duplicates: string[];
+  /** Rows rejected before scoring, labelled by their line in the file. */
+  invalid: string[];
+  /** Every key pair scored exactly once by a well-formed verdict. */
+  complete: boolean;
   shadowWins: number;
   legacyWins: number;
   ties: number;
-  /** shadow wins / decided comparisons — the no-go gate's input. */
+  /** shadow wins / decided comparisons — null unless the set is complete. */
   shadowWinRate: number | null;
+}
+
+/**
+ * Accept a verdict row only if it is unambiguously one: a non-empty pairId and
+ * one of the three winners. Anything else is a hole in the measurement, and a
+ * hole has to be visible — a tolerant reader here would turn a judge that
+ * silently answered half the pairs into a clean-looking win rate.
+ */
+export function parseVerdictRow(value: unknown): VerdictRow | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const pairId = (value as { pairId?: unknown }).pairId;
+  const winner = (value as { winner?: unknown }).winner;
+  if (typeof pairId !== "string" || pairId.trim() === "") {
+    return null;
+  }
+  if (winner !== "A" && winner !== "B" && winner !== "tie") {
+    return null;
+  }
+
+  const reason = (value as { reason?: unknown }).reason;
+  return {
+    pairId: pairId.trim(),
+    winner,
+    reason: typeof reason === "string" ? reason : undefined,
+  };
 }
 
 /**
  * Score verdicts against the key. Kept separate from the judge runner on
  * purpose: the runner never reads the key, so a judge process cannot see the
  * mapping even by accident.
+ *
+ * The scoring is all-or-nothing. A win rate computed over whatever verdicts
+ * happened to arrive is not a measurement of the trial, it is a measurement of
+ * the pairs the judge found easy enough to answer — failures are not uniformly
+ * distributed, so a partial set is biased in an unknown direction. Every gap is
+ * therefore named (unmatched / missing / duplicate / malformed) and the rate
+ * stays null until there are none.
  */
 export function unblindVerdicts(
-  verdicts: VerdictRow[],
+  verdicts: readonly unknown[],
   key: PairKeyRow[],
 ): UnblindedTally {
   const byPairId = new Map(key.map((row) => [row.pairId, row]));
   const unmatched: string[] = [];
+  const duplicates: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
   let shadowWins = 0;
   let legacyWins = 0;
   let ties = 0;
   let scored = 0;
 
-  for (const verdict of verdicts) {
+  verdicts.forEach((raw, index) => {
+    const verdict = parseVerdictRow(raw);
+    if (!verdict) {
+      invalid.push(`line ${index + 1}`);
+      return;
+    }
+
+    if (seen.has(verdict.pairId)) {
+      duplicates.push(verdict.pairId);
+      return;
+    }
+    seen.add(verdict.pairId);
+
     const mapping = byPairId.get(verdict.pairId);
     if (!mapping) {
       unmatched.push(verdict.pairId);
-      continue;
+      return;
     }
 
     scored += 1;
     if (verdict.winner === "tie") {
       ties += 1;
-      continue;
+      return;
     }
 
     const source = verdict.winner === "A" ? mapping.a : mapping.b;
@@ -379,16 +545,29 @@ export function unblindVerdicts(
     } else {
       legacyWins += 1;
     }
-  }
+  });
 
+  const missing = key
+    .map((row) => row.pairId)
+    .filter((pairId) => !seen.has(pairId));
+  const complete =
+    key.length > 0 &&
+    invalid.length === 0 &&
+    duplicates.length === 0 &&
+    unmatched.length === 0 &&
+    missing.length === 0;
   const decided = shadowWins + legacyWins;
 
   return {
     scored,
     unmatched,
+    missing,
+    duplicates,
+    invalid,
+    complete,
     shadowWins,
     legacyWins,
     ties,
-    shadowWinRate: decided > 0 ? shadowWins / decided : null,
+    shadowWinRate: complete && decided > 0 ? shadowWins / decided : null,
   };
 }

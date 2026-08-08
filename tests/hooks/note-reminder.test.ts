@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
@@ -11,6 +11,7 @@ import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { createNoteReminderHandler } from "../../src/hooks/handlers/note-reminder";
 import { createResultDispatchHandler } from "../../src/hooks/handlers/result-dispatch";
+import { resolveTriggerIndexPath } from "../../src/rules/pretooluse-dispatcher";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
 describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
@@ -248,7 +249,7 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(getNoteDebt(db, second)?.status).toBe("pending");
   });
 
-  test("a rolled-back turn is announced once, then closed", async () => {
+  test("a rolled-back turn is announced once, and closes in the same flow", async () => {
     const rolledBack = addTurn(1, { prompt: "try the risky refactor" });
     addObservation(rolledBack, "Edit");
     reconcileNoteDebt(db, {
@@ -260,9 +261,6 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     addTurn(2);
 
     const announced = await handler()(createInput());
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 320 });
-    addTurn(3);
-    const afterwards = await handler()(createInput());
 
     expect(announced.hookSpecificOutput).toBe(
       [
@@ -271,11 +269,125 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
         "No notes are due.",
       ].join("\n"),
     );
+    // Closed by the act of announcing it — no reconcile has run. A session that
+    // ends right here would otherwise leave the debt pending permanently, with
+    // nothing left that could ever close it.
     expect(getNoteDebt(db, rolledBack)).toMatchObject({
       status: "skipped",
       reason: "rolled-back",
+      closedAtEpoch: 500,
     });
+
+    addTurn(3);
+    const afterwards = await handler()(createInput());
     expect(afterwards.hookSpecificOutput).toBeUndefined();
+
+    // And the asynchronous side, running later, cannot rewrite that outcome.
+    reconcileNoteDebt(db, { sessionId, nowEpoch: 900 });
+    expect(getNoteDebt(db, rolledBack)).toMatchObject({
+      status: "skipped",
+      reason: "rolled-back",
+      closedAtEpoch: 500,
+    });
+  });
+
+  test("a backlog deeper than the display limit does not repeat itself", async () => {
+    // Seven debts, five lines. The gate used to ask "has every OPEN debt been
+    // shown?", which a backlog of seven can never satisfy — so the identical
+    // five-line reminder fired on every tool result for the rest of the session.
+    // The gate asks about the lines it is about to write instead.
+    for (let promptNumber = 1; promptNumber <= 7; promptNumber += 1) {
+      addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);
+    }
+    addTurn(8);
+
+    const first = await handler()(createInput());
+    // A second ride turn, so the once-per-turn rule is not what silences it.
+    addTurn(9);
+    const second = await handler()(createInput({ toolName: "Bash" }));
+
+    expect(first.hookSpecificOutput).toContain(`[S${sessionId}/T1]`);
+    expect(second.hookSpecificOutput).toBeUndefined();
+    expect(exposureRows()).toHaveLength(5);
+  });
+
+  test("writable and rolled-back lines share one five-line budget", async () => {
+    for (let promptNumber = 1; promptNumber <= 3; promptNumber += 1) {
+      addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);
+    }
+    for (let promptNumber = 4; promptNumber <= 7; promptNumber += 1) {
+      const rolledBack = addWorkingTurn(promptNumber, `rolled ${promptNumber}`);
+      db.query("UPDATE turns SET was_rolled_back = 1 WHERE id = ?").run(rolledBack);
+    }
+    addTurn(8);
+
+    const result = await handler()(createInput());
+    const lines = (result.hookSpecificOutput ?? "").split("\n");
+    const items = lines.filter((line) => line.startsWith("  ["));
+
+    // Three writable plus two rolled-back notices — five, not the eight a
+    // per-kind cap would have produced.
+    expect(items).toHaveLength(5);
+    expect(items.filter((line) => line.includes("rolled back"))).toHaveLength(2);
+    // Only the rolled-back debts that were actually announced are closed.
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM note_debt WHERE reason = 'rolled-back'",
+        )
+        .get()?.count,
+    ).toBe(2);
+  });
+
+  test("the once-per-turn rule is a claim, not a check", async () => {
+    // A batch of parallel tool calls runs this hook in several processes at
+    // once, all riding the same turn. The read that opens the handler is only a
+    // fast path; the exclusive decision has to be the write itself.
+    addWorkingTurn(1);
+    addTurn(2);
+    let rendered = 0;
+
+    const racing = createNoteReminderHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: (database, fn) => {
+        // Another process committed its reminder for this ride turn while this
+        // one was between its read and its write.
+        db.query(
+          `INSERT INTO note_id_exposures (
+             session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+           ) VALUES (?, ?, ?, 'reminder', 400)`,
+        ).run(sessionId, 2, 1);
+        return fn();
+      },
+    });
+    if ((await racing(createInput())).hookSpecificOutput) {
+      rendered += 1;
+    }
+
+    expect(rendered).toBe(0);
+    expect(exposureRows()).toHaveLength(1);
+  });
+
+  test("a failed exposure write costs the bookkeeping, never the reminder", async () => {
+    addWorkingTurn(1);
+    addTurn(2);
+    const warnings: unknown[][] = [];
+
+    const result = await createNoteReminderHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: () => {
+        throw new Error("database is locked");
+      },
+      logger: { warn: (...args: unknown[]) => warnings.push(args) },
+    })(createInput());
+
+    // Rendering is the point; the exposure row is bookkeeping. Losing it risks
+    // showing the same line twice, which beats never mentioning the debt.
+    expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
+    expect(exposureRows()).toEqual([]);
+    expect(warnings[0]?.[0]).toBe("note reminder exposure not recorded");
   });
 
   test("shows the oldest five and withdraws the skip authorisation from three", async () => {
@@ -344,5 +456,52 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
 
     expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
     expect(result.asyncWork).toBeUndefined();
+  });
+
+  test("a reminder that throws does not take the rule output down with it", async () => {
+    // Two features share one hook process, so they must not share one fate: an
+    // uncaught throw here reaches the command's catch-all, which answers with a
+    // bare non-blocking exit and silently drops the rule digest — a regression
+    // against behaviour that shipped long before the reminder existed.
+    addWorkingTurn(1);
+    addTurn(2);
+    const warnings: unknown[][] = [];
+
+    const indexPath = resolveTriggerIndexPath(dataRoot);
+    mkdirSync(dirname(indexPath), { recursive: true });
+    writeFileSync(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: 1,
+            name: "read-tip",
+            claim: "Read the whole file before editing.",
+            scope: "global",
+            trigger: { kind: "result", patterns: ["line 1"] },
+          },
+        ],
+      }),
+    );
+
+    // A closed handle makes every reminder query throw; the rule dispatcher
+    // reads no database at all, so it is unaffected.
+    const brokenDb = createDatabase(":memory:");
+    brokenDb.close();
+
+    const dispatch = createResultDispatchHandler({
+      db: brokenDb,
+      dataRoot,
+      now: () => 500,
+      logger: { warn: (...args: unknown[]) => warnings.push(args) },
+    });
+    const result = await dispatch(createInput());
+
+    expect(result.hookSpecificOutput).toContain(
+      "Read the whole file before editing.",
+    );
+    expect(result.hookSpecificOutput).not.toContain("mnemo pending notes:");
+    expect(warnings[0]?.[0]).toBe("result-dispatch section failed");
   });
 });

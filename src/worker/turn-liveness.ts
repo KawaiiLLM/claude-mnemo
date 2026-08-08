@@ -13,9 +13,30 @@ export interface RestoreStrandedTurnStopsOptions {
   hasRegisteredSessionEnv(sessionDbId: number): boolean;
 }
 
+/**
+ * Everything about a turn that the "unreachable" verdict rested on, sampled at
+ * the moment the verdict was reached. The finalizer re-samples it inside its
+ * write transaction and refuses to floor a turn whose sample moved: between the
+ * two, the caller awaits a drain, and a session that re-registers its
+ * environment in that window is being resumed, not abandoned.
+ */
+export interface StrandedTurnEvidence {
+  status: string;
+  /** seq of every turn-stop row targeting the turn, ascending. */
+  turnStopSeqs: number[];
+  /** Highest observation id the turn had; 0 when it had none. */
+  latestObservationId: number;
+}
+
+export interface UnreachableStrandedTurn {
+  turnId: number;
+  sessionDbId: number;
+  evidence: StrandedTurnEvidence;
+}
+
 export interface StrandedTurnRepairResult {
   strandedTurnIds: number[];
-  unreachableTurnIds: number[];
+  unreachable: UnreachableStrandedTurn[];
   enqueuedSessionDbIds: number[];
   enqueuedTurnStopCount: number;
 }
@@ -25,6 +46,11 @@ export interface FlooredTurnResult {
   sessionDbId: number;
   status: "extracted" | "failed";
   reasonCode: "unreachable-partial-preserved" | "unreachable-no-usable-record";
+}
+
+export interface FinalizeUnreachableOptions {
+  /** Re-asked per turn inside the write transaction, never cached. */
+  hasRegisteredSessionEnv(sessionDbId: number): boolean;
 }
 
 interface CandidateTurnRow {
@@ -84,6 +110,14 @@ function listCompletionEvidencedTurnsForDate(
  * stranded turns falling inside a day, so this is by construction the smallest
  * date set that still yields every candidate on a closed day — no external
  * backlog can add a candidate it does not already cover.
+ *
+ * That coverage argument holds where `contentDateAt` and `calendarDayBounds`
+ * are exact inverses, which is any zone without DST — the Asia/Shanghai default
+ * and the UTC the tests use. Under a DST zone with a small-hours boundary (say
+ * America/New_York at 4am) a transition day's bounds and its derived date can
+ * disagree by an hour, so a turn inside that hour may land on a neighbouring
+ * day. It would be re-derived on the next end event, and nothing here is
+ * configured for such a zone today; this is a documented limit, not a claim.
  *
  * The still-open day is withheld deliberately. Not every queued turn-stop is
  * abandoned: a connection failure suspends its row for a later resume, and a
@@ -147,14 +181,21 @@ export function restoreStrandedTurnStops(
   }
 
   const strandedTurnIds: number[] = [];
-  const unreachableTurnIds: number[] = [];
+  const unreachable: UnreachableStrandedTurn[] = [];
   const enqueuedSessionDbIds = new Set<number>();
   let enqueuedTurnStopCount = 0;
 
   for (const candidate of candidates.values()) {
     strandedTurnIds.push(candidate.id);
     if (!options.hasRegisteredSessionEnv(candidate.sessionDbId)) {
-      unreachableTurnIds.push(candidate.id);
+      const evidence = readStrandedTurnEvidence(db, candidate.id);
+      if (evidence) {
+        unreachable.push({
+          turnId: candidate.id,
+          sessionDbId: candidate.sessionDbId,
+          evidence,
+        });
+      }
       continue;
     }
     const enqueued = runWriteTransaction(db, () => {
@@ -187,10 +228,50 @@ export function restoreStrandedTurnStops(
 
   return {
     strandedTurnIds,
-    unreachableTurnIds,
+    unreachable,
     enqueuedSessionDbIds: [...enqueuedSessionDbIds],
     enqueuedTurnStopCount,
   };
+}
+
+function readStrandedTurnEvidence(
+  db: Database,
+  turnId: number,
+): StrandedTurnEvidence | null {
+  const turn = getTurnById(db, turnId);
+  if (!turn) {
+    return null;
+  }
+
+  return {
+    status: turn.status,
+    turnStopSeqs: db
+      .query<{ seq: number }, [number]>(
+        `SELECT seq FROM pending_queue
+         WHERE kind = 'turn-stop' AND target_id = ?
+         ORDER BY seq ASC`,
+      )
+      .all(turnId)
+      .map((row) => row.seq),
+    latestObservationId:
+      db
+        .query<{ maxId: number | null }, [number]>(
+          "SELECT MAX(id) AS maxId FROM observations WHERE turn_id = ?",
+        )
+        .get(turnId)?.maxId ?? 0,
+  };
+}
+
+function sameEvidence(
+  left: StrandedTurnEvidence,
+  right: StrandedTurnEvidence,
+): boolean {
+  return (
+    left.status === right.status &&
+    left.latestObservationId === right.latestObservationId &&
+    left.turnStopSeqs.length === right.turnStopSeqs.length &&
+    left.turnStopSeqs.every((seq, index) => seq === right.turnStopSeqs[index])
+  );
 }
 
 export function completionFloorStatus(
@@ -199,18 +280,47 @@ export function completionFloorStatus(
   return turn.title !== null || turn.content !== null ? "extracted" : "failed";
 }
 
+/**
+ * Write the completion floor for turns the scan judged unreachable.
+ *
+ * The verdict is re-established here rather than trusted: the caller awaits a
+ * drain between the scan and this call, and during that await a session can
+ * re-register its environment (server.ts's registerSessionEnv) and have its
+ * turn-stops re-queued. Flooring on the stale verdict would mark a turn that is
+ * mid-resume as failed and delete the queue rows carrying its resume. So every
+ * turn is re-checked inside its own write transaction — environment first, then
+ * the evidence sample — and anything that moved is left for the next end event.
+ */
 export function finalizeUnreachableStrandedTurns(
   db: Database,
-  turnIds: Iterable<number>,
+  unreachableTurns: Iterable<UnreachableStrandedTurn>,
+  options: FinalizeUnreachableOptions,
 ): FlooredTurnResult[] {
   const results: FlooredTurnResult[] = [];
-  for (const turnId of new Set(turnIds)) {
+  const seen = new Set<number>();
+
+  for (const candidate of unreachableTurns) {
+    if (seen.has(candidate.turnId)) {
+      continue;
+    }
+    seen.add(candidate.turnId);
+    const turnId = candidate.turnId;
+
     const result = runWriteTransaction(db, () => {
       const turn = getTurnById(db, turnId);
       if (
         !turn ||
         (turn.status !== "active" && turn.status !== "provisional")
       ) {
+        return null;
+      }
+      // The session came back while the drain ran: its work is live again and
+      // the floor would destroy it.
+      if (options.hasRegisteredSessionEnv(turn.sessionId)) {
+        return null;
+      }
+      const current = readStrandedTurnEvidence(db, turnId);
+      if (!current || !sameEvidence(current, candidate.evidence)) {
         return null;
       }
       const status = completionFloorStatus(turn);

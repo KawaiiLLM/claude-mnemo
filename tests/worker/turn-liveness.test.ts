@@ -123,7 +123,12 @@ describe("stranded-turn liveness repair", () => {
     const result = repair();
 
     expect(result.strandedTurnIds).toEqual([queued, followed, interrupted, rolledBack]);
-    expect(result.unreachableTurnIds).toEqual([queued, followed, interrupted, rolledBack]);
+    expect(result.unreachable.map((item) => item.turnId)).toEqual([
+      queued,
+      followed,
+      interrupted,
+      rolledBack,
+    ]);
   });
 
   test("leaves no-evidence, no-response, and outside-due-day turns untouched", () => {
@@ -160,7 +165,7 @@ describe("stranded-turn liveness repair", () => {
     expect(first.enqueuedTurnStopCount).toBe(1);
     expect(second.enqueuedTurnStopCount).toBe(0);
     expect(listPendingQueueItems(db).filter((item) => item.kind === "turn-stop" && item.targetId === stranded)).toHaveLength(1);
-    expect(first.unreachableTurnIds).toEqual([]);
+    expect(first.unreachable).toEqual([]);
   });
 
   test("runs a restored stop through ordinary extraction when the environment is available", async () => {
@@ -224,8 +229,12 @@ describe("stranded-turn liveness repair", () => {
     }
 
     const prepared = repair();
-    const first = finalizeUnreachableStrandedTurns(db, prepared.unreachableTurnIds);
-    const second = finalizeUnreachableStrandedTurns(db, prepared.unreachableTurnIds);
+    const first = finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: () => false,
+    });
+    const second = finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: () => false,
+    });
 
     expect(getTurnById(db, partial)?.status).toBe("extracted");
     expect(getTurnById(db, empty)?.status).toBe("failed");
@@ -236,6 +245,77 @@ describe("stranded-turn liveness repair", () => {
       "SELECT COUNT(*) AS count FROM observations WHERE status != 'skipped'",
     ).get()?.count).toBe(0);
     expect(getObservation(db, 1)?.status).toBe("skipped");
+  });
+
+  test("a session that re-registers between the scan and the floor is spared", () => {
+    // The caller awaits a drain in that window, and a session whose environment
+    // comes back is being resumed, not abandoned. Flooring on the stale verdict
+    // would mark a live turn failed and delete the queue rows carrying its
+    // resume.
+    const stranded = seedTurn({ promptNumber: 1, interrupted: true });
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, ?)`,
+    ).run(stranded, sessionId, DUE_EPOCH);
+
+    const prepared = repair();
+    expect(prepared.unreachable.map((item) => item.turnId)).toEqual([stranded]);
+
+    const registered = new Set<number>();
+    const floored = finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: (id) => {
+        registered.add(id);
+        return true;
+      },
+    });
+
+    expect(floored).toEqual([]);
+    expect(registered).toEqual(new Set([sessionId]));
+    expect(getTurnById(db, stranded)?.status).toBe("active");
+    expect(
+      listPendingQueueItems(db).filter((item) => item.kind === "turn-stop"),
+    ).toHaveLength(1);
+  });
+
+  test("a turn whose queue or observations moved during the repair is deferred", () => {
+    const requeued = seedTurn({ promptNumber: 1, interrupted: true });
+    const observed = seedTurn({ promptNumber: 2, interrupted: true });
+
+    const prepared = repair();
+    expect(prepared.unreachable.map((item) => item.turnId)).toEqual([
+      requeued,
+      observed,
+    ]);
+
+    // Both are things only a live session does: a stop re-queued by the Stop
+    // hook, and a tool result captured by PostToolUse.
+    db.query(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, ?)`,
+    ).run(requeued, sessionId, DUE_EPOCH + 50);
+    createObservation(db, {
+      turnId: observed,
+      toolName: "Bash",
+      status: "pending",
+      createdAtEpoch: DUE_EPOCH + 50,
+    });
+
+    const floored = finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: () => false,
+    });
+
+    expect(floored).toEqual([]);
+    expect(getTurnById(db, requeued)?.status).toBe("active");
+    expect(getTurnById(db, observed)?.status).toBe("active");
+
+    // Nothing is lost: the next end event re-scans and floors what is still
+    // stranded then.
+    const nextRound = repair();
+    expect(
+      finalizeUnreachableStrandedTurns(db, nextRound.unreachable, {
+        hasRegisteredSessionEnv: () => false,
+      }).map((item) => item.turnId),
+    ).toEqual([requeued, observed]);
   });
 
   test("derives one repair date per content-day holding a stranded turn", () => {
@@ -290,11 +370,16 @@ describe("stranded-turn liveness repair", () => {
     expect(derivedDates({ nowEpoch: OTHER_EPOCH + 86_400 })).toEqual([OTHER_DATE]);
   });
 
-  test("derived dates cover every candidate a dream due day could contribute", () => {
+  test("in a DST-free zone the derived dates cover every dream due day's candidates", () => {
     // The old wiring scanned exactly the due days the dream reconcile returned.
     // A due day only ever yields turns that live inside it, and each such turn
     // puts its own content-day into the derived set, so the due-day result is
     // always a subset — unioning the two would add nothing.
+    //
+    // The "always" holds where contentDateAt inverts calendarDayBounds exactly,
+    // i.e. a zone without DST: the Asia/Shanghai default and the UTC here. Under
+    // a DST zone with a small-hours boundary the two can disagree by an hour on
+    // a transition day; see listStrandedRepairDates.
     const onDueDay = seedTurn({ promptNumber: 1, interrupted: true });
     const offDueDay = seedTurn({
       sessionDbId: makeSession("off-due-day-session"),

@@ -5,7 +5,11 @@ import type { OpenNoteDebt } from "../db/note-debt";
  * user prompt, which keeps its original language because it is a quotation.
  */
 
-/** Display cap, not a queue cap: the ledger may hold more than it shows. */
+/**
+ * Display cap, not a queue cap: the ledger may hold more than it shows. It caps
+ * the WHOLE item list — writable debts and rolled-back notices together — so a
+ * reminder is at most five item lines however the two mix.
+ */
 export const NOTE_REMINDER_DISPLAY_LIMIT = 5;
 
 /**
@@ -25,9 +29,16 @@ export interface NoteReminderView {
 }
 
 /**
- * Pick what a single reminder shows: the oldest debts first, writable ones and
- * rolled-back notices capped separately so a run of rollbacks cannot crowd out
- * the debts the agent actually has to write.
+ * Pick what a single reminder shows: the oldest debts first, writable ones
+ * before rolled-back notices, and never more than `displayLimit` lines in total.
+ *
+ * The budget is shared rather than one cap per kind. Two caps of five made a
+ * mixed backlog render ten item lines — twice the interruption the limit exists
+ * to bound — and a reminder is a foreign paragraph inserted into somebody
+ * else's work, so its size is the constraint the split has to live inside.
+ * Writable debts take the slots first because they are the ones that need an
+ * action; a rolled-back notice only needs to be seen once, and it closes its
+ * debt the moment it renders, so it drains as fast as it gets shown.
  */
 export function selectNoteReminderItems(
   open: OpenNoteDebt[],
@@ -38,10 +49,14 @@ export function selectNoteReminderItems(
   );
   const writable = ordered.filter((debt) => !debt.wasRolledBack);
   const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
+  const shownWritable = writable.slice(0, Math.max(0, displayLimit));
 
   return {
-    writable: writable.slice(0, displayLimit),
-    rolledBack: rolledBack.slice(0, displayLimit),
+    writable: shownWritable,
+    rolledBack: rolledBack.slice(
+      0,
+      Math.max(0, displayLimit - shownWritable.length),
+    ),
     writableTotal: writable.length,
   };
 }

@@ -137,6 +137,37 @@ describe("note debt on the asynchronous capture entries", () => {
     expect(result.hookSpecificOutput).toBeUndefined();
   });
 
+  test("the sweep reaches every unclassified turn, not just the previous one", async () => {
+    // A turn that ends without a Stop (interrupt, crash) is followed here by
+    // three pure question-and-answer turns, which produce no tool result of
+    // their own and so cannot trigger a sweep. The classification cursor is what
+    // makes the eventual sweep whole: it walks every prompt number above the
+    // cursor, so the working turn is still classified four turns later.
+    const working = addTurn(1);
+    addObservation(working, "Bash");
+    const chatA = addTurn(2);
+    const chatB = addTurn(3);
+    const chatC = addTurn(4);
+    addTurn(5);
+
+    await createPostToolUseHandler({ db, now: () => 500 })({
+      eventName: "PostToolUse",
+      sessionId: "session-capture",
+      cwd: "/tmp/project",
+      toolName: "Read",
+      toolResponse: "line 1",
+      stopHookActive: false,
+      raw: {},
+    });
+
+    expect(getNoteDebt(db, working)?.status).toBe("pending");
+    // The intervening chat turns did no tool work, so they owe nothing and the
+    // ledger stays proportional to real debt.
+    for (const chat of [chatA, chatB, chatC]) {
+      expect(getNoteDebt(db, chat)).toBeNull();
+    }
+  });
+
   test("a note call closes its debt on the same tool result", async () => {
     const working = addTurn(1);
     addObservation(working, "Edit");
