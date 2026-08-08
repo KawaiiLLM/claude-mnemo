@@ -27,11 +27,9 @@ import {
 import { createDiarySdkQuery } from "../../src/worker/diary-sdk-query";
 import { createWorkerAbortError } from "../../src/worker/error-classifier";
 import { createWorkerCore, main } from "../../src/worker/server";
-import {
-  DEFAULT_CONFIG,
-  DREAM_RETRY_BACKOFF_MS,
-} from "../../src/shared/config";
+import { DREAM_RETRY_BACKOFF_MS } from "../../src/shared/config";
 import { createLogger } from "../../src/shared/logger";
+import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import { saveTurnFixture } from "../support/turn-fixtures";
 
 const roots: string[] = [];
@@ -91,6 +89,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
+      config: DREAM_ENABLED_CONFIG,
       async runQuery(request) {
         seenAgentEnv = (
           request as typeof request & { agentEnv?: NodeJS.ProcessEnv }
@@ -156,7 +155,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
-      config: DEFAULT_CONFIG,
+      config: DREAM_ENABLED_CONFIG,
       nowEpoch: () => DREAM_READY_EPOCH,
       async runQuery(request) {
         runs += 1;
@@ -208,6 +207,7 @@ describe("createDiaryRuntime", () => {
       const core = createWorkerCore({
         db,
         now: () => DREAM_READY_EPOCH,
+        config: DREAM_ENABLED_CONFIG,
         processDiaryItem: runtime.processDreamItem,
         logger: { warn() {}, error() {} },
       });
@@ -615,7 +615,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
-      config: DEFAULT_CONFIG,
+      config: DREAM_ENABLED_CONFIG,
       nowEpoch: () => 500,
       async runQuery(input) {
         dreamRuns += 1;
@@ -705,6 +705,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
+      config: DREAM_ENABLED_CONFIG,
       async runQuery(request) {
         calls += 1;
         writeStaging(dataRoot, {
@@ -762,7 +763,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
-      config: DEFAULT_CONFIG,
+      config: DREAM_ENABLED_CONFIG,
       nowEpoch: () => 500,
       async runQuery(request) {
         dreamRuns += 1;
@@ -843,7 +844,7 @@ describe("createDiaryRuntime", () => {
     const runtime = createDiaryRuntime({
       db,
       dataRoot,
-      config: { ...DEFAULT_CONFIG, dreamAgentTimeoutMs: 2_400_000 },
+      config: { ...DREAM_ENABLED_CONFIG, dreamAgentTimeoutMs: 2_400_000 },
       async runQuery(request) {
         dreamRuns += 1;
         seenTimeouts.push(request.timeoutMs);
@@ -931,7 +932,7 @@ describe("createDiaryRuntime", () => {
         db,
         env: {},
         dataRoot,
-        config: DEFAULT_CONFIG,
+        config: DREAM_ENABLED_CONFIG,
         logger: { warn() {}, error() {} },
         createWorkerQuerySessionImpl: ((...args: unknown[]) => {
           const queryDeps = (args.length === 2 ? args[1] : args[3]) as

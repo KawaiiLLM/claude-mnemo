@@ -26,6 +26,13 @@ export interface MnemoConfig {
    * window is set below 200K (see server.ts).
    */
   compactContextRatio: number;
+  /**
+   * Master switch for the whole nightly dream chain. When false, no entry point
+   * (end-event backlog reconcile, queue drain and its retries, manual
+   * `POST /dream`) enqueues or runs dream work. Reading the last generated
+   * diary/persona documents is unaffected — injection keeps serving them.
+   */
+  dreamAgentEnabled: boolean;
   /** Model used by the merged nightly dream agent. */
   dreamAgentModel: DreamAgentModel;
   /** Total wall-clock timeout for one merged nightly dream-agent request. */
@@ -91,6 +98,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
+  dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
@@ -172,6 +180,12 @@ function resolveDreamAgentTimeZone(
   return DEFAULT_DREAM_AGENT_TIME_ZONE;
 }
 
+// A hand-written config can carry "true" or 1; only a real boolean flips a
+// switch, so junk keeps the safer default rather than becoming truthy.
+function resolveBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
 function clampInteger(
   value: unknown,
   min: number,
@@ -230,6 +244,10 @@ function clampConfig(
       MIN_COMPACT_CONTEXT_RATIO,
       MAX_COMPACT_CONTEXT_RATIO,
       DEFAULT_CONFIG.compactContextRatio,
+    ),
+    dreamAgentEnabled: resolveBoolean(
+      config.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled,
     ),
     dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
     dreamAgentTimeoutMs: clampInteger(

@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { createWorkerCore } from "../../src/worker/server";
+import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 const DUE_DATE = "2026-07-10";
@@ -71,6 +72,7 @@ describe("end-event extraction-liveness orchestration", () => {
       db,
       now: () => END_EVENT_EPOCH,
       sessionEnvRegistry: registry,
+      config: DREAM_ENABLED_CONFIG,
       reconcileDreamBacklog,
       async processDiaryItem(item) {
         diaryStatuses.push(

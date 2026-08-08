@@ -220,8 +220,15 @@ export function createDiaryRuntime(
     return tracked;
   }
 
+  // Second gate behind the worker core's: whoever wires this runtime, a
+  // disabled dream neither enqueues a day nor spawns the agent.
+  const enabled = config.dreamAgentEnabled;
+
   return {
     async reconcileDreamBacklog(nowEpoch) {
+      if (!enabled) {
+        return [];
+      }
       const triggerWindow = dreamTriggerWindow({
         nowEpoch,
         timeZone: config.dreamAgentTimeZone,
@@ -244,11 +251,15 @@ export function createDiaryRuntime(
       });
     },
     processDreamDate: (date) =>
-      trackDream(async () => {
-        await processDreamDateRaw(date);
-      }),
+      enabled
+        ? trackDream(async () => {
+            await processDreamDateRaw(date);
+          })
+        : Promise.resolve(),
     processDreamItem: (item, agentEnv) =>
-      trackDream(() => dreamQueue.process(item), agentEnv),
+      enabled
+        ? trackDream(() => dreamQueue.process(item), agentEnv)
+        : Promise.resolve(),
     isDreamRunning: () => activeDream !== null,
     async abortDream(reason) {
       const dream = activeDream;

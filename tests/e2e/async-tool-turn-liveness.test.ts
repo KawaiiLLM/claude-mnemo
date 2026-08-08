@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
 import { createDiaryStateStore } from "../../src/db/diary-state";
+import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
@@ -43,6 +44,7 @@ describe("async tool attribution production-blockade regression", () => {
       db,
       now: () => NOW_EPOCH,
       sessionEnvRegistry,
+      config: DREAM_ENABLED_CONFIG,
       reconcileDreamBacklog: async () => [DUE_DATE],
       async processDiaryItem(item) {
         dreamClaims += 1;

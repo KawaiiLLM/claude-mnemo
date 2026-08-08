@@ -7,6 +7,7 @@ import { listPendingQueueItems } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
+import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import { createWorkerCore } from "../../src/worker/server";
 import {
   createWorkerQuerySession,
@@ -285,7 +286,7 @@ describe("worker per-session env registry", () => {
       },
       sessionEnvRegistry,
       config: {
-        ...DEFAULT_CONFIG,
+        ...DREAM_ENABLED_CONFIG,
         mergeThresholdChars: 1,
         maxQueuedBatches: 0,
       },
@@ -354,7 +355,7 @@ describe("worker per-session env registry", () => {
       },
       sessionEnvRegistry,
       config: {
-        ...DEFAULT_CONFIG,
+        ...DREAM_ENABLED_CONFIG,
         mergeThresholdChars: 1,
         maxQueuedBatches: 0,
       },

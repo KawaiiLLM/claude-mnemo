@@ -2821,7 +2821,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   function scheduleDiaryContinuation(): void {
-    if (!deps.processDiaryItem) {
+    if (!config.dreamAgentEnabled || !deps.processDiaryItem) {
       return;
     }
 
@@ -3003,7 +3003,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   async function drainOneDiaryItem(
     triggeringSessionDbId: number | null,
   ): Promise<void> {
-    if (!deps.processDiaryItem) {
+    // The only executor of dream work: gating here also holds back every retry,
+    // since a failed day is re-dispatched through this same claim.
+    if (!config.dreamAgentEnabled || !deps.processDiaryItem) {
       return;
     }
 
@@ -3042,10 +3044,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     triggeringSessionDbId: number,
   ): Promise<void> {
     let dueDates: string[] = [];
-    try {
-      dueDates = (await deps.reconcileDreamBacklog?.(now())) ?? [];
-    } catch (error) {
-      logger.error?.("dream backlog reconcile failed", { error });
+    if (config.dreamAgentEnabled) {
+      try {
+        dueDates = (await deps.reconcileDreamBacklog?.(now())) ?? [];
+      } catch (error) {
+        logger.error?.("dream backlog reconcile failed", { error });
+      }
     }
 
     if (dueDates.length > 0) {
@@ -3610,6 +3614,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date: unknown): ManualDreamResult {
+      // Reject before any DB write: a disabled dream must leave no queued day
+      // behind that a later re-enable would silently run.
+      if (!config.dreamAgentEnabled) {
+        return {
+          ok: false,
+          status: 503,
+          message: "dream agent is disabled (set dreamAgentEnabled to true)",
+        };
+      }
       if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
         return { ok: false, status: 400, message: "date must be YYYY-MM-DD" };
       }

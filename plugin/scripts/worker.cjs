@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-msftfqpx" : "dev";
+var BUILD_ID = true ? "0.8.6-mskk4mk3" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -295,6 +295,7 @@ var DEFAULT_CONFIG = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
+  dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
   dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
@@ -336,6 +337,9 @@ function resolveDreamAgentTimeZone(value, logger) {
     `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
   );
   return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
 }
 function clampInteger(value, min, max, fallback) {
   if (typeof value !== "number" || !Number.isSafeInteger(value)) {
@@ -384,6 +388,10 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       MIN_COMPACT_CONTEXT_RATIO,
       MAX_COMPACT_CONTEXT_RATIO,
       DEFAULT_CONFIG.compactContextRatio
+    ),
+    dreamAgentEnabled: resolveBoolean(
+      config3.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
     ),
     dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
     dreamAgentTimeoutMs: clampInteger(
@@ -48902,8 +48910,12 @@ function createDiaryRuntime(options) {
     });
     return tracked;
   }
+  const enabled = config3.dreamAgentEnabled;
   return {
     async reconcileDreamBacklog(nowEpoch) {
+      if (!enabled) {
+        return [];
+      }
       const triggerWindow = dreamTriggerWindow({
         nowEpoch,
         timeZone: config3.dreamAgentTimeZone,
@@ -48925,10 +48937,10 @@ function createDiaryRuntime(options) {
         enqueuedAtEpoch: nowEpoch
       });
     },
-    processDreamDate: (date6) => trackDream(async () => {
+    processDreamDate: (date6) => enabled ? trackDream(async () => {
       await processDreamDateRaw(date6);
-    }),
-    processDreamItem: (item, agentEnv) => trackDream(() => dreamQueue.process(item), agentEnv),
+    }) : Promise.resolve(),
+    processDreamItem: (item, agentEnv) => enabled ? trackDream(() => dreamQueue.process(item), agentEnv) : Promise.resolve(),
     isDreamRunning: () => activeDream !== null,
     async abortDream(reason) {
       const dream = activeDream;
@@ -50778,7 +50790,7 @@ ${coldStart}
     }
   }
   function scheduleDiaryContinuation() {
-    if (!deps.processDiaryItem) {
+    if (!config3.dreamAgentEnabled || !deps.processDiaryItem) {
       return;
     }
     if (!diaryStateStore.hasReadyDiaryItem(now())) {
@@ -50907,7 +50919,7 @@ ${coldStart}
     }
   }
   async function drainOneDiaryItem(triggeringSessionDbId) {
-    if (!deps.processDiaryItem) {
+    if (!config3.dreamAgentEnabled || !deps.processDiaryItem) {
       return;
     }
     const diaryItem = diaryStateStore.claimNextDiaryItem(now());
@@ -50937,10 +50949,12 @@ ${coldStart}
   }
   async function coordinateEndEvent(triggeringSessionDbId) {
     let dueDates = [];
-    try {
-      dueDates = await deps.reconcileDreamBacklog?.(now()) ?? [];
-    } catch (error49) {
-      logger.error?.("dream backlog reconcile failed", { error: error49 });
+    if (config3.dreamAgentEnabled) {
+      try {
+        dueDates = await deps.reconcileDreamBacklog?.(now()) ?? [];
+      } catch (error49) {
+        logger.error?.("dream backlog reconcile failed", { error: error49 });
+      }
     }
     if (dueDates.length > 0) {
       const repair = restoreStrandedTurnStops(deps.db, {
@@ -51356,6 +51370,13 @@ ${coldStart}
     abortAllExtractionSessionsForShutdown,
     handleCompact,
     triggerManualDream(date6) {
+      if (!config3.dreamAgentEnabled) {
+        return {
+          ok: false,
+          status: 503,
+          message: "dream agent is disabled (set dreamAgentEnabled to true)"
+        };
+      }
       if (typeof date6 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date6)) {
         return { ok: false, status: 400, message: "date must be YYYY-MM-DD" };
       }

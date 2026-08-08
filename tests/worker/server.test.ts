@@ -10,6 +10,7 @@ import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { DEFAULT_CONFIG, MIN_MINI_TURN_CHARS } from "../../src/shared/config";
+import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
 import { TASK_CAUSALITY_ERA_CUTOFF_EPOCH } from "../../src/task-causality-era";
 import {
   getSession,
@@ -612,6 +613,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1000),
+      config: DREAM_ENABLED_CONFIG,
     });
     const store = createDiaryStateStore(db);
 
@@ -672,6 +674,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db: manualDb,
       now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1_000),
+      config: DREAM_ENABLED_CONFIG,
       logger: { warn() {}, error() {} },
       reconcileDreamBacklog,
       setTimeoutImpl(callback) {
@@ -1039,6 +1042,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => DREAM_READY_EPOCH,
+      config: DREAM_ENABLED_CONFIG,
       processDiaryItem,
     });
 
@@ -1071,7 +1075,7 @@ describe("worker server", () => {
       db,
       now: () => DREAM_READY_EPOCH,
       config: {
-        ...DEFAULT_CONFIG,
+        ...DREAM_ENABLED_CONFIG,
         mergeThresholdChars: 1,
         maxQueuedBatches: 0,
       },
@@ -1121,7 +1125,7 @@ describe("worker server", () => {
       dataRoot,
       nowEpoch: () => nowEpoch,
       config: {
-        ...DEFAULT_CONFIG,
+        ...DREAM_ENABLED_CONFIG,
         dreamAgentBacklogLimit: 1,
       },
     });
@@ -1131,7 +1135,7 @@ describe("worker server", () => {
       db,
       now: () => nowEpoch,
       config: {
-        ...DEFAULT_CONFIG,
+        ...DREAM_ENABLED_CONFIG,
         mergeThresholdChars: 1,
         maxQueuedBatches: 0,
       },
@@ -1204,6 +1208,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => DREAM_READY_EPOCH,
+      config: DREAM_ENABLED_CONFIG,
       reconcileDreamBacklog,
       pushSessionSummaryPromptImpl: async () => {},
       logger: { warn() {}, error() {} },
@@ -1254,6 +1259,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => DREAM_READY_EPOCH,
+      config: DREAM_ENABLED_CONFIG,
       processDiaryItem: async (item) => {
         sessionWorkBufferedBeforeDiary.push(
           core.buffers
@@ -1419,6 +1425,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => DREAM_READY_EPOCH,
+      config: DREAM_ENABLED_CONFIG,
       async processDiaryItem(item) {
         processedDates.push(item.targetId);
         stateStore.acknowledgeDiaryItem(item.seq);
@@ -1464,6 +1471,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => nowEpoch,
+      config: DREAM_ENABLED_CONFIG,
       setTimeoutImpl(callback, delayMs) {
         scheduled.push({ callback, dueEpoch: nowEpoch + delayMs / 1_000 });
         return Symbol("clock-callback");
@@ -1546,6 +1554,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => nowEpoch,
+      config: DREAM_ENABLED_CONFIG,
       processDiaryItem,
     });
 
@@ -1620,6 +1629,7 @@ describe("worker server", () => {
     const core = createWorkerCore({
       db,
       now: () => 123,
+      config: DREAM_ENABLED_CONFIG,
       processDiaryItem,
     });
     const turnId = createTurn(db, sessionId, 1);
@@ -3888,6 +3898,7 @@ describe("worker server", () => {
         dataRoot: mkMainDataRoot(),
         env: {},
         now: () => 123,
+        config: DREAM_ENABLED_CONFIG,
         processDiaryItem,
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
@@ -3977,6 +3988,7 @@ describe("worker server", () => {
         dataRoot: mkMainDataRoot(),
         env: {},
         now: () => Math.floor(Date.parse("2026-07-14T12:00:00Z") / 1_000),
+        config: DREAM_ENABLED_CONFIG,
         processDiaryItem,
         logger: { warn() {}, error() {} },
         BunServeImpl: mock(((options: { fetch: (req: Request) => Promise<Response> }) => {
@@ -4242,6 +4254,7 @@ describe("worker server", () => {
           fetchHandler = options.fetch;
           return { stop };
         }) as typeof Bun.serve),
+        config: DREAM_ENABLED_CONFIG,
         isProcessAliveImpl: () => false,
         existsSyncImpl: () => false,
         mkdirSyncImpl: (() => undefined) as typeof import("node:fs").mkdirSync,

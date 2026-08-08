@@ -292,6 +292,27 @@ describe("shared config", () => {
     });
   });
 
+  test("the dream agent is off by default and only a real boolean enables it", () => {
+    expect(DEFAULT_CONFIG.dreamAgentEnabled).toBe(false);
+    expect(loadConfig("/definitely-missing").dreamAgentEnabled).toBe(false);
+
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentEnabled: true }),
+    );
+    expect(loadConfig(home).dreamAgentEnabled).toBe(true);
+
+    // A hand-written truthy non-boolean must not switch the agent back on.
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ dreamAgentEnabled: "true" }),
+    );
+    expect(loadConfig(home).dreamAgentEnabled).toBe(false);
+  });
+
   test("dream agent timeout defaults to thirty minutes and accepts an override", () => {
     expect(DEFAULT_DREAM_AGENT_TIMEOUT_MS).toBe(1_800_000);
     expect(DEFAULT_CONFIG.dreamAgentTimeoutMs).toBe(1_800_000);
