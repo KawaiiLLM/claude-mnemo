@@ -54,12 +54,16 @@ describe("tool surface", () => {
   // re-grades a trailing window against the arc it belongs to, and that arc is
   // a timeline call. Still read-only — no new write surface.
   it("keeps the worker allowlist at the three read/write tools and exposes timeline descriptions", () => {
+    // `note` is deliberately absent: it is the MAIN agent's own note channel
+    // (spec D1). Handing it to the extraction worker would let the pipeline
+    // write the notes the P1 trial exists to compare it against.
     expect(MNEMO_ALLOWED_TOOLS).toEqual([
       "mcp__mnemo__remember",
       "mcp__mnemo__recall",
       "mcp__mnemo__timeline",
     ]);
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
+      "note",
       "recall",
       "remember",
       "timeline",

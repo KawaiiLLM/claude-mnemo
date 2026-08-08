@@ -2,8 +2,8 @@ import type { Database } from "bun:sqlite";
 
 import { deleteQueueItem, type PendingQueueItem } from "../db/pending-queue";
 import {
+  getExtractableObservationsForTurn,
   getObservation,
-  getObservationsForTurn,
   updateObservation,
 } from "../db/observations";
 import { getSession } from "../db/sessions";
@@ -460,7 +460,10 @@ function collectPathValues(input: Record<string, unknown>, key: string): string[
 }
 
 function aggregateTurnFiles(db: Database, turnId: number) {
-  const observations = getObservationsForTurn(db, turnId);
+  // Extractable only: a `note` call is bookkeeping about a turn, so counting it
+  // here would let note-taking inflate the very tool_call_count the pipeline
+  // reads as evidence of work.
+  const observations = getExtractableObservationsForTurn(db, turnId);
   return aggregateFilesFromObservations(observations);
 }
 

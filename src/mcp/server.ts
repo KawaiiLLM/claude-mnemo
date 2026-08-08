@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import {
   MNEMO_TOOL_DESCRIPTIONS,
+  noteInputSchema,
   recallInputSchema,
   rememberInputSchema,
   timelineInputSchema,
@@ -28,7 +29,7 @@ export interface CreateMcpServerOptions {
   handlers?: Partial<MnemoToolHandlers>;
 }
 
-type MainMcpToolName = "recall" | "timeline" | "remember";
+type MainMcpToolName = "recall" | "timeline" | "remember" | "note";
 type MainMcpToolHandlers = Pick<MnemoToolHandlers, MainMcpToolName>;
 type ToolRegistrationTarget = Pick<McpServer, "registerTool">;
 
@@ -72,6 +73,14 @@ export function registerMainMcpTools(
     },
     (args) => toolHandlers.remember(args as Record<string, unknown>),
   );
+  server.registerTool(
+    "note",
+    {
+      description: MNEMO_TOOL_DESCRIPTIONS.note,
+      inputSchema: noteInputSchema,
+    },
+    (args) => toolHandlers.note(args as Record<string, unknown>),
+  );
 }
 
 export function createMcpServer(
@@ -100,6 +109,7 @@ export function createMcpServer(
     recall: mergedHandlers.recall ?? createStubHandler("recall"),
     timeline: mergedHandlers.timeline ?? createStubHandler("timeline"),
     remember: mergedHandlers.remember ?? createStubHandler("remember"),
+    note: mergedHandlers.note ?? createStubHandler("note"),
   };
 
   registerMainMcpTools(server, toolHandlers);

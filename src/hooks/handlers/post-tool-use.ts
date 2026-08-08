@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId } from "../../db/sessions";
 import type { TurnStatus } from "../../db/turns";
+import { isExtractionExcludedToolName } from "../../shared/note-tool";
 import { stripPrivateTags } from "../../shared/tag-stripping";
 import { notifyWorkerTrigger, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -70,6 +71,12 @@ export function createPostToolUseHandler(
     const toolName = input.toolName;
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
+    // A `note` call is the agent's bookkeeping about a turn, not work inside
+    // it. Record it (the raw axis stays complete) but withhold it from the
+    // extraction pipeline: mark the row and never enqueue it, so it reaches
+    // neither the extraction agent's observation stream nor the turn's
+    // tool_call_count. See shared/note-tool.ts.
+    const excludedFromExtraction = isExtractionExcludedToolName(toolName);
 
     const writeResult = writeTransaction(dependencies.db, () => {
       const latestTurn = getLatestTurn(dependencies.db, session.id);
@@ -89,6 +96,7 @@ export function createPostToolUseHandler(
             string | null,
             string | null,
             number,
+            number,
           ]
         >(
           `
@@ -97,8 +105,9 @@ export function createPostToolUseHandler(
               tool_name,
               tool_input,
               tool_result,
+              excluded_from_extraction,
               created_at_epoch
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             RETURNING id
           `,
         )
@@ -107,11 +116,16 @@ export function createPostToolUseHandler(
           toolName,
           toolInput,
           toolResult,
+          excludedFromExtraction ? 1 : 0,
           createdAtEpoch,
         );
 
       if (!inserted) {
         throw new Error("Failed to enqueue observation for worker processing.");
+      }
+
+      if (excludedFromExtraction) {
+        return { outcome: "excluded" as const, turnId: latestTurn.id };
       }
 
       dependencies.db
@@ -128,6 +142,12 @@ export function createPostToolUseHandler(
         .run(inserted.id, session.id, createdAtEpoch);
       return { outcome: "inserted" as const, turnId: latestTurn.id };
     });
+
+    // "excluded" is a successful capture, not a dropped one — it is only the
+    // enqueue that is skipped, so it must not be logged as ignored.
+    if (writeResult.outcome === "excluded") {
+      return { continue: true };
+    }
 
     if (writeResult.outcome !== "inserted") {
       logger.warn?.("post-tool-use ignored", {

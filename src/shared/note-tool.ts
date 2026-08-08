@@ -1,0 +1,32 @@
+// The `note` MCP tool (spec D1) is the main agent's own bookkeeping about a
+// turn, not work done inside that turn. Its PostToolUse observation is still
+// captured — the raw axis stays complete and auditable — but it carries an
+// exclusion marker so the legacy extraction pipeline never reads it as work
+// content. Without the marker a note call would inflate the ride turn's
+// tool_call_count and appear in the extraction agent's observation stream,
+// i.e. the act of taking notes would itself manufacture material to take notes
+// about, and the P1 trial's two data sources would stop being independent.
+//
+// The tool name a hook actually sees depends on how the server is mounted:
+//   plain `.mcp.json` entry   -> mcp__mnemo__note
+//   plugin-scoped server      -> mcp__plugin_claude-mnemo_mnemo__note
+// so match the `…mnemo__note` shape under the `mcp__` prefix rather than one
+// literal string that silently stops matching when the mount changes.
+export const NOTE_TOOL_NAME = "note";
+
+const NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
+
+export function isNoteToolName(toolName: string): boolean {
+  return NOTE_TOOL_NAME_PATTERN.test(toolName);
+}
+
+/**
+ * Tool calls whose observation is captured but withheld from the legacy
+ * extraction pipeline. Only `note` qualifies today: recall/remember/timeline
+ * observations keep flowing exactly as before, because narrowing the old
+ * pipeline's input is a behaviour change this ticket does not own (spec D3
+ * revisits the debt-side tool count in the ledger ticket).
+ */
+export function isExtractionExcludedToolName(toolName: string): boolean {
+  return isNoteToolName(toolName);
+}

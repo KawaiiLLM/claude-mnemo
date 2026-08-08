@@ -45,6 +45,7 @@ describe("initializeSchema", () => {
     expect(tableNames).toContain("turns");
     expect(tableNames).toContain("session_run_state");
     expect(tableNames).toContain("observations");
+    expect(tableNames).toContain("shadow_notes");
     expect(tableNames).toContain("pending_queue");
     expect(tableNames).toContain("memory_fts");
   });
@@ -387,6 +388,7 @@ describe("initializeSchema", () => {
       "status",
       "title",
       "content",
+      "excluded_from_extraction",
       "created_at_epoch",
     ]);
   });
@@ -469,6 +471,7 @@ describe("initializeSchema", () => {
       "status",
       "title",
       "content",
+      "excluded_from_extraction",
       "created_at_epoch",
     ]);
   });
@@ -564,6 +567,7 @@ describe("initializeSchema", () => {
       "status",
       "title",
       "content",
+      "excluded_from_extraction",
       "created_at_epoch",
     ]);
     expect(

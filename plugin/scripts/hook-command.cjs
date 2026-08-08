@@ -463,8 +463,39 @@ var SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'pending',
     title TEXT,
     content TEXT,
+    -- Captured for the raw axis, withheld from the extraction pipeline: the
+    -- row is never enqueued and never counted as work. See shared/note-tool.ts
+    -- for why a note call must not become material for the old pipeline.
+    excluded_from_extraction INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL
   );
+
+  -- P1 shadow store (spec D12). The main agent's own notes live entirely
+  -- outside the turns table: nothing in the legacy extraction pipeline reads
+  -- this table, and its text is deliberately NOT indexed into memory_fts. The
+  -- trial compares agent-written notes against pipeline-written summaries
+  -- offline, so a leak either way would invalidate the comparison it exists for.
+  --
+  -- turn_id is the PRIMARY KEY, which carries both invariants at once: one
+  -- note per turn, and overwrite (not accumulate) on a repeat write \u2014 a note is
+  -- rewritten whole, the way a session summary is.
+  CREATE TABLE IF NOT EXISTS shadow_notes (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    insight TEXT,
+    -- Mechanical provenance (D4), never caller-supplied. writer_model is NULL
+    -- when the environment does not expose a model identity; ride_turn_id is
+    -- the turn the session was on when the note was written, which is what makes
+    -- "how long did this note wait" a fact rather than a reconstruction.
+    writer_model TEXT,
+    ride_turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_shadow_notes_ride_turn
+    ON shadow_notes(ride_turn_id);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -760,7 +791,15 @@ function initializeSchema(db) {
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
+  ensureObservationExtractionExclusionColumn(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureObservationExtractionExclusionColumn(db) {
+  if (!hasColumn(db, "observations", "excluded_from_extraction")) {
+    db.exec(
+      "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureRepairLedgerClaimColumns(db) {
   const columns = [
@@ -1077,6 +1116,7 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
+  db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
@@ -2491,7 +2531,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-mskk4mk3" : "dev";
+var BUILD_ID = true ? "0.8.6-mskk91pi" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -21040,6 +21080,15 @@ function createContextHandler(dependencies, section = "sessions") {
   };
 }
 
+// src/shared/note-tool.ts
+var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
+function isNoteToolName(toolName) {
+  return NOTE_TOOL_NAME_PATTERN.test(toolName);
+}
+function isExtractionExcludedToolName(toolName) {
+  return isNoteToolName(toolName);
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -21094,6 +21143,7 @@ function createPostToolUseHandler(dependencies) {
     const toolName = input.toolName;
     const toolInput = stringifyToolPayload(input.toolInput);
     const toolResult = stringifyToolPayload(input.toolResponse);
+    const excludedFromExtraction = isExtractionExcludedToolName(toolName);
     const writeResult = writeTransaction(dependencies.db, () => {
       const latestTurn = getLatestTurn(dependencies.db, session.id);
       if (!latestTurn) {
@@ -21109,8 +21159,9 @@ function createPostToolUseHandler(dependencies) {
               tool_name,
               tool_input,
               tool_result,
+              excluded_from_extraction,
               created_at_epoch
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             RETURNING id
           `
       ).get(
@@ -21118,10 +21169,14 @@ function createPostToolUseHandler(dependencies) {
         toolName,
         toolInput,
         toolResult,
+        excludedFromExtraction ? 1 : 0,
         createdAtEpoch
       );
       if (!inserted) {
         throw new Error("Failed to enqueue observation for worker processing.");
+      }
+      if (excludedFromExtraction) {
+        return { outcome: "excluded", turnId: latestTurn.id };
       }
       dependencies.db.query(
         `
@@ -21135,6 +21190,9 @@ function createPostToolUseHandler(dependencies) {
       ).run(inserted.id, session.id, createdAtEpoch);
       return { outcome: "inserted", turnId: latestTurn.id };
     });
+    if (writeResult.outcome === "excluded") {
+      return { continue: true };
+    }
     if (writeResult.outcome !== "inserted") {
       logger.warn?.("post-tool-use ignored", {
         sessionId: input.sessionId,

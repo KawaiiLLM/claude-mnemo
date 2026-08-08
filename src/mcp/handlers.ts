@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { noteTool } from "./note";
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
@@ -22,6 +23,7 @@ export interface MnemoToolHandlers {
   recall: ToolHandler;
   remember: ToolHandler;
   timeline: ToolHandler;
+  note: ToolHandler;
 }
 
 export type TimelineToolView = "turns" | "milestones" | "phases";
@@ -122,5 +124,9 @@ export function createDatabaseBackedHandlers(
       workerTextResult(
         timelineQuery(database, toTimelineQueryInput(args)),
       ),
+    // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
+    // its confirmation is a short mechanical receipt with no memory text to
+    // truncate or re-strip.
+    note: (args) => noteTool(database, args as Parameters<typeof noteTool>[1]),
   };
 }

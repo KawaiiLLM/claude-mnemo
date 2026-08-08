@@ -138,8 +138,39 @@ const SCHEMA_SQL = `
     status TEXT NOT NULL DEFAULT 'pending',
     title TEXT,
     content TEXT,
+    -- Captured for the raw axis, withheld from the extraction pipeline: the
+    -- row is never enqueued and never counted as work. See shared/note-tool.ts
+    -- for why a note call must not become material for the old pipeline.
+    excluded_from_extraction INTEGER NOT NULL DEFAULT 0,
     created_at_epoch INTEGER NOT NULL
   );
+
+  -- P1 shadow store (spec D12). The main agent's own notes live entirely
+  -- outside the turns table: nothing in the legacy extraction pipeline reads
+  -- this table, and its text is deliberately NOT indexed into memory_fts. The
+  -- trial compares agent-written notes against pipeline-written summaries
+  -- offline, so a leak either way would invalidate the comparison it exists for.
+  --
+  -- turn_id is the PRIMARY KEY, which carries both invariants at once: one
+  -- note per turn, and overwrite (not accumulate) on a repeat write — a note is
+  -- rewritten whole, the way a session summary is.
+  CREATE TABLE IF NOT EXISTS shadow_notes (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    insight TEXT,
+    -- Mechanical provenance (D4), never caller-supplied. writer_model is NULL
+    -- when the environment does not expose a model identity; ride_turn_id is
+    -- the turn the session was on when the note was written, which is what makes
+    -- "how long did this note wait" a fact rather than a reconstruction.
+    writer_model TEXT,
+    ride_turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_shadow_notes_ride_turn
+    ON shadow_notes(ride_turn_id);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -436,7 +467,22 @@ export function initializeSchema(db: Database): void {
   ensureTurnPromptIdIndex(db);
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
+  ensureObservationExtractionExclusionColumn(db);
   dropLegacyMemoriesTable(db);
+}
+
+// `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
+// `observations` predates the exclusion marker, and CREATE TABLE IF NOT EXISTS
+// is a no-op on a database that already has the table — so the column has to
+// arrive by ALTER or every capture on an existing database throws "no such
+// column". Old rows land on 0, which is the correct legacy reading: everything
+// captured before the `note` tool existed was work content.
+function ensureObservationExtractionExclusionColumn(db: Database): void {
+  if (!hasColumn(db, "observations", "excluded_from_extraction")) {
+    db.exec(
+      "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 }
 
 // `repair_ledger` reached a dev build before it carried a claim fence or a
@@ -877,6 +923,7 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS repair_ledger");
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
+  db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");

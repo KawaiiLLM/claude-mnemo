@@ -8,6 +8,8 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
+  note:
+    "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Re-sending a turn replaces its note. Never include <private> content.",
 } as const;
 
 export const recallInputShape = {
@@ -81,6 +83,16 @@ export const rememberInputShape = {
   reference: z.string().optional(),
 };
 
+// Spec D1: exactly four parameters. Everything else the shadow row records
+// (writer_model, ride_turn, timestamps) is filled mechanically — asking the
+// caller for provenance invites the caller to invent it.
+export const noteInputShape = {
+  turn: z.string().min(1),
+  title: z.string().min(1),
+  content: z.string().min(1),
+  insight: z.string().optional(),
+};
+
 export const timelineInputShape = {
   id: z.string().min(1),
   page: z.number().int().positive().optional(),
@@ -91,6 +103,7 @@ export const timelineInputShape = {
 export const recallInputSchema = z.object(recallInputShape).strict();
 export const rememberInputSchema = z.object(rememberInputShape).strict();
 export const timelineInputSchema = z.object(timelineInputShape).strict();
+export const noteInputSchema = z.object(noteInputShape).strict();
 
 // `timeline` joins the worker's surface for settlement (spec §A): re-grading a
 // trailing window means reading the arc that window sits in, and the arc view is

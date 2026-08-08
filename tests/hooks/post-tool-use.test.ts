@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import {
+  getExtractableObservationsForTurn,
+  hasSkippedObservationsForTurn,
+} from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createPostToolUseHandler } from "../../src/hooks/handlers/post-tool-use";
@@ -271,4 +275,62 @@ describe("handlePostToolUseHook", () => {
       ).get()?.toolName).toBe(toolName);
     });
   }
+
+  // Both mount shapes: a plain `.mcp.json` server and a plugin-scoped one.
+  for (const toolName of [
+    "mcp__mnemo__note",
+    "mcp__plugin_claude-mnemo_mnemo__note",
+  ] as const) {
+    test(`captures ${toolName} but keeps it out of the extraction input stream`, async () => {
+      const handler = createPostToolUseHandler({ db, now: () => 500 });
+
+      const result = await handler(
+        createInput({
+          toolName,
+          toolInput: { turn: "S1/T1", title: "t", content: "c" },
+          toolResponse: "Noted S1/T1.",
+        }),
+      );
+
+      const observation = db
+        .query<{ id: number; excluded: number; status: string }, []>(
+          `SELECT id, excluded_from_extraction AS excluded, status FROM observations`,
+        )
+        .get()!;
+
+      // Captured for the raw axis…
+      expect(observation.excluded).toBe(1);
+      // …but never handed to the pipeline: no queue item means the extraction
+      // agent never sees the note call as a tool result to summarise.
+      expect(getQueueRows(db)).toEqual([]);
+      expect(getExtractableObservationsForTurn(db, turnId)).toEqual([]);
+      expect(result).toEqual({ continue: true });
+    });
+  }
+
+  test("a note observation cannot forge the already-delivered signal", async () => {
+    const handler = createPostToolUseHandler({ db, now: () => 500 });
+    await handler(createInput({ toolName: "mcp__mnemo__note" }));
+
+    // Terminal finalizers retire every *pending* observation wholesale.
+    db.query("UPDATE observations SET status = 'skipped' WHERE status = 'pending'").run();
+
+    expect(hasSkippedObservationsForTurn(db, turnId)).toBe(false);
+  });
+
+  test("keeps capturing and enqueuing the other mnemo tools unchanged", async () => {
+    const handler = createPostToolUseHandler({ db, now: () => 500 });
+
+    await handler(createInput({ toolName: "mcp__mnemo__recall" }));
+
+    const observation = db
+      .query<{ id: number; excluded: number }, []>(
+        "SELECT id, excluded_from_extraction AS excluded FROM observations",
+      )
+      .get()!;
+    expect(observation.excluded).toBe(0);
+    expect(getQueueRows(db)).toEqual([
+      { kind: "obs", targetId: observation.id, sessionDbId: sessionId },
+    ]);
+  });
 });
