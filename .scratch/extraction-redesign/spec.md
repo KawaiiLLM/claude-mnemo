@@ -124,7 +124,7 @@ Append note(turn:"S15069/T332", ...) at the end of this batch; skip if busy.
 </system-reminder>
 ```
 
-（prompt 前缀为用户原文引用，保留原语言——裁决 16 的例外条款。）
+（prompt 前缀为用户原文引用，保留原语言——裁决 16 的例外条款。实现注记：实际输出**不带** `<system-reminder>` 标签——CC 对 PostToolUse 的 additionalContext 自动包一层该标签，自带会嵌套；原型里的标签仅示意最终呈现。）
 
 工具名候选 `note`（与裁决 12 命名一致，与面向用户的 remember 区分，实现时定）。静态部分刻意只含指令不含背景（指令被遵循、概览烧钱——文献依据同 Solution 节）。
 
