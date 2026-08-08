@@ -134,13 +134,17 @@ export function anonymizeNoteText(text: string): string {
  * prefix. Applied to both sides, so a legacy title that happens to open the same
  * way is treated identically — symmetry is what makes the strip a blinding step
  * rather than a second, subtler tell.
+ *
+ * A title that is nothing BUT the prefix (`"fix+cache:"`, nothing after the
+ * colon) strips to empty, and stays empty. Falling back to the original text
+ * here — the earlier behaviour — hands the judge the exact source-structure
+ * tell this function exists to remove: it just needed one side to open with
+ * `<word>+<word>:` and nothing else to be de-anonymised right back to knowing
+ * which side it was.
  */
 export function anonymizeNoteTitle(title: string): string {
   const normalised = anonymizeNoteText(title);
-  const stripped = normalised.replace(TITLE_STRUCTURAL_PREFIX, "").trim();
-  // A title that is nothing BUT the prefix would vanish; keep the original
-  // rather than hand the judge an empty side.
-  return stripped === "" ? normalised : stripped;
+  return normalised.replace(TITLE_STRUCTURAL_PREFIX, "").trim();
 }
 
 export function hasStructuralTitlePrefix(title: string): boolean {
@@ -504,7 +508,23 @@ export function unblindVerdicts(
   verdicts: readonly unknown[],
   key: PairKeyRow[],
 ): UnblindedTally {
-  const byPairId = new Map(key.map((row) => [row.pairId, row]));
+  // Built by hand rather than `new Map(key.map(...))`: a Map constructed from
+  // an array with a repeated key silently keeps only the last row, so a
+  // corrupt key file — two rows naming the same pairId, possibly two
+  // different turns — would score against whichever row happened to be last
+  // and never say so. The pairId space has to be a set before it is treated
+  // as one; a duplicate here is not a gap to report alongside the others, it
+  // is a reason not to trust the key at all.
+  const byPairId = new Map<string, PairKeyRow>();
+  for (const row of key) {
+    if (byPairId.has(row.pairId)) {
+      throw new Error(
+        `key file is corrupt: pairId ${row.pairId} appears more than once. ` +
+          "A Map built from this array would silently keep only the last row.",
+      );
+    }
+    byPairId.set(row.pairId, row);
+  }
   const unmatched: string[] = [];
   const duplicates: string[] = [];
   const invalid: string[] = [];

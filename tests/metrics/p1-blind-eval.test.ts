@@ -152,6 +152,19 @@ describe("P1 blind evaluation pairs", () => {
     expect(tally.invalid).toEqual(["line 4", "line 5"]);
   });
 
+  test("a key file with a duplicate pairId is a hard error, not a silently collapsed row", () => {
+    // `new Map(key.map(...))` would keep only the last of two rows sharing a
+    // pairId — possibly naming a different turn — and report `complete: true`
+    // as long as the surviving row got scored. The pairId space in a key file
+    // has to be a set before it is trusted as one.
+    const { key } = exportBlindPairs(db, { seed: 1 });
+    const corruptKey = [...key, key[0]!];
+
+    expect(() => unblindVerdicts([], corruptKey)).toThrow(
+      new RegExp(`${key[0]!.pairId}.*more than once`, "u"),
+    );
+  });
+
   test("a complete set of well-formed verdicts scores and reports a rate", () => {
     const { key } = exportBlindPairs(db, { seed: 1 });
 
@@ -182,18 +195,46 @@ describe("P1 blind evaluation pairs", () => {
     );
     // A full-width colon is the same structure in the bilingual corpus.
     expect(anonymizeNoteTitle("fix+recall：修好了检索")).toBe("修好了检索");
-    // An ordinary title is left alone, and a title that is nothing but the
-    // prefix is kept rather than emptied.
+    // An ordinary title is left alone. A title that is nothing but the prefix
+    // is emptied, not kept: keeping it would hand the judge the exact
+    // source-structure tell the strip exists to remove.
     expect(anonymizeNoteTitle("Recall returns zero for CJK bigrams")).toBe(
       "Recall returns zero for CJK bigrams",
     );
-    expect(anonymizeNoteTitle("design+arc-spine:")).toBe("design+arc-spine:");
+    expect(anonymizeNoteTitle("design+arc-spine:")).toBe("");
+    expect(anonymizeNoteTitle("fix+cache: ")).toBe("");
 
     const { pairs } = exportBlindPairs(db, { seed: 1 });
     for (const pair of pairs) {
       for (const side of [pair.a, pair.b]) {
         expect(hasStructuralTitlePrefix(side.title)).toBe(false);
       }
+    }
+  });
+
+  test("no anonymised title is a bare '<word>+<word>:' shell — the reviewer's fingerprint regex finds nothing", () => {
+    // The exact detection regex the review round used to name this bug: a
+    // title that is the structural prefix and nothing else, colon to end of
+    // string. Run over every title this module actually produces, plus the
+    // pure-prefix shapes that used to fall back to the untouched original.
+    const REVIEWER_FINGERPRINT =
+      /^[\p{L}\p{N}_-]{1,24}\s*\+\s*[^:：\n]{1,48}[:：]\s*$/u;
+
+    for (const seed of [1, 2, 3]) {
+      const { pairs } = exportBlindPairs(db, { seed });
+      for (const pair of pairs) {
+        expect(pair.a.title).not.toMatch(REVIEWER_FINGERPRINT);
+        expect(pair.b.title).not.toMatch(REVIEWER_FINGERPRINT);
+      }
+    }
+
+    for (const sample of [
+      "design+arc-spine:",
+      "fix+cache:",
+      "refactor+cache：",
+      "implement+note-debt: ",
+    ]) {
+      expect(anonymizeNoteTitle(sample)).not.toMatch(REVIEWER_FINGERPRINT);
     }
   });
 

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, isAbsolute } from "node:path";
 
 import type { Database } from "bun:sqlite";
@@ -424,12 +424,33 @@ function readJsonl<T>(path: string): T[] {
     .map((line) => JSON.parse(line) as T);
 }
 
+/** Walk up from `path` to the nearest ancestor that exists on disk. */
+function nearestExistingAncestor(path: string): string {
+  let current = path;
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) {
+      return current;
+    }
+    current = parent;
+  }
+  return current;
+}
+
 /**
  * blind-eval writes two files derived from one `--out` prefix, and one of them
  * is the key that de-anonymises the whole trial. Confining the prefix to the
  * working directory keeps a mistyped or pasted `--out` from dropping that key
  * into a shared location — and since this is the only writing path in an
  * otherwise read-only tool, the confinement costs nothing else.
+ *
+ * The lexical check alone trusts `path.resolve`, which never looks at the
+ * filesystem: a symlinked directory sitting lexically inside `cwd` (e.g.
+ * `./out -> /elsewhere`) passes it and still writes outside `cwd` for real. So
+ * once the string check passes, the nearest ancestor of the target that
+ * actually exists is realpath'd — the target file itself usually does not
+ * exist yet, this call is about to create it — and the same containment check
+ * runs again against the realpath'd root.
  */
 export function resolveOutputPath(path: string, cwd = process.cwd()): string {
   const root = resolve(cwd);
@@ -440,6 +461,18 @@ export function resolveOutputPath(path: string, cwd = process.cwd()): string {
       `--out must stay inside the working directory; ${path} resolves to ${resolved}.`,
     );
   }
+
+  const realRoot = realpathSync(root);
+  const ancestor = nearestExistingAncestor(dirname(resolved));
+  const realAncestor = realpathSync(ancestor);
+  const realInside = relative(realRoot, realAncestor);
+  if (realInside.startsWith("..") || isAbsolute(realInside)) {
+    throw new Error(
+      `--out must stay inside the working directory; ${path} resolves to ${resolved}, ` +
+        `whose existing parent ${ancestor} is a symlink escaping ${realRoot}.`,
+    );
+  }
+
   return resolved;
 }
 

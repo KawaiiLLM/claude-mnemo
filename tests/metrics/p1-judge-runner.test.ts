@@ -254,6 +254,53 @@ describe("P1 judge CLI", () => {
     expect(out.join("\n")).toContain("judged 1/1 pairs");
   });
 
+  test("--limit 0 or negative is a hard error, not a vacuous success", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
+    const pairsPath = join(directory, "pairs.jsonl");
+    const outPath = join(directory, "verdicts.jsonl");
+    await Bun.write(pairsPath, toJsonl(PAIRS));
+
+    for (const limit of ["0", "-1", "1.5", "not-a-number"]) {
+      const { io, err } = makeIo();
+      const code = await judgeMain(
+        ["--pairs", pairsPath, "--out", outPath, "--limit", limit],
+        {
+          io,
+          env: { P1_JUDGE_MODEL: "stub-model", P1_JUDGE_API_KEY: "k" },
+          invoke: async () => {
+            throw new Error("must not be called");
+          },
+        },
+      );
+
+      expect(code, limit).toBe(1);
+      expect(err.join("\n"), limit).toContain("positive integer");
+    }
+  });
+
+  test("an empty pairs file is a hard failure, not a 0/0 success", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
+    const pairsPath = join(directory, "pairs.jsonl");
+    const outPath = join(directory, "verdicts.jsonl");
+    // Header only — no pairs at all.
+    await Bun.write(
+      pairsPath,
+      toJsonl([{ kind: "blind-pairs-header", version: 1 }]),
+    );
+
+    const { io, err } = makeIo();
+    const code = await judgeMain(["--pairs", pairsPath, "--out", outPath], {
+      io,
+      env: { P1_JUDGE_MODEL: "stub-model", P1_JUDGE_API_KEY: "k" },
+      invoke: async () => {
+        throw new Error("must not be called");
+      },
+    });
+
+    expect(code).toBe(1);
+    expect(err.join("\n")).toContain("No pairs to judge.");
+  });
+
   test("the declaration header is skipped, and a stray line is not", async () => {
     const directory = mkdtempSync(join(tmpdir(), "p1-judge-"));
     const pairsPath = join(directory, "pairs.jsonl");

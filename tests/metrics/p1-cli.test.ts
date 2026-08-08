@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -150,6 +150,25 @@ describe("p1-metrics CLI", () => {
     // prefix would drop it wherever the string happened to point.
     const code = await main(
       ["blind-eval", "--db", fixture.path, "--out", join(tmpdir(), "escaped")],
+      io,
+      { cwd: directory },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr()).toContain("must stay inside the working directory");
+  });
+
+  test("--out may not escape through a symlinked directory that is lexically inside cwd", async () => {
+    const fixture = createFixtureDatabase();
+    const directory = mkdtempSync(join(tmpdir(), "p1-cli-"));
+    const outside = mkdtempSync(join(tmpdir(), "p1-cli-outside-"));
+    // Lexically "escape-link/run" resolves under `directory` and passes a
+    // string-only containment check; on disk it lands in `outside` instead.
+    symlinkSync(outside, join(directory, "escape-link"));
+    const { io, stderr } = makeIo();
+
+    const code = await main(
+      ["blind-eval", "--db", fixture.path, "--out", "escape-link/run"],
       io,
       { cwd: directory },
     );

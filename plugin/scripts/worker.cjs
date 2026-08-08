@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-msko8log" : "dev";
+var BUILD_ID = true ? "0.8.6-mskpol2a" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -42874,6 +42874,9 @@ function requireText(value, field) {
   }
   return { ok: true, value };
 }
+function debtOwesNoNoteMessage(address, debt) {
+  return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.`;
+}
 function noteTool(db, rawInput, options = {}) {
   if (typeof rawInput.turn !== "string") {
     return parameterError(
@@ -42903,12 +42906,10 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
-  const existing = getShadowNote(db, turn.id);
-  const debt = getNoteDebt(db, turn.id);
-  if (!existing && debt?.status !== "pending") {
-    return parameterError(
-      `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.`
-    );
+  const fastExisting = getShadowNote(db, turn.id);
+  const fastDebt = getNoteDebt(db, turn.id);
+  if (!fastExisting && fastDebt?.status !== "pending") {
+    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
   const rawTitle = titleInput.value;
   const rawContent = contentInput.value;
@@ -42920,7 +42921,13 @@ function noteTool(db, rawInput, options = {}) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
-  runWriteTransaction(db, () => {
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const outcome = writeTransaction(db, () => {
+    const existing = getShadowNote(db, turn.id);
+    const debt = getNoteDebt(db, turn.id);
+    if (!existing && debt?.status !== "pending") {
+      return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
+    }
     upsertShadowNote(db, {
       turnId: turn.id,
       title,
@@ -42931,9 +42938,13 @@ function noteTool(db, rawInput, options = {}) {
       nowEpoch
     });
     closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+    return { ok: true, existing: existing !== null };
   });
+  if (!outcome.ok) {
+    return parameterError(outcome.message);
+  }
   const parts = [
-    `Noted S${turn.sessionId}/T${turn.promptNumber}${existing ? " (replaced the previous note)" : ""}.`
+    `Noted S${turn.sessionId}/T${turn.promptNumber}${outcome.existing ? " (replaced the previous note)" : ""}.`
   ];
   parts.push(
     rideTurnId === null ? "ride_turn: unknown." : `ride_turn: S${turn.sessionId}/T${getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber}.`

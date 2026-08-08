@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
-import { closeNoteDebtAsNoted, getNoteDebt } from "../db/note-debt";
+import { closeNoteDebtAsNoted, getNoteDebt, type NoteDebtRecord } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn } from "../db/turns";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -23,6 +23,8 @@ export interface NoteToolInput {
 export interface NoteToolOptions {
   now?: () => number;
   env?: NodeJS.ProcessEnv;
+  /** Injected for tests: lets a race with a concurrent reconcile be simulated. */
+  runWriteTransaction?: typeof runWriteTransaction;
 }
 
 function textResult(text: string): ToolTextResult {
@@ -125,6 +127,21 @@ function requireText(
   return { ok: true, value };
 }
 
+type NoteWriteOutcome =
+  | { ok: true; existing: boolean }
+  | { ok: false; message: string };
+
+function debtOwesNoNoteMessage(
+  address: TurnAddress,
+  debt: NoteDebtRecord | null,
+): string {
+  return (
+    `S${address.sessionId}/T${address.promptNumber} owes no note` +
+    `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
+    " Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote."
+  );
+}
+
 /**
  * `note` — the main agent's own turn note (spec D1), written to the P1 shadow
  * store. It never writes `turns`: the legacy extraction pipeline keeps sole
@@ -183,14 +200,18 @@ export function noteTool(
   // them — and it makes ride_turn coherent as a side effect, since ride_turn is
   // derived from the address's session. Without it, a note addressed at another
   // session's turn silently attributes itself to THAT session's newest turn.
-  const existing = getShadowNote(db, turn.id);
-  const debt = getNoteDebt(db, turn.id);
-  if (!existing && debt?.status !== "pending") {
-    return parameterError(
-      `S${address.sessionId}/T${address.promptNumber} owes no note` +
-        `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
-        " Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.",
-    );
+  //
+  // This read is a fast path only, not the authorising one: the hook-side
+  // reconcile (Stop handler, PostToolUse capture) runs in another process and
+  // can close this same debt — age it out, or close it as rolled-back —
+  // between this read and the write transaction below. The re-check that
+  // actually decides is the one taken inside that transaction; skipping the
+  // fast path here would only cost an avoidable BEGIN IMMEDIATE for a plainly
+  // invalid address.
+  const fastExisting = getShadowNote(db, turn.id);
+  const fastDebt = getNoteDebt(db, turn.id);
+  if (!fastExisting && fastDebt?.status !== "pending") {
+    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
 
   // Same removal the transcript capture path applies (D10). It runs at the
@@ -212,12 +233,27 @@ export function noteTool(
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
-  // The note and the debt's closure are one transaction: the ledger's durable
-  // state is what the trial measures, and leaving it to the next reconcile means
-  // a session whose last act is a note reports that debt as still open forever.
-  // Age is not consulted — see closeNoteDebtAsNoted.
-  runWriteTransaction(db, () => {
+  // The debt validation, the note write and the debt's closure are one
+  // transaction, and the validation inside it is the one that counts: an
+  // IMMEDIATE transaction takes the write lock before either statement inside
+  // it runs, so whatever this read observes is the state the write commits
+  // against — there is no window left for a concurrent reconcile to close the
+  // debt between "we checked it was open" and "we wrote against it". Without
+  // this, that window let the note get written while its own closing UPDATE
+  // (WHERE status = 'pending') quietly matched zero rows, leaving a note on
+  // record for a debt whose ledger entry says anything but 'noted'.
+  //
+  // Age is still not consulted inside the transaction — see
+  // closeNoteDebtAsNoted — only pending-ness, re-read live.
+  const outcome = writeTransaction(db, (): NoteWriteOutcome => {
+    const existing = getShadowNote(db, turn.id);
+    const debt = getNoteDebt(db, turn.id);
+    if (!existing && debt?.status !== "pending") {
+      return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
+    }
+
     upsertShadowNote(db, {
       turnId: turn.id,
       title,
@@ -228,11 +264,16 @@ export function noteTool(
       nowEpoch,
     });
     closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+    return { ok: true, existing: existing !== null };
   });
+
+  if (!outcome.ok) {
+    return parameterError(outcome.message);
+  }
 
   const parts = [
     `Noted S${turn.sessionId}/T${turn.promptNumber}${
-      existing ? " (replaced the previous note)" : ""
+      outcome.existing ? " (replaced the previous note)" : ""
     }.`,
   ];
   parts.push(

@@ -66,7 +66,9 @@ export function parseJudgeArguments(argv: string[]): JudgeCliOptions {
         break;
       case "--limit": {
         const parsed = Number(next);
-        if (!Number.isFinite(parsed)) throw new Error("--limit requires a number");
+        if (!Number.isInteger(parsed) || parsed < 1) {
+          throw new Error("--limit must be a positive integer");
+        }
         options.limit = parsed;
         index += 1;
         break;
@@ -183,6 +185,16 @@ export async function judgeMain(
   const invoke = dependencies.invoke ?? createHttpJudgeInvoke();
   const attempted =
     options.limit === undefined ? pairs : pairs.slice(0, options.limit);
+
+  // Zero pairs is not a vacuous success: with --limit now rejecting anything
+  // below 1, the only way here is an empty (or header-only) pairs file, and a
+  // "0/0 judged" run must not exit 0 — the whole point of this CLI's exit code
+  // is to say whether the trial was measured, not whether it was attempted.
+  if (attempted.length === 0) {
+    io.stderr("No pairs to judge.");
+    return 1;
+  }
+
   const result = await runJudge({
     pairs,
     config,
