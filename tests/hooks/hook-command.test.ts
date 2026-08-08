@@ -325,6 +325,7 @@ describe("runHookCommand", () => {
     const recentHandler = mock(async () => ({ continue: true }));
     const digestHandler = mock(async () => ({ continue: true }));
     const milestonesHandler = mock(async () => ({ continue: true }));
+    const notesHandler = mock(async () => ({ continue: true }));
     const run = runHookCommand as unknown as (
       dependencies?: TestHookCommandDependencies,
     ) => Promise<number>;
@@ -334,6 +335,7 @@ describe("runHookCommand", () => {
       "SessionStart:recent": recentHandler,
       "SessionStart:digest": digestHandler,
       "SessionStart:milestones": milestonesHandler,
+      "SessionStart:notes": notesHandler,
     };
 
     for (const [section, expectedHandler] of [
@@ -342,6 +344,7 @@ describe("runHookCommand", () => {
       ["recent", recentHandler],
       ["digest", digestHandler],
       ["milestones", milestonesHandler],
+      ["notes", notesHandler],
     ] as const) {
       await run({
         env: {},

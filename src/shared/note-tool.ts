@@ -16,8 +16,29 @@ export const NOTE_TOOL_NAME = "note";
 
 const NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
 
+// Same two mount shapes, widened to every tool this system mounts itself.
+const MNEMO_TOOL_NAME_PATTERN =
+  /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
+
 export function isNoteToolName(toolName: string): boolean {
   return NOTE_TOOL_NAME_PATTERN.test(toolName);
+}
+
+/**
+ * Mnemo's own tool calls (spec D3, R2#P2-5). The note-debt classification counts
+ * a turn's *substantive* tool calls, and memory housekeeping is not work: if
+ * recall/remember/timeline/note counted, then answering "what did we decide?"
+ * with one recall would open a debt, and taking a note would open the next one —
+ * the ledger would manufacture its own input.
+ *
+ * Deliberately NOT folded into `isExtractionExcludedToolName`: that predicate
+ * governs what the legacy extraction pipeline may read, and widening it mid-P1
+ * would change the very baseline the trial's blind evaluation compares against.
+ * Two predicates, two questions — "does the old pipeline see it" and "does it
+ * count as work" — that happen to agree only on `note` today.
+ */
+export function isMnemoOwnToolName(toolName: string): boolean {
+  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
 }
 
 /**

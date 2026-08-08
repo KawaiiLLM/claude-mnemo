@@ -186,13 +186,18 @@ function observationQuery(full: boolean): string {
   const textColumns = full
     ? "tool_input, tool_result"
     : "substr(tool_input, 1, ?) AS tool_input, substr(tool_result, 1, ?) AS tool_result";
+  // `excluded_from_extraction = 0`: a `note` call's observation is captured for
+  // the raw axis only. The dream agent reads turn detail in full, so without the
+  // filter the note payload — the very text the P1 trial keeps out of the old
+  // pipeline — would come back through this tool verbatim.
   return `
     SELECT id, tool_name, status,
            length(tool_input) AS input_len,
            length(tool_result) AS result_len,
            ${textColumns}
     FROM observations
-    WHERE turn_id = ? AND (? IS NULL OR tool_name LIKE ?)
+    WHERE turn_id = ? AND excluded_from_extraction = 0
+      AND (? IS NULL OR tool_name LIKE ?)
     ORDER BY id`;
 }
 

@@ -51,5 +51,23 @@ test("SessionStart diary backfill also runs when a session resumes", () => {
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context recent",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context digest",
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context milestones",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs context notes",
+  ]);
+});
+
+test("PostToolUse keeps exactly two entries, one async and one synchronous", () => {
+  const config = readHookConfig();
+  const commands = config.hooks.PostToolUse?.[0]?.hooks.map(
+    (hook) => hook.command,
+  );
+
+  // The pending-notes reminder rides `result-dispatch` rather than a third
+  // registration: `additionalContext` and `asyncWork` are mutually exclusive per
+  // handler (R1#11), so the split has to be by response shape — `tool-use`
+  // captures and wakes the worker, `result-dispatch` answers with text.
+  expect(config.hooks.PostToolUse).toHaveLength(1);
+  expect(commands).toEqual([
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs tool-use",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs result-dispatch",
   ]);
 });

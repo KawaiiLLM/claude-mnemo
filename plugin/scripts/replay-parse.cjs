@@ -526,6 +526,7 @@ function mergeTranscriptEntries(first, later) {
     type: later.type ?? first.type,
     subtype: later.subtype ?? first.subtype,
     role: later.role ?? first.role,
+    model: later.model ?? first.model,
     content: later.content ?? first.content,
     promptId: first.promptId ?? later.promptId,
     permissionMode: later.permissionMode ?? first.permissionMode,
@@ -553,6 +554,7 @@ function normalizeEntry(raw) {
     type: typeof raw.type === "string" ? raw.type : void 0,
     subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
     role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    model: typeof message?.model === "string" ? message.model : void 0,
     content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
     uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
@@ -608,7 +610,8 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
         assistantText: "",
         toolCalls: [],
         isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
+        assistantModel: null
       };
       turns.push(currentTurn);
       continue;
@@ -634,6 +637,9 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
       currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
 
 ${assistantText}` : assistantText;
+    }
+    if (entry.model) {
+      currentTurn.assistantModel = entry.model;
     }
     currentTurn.toolCalls.push(
       ...toolCalls.map((toolCall) => ({

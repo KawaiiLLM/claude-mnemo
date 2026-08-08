@@ -497,6 +497,64 @@ var SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_shadow_notes_ride_turn
     ON shadow_notes(ride_turn_id);
 
+  -- P1 note-debt ledger (spec D2/D3), shadow side like shadow_notes: it records
+  -- which turns still owe a note and how each debt ended, and it never touches a
+  -- turns row or its status \u2014 the legacy pipeline keeps sole ownership of those.
+  --
+  -- turn_id is the PRIMARY KEY: one debt per turn, and re-running the completion
+  -- classification is an INSERT that loses the race rather than a second debt.
+  -- A trivial turn (no substantive tool call) gets NO row at all \u2014 "not in the
+  -- ledger" is the representation of "owes nothing", so the ledger's size tracks
+  -- real debt rather than session length.
+  CREATE TABLE IF NOT EXISTS note_debt (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    prompt_number INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'noted', 'skipped')
+    ),
+    -- Only a skipped debt carries a reason (D4's status vocabulary).
+    reason TEXT CHECK (
+      reason IS NULL OR reason IN ('aged', 'rolled-back')
+    ),
+    opened_at_epoch INTEGER NOT NULL,
+    closed_at_epoch INTEGER,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_debt_open
+    ON note_debt(session_id, status, prompt_number);
+
+  -- How far the completion classification has already walked, per session. It is
+  -- what keeps the sweep O(new turns) instead of O(session): without it, every
+  -- trivial turn \u2014 which by design leaves no ledger row \u2014 would be re-examined
+  -- on every tool call for the life of the session.
+  CREATE TABLE IF NOT EXISTS note_debt_cursor (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  -- Exposure ledger (spec D7): every turn id this session has actually shown the
+  -- main agent, and the turn it was shown during. P2's citation check reads it \u2014
+  -- a note may cite only ids its writer was shown \u2014 so a row must mean "rendered
+  -- into the model's context", never "was in the ledger at the time".
+  --
+  -- Keyed by (ride_turn_id, exposed_turn_id): re-showing an id in a later turn
+  -- adds a row, which is also the "a reminder already fired this turn" fact the
+  -- at-most-once-per-turn rule reads.
+  CREATE TABLE IF NOT EXISTS note_id_exposures (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ride_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    exposed_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (source IN ('reminder', 'injection')),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, ride_turn_id, exposed_turn_id, source)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
+    ON note_id_exposures(session_id, exposed_turn_id);
+
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
 
@@ -1117,6 +1175,9 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS shadow_notes");
+  db.exec("DROP TABLE IF EXISTS note_id_exposures");
+  db.exec("DROP TABLE IF EXISTS note_debt_cursor");
+  db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
@@ -2531,7 +2592,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.8.6-mskk91pi" : "dev";
+var BUILD_ID = true ? "0.8.6-mskl9wak" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4146,6 +4207,7 @@ function mergeTranscriptEntries(first, later) {
     type: later.type ?? first.type,
     subtype: later.subtype ?? first.subtype,
     role: later.role ?? first.role,
+    model: later.model ?? first.model,
     content: later.content ?? first.content,
     promptId: first.promptId ?? later.promptId,
     permissionMode: later.permissionMode ?? first.permissionMode,
@@ -4173,6 +4235,7 @@ function normalizeEntry(raw) {
     type: typeof raw.type === "string" ? raw.type : void 0,
     subtype: typeof raw.subtype === "string" ? raw.subtype : void 0,
     role: typeof message?.role === "string" ? message.role : typeof raw.role === "string" ? raw.role : typeof raw.type === "string" ? raw.type : void 0,
+    model: typeof message?.model === "string" ? message.model : void 0,
     content: typeof message?.content === "string" || Array.isArray(message?.content) ? message.content : typeof raw.content === "string" || Array.isArray(raw.content) ? raw.content : void 0,
     promptId: typeof raw.promptId === "string" ? raw.promptId : void 0,
     uuid: typeof raw.uuid === "string" ? raw.uuid : void 0,
@@ -4239,7 +4302,8 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
         assistantText: "",
         toolCalls: [],
         isSidechain: Boolean(entry.isSidechain),
-        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId)
+        wasInterrupted: entry.promptId !== void 0 && interruptedPromptIds.has(entry.promptId),
+        assistantModel: null
       };
       turns.push(currentTurn);
       continue;
@@ -4265,6 +4329,9 @@ function parseReplayTranscript(transcriptPath, preloadedEntries) {
       currentTurn.assistantText = currentTurn.assistantText ? `${currentTurn.assistantText}
 
 ${assistantText}` : assistantText;
+    }
+    if (entry.model) {
+      currentTurn.assistantModel = entry.model;
     }
     currentTurn.toolCalls.push(
       ...toolCalls.map((toolCall) => ({
@@ -21082,11 +21149,227 @@ function createContextHandler(dependencies, section = "sessions") {
 
 // src/shared/note-tool.ts
 var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
+var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
 function isNoteToolName(toolName) {
   return NOTE_TOOL_NAME_PATTERN.test(toolName);
 }
+function isMnemoOwnToolName(toolName) {
+  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
+}
 function isExtractionExcludedToolName(toolName) {
   return isNoteToolName(toolName);
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_AGING_TURNS = 50;
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function countSubstantiveToolCalls(db, turnId) {
+  const rows = db.query(
+    `SELECT tool_name AS toolName FROM observations
+       WHERE turn_id = ? AND excluded_from_extraction = 0`
+  ).all(turnId);
+  return rows.filter(
+    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
+  ).length;
+}
+function getMaxPromptNumber2(db, sessionId) {
+  return db.query(
+    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+  ).get(sessionId)?.maxPromptNumber ?? 0;
+}
+function getClassificationCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_classified_prompt_number AS cursor
+         FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
+  db.query(
+    `INSERT INTO note_debt_cursor (
+       session_id, last_classified_prompt_number, updated_at_epoch
+     ) VALUES (?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       last_classified_prompt_number = MAX(
+         note_debt_cursor.last_classified_prompt_number,
+         excluded.last_classified_prompt_number
+       ),
+       updated_at_epoch = excluded.updated_at_epoch`
+  ).run(sessionId, promptNumber, nowEpoch);
+}
+function classifyCompletedTurn(db, turn, nowEpoch) {
+  if (getNoteDebt(db, turn.id) !== null) {
+    return false;
+  }
+  const alreadyNoted = db.query(
+    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
+  ).get(turn.id);
+  if (alreadyNoted) {
+    return false;
+  }
+  if (countSubstantiveToolCalls(db, turn.id) === 0) {
+    return false;
+  }
+  db.query(
+    `INSERT OR IGNORE INTO note_debt (
+       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
+     ) VALUES (?, ?, ?, 'pending', ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
+  return true;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  db.query(
+    `UPDATE note_debt
+     SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+     WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId);
+}
+function reconcileNoteDebt(db, input) {
+  const { sessionId, nowEpoch } = input;
+  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const maxPromptNumber = getMaxPromptNumber2(db, sessionId);
+  const cursor = getClassificationCursor(db, sessionId);
+  let classifyThrough = maxPromptNumber - 1;
+  if (input.completedTurnId !== void 0) {
+    const completed = db.query(
+      `SELECT prompt_number AS promptNumber, session_id AS sessionId
+         FROM turns WHERE id = ?`
+    ).get(input.completedTurnId);
+    if (completed && completed.sessionId === sessionId) {
+      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
+    }
+  }
+  const opened = [];
+  if (classifyThrough > cursor) {
+    const candidates = db.query(
+      `SELECT id, prompt_number AS promptNumber, session_id AS sessionId
+         FROM turns
+         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?
+         ORDER BY prompt_number ASC`
+    ).all(sessionId, cursor, classifyThrough);
+    for (const candidate of candidates) {
+      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
+        opened.push(candidate.id);
+      }
+    }
+    setClassificationCursor(db, sessionId, classifyThrough, nowEpoch);
+  }
+  const pending = db.query(
+    `SELECT
+         d.turn_id AS turnId,
+         d.prompt_number AS promptNumber,
+         t.was_rolled_back AS wasRolledBack,
+         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote,
+         EXISTS(
+           SELECT 1 FROM note_id_exposures e
+           WHERE e.session_id = d.session_id
+             AND e.exposed_turn_id = d.turn_id
+             AND e.source = 'reminder'
+         ) AS wasExposed
+       FROM note_debt d
+       JOIN turns t ON t.id = d.turn_id
+       WHERE d.session_id = ? AND d.status = 'pending'
+       ORDER BY d.prompt_number ASC`
+  ).all(sessionId);
+  const noted = [];
+  const rolledBack = [];
+  const aged = [];
+  for (const row of pending) {
+    if (row.hasNote === 1) {
+      closeDebt(db, row.turnId, "noted", null, nowEpoch);
+      noted.push(row.turnId);
+      continue;
+    }
+    if (row.wasRolledBack === 1 && row.wasExposed === 1) {
+      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
+      rolledBack.push(row.turnId);
+      continue;
+    }
+    if (maxPromptNumber - row.promptNumber > agingTurns) {
+      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
+      aged.push(row.turnId);
+    }
+  }
+  return {
+    opened,
+    noted,
+    aged,
+    rolledBack,
+    classifiedThroughPromptNumber: Math.max(cursor, classifyThrough)
+  };
+}
+function listOpenNoteDebt(db, sessionId, options) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         d.turn_id AS turnId,
+         d.session_id AS sessionId,
+         d.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt,
+         t.was_rolled_back AS wasRolledBack,
+         d.opened_at_epoch AS openedAtEpoch
+       FROM note_debt d
+       JOIN turns t ON t.id = d.turn_id
+       WHERE d.session_id = ? AND d.status = 'pending'
+       ORDER BY d.prompt_number ASC`
+  ).all(sessionId).map((row) => ({
+    turnId: row.turnId,
+    sessionId: row.sessionId,
+    promptNumber: row.promptNumber,
+    userPrompt: row.userPrompt,
+    wasRolledBack: row.wasRolledBack === 1,
+    openedAtEpoch: row.openedAtEpoch,
+    pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
+  })).filter((debt) => debt.pendingTurns <= agingTurns);
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+function getExposedTurnIds(db, sessionId, source) {
+  const rows = source ? db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ? AND source = ?`
+  ).all(sessionId, source) : db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ?`
+  ).all(sessionId);
+  return new Set(rows.map((row) => row.exposedTurnId));
+}
+function hasReminderForRideTurn(db, sessionId, rideTurnId) {
+  return db.query(
+    `SELECT 1 AS present FROM note_id_exposures
+         WHERE session_id = ? AND ride_turn_id = ? AND source = 'reminder'
+         LIMIT 1`
+  ).get(sessionId, rideTurnId) !== null;
 }
 
 // src/shared/tag-stripping.ts
@@ -21145,6 +21428,18 @@ function createPostToolUseHandler(dependencies) {
     const toolResult = stringifyToolPayload(input.toolResponse);
     const excludedFromExtraction = isExtractionExcludedToolName(toolName);
     const writeResult = writeTransaction(dependencies.db, () => {
+      try {
+        reconcileNoteDebt(dependencies.db, {
+          sessionId: session.id,
+          nowEpoch: createdAtEpoch
+        });
+      } catch (error48) {
+        logger.warn?.("note debt reconcile failed", {
+          sessionId: input.sessionId,
+          reasonCode: "post-tool-use-sweep",
+          error: error48 instanceof Error ? error48.message : String(error48)
+        });
+      }
       const latestTurn = getLatestTurn(dependencies.db, session.id);
       if (!latestTurn) {
         return { outcome: "no-root-turn", turnId: null };
@@ -21261,6 +21556,569 @@ function createMilestoneContextHandler(dependencies) {
     } catch {
       return { continue: true };
     }
+  };
+}
+
+// src/hooks/handlers/context-note-taking.ts
+var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
+You keep notes on your own turns (episodic memory across sessions).
+Trigger: after a tool result you may see a "pending notes" reminder. When it
+appears, append a note call for the listed turns at the end of the current
+batch. No reminder \u2014 do nothing. Never start a tool call just to write a note.
+Skip when the main task is critical; the system will remind you again.
+Fields:
+- title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
+  words (research/design/implement/fix/measure/review/write/ops) must state
+  the real stage \u2014 never claim "finalized" for work still in design.
+- content (~100 tokens): conclusion first, then the key steps. Include
+  rejected alternatives with reasons, and who decided (user/data/literature/
+  inference). Prefer proper nouns (file names, error names) over narration.
+  Do not repeat the title.
+- insight: study notes; empty by default. Only knowledge gained this turn
+  that is worth keeping long-term and hard to reacquire \u2014 pitfalls hit,
+  durable pointers, transferable lessons \u2014 and orthogonal to this turn's
+  conclusion. Already-known facts, perishable state, and anything one search
+  away do not qualify.
+Rules: the note call always goes last in a batch; cite other turns only as
+[S15069/T332] and only ids seen in reminders or injected context; omit
+numbers you are not sure of; never include <private> content.
+</mnemo-note-taking>`;
+function createNoteTakingContextHandler() {
+  return async function handleNoteTakingContextHook(input) {
+    if (input.eventName !== "SessionStart") {
+      return { continue: true };
+    }
+    return { continue: true, hookSpecificOutput: NOTE_TAKING_INSTRUCTIONS };
+  };
+}
+
+// src/rules/pretooluse-dispatcher.ts
+var import_node_fs6 = require("node:fs");
+var import_node_crypto3 = require("node:crypto");
+var import_node_path13 = require("node:path");
+
+// src/rules/sidecar-protocol.ts
+var import_node_crypto2 = require("node:crypto");
+var import_node_fs5 = require("node:fs");
+var import_node_path12 = require("node:path");
+var INPUT_SUMMARY_LIMIT = 200;
+var SIDECAR_LOCK_WAIT_MS = 5e3;
+var lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
+function isErrorCode(error48, code) {
+  return error48 instanceof Error && "code" in error48 && error48.code === code;
+}
+function resolveHitSidecarLockPath(dataRoot) {
+  return (0, import_node_path12.join)(dataRoot, "rules", "hits.lock");
+}
+function summarizeToolInput(value) {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
+  return Array.from(stripPrivateTags(serialized)).slice(0, INPUT_SUMMARY_LIMIT).join("");
+}
+function readLockOwner(path2) {
+  try {
+    const value = JSON.parse(
+      (0, import_node_fs5.readFileSync)(path2, "utf8")
+    );
+    return Number.isInteger(value.pid) && value.pid > 0 && typeof value.token === "string" ? { pid: value.pid, token: value.token } : null;
+  } catch {
+    return null;
+  }
+}
+function withHitSidecarLock(dataRoot, operation, options = {}) {
+  const path2 = resolveHitSidecarLockPath(dataRoot);
+  (0, import_node_fs5.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
+  const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
+  if (!Number.isFinite(waitMs) || waitMs < 0) {
+    throw new Error("waitMs must be a non-negative finite number");
+  }
+  const owner = { pid: process.pid, token: (0, import_node_crypto2.randomUUID)() };
+  const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
+  (0, import_node_fs5.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
+  const deadline = performance.now() + waitMs;
+  let acquired = false;
+  try {
+    while (performance.now() <= deadline) {
+      try {
+        (0, import_node_fs5.linkSync)(temporary, path2);
+        acquired = true;
+        break;
+      } catch (error48) {
+        if (!isErrorCode(error48, "EEXIST")) throw error48;
+        Atomics.wait(lockWaitArray, 0, 0, 1);
+      }
+    }
+    if (!acquired) {
+      throw new Error("timed out waiting for the hit sidecar lock");
+    }
+    return operation();
+  } finally {
+    try {
+      (0, import_node_fs5.unlinkSync)(temporary);
+    } catch (error48) {
+      if (!isErrorCode(error48, "ENOENT")) throw error48;
+    }
+    if (acquired && readLockOwner(path2)?.token === owner.token) {
+      try {
+        (0, import_node_fs5.unlinkSync)(path2);
+      } catch (error48) {
+        if (!isErrorCode(error48, "ENOENT")) throw error48;
+      }
+    }
+  }
+}
+
+// src/rules/pretooluse-dispatcher.ts
+var EVENT_HIT_LIMIT = 2;
+var SESSION_LOCK_WAIT_MS = 35;
+var STALE_SESSION_LOCK_MS = 3e4;
+var lockWaitArray2 = new Int32Array(new SharedArrayBuffer(4));
+function resolveTriggerIndexPath(dataRoot = DATA_DIR) {
+  return (0, import_node_path13.join)(dataRoot, "rules", "trigger-index.json");
+}
+function resolveSessionStateDirectory(dataRoot = DATA_DIR) {
+  return (0, import_node_path13.join)(dataRoot, "rules", "session-state");
+}
+function localDate(tsMs) {
+  const date5 = new Date(tsMs);
+  const year = date5.getFullYear();
+  const month = String(date5.getMonth() + 1).padStart(2, "0");
+  const day = String(date5.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function resolveHitSidecarPath(dataRoot = DATA_DIR, tsMs = Date.now()) {
+  return (0, import_node_path13.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
+}
+function sessionStatePath(dataRoot, sessionId) {
+  const digest = (0, import_node_crypto3.createHash)("sha256").update(sessionId).digest("hex");
+  return (0, import_node_path13.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
+}
+function readIndex(dataRoot) {
+  try {
+    return triggerIndexSchema.parse(
+      JSON.parse((0, import_node_fs6.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
+    );
+  } catch {
+    return void 0;
+  }
+}
+function readState(dataRoot, sessionId) {
+  try {
+    const parsed = JSON.parse(
+      (0, import_node_fs6.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
+    );
+    if (parsed.version !== 1 || !Array.isArray(parsed.rule_ids)) return /* @__PURE__ */ new Set();
+    return new Set(
+      parsed.rule_ids.filter(
+        (id) => Number.isInteger(id) && id > 0
+      )
+    );
+  } catch {
+    return /* @__PURE__ */ new Set();
+  }
+}
+function writeState(dataRoot, sessionId, ruleIds) {
+  const path2 = sessionStatePath(dataRoot, sessionId);
+  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  const temporary = `${path2}.${process.pid}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
+  (0, import_node_fs6.writeFileSync)(
+    temporary,
+    `${JSON.stringify({
+      version: 1,
+      rule_ids: [...ruleIds].sort((left, right) => left - right)
+    })}
+`,
+    { mode: 384 }
+  );
+  (0, import_node_fs6.renameSync)(temporary, path2);
+}
+function acquireSessionLock(dataRoot, sessionId) {
+  const statePath = sessionStatePath(dataRoot, sessionId);
+  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
+  const path2 = `${statePath}.lock`;
+  const deadline = performance.now() + SESSION_LOCK_WAIT_MS;
+  while (performance.now() <= deadline) {
+    try {
+      return {
+        descriptor: (0, import_node_fs6.openSync)(
+          path2,
+          import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_EXCL | import_node_fs6.constants.O_WRONLY,
+          384
+        ),
+        path: path2
+      };
+    } catch (error48) {
+      if (!(error48 instanceof Error) || !("code" in error48) || error48.code !== "EEXIST") {
+        throw error48;
+      }
+      try {
+        if (Date.now() - (0, import_node_fs6.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
+          (0, import_node_fs6.unlinkSync)(path2);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      Atomics.wait(lockWaitArray2, 0, 0, 1);
+    }
+  }
+  return void 0;
+}
+function releaseSessionLock(lock) {
+  (0, import_node_fs6.closeSync)(lock.descriptor);
+  try {
+    (0, import_node_fs6.unlinkSync)(lock.path);
+  } catch {
+  }
+}
+function appendHits(path2, hits) {
+  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  const descriptor = (0, import_node_fs6.openSync)(
+    path2,
+    import_node_fs6.constants.O_APPEND | import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_WRONLY,
+    384
+  );
+  try {
+    (0, import_node_fs6.writeFileSync)(
+      descriptor,
+      `${hits.map((hit) => JSON.stringify(hit)).join("\n")}
+`
+    );
+  } finally {
+    (0, import_node_fs6.closeSync)(descriptor);
+  }
+}
+function hasOwnParameter(input, parameter) {
+  return Object.prototype.hasOwnProperty.call(input, parameter);
+}
+function commandPrefixMatches(input, prefix) {
+  if (typeof input.command !== "string") return false;
+  const tokens = input.command.trim().split(/\s+/u);
+  return prefix.every((expected, index) => tokens[index] === expected);
+}
+function globExpression(pattern) {
+  let expression = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        if (pattern[index + 2] === "/") {
+          expression += "(?:.*/)?";
+          index += 2;
+        } else {
+          expression += ".*";
+          index += 1;
+        }
+      } else {
+        expression += "[^/]*";
+      }
+    } else if (character === "?") {
+      expression += "[^/]";
+    } else {
+      expression += character.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&");
+    }
+  }
+  return new RegExp(`${expression}$`, "u");
+}
+function pathGlobMatches(input, cwd, pathGlob) {
+  const candidate = [input.path, input.file_path, input.notebook_path].find(
+    (value) => typeof value === "string" && value !== ""
+  );
+  if (!candidate) return false;
+  return globExpression((0, import_node_path13.resolve)(cwd, pathGlob)).test((0, import_node_path13.resolve)(cwd, candidate));
+}
+function toolTriggerMatches(trigger, input) {
+  if (input.toolName !== trigger.tool) return false;
+  const toolInput = typeof input.toolInput === "object" && input.toolInput !== null && !Array.isArray(input.toolInput) ? input.toolInput : {};
+  if (trigger.require_param && !hasOwnParameter(toolInput, trigger.require_param)) {
+    return false;
+  }
+  if (trigger.param_absent && hasOwnParameter(toolInput, trigger.param_absent)) {
+    return false;
+  }
+  if (trigger.command_prefix && !commandPrefixMatches(toolInput, trigger.command_prefix)) {
+    return false;
+  }
+  if (trigger.path_glob && (!input.cwd || !pathGlobMatches(toolInput, input.cwd, trigger.path_glob))) {
+    return false;
+  }
+  return true;
+}
+function promptTriggerMatches(trigger, prompt) {
+  const normalizedPrompt = prompt.toLowerCase();
+  const matches = trigger.keywords.map(
+    (keyword) => normalizedPrompt.includes(keyword.toLowerCase())
+  );
+  return trigger.match === "all" ? matches.every(Boolean) : matches.some(Boolean);
+}
+function resultHead(value) {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
+  return Buffer.from(serialized).subarray(0, 8 * 1024).toString("utf8");
+}
+function resultTriggerMatches(trigger, input) {
+  if (trigger.tool && input.toolName !== trigger.tool) return false;
+  const head = resultHead(input.toolResponse);
+  return trigger.patterns.some((pattern) => head.includes(pattern));
+}
+function triggerMatches(eventName, trigger, input) {
+  switch (eventName) {
+    case "PreToolUse":
+      return trigger.kind === "tool" && toolTriggerMatches(trigger, input);
+    case "UserPromptSubmit":
+      return trigger.kind === "prompt" && promptTriggerMatches(trigger, input.prompt ?? "");
+    case "PostToolUse":
+      return trigger.kind === "result" && resultTriggerMatches(trigger, input);
+  }
+}
+function hasRequiredIdentity(eventName, input) {
+  if (!input.sessionId || !input.cwd) return false;
+  if (eventName === "UserPromptSubmit") return Boolean(input.prompt);
+  if (eventName === "PreToolUse") return Boolean(input.toolName);
+  return Boolean(input.toolName) && input.toolResponse !== void 0;
+}
+function summarizePrompt(prompt) {
+  return Array.from(prompt).slice(0, 200).join("");
+}
+function createHits(eventName, input, ruleIds, timestamp, randomUuid) {
+  if (eventName === "UserPromptSubmit") {
+    return ruleIds.map((ruleId) => ({
+      hit_id: randomUuid(),
+      content_session_id: input.sessionId,
+      event_type: eventName,
+      ts_ms: timestamp,
+      rule_id: ruleId,
+      prompt_summary: summarizePrompt(input.prompt)
+    }));
+  }
+  return ruleIds.map((ruleId) => ({
+    hit_id: randomUuid(),
+    content_session_id: input.sessionId,
+    event_type: eventName,
+    ts_ms: timestamp,
+    rule_id: ruleId,
+    tool_name: input.toolName,
+    tool_input_summary: summarizeToolInput(input.toolInput),
+    ...input.toolUseId ? { tool_use_id: input.toolUseId } : {}
+  }));
+}
+function createDispatcher(eventName, dependencies) {
+  const dataRoot = dependencies.dataRoot ?? DATA_DIR;
+  const nowMs = dependencies.nowMs ?? Date.now;
+  const randomUuid = dependencies.randomUuid ?? import_node_crypto3.randomUUID;
+  return (input) => {
+    if (input.eventName !== eventName || !hasRequiredIdentity(eventName, input)) {
+      return { continue: true };
+    }
+    const index = readIndex(dataRoot);
+    if (!index) return { continue: true };
+    const project = (0, import_node_path13.resolve)(input.cwd);
+    const candidates = index.rules.filter(
+      (rule) => rule.scope === "global" || (0, import_node_path13.resolve)(rule.scope) === project
+    ).slice(0, TRIGGER_INDEX_SLOT_LIMIT).filter((rule) => triggerMatches(eventName, rule.trigger, input));
+    if (candidates.length === 0) return { continue: true };
+    const lock = acquireSessionLock(dataRoot, input.sessionId);
+    if (!lock) return { continue: true };
+    try {
+      const pushed = readState(dataRoot, input.sessionId);
+      const matches = candidates.filter((rule) => !pushed.has(rule.id)).slice(0, EVENT_HIT_LIMIT);
+      if (matches.length === 0) return { continue: true };
+      const timestamp = nowMs();
+      const hits = createHits(
+        eventName,
+        input,
+        matches.map((rule) => rule.id),
+        timestamp,
+        randomUuid
+      );
+      const previousPushed = new Set(pushed);
+      for (const rule of matches) pushed.add(rule.id);
+      writeState(dataRoot, input.sessionId, pushed);
+      try {
+        withHitSidecarLock(
+          dataRoot,
+          () => appendHits(resolveHitSidecarPath(dataRoot, timestamp), hits),
+          { waitMs: 35 }
+        );
+      } catch (error48) {
+        writeState(dataRoot, input.sessionId, previousPushed);
+        throw error48;
+      }
+      return {
+        continue: true,
+        hookSpecificOutput: `## Mnemo Tips
+${matches.map((rule) => `- ${rule.claim}`).join("\n")}`
+      };
+    } finally {
+      releaseSessionLock(lock);
+    }
+  };
+}
+function createPreToolUseDispatcher(dependencies = {}) {
+  return createDispatcher("PreToolUse", dependencies);
+}
+function createUserPromptSubmitDispatcher(dependencies = {}) {
+  return createDispatcher("UserPromptSubmit", dependencies);
+}
+function createPostToolUseDispatcher(dependencies = {}) {
+  return createDispatcher("PostToolUse", dependencies);
+}
+
+// src/hooks/note-reminder.ts
+var NOTE_REMINDER_DISPLAY_LIMIT = 5;
+var NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
+var PROMPT_PREFIX_CHARACTERS = 40;
+function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
+  const ordered = [...open2].sort(
+    (left, right) => left.promptNumber - right.promptNumber
+  );
+  const writable = ordered.filter((debt) => !debt.wasRolledBack);
+  const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
+  return {
+    writable: writable.slice(0, displayLimit),
+    rolledBack: rolledBack.slice(0, displayLimit),
+    writableTotal: writable.length
+  };
+}
+function formatTurnAddress(debt) {
+  return `S${debt.sessionId}/T${debt.promptNumber}`;
+}
+function formatPromptPrefix(userPrompt) {
+  const collapsed = (userPrompt ?? "").replace(/\s+/gu, " ").replace(/"/gu, "'").trim();
+  if (collapsed === "") {
+    return '""';
+  }
+  const characters = Array.from(collapsed);
+  return characters.length > PROMPT_PREFIX_CHARACTERS ? `"${characters.slice(0, PROMPT_PREFIX_CHARACTERS).join("")}\u2026"` : `"${collapsed}"`;
+}
+function pendingSuffix(pendingTurns) {
+  return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
+}
+function renderNoteReminder(view) {
+  const lines = ["<system-reminder>mnemo pending notes:"];
+  for (const debt of view.writable) {
+    lines.push(
+      `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`
+    );
+  }
+  for (const debt of view.rolledBack) {
+    lines.push(
+      `  [${formatTurnAddress(debt)}] rolled back \u2014 no note needed.`
+    );
+  }
+  const oldest = view.writable[0];
+  if (!oldest) {
+    lines.push("No notes are due.");
+  } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
+    lines.push(
+      "Write the pending notes in this batch; skipping is no longer authorized."
+    );
+  } else {
+    lines.push(
+      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of this batch; skip if busy.`
+    );
+  }
+  lines.push("</system-reminder>");
+  return lines.join("\n");
+}
+
+// src/hooks/handlers/note-reminder.ts
+function getLatestTurn2(db, sessionDbId) {
+  return db.query(
+    `SELECT id, prompt_number AS promptNumber FROM turns
+         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+  ).get(sessionDbId) ?? null;
+}
+function createNoteReminderHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  return async function handleNoteReminderHook(input) {
+    if (input.eventName !== "PostToolUse") {
+      return { continue: true };
+    }
+    if (input.agentId !== void 0) {
+      return { continue: true };
+    }
+    if (!input.sessionId || !input.toolName) {
+      return { continue: true };
+    }
+    if (isNoteToolName(input.toolName)) {
+      return { continue: true };
+    }
+    const session = getSessionByContentId(dependencies.db, input.sessionId);
+    if (!session) {
+      return { continue: true };
+    }
+    const rideTurn = getLatestTurn2(dependencies.db, session.id);
+    if (!rideTurn) {
+      return { continue: true };
+    }
+    const open2 = listOpenNoteDebt(dependencies.db, session.id, {
+      latestPromptNumber: rideTurn.promptNumber,
+      agingTurns
+    });
+    if (open2.length === 0) {
+      return { continue: true };
+    }
+    let view = null;
+    try {
+      view = writeTransaction(dependencies.db, () => {
+        if (hasReminderForRideTurn(dependencies.db, session.id, rideTurn.id)) {
+          return null;
+        }
+        const exposed = getExposedTurnIds(dependencies.db, session.id, "reminder");
+        if (open2.every((debt) => exposed.has(debt.turnId))) {
+          return null;
+        }
+        const selected = selectNoteReminderItems(open2, displayLimit);
+        recordNoteIdExposure(dependencies.db, {
+          sessionId: session.id,
+          rideTurnId: rideTurn.id,
+          exposedTurnIds: [
+            ...selected.writable.map((debt) => debt.turnId),
+            ...selected.rolledBack.map((debt) => debt.turnId)
+          ],
+          source: "reminder",
+          nowEpoch: now()
+        });
+        return selected;
+      });
+    } catch (error48) {
+      dependencies.logger?.warn?.("note reminder skipped", {
+        sessionId: input.sessionId,
+        reasonCode: "exposure-write-failed",
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return { continue: true };
+    }
+    if (!view) {
+      return { continue: true };
+    }
+    return {
+      continue: true,
+      hookSpecificOutput: renderNoteReminder(view)
+    };
+  };
+}
+
+// src/hooks/handlers/result-dispatch.ts
+function createResultDispatchHandler(dependencies = {}) {
+  const { db, now, ...dispatcherDependencies } = dependencies;
+  const ruleDispatcher = createPostToolUseDispatcher(dispatcherDependencies);
+  const noteReminder = db ? createNoteReminderHandler({ db, now }) : void 0;
+  return async function handleResultDispatch(input) {
+    const sections = [];
+    const rules = await ruleDispatcher(input);
+    if (rules.hookSpecificOutput) {
+      sections.push(rules.hookSpecificOutput);
+    }
+    if (noteReminder) {
+      const reminder = await noteReminder(input);
+      if (reminder.hookSpecificOutput) {
+        sections.push(reminder.hookSpecificOutput);
+      }
+    }
+    return sections.length > 0 ? { continue: true, hookSpecificOutput: sections.join("\n\n") } : { continue: true };
   };
 }
 
@@ -21434,7 +22292,7 @@ function enqueueSessionEndSettlementJob(db, sessionId, nowEpoch, hadActivity, op
 }
 
 // src/hooks/transcript-scan.ts
-var import_node_fs5 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var DEFAULT_SCAN_MAX_LINES = 5e3;
 var DEFAULT_SCAN_MAX_BYTES = 5 * 1024 * 1024;
 var NEWLINE_BYTE = 10;
@@ -21444,27 +22302,27 @@ function readRange(transcriptPath, start, length) {
   }
   let fd = null;
   try {
-    fd = (0, import_node_fs5.openSync)(transcriptPath, "r");
+    fd = (0, import_node_fs7.openSync)(transcriptPath, "r");
     const buffer = Buffer.alloc(length);
-    const bytesRead = (0, import_node_fs5.readSync)(fd, buffer, 0, length, start);
+    const bytesRead = (0, import_node_fs7.readSync)(fd, buffer, 0, length, start);
     return buffer.subarray(0, bytesRead);
   } catch {
     return null;
   } finally {
     if (fd !== null) {
-      (0, import_node_fs5.closeSync)(fd);
+      (0, import_node_fs7.closeSync)(fd);
     }
   }
 }
 function scanTranscriptIncrementally(transcriptPath, cursor, options = {}) {
-  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs7.existsSync)(transcriptPath)) {
     return null;
   }
   const maxLines = options.maxLines ?? DEFAULT_SCAN_MAX_LINES;
   const maxBytes = options.maxBytes ?? DEFAULT_SCAN_MAX_BYTES;
   let fileSize;
   try {
-    fileSize = (0, import_node_fs5.statSync)(transcriptPath).size;
+    fileSize = (0, import_node_fs7.statSync)(transcriptPath).size;
   } catch {
     return null;
   }
@@ -22690,6 +23548,40 @@ function computePrefixOverlap(prefix, foreignOwners, ownership, childSessionId) 
 }
 
 // src/hooks/backfill.ts
+function backfillShadowNoteWriterModels(db, sessionId, transcriptTurns) {
+  const hasUnattributedNote = db.query(
+    `SELECT 1 AS present
+       FROM shadow_notes n
+       JOIN turns t ON t.id = n.ride_turn_id
+       WHERE t.session_id = ? AND n.writer_model IS NULL
+       LIMIT 1`
+  ).get(sessionId);
+  if (!hasUnattributedNote) {
+    return 0;
+  }
+  const byPromptId = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND content_prompt_id = ?"
+  );
+  const byPromptNumber = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const update = db.query(
+    `UPDATE shadow_notes SET writer_model = ?
+     WHERE ride_turn_id = ? AND writer_model IS NULL`
+  );
+  let filled = 0;
+  for (const transcriptTurn of transcriptTurns) {
+    if (!transcriptTurn.assistantModel) {
+      continue;
+    }
+    const rideTurn = (transcriptTurn.promptId ? byPromptId.get(sessionId, transcriptTurn.promptId) : null) ?? byPromptNumber.get(sessionId, transcriptTurn.promptNumber);
+    if (!rideTurn) {
+      continue;
+    }
+    filled += update.run(transcriptTurn.assistantModel, rideTurn.id)?.changes ?? 0;
+  }
+  return filled;
+}
 function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantMessage, transcriptTurns) {
   if (pendingTurns.length === 0) {
     return;
@@ -22725,7 +23617,7 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
 }
 
 // src/hooks/handlers/stop.ts
-function getLatestTurn2(db, sessionDbId) {
+function getLatestTurn3(db, sessionDbId) {
   const row = db.query(
     `
         SELECT
@@ -22755,6 +23647,7 @@ function hasTurnStopTask(db, turnId) {
 function createStopHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
   return async function handleStopHook(input) {
     if (input.stopHookActive || !input.sessionId) {
       return {
@@ -22769,7 +23662,7 @@ function createStopHandler(dependencies) {
         exitCode: HOOK_SUCCESS_EXIT_CODE
       };
     }
-    const turn = getLatestTurn2(dependencies.db, session.id);
+    const turn = getLatestTurn3(dependencies.db, session.id);
     if (!turn) {
       return {
         continue: true,
@@ -22848,6 +23741,26 @@ function createStopHandler(dependencies) {
           epoch
         );
       }
+      try {
+        reconcileNoteDebt(dependencies.db, {
+          sessionId: session.id,
+          nowEpoch: epoch,
+          completedTurnId: turn.id
+        });
+        if (parsedTurns) {
+          backfillShadowNoteWriterModels(
+            dependencies.db,
+            session.id,
+            parsedTurns
+          );
+        }
+      } catch (error48) {
+        logger.warn?.("note debt reconcile failed", {
+          sessionId: input.sessionId,
+          reasonCode: "stop-completion",
+          error: error48 instanceof Error ? error48.message : String(error48)
+        });
+      }
     });
     return {
       continue: true,
@@ -22867,385 +23780,17 @@ function createStopHandler(dependencies) {
   };
 }
 
-// src/rules/pretooluse-dispatcher.ts
-var import_node_fs7 = require("node:fs");
-var import_node_crypto3 = require("node:crypto");
-var import_node_path13 = require("node:path");
-
-// src/rules/sidecar-protocol.ts
-var import_node_crypto2 = require("node:crypto");
-var import_node_fs6 = require("node:fs");
-var import_node_path12 = require("node:path");
-var INPUT_SUMMARY_LIMIT = 200;
-var SIDECAR_LOCK_WAIT_MS = 5e3;
-var lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
-function isErrorCode(error48, code) {
-  return error48 instanceof Error && "code" in error48 && error48.code === code;
-}
-function resolveHitSidecarLockPath(dataRoot) {
-  return (0, import_node_path12.join)(dataRoot, "rules", "hits.lock");
-}
-function summarizeToolInput(value) {
-  const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
-  return Array.from(stripPrivateTags(serialized)).slice(0, INPUT_SUMMARY_LIMIT).join("");
-}
-function readLockOwner(path2) {
-  try {
-    const value = JSON.parse(
-      (0, import_node_fs6.readFileSync)(path2, "utf8")
-    );
-    return Number.isInteger(value.pid) && value.pid > 0 && typeof value.token === "string" ? { pid: value.pid, token: value.token } : null;
-  } catch {
-    return null;
-  }
-}
-function withHitSidecarLock(dataRoot, operation, options = {}) {
-  const path2 = resolveHitSidecarLockPath(dataRoot);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
-  const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
-  if (!Number.isFinite(waitMs) || waitMs < 0) {
-    throw new Error("waitMs must be a non-negative finite number");
-  }
-  const owner = { pid: process.pid, token: (0, import_node_crypto2.randomUUID)() };
-  const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
-  (0, import_node_fs6.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
-  const deadline = performance.now() + waitMs;
-  let acquired = false;
-  try {
-    while (performance.now() <= deadline) {
-      try {
-        (0, import_node_fs6.linkSync)(temporary, path2);
-        acquired = true;
-        break;
-      } catch (error48) {
-        if (!isErrorCode(error48, "EEXIST")) throw error48;
-        Atomics.wait(lockWaitArray, 0, 0, 1);
-      }
-    }
-    if (!acquired) {
-      throw new Error("timed out waiting for the hit sidecar lock");
-    }
-    return operation();
-  } finally {
-    try {
-      (0, import_node_fs6.unlinkSync)(temporary);
-    } catch (error48) {
-      if (!isErrorCode(error48, "ENOENT")) throw error48;
-    }
-    if (acquired && readLockOwner(path2)?.token === owner.token) {
-      try {
-        (0, import_node_fs6.unlinkSync)(path2);
-      } catch (error48) {
-        if (!isErrorCode(error48, "ENOENT")) throw error48;
-      }
-    }
-  }
-}
-
-// src/rules/pretooluse-dispatcher.ts
-var EVENT_HIT_LIMIT = 2;
-var SESSION_LOCK_WAIT_MS = 35;
-var STALE_SESSION_LOCK_MS = 3e4;
-var lockWaitArray2 = new Int32Array(new SharedArrayBuffer(4));
-function resolveTriggerIndexPath(dataRoot = DATA_DIR) {
-  return (0, import_node_path13.join)(dataRoot, "rules", "trigger-index.json");
-}
-function resolveSessionStateDirectory(dataRoot = DATA_DIR) {
-  return (0, import_node_path13.join)(dataRoot, "rules", "session-state");
-}
-function localDate(tsMs) {
-  const date5 = new Date(tsMs);
-  const year = date5.getFullYear();
-  const month = String(date5.getMonth() + 1).padStart(2, "0");
-  const day = String(date5.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function resolveHitSidecarPath(dataRoot = DATA_DIR, tsMs = Date.now()) {
-  return (0, import_node_path13.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
-}
-function sessionStatePath(dataRoot, sessionId) {
-  const digest = (0, import_node_crypto3.createHash)("sha256").update(sessionId).digest("hex");
-  return (0, import_node_path13.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
-}
-function readIndex(dataRoot) {
-  try {
-    return triggerIndexSchema.parse(
-      JSON.parse((0, import_node_fs7.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
-    );
-  } catch {
-    return void 0;
-  }
-}
-function readState(dataRoot, sessionId) {
-  try {
-    const parsed = JSON.parse(
-      (0, import_node_fs7.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
-    );
-    if (parsed.version !== 1 || !Array.isArray(parsed.rule_ids)) return /* @__PURE__ */ new Set();
-    return new Set(
-      parsed.rule_ids.filter(
-        (id) => Number.isInteger(id) && id > 0
-      )
-    );
-  } catch {
-    return /* @__PURE__ */ new Set();
-  }
-}
-function writeState(dataRoot, sessionId, ruleIds) {
-  const path2 = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
-  const temporary = `${path2}.${process.pid}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
-  (0, import_node_fs7.writeFileSync)(
-    temporary,
-    `${JSON.stringify({
-      version: 1,
-      rule_ids: [...ruleIds].sort((left, right) => left - right)
-    })}
-`,
-    { mode: 384 }
-  );
-  (0, import_node_fs7.renameSync)(temporary, path2);
-}
-function acquireSessionLock(dataRoot, sessionId) {
-  const statePath = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
-  const path2 = `${statePath}.lock`;
-  const deadline = performance.now() + SESSION_LOCK_WAIT_MS;
-  while (performance.now() <= deadline) {
-    try {
-      return {
-        descriptor: (0, import_node_fs7.openSync)(
-          path2,
-          import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_EXCL | import_node_fs7.constants.O_WRONLY,
-          384
-        ),
-        path: path2
-      };
-    } catch (error48) {
-      if (!(error48 instanceof Error) || !("code" in error48) || error48.code !== "EEXIST") {
-        throw error48;
-      }
-      try {
-        if (Date.now() - (0, import_node_fs7.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
-          (0, import_node_fs7.unlinkSync)(path2);
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(lockWaitArray2, 0, 0, 1);
-    }
-  }
-  return void 0;
-}
-function releaseSessionLock(lock) {
-  (0, import_node_fs7.closeSync)(lock.descriptor);
-  try {
-    (0, import_node_fs7.unlinkSync)(lock.path);
-  } catch {
-  }
-}
-function appendHits(path2, hits) {
-  (0, import_node_fs7.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
-  const descriptor = (0, import_node_fs7.openSync)(
-    path2,
-    import_node_fs7.constants.O_APPEND | import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_WRONLY,
-    384
-  );
-  try {
-    (0, import_node_fs7.writeFileSync)(
-      descriptor,
-      `${hits.map((hit) => JSON.stringify(hit)).join("\n")}
-`
-    );
-  } finally {
-    (0, import_node_fs7.closeSync)(descriptor);
-  }
-}
-function hasOwnParameter(input, parameter) {
-  return Object.prototype.hasOwnProperty.call(input, parameter);
-}
-function commandPrefixMatches(input, prefix) {
-  if (typeof input.command !== "string") return false;
-  const tokens = input.command.trim().split(/\s+/u);
-  return prefix.every((expected, index) => tokens[index] === expected);
-}
-function globExpression(pattern) {
-  let expression = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index];
-    if (character === "*") {
-      if (pattern[index + 1] === "*") {
-        if (pattern[index + 2] === "/") {
-          expression += "(?:.*/)?";
-          index += 2;
-        } else {
-          expression += ".*";
-          index += 1;
-        }
-      } else {
-        expression += "[^/]*";
-      }
-    } else if (character === "?") {
-      expression += "[^/]";
-    } else {
-      expression += character.replace(/[|\\{}()[\]^$+?.]/gu, "\\$&");
-    }
-  }
-  return new RegExp(`${expression}$`, "u");
-}
-function pathGlobMatches(input, cwd, pathGlob) {
-  const candidate = [input.path, input.file_path, input.notebook_path].find(
-    (value) => typeof value === "string" && value !== ""
-  );
-  if (!candidate) return false;
-  return globExpression((0, import_node_path13.resolve)(cwd, pathGlob)).test((0, import_node_path13.resolve)(cwd, candidate));
-}
-function toolTriggerMatches(trigger, input) {
-  if (input.toolName !== trigger.tool) return false;
-  const toolInput = typeof input.toolInput === "object" && input.toolInput !== null && !Array.isArray(input.toolInput) ? input.toolInput : {};
-  if (trigger.require_param && !hasOwnParameter(toolInput, trigger.require_param)) {
-    return false;
-  }
-  if (trigger.param_absent && hasOwnParameter(toolInput, trigger.param_absent)) {
-    return false;
-  }
-  if (trigger.command_prefix && !commandPrefixMatches(toolInput, trigger.command_prefix)) {
-    return false;
-  }
-  if (trigger.path_glob && (!input.cwd || !pathGlobMatches(toolInput, input.cwd, trigger.path_glob))) {
-    return false;
-  }
-  return true;
-}
-function promptTriggerMatches(trigger, prompt) {
-  const normalizedPrompt = prompt.toLowerCase();
-  const matches = trigger.keywords.map(
-    (keyword) => normalizedPrompt.includes(keyword.toLowerCase())
-  );
-  return trigger.match === "all" ? matches.every(Boolean) : matches.some(Boolean);
-}
-function resultHead(value) {
-  const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
-  return Buffer.from(serialized).subarray(0, 8 * 1024).toString("utf8");
-}
-function resultTriggerMatches(trigger, input) {
-  if (trigger.tool && input.toolName !== trigger.tool) return false;
-  const head = resultHead(input.toolResponse);
-  return trigger.patterns.some((pattern) => head.includes(pattern));
-}
-function triggerMatches(eventName, trigger, input) {
-  switch (eventName) {
-    case "PreToolUse":
-      return trigger.kind === "tool" && toolTriggerMatches(trigger, input);
-    case "UserPromptSubmit":
-      return trigger.kind === "prompt" && promptTriggerMatches(trigger, input.prompt ?? "");
-    case "PostToolUse":
-      return trigger.kind === "result" && resultTriggerMatches(trigger, input);
-  }
-}
-function hasRequiredIdentity(eventName, input) {
-  if (!input.sessionId || !input.cwd) return false;
-  if (eventName === "UserPromptSubmit") return Boolean(input.prompt);
-  if (eventName === "PreToolUse") return Boolean(input.toolName);
-  return Boolean(input.toolName) && input.toolResponse !== void 0;
-}
-function summarizePrompt(prompt) {
-  return Array.from(prompt).slice(0, 200).join("");
-}
-function createHits(eventName, input, ruleIds, timestamp, randomUuid) {
-  if (eventName === "UserPromptSubmit") {
-    return ruleIds.map((ruleId) => ({
-      hit_id: randomUuid(),
-      content_session_id: input.sessionId,
-      event_type: eventName,
-      ts_ms: timestamp,
-      rule_id: ruleId,
-      prompt_summary: summarizePrompt(input.prompt)
-    }));
-  }
-  return ruleIds.map((ruleId) => ({
-    hit_id: randomUuid(),
-    content_session_id: input.sessionId,
-    event_type: eventName,
-    ts_ms: timestamp,
-    rule_id: ruleId,
-    tool_name: input.toolName,
-    tool_input_summary: summarizeToolInput(input.toolInput),
-    ...input.toolUseId ? { tool_use_id: input.toolUseId } : {}
-  }));
-}
-function createDispatcher(eventName, dependencies) {
-  const dataRoot = dependencies.dataRoot ?? DATA_DIR;
-  const nowMs = dependencies.nowMs ?? Date.now;
-  const randomUuid = dependencies.randomUuid ?? import_node_crypto3.randomUUID;
-  return (input) => {
-    if (input.eventName !== eventName || !hasRequiredIdentity(eventName, input)) {
-      return { continue: true };
-    }
-    const index = readIndex(dataRoot);
-    if (!index) return { continue: true };
-    const project = (0, import_node_path13.resolve)(input.cwd);
-    const candidates = index.rules.filter(
-      (rule) => rule.scope === "global" || (0, import_node_path13.resolve)(rule.scope) === project
-    ).slice(0, TRIGGER_INDEX_SLOT_LIMIT).filter((rule) => triggerMatches(eventName, rule.trigger, input));
-    if (candidates.length === 0) return { continue: true };
-    const lock = acquireSessionLock(dataRoot, input.sessionId);
-    if (!lock) return { continue: true };
-    try {
-      const pushed = readState(dataRoot, input.sessionId);
-      const matches = candidates.filter((rule) => !pushed.has(rule.id)).slice(0, EVENT_HIT_LIMIT);
-      if (matches.length === 0) return { continue: true };
-      const timestamp = nowMs();
-      const hits = createHits(
-        eventName,
-        input,
-        matches.map((rule) => rule.id),
-        timestamp,
-        randomUuid
-      );
-      const previousPushed = new Set(pushed);
-      for (const rule of matches) pushed.add(rule.id);
-      writeState(dataRoot, input.sessionId, pushed);
-      try {
-        withHitSidecarLock(
-          dataRoot,
-          () => appendHits(resolveHitSidecarPath(dataRoot, timestamp), hits),
-          { waitMs: 35 }
-        );
-      } catch (error48) {
-        writeState(dataRoot, input.sessionId, previousPushed);
-        throw error48;
-      }
-      return {
-        continue: true,
-        hookSpecificOutput: `## Mnemo Tips
-${matches.map((rule) => `- ${rule.claim}`).join("\n")}`
-      };
-    } finally {
-      releaseSessionLock(lock);
-    }
-  };
-}
-function createPreToolUseDispatcher(dependencies = {}) {
-  return createDispatcher("PreToolUse", dependencies);
-}
-function createUserPromptSubmitDispatcher(dependencies = {}) {
-  return createDispatcher("UserPromptSubmit", dependencies);
-}
-function createPostToolUseDispatcher(dependencies = {}) {
-  return createDispatcher("PostToolUse", dependencies);
-}
-
 // src/hooks/hook-command.ts
 var defaultHandlers;
 var defaultReadOnlyContextHandlers;
 var defaultRecentContextHandler;
 var defaultDigestContextHandler;
 var defaultMilestoneContextHandler;
+var defaultNoteTakingContextHandler;
 var defaultPreToolUseHandler;
 var defaultUserPromptSubmitDispatcher;
-var defaultPostToolUseDispatcher;
+var defaultResultDispatchHandler;
+var defaultHookDatabase;
 var HOOK_DB_BUSY_TIMEOUT_MS = 800;
 function createDefaultReadOnlyContextHandlers({
   dataRoot = DATA_DIR
@@ -23283,6 +23828,7 @@ function createDefaultHookHandlers({
     ),
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:milestones": createMilestoneContextHandler({ db }),
+    "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
     PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
@@ -23291,14 +23837,21 @@ function createDefaultHookHandlers({
     Stop: createStopHandler({ db, workerClientDeps, workerEnv })
   };
 }
+function getDefaultHookDatabase() {
+  if (!defaultHookDatabase) {
+    defaultHookDatabase = createDatabase(void 0, {
+      busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS
+    });
+    initializeDatabase(defaultHookDatabase);
+  }
+  return defaultHookDatabase;
+}
 function getDefaultHandlers() {
   if (defaultHandlers) {
     return defaultHandlers;
   }
-  const db = createDatabase(void 0, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
-  initializeDatabase(db);
   defaultHandlers = createDefaultHookHandlers({
-    db,
+    db: getDefaultHookDatabase(),
     workerEnv: process.env,
     enableSessionEnvCapture: true
   });
@@ -23373,11 +23926,19 @@ function getDefaultUserPromptSubmitDispatcher() {
   }
   return defaultUserPromptSubmitDispatcher;
 }
-function getDefaultPostToolUseDispatcher() {
-  if (!defaultPostToolUseDispatcher) {
-    defaultPostToolUseDispatcher = createPostToolUseDispatcher();
+function getDefaultResultDispatchHandler() {
+  if (!defaultResultDispatchHandler) {
+    defaultResultDispatchHandler = createResultDispatchHandler({
+      db: getDefaultHookDatabase()
+    });
   }
-  return defaultPostToolUseDispatcher;
+  return defaultResultDispatchHandler;
+}
+function getDefaultNoteTakingContextHandler() {
+  if (!defaultNoteTakingContextHandler) {
+    defaultNoteTakingContextHandler = createNoteTakingContextHandler();
+  }
+  return defaultNoteTakingContextHandler;
 }
 function getDefaultHandler(handlerKey) {
   if (handlerKey === "PreToolUse") {
@@ -23387,7 +23948,10 @@ function getDefaultHandler(handlerKey) {
     return getDefaultUserPromptSubmitDispatcher();
   }
   if (handlerKey === "PostToolUse:rule-dispatch") {
-    return getDefaultPostToolUseDispatcher();
+    return getDefaultResultDispatchHandler();
+  }
+  if (handlerKey === "SessionStart:notes") {
+    return getDefaultNoteTakingContextHandler();
   }
   if (handlerKey === "SessionStart:recent") {
     return getDefaultRecentContextHandler();
@@ -23448,7 +24012,7 @@ function contextSectionFromCommandArguments(command, section) {
   if (command !== "context") {
     return "sessions";
   }
-  return section === "persona" || section === "recent" || section === "digest" || section === "milestones" ? section : "sessions";
+  return section === "persona" || section === "recent" || section === "digest" || section === "milestones" || section === "notes" ? section : "sessions";
 }
 function writeHookResult(result, eventName, stdout = process.stdout) {
   const output = {

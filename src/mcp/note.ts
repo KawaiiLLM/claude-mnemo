@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
+import { getNoteDebt } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn } from "../db/turns";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -173,6 +174,25 @@ export function noteTool(
     );
   }
 
+  // Only a turn that owes a note, or one already noted, may be written to.
+  //
+  // This is the guard against a mistyped or borrowed address, and it is the only
+  // one available: an MCP server is told nothing about which session is calling
+  // it, so "is this my own turn?" cannot be asked directly. An open debt is the
+  // session anchor instead — it exists only for turns of the session that ran
+  // them — and it makes ride_turn coherent as a side effect, since ride_turn is
+  // derived from the address's session. Without it, a note addressed at another
+  // session's turn silently attributes itself to THAT session's newest turn.
+  const existing = getShadowNote(db, turn.id);
+  const debt = getNoteDebt(db, turn.id);
+  if (!existing && debt?.status !== "pending") {
+    return parameterError(
+      `S${address.sessionId}/T${address.promptNumber} owes no note` +
+        `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
+        " Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.",
+    );
+  }
+
   // Same removal the transcript capture path applies (D10). It runs at the
   // persistence boundary, not at the caller's discretion: instruction
   // discipline alone has no enforcement, and the strip is what makes the
@@ -191,8 +211,6 @@ export function noteTool(
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-
-  const existing = getShadowNote(db, turn.id);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
 
   runWriteTransaction(db, () =>

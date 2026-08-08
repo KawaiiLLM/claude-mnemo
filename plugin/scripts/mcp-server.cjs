@@ -7952,6 +7952,9 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS diary_day_state");
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS shadow_notes");
+  db.exec("DROP TABLE IF EXISTS note_id_exposures");
+  db.exec("DROP TABLE IF EXISTS note_debt_cursor");
+  db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
@@ -8144,6 +8147,64 @@ var init_schema = __esm({
 
   CREATE INDEX IF NOT EXISTS idx_shadow_notes_ride_turn
     ON shadow_notes(ride_turn_id);
+
+  -- P1 note-debt ledger (spec D2/D3), shadow side like shadow_notes: it records
+  -- which turns still owe a note and how each debt ended, and it never touches a
+  -- turns row or its status \u2014 the legacy pipeline keeps sole ownership of those.
+  --
+  -- turn_id is the PRIMARY KEY: one debt per turn, and re-running the completion
+  -- classification is an INSERT that loses the race rather than a second debt.
+  -- A trivial turn (no substantive tool call) gets NO row at all \u2014 "not in the
+  -- ledger" is the representation of "owes nothing", so the ledger's size tracks
+  -- real debt rather than session length.
+  CREATE TABLE IF NOT EXISTS note_debt (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    prompt_number INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'noted', 'skipped')
+    ),
+    -- Only a skipped debt carries a reason (D4's status vocabulary).
+    reason TEXT CHECK (
+      reason IS NULL OR reason IN ('aged', 'rolled-back')
+    ),
+    opened_at_epoch INTEGER NOT NULL,
+    closed_at_epoch INTEGER,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_debt_open
+    ON note_debt(session_id, status, prompt_number);
+
+  -- How far the completion classification has already walked, per session. It is
+  -- what keeps the sweep O(new turns) instead of O(session): without it, every
+  -- trivial turn \u2014 which by design leaves no ledger row \u2014 would be re-examined
+  -- on every tool call for the life of the session.
+  CREATE TABLE IF NOT EXISTS note_debt_cursor (
+    session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  -- Exposure ledger (spec D7): every turn id this session has actually shown the
+  -- main agent, and the turn it was shown during. P2's citation check reads it \u2014
+  -- a note may cite only ids its writer was shown \u2014 so a row must mean "rendered
+  -- into the model's context", never "was in the ledger at the time".
+  --
+  -- Keyed by (ride_turn_id, exposed_turn_id): re-showing an id in a later turn
+  -- adds a row, which is also the "a reminder already fired this turn" fact the
+  -- at-most-once-per-turn rule reads.
+  CREATE TABLE IF NOT EXISTS note_id_exposures (
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    ride_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    exposed_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    source TEXT NOT NULL CHECK (source IN ('reminder', 'injection')),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (session_id, ride_turn_id, exposed_turn_id, source)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
+    ON note_id_exposures(session_id, exposed_turn_id);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -32072,6 +32133,23 @@ var noteInputSchema = external_exports3.object(noteInputShape).strict();
 // src/mcp/note.ts
 init_database();
 
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
   turn_id AS turnId,
@@ -32483,6 +32561,13 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
+  const existing = getShadowNote(db, turn.id);
+  const debt = getNoteDebt(db, turn.id);
+  if (!existing && debt?.status !== "pending") {
+    return parameterError(
+      `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.`
+    );
+  }
   const rawTitle = titleInput.value;
   const rawContent = contentInput.value;
   const rawInsight = typeof rawInput.insight === "string" ? rawInput.insight : null;
@@ -32492,7 +32577,6 @@ function noteTool(db, rawInput, options = {}) {
   const stripped = title !== rawTitle || content !== rawContent || insight !== rawInsight;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-  const existing = getShadowNote(db, turn.id);
   const rideTurnId = getRideTurnId(db, turn.sessionId);
   runWriteTransaction(
     db,
@@ -32585,9 +32669,9 @@ function updateObservation(db, observationId, input) {
   }
   return updated;
 }
-function getObservationsForTurn(db, turnId) {
+function getExtractableObservationsForTurn(db, turnId) {
   return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? ORDER BY id ASC`
+    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
   ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
 function getObservation(db, observationId) {
@@ -33572,7 +33656,7 @@ function buildSessionSummary(db, sessionId) {
     `SELECT COUNT(*) AS count
          FROM observations o
          JOIN turns t ON t.id = o.turn_id
-         WHERE t.session_id = ?`
+         WHERE t.session_id = ? AND o.excluded_from_extraction = 0`
   ).get(session.id)?.count ?? 0;
   return {
     id: session.id,
@@ -33586,7 +33670,7 @@ function buildSessionSummary(db, sessionId) {
   };
 }
 function buildTurnView(db, turn) {
-  const observations = getObservationsForTurn(db, turn.id);
+  const observations = getExtractableObservationsForTurn(db, turn.id);
   return {
     id: turn.id,
     promptNumber: turn.promptNumber,
@@ -34025,7 +34109,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     if (!turn) {
       return "Turn not found.";
     }
-    const observations = getObservationsForTurn(db, turn.id).filter((observation) => {
+    const observations = getExtractableObservationsForTurn(db, turn.id).filter((observation) => {
       if (after !== void 0 && observation.createdAtEpoch < after) {
         return false;
       }
@@ -34047,7 +34131,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
   }
   if (routed.kind === "session-observation-list") {
     const observations = getTurnsForSession(db, routed.sessionId).flatMap(
-      (turn) => getObservationsForTurn(db, turn.id).filter((observation) => {
+      (turn) => getExtractableObservationsForTurn(db, turn.id).filter((observation) => {
         if (after !== void 0 && observation.createdAtEpoch < after) {
           return false;
         }

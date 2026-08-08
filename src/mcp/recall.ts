@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 
-import { getObservation, getObservationsForTurn } from "../db/observations";
+import {
+  getObservation,
+  getExtractableObservationsForTurn,
+} from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
 import { getSession } from "../db/sessions";
 import {
@@ -345,7 +348,7 @@ function getObservationCountByTurnId(
     .query<{ turnId: number; count: number }, number[]>(
       `SELECT turn_id AS turnId, COUNT(*) AS count
        FROM observations
-       WHERE turn_id IN (${placeholders})
+       WHERE turn_id IN (${placeholders}) AND excluded_from_extraction = 0
        GROUP BY turn_id`,
     )
     .all(...turnIds);
@@ -374,7 +377,7 @@ export function buildSessionSummary(
         `SELECT COUNT(*) AS count
          FROM observations o
          JOIN turns t ON t.id = o.turn_id
-         WHERE t.session_id = ?`,
+         WHERE t.session_id = ? AND o.excluded_from_extraction = 0`,
       )
       .get(session.id)?.count ?? 0;
 
@@ -455,7 +458,11 @@ export function buildFormattedSession(
 }
 
 export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
-  const observations = getObservationsForTurn(db, turn.id);
+  // Excluded observations (a `note` call) stay out of every reader-facing view:
+  // their count, their ids and their tool names are as much of a leak as their
+  // payloads would be — the P1 comparison needs the note channel invisible to
+  // the pipeline's own output, and an id here is an id the model can then fetch.
+  const observations = getExtractableObservationsForTurn(db, turn.id);
   return {
     id: turn.id,
     promptNumber: turn.promptNumber,
@@ -1093,7 +1100,7 @@ function renderRoutedId(
       return "Turn not found.";
     }
 
-    const observations = getObservationsForTurn(db, turn.id)
+    const observations = getExtractableObservationsForTurn(db, turn.id)
       .filter((observation) => {
         if (after !== undefined && observation.createdAtEpoch < after) {
           return false;
@@ -1120,7 +1127,7 @@ function renderRoutedId(
   if (routed.kind === "session-observation-list") {
     const observations = getTurnsForSession(db, routed.sessionId)
       .flatMap((turn) =>
-        getObservationsForTurn(db, turn.id)
+        getExtractableObservationsForTurn(db, turn.id)
           .filter((observation) => {
             if (after !== undefined && observation.createdAtEpoch < after) {
               return false;

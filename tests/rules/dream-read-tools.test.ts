@@ -248,6 +248,34 @@ describe("dream rule read tools", () => {
       .not.toHaveProperty("observations");
   });
 
+  test("withholds a note call's observation, payload and identity alike", () => {
+    const session = db.query<{ id: number }, []>(
+      "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('excluded', '/project', 1) RETURNING id",
+    ).get()!;
+    const turn = db.query<{ id: number }, [number]>(
+      "INSERT INTO turns (session_id, prompt_number, status, created_at_epoch) VALUES (?, 1, 'extracted', 2) RETURNING id",
+    ).get(session.id)!;
+    db.query(
+      "INSERT INTO observations (turn_id, tool_name, tool_input, tool_result, created_at_epoch) VALUES (?, 'Bash', 'work', 'output', 3)",
+    ).run(turn.id);
+    db.query(
+      `INSERT INTO observations (
+         turn_id, tool_name, tool_input, tool_result,
+         excluded_from_extraction, created_at_epoch
+       ) VALUES (?, 'mcp__mnemo__note', '{"title":"secretnotetitle"}', 'Noted.', 1, 4)`,
+    ).run(turn.id);
+
+    // `full: true` is the dream agent's own reading mode — the one that would
+    // return the note text verbatim without the exclusion filter.
+    const detail = createDreamRuleReadTools({ db }).readTurnDetail("S1/T1", {
+      full: true,
+    });
+
+    expect(detail.observations).toHaveLength(1);
+    expect(detail.observations![0]).toMatchObject({ tool_name: "Bash" });
+    expect(JSON.stringify(detail)).not.toContain("secretnotetitle");
+  });
+
   test("errors for a missing or malformed turn_ref and conflicting truncation options", () => {
     const tools = createDreamRuleReadTools({ db });
     expect(() => tools.readTurnDetail("S999/T1")).toThrow("turn not found: S999/T1");

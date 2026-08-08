@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
 import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
+import { reconcileNoteDebt } from "../../db/note-debt";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
 import {
@@ -23,7 +24,10 @@ import {
 } from "../../worker/invalidation";
 import { detectAndCleanSubagentTurnsFromParsed } from "../../worker/subagent-filter";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
-import { backfillFromTranscript } from "../backfill";
+import {
+  backfillFromTranscript,
+  backfillShadowNoteWriterModels,
+} from "../backfill";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface StopHandlerDependencies {
@@ -32,6 +36,7 @@ export interface StopHandlerDependencies {
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
+  logger?: Pick<Console, "warn">;
 }
 
 function getLatestTurn(
@@ -89,6 +94,7 @@ function hasTurnStopTask(db: Database, turnId: number): boolean {
 export function createStopHandler(dependencies: StopHandlerDependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
 
   return async function handleStopHook(
     input: NormalizedHookInput,
@@ -217,6 +223,34 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           parsedTurns,
           epoch,
         );
+      }
+
+      // Stop is the turn-completion event (spec D3, R2#1): only now is the
+      // turn's tool batch final, so only now can it be classified as trivial or
+      // as owing a note. Classifying at creation would have to predict tool use.
+      //
+      // Both shadow-side writes are wrapped: a P1 trial artefact must never
+      // abort the capture transaction it shares.
+      try {
+        reconcileNoteDebt(dependencies.db, {
+          sessionId: session.id,
+          nowEpoch: epoch,
+          completedTurnId: turn.id,
+        });
+
+        if (parsedTurns) {
+          backfillShadowNoteWriterModels(
+            dependencies.db,
+            session.id,
+            parsedTurns,
+          );
+        }
+      } catch (error) {
+        logger.warn?.("note debt reconcile failed", {
+          sessionId: input.sessionId,
+          reasonCode: "stop-completion",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     });
 

@@ -19,11 +19,12 @@ import {
 } from "./handlers/context";
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createMilestoneContextHandler } from "./handlers/context-milestones";
+import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
+import { createResultDispatchHandler } from "./handlers/result-dispatch";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
 import {
-  createPostToolUseDispatcher,
   createPreToolUseDispatcher,
   createUserPromptSubmitDispatcher,
 } from "../rules/pretooluse-dispatcher";
@@ -44,9 +45,11 @@ let defaultReadOnlyContextHandlers: Record<string, HookHandler> | undefined;
 let defaultRecentContextHandler: HookHandler | undefined;
 let defaultDigestContextHandler: HookHandler | undefined;
 let defaultMilestoneContextHandler: HookHandler | undefined;
+let defaultNoteTakingContextHandler: HookHandler | undefined;
 let defaultPreToolUseHandler: HookHandler | undefined;
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
-let defaultPostToolUseDispatcher: HookHandler | undefined;
+let defaultResultDispatchHandler: HookHandler | undefined;
+let defaultHookDatabase: ReturnType<typeof createDatabase> | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
 export interface DefaultHookHandlersDependencies {
@@ -100,6 +103,7 @@ export function createDefaultHookHandlers({
     ),
     "SessionStart:digest": createReadOnlyContextHandler({ db }, "digest"),
     "SessionStart:milestones": createMilestoneContextHandler({ db }),
+    "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
     PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
@@ -109,16 +113,25 @@ export function createDefaultHookHandlers({
   };
 }
 
+// One writable handle per hook process, shared by every handler that needs one.
+// A hook process runs exactly one handler, so this opens at most one database.
+function getDefaultHookDatabase(): ReturnType<typeof createDatabase> {
+  if (!defaultHookDatabase) {
+    defaultHookDatabase = createDatabase(undefined, {
+      busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS,
+    });
+    initializeDatabase(defaultHookDatabase);
+  }
+  return defaultHookDatabase;
+}
+
 function getDefaultHandlers(): Record<string, HookHandler> {
   if (defaultHandlers) {
     return defaultHandlers;
   }
 
-  const db = createDatabase(undefined, { busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS });
-  initializeDatabase(db);
-
   defaultHandlers = createDefaultHookHandlers({
-    db,
+    db: getDefaultHookDatabase(),
     workerEnv: process.env,
     enableSessionEnvCapture: true,
   });
@@ -207,11 +220,23 @@ function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   return defaultUserPromptSubmitDispatcher;
 }
 
-function getDefaultPostToolUseDispatcher(): HookHandler {
-  if (!defaultPostToolUseDispatcher) {
-    defaultPostToolUseDispatcher = createPostToolUseDispatcher();
+// The synchronous PostToolUse entry. It needs a writable handle: rendering a
+// pending-notes reminder is also the act of recording that those ids were shown
+// (the exposure ledger), and only the renderer can know that.
+function getDefaultResultDispatchHandler(): HookHandler {
+  if (!defaultResultDispatchHandler) {
+    defaultResultDispatchHandler = createResultDispatchHandler({
+      db: getDefaultHookDatabase(),
+    });
   }
-  return defaultPostToolUseDispatcher;
+  return defaultResultDispatchHandler;
+}
+
+function getDefaultNoteTakingContextHandler(): HookHandler {
+  if (!defaultNoteTakingContextHandler) {
+    defaultNoteTakingContextHandler = createNoteTakingContextHandler();
+  }
+  return defaultNoteTakingContextHandler;
 }
 
 function getDefaultHandler(handlerKey: string): HookHandler | undefined {
@@ -222,7 +247,10 @@ function getDefaultHandler(handlerKey: string): HookHandler | undefined {
     return getDefaultUserPromptSubmitDispatcher();
   }
   if (handlerKey === "PostToolUse:rule-dispatch") {
-    return getDefaultPostToolUseDispatcher();
+    return getDefaultResultDispatchHandler();
+  }
+  if (handlerKey === "SessionStart:notes") {
+    return getDefaultNoteTakingContextHandler();
   }
   if (handlerKey === "SessionStart:recent") {
     return getDefaultRecentContextHandler();
@@ -290,14 +318,15 @@ function ruleDispatcherKeyFromCommandArgument(
 function contextSectionFromCommandArguments(
   command?: string,
   section?: string,
-): "sessions" | "persona" | "recent" | "digest" | "milestones" {
+): "sessions" | "persona" | "recent" | "digest" | "milestones" | "notes" {
   if (command !== "context") {
     return "sessions";
   }
   return section === "persona" ||
     section === "recent" ||
     section === "digest" ||
-    section === "milestones"
+    section === "milestones" ||
+    section === "notes"
     ? section
     : "sessions";
 }

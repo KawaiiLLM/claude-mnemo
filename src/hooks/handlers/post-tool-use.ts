@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { reconcileNoteDebt } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
 import type { TurnStatus } from "../../db/turns";
 import { isExtractionExcludedToolName } from "../../shared/note-tool";
@@ -79,6 +80,27 @@ export function createPostToolUseHandler(
     const excludedFromExtraction = isExtractionExcludedToolName(toolName);
 
     const writeResult = writeTransaction(dependencies.db, () => {
+      // Note-debt ownership (spec D2/D3): the asynchronous capture entry
+      // maintains the ledger, the synchronous reminder entry only reads it.
+      // Here it is a catch-up sweep — only turns older than the open one are
+      // classified — which covers turns that ended without a Stop event
+      // (interrupt, crash) and costs one indexed query when nothing is new.
+      //
+      // Wrapped: the shadow ledger is a P1 trial artefact and must never be
+      // able to abort the capture write it shares a transaction with.
+      try {
+        reconcileNoteDebt(dependencies.db, {
+          sessionId: session.id,
+          nowEpoch: createdAtEpoch,
+        });
+      } catch (error) {
+        logger.warn?.("note debt reconcile failed", {
+          sessionId: input.sessionId,
+          reasonCode: "post-tool-use-sweep",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
       const latestTurn = getLatestTurn(dependencies.db, session.id);
       if (!latestTurn) {
         return { outcome: "no-root-turn" as const, turnId: null };

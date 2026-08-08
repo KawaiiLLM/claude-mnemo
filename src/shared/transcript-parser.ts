@@ -19,6 +19,13 @@ export interface TranscriptEntry {
   type?: string;
   subtype?: string;
   role?: string;
+  /**
+   * `message.model` on an assistant entry — the only mechanical source of the
+   * writing model's identity. Claude Code hands an MCP server no model name (not
+   * in the environment, not in the request), so a note's `writer_model` can only
+   * be recovered here, from the transcript, after the fact.
+   */
+  model?: string;
   content?: TranscriptContentBlock[] | string;
   promptId?: string;
   permissionMode?: string;
@@ -67,6 +74,12 @@ export interface ParsedReplayTurn {
   toolCalls: ReplayToolCall[];
   isSidechain: boolean;
   wasInterrupted: boolean;
+  /**
+   * The model that answered this turn (last assistant message wins — a model
+   * switch mid-turn leaves the one that finished it). NULL for a turn with no
+   * assistant entry carrying a model.
+   */
+  assistantModel: string | null;
 }
 
 interface RawTranscriptEntry {
@@ -91,6 +104,7 @@ interface RawTranscriptEntry {
 interface RawTranscriptMessage {
   role?: unknown;
   content?: unknown;
+  model?: unknown;
   usage?: unknown;
 }
 
@@ -407,6 +421,7 @@ function mergeTranscriptEntries(
     type: later.type ?? first.type,
     subtype: later.subtype ?? first.subtype,
     role: later.role ?? first.role,
+    model: later.model ?? first.model,
     content: later.content ?? first.content,
     promptId: first.promptId ?? later.promptId,
     permissionMode: later.permissionMode ?? first.permissionMode,
@@ -446,6 +461,7 @@ function normalizeEntry(raw: RawTranscriptEntry): TranscriptEntry {
           : typeof raw.type === "string"
             ? raw.type
             : undefined,
+    model: typeof message?.model === "string" ? message.model : undefined,
     content:
       typeof message?.content === "string" || Array.isArray(message?.content)
         ? message.content
@@ -633,6 +649,7 @@ export function parseReplayTranscript(
         isSidechain: Boolean(entry.isSidechain),
         wasInterrupted:
           entry.promptId !== undefined && interruptedPromptIds.has(entry.promptId),
+        assistantModel: null,
       };
       turns.push(currentTurn);
       continue;
@@ -667,6 +684,10 @@ export function parseReplayTranscript(
       currentTurn.assistantText = currentTurn.assistantText
         ? `${currentTurn.assistantText}\n\n${assistantText}`
         : assistantText;
+    }
+
+    if (entry.model) {
+      currentTurn.assistantModel = entry.model;
     }
 
     currentTurn.toolCalls.push(
