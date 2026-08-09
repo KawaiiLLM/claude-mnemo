@@ -16,6 +16,7 @@ import {
   NOTE_RELIEF_PENDING_THRESHOLD,
   renderNoteBacklogRelief,
   selectNoteReminderItems,
+  type NoteReminderView,
 } from "../note-reminder";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -96,6 +97,11 @@ export function createNoteBacklogReliefHandler(
       return { continue: true };
     }
 
+    // Everything from here to the transaction is a fast path: it decides
+    // whether opening a write transaction is worth it at all, and it reads the
+    // watermark the claim will swap on. It decides nothing on its own — two
+    // parallel processes both pass these gates, which is exactly the race the
+    // transaction below settles.
     const relief = getNoteReliefState(dependencies.db, session.id);
     if (relief.dryTurns < dryTurnsThreshold) {
       return { continue: true };
@@ -112,11 +118,32 @@ export function createNoteBacklogReliefHandler(
       return { continue: true };
     }
 
-    const view = selectNoteReminderItems(writable, displayLimit);
-    const renderedTurnIds = view.writable.map((debt) => debt.turnId);
-
+    let claimed: NoteReminderView | null = null;
     try {
-      const claimed = writeTransaction(dependencies.db, () => {
+      claimed = writeTransaction(dependencies.db, (): NoteReminderView | null => {
+        // Both gates are re-read here, under the write lock, and the claim
+        // swaps on the watermark the fast path saw. That is what makes one
+        // relief per streak true rather than likely: two UserPromptSubmit
+        // processes can be looking at different ride turns (the one the user
+        // just submitted, or the one before it, depending on whether
+        // `session-init` had created the row yet), so nothing about the value
+        // each carries distinguishes the winner from the loser. Re-deciding
+        // inside the transaction does: the first to commit moves the relief
+        // watermark to its own ride turn, which is at or past every finished
+        // turn, so the second finds a dry streak of zero and stands down.
+        const settled = getNoteReliefState(dependencies.db, session.id);
+        if (settled.dryTurns < dryTurnsThreshold) {
+          return null;
+        }
+
+        const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
+          latestPromptNumber: rideTurn.promptNumber,
+          agingTurns,
+        }).filter((debt) => !debt.wasRolledBack);
+        if (stillOpen.length < pendingThreshold) {
+          return null;
+        }
+
         // The claim and the exposure rows commit together: a relief the agent
         // was shown but that never re-armed would fire again on the next
         // prompt, and one that re-armed without being shown would silence the
@@ -125,16 +152,18 @@ export function createNoteBacklogReliefHandler(
           !claimNoteBacklogRelief(dependencies.db, {
             sessionId: session.id,
             firePromptNumber: rideTurn.promptNumber,
+            previousReliefPromptNumber: relief.lastReliefPromptNumber,
             nowEpoch: now(),
           })
         ) {
-          return false;
+          return null;
         }
 
+        const view = selectNoteReminderItems(stillOpen, displayLimit);
         recordNoteIdExposure(dependencies.db, {
           sessionId: session.id,
           rideTurnId: rideTurn.id,
-          exposedTurnIds: renderedTurnIds,
+          exposedTurnIds: view.writable.map((debt) => debt.turnId),
           // `injection`, not `reminder`: this is prompt-time context, and the
           // reminder path's own gates read the `reminder` rows to decide what
           // it has already shown. Filing these as `reminder` would silence the
@@ -143,12 +172,8 @@ export function createNoteBacklogReliefHandler(
           source: "injection",
           nowEpoch: now(),
         });
-        return true;
+        return view;
       });
-
-      if (!claimed) {
-        return { continue: true };
-      }
     } catch (error) {
       // Unlike the reminder, a failed write here costs the injection too. The
       // claim IS the one-shot: rendering without it would repeat this standing
@@ -162,9 +187,13 @@ export function createNoteBacklogReliefHandler(
       return { continue: true };
     }
 
+    if (!claimed) {
+      return { continue: true };
+    }
+
     return {
       continue: true,
-      hookSpecificOutput: renderNoteBacklogRelief(view),
+      hookSpecificOutput: renderNoteBacklogRelief(claimed),
     };
   };
 }

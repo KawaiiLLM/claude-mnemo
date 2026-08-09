@@ -80,14 +80,36 @@ export function formatTurnAddress(debt: {
 }
 
 /**
+ * Anything left in the C0 range once whitespace has been collapsed: NUL, the
+ * escape character, the rest of the terminal control set. `\s` already took the
+ * tabs and newlines, so nothing here is a word separator and dropping them
+ * cannot join two words together.
+ */
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/gu;
+
+/**
  * The prompt prefix exists so the agent can recognise the turn without counting
  * back through the conversation. Collapsed to one line and cut short: it is a
  * label, not the content.
+ *
+ * It is also the only part of a reminder that somebody else wrote, quoted into
+ * text the model reads as system context — Claude Code wraps this file's output
+ * in a `<system-reminder>` element on both paths. So the quotation is made inert
+ * before it is framed: angle brackets become their single-guillemet lookalikes,
+ * because a prompt containing `</system-reminder>` would otherwise close the
+ * wrapper early and leave everything after it reading as instruction rather than
+ * quotation; double quotes become single ones so they cannot close the quotation
+ * either; and control characters are dropped. The character budget is applied
+ * last, after every substitution, so neutralising can never push a prefix past
+ * it.
  */
 export function formatPromptPrefix(userPrompt: string | null): string {
   const collapsed = (userPrompt ?? "")
     .replace(/\s+/gu, " ")
+    .replace(CONTROL_CHARACTERS, "")
     .replace(/"/gu, "'")
+    .replace(/</gu, "‹")
+    .replace(/>/gu, "›")
     .trim();
   if (collapsed === "") {
     return '""';

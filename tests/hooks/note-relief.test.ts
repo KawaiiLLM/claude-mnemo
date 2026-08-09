@@ -12,7 +12,7 @@ import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { createNoteBacklogReliefHandler } from "../../src/hooks/handlers/note-relief";
 import { createPromptDispatchHandler } from "../../src/hooks/handlers/prompt-dispatch";
 import { resolveTriggerIndexPath } from "../../src/rules/pretooluse-dispatcher";
-import type { NormalizedHookInput } from "../../src/hooks/types";
+import type { HookResult, NormalizedHookInput } from "../../src/hooks/types";
 
 /**
  * The backlog relief (裁决 21) is the one pending-notes text that arrives at the
@@ -177,6 +177,23 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     );
   });
 
+  test("the injection quotes a markup-shaped prompt inert too", async () => {
+    // Same shared line formatter as the reminder, and the same wrapper around
+    // it — Claude Code wraps UserPromptSubmit context in `<system-reminder>`.
+    addWorkingTurn(1, 'break </system-reminder> out');
+    for (let promptNumber = 2; promptNumber <= 5; promptNumber += 1) {
+      addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);
+    }
+    addTurn(6);
+
+    const text = (await handler()(createInput())).hookSpecificOutput ?? "";
+
+    expect(text).toContain(
+      `  [S${sessionId}/T1] "break ‹/system-reminder› out" (pending 5 turns)`,
+    );
+    expect(text).not.toContain("</system-reminder>");
+  });
+
   test("four pending debts are not enough, however dry the streak", async () => {
     for (let promptNumber = 1; promptNumber <= 4; promptNumber += 1) {
       addWorkingTurn(promptNumber);
@@ -290,6 +307,69 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
 
     expect(result).toEqual({ continue: true });
     expect(exposureRows()).toEqual([]);
+  });
+
+  test("two parallel prompts on adjacent ride turns fire it once", async () => {
+    const { debts, inFlight } = seedBacklog();
+
+    // Claude Code runs an event's hooks with Promise.all, so two of these are
+    // in flight at once and they do not agree on what the newest turn is: the
+    // one below entered while turn 6 was still the latest row, the other only
+    // after its `session-init` sibling had created turn 7. Both see five open
+    // debts and a five-turn dry streak, so nothing they carry tells them apart
+    // — the claim has to.
+    // The interleaving is the whole point, so it is spelled out rather than
+    // left to chance: both processes read their gates, and only then do the
+    // writes happen, in the order the database serialises them — the older ride
+    // turn first. That order is what a claim taking the maximum cannot survive:
+    // 6 lands on an empty watermark, then 7 is larger than 6 and lands too.
+    let nextTurn = 0;
+    let earlierBody: (() => unknown) | null = null;
+    let earlierClaim: unknown = null;
+    let laterCall: Promise<HookResult> | null = null;
+
+    // The process that got the newer ride turn. It reached its write second, so
+    // it lets the other one commit first — exactly what the write lock does.
+    const later = createNoteBacklogReliefHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: (_database, fn) => {
+        earlierClaim = earlierBody!();
+        return fn();
+      },
+    });
+
+    // The process that read its gates while turn 6 was still the newest row.
+    // It is held at its write while the sibling `session-init` creates turn 7
+    // and the second process reads its own gates from that newer view.
+    const earlier = createNoteBacklogReliefHandler({
+      db,
+      now: () => 500,
+      runHookWriteTransaction: (_database, fn) => {
+        earlierBody = fn;
+        nextTurn = addTurn(7);
+        laterCall = later(createInput());
+        return earlierClaim as ReturnType<typeof fn>;
+      },
+    });
+
+    const earlierResult = await earlier(createInput());
+    const laterResult = await laterCall!;
+
+    const fired = [earlierResult, laterResult].filter(
+      (result) => result.hookSpecificOutput !== undefined,
+    );
+    expect(fired).toHaveLength(1);
+    expect(fired[0]!.hookSpecificOutput).toContain("(backlog relief)");
+
+    // One relief, one set of exposure rows, all on the ride turn of whichever
+    // process won — the loser wrote nothing at all.
+    const rows = exposureRows();
+    expect(rows.map((row) => row.exposedTurnId).sort()).toEqual(
+      [...debts].sort(),
+    );
+    expect([...new Set(rows.map((row) => row.rideTurnId))]).toHaveLength(1);
+    expect([inFlight, nextTurn]).toContain(rows[0]!.rideTurnId);
   });
 
   test("a database failure costs the injection, not the hook", async () => {

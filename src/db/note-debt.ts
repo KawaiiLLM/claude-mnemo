@@ -534,14 +534,34 @@ export interface ClaimNoteBacklogReliefInput {
   sessionId: number;
   /** The turn the injection rides; also the re-arm anchor. */
   firePromptNumber: number;
+  /**
+   * The watermark the caller's eligibility check was computed from. The claim
+   * lands only while the row still holds it; 0 also covers "no cursor row yet",
+   * which is how `getNoteReliefState` reads an absent row.
+   */
+  previousReliefPromptNumber: number;
   nowEpoch: number;
 }
 
 /**
  * Claim the one-shot backlog relief for this session, re-arming it at the turn
- * that fired. Returns false when someone else already fired at this turn or
- * later, which is what makes "at most one relief per streak" a claim rather
- * than a check — the same shape as the reminder's once-per-turn rule.
+ * that fired. A compare-and-swap on the watermark, not a monotonic maximum: the
+ * update lands only while the row still holds the value the caller's
+ * eligibility check read, so a claim computed from a stale view of the session
+ * loses instead of overwriting the winner.
+ *
+ * The maximum form let a real race through. UserPromptSubmit hooks run in
+ * parallel (Claude Code awaits them with Promise.all), so two processes reach
+ * this point looking at different ride turns — one at the turn the user just
+ * submitted, one at the turn before it, depending on whether the `session-init`
+ * entry had created the row yet. Both then see the same open backlog, and under
+ * `existing < incoming` both claims succeed: the older ride turn writes first,
+ * the newer one is larger and overwrites it. The agent gets the standing
+ * authorisation twice. Under the swap the two contend for one value and exactly
+ * one wins, whichever ride turn each happened to see.
+ *
+ * The `>` conjunct keeps the watermark monotonic: re-arming at an older turn
+ * would shorten the silence the relief just bought.
  *
  * This is the ONLY write the relief path performs on the ledger besides its
  * exposure rows: no debt changes status here. Debt transitions stay on the
@@ -554,7 +574,7 @@ export function claimNoteBacklogRelief(
 ): boolean {
   return (
     db
-      .query<unknown, [number, number, number]>(
+      .query<unknown, [number, number, number, number]>(
         `INSERT INTO note_debt_cursor (
            session_id, last_classified_prompt_number,
            last_relief_prompt_number, updated_at_epoch
@@ -562,10 +582,16 @@ export function claimNoteBacklogRelief(
          ON CONFLICT(session_id) DO UPDATE SET
            last_relief_prompt_number = excluded.last_relief_prompt_number,
            updated_at_epoch = excluded.updated_at_epoch
-         WHERE note_debt_cursor.last_relief_prompt_number
-               < excluded.last_relief_prompt_number`,
+         WHERE note_debt_cursor.last_relief_prompt_number = ?
+           AND excluded.last_relief_prompt_number
+               > note_debt_cursor.last_relief_prompt_number`,
       )
-      .run(input.sessionId, input.firePromptNumber, input.nowEpoch).changes > 0
+      .run(
+        input.sessionId,
+        input.firePromptNumber,
+        input.nowEpoch,
+        input.previousReliefPromptNumber,
+      ).changes > 0
   );
 }
 
