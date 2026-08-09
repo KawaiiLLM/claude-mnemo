@@ -22,6 +22,12 @@ import { closePendingNoteDebtsAsClosed } from "./note-debt";
  *   - attempts are consumed AT CLAIM, so a worker that dies holding a lease has
  *     still spent one. Three deaths exhaust the job; the reclaim path respects
  *     the cap instead of resurrecting a fourth attempt;
+ *   - `claim_generation` rises on EVERY transition out of `claimed`, not only on
+ *     a fresh claim. Ownership ends when the row stops being claimed — by
+ *     reclamation or by terminalisation — and a fence that only moved on the
+ *     next claim would leave a window in which the displaced dispatch's late
+ *     write-back still matched, resurrecting a terminal job to `done` and
+ *     walking the cursor over a window nobody settled;
  *   - the cursor advances across CONSECUTIVE RESOLVED windows, where resolved
  *     includes terminally failed. Abandon and continue: parking the cursor on a
  *     dead window would wedge every later window behind it forever.
@@ -232,6 +238,24 @@ export function getDecidedPrefixEnd(
   return Math.min(classifiedThrough, firstPending - 1);
 }
 
+/**
+ * The compact boundary marker as `updateCompactAnchor` last repaired it: the
+ * highest prompt_number that had reached a terminal status when the compact was
+ * handled. Null when the session has never had one.
+ */
+export function getCompactBoundaryPromptNumber(
+  db: Database,
+  sessionId: number,
+): number | null {
+  return (
+    db
+      .query<{ boundary: number | null }, [number]>(
+        "SELECT last_compact_turn AS boundary FROM sessions WHERE id = ?",
+      )
+      .get(sessionId)?.boundary ?? null
+  );
+}
+
 export interface NoteSettlementWindowOptions {
   consecutiveTurns?: number;
   minWindowTurns?: number;
@@ -249,6 +273,15 @@ export interface NoteSettlementWindowOptions {
  * decided turns at once produces two 50-turn windows plus (at a compact) the
  * 30-turn remainder, rather than one 130-turn payload. Only the remainder is
  * subject to the minimum-window floor, and only a compact may take it.
+ *
+ * A COMPACT trigger is additionally bounded by the repaired boundary marker
+ * (spec D9: 「compact 触发以捕获修复后的 boundary marker 为准」). Between
+ * `updateCompactAnchor` and this call the worker drains its queue, which
+ * classifies more turns, so the decided prefix can already run past the turns
+ * the compact actually closed over; without the bound those later turns would
+ * be swallowed into the compact's window instead of the next one. The bound
+ * applies to the whole plan, 50-blocks included — a block reaching past the
+ * boundary is not lost, it is simply cut by the next turn-stop trigger.
  */
 export function planNoteSettlementWindows(
   db: Database,
@@ -262,7 +295,15 @@ export function planNoteSettlementWindows(
     options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
 
   let windowStart = getNoteSettlementWindowStart(db, sessionId);
-  const prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
+  let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
+  if (trigger === "compact") {
+    const boundary = getCompactBoundaryPromptNumber(db, sessionId);
+    // Null means no compact has ever been anchored on this session, so there is
+    // no boundary to be bounded by — never a licence to settle everything.
+    if (boundary !== null) {
+      prefixEnd = Math.min(prefixEnd, boundary);
+    }
+  }
   const plans: NoteSettlementWindowPlan[] = [];
 
   while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
@@ -288,6 +329,22 @@ export function planNoteSettlementWindows(
   return plans;
 }
 
+/**
+ * Insert one job, re-deriving the disjointness bound INSIDE the caller's
+ * transaction and refusing any window that reaches back over turns another job
+ * already owns.
+ *
+ * Planning is a read and enqueueing is a write, and the two are not one atomic
+ * step. Today nothing can interleave them (one JS worker, no await between), so
+ * this is a guard against a second writer rather than a live bug — but the
+ * UNIQUE key is (session, window_start, trigger_type), which means two plans of
+ * DIFFERENT trigger types are free to claim the same turns without the
+ * constraint noticing. First writer wins (先到先得); the loser's turns are not
+ * dropped, they are simply re-planned from the new bound at the next trigger.
+ *
+ * Refusing rather than clipping is deliberate: a clipped window can fall under
+ * the minimum-window floor, and the floor is the planner's judgement to make.
+ */
 function insertJob(
   db: Database,
   sessionId: number,
@@ -296,6 +353,12 @@ function insertJob(
   triggerType: NoteSettlementTrigger,
   nowEpoch: number,
 ): NoteSettlementJob | null {
+  if (windowStart < getNoteSettlementWindowStart(db, sessionId)) {
+    return null;
+  }
+  if (windowEnd < windowStart) {
+    return null;
+  }
   return (
     db
       .query<
@@ -352,7 +415,11 @@ export interface ResidualNoteSettlementCandidate {
 }
 
 export interface ListResidualNoteSettlementOptions {
-  /** Session db ids with a live env registration — never residual. */
+  /**
+   * Session db ids this scan must never return: those with a live env
+   * registration (never residual by definition), plus any the caller is already
+   * settling this pass and must not double-count against its budget.
+   */
   activeSessionIds: ReadonlySet<number>;
   nowEpoch: number;
   idleMs?: number;
@@ -452,6 +519,80 @@ export function enqueueResidualNoteSettlementJob(
   );
 }
 
+export interface ListDispatchableNoteSettlementSessionsOptions {
+  /** Sessions the caller drains anyway — normally the triggering session. */
+  excludeSessionIds?: ReadonlySet<number>;
+  nowEpoch: number;
+  nowMs: number;
+  leaseMs?: number;
+  maxAttempts?: number;
+  limit?: number;
+}
+
+/**
+ * Sessions holding a job that is DUE right now, oldest job first.
+ *
+ * The counterpart to `listResidualNoteSettlementCandidates`, and the reason both
+ * exist: that one derives candidates from turns and deliberately skips a session
+ * that already has a job row, so once a job is RECORDED it can only ever be
+ * dispatched by whoever recorded it. Two ordinary situations record a job that
+ * nobody then dispatches — the graceful-exit window (records, never dispatches,
+ * by design) and a transient failure whose backoff comes due later — and for a
+ * closed session there is no later trigger of its own to pick it up. Dispatch
+ * therefore has to be able to start from the job table, not only from a fresh
+ * derivation.
+ *
+ * "Due" is anything the claim would act on: a pending or backed-off job with
+ * attempts left, and an expired lease of any attempt count (an expired lease at
+ * the cap has no dispatch left in it, but reclaiming it is what turns it
+ * terminal and lets the cursor walk past — one trigger's work, after which it
+ * stops being due).
+ *
+ * Spec D9's 「无定时器」 is preserved exactly: this is a query run in passing by
+ * a content event, never a wake-up.
+ */
+export function listDispatchableNoteSettlementSessions(
+  db: Database,
+  options: ListDispatchableNoteSettlementSessionsOptions,
+): number[] {
+  const leaseMs = options.leaseMs ?? NOTE_SETTLEMENT_LEASE_MS;
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
+  const limit = options.limit ?? NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER;
+  const leaseCutoffEpoch = Math.floor((options.nowMs - leaseMs) / 1000);
+  const excluded = options.excludeSessionIds ?? new Set<number>();
+
+  if (limit <= 0) {
+    return [];
+  }
+
+  return db
+    .query<{ sessionId: number }, [number, number, number, number]>(
+      `SELECT session_id AS sessionId, MIN(created_at_epoch) AS oldestJobEpoch
+       FROM note_settlement_jobs
+       WHERE (
+               (status IN ('pending', 'failed')
+                AND attempts < ?
+                AND retry_at_epoch <= ?)
+               OR (status = 'claimed'
+                   AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?))
+             )
+       GROUP BY session_id
+       ORDER BY oldestJobEpoch ASC, session_id ASC
+       LIMIT ?`,
+    )
+    // The exclusion set lives in worker memory, so it is filtered in TS and the
+    // SQL limit leaves room for it — same shape as the residual scan.
+    .all(
+      maxAttempts,
+      options.nowEpoch,
+      leaseCutoffEpoch,
+      limit + excluded.size,
+    )
+    .map((row) => row.sessionId)
+    .filter((sessionId) => !excluded.has(sessionId))
+    .slice(0, limit);
+}
+
 export interface ClaimNoteSettlementJobOptions {
   /** Jobs already attempted in this pass; one pass burns one attempt each. */
   excludeJobIds?: ReadonlySet<number>;
@@ -491,10 +632,16 @@ export function claimNextNoteSettlementJob(
   const excluded = options.excludeJobIds ?? new Set<number>();
 
   return runWriteTransaction(db, () => {
+    // Both reclaim paths bump the generation, and that bump is the whole reason
+    // a late write-back is safe: the dispatch still running against this row
+    // holds the OLD generation, so its `done` (or its failure) matches nothing
+    // once ownership has moved — including when ownership moved to nobody,
+    // which is exactly the terminal case below.
     db.query<unknown, [string, number, number, number, number]>(
       `UPDATE note_settlement_jobs
        SET status = 'failed',
            claimed_at_epoch = NULL,
+           claim_generation = claim_generation + 1,
            last_error = COALESCE(last_error, ?),
            updated_at_epoch = ?
        WHERE session_id = ?
@@ -511,7 +658,8 @@ export function claimNextNoteSettlementJob(
 
     db.query<unknown, [number, number, number, number]>(
       `UPDATE note_settlement_jobs
-       SET status = 'pending', claimed_at_epoch = NULL, updated_at_epoch = ?
+       SET status = 'pending', claimed_at_epoch = NULL,
+           claim_generation = claim_generation + 1, updated_at_epoch = ?
        WHERE session_id = ?
          AND status = 'claimed'
          AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
@@ -576,11 +724,46 @@ export function claimNextNoteSettlementJob(
 }
 
 /**
+ * Give a claim back WITHOUT spending its attempt — the graceful-exit path.
+ *
+ * A claim normally costs an attempt precisely because a worker that vanishes
+ * holding the lease must not retry forever. Shutdown is the one case where the
+ * disappearance is known in advance and provably did no work, so the attempt is
+ * returned. The generation still rises: releasing is a transition out of
+ * `claimed` like any other, and a dispatch that somehow started must not be able
+ * to report against the released row.
+ */
+export function releaseNoteSettlementJobClaim(
+  db: Database,
+  jobId: number,
+  nowEpoch: number,
+  claimGeneration: number,
+): boolean {
+  return (
+    db
+      .query<unknown, [number, number, number]>(
+        `UPDATE note_settlement_jobs
+         SET status = 'pending', claimed_at_epoch = NULL,
+             attempts = MAX(0, attempts - 1),
+             claim_generation = claim_generation + 1,
+             updated_at_epoch = ?
+         WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
+      )
+      .run(nowEpoch, jobId, claimGeneration).changes > 0
+  );
+}
+
+/**
  * Mark the job done, fenced on the generation it was claimed under.
  *
  * Returns false when the CAS matches nothing — the lease expired and the row has
- * a new owner. A late dispatch result is DISCARDED at this point rather than
- * committed over the attempt that replaced it.
+ * a new owner, or no owner at all. A late dispatch result is DISCARDED at this
+ * point rather than committed over the attempt that replaced it.
+ *
+ * `status = 'claimed'` is part of the fence and not decoration: it is what makes
+ * the rejection self-evident for a row that left `claimed` without anyone
+ * claiming it again (a terminalised or released job), independently of the
+ * generation arithmetic.
  */
 export function completeNoteSettlementJob(
   db: Database,
@@ -594,7 +777,7 @@ export function completeNoteSettlementJob(
         `UPDATE note_settlement_jobs
          SET status = 'done', claimed_at_epoch = NULL, last_error = NULL,
              updated_at_epoch = ?
-         WHERE id = ? AND claim_generation = ?`,
+         WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
       )
       .run(nowEpoch, jobId, claimGeneration).changes > 0
   );
@@ -625,7 +808,11 @@ export function failNoteSettlementJob(
 
   return runWriteTransaction(db, () => {
     const job = getNoteSettlementJob(db, jobId);
-    if (!job || job.claimGeneration !== claimGeneration) {
+    if (
+      !job ||
+      job.status !== "claimed" ||
+      job.claimGeneration !== claimGeneration
+    ) {
       return null;
     }
     const backoffSeconds = Math.max(
@@ -637,7 +824,7 @@ export function failNoteSettlementJob(
         `UPDATE note_settlement_jobs
          SET status = 'failed', claimed_at_epoch = NULL, last_error = ?,
              retry_at_epoch = ?, updated_at_epoch = ?
-         WHERE id = ? AND claim_generation = ?`,
+         WHERE id = ? AND status = 'claimed' AND claim_generation = ?`,
       )
       .run(
         reason.slice(0, 500),

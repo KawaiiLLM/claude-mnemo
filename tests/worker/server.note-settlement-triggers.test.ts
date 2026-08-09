@@ -41,13 +41,20 @@ function seedDecidedSession(
     completedAtEpoch: null,
   }).id;
 
+  // TERMINAL turns, so the session is decided on both readings — the note-debt
+  // ledger below and `turns.status` — and `updateCompactAnchor` can place the
+  // compact boundary at the last turn rather than one short of it. `failed` is
+  // the terminal status this very harness produced for these rows anyway (no
+  // extraction runs here, so the derailment floor closed them), and unlike
+  // `extracted` it does not hand them to the legacy 0.8.4 grading settlement,
+  // whose agent session would then be the thing this file's zero is counting.
   for (let promptNumber = 1; promptNumber <= turns; promptNumber += 1) {
     const turnId = db
       .query<{ id: number }, [number, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
            assistant_response, created_at_epoch
-         ) VALUES (?, ?, 'active', 'prompt', 'reply', 1000)
+         ) VALUES (?, ?, 'failed', 'prompt', 'reply', 1000)
          RETURNING id`,
       )
       .get(sessionDbId, promptNumber)!.id;

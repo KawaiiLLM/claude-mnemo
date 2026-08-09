@@ -8,8 +8,11 @@ import {
   enqueueNoteSettlementWindows,
   enqueueResidualNoteSettlementJob,
   failNoteSettlementJob,
+  listDispatchableNoteSettlementSessions,
   listResidualNoteSettlementCandidates,
+  NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER,
   planNoteSettlementWindows,
+  releaseNoteSettlementJobClaim,
   type NoteSettlementJob,
   type NoteSettlementTrigger,
   type NoteSettlementWindowPlan,
@@ -140,6 +143,12 @@ export function createNoteSettlementScheduler(
    * returns the job to a later trigger instead of burning all three attempts in
    * one loop. A failure also ENDS the pass — settling a later window while an
    * earlier one is unresolved would read an arc whose first half is missing.
+   *
+   * The graceful-exit flag is read on EVERY iteration, not once on the way in.
+   * Shutdown arrives asynchronously and a drain can run for minutes, so a flag
+   * consulted only at entry would let the loop keep launching payloads that exit
+   * is about to kill — and since an attempt is consumed at claim, each of those
+   * kills would spend one of the job's three lives on work that never ran.
    */
   async function drainSession(
     sessionDbId: number,
@@ -149,6 +158,9 @@ export function createNoteSettlementScheduler(
     const dispatched: NoteSettlementJob[] = [];
 
     while (dispatched.length < maxJobs) {
+      if (isGracefulExit()) {
+        break;
+      }
       let job: NoteSettlementJob | null = null;
       try {
         job = claimNextNoteSettlementJob(db, sessionDbId, now(), nowMs(), {
@@ -166,6 +178,28 @@ export function createNoteSettlementScheduler(
       // `let` would widen back to nullable inside it.
       const claimed = job;
       attempted.add(claimed.id);
+
+      // Shutdown that landed between the check above and the claim: hand the
+      // claim back and refund its attempt. A job killed before its payload ever
+      // started did no work and must not be charged as if it had.
+      if (isGracefulExit()) {
+        try {
+          releaseNoteSettlementJobClaim(
+            db,
+            claimed.id,
+            now(),
+            claimed.claimGeneration,
+          );
+        } catch (error) {
+          logger.error?.("note settlement claim release failed", {
+            sessionDbId,
+            jobId: claimed.id,
+            error,
+          });
+        }
+        break;
+      }
+
       dispatched.push(claimed);
 
       let outcome: NoteSettlementDispatchOutcome;
@@ -242,6 +276,28 @@ export function createNoteSettlementScheduler(
       break;
     }
 
+    // A pass that dispatched nothing may still have RESOLVED something: an
+    // expired lease at the attempt cap turns terminal inside the claim, and the
+    // claim then returns null with no one left to advance the cursor. Skipped
+    // during exit, where the whole point is to write as little as possible.
+    if (dispatched.length === 0 && !isGracefulExit()) {
+      try {
+        runWriteTransaction(db, () =>
+          advanceNoteSettlementCursor(
+            db,
+            sessionDbId,
+            now(),
+            claimOptions.maxAttempts,
+          ),
+        );
+      } catch (error) {
+        logger.error?.("note settlement cursor advance failed", {
+          sessionDbId,
+          error,
+        });
+      }
+    }
+
     return dispatched;
   }
 
@@ -250,15 +306,23 @@ export function createNoteSettlementScheduler(
    * at most `residualLimit` sessions, oldest first, one job each, never mixed
    * into another session's window.
    */
-  function enqueueResiduals(excludeSessionDbId: number): NoteSettlementJob[] {
+  function enqueueResiduals(
+    excludeSessionDbIds: Iterable<number>,
+    limit: number,
+  ): NoteSettlementJob[] {
+    if (limit <= 0) {
+      return [];
+    }
     const active = new Set<number>(activeSessionIds());
-    active.add(excludeSessionDbId);
+    for (const sessionDbId of excludeSessionDbIds) {
+      active.add(sessionDbId);
+    }
     const candidates = listResidualNoteSettlementCandidates(db, {
       activeSessionIds: active,
       nowEpoch: now(),
       idleMs: deps.residualIdleMs,
       minWindowTurns: deps.minWindowTurns,
-      limit: deps.residualLimit,
+      limit,
     });
 
     const created: NoteSettlementJob[] = [];
@@ -296,10 +360,32 @@ export function createNoteSettlementScheduler(
       return inertPass();
     }
 
+    const otherSessionBudget =
+      deps.residualLimit ?? NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER;
+
     const created: NoteSettlementJob[] = [];
+    // Jobs another session ALREADY has on the books, due now. They come first
+    // and they spend the same budget as freshly derived residuals: a job the
+    // graceful-exit window recorded, or one whose backoff has come due, has no
+    // trigger of its own to come back for it, so if this pass overlooks it in
+    // favour of newly derived work it is overlooked forever.
+    let dueSessionIds: number[] = [];
     try {
       created.push(...enqueueNoteSettlementWindows(db, plans, now()));
-      created.push(...enqueueResiduals(sessionDbId));
+      dueSessionIds = listDispatchableNoteSettlementSessions(db, {
+        excludeSessionIds: new Set([sessionDbId]),
+        nowEpoch: now(),
+        nowMs: nowMs(),
+        leaseMs: claimOptions.leaseMs,
+        maxAttempts: claimOptions.maxAttempts,
+        limit: otherSessionBudget,
+      });
+      created.push(
+        ...enqueueResiduals(
+          [sessionDbId, ...dueSessionIds],
+          otherSessionBudget - dueSessionIds.length,
+        ),
+      );
     } catch (error) {
       logger.error?.("note settlement enqueue failed", { sessionDbId, error });
     }
@@ -317,8 +403,10 @@ export function createNoteSettlementScheduler(
       sessionDbId,
       Number.MAX_SAFE_INTEGER,
     );
-    for (const residualSessionId of residualSessionIds) {
-      dispatched.push(...(await drainSession(residualSessionId, 1)));
+    // Disjoint by construction: the residual scan was told to skip every session
+    // already carrying a due job.
+    for (const otherSessionId of [...dueSessionIds, ...residualSessionIds]) {
+      dispatched.push(...(await drainSession(otherSessionId, 1)));
     }
 
     return { triggered, created, dispatched, residualSessionIds };

@@ -84,8 +84,13 @@ export function createPostToolUseHandler(
       // Note-debt ownership (spec D2/D3): the asynchronous capture entry
       // maintains the ledger, the synchronous reminder entry only reads it.
       // Here it is a catch-up sweep — only turns older than the open one are
-      // classified — which covers turns that ended without a Stop event
-      // (interrupt, crash) and costs one indexed query when nothing is new.
+      // classified — and it costs one indexed query when nothing is new.
+      //
+      // It catches up on turns whose Stop was CAPTURED but whose reconcile did
+      // not land. A turn whose Stop was never captured at all is stranded, not
+      // finished, and the sweep stops at it rather than reading its half-landed
+      // observations as a verdict; the liveness repair restores its turn-stop
+      // and the next sweep walks on.
       //
       // Wrapped: the shadow ledger is a P1 trial artefact and must never be
       // able to abort the capture write it shares a transaction with.

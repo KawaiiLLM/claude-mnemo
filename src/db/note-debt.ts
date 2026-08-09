@@ -169,6 +169,39 @@ function setClassificationCursor(
 }
 
 /**
+ * Did mnemo actually capture this turn's completion?
+ *
+ * The sweep's whole premise is that a turn's tool batch is final, and a turn
+ * that is still `active`/`provisional` with no captured Stop breaks it: those
+ * are STRANDED turns (worker/turn-liveness.ts — a real production shape, not a
+ * hypothetical), and classifying one reads whatever observations happened to
+ * land before the capture path dropped out. Zero of them reads as "trivial",
+ * which is indistinguishable from a turn that genuinely owed nothing, and the
+ * watermark then walks over it so settlement freezes the misreading into a
+ * window that can never be recut.
+ *
+ * Two independent kinds of evidence, and both are needed:
+ *   - a terminal status, which is what the extraction pipeline leaves behind;
+ *   - a queued `turn-stop` item, which is what the Stop hook and the stranded
+ *     repair (ticket 10) leave behind BEFORE extraction runs. Without this
+ *     clause the note ledger would inherit the extraction backlog's latency —
+ *     debts would stop opening whenever extraction fell behind, which is
+ *     exactly the coupling the ticket's ledger-not-`turns.status` rule exists
+ *     to avoid, and it would also leave a repaired turn blocked until its
+ *     re-extraction finished.
+ *
+ * Reading `turns` is allowed under P1 isolation; WRITING it is not, and nothing
+ * here writes.
+ */
+const COMPLETION_EVIDENCE_SQL = `(
+  t.status NOT IN ('active', 'provisional')
+  OR EXISTS (
+    SELECT 1 FROM pending_queue q
+    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+  )
+)`;
+
+/**
  * Classify one finished turn and open a debt if it owes a note.
  *
  * Returns the turn id when a debt was opened. Trivial turns (spec's 裁决 13)
@@ -310,26 +343,56 @@ export function reconcileNoteDebt(
   }
 
   const opened: number[] = [];
+  let classifiedThrough = cursor;
   if (classifyThrough > cursor) {
     const candidates = db
       .query<
-        { id: number; promptNumber: number; sessionId: number },
+        {
+          id: number;
+          promptNumber: number;
+          sessionId: number;
+          hasCompletionEvidence: number;
+        },
         [number, number, number]
       >(
-        `SELECT id, prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns
-         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?
-         ORDER BY prompt_number ASC`,
+        `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
+                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
+         FROM turns t
+         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
+         ORDER BY t.prompt_number ASC`,
       )
       .all(sessionId, cursor, classifyThrough);
 
+    // The watermark is a CONTIGUOUS prefix, so an unfinished turn stops the walk
+    // rather than being skipped over: settlement cuts its windows from this
+    // prefix, and a window is frozen at enqueue. Blocking costs a delay that the
+    // stranded repair ends; skipping costs a turn silently settled as trivial,
+    // permanently. The Stop event's own turn is evidence in itself — the caller
+    // naming it IS the capture.
+    let blockedAtPromptNumber: number | null = null;
     for (const candidate of candidates) {
+      if (
+        candidate.hasCompletionEvidence !== 1 &&
+        candidate.id !== input.completedTurnId
+      ) {
+        blockedAtPromptNumber = candidate.promptNumber;
+        break;
+      }
       if (classifyCompletedTurn(db, candidate, nowEpoch)) {
         opened.push(candidate.id);
       }
     }
 
-    setClassificationCursor(db, sessionId, classifyThrough, nowEpoch);
+    // Nothing blocked → the whole computed range is classified, gaps in
+    // prompt_number included (a deleted subagent turn leaves one, and stopping
+    // at the last surviving row would wedge the watermark on it forever).
+    classifiedThrough =
+      blockedAtPromptNumber === null
+        ? classifyThrough
+        : blockedAtPromptNumber - 1;
+    if (classifiedThrough > cursor) {
+      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
+    }
   }
 
   const pending = db
@@ -392,7 +455,7 @@ export function reconcileNoteDebt(
     noted,
     aged,
     rolledBack,
-    classifiedThroughPromptNumber: Math.max(cursor, classifyThrough),
+    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough),
   };
 }
 

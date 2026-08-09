@@ -2848,7 +2848,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslhp3sq" : "dev";
+var BUILD_ID = true ? "0.9.1-msljfst8" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -21618,6 +21618,13 @@ function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
        updated_at_epoch = excluded.updated_at_epoch`
   ).run(sessionId, promptNumber, nowEpoch);
 }
+var COMPLETION_EVIDENCE_SQL = `(
+  t.status NOT IN ('active', 'provisional')
+  OR EXISTS (
+    SELECT 1 FROM pending_queue q
+    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+  )
+)`;
 function classifyCompletedTurn(db, turn, nowEpoch) {
   if (getNoteDebt(db, turn.id) !== null) {
     return false;
@@ -21670,19 +21677,29 @@ function reconcileNoteDebt(db, input) {
     }
   }
   const opened = [];
+  let classifiedThrough = cursor;
   if (classifyThrough > cursor) {
     const candidates = db.query(
-      `SELECT id, prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns
-         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?
-         ORDER BY prompt_number ASC`
+      `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
+                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
+         FROM turns t
+         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
+         ORDER BY t.prompt_number ASC`
     ).all(sessionId, cursor, classifyThrough);
+    let blockedAtPromptNumber = null;
     for (const candidate of candidates) {
+      if (candidate.hasCompletionEvidence !== 1 && candidate.id !== input.completedTurnId) {
+        blockedAtPromptNumber = candidate.promptNumber;
+        break;
+      }
       if (classifyCompletedTurn(db, candidate, nowEpoch)) {
         opened.push(candidate.id);
       }
     }
-    setClassificationCursor(db, sessionId, classifyThrough, nowEpoch);
+    classifiedThrough = blockedAtPromptNumber === null ? classifyThrough : blockedAtPromptNumber - 1;
+    if (classifiedThrough > cursor) {
+      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
+    }
   }
   const pending = db.query(
     `SELECT
@@ -21725,7 +21742,7 @@ function reconcileNoteDebt(db, input) {
     noted,
     aged,
     rolledBack,
-    classifiedThroughPromptNumber: Math.max(cursor, classifyThrough)
+    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough)
   };
 }
 function listOpenNoteDebt(db, sessionId, options) {
