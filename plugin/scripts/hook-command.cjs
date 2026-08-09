@@ -340,6 +340,29 @@ var MEMORY_FTS_DDL = `
     tokenize = 'trigram'
   );
 `;
+var NOTE_DEBT_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_debt (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    prompt_number INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'noted', 'skipped')
+    ),
+    -- Only a skipped debt carries a reason (D4's status vocabulary). 'closed'
+    -- is residual settlement's claim-time write (D9): the session is gone, so
+    -- the debt is written off rather than left blocking its window forever.
+    reason TEXT CHECK (
+      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed')
+    ),
+    opened_at_epoch INTEGER NOT NULL,
+    closed_at_epoch INTEGER,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+var NOTE_DEBT_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_debt_open
+    ON note_debt(session_id, status, prompt_number);
+`;
 var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -506,24 +529,8 @@ var SCHEMA_SQL = `
   -- A trivial turn (no substantive tool call) gets NO row at all \u2014 "not in the
   -- ledger" is the representation of "owes nothing", so the ledger's size tracks
   -- real debt rather than session length.
-  CREATE TABLE IF NOT EXISTS note_debt (
-    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    prompt_number INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'noted', 'skipped')
-    ),
-    -- Only a skipped debt carries a reason (D4's status vocabulary).
-    reason TEXT CHECK (
-      reason IS NULL OR reason IN ('aged', 'rolled-back')
-    ),
-    opened_at_epoch INTEGER NOT NULL,
-    closed_at_epoch INTEGER,
-    updated_at_epoch INTEGER NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_debt_open
-    ON note_debt(session_id, status, prompt_number);
+  ${NOTE_DEBT_TABLE_DDL}
+  ${NOTE_DEBT_INDEX_DDL}
 
   -- How far the completion classification has already walked, per session. It is
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
@@ -554,6 +561,59 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
     ON note_id_exposures(session_id, exposed_turn_id);
+
+  -- P2 note settlement jobs (spec D9, ticket 05). Deliberately a SEPARATE table
+  -- from settlement_jobs: that one is the 0.8.4 two-phase GRADING settlement,
+  -- keyed by an extracted-turn boundary ordinal and still live on the legacy
+  -- path, while this one is keyed by a prompt-number window and is what D13
+  -- retires the grading settlement in favour of. Sharing a table would couple a
+  -- machine being retired to the machine retiring it.
+  --
+  -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
+  -- under replay, and the two triggers can each own a window that starts at the
+  -- same place without one silently swallowing the other.
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
+
+  CREATE TABLE IF NOT EXISTS note_settlement_cursors (
+    session_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Highest prompt_number such that every window at or below it is RESOLVED.
+    -- A terminally failed window resolves too (terminal-state-must-abandon-and-
+    -- continue): holding the cursor at it would wedge the session forever.
+    last_settled_prompt_number INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -864,7 +924,31 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureNoteDebtClosedReason(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureNoteDebtClosedReason(db) {
+  const existing = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
+  ).get();
+  if (!existing?.sql || existing.sql.includes("'closed'")) {
+    return;
+  }
+  db.transaction(() => {
+    db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
+    db.exec(NOTE_DEBT_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, reason,
+         opened_at_epoch, closed_at_epoch, updated_at_epoch
+       )
+       SELECT turn_id, session_id, prompt_number, status, reason,
+              opened_at_epoch, closed_at_epoch, updated_at_epoch
+       FROM note_debt_pre_closed_reason`
+    );
+    db.exec("DROP TABLE note_debt_pre_closed_reason");
+    db.exec(NOTE_DEBT_INDEX_DDL);
+  })();
 }
 function ensureObservationExtractionExclusionColumn(db) {
   if (!hasColumn(db, "observations", "excluded_from_extraction")) {
@@ -1191,8 +1275,11 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
+  db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
+  db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
@@ -2607,7 +2694,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.0-mskq32sc" : "dev";
+var BUILD_ID = true ? "0.9.0-mslhfoyp" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

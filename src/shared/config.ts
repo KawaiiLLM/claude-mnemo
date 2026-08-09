@@ -27,6 +27,13 @@ export interface MnemoConfig {
    */
   compactContextRatio: number;
   /**
+   * Master switch for P2 note settlement (spec D9, ticket 05). When false the
+   * scheduler is inert: no job row is written, nothing is claimed, nothing is
+   * dispatched, and the note-debt ledger is never transitioned by this path — so
+   * merging the machinery cannot perturb the P1 shadow trial running beside it.
+   */
+  settlementEnabled: boolean;
+  /**
    * Master switch for the whole nightly dream chain. When false, no entry point
    * (end-event backlog reconcile, queue drain and its retries, manual
    * `POST /dream`) enqueues or runs dream work. Reading the last generated
@@ -98,6 +105,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
+  settlementEnabled: false,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -244,6 +252,10 @@ function clampConfig(
       MIN_COMPACT_CONTEXT_RATIO,
       MAX_COMPACT_CONTEXT_RATIO,
       DEFAULT_CONFIG.compactContextRatio,
+    ),
+    settlementEnabled: resolveBoolean(
+      config.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled,
     ),
     dreamAgentEnabled: resolveBoolean(
       config.dreamAgentEnabled,

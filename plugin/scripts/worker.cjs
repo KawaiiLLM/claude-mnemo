@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.0-mskq32sc" : "dev";
+var BUILD_ID = true ? "0.9.0-mslhfoyp" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -295,6 +295,7 @@ var DEFAULT_CONFIG = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
+  settlementEnabled: false,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -388,6 +389,10 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       MIN_COMPACT_CONTEXT_RATIO,
       MAX_COMPACT_CONTEXT_RATIO,
       DEFAULT_CONFIG.compactContextRatio
+    ),
+    settlementEnabled: resolveBoolean(
+      config3.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
     ),
     dreamAgentEnabled: resolveBoolean(
       config3.dreamAgentEnabled,
@@ -2280,6 +2285,29 @@ var MEMORY_FTS_DDL = `
     tokenize = 'trigram'
   );
 `;
+var NOTE_DEBT_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_debt (
+    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    prompt_number INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'noted', 'skipped')
+    ),
+    -- Only a skipped debt carries a reason (D4's status vocabulary). 'closed'
+    -- is residual settlement's claim-time write (D9): the session is gone, so
+    -- the debt is written off rather than left blocking its window forever.
+    reason TEXT CHECK (
+      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed')
+    ),
+    opened_at_epoch INTEGER NOT NULL,
+    closed_at_epoch INTEGER,
+    updated_at_epoch INTEGER NOT NULL
+  );
+`;
+var NOTE_DEBT_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_debt_open
+    ON note_debt(session_id, status, prompt_number);
+`;
 var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2446,24 +2474,8 @@ var SCHEMA_SQL = `
   -- A trivial turn (no substantive tool call) gets NO row at all \u2014 "not in the
   -- ledger" is the representation of "owes nothing", so the ledger's size tracks
   -- real debt rather than session length.
-  CREATE TABLE IF NOT EXISTS note_debt (
-    turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    prompt_number INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'noted', 'skipped')
-    ),
-    -- Only a skipped debt carries a reason (D4's status vocabulary).
-    reason TEXT CHECK (
-      reason IS NULL OR reason IN ('aged', 'rolled-back')
-    ),
-    opened_at_epoch INTEGER NOT NULL,
-    closed_at_epoch INTEGER,
-    updated_at_epoch INTEGER NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_debt_open
-    ON note_debt(session_id, status, prompt_number);
+  ${NOTE_DEBT_TABLE_DDL}
+  ${NOTE_DEBT_INDEX_DDL}
 
   -- How far the completion classification has already walked, per session. It is
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
@@ -2494,6 +2506,59 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
     ON note_id_exposures(session_id, exposed_turn_id);
+
+  -- P2 note settlement jobs (spec D9, ticket 05). Deliberately a SEPARATE table
+  -- from settlement_jobs: that one is the 0.8.4 two-phase GRADING settlement,
+  -- keyed by an extracted-turn boundary ordinal and still live on the legacy
+  -- path, while this one is keyed by a prompt-number window and is what D13
+  -- retires the grading settlement in favour of. Sharing a table would couple a
+  -- machine being retired to the machine retiring it.
+  --
+  -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
+  -- under replay, and the two triggers can each own a window that starts at the
+  -- same place without one silently swallowing the other.
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
+
+  CREATE TABLE IF NOT EXISTS note_settlement_cursors (
+    session_id INTEGER PRIMARY KEY
+      REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Highest prompt_number such that every window at or below it is RESOLVED.
+    -- A terminally failed window resolves too (terminal-state-must-abandon-and-
+    -- continue): holding the cursor at it would wedge the session forever.
+    last_settled_prompt_number INTEGER NOT NULL DEFAULT 0,
+    updated_at_epoch INTEGER NOT NULL
+  );
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -2804,7 +2869,31 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureNoteDebtClosedReason(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureNoteDebtClosedReason(db) {
+  const existing = db.query(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
+  ).get();
+  if (!existing?.sql || existing.sql.includes("'closed'")) {
+    return;
+  }
+  db.transaction(() => {
+    db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
+    db.exec(NOTE_DEBT_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, reason,
+         opened_at_epoch, closed_at_epoch, updated_at_epoch
+       )
+       SELECT turn_id, session_id, prompt_number, status, reason,
+              opened_at_epoch, closed_at_epoch, updated_at_epoch
+       FROM note_debt_pre_closed_reason`
+    );
+    db.exec("DROP TABLE note_debt_pre_closed_reason");
+    db.exec(NOTE_DEBT_INDEX_DDL);
+  })();
 }
 function ensureObservationExtractionExclusionColumn(db) {
   if (!hasColumn(db, "observations", "excluded_from_extraction")) {
@@ -3131,8 +3220,11 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DROP TABLE IF EXISTS shadow_notes");
   db.exec("DROP TABLE IF EXISTS note_id_exposures");
+  db.exec("DROP TABLE IF EXISTS note_settlement_jobs");
+  db.exec("DROP TABLE IF EXISTS note_settlement_cursors");
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
+  db.exec("DROP TABLE IF EXISTS note_debt_pre_closed_reason");
   db.exec("DROP TABLE IF EXISTS observations");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
@@ -21239,6 +21331,530 @@ function applySettlementBatchLocked(db, job, items, signals, nowEpoch) {
     );
     return summary;
   });
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "noted", null, nowEpoch);
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+
+// src/db/note-settlement.ts
+var NOTE_SETTLEMENT_CONSECUTIVE_TURNS = 50;
+var NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
+var NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
+var NOTE_SETTLEMENT_MAX_ATTEMPTS = 3;
+var NOTE_SETTLEMENT_RETRY_BASE_MS = 6e4;
+var NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1e3;
+var NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER = 2;
+var JOB_COLUMNS = `
+    id,
+    session_id AS sessionId,
+    window_start AS windowStart,
+    window_end AS windowEnd,
+    trigger_type AS triggerType,
+    status,
+    attempts,
+    retry_at_epoch AS retryAtEpoch,
+    claimed_at_epoch AS claimedAtEpoch,
+    claim_generation AS claimGeneration,
+    last_error AS lastError,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch`;
+var JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
+function getNoteSettlementJob(db, jobId) {
+  return db.query(`${JOB_SELECT} WHERE id = ?`).get(jobId) ?? null;
+}
+function getNoteSettlementCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_settled_prompt_number AS cursor
+         FROM note_settlement_cursors WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function getNoteSettlementWindowStart(db, sessionId) {
+  const highestEnqueued = db.query(
+    `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
+         WHERE session_id = ?`
+  ).get(sessionId)?.windowEnd ?? 0;
+  return Math.max(getNoteSettlementCursor(db, sessionId), highestEnqueued ?? 0) + 1;
+}
+function getClassifiedThrough(db, sessionId) {
+  return db.query(
+    `SELECT last_classified_prompt_number AS cursor
+         FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function getDecidedPrefixEnd(db, sessionId, windowStart) {
+  const classifiedThrough = getClassifiedThrough(db, sessionId);
+  if (classifiedThrough < windowStart) {
+    return windowStart - 1;
+  }
+  const firstPending = db.query(
+    `SELECT MIN(prompt_number) AS promptNumber FROM note_debt
+         WHERE session_id = ? AND status = 'pending' AND prompt_number >= ?`
+  ).get(sessionId, windowStart)?.promptNumber ?? null;
+  if (firstPending === null) {
+    return classifiedThrough;
+  }
+  return Math.min(classifiedThrough, firstPending - 1);
+}
+function planNoteSettlementWindows(db, sessionId, trigger, options = {}) {
+  const consecutiveTurns = options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
+  const minWindowTurns = options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
+  let windowStart = getNoteSettlementWindowStart(db, sessionId);
+  const prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
+  const plans = [];
+  while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
+    const windowEnd = windowStart + consecutiveTurns - 1;
+    plans.push({
+      sessionId,
+      windowStart,
+      windowEnd,
+      triggerType: "consecutive"
+    });
+    windowStart = windowEnd + 1;
+  }
+  if (trigger === "compact" && prefixEnd - windowStart + 1 >= minWindowTurns) {
+    plans.push({
+      sessionId,
+      windowStart,
+      windowEnd: prefixEnd,
+      triggerType: "compact"
+    });
+  }
+  return plans;
+}
+function insertJob2(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_settlement_jobs (
+           session_id, window_start, window_end, trigger_type,
+           status, attempts, retry_at_epoch,
+           created_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+         RETURNING${JOB_COLUMNS}`
+  ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
+}
+function enqueueNoteSettlementWindows(db, plans, nowEpoch) {
+  if (plans.length === 0) {
+    return [];
+  }
+  return runWriteTransaction(db, () => {
+    const created = [];
+    for (const plan of plans) {
+      const job = insertJob2(
+        db,
+        plan.sessionId,
+        plan.windowStart,
+        plan.windowEnd,
+        plan.triggerType,
+        nowEpoch
+      );
+      if (job) {
+        created.push(job);
+      }
+    }
+    return created;
+  });
+}
+function listResidualNoteSettlementCandidates(db, options) {
+  const idleMs = options.idleMs ?? NOTE_SETTLEMENT_RESIDUAL_IDLE_MS;
+  const minWindowTurns = options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
+  const limit = options.limit ?? NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER;
+  const idleCutoffEpoch = options.nowEpoch - Math.floor(idleMs / 1e3);
+  const scanLimit = limit + options.activeSessionIds.size;
+  return db.query(
+    `SELECT sessionId, windowStart, windowEnd, lastActivityEpoch,
+              windowEnd - windowStart + 1 AS residualTurns
+       FROM (
+         SELECT
+           s.id AS sessionId,
+           MAX(
+             s.updated_at_epoch,
+             COALESCE(
+               (SELECT MAX(t.created_at_epoch) FROM turns t
+                WHERE t.session_id = s.id),
+               0
+             )
+           ) AS lastActivityEpoch,
+           COALESCE(
+             (SELECT MAX(t.prompt_number) FROM turns t
+              WHERE t.session_id = s.id),
+             0
+           ) AS windowEnd,
+           MAX(
+             COALESCE(
+               (SELECT c.last_settled_prompt_number
+                FROM note_settlement_cursors c WHERE c.session_id = s.id),
+               0
+             ),
+             COALESCE(
+               (SELECT MAX(j.window_end) FROM note_settlement_jobs j
+                WHERE j.session_id = s.id),
+               0
+             )
+           ) + 1 AS windowStart
+         FROM sessions s
+       )
+       WHERE lastActivityEpoch <= ?
+         AND windowEnd - windowStart + 1 >= ?
+       ORDER BY lastActivityEpoch ASC, sessionId ASC
+       LIMIT ?`
+  ).all(idleCutoffEpoch, minWindowTurns, scanLimit).filter((row) => !options.activeSessionIds.has(row.sessionId)).slice(0, limit);
+}
+function enqueueResidualNoteSettlementJob(db, candidate, nowEpoch) {
+  return runWriteTransaction(
+    db,
+    () => insertJob2(
+      db,
+      candidate.sessionId,
+      candidate.windowStart,
+      candidate.windowEnd,
+      "residual",
+      nowEpoch
+    )
+  );
+}
+var LEASE_EXHAUSTED_ERROR2 = "note settlement lease expired with no attempts left (dispatch never reported back)";
+function claimNextNoteSettlementJob(db, sessionId, nowEpoch, nowMs, options = {}) {
+  const leaseMs = options.leaseMs ?? NOTE_SETTLEMENT_LEASE_MS;
+  const maxAttempts = options.maxAttempts ?? NOTE_SETTLEMENT_MAX_ATTEMPTS;
+  const leaseCutoffEpoch = Math.floor((nowMs - leaseMs) / 1e3);
+  const excluded = options.excludeJobIds ?? /* @__PURE__ */ new Set();
+  return runWriteTransaction(db, () => {
+    db.query(
+      `UPDATE note_settlement_jobs
+       SET status = 'failed',
+           claimed_at_epoch = NULL,
+           last_error = COALESCE(last_error, ?),
+           updated_at_epoch = ?
+       WHERE session_id = ?
+         AND status = 'claimed'
+         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+         AND attempts >= ?`
+    ).run(
+      LEASE_EXHAUSTED_ERROR2,
+      nowEpoch,
+      sessionId,
+      leaseCutoffEpoch,
+      maxAttempts
+    );
+    db.query(
+      `UPDATE note_settlement_jobs
+       SET status = 'pending', claimed_at_epoch = NULL, updated_at_epoch = ?
+       WHERE session_id = ?
+         AND status = 'claimed'
+         AND (claimed_at_epoch IS NULL OR claimed_at_epoch <= ?)
+         AND attempts < ?`
+    ).run(nowEpoch, sessionId, leaseCutoffEpoch, maxAttempts);
+    db.query(
+      `UPDATE note_settlement_jobs
+       SET status = 'pending', claimed_at_epoch = NULL, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'failed'
+         AND attempts < ? AND retry_at_epoch <= ?`
+    ).run(nowEpoch, sessionId, maxAttempts, nowEpoch);
+    const stillClaimed = db.query(
+      `SELECT id FROM note_settlement_jobs
+         WHERE session_id = ? AND status = 'claimed' LIMIT 1`
+    ).get(sessionId);
+    if (stillClaimed) {
+      return null;
+    }
+    const excludedIds = [...excluded];
+    const exclusionClause = excludedIds.length > 0 ? ` AND id NOT IN (${excludedIds.map(() => "?").join(", ")})` : "";
+    const candidate = db.query(
+      `SELECT id FROM note_settlement_jobs
+         WHERE session_id = ? AND status = 'pending'
+           AND attempts < ? AND retry_at_epoch <= ?${exclusionClause}
+         ORDER BY window_start ASC, id ASC
+         LIMIT 1`
+    ).get(sessionId, maxAttempts, nowEpoch, ...excludedIds);
+    if (!candidate) {
+      return null;
+    }
+    const claimed = db.query(
+      `UPDATE note_settlement_jobs
+           SET status = 'claimed',
+               attempts = attempts + 1,
+               claim_generation = claim_generation + 1,
+               claimed_at_epoch = ?,
+               updated_at_epoch = ?
+           WHERE id = ? AND status = 'pending'
+           RETURNING${JOB_COLUMNS}`
+    ).get(nowEpoch, nowEpoch, candidate.id) ?? null;
+    if (claimed?.triggerType === "residual") {
+      closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch);
+    }
+    return claimed;
+  });
+}
+function completeNoteSettlementJob(db, jobId, nowEpoch, claimGeneration) {
+  return db.query(
+    `UPDATE note_settlement_jobs
+         SET status = 'done', claimed_at_epoch = NULL, last_error = NULL,
+             updated_at_epoch = ?
+         WHERE id = ? AND claim_generation = ?`
+  ).run(nowEpoch, jobId, claimGeneration).changes > 0;
+}
+function failNoteSettlementJob(db, jobId, reason, nowEpoch, claimGeneration, options = {}) {
+  const retryBaseMs = options.retryBaseMs ?? NOTE_SETTLEMENT_RETRY_BASE_MS;
+  return runWriteTransaction(db, () => {
+    const job = getNoteSettlementJob(db, jobId);
+    if (!job || job.claimGeneration !== claimGeneration) {
+      return null;
+    }
+    const backoffSeconds = Math.max(
+      1,
+      Math.round(retryBaseMs * 2 ** Math.max(0, job.attempts - 1) / 1e3)
+    );
+    const changed = db.query(
+      `UPDATE note_settlement_jobs
+         SET status = 'failed', claimed_at_epoch = NULL, last_error = ?,
+             retry_at_epoch = ?, updated_at_epoch = ?
+         WHERE id = ? AND claim_generation = ?`
+    ).run(
+      reason.slice(0, 500),
+      nowEpoch + backoffSeconds,
+      nowEpoch,
+      jobId,
+      claimGeneration
+    ).changes;
+    if (changed === 0) {
+      return null;
+    }
+    return getNoteSettlementJob(db, jobId);
+  });
+}
+function advanceNoteSettlementCursor(db, sessionId, nowEpoch, maxAttempts = NOTE_SETTLEMENT_MAX_ATTEMPTS) {
+  const rows = db.query(
+    `SELECT window_end AS windowEnd, status, attempts
+       FROM note_settlement_jobs
+       WHERE session_id = ? ORDER BY window_start ASC, id ASC`
+  ).all(sessionId);
+  let consecutive = 0;
+  for (const row of rows) {
+    const resolved = row.status === "done" || row.status === "failed" && row.attempts >= maxAttempts;
+    if (!resolved) {
+      break;
+    }
+    consecutive = row.windowEnd;
+  }
+  const current = getNoteSettlementCursor(db, sessionId);
+  const next = Math.max(current, consecutive);
+  if (next !== current) {
+    db.query(
+      `INSERT INTO note_settlement_cursors (
+         session_id, last_settled_prompt_number, updated_at_epoch
+       ) VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         last_settled_prompt_number = excluded.last_settled_prompt_number,
+         updated_at_epoch = excluded.updated_at_epoch`
+    ).run(sessionId, next, nowEpoch);
+  }
+  return next;
+}
+
+// src/worker/note-settlement.ts
+var noopNoteSettlementDispatch = async () => ({
+  ok: true
+});
+var INERT_PASS = {
+  triggered: false,
+  created: [],
+  dispatched: [],
+  residualSessionIds: []
+};
+function inertPass() {
+  return { ...INERT_PASS, created: [], dispatched: [], residualSessionIds: [] };
+}
+function createNoteSettlementScheduler(deps) {
+  const db = deps.db;
+  const config3 = deps.config ?? DEFAULT_CONFIG;
+  const now = deps.now ?? (() => Math.floor(Date.now() / 1e3));
+  const nowMs = deps.nowMs ?? (() => Date.now());
+  const dispatch = deps.dispatch ?? noopNoteSettlementDispatch;
+  const activeSessionIds = deps.activeSessionIds ?? (() => []);
+  const isGracefulExit = deps.isGracefulExit ?? (() => false);
+  const logger = deps.logger ?? console;
+  const windowOptions = {
+    consecutiveTurns: deps.consecutiveTurns,
+    minWindowTurns: deps.minWindowTurns
+  };
+  const claimOptions = {
+    leaseMs: deps.leaseMs,
+    maxAttempts: deps.maxAttempts
+  };
+  async function drainSession(sessionDbId, maxJobs) {
+    const attempted = /* @__PURE__ */ new Set();
+    const dispatched = [];
+    while (dispatched.length < maxJobs) {
+      let job = null;
+      try {
+        job = claimNextNoteSettlementJob(db, sessionDbId, now(), nowMs(), {
+          ...claimOptions,
+          excludeJobIds: attempted
+        });
+      } catch (error49) {
+        logger.error?.("note settlement claim failed", { sessionDbId, error: error49 });
+        break;
+      }
+      if (!job) {
+        break;
+      }
+      const claimed = job;
+      attempted.add(claimed.id);
+      dispatched.push(claimed);
+      let outcome;
+      try {
+        outcome = await dispatch({ job: claimed });
+      } catch (error49) {
+        outcome = {
+          ok: false,
+          reason: `note settlement dispatch threw: ${error49 instanceof Error ? error49.message : String(error49)}`
+        };
+      }
+      if (outcome.ok) {
+        const committed = runWriteTransaction(db, () => {
+          if (!completeNoteSettlementJob(
+            db,
+            claimed.id,
+            now(),
+            claimed.claimGeneration
+          )) {
+            return false;
+          }
+          advanceNoteSettlementCursor(
+            db,
+            claimed.sessionId,
+            now(),
+            claimOptions.maxAttempts
+          );
+          return true;
+        });
+        if (!committed) {
+          logger.warn?.("note settlement result discarded, job was reclaimed", {
+            sessionDbId,
+            jobId: claimed.id,
+            claimGeneration: claimed.claimGeneration
+          });
+          break;
+        }
+        continue;
+      }
+      const failed = failNoteSettlementJob(
+        db,
+        claimed.id,
+        outcome.reason,
+        now(),
+        claimed.claimGeneration,
+        { retryBaseMs: deps.retryBaseMs }
+      );
+      if (failed === null) {
+        logger.warn?.("note settlement failure discarded, job was reclaimed", {
+          sessionDbId,
+          jobId: claimed.id
+        });
+        break;
+      }
+      runWriteTransaction(
+        db,
+        () => advanceNoteSettlementCursor(
+          db,
+          claimed.sessionId,
+          now(),
+          claimOptions.maxAttempts
+        )
+      );
+      break;
+    }
+    return dispatched;
+  }
+  function enqueueResiduals(excludeSessionDbId) {
+    const active = new Set(activeSessionIds());
+    active.add(excludeSessionDbId);
+    const candidates = listResidualNoteSettlementCandidates(db, {
+      activeSessionIds: active,
+      nowEpoch: now(),
+      idleMs: deps.residualIdleMs,
+      minWindowTurns: deps.minWindowTurns,
+      limit: deps.residualLimit
+    });
+    const created = [];
+    for (const candidate of candidates) {
+      const job = enqueueResidualNoteSettlementJob(db, candidate, now());
+      if (job) {
+        created.push(job);
+      }
+    }
+    return created;
+  }
+  async function runTrigger(sessionDbId, trigger) {
+    if (!config3.settlementEnabled) {
+      return inertPass();
+    }
+    let plans;
+    try {
+      plans = planNoteSettlementWindows(db, sessionDbId, trigger, windowOptions);
+    } catch (error49) {
+      logger.error?.("note settlement planning failed", { sessionDbId, error: error49 });
+      return inertPass();
+    }
+    const triggered = trigger === "compact" || plans.length > 0;
+    if (!triggered) {
+      return inertPass();
+    }
+    const created = [];
+    try {
+      created.push(...enqueueNoteSettlementWindows(db, plans, now()));
+      created.push(...enqueueResiduals(sessionDbId));
+    } catch (error49) {
+      logger.error?.("note settlement enqueue failed", { sessionDbId, error: error49 });
+    }
+    const residualSessionIds = created.filter((job) => job.triggerType === "residual").map((job) => job.sessionId);
+    if (isGracefulExit()) {
+      return { triggered, created, dispatched: [], residualSessionIds };
+    }
+    const dispatched = await drainSession(
+      sessionDbId,
+      Number.MAX_SAFE_INTEGER
+    );
+    for (const residualSessionId of residualSessionIds) {
+      dispatched.push(...await drainSession(residualSessionId, 1));
+    }
+    return { triggered, created, dispatched, residualSessionIds };
+  }
+  return {
+    onTurnStop: (sessionDbId) => runTrigger(sessionDbId, "consecutive"),
+    onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact")
+  };
 }
 
 // src/shared/logger.ts
@@ -42727,33 +43343,6 @@ function query({
 var import_node_fs7 = require("node:fs");
 var import_node_child_process = require("node:child_process");
 
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "noted", null, nowEpoch);
-}
-
 // src/db/shadow-notes.ts
 var SHADOW_NOTE_COLUMNS = `
   turn_id AS turnId,
@@ -49782,6 +50371,34 @@ function createWorkerCore(deps) {
   const enforceSessionEnvPresence = deps.sessionEnvRegistry !== void 0;
   const contentSessionIdByDbId = /* @__PURE__ */ new Map();
   const isSessionRetryGated = (sessionDbId) => suspendedUntilBySession.has(sessionDbId) || blockedUntilBySession.has(sessionDbId);
+  let gracefulExitWindow = false;
+  const noteSettlement = createNoteSettlementScheduler({
+    db: deps.db,
+    config: config3,
+    now,
+    nowMs,
+    dispatch: deps.noteSettlementDispatchImpl,
+    // "Closed" is derived, never stored: a session counts as live exactly while
+    // its env registration is present, which is worker memory, not a column.
+    activeSessionIds: () => contentSessionIdByDbId.keys(),
+    isGracefulExit: deps.isGracefulExitImpl ?? (() => gracefulExitWindow),
+    logger
+  });
+  async function runNoteSettlementTrigger(sessionDbId, trigger) {
+    try {
+      if (trigger === "compact") {
+        await noteSettlement.onCompact(sessionDbId);
+      } else {
+        await noteSettlement.onTurnStop(sessionDbId);
+      }
+    } catch (error49) {
+      logger.error?.("note settlement trigger failed", {
+        sessionDbId,
+        trigger,
+        error: error49
+      });
+    }
+  }
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer = null;
   let pendingDiaryTriggerSessionDbId;
@@ -51473,6 +52090,7 @@ ${coldStart}
   }
   async function handleTurnStop(sessionDbId) {
     await scanAndDrainGlobalQueue(sessionDbId);
+    await runNoteSettlementTrigger(sessionDbId, "turn-stop");
   }
   async function drainSessionCompletely(sessionDbId, options = {}) {
     let previousCount = Number.POSITIVE_INFINITY;
@@ -51573,6 +52191,7 @@ ${coldStart}
     await closeSessionQuery(sessionDbId);
   }
   async function abortAllExtractionSessionsForShutdown() {
+    gracefulExitWindow = true;
     const liveSessionIds = Array.from(sessions.values()).filter((state) => state.querySession !== null).map((state) => state.sessionDbId);
     await Promise.all(
       liveSessionIds.map(async (sessionDbId) => {
@@ -51717,6 +52336,7 @@ ${coldStart}
         });
       }
       await scanAndDrainGlobalQueue(sessionDbId);
+      await runNoteSettlementTrigger(sessionDbId, "compact");
       try {
         const state = getOrCreateSessionState(sessionDbId);
         const summaryShape = { kind: "session-summary" };
@@ -51795,6 +52415,7 @@ ${coldStart}
     finishSession,
     drainSessionCompletely,
     settleSession,
+    noteSettlement,
     closeSessionQuery,
     ensureQuerySession: (state) => ensureQuerySession(state),
     abortAllExtractionSessionsForShutdown,

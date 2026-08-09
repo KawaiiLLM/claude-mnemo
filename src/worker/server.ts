@@ -63,6 +63,11 @@ import {
   parseSettlementBatch,
 } from "./settlement";
 import {
+  createNoteSettlementScheduler,
+  type NoteSettlementDispatch,
+  type NoteSettlementScheduler,
+} from "./note-settlement";
+import {
   DATA_DIR,
   WORKER_PID_PATH,
   WORKER_STARTING_PATH,
@@ -371,6 +376,14 @@ export interface WorkerCoreDeps {
   isProcessAliveImpl?: typeof isProcessAlive;
   /** Live context size (tokens) of the memory agent, by agent session id. */
   readAgentContextTokensImpl?: (agentSessionId: string) => number | null;
+  /**
+   * P2 note settlement payload (spec D9, ticket 05). Defaults to the no-op stub,
+   * which is what keeps "the worker never calls a model" true of the shipped
+   * wiring; ticket 07 supplies the real Sonnet subprocess here.
+   */
+  noteSettlementDispatchImpl?: NoteSettlementDispatch;
+  /** Forces the record-only graceful-exit window in tests. */
+  isGracefulExitImpl?: () => boolean;
   logger?: Pick<Console, "warn" | "error">;
   config?: MnemoConfig;
 }
@@ -464,6 +477,12 @@ export interface WorkerCore {
    * grade pass can be driven directly in tests.
    */
   settleSession(sessionDbId: number): Promise<void>;
+  /**
+   * P2 note settlement (spec D9, ticket 05). Exposed so the trigger surface can
+   * be driven directly; the worker itself calls it from exactly two places —
+   * `handleTurnStop` and `handleCompact`.
+   */
+  noteSettlement: NoteSettlementScheduler;
   closeSessionQuery(sessionDbId: number): Promise<void>;
   /**
    * Build (or return) this session's agent runtime. Exposed so the
@@ -834,6 +853,46 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   const isSessionRetryGated = (sessionDbId: number): boolean =>
     suspendedUntilBySession.has(sessionDbId) ||
     blockedUntilBySession.has(sessionDbId);
+  // Latched by the shutdown abort path. Inside this window settlement records
+  // jobs and dispatches nothing — a payload launched here would be killed
+  // before it reported back and would burn an attempt for no work.
+  let gracefulExitWindow = false;
+  const noteSettlement: NoteSettlementScheduler = createNoteSettlementScheduler({
+    db: deps.db,
+    config,
+    now,
+    nowMs,
+    dispatch: deps.noteSettlementDispatchImpl,
+    // "Closed" is derived, never stored: a session counts as live exactly while
+    // its env registration is present, which is worker memory, not a column.
+    activeSessionIds: () => contentSessionIdByDbId.keys(),
+    isGracefulExit: deps.isGracefulExitImpl ?? (() => gracefulExitWindow),
+    logger,
+  });
+
+  /**
+   * Run one settlement trigger. Wrapped so a settlement fault can never fail the
+   * content event that carried it — capture and extraction outrank settlement,
+   * and a settled window is recoverable from the durable job row anyway.
+   */
+  async function runNoteSettlementTrigger(
+    sessionDbId: number,
+    trigger: "turn-stop" | "compact",
+  ): Promise<void> {
+    try {
+      if (trigger === "compact") {
+        await noteSettlement.onCompact(sessionDbId);
+      } else {
+        await noteSettlement.onTurnStop(sessionDbId);
+      }
+    } catch (error) {
+      logger.error?.("note settlement trigger failed", {
+        sessionDbId,
+        trigger,
+        error,
+      });
+    }
+  }
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer: unknown | null = null;
   let pendingDiaryTriggerSessionDbId: number | null | undefined;
@@ -3203,6 +3262,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // scans. A direct session drain can otherwise overtake rows already being
     // claimed by an in-flight global drain and terminalize their owner first.
     await scanAndDrainGlobalQueue(sessionDbId);
+    // One of the two settlement triggers (spec D9), and the only one that fires
+    // from ordinary work. It settles nothing until 50 consecutive decided turns
+    // have accumulated, so every other turn-stop costs one indexed read.
+    await runNoteSettlementTrigger(sessionDbId, "turn-stop");
   }
 
   async function drainSessionCompletely(
@@ -3329,6 +3392,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function abortAllExtractionSessionsForShutdown(): Promise<void> {
+    // Entering the graceful-exit window: from here settlement records but never
+    // dispatches, so nothing is started that shutdown is about to kill.
+    gracefulExitWindow = true;
     const liveSessionIds = Array.from(sessions.values())
       .filter((state) => state.querySession !== null)
       .map((state) => state.sessionDbId);
@@ -3537,6 +3603,12 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       await scanAndDrainGlobalQueue(sessionDbId);
 
+      // The second settlement trigger (spec D9). Placed here on purpose: the
+      // boundary marker has already been repaired by updateCompactAnchor above
+      // and the queue is drained, so the note-debt ledger is as decided as it
+      // will get for the turns this compact closes over.
+      await runNoteSettlementTrigger(sessionDbId, "compact");
+
       try {
         const state = getOrCreateSessionState(sessionDbId);
         // Standalone <session> summary: requiredIds = ∅, completion point. A
@@ -3641,6 +3713,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     finishSession,
     drainSessionCompletely,
     settleSession,
+    noteSettlement,
     closeSessionQuery,
     ensureQuerySession: (state: SessionState) => ensureQuerySession(state),
     abortAllExtractionSessionsForShutdown,
