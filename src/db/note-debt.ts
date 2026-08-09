@@ -20,7 +20,13 @@ import { isMnemoOwnToolName } from "../shared/note-tool";
 export const NOTE_DEBT_AGING_TURNS = 50;
 
 export type NoteDebtStatus = "pending" | "noted" | "skipped";
-export type NoteDebtReason = "aged" | "rolled-back";
+/**
+ * `closed` is written only by residual settlement (spec D9): a session with no
+ * live registration and no activity for a day will never get its notes written,
+ * so its open debts are converted at claim time. Without that conversion the
+ * unsettled window is permanently blocked behind a debt nobody will ever pay.
+ */
+export type NoteDebtReason = "aged" | "rolled-back" | "closed";
 
 export interface NoteDebtRecord {
   turnId: number;
@@ -448,6 +454,34 @@ export function listOpenNoteDebt(
       pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber),
     }))
     .filter((debt) => debt.pendingTurns <= agingTurns);
+}
+
+/**
+ * Convert every open debt of a CLOSED session to `skipped(closed)` — the
+ * claim-time step of residual settlement (spec D9, 裁决 11).
+ *
+ * Called from inside the residual job's claim transaction, never speculatively:
+ * "closed" is a judgement computed at query time from live registrations and
+ * idle age, and it is deliberately never stored. Writing these rows outside the
+ * claim would durably record that judgement, and a session that reopens a minute
+ * later would find its debts silently written off with no job to show for it.
+ *
+ * Uses the same `WHERE status = 'pending'` guard as every other close, so a debt
+ * a late note just settled keeps its `noted` outcome.
+ */
+export function closePendingNoteDebtsAsClosed(
+  db: Database,
+  sessionId: number,
+  nowEpoch: number,
+): number {
+  return db
+    .query<unknown, [number, number, number]>(
+      `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`,
+    )
+    .run(nowEpoch, nowEpoch, sessionId).changes;
 }
 
 export type NoteIdExposureSource = "reminder" | "injection";
