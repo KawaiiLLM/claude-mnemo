@@ -61,8 +61,29 @@ export function normalizeTrigramText(value: string): string {
     .trim();
 }
 
+export interface SegmentFtsRecord {
+  id: number;
+  title: string;
+  content: string | null;
+  /** JSON arrays as stored on the row; both go into the `extra` slot. */
+  type: string | null;
+  tags: string | null;
+}
+
+/**
+ * Which turn statuses reach a reader (spec D11).
+ *
+ * FTS ingest stopped caring about status in ticket 06 — the index answers "was
+ * this ever written down", which is a property of the text. Deciding what a
+ * reader is SHOWN is this side's job, and it is the same answer the index used
+ * to enforce by deleting rows: a `skipped`, `undone`, `failed` or still in-flight
+ * turn is not a search hit. Its originals stay indexed and stay reachable by
+ * direct address (`recall(id="S<n>/T<m>")`) and by replay.
+ */
+const RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
+
 export interface SearchMemoryOptions {
-  scope?: "sessions" | "turns" | "observations";
+  scope?: "sessions" | "turns" | "observations" | "segments";
   query?: string;
   project?: string;
   type?: string;
@@ -75,7 +96,12 @@ export interface SearchMemoryOptions {
 }
 
 export interface SearchMemoryResult {
-  layer: "session" | "turn" | "observation";
+  /**
+   * `segment` rows carry the segment id in `sourceId` and leave `sessionId`
+   * null — a segment is not bound to a session (spec D6), so it enters the hit
+   * set as a peer of the session rows rather than under one.
+   */
+  layer: "session" | "turn" | "observation" | "segment";
   sourceId: number;
   sessionId: number | null;
   turnId: number | null;
@@ -92,7 +118,7 @@ export interface SearchMemoryResult {
 }
 
 interface SearchRow {
-  layer: "session" | "turn" | "observation";
+  layer: "session" | "turn" | "observation" | "segment";
   sourceId: number;
   sessionId: number | null;
   turnId: number | null;
@@ -253,7 +279,7 @@ function buildSafeFtsQuery(query?: string): string | undefined {
 
 function indexFtsRecord(
   db: Database,
-  layer: "session" | "turn" | "observation" | "rule",
+  layer: "session" | "turn" | "observation" | "segment" | "rule",
   sourceId: number,
   title: string | null,
   content: string | null,
@@ -412,6 +438,41 @@ export function indexObservationToFTS(
   );
 }
 
+/**
+ * Index a segment, so the higher level of memory is searchable through the same
+ * query a turn is (spec D6: a segment carries a turn's field shape precisely so
+ * the read surfaces need no second vocabulary). `type` and `tags` share the
+ * `extra` slot, the same slot a session's summary fields use.
+ */
+export function indexSegmentToFTS(db: Database, segment: SegmentFtsRecord): void {
+  const facets = [segment.type, segment.tags]
+    .flatMap((value) => {
+      if (!value) {
+        return [];
+      }
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        return Array.isArray(parsed)
+          ? parsed.filter((item): item is string => typeof item === "string")
+          : [];
+      } catch {
+        return [];
+      }
+    })
+    .join(" ");
+
+  indexFtsRecord(
+    db,
+    "segment",
+    segment.id,
+    segment.title,
+    segment.content,
+    facets,
+    null,
+    null,
+  );
+}
+
 export function rebuildSearchIndex(db: Database): void {
   db.exec("DELETE FROM memory_fts");
 
@@ -504,6 +565,15 @@ export function rebuildSearchIndex(db: Database): void {
 
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
+  }
+
+  const segmentRows = db
+    .query<SegmentFtsRecord, []>(
+      "SELECT id, title, content, type, tags FROM segments ORDER BY id",
+    )
+    .all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
   }
 
   const ruleRows = db
@@ -620,6 +690,65 @@ function queryRecentObservations(
   );
 }
 
+/**
+ * The `type:`/`file:`/`tag:` facets as a SESSION answers them: "does this
+ * session hold such a turn". Written once for both the text and filter-only
+ * paths — two copies of a predicate are two places for the status rule to go
+ * missing, which is how a skipped turn came back as a session hit.
+ *
+ * Every one of them is scoped by `RENDERED_TURN_STATUS_CLAUSE`, so the turns a
+ * session is judged by are exactly the turns the turn-scoped query would
+ * return; otherwise a hidden turn re-enters the hit set one level up.
+ */
+function buildSessionTurnFacetClauses(options: SearchMemoryOptions): {
+  clauses: string[];
+  params: Array<string | number>;
+} {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (options.type) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND t.type = ?
+      )`,
+    );
+    params.push(options.type);
+  }
+
+  if (options.file) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+      )`,
+    );
+    params.push(`%${options.file}%`, `%${options.file}%`);
+  }
+
+  if (options.tag) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`,
+    );
+    params.push(options.tag);
+  }
+
+  return { clauses, params };
+}
+
 function querySessionsByScope(
   db: Database,
   options: SearchMemoryOptions,
@@ -628,46 +757,11 @@ function querySessionsByScope(
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
   const sessionClause = buildSessionClause("s.id", options.sessionId);
+  const facets = buildSessionTurnFacetClauses(options);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
-
-    if (options.type) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND t.type = ?
-        )`,
-      );
-      params.push(options.type);
-    }
-
-    if (options.file) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-        )`,
-      );
-      params.push(`%${options.file}%`, `%${options.file}%`);
-    }
-
-    if (options.tag) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-        )`,
-      );
-      params.push(options.tag);
-    }
+    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
 
     return queryRows(
       db,
@@ -696,44 +790,8 @@ function querySessionsByScope(
     );
   }
 
-  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
-
-  if (options.type) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND t.type = ?
-      )`,
-    );
-    params.push(options.type);
-  }
-
-  if (options.file) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-      )`,
-    );
-    params.push(`%${options.file}%`, `%${options.file}%`);
-  }
-
-  if (options.tag) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-      )`,
-    );
-    params.push(options.tag);
-  }
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
 
   return queryRows(
     db,
@@ -773,7 +831,7 @@ function queryTurnsByScope(
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const whereClauses = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
     const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
     if (options.type) {
@@ -809,7 +867,7 @@ function queryTurnsByScope(
     );
   }
 
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const whereClauses = [RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
   const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
 
   if (options.type) {
@@ -842,6 +900,90 @@ function queryTurnsByScope(
     `, options.limit),
     withLimit(params, options.limit),
   );
+}
+
+/**
+ * Segment hits (spec D11's `E` selector). A segment answers `tag:` and `type:`
+ * off its own JSON arrays, and answers `project:`/`session:` through its
+ * MEMBERS — the only relation it has to a session at all. `file:` excludes the
+ * layer outright: a segment records no file set of its own.
+ */
+function querySegmentsByScope(
+  db: Database,
+  options: SearchMemoryOptions,
+  query?: string,
+): SearchMemoryResult[] {
+  if (options.file) {
+    return [];
+  }
+
+  const dateClause = buildDateClause("g.created_at_epoch", options);
+  const tagClause = buildTagClause("g.tags", options.tag);
+  const whereClauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (query) {
+    whereClauses.push("memory_fts.layer = 'segment'", "memory_fts MATCH ?");
+    params.push(query);
+  }
+
+  whereClauses.push(dateClause.clause, tagClause.clause);
+  params.push(...dateClause.params, ...tagClause.params);
+
+  if (options.type) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(g.type) WHERE value = ?)");
+    params.push(options.type);
+  }
+
+  if (options.project !== undefined) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         JOIN sessions s ON s.id = t.session_id
+         WHERE sm.segment_id = g.id AND s.project = ?
+       )`,
+    );
+    params.push(options.project);
+  }
+
+  if (options.sessionId !== undefined) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         WHERE sm.segment_id = g.id AND t.session_id = ?
+       )`,
+    );
+    params.push(options.sessionId);
+  }
+
+  const selection = `
+    SELECT
+      'segment' AS layer,
+      g.id AS sourceId,
+      NULL AS sessionId,
+      NULL AS turnId,
+      NULL AS observationId,
+      NULL AS sourceTurnId,
+      '' AS project,
+      g.title AS title,
+      g.content AS content,
+      g.type AS type,
+      NULL AS filesRead,
+      NULL AS filesModified,
+      g.created_at_epoch AS timestampEpoch,
+      ${query ? "bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0)" : "NULL"} AS relevance
+    ${
+      query
+        ? "FROM memory_fts JOIN segments g ON g.id = memory_fts.source_id"
+        : "FROM segments g"
+    }
+    ${combineClauses(whereClauses)}
+    ORDER BY ${query ? "relevance ASC" : "g.created_at_epoch DESC"}
+  `;
+
+  return queryRows(db, applyLimit(selection, options.limit), withLimit(params, options.limit));
 }
 
 function queryObservationsByScope(
@@ -952,6 +1094,10 @@ export function searchMemory(
       return queryRecentTurns(db, options);
     }
 
+    if (options.scope === "segments") {
+      return querySegmentsByScope(db, options, query);
+    }
+
     return queryRecentObservations(db, options);
   }
 
@@ -960,6 +1106,10 @@ export function searchMemory(
 
     if (!options.file) {
       results.push(...querySessionsByScope(db, options, query));
+      // Segments sit beside sessions rather than under them: one `tag:` query
+      // is meant to return the chapter AND its member turns in one pass
+      // (spec D6 / user story 16), so the caller gets the hierarchy for free.
+      results.push(...querySegmentsByScope(db, options, query));
     }
 
     results.push(...queryTurnsByScope(db, options, query));
@@ -986,6 +1136,10 @@ export function searchMemory(
 
   if (options.scope === "turns") {
     return queryTurnsByScope(db, options, query);
+  }
+
+  if (options.scope === "segments") {
+    return querySegmentsByScope(db, options, query);
   }
 
   return queryObservationsByScope(db, options, query);

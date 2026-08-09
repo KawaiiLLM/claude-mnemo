@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { normalizeEraCutoffEpoch } from "../segment-era";
+
 export interface MnemoConfig {
   mergeThresholdChars: number;
   maxQueuedBatches: number;
@@ -33,6 +35,13 @@ export interface MnemoConfig {
    * merging the machinery cannot perturb the P1 shadow trial running beside it.
    */
   settlementEnabled: boolean;
+  /**
+   * P2 era boundary (spec D11, ticket 09 sets it). A turn created at or after
+   * this epoch renders through the segment spine; everything earlier keeps the
+   * legacy arc rendering, in the same session view. `null` — the product
+   * default — means every turn is legacy, so the segment read path is inert.
+   */
+  eraCutoffEpoch: number | null;
   /**
    * Master switch for the whole nightly dream chain. When false, no entry point
    * (end-event backlog reconcile, queue drain and its retries, manual
@@ -106,6 +115,7 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   settlementEnabled: false,
+  eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -257,6 +267,9 @@ function clampConfig(
       config.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled,
     ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config.eraCutoffEpoch),
     dreamAgentEnabled: resolveBoolean(
       config.dreamAgentEnabled,
       DEFAULT_CONFIG.dreamAgentEnabled,

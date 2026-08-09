@@ -26,6 +26,13 @@ export const MILESTONE_INJECTION_TOKEN_BUDGET = 2_500;
  */
 export interface RenderMilestoneInjectionOptions {
   tokenBudget?: number;
+  /**
+   * P2 era boundary (spec D11). Set, the injection's arc becomes the segment
+   * spine for the era side of the session and the legacy arc for the rest —
+   * under this same token budget, which is the existing contract and is not
+   * renegotiated here.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 export function renderMilestoneInjection(
@@ -52,6 +59,7 @@ export function renderSessionMilestoneInjection(
     // One page holding every selected row: the token budget, not pagination, is
     // what sizes the injection.
     pageSize: Number.MAX_SAFE_INTEGER,
+    eraCutoffEpoch: options.eraCutoffEpoch ?? null,
   });
   return renderMilestoneInjection(view, options);
 }

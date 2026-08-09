@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
+import { addSegmentMembers, createSegment } from "../../src/db/segments";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { createRuleStore } from "../../src/db/rules";
@@ -750,6 +751,60 @@ describe("mechanical signals and rule exemption", () => {
     expect(withRealSnapshot).not.toBe(withEmptySnapshot);
     expect(withRealSnapshot).toMatch(/T2 [^\n]*G3/);
     expect(withEmptySnapshot).toMatch(/T2 [^\n]*G0/);
+  });
+
+  test("the arc view is drawn under the configured era boundary", () => {
+    // The settle agent reads the arc to decide grades. If the renderer is never
+    // told where the era starts, it keeps drawing era turns as legacy arc rows
+    // long after the switch — the one screen where the two semantics must not
+    // blend.
+    const eraCutoffEpoch = 1_900_000_000;
+    const turnId = seedTurn(db, sessionId, 1, {
+      grade: 3,
+      title: "implement the spine",
+      createdAtEpoch: eraCutoffEpoch + 1,
+    });
+    const cohort = [getTurnById(db, turnId)!];
+    const signals = computeSettlementSignals(db, sessionId, cohort);
+    const segment = createSegment(db, {
+      title: "implement the segment spine",
+      type: ["implement"],
+      nowEpoch: eraCutoffEpoch,
+    });
+    addSegmentMembers(db, segment.id, [turnId], eraCutoffEpoch);
+
+    expect(
+      renderSettlementWindow(db, sessionId, cohort, signals, undefined, eraCutoffEpoch),
+    ).toContain(`[E${segment.id}]`);
+    expect(
+      buildSettlementPrompt({
+        db,
+        sessionId,
+        job: {
+          id: 1,
+          sessionId,
+          boundary: 1,
+          frozenMemberIds: [turnId],
+          status: "claimed",
+          attempts: 1,
+          claimedAtEpoch: 1,
+          claimGeneration: 1,
+          changeSummary: null,
+          lastError: null,
+          createdAtEpoch: 1,
+          updatedAtEpoch: 1,
+        },
+        cohort,
+        signals,
+        eraCutoffEpoch,
+      }),
+    ).toContain(`[E${segment.id}]`);
+
+    // The configured default is still null, so nothing changes until ticket 09
+    // sets a cutoff.
+    expect(renderSettlementWindow(db, sessionId, cohort, signals)).not.toContain(
+      `[E${segment.id}]`,
+    );
   });
 
   test("the prompt carries the roster, the signal package and the calibration block", () => {

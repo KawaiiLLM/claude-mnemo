@@ -1254,6 +1254,7 @@ function shouldRebuildSearchIndex(db: Database): boolean {
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
     { table: "observations", layer: "observation" },
+    { table: "segments", layer: "segment" },
     { table: "rules", layer: "rule" },
   ] as const;
 

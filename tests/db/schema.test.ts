@@ -11,6 +11,7 @@ import {
   initializeDatabase,
   initializeSchema,
 } from "../../src/db/schema";
+import { createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
 import { runTranscriptPathBackfill } from "../../src/db/transcript-path-backfill";
 import { getTurnById } from "../../src/db/turns";
@@ -1050,6 +1051,35 @@ describe("initializeSchema", () => {
           "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'session'",
         )
         .get().count,
+    ).toBe(1);
+
+    rebuildSpy.mockRestore();
+  });
+
+  test("rebuilds the search index when segments are missing from FTS", () => {
+    // Segments are indexed row-by-row at write time, so a commit that lands
+    // while the index write fails leaves a segment nothing can find. Drift
+    // detection is the only thing that ever notices, and it has to know the
+    // layer exists.
+    initializeSchema(db);
+    const segment = createSegment(db, {
+      title: "implement the segment spine",
+      type: ["implement"],
+      nowEpoch: 10,
+    });
+    db.query("DELETE FROM memory_fts WHERE layer = 'segment'").run();
+
+    const rebuildSpy = spyOn(searchModule, "rebuildSearchIndex");
+
+    initializeDatabase(db);
+
+    expect(rebuildSpy).toHaveBeenCalledTimes(1);
+    expect(
+      db
+        .query<{ count: number }, [number]>(
+          "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'segment' AND source_id = ?",
+        )
+        .get(segment.id).count,
     ).toBe(1);
 
     rebuildSpy.mockRestore();

@@ -14,6 +14,7 @@ import {
 } from "../db/settlement";
 import { runWriteTransaction } from "../db/database";
 import { getTurnById, updateTurnById, type TurnRecord } from "../db/turns";
+import { loadConfig } from "../shared/config";
 import {
   buildCorrectionGraph,
   buildTimelineView,
@@ -30,6 +31,21 @@ import {
  * `db/settlement.ts`; this module owns what the settle agent SEES, what it is
  * allowed to SAY back, and what one accepted answer WRITES.
  */
+
+/**
+ * The configured era boundary (spec D11). The arc view this module shows the
+ * settle agent is the SAME renderer every read surface uses, so it has to be
+ * told where the era starts or it keeps drawing era turns as legacy arc rows
+ * after the switch. Resolved here rather than plumbed from the worker because
+ * the value only changes on a reload; the default (`null`) is the legacy path.
+ */
+function resolveConfiguredEraCutoff(): number | null {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
 
 /** Grade a provisional turn must currently hold to be a demotion candidate. */
 const DEMOTION_CANDIDATE_GRADE = 3;
@@ -188,6 +204,7 @@ export function renderSettlementWindow(
   cohort: readonly TurnRecord[],
   signals: SettlementSignals,
   citations?: ReadonlyMap<number, EffectiveCitations>,
+  eraCutoffEpoch: number | null = resolveConfiguredEraCutoff(),
 ): string {
   let arcView = "(arc view unavailable)";
   try {
@@ -198,6 +215,7 @@ export function renderSettlementWindow(
           id: `S${sessionId}`,
           view: "milestones",
           pageSize: Math.max(cohort.length, 1),
+          eraCutoffEpoch,
         },
         [...cohort],
         // The SAME snapshot the mechanical signals were derived from. Two reads
@@ -265,6 +283,8 @@ export interface SettlementPromptInput {
   signals: SettlementSignals;
   /** The session citation snapshot the signals were derived from (spec §B). */
   citations?: ReadonlyMap<number, EffectiveCitations>;
+  /** Overrides the configured era boundary; tests are the only caller that does. */
+  eraCutoffEpoch?: number | null;
 }
 
 /**
@@ -293,6 +313,7 @@ ${renderSettlementWindow(
   cohort,
   signals,
   input.citations,
+  input.eraCutoffEpoch,
 )}
 
 ${renderMechanicalSignals(signals)}

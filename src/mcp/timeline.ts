@@ -4,12 +4,24 @@ import {
   parseInlineCitations,
   type EffectiveCitations,
 } from "../db/citations";
+import {
+  listOrphanAnchorTurns,
+  listSegmentSpineForSession,
+  type OrphanAnchorRow,
+  type SegmentSpineRow,
+} from "../db/segment-rank";
 import { getSession, type SessionRecord } from "../db/sessions";
 import { getFirstTurn, getTurnById, getTurnsForSession, type TurnRecord } from "../db/turns";
 import { estimateDiaryTokens } from "../diary/domain";
+import { isSegmentEra } from "../segment-era";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
+
+import {
+  legacyEraHeader,
+  renderSegmentSpineBlock,
+} from "./segment-spine";
 
 export interface TimelineInput {
   id: string;
@@ -23,6 +35,13 @@ export interface TimelineInput {
    * context render so compact/clear surface the recent milestone arc.
    */
   milestoneTail?: boolean;
+  /**
+   * P2 era boundary (spec D11). Turns created at or after it render as the
+   * segment spine; earlier turns keep the legacy arc, in the same view. `null`
+   * or omitted — the product default until ticket 09 — puts every turn on the
+   * legacy path, so the output is byte-identical to the pre-segment renderer.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 export type TimelineViewKind = "turns" | "milestones" | "phases";
@@ -68,6 +87,18 @@ export interface TimelineView {
   milestoneTail: boolean;
   /** Fork-lineage breadcrumb string, or null for root sessions. */
   breadcrumb: string | null;
+  /** The era boundary this view was built against; null = everything legacy. */
+  eraCutoffEpoch: number | null;
+  /**
+   * Window turns on the era side. The legacy selection never sees these — a
+   * turn is read under exactly one set of semantics — and their presence is
+   * what makes the renderer emit both blocks.
+   */
+  eraWindowTurns: TurnRecord[];
+  /** Segment rows for the era side of this session (arc view only). */
+  segmentSpine: SegmentSpineRow[];
+  /** Era turns with hard mechanical signals that no segment claimed. */
+  orphanAnchors: OrphanAnchorRow[];
 }
 
 export interface RenderTimelineOptions {
@@ -1760,6 +1791,19 @@ export function buildTimelineView(
       turn.promptNumber >= window.startPromptNumber &&
       turn.promptNumber <= window.endPromptNumber,
   );
+  // Era split (spec D11, R2#7). The legacy selection runs over the pre-cutoff
+  // turns ALONE — including the universe it resolves citations against — so no
+  // era turn can be pulled into the legacy block as an antecedent and read under
+  // grade semantics it was never written with. With no cutoff the two arrays are
+  // the originals and nothing downstream changes.
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const isEra = (turn: TurnRecord): boolean =>
+    isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
+  const legacyWindowTurns =
+    eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
+  const legacySessionTurns =
+    eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -1782,10 +1826,10 @@ export function buildTimelineView(
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
     session,
-    windowTurns,
+    windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
-    sessionTurns: allTurns,
+    sessionTurns: legacySessionTurns,
     // One read for the whole selection: in-degree, victim demotion and
     // pull-through all consume this map (spec §B). A caller that already read it
     // (settlement) hands its own snapshot in rather than paying for a second.
@@ -1816,6 +1860,21 @@ export function buildTimelineView(
     viewKind === "phases"
       ? paginateItems(phases, page, pageSize)
       : emptyPaginatedItems<Phase>(phases.length, pageSize);
+  // The spine is the arc view's business only: the turn table is a flat ledger
+  // of raw rows and the phase view is derived from turn types, so neither
+  // changes semantics at the boundary. (The turn table's G column does: era
+  // turns are absent from `effGradeByTurnId` and print `—`, which is correct —
+  // a grade is legacy semantics and an era turn must not claim one.)
+  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  // The era side answers to the same window the legacy body does: a range view
+  // shows the chapters its turns belong to and nothing else.
+  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
+  const segmentSpine = renderSegments
+    ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
+    : [];
+  const orphanAnchors = renderSegments
+    ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
+    : [];
   const viewItemTotal =
     viewKind === "turns"
       ? pagedTurns.total
@@ -1865,6 +1924,10 @@ export function buildTimelineView(
       : false,
     milestoneTail,
     breadcrumb,
+    eraCutoffEpoch,
+    eraWindowTurns,
+    segmentSpine,
+    orphanAnchors,
   };
 }
 
@@ -1872,6 +1935,7 @@ export function buildContextTimelineView(
   db: Database,
   sessionId: number,
   view: TimelineViewKind = "turns",
+  eraCutoffEpoch: number | null = null,
 ): TimelineView {
   const session = getSession(db, sessionId);
   if (!session) {
@@ -1889,7 +1953,7 @@ export function buildContextTimelineView(
   });
 
   if (sortedTurns.length === 0) {
-    return buildTimelineView(db, { id: `S${sessionId}` });
+    return buildTimelineView(db, { id: `S${sessionId}`, eraCutoffEpoch });
   }
 
   // Milestones: select over the full session (correct endpoints/budget/retention)
@@ -1901,6 +1965,7 @@ export function buildContextTimelineView(
       view: "milestones",
       pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
       milestoneTail: true,
+      eraCutoffEpoch,
     }, sortedTurns);
   }
 
@@ -1912,6 +1977,7 @@ export function buildContextTimelineView(
     id: `S${sessionId}/T${firstPromptNumber}..${lastPromptNumber}`,
     pageSize: DEFAULT_TIMELINE_PAGE_SIZE,
     view,
+    eraCutoffEpoch,
   }, sortedTurns);
 
   return {
@@ -3414,16 +3480,51 @@ function renderLineagePointer(view: TimelineView): string[] {
   ];
 }
 
+/**
+ * Legacy-body lines with the era divider spliced in. The body model opens with a
+ * blank line, so the divider goes AFTER it — the reader gets one blank, then the
+ * "you are now in the old semantics" marker, then the day groups.
+ */
+function withLegacyEraHeader(
+  view: TimelineView,
+  bodyLines: string[],
+  hasSpine: boolean,
+): string[] {
+  if (!hasSpine || bodyLines.length === 0) {
+    return bodyLines;
+  }
+  const legacyPrompts = view.windowTurns
+    .filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch))
+    .map((turn) => turn.promptNumber);
+  const header = legacyEraHeader(
+    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
+    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null,
+  );
+  const [first, ...rest] = bodyLines;
+  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
+}
+
 export function renderTimeline(
   view: TimelineView,
   options: RenderTimelineOptions = {},
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  // Spine lines are recomputed whenever the budget sheds a row; everything else
+  // in `assemble` is fixed.
+  let spineLines =
+    view.view === "milestones"
+      ? renderSegmentSpineBlock({
+          spine: view.segmentSpine,
+          orphans: view.orphanAnchors,
+          titleCap,
+        })
+      : [];
   const assemble = (bodyLines: string[]): string =>
     [
       ...renderSessionHeader(view),
-      ...bodyLines,
+      ...spineLines,
+      ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
       ...renderShapeSignals(view),
       ...renderEarlierHint(view, options),
       ...renderLineagePointer(view),
@@ -3442,6 +3543,24 @@ export function renderTimeline(
   if (options.tokenBudget === undefined) {
     return assemble(renderMilestoneBody(view, titleCap));
   }
+
+  // The spine is the era's default view, so it is served first: it sheds its own
+  // lowest-value rows only until it fits ALONE, and whatever is left of the
+  // budget is what the legacy body's existing fitter degrades into. Both stages
+  // measure with `estimateDiaryTokens` over the whole assembled output — one
+  // budget, one measure, no second budget system.
+  if (spineLines.length > 0) {
+    shedSpineToBudget({
+      view,
+      titleCap,
+      tokenBudget: options.tokenBudget,
+      apply: (candidate) => {
+        spineLines = candidate;
+      },
+      measure: () => estimateDiaryTokens(assemble([])),
+    });
+  }
+
   // Everything outside the body is fixed, so its weight is measured once and the
   // fitter only has to price what it changes.
   return assemble(
@@ -3453,6 +3572,46 @@ export function renderTimeline(
       (bodyLines) => estimateDiaryTokens(assemble(bodyLines)),
     ),
   );
+}
+
+interface ShedSpineOptions {
+  view: TimelineView;
+  titleCap: number;
+  tokenBudget: number;
+  /** Install a candidate so the caller's `measure` prices it. */
+  apply: (lines: string[]) => void;
+  /** Token cost of the whole assembled output with an EMPTY legacy body. */
+  measure: () => number;
+}
+
+/**
+ * Sheds spine rows until the header + spine alone fit the budget: orphan
+ * anchors first (they are the safety net, not the structure), then the oldest
+ * segments — the recent arc is what a resumed session needs restored. Each
+ * candidate is installed through `apply` before `measure` prices it, so the
+ * measurement is always of the output that would actually be emitted.
+ */
+function shedSpineToBudget(options: ShedSpineOptions): void {
+  const { view, titleCap, tokenBudget, apply, measure } = options;
+  let segments = view.segmentSpine.length;
+  let orphans = view.orphanAnchors.length;
+
+  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
+    if (orphans > 0) {
+      orphans -= 1;
+    } else {
+      segments -= 1;
+    }
+    apply(
+      renderSegmentSpineBlock({
+        spine: view.segmentSpine,
+        orphans: view.orphanAnchors,
+        titleCap,
+        maxSegments: segments,
+        maxOrphans: orphans,
+      }),
+    );
+  }
 }
 
 export function timelineQuery(db: Database, input: TimelineInput): string {

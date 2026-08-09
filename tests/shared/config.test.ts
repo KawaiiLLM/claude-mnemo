@@ -353,4 +353,29 @@ describe("shared config", () => {
     );
     expect(loadConfig(home).dreamAgentIdleWatchdogMs).toBe(3_600_000);
   });
+
+  test("eraCutoffEpoch defaults to null and only accepts a positive whole epoch", () => {
+    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
+    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
+
+    // The default is what makes ticket 08's rendering work inert in production:
+    // null means every turn stays on the legacy path.
+    expect(DEFAULT_CONFIG.eraCutoffEpoch).toBeNull();
+
+    writeFileSync(
+      `${home}/.claude-mnemo/config.json`,
+      JSON.stringify({ eraCutoffEpoch: 1_900_000_000 }),
+    );
+    expect(loadConfig(home).eraCutoffEpoch).toBe(1_900_000_000);
+
+    // 0, a float, a string and null all read as "no era yet" — an epoch of 0
+    // would silently put the WHOLE history on the new path.
+    for (const value of [0, -1, 1.5, "1900000000", null]) {
+      writeFileSync(
+        `${home}/.claude-mnemo/config.json`,
+        JSON.stringify({ eraCutoffEpoch: value }),
+      );
+      expect(loadConfig(home).eraCutoffEpoch).toBeNull();
+    }
+  });
 });

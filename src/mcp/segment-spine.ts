@@ -1,0 +1,234 @@
+import type { SegmentRecord } from "../db/segments";
+import type { OrphanAnchorRow, SegmentSpineRow } from "../db/segment-rank";
+import { TYPE_GLYPH, isMemoryType } from "../shared/type-vocabulary";
+
+import { TYPE_EMOJI } from "./format";
+
+/**
+ * The segment spine (spec D11): the new era's default reading surface.
+ *
+ * One line per segment — the chapter — plus one line per ORPHAN ANCHOR, a turn
+ * with hard mechanical signals that no segment has claimed. A 1000-turn session
+ * is meant to read as a few dozen of these lines, which is why the row carries
+ * only pointers: the dominant type glyph, the topic tag, the title, the status,
+ * the member count and span, and the phase trace. Everything else is one
+ * `recall(id="E<n>")` away.
+ *
+ * There is no day grouping here, on purpose. Day grouping is the legacy arc's
+ * organizing principle and it is what makes a long session over-budget: a
+ * month-long session pays for 31 headers before it renders any content, and a
+ * segment does not respect day boundaries anyway (70% of real topic arcs are
+ * non-contiguous). `time=` covers the "what happened on the 14th" question.
+ */
+
+/** `⚑` marks a row that is a bare turn on a surface made of segments. */
+const ORPHAN_GLYPH = "⚑";
+const SPINE_ROW_INDENT = "   ";
+/** Tags shown inline on a spine row before the rest collapse to `+N`. */
+export const SPINE_TAG_CAP = 2;
+
+export function segmentTypeGlyph(type: string | null | undefined): string {
+  if (!type) {
+    return "•";
+  }
+  if (isMemoryType(type)) {
+    return TYPE_GLYPH[type];
+  }
+  // A legacy-vocabulary type can still reach here through a member turn written
+  // before the switch; showing its old glyph beats showing none.
+  return TYPE_EMOJI[type] ?? "•";
+}
+
+function formatTags(tags: readonly string[]): string {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+
+function truncate(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
+}
+
+function sanitize(value: string): string {
+  return value.replaceAll("|", "/").replaceAll("→", "->");
+}
+
+export function formatPhaseTrace(phaseTrace: readonly string[]): string {
+  return phaseTrace.map((type) => segmentTypeGlyph(type)).join("→");
+}
+
+function formatSpan(row: SegmentSpineRow): string {
+  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
+    return "";
+  }
+  return row.firstPromptNumber === row.lastPromptNumber
+    ? `T${row.firstPromptNumber}`
+    : `T${row.firstPromptNumber}–T${row.lastPromptNumber}`;
+}
+
+/** `[E47] 🔧 #topic title [open] · 12 turns · T12–T87 · 🔍→⚖️→🔧` */
+export function renderSpineRow(row: SegmentSpineRow, titleCap: number): string {
+  const { segment } = row;
+  const parts = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(row.dominantType),
+    formatTags(segment.tags),
+    sanitize(truncate(segment.title, titleCap)),
+    `[${segment.status}]`,
+  ].filter((part) => part !== "");
+
+  const facts = [
+    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
+    formatSpan(row),
+    formatPhaseTrace(row.phaseTrace),
+  ].filter((part) => part !== "");
+
+  return `${SPINE_ROW_INDENT}${parts.join(" ")} · ${facts.join(" · ")}`.trimEnd();
+}
+
+/** `⚑ T101 🔴 title (corrector, cited 2)` */
+export function renderOrphanRow(row: OrphanAnchorRow, titleCap: number): string {
+  const { facts } = row;
+  const label = facts.title === null || facts.title.trim() === ""
+    ? "(untitled)"
+    : sanitize(truncate(facts.title, titleCap));
+  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
+    facts.type,
+  )} ${label} (${row.signals.join(", ")})`;
+}
+
+export interface SegmentSpineBlockInput {
+  spine: readonly SegmentSpineRow[];
+  orphans: readonly OrphanAnchorRow[];
+  titleCap: number;
+  /** Rows retained after budget shedding; undefined = all. */
+  maxSegments?: number;
+  maxOrphans?: number;
+}
+
+/**
+ * The whole spine block, ready to splice between the session header and the
+ * legacy body. Empty when there is nothing on the era side, which is what makes
+ * a null era cutoff byte-identical to the pre-ticket rendering.
+ *
+ * Shedding drops the OLDEST segments and the LOWEST-ranked orphans, and says so
+ * with a fold line — an omission is never silent.
+ */
+export function renderSegmentSpineBlock(
+  input: SegmentSpineBlockInput,
+): string[] {
+  const { spine, orphans, titleCap } = input;
+  if (spine.length === 0 && orphans.length === 0) {
+    return [];
+  }
+
+  const keptSegments = input.maxSegments === undefined
+    ? [...spine]
+    : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
+  const droppedSegments = spine.length - keptSegments.length;
+  const keptOrphans = input.maxOrphans === undefined
+    ? [...orphans]
+    : orphans.slice(0, Math.max(0, input.maxOrphans));
+  const droppedOrphans = orphans.length - keptOrphans.length;
+
+  const headerParts = [
+    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`,
+  ];
+  if (orphans.length > 0) {
+    headerParts.push(
+      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`,
+    );
+  }
+
+  const lines = ["", `── segment spine · ${headerParts.join(" · ")} ──`];
+
+  if (droppedSegments > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}… +${droppedSegments} earlier ${
+        droppedSegments === 1 ? "segment" : "segments"
+      }`,
+    );
+  }
+  for (const row of keptSegments) {
+    lines.push(renderSpineRow(row, titleCap));
+  }
+  for (const row of keptOrphans) {
+    lines.push(renderOrphanRow(row, titleCap));
+  }
+  if (droppedOrphans > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}… +${droppedOrphans} orphan ${
+        droppedOrphans === 1 ? "anchor" : "anchors"
+      }`,
+    );
+  }
+
+  return lines;
+}
+
+/**
+ * Marks where the segment spine ends and the legacy arc begins, so a session
+ * that straddles the cutoff never reads as one list written under two different
+ * sets of semantics (spec D11: each side of the boundary renders by its own
+ * rules). Emitted only when BOTH sides have content.
+ */
+export function legacyEraHeader(
+  firstPromptNumber: number | null,
+  lastPromptNumber: number | null,
+): string {
+  const span =
+    firstPromptNumber === null || lastPromptNumber === null
+      ? ""
+      : ` · T${firstPromptNumber}–T${lastPromptNumber}`;
+  return `── legacy era${span} ──`;
+}
+
+export interface SegmentHeaderInput {
+  segment: SegmentRecord;
+  memberCount: number;
+  dominantType: string | null;
+  phaseTrace: readonly string[];
+  /** Qualified `S<n>/T<m>` addresses of the body's anchors, in body order. */
+  anchorRefs: readonly string[];
+  truncate: number;
+}
+
+/**
+ * The `[E<n>]` record as recall renders it — the same collapsed/expanded shape
+ * a session or turn gets, because a segment carries a turn's field shape and
+ * the reader should not have to learn a second layout for the higher level.
+ */
+export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
+  const { segment } = input;
+  const tags = formatTags(segment.tags);
+  const head = [
+    `- [E${segment.id}]`,
+    segmentTypeGlyph(input.dominantType),
+    tags,
+    sanitize(segment.title),
+  ]
+    .filter((part) => part !== "")
+    .join(" ");
+
+  const lines = [
+    `${head} | ${input.memberCount} ${
+      input.memberCount === 1 ? "turn" : "turns"
+    } | [${segment.status}] | rev ${segment.revision}`,
+  ];
+
+  if (segment.content) {
+    lines.push(`  - desc: ${truncate(segment.content, input.truncate)}`);
+  }
+  const trace = formatPhaseTrace(input.phaseTrace);
+  if (trace !== "") {
+    lines.push(`  - phases: ${trace}`);
+  }
+  if (input.anchorRefs.length > 0) {
+    lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
+  }
+
+  return lines;
+}
