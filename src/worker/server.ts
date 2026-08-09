@@ -67,6 +67,8 @@ import {
   type NoteSettlementDispatch,
   type NoteSettlementScheduler,
 } from "./note-settlement";
+import { createNoteSettlementDispatch } from "./note-settlement-dispatch";
+import { createNoteSettlementSdkQuery } from "./note-settlement-sdk-query";
 import {
   DATA_DIR,
   WORKER_PID_PATH,
@@ -4405,10 +4407,31 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
           workerEnv: env,
         });
 
+  // The real settlement payload is assembled HERE rather than inside the core,
+  // because it needs the data root the subprocess runs in and the core has no
+  // reason to learn about one. With the flag off nothing is constructed and the
+  // core keeps its no-op stub, so "the worker calls no model" stays true of the
+  // shipped default wiring rather than of a code path.
+  const noteSettlementDispatchImpl =
+    deps.noteSettlementDispatchImpl ??
+    (config.settlementEnabled
+      ? createNoteSettlementDispatch({
+          db,
+          config,
+          now: deps.now,
+          logger,
+          runQuery: createNoteSettlementSdkQuery({
+            db,
+            dataRoot: deps.dataRoot ?? DATA_DIR,
+          }),
+        })
+      : undefined);
+
   const core = createWorkerCore({
     db,
     workerEnv: env,
     sessionEnvRegistry,
+    noteSettlementDispatchImpl,
     now: deps.now,
     nowMs: deps.nowMs,
     setTimeoutImpl: deps.setTimeoutImpl,

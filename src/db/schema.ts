@@ -200,6 +200,16 @@ const SCHEMA_SQL = `
     -- "how long did this note wait" a fact rather than a reconstruction.
     writer_model TEXT,
     ride_turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    -- Who authored this note. 'agent' is the main agent writing its own turn
+    -- (the only P1 writer); 'settlement' is the P2 settlement pass reconstructing
+    -- an INTERIOR HOLE — a turn whose debt was written off at residual-claim time
+    -- but which later turns in the same window still depend on (spec D9, 裁决 20).
+    -- The column exists so the P1 measurements never mistake a hindsight
+    -- reconstruction for the agent's own compliance: every metric that counts
+    -- notes filters on 'agent'.
+    writer_origin TEXT NOT NULL DEFAULT 'agent' CHECK (
+      writer_origin IN ('agent', 'settlement')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -784,6 +794,7 @@ export function initializeSchema(db: Database): void {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureShadowNoteWriterOriginColumn(db);
   ensureNoteDebtClosedReason(db);
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
@@ -854,6 +865,18 @@ function ensureObservationExtractionExclusionColumn(db: Database): void {
     "excluded_from_extraction",
     "INTEGER NOT NULL DEFAULT 0",
   );
+}
+
+// `shadow_notes` shipped through the whole P1 trial with one writer, so the
+// origin column has to arrive by ALTER on every database that already has the
+// table. Old rows land on 'agent', which is the correct reading: nothing but the
+// main agent could have written them.
+function ensureShadowNoteWriterOriginColumn(db: Database): void {
+  if (!hasColumn(db, "shadow_notes", "writer_origin")) {
+    db.exec(
+      "ALTER TABLE shadow_notes ADD COLUMN writer_origin TEXT NOT NULL DEFAULT 'agent'",
+    );
+  }
 }
 
 // `repair_ledger` reached a dev build before it carried a claim fence or a

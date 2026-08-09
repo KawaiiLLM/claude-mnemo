@@ -168,6 +168,19 @@ function renderBoundedSessionStateOutput(
   return included.join("\n");
 }
 
+/**
+ * The bounded session-state rendering for callers that hold the raw summary
+ * fields rather than a `FormattedSession` — the P2 settlement context builder is
+ * the first (spec D9's "session summary 沿用现有预算合同"). It exists so that
+ * contract stays ONE implementation: the degradation ladder and the 2,000-token
+ * ceiling are the same object SessionStart injects, not a second copy of them.
+ */
+export function renderSessionStateInjection(
+  input: SessionStateRenderInput,
+): string {
+  return renderBoundedSessionStateOutput(input);
+}
+
 export function renderCurrentSessionStateOutput(
   session: FormattedSession,
   sessionRecord: SessionRecord,

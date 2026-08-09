@@ -7675,6 +7675,7 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureShadowNoteWriterOriginColumn(db);
   ensureNoteDebtClosedReason(db);
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
@@ -7717,6 +7718,13 @@ function ensureObservationExtractionExclusionColumn(db) {
     "excluded_from_extraction",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function ensureShadowNoteWriterOriginColumn(db) {
+  if (!hasColumn(db, "shadow_notes", "writer_origin")) {
+    db.exec(
+      "ALTER TABLE shadow_notes ADD COLUMN writer_origin TEXT NOT NULL DEFAULT 'agent'"
+    );
+  }
 }
 function ensureRepairLedgerClaimColumns(db) {
   const columns = [
@@ -8231,6 +8239,16 @@ var init_schema = __esm({
     -- "how long did this note wait" a fact rather than a reconstruction.
     writer_model TEXT,
     ride_turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    -- Who authored this note. 'agent' is the main agent writing its own turn
+    -- (the only P1 writer); 'settlement' is the P2 settlement pass reconstructing
+    -- an INTERIOR HOLE \u2014 a turn whose debt was written off at residual-claim time
+    -- but which later turns in the same window still depend on (spec D9, \u88C1\u51B3 20).
+    -- The column exists so the P1 measurements never mistake a hindsight
+    -- reconstruction for the agent's own compliance: every metric that counts
+    -- notes filters on 'agent'.
+    writer_origin TEXT NOT NULL DEFAULT 'agent' CHECK (
+      writer_origin IN ('agent', 'settlement')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -32403,6 +32421,7 @@ var SHADOW_NOTE_COLUMNS = `
   content,
   insight,
   writer_model AS writerModel,
+  writer_origin AS writerOrigin,
   ride_turn_id AS rideTurnId,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
@@ -32416,15 +32435,17 @@ function upsertShadowNote(db, input) {
           content,
           insight,
           writer_model,
+          writer_origin,
           ride_turn_id,
           created_at_epoch,
           updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(turn_id) DO UPDATE SET
           title = excluded.title,
           content = excluded.content,
           insight = excluded.insight,
           writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
           ride_turn_id = excluded.ride_turn_id,
           updated_at_epoch = excluded.updated_at_epoch
         RETURNING ${SHADOW_NOTE_COLUMNS}
@@ -32435,6 +32456,7 @@ function upsertShadowNote(db, input) {
     input.content,
     input.insight ?? null,
     input.writerModel ?? null,
+    input.writerOrigin ?? "agent",
     input.rideTurnId ?? null,
     input.nowEpoch,
     input.nowEpoch

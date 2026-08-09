@@ -9,12 +9,33 @@ import type { Database } from "bun:sqlite";
  * every caller remembering to be careful.
  */
 
+/**
+ * Who authored a note. `agent` is the main agent writing up its own turn — the
+ * only writer P1 has, and the only one its compliance and blind-pair metrics may
+ * count. `settlement` is the P2 settlement pass reconstructing an interior hole
+ * in hindsight (spec D9, 裁决 20): a real note about a real turn, but not
+ * evidence that the agent wrote it.
+ */
+export const SHADOW_NOTE_ORIGINS = ["agent", "settlement"] as const;
+export type ShadowNoteOrigin = (typeof SHADOW_NOTE_ORIGINS)[number];
+
+/**
+ * SQL predicate every P1 measurement puts on `shadow_notes`. The trial measures
+ * whether the MAIN AGENT writes its notes, so a settlement-authored hole
+ * reconstruction has to be invisible to it: counted, it would report compliance
+ * the agent never earned.
+ */
+export function agentAuthoredNotePredicate(alias = "n"): string {
+  return `${alias}.writer_origin = 'agent'`;
+}
+
 export interface ShadowNoteRecord {
   turnId: number;
   title: string;
   content: string;
   insight: string | null;
   writerModel: string | null;
+  writerOrigin: ShadowNoteOrigin;
   rideTurnId: number | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
@@ -26,6 +47,8 @@ export interface UpsertShadowNoteInput {
   content: string;
   insight?: string | null;
   writerModel?: string | null;
+  /** Omitted → `agent`; only the settlement pass declares otherwise. */
+  writerOrigin?: ShadowNoteOrigin;
   rideTurnId?: number | null;
   nowEpoch: number;
 }
@@ -36,6 +59,7 @@ const SHADOW_NOTE_COLUMNS = `
   content,
   insight,
   writer_model AS writerModel,
+  writer_origin AS writerOrigin,
   ride_turn_id AS rideTurnId,
   created_at_epoch AS createdAtEpoch,
   updated_at_epoch AS updatedAtEpoch
@@ -61,6 +85,7 @@ export function upsertShadowNote(
         string,
         string | null,
         string | null,
+        string,
         number | null,
         number,
         number,
@@ -73,15 +98,17 @@ export function upsertShadowNote(
           content,
           insight,
           writer_model,
+          writer_origin,
           ride_turn_id,
           created_at_epoch,
           updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(turn_id) DO UPDATE SET
           title = excluded.title,
           content = excluded.content,
           insight = excluded.insight,
           writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
           ride_turn_id = excluded.ride_turn_id,
           updated_at_epoch = excluded.updated_at_epoch
         RETURNING ${SHADOW_NOTE_COLUMNS}
@@ -93,6 +120,7 @@ export function upsertShadowNote(
       input.content,
       input.insight ?? null,
       input.writerModel ?? null,
+      input.writerOrigin ?? "agent",
       input.rideTurnId ?? null,
       input.nowEpoch,
       input.nowEpoch,

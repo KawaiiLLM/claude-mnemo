@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { agentAuthoredNotePredicate } from "../../db/shadow-notes";
 import { formatTurnAddress } from "../../hooks/note-reminder";
 
 /**
@@ -116,7 +117,9 @@ function channelSql(channel: MisattributionChannel): string {
         : "COALESCE(n.title, '') || ' ' || COALESCE(n.content, '')";
 
   const join =
-    channel === "shadow-note" ? "JOIN shadow_notes n ON n.turn_id = t.id" : "";
+    channel === "shadow-note"
+      ? `JOIN shadow_notes n ON n.turn_id = t.id AND ${agentAuthoredNotePredicate()}`
+      : "";
 
   return `
     SELECT

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { NOTE_DEBT_AGING_TURNS } from "../../db/note-debt";
+import { agentAuthoredNotePredicate } from "../../db/shadow-notes";
 import { isMnemoOwnToolName } from "../../shared/note-tool";
 
 /**
@@ -199,6 +200,7 @@ function dominantWriterModelPerSession(db: Database): Map<number, string> {
        FROM shadow_notes n
        JOIN turns t ON t.id = n.turn_id
        WHERE n.writer_model IS NOT NULL AND n.writer_model <> ''
+         AND ${agentAuthoredNotePredicate()}
        GROUP BY t.session_id, n.writer_model`,
     )
     .all();
@@ -248,6 +250,7 @@ export function collectDebtFacts(
     JOIN turns t ON t.id = d.turn_id
     JOIN session_size z ON z.sessionId = d.session_id
     LEFT JOIN shadow_notes n ON n.turn_id = d.turn_id
+      AND ${agentAuthoredNotePredicate()}
     LEFT JOIN turns r ON r.id = n.ride_turn_id
     ${options.sessionId === undefined ? "" : "WHERE d.session_id = ?"}
     ORDER BY d.session_id ASC, d.prompt_number ASC
@@ -408,7 +411,7 @@ function countNotesWithoutDebt(db: Database, sessionId?: number): number {
     FROM shadow_notes n
     JOIN turns t ON t.id = n.turn_id
     LEFT JOIN note_debt d ON d.turn_id = n.turn_id
-    WHERE d.turn_id IS NULL
+    WHERE d.turn_id IS NULL AND ${agentAuthoredNotePredicate()}
     ${sessionId === undefined ? "" : "AND t.session_id = ?"}
   `;
 
