@@ -277,6 +277,9 @@ LIMIT N   -- N = 渲染预算
 19. **pending 不做额外清扫**（T395）：未被认领的关闭会话，pending 留在台账（resume 还原完整上下文，债是真实的）；唯一清账点 = 残留作业认领时。
 20. **中间洞由结算顺手补写**（T398）：认领清账的 pending 中，其后仍有 noted turn 的洞随窗注入截断原文（~1000 token/turn）并补重建笔记，带结算侧 provenance；尾部洞不补。
 21. **积压泄压批次**（T403）：pending ≥5 且连续 5 轮零笔记写入时，UserPromptSubmit 注入一次性授权开纯笔记批次（专开批次禁令的唯一例外）；触发即重臂。防纯 QA 段落把真实债饿进 50-turn 老化。
+22. **提醒迁 prompt 时点，每欠账至多提醒一次**（0.9.3，S15069 缓存断裂调查后追加）：CC 把 Pre/PostToolUse 的 hook additionalContext 渲染为浮动 attachment、逐请求重渲染——逐轮变字节的提醒每个轮次边界杀掉消息侧缓存断点（~12× 输入成本）。日常提醒改挂 UserPromptSubmit（持久化进 user message 字节，追加式安全），只列从未提醒过的欠账（reminded 标记列即 claim）；D2 的「不挂 turn 开头」时点裁决就此推翻，「不为笔记专开工具批」规则靠措辞保留。统一原则：mnemo 对工具邻接事件零注入（PreToolUse/result-dispatch 注册整体退役，tool/result 规则类暂 dormant，拆除随票 09）。
+23. **泄压阀确认不变**：≥5 积压 + 5 干轮 → 重提最旧 ≤5 可无视已提醒标记，专用笔记批次授权照旧；与日常提醒同 prompt 竞发时泄压优先、被让位欠账不落标记（eligible-but-not-claimed 同样让位）。
+24. **skip 显式化**：无可记信息或细节已随 compact 从上下文丢失的 turn，调 note(turn, skip:true) 关账（reason=declined，唯一可被迟到笔记重开的关闭态；aged/rolled-back/closed 仍拒收）；绝不凭提醒行硬编笔记。理由：compact 常态化使最老欠账批量不可写，静默跳过会堵死泄压窗口、污染干轮计数——拒绝必须与疏忽可分辨。
 
 **待跑实验**：rank 键序校准（S1730 回放对照已知里程碑）；静默废弃 N（同回放）；content 压缩十题召回（截断版下界+改写版真值）；P1 首周三指标基线与 no-go 阈值。
 
