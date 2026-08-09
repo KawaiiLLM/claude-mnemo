@@ -223,9 +223,17 @@ const SCHEMA_SQL = `
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
   -- trivial turn — which by design leaves no ledger row — would be re-examined
   -- on every tool call for the life of the session.
+  --
+  -- last_relief_prompt_number is the re-arm state of the backlog-relief
+  -- injection (裁决 21): the turn the last relief rode, 0 when it has never
+  -- fired. It lives here rather than in its own table because it is the same
+  -- kind of fact as the classification cursor — one per-session watermark the
+  -- ledger reads to decide what to do next — and because eligibility compares
+  -- the two in one row read.
   CREATE TABLE IF NOT EXISTS note_debt_cursor (
     session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    last_relief_prompt_number INTEGER NOT NULL DEFAULT 0,
     updated_at_epoch INTEGER NOT NULL
   );
 
@@ -777,6 +785,7 @@ export function initializeSchema(db: Database): void {
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
   ensureNoteDebtClosedReason(db);
+  ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
 
@@ -818,6 +827,20 @@ function ensureNoteDebtClosedReason(db: Database): void {
   })();
 }
 
+// `note_debt_cursor` shipped in 0.9.0 with only the classification watermark,
+// and CREATE TABLE IF NOT EXISTS is a no-op on a database that already has the
+// table — so the relief watermark has to arrive by ALTER or every prompt on an
+// existing database throws "no such column". 0 is the correct legacy reading:
+// relief has never fired on those sessions.
+function ensureNoteDebtCursorReliefColumn(db: Database): void {
+  addColumnIfMissing(
+    db,
+    "note_debt_cursor",
+    "last_relief_prompt_number",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
 // `observations` predates the exclusion marker, and CREATE TABLE IF NOT EXISTS
 // is a no-op on a database that already has the table — so the column has to
@@ -825,11 +848,12 @@ function ensureNoteDebtClosedReason(db: Database): void {
 // column". Old rows land on 0, which is the correct legacy reading: everything
 // captured before the `note` tool existed was work content.
 function ensureObservationExtractionExclusionColumn(db: Database): void {
-  if (!hasColumn(db, "observations", "excluded_from_extraction")) {
-    db.exec(
-      "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "observations",
+    "excluded_from_extraction",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 // `repair_ledger` reached a dev build before it carried a claim fence or a
@@ -844,9 +868,7 @@ function ensureRepairLedgerClaimColumns(db: Database): void {
     ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"],
   ];
   for (const [column, definition] of columns) {
-    if (!hasColumn(db, "repair_ledger", column)) {
-      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
-    }
+    addColumnIfMissing(db, "repair_ledger", column, definition);
   }
 }
 
@@ -855,34 +877,33 @@ function ensureRepairLedgerClaimColumns(db: Database): void {
 // IF NOT EXISTS is a no-op), so the column has to arrive by migration or every
 // claim on that database throws.
 function ensureSettlementClaimGenerationColumn(db: Database): void {
-  if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
-    db.exec(
-      "ALTER TABLE settlement_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "settlement_jobs",
+    "claim_generation",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 function ensureDiaryDayStateTerminalColumn(db: Database): void {
-  if (hasColumn(db, "diary_day_state", "terminal")) {
-    return;
-  }
-
-  db.exec(
-    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "terminal",
+    "INTEGER NOT NULL DEFAULT 0",
   );
 }
 
 function ensureDiaryDayStateRetryDispositionColumn(db: Database): void {
-  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
-    db.exec(
-      `ALTER TABLE diary_day_state
-       ADD COLUMN retry_disposition TEXT
-       CHECK (
-         retry_disposition IS NULL OR
-         retry_disposition IN ('transient', 'permanent')
-       )`,
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "retry_disposition",
+    `TEXT CHECK (
+       retry_disposition IS NULL OR
+       retry_disposition IN ('transient', 'permanent')
+     )`,
+  );
 
   // Before this column existed, every terminal day was manual-only regardless
   // of whether it came from retry exhaustion or backlog eviction. Preserve
@@ -906,11 +927,7 @@ function dropRetiredMaintenanceState(db: Database): void {
 }
 
 function ensureSessionLastAgentSessionIdColumn(db: Database): void {
-  if (hasColumn(db, "sessions", "last_agent_session_id")) {
-    return;
-  }
-
-  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+  addColumnIfMissing(db, "sessions", "last_agent_session_id", "TEXT");
 }
 
 // `project` is overwritten with the latest cwd on every hook upsert, but the
@@ -922,19 +939,11 @@ function ensureSessionLastAgentSessionIdColumn(db: Database): void {
 // runs from its own resumable ledger, so a crash mid-scan cannot leave the
 // column "migrated" but the repair half-done and unrepeatable.
 function ensureSessionTranscriptPathColumn(db: Database): void {
-  if (hasColumn(db, "sessions", "transcript_path")) {
-    return;
-  }
-
-  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
+  addColumnIfMissing(db, "sessions", "transcript_path", "TEXT");
 }
 
 function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
-  if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
-    return;
-  }
-
-  db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+  addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
 }
 
 // D7: the redesigned session summary splits into a time-axis (done/current/
@@ -943,18 +952,12 @@ function ensureSessionSummaryUpdatedAtEpochColumn(db: Database): void {
 // and fall back to the legacy `insight` column on read.
 function ensureSessionSummaryFieldColumns(db: Database): void {
   for (const column of ["decision", "done", "current", "reference"]) {
-    if (!hasColumn(db, "sessions", column)) {
-      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
-    }
+    addColumnIfMissing(db, "sessions", column, "TEXT");
   }
 }
 
 function ensureTurnTranscriptLineStartColumn(db: Database): void {
-  if (hasColumn(db, "turns", "transcript_line_start")) {
-    return;
-  }
-
-  db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+  addColumnIfMissing(db, "turns", "transcript_line_start", "INTEGER");
 }
 
 // The full interleaved assistant narration (every text block of the turn),
@@ -962,64 +965,40 @@ function ensureTurnTranscriptLineStartColumn(db: Database): void {
 // extractor. Lets mnemo-replay reconstruct a turn from SQLite without the JSONL.
 // Forward-only: old rows keep NULL and fall back to the transcript on read.
 function ensureTurnAssistantTranscriptColumn(db: Database): void {
-  if (hasColumn(db, "turns", "assistant_transcript")) {
-    return;
-  }
-
-  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
+  addColumnIfMissing(db, "turns", "assistant_transcript", "TEXT");
 }
 
 function ensureTurnInvalidationColumns(db: Database): void {
-  if (!hasColumn(db, "turns", "was_interrupted")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-
-  if (!hasColumn(db, "turns", "was_rolled_back")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
 }
 
 function ensureTurnExtractionStallRetryColumns(db: Database): void {
-  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
-       CHECK (extraction_stall_attempts >= 0)`,
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
-    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER",
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_retry_mode TEXT
-       CHECK (
-         extraction_stall_retry_mode IS NULL OR
-         extraction_stall_retry_mode IN ('resume', 'forceFresh')
-       )`,
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_attempts",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)",
+  );
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_at_ms", "INTEGER");
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_after_seq", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_retry_mode",
+    `TEXT CHECK (
+       extraction_stall_retry_mode IS NULL OR
+       extraction_stall_retry_mode IN ('resume', 'forceFresh')
+     )`,
+  );
 }
 
 function ensureTurnSignificanceGradeColumn(db: Database): void {
-  if (hasColumn(db, "turns", "significance_grade")) {
-    return;
-  }
-
-  db.exec(
-    `ALTER TABLE turns
-     ADD COLUMN significance_grade INTEGER
-     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`,
+  addColumnIfMissing(
+    db,
+    "turns",
+    "significance_grade",
+    "INTEGER CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)",
   );
 }
 
@@ -1031,20 +1010,14 @@ function ensureTurnSignificanceGradeColumn(db: Database): void {
 // that genuinely cites nothing must be distinguishable from one that predates
 // the edge table. Old rows land on 0 (never NULL) → legacy inline fallback.
 function ensureTurnCitationsSchema(db: Database): void {
-  if (!hasColumn(db, "turns", "cites_recorded")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
 }
 
 // Mechanical retrieval provenance (spec D4). Old rows stay NULL, which reads as
 // "never observed" rather than "consulted nothing" — the column only starts
 // meaning something for turns captured after it existed.
 function ensureTurnConsultedMemoriesColumn(db: Database): void {
-  if (!hasColumn(db, "turns", "consulted_memories")) {
-    db.exec("ALTER TABLE turns ADD COLUMN consulted_memories TEXT");
-  }
+  addColumnIfMissing(db, "turns", "consulted_memories", "TEXT");
 }
 
 // Spec §F capture repair. The incremental transcript scan resumes from a
@@ -1055,16 +1028,18 @@ function ensureTurnConsultedMemoriesColumn(db: Database): void {
 // stays comparable across the two paths. Old rows land on 0/0 → first scan reads
 // from the top exactly once.
 function ensureSessionScanCursorColumns(db: Database): void {
-  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0",
-    );
-  }
-  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_byte_offset",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_line",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 // The compact-boundary UUID is the identity key that makes claiming idempotent:
@@ -1073,9 +1048,7 @@ function ensureSessionScanCursorColumns(db: Database): void {
 // inherits the parent's transcript prefix verbatim, so the same boundary UUID
 // legitimately appears in two sessions and each needs its own marker.
 function ensureTurnCompactBoundarySchema(db: Database): void {
-  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
-    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
-  }
+  addColumnIfMissing(db, "turns", "compact_boundary_uuid", "TEXT");
 
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
@@ -1085,14 +1058,21 @@ function ensureTurnCompactBoundarySchema(db: Database): void {
 }
 
 function ensureForkLineageColumns(db: Database): void {
-  if (!hasColumn(db, "turns", "parent_turn_id")) {
-    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+  // The backfill runs whenever the column was missing when this process looked,
+  // including when another process added it a moment earlier: it is an
+  // idempotent `WHERE parent_turn_id IS NULL` sweep, so running it twice costs
+  // one query, while skipping it would leave the loser reading a column the
+  // winner has not filled yet.
+  if (addColumnIfMissing(db, "turns", "parent_turn_id", "INTEGER")) {
     backfillAllIntraChains(db); // one-time bulk Step A on migration
   }
-  if (!hasColumn(db, "sessions", "parent_session_id"))
-    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
-  if (!hasColumn(db, "sessions", "lineage_status"))
-    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+  addColumnIfMissing(db, "sessions", "parent_session_id", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "lineage_status",
+    "TEXT NOT NULL DEFAULT 'unchecked'",
+  );
 }
 
 export function backfillAllIntraChains(db: Database): void {
@@ -1174,6 +1154,56 @@ function ensureTurnPromptIdIndex(db: Database): void {
 function dropLegacyMemoriesTable(db: Database): void {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
+
+/**
+ * SQLite reports the lost half of a concurrent migration as
+ * `duplicate column name: <column>` under the generic SQLITE_ERROR code, so the
+ * message is the only thing there is to recognise it by. Matched loosely on
+ * purpose: the driver decorates it differently across versions.
+ */
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate column name/i.test(message);
+}
+
+/**
+ * `ALTER TABLE … ADD COLUMN`, made safe against a second process running the
+ * same migration at the same moment.
+ *
+ * The check and the ALTER cannot be one statement, and `initializeSchema` runs
+ * from every entry point — including the hook entries, which Claude Code starts
+ * in parallel for a single event (`session-init` and `prompt-dispatch` both open
+ * the database on UserPromptSubmit). On a database that has not been migrated
+ * yet, both processes read "column missing" and both issue the ALTER; SQLite
+ * serialises them, one adds the column and the other fails with a duplicate. The
+ * loser has nothing to fix — the post-condition this function promises is that
+ * the column exists, and it does — but the throw propagates out of schema
+ * initialisation and takes the caller's real work with it, which for
+ * `session-init` is the turn row of the prompt being submitted.
+ *
+ * Returns whether the column was missing when this call looked, so a caller with
+ * a one-time backfill still runs it after losing the race.
+ */
+function addColumnIfMissing(
+  db: Database,
+  table: string,
+  column: string,
+  definition: string,
+): boolean {
+  if (hasColumn(db, table, column)) {
+    return false;
+  }
+
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN "${column}" ${definition}`);
+  } catch (error) {
+    if (!isDuplicateColumnError(error)) {
+      throw error;
+    }
+  }
+
+  return true;
 }
 
 function hasColumn(db: Database, table: string, column: string): boolean {

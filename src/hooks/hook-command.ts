@@ -20,14 +20,12 @@ import {
 import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createMilestoneContextHandler } from "./handlers/context-milestones";
 import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
+import { createPromptDispatchHandler } from "./handlers/prompt-dispatch";
 import { createResultDispatchHandler } from "./handlers/result-dispatch";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
-import {
-  createPreToolUseDispatcher,
-  createUserPromptSubmitDispatcher,
-} from "../rules/pretooluse-dispatcher";
+import { createPreToolUseDispatcher } from "../rules/pretooluse-dispatcher";
 import type { HookEventName, HookHandler, HookResult } from "./types";
 
 export interface HookCommandDependencies {
@@ -213,9 +211,25 @@ function getDefaultPreToolUseHandler(): HookHandler {
   return defaultPreToolUseHandler;
 }
 
+// The synchronous UserPromptSubmit entry. Like its PostToolUse twin it needs a
+// writable handle — the backlog relief records the ids it just injected and
+// re-arms itself in the same transaction — and like its twin it must survive
+// failing to get one: `session-init` runs in a parallel process on the very
+// same event and can hold the write lock past the busy timeout. A database that
+// cannot be opened costs the relief alone, never the rule digest.
 function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   if (!defaultUserPromptSubmitDispatcher) {
-    defaultUserPromptSubmitDispatcher = createUserPromptSubmitDispatcher();
+    let db: ReturnType<typeof createDatabase> | undefined;
+    try {
+      db = getDefaultHookDatabase();
+    } catch (error) {
+      process.stderr.write(
+        `[HOOK] note backlog relief disabled for this call: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
+    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
   }
   return defaultUserPromptSubmitDispatcher;
 }

@@ -559,9 +559,17 @@ var SCHEMA_SQL = `
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
   -- trivial turn \u2014 which by design leaves no ledger row \u2014 would be re-examined
   -- on every tool call for the life of the session.
+  --
+  -- last_relief_prompt_number is the re-arm state of the backlog-relief
+  -- injection (\u88C1\u51B3 21): the turn the last relief rode, 0 when it has never
+  -- fired. It lives here rather than in its own table because it is the same
+  -- kind of fact as the classification cursor \u2014 one per-session watermark the
+  -- ledger reads to decide what to do next \u2014 and because eligibility compares
+  -- the two in one row read.
   CREATE TABLE IF NOT EXISTS note_debt_cursor (
     session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    last_relief_prompt_number INTEGER NOT NULL DEFAULT 0,
     updated_at_epoch INTEGER NOT NULL
   );
 
@@ -1070,6 +1078,7 @@ function initializeSchema(db) {
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
   ensureNoteDebtClosedReason(db);
+  ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
 function ensureNoteDebtClosedReason(db) {
@@ -1095,12 +1104,21 @@ function ensureNoteDebtClosedReason(db) {
     db.exec(NOTE_DEBT_INDEX_DDL);
   })();
 }
+function ensureNoteDebtCursorReliefColumn(db) {
+  addColumnIfMissing(
+    db,
+    "note_debt_cursor",
+    "last_relief_prompt_number",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+}
 function ensureObservationExtractionExclusionColumn(db) {
-  if (!hasColumn(db, "observations", "excluded_from_extraction")) {
-    db.exec(
-      "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "observations",
+    "excluded_from_extraction",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureRepairLedgerClaimColumns(db) {
   const columns = [
@@ -1110,37 +1128,35 @@ function ensureRepairLedgerClaimColumns(db) {
     ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"]
   ];
   for (const [column, definition] of columns) {
-    if (!hasColumn(db, "repair_ledger", column)) {
-      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
-    }
+    addColumnIfMissing(db, "repair_ledger", column, definition);
   }
 }
 function ensureSettlementClaimGenerationColumn(db) {
-  if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
-    db.exec(
-      "ALTER TABLE settlement_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "settlement_jobs",
+    "claim_generation",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureDiaryDayStateTerminalColumn(db) {
-  if (hasColumn(db, "diary_day_state", "terminal")) {
-    return;
-  }
-  db.exec(
-    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "terminal",
+    "INTEGER NOT NULL DEFAULT 0"
   );
 }
 function ensureDiaryDayStateRetryDispositionColumn(db) {
-  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
-    db.exec(
-      `ALTER TABLE diary_day_state
-       ADD COLUMN retry_disposition TEXT
-       CHECK (
-         retry_disposition IS NULL OR
-         retry_disposition IN ('transient', 'permanent')
-       )`
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "retry_disposition",
+    `TEXT CHECK (
+       retry_disposition IS NULL OR
+       retry_disposition IN ('transient', 'permanent')
+     )`
+  );
   db.exec(
     `UPDATE diary_day_state
      SET retry_disposition = 'permanent'
@@ -1152,119 +1168,78 @@ function dropRetiredMaintenanceState(db) {
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
-  if (hasColumn(db, "sessions", "last_agent_session_id")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+  addColumnIfMissing(db, "sessions", "last_agent_session_id", "TEXT");
 }
 function ensureSessionTranscriptPathColumn(db) {
-  if (hasColumn(db, "sessions", "transcript_path")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
+  addColumnIfMissing(db, "sessions", "transcript_path", "TEXT");
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
-  if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+  addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
 }
 function ensureSessionSummaryFieldColumns(db) {
   for (const column of ["decision", "done", "current", "reference"]) {
-    if (!hasColumn(db, "sessions", column)) {
-      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
-    }
+    addColumnIfMissing(db, "sessions", column, "TEXT");
   }
 }
 function ensureTurnTranscriptLineStartColumn(db) {
-  if (hasColumn(db, "turns", "transcript_line_start")) {
-    return;
-  }
-  db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+  addColumnIfMissing(db, "turns", "transcript_line_start", "INTEGER");
 }
 function ensureTurnAssistantTranscriptColumn(db) {
-  if (hasColumn(db, "turns", "assistant_transcript")) {
-    return;
-  }
-  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
+  addColumnIfMissing(db, "turns", "assistant_transcript", "TEXT");
 }
 function ensureTurnInvalidationColumns(db) {
-  if (!hasColumn(db, "turns", "was_interrupted")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "turns", "was_rolled_back")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
 }
 function ensureTurnExtractionStallRetryColumns(db) {
-  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
-       CHECK (extraction_stall_attempts >= 0)`
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
-    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER"
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_retry_mode TEXT
-       CHECK (
-         extraction_stall_retry_mode IS NULL OR
-         extraction_stall_retry_mode IN ('resume', 'forceFresh')
-       )`
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_attempts",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)"
+  );
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_at_ms", "INTEGER");
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_after_seq", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_retry_mode",
+    `TEXT CHECK (
+       extraction_stall_retry_mode IS NULL OR
+       extraction_stall_retry_mode IN ('resume', 'forceFresh')
+     )`
+  );
 }
 function ensureTurnSignificanceGradeColumn(db) {
-  if (hasColumn(db, "turns", "significance_grade")) {
-    return;
-  }
-  db.exec(
-    `ALTER TABLE turns
-     ADD COLUMN significance_grade INTEGER
-     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
+  addColumnIfMissing(
+    db,
+    "turns",
+    "significance_grade",
+    "INTEGER CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)"
   );
 }
 function ensureTurnCitationsSchema(db) {
-  if (!hasColumn(db, "turns", "cites_recorded")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
 }
 function ensureTurnConsultedMemoriesColumn(db) {
-  if (!hasColumn(db, "turns", "consulted_memories")) {
-    db.exec("ALTER TABLE turns ADD COLUMN consulted_memories TEXT");
-  }
+  addColumnIfMissing(db, "turns", "consulted_memories", "TEXT");
 }
 function ensureSessionScanCursorColumns(db) {
-  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_byte_offset",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_line",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureTurnCompactBoundarySchema(db) {
-  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
-    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
-  }
+  addColumnIfMissing(db, "turns", "compact_boundary_uuid", "TEXT");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
       ON turns(session_id, compact_boundary_uuid)
@@ -1272,14 +1247,16 @@ function ensureTurnCompactBoundarySchema(db) {
   `);
 }
 function ensureForkLineageColumns(db) {
-  if (!hasColumn(db, "turns", "parent_turn_id")) {
-    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+  if (addColumnIfMissing(db, "turns", "parent_turn_id", "INTEGER")) {
     backfillAllIntraChains(db);
   }
-  if (!hasColumn(db, "sessions", "parent_session_id"))
-    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
-  if (!hasColumn(db, "sessions", "lineage_status"))
-    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+  addColumnIfMissing(db, "sessions", "parent_session_id", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "lineage_status",
+    "TEXT NOT NULL DEFAULT 'unchecked'"
+  );
 }
 function backfillAllIntraChains(db) {
   db.query(
@@ -1344,6 +1321,23 @@ function ensureTurnPromptIdIndex(db) {
 function dropLegacyMemoriesTable(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
+function isDuplicateColumnError(error48) {
+  const message = error48 instanceof Error ? error48.message : String(error48);
+  return /duplicate column name/i.test(message);
+}
+function addColumnIfMissing(db, table, column, definition) {
+  if (hasColumn(db, table, column)) {
+    return false;
+  }
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN "${column}" ${definition}`);
+  } catch (error48) {
+    if (!isDuplicateColumnError(error48)) {
+      throw error48;
+    }
+  }
+  return true;
 }
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
@@ -2848,7 +2842,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslhp3sq" : "dev";
+var BUILD_ID = true ? "0.9.1-mslje6jx" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4040,6 +4034,12 @@ function getMaxPromptNumber(db, sessionId) {
     "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
   ).get(sessionId);
   return row?.max ?? null;
+}
+function getLatestTurn(db, sessionId) {
+  return db.query(
+    `SELECT id, prompt_number AS promptNumber FROM turns
+         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+  ).get(sessionId) ?? null;
 }
 function getMaxTurnId(db, sessionId) {
   const row = db.query(
@@ -21752,6 +21752,55 @@ function listOpenNoteDebt(db, sessionId, options) {
     pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
   })).filter((debt) => debt.pendingTurns <= agingTurns);
 }
+function getNoteReliefState(db, sessionId) {
+  const lastNotePromptNumber = db.query(
+    `SELECT MAX(t.prompt_number) AS promptNumber
+         FROM shadow_notes n
+         JOIN turns t ON t.id = n.ride_turn_id
+         WHERE t.session_id = ?`
+  ).get(sessionId)?.promptNumber ?? 0;
+  const cursor = db.query(
+    `SELECT last_classified_prompt_number AS classifiedThrough,
+              last_relief_prompt_number AS lastRelief
+       FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId);
+  const classifiedThroughPromptNumber = cursor?.classifiedThrough ?? 0;
+  const lastReliefPromptNumber = cursor?.lastRelief ?? 0;
+  const anchorPromptNumber = Math.max(
+    lastNotePromptNumber,
+    lastReliefPromptNumber
+  );
+  const dryTurns = db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?`
+  ).get(sessionId, anchorPromptNumber, classifiedThroughPromptNumber)?.count ?? 0;
+  return {
+    lastNotePromptNumber,
+    lastReliefPromptNumber,
+    classifiedThroughPromptNumber,
+    anchorPromptNumber,
+    dryTurns
+  };
+}
+function claimNoteBacklogRelief(db, input) {
+  return db.query(
+    `INSERT INTO note_debt_cursor (
+           session_id, last_classified_prompt_number,
+           last_relief_prompt_number, updated_at_epoch
+         ) VALUES (?, 0, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_relief_prompt_number = excluded.last_relief_prompt_number,
+           updated_at_epoch = excluded.updated_at_epoch
+         WHERE note_debt_cursor.last_relief_prompt_number = ?
+           AND excluded.last_relief_prompt_number
+               > note_debt_cursor.last_relief_prompt_number`
+  ).run(
+    input.sessionId,
+    input.firePromptNumber,
+    input.nowEpoch,
+    input.previousReliefPromptNumber
+  ).changes > 0;
+}
 function recordNoteIdExposure(db, input) {
   const statement = db.query(
     `INSERT OR IGNORE INTO note_id_exposures (
@@ -21814,7 +21863,7 @@ function stringifyToolPayload(value) {
   const normalized = typeof value === "string" ? value : JSON.stringify(value);
   return stripPrivateTags(normalized);
 }
-function getLatestTurn(db, sessionDbId) {
+function getLatestTurn2(db, sessionDbId) {
   const row = db.query(
     `SELECT id, status FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionDbId);
@@ -21857,7 +21906,7 @@ function createPostToolUseHandler(dependencies) {
           error: error48 instanceof Error ? error48.message : String(error48)
         });
       }
-      const latestTurn = getLatestTurn(dependencies.db, session.id);
+      const latestTurn = getLatestTurn2(dependencies.db, session.id);
       if (!latestTurn) {
         return { outcome: "no-root-turn", turnId: null };
       }
@@ -22397,6 +22446,8 @@ function createPostToolUseDispatcher(dependencies = {}) {
 // src/hooks/note-reminder.ts
 var NOTE_REMINDER_DISPLAY_LIMIT = 5;
 var NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
+var NOTE_RELIEF_PENDING_THRESHOLD = 5;
+var NOTE_RELIEF_DRY_TURNS = 5;
 var PROMPT_PREFIX_CHARACTERS = 40;
 function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
   const ordered = [...open2].sort(
@@ -22417,8 +22468,9 @@ function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIM
 function formatTurnAddress(debt) {
   return `S${debt.sessionId}/T${debt.promptNumber}`;
 }
+var CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/gu;
 function formatPromptPrefix(userPrompt) {
-  const collapsed = (userPrompt ?? "").replace(/\s+/gu, " ").replace(/"/gu, "'").trim();
+  const collapsed = (userPrompt ?? "").replace(/\s+/gu, " ").replace(CONTROL_CHARACTERS, "").replace(/"/gu, "'").replace(/</gu, "\u2039").replace(/>/gu, "\u203A").trim();
   if (collapsed === "") {
     return '""';
   }
@@ -22428,12 +22480,13 @@ function formatPromptPrefix(userPrompt) {
 function pendingSuffix(pendingTurns) {
   return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
 }
+function formatDebtLine(debt) {
+  return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
+}
 function renderNoteReminder(view) {
   const lines = ["mnemo pending notes:"];
   for (const debt of view.writable) {
-    lines.push(
-      `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`
-    );
+    lines.push(formatDebtLine(debt));
   }
   for (const debt of view.rolledBack) {
     lines.push(
@@ -22454,14 +22507,151 @@ function renderNoteReminder(view) {
   }
   return lines.join("\n");
 }
+function renderNoteBacklogRelief(view) {
+  const lines = ["mnemo pending notes (backlog relief):"];
+  for (const debt of view.writable) {
+    lines.push(formatDebtLine(debt));
+  }
+  lines.push(
+    `${view.writableTotal} turns are waiting for notes. This once, after you answer, append a dedicated batch containing ONLY note calls for the turns above \u2014 the standing rule against starting a tool call just to write notes is waived for this batch only, and for nothing else in it.`
+  );
+  return lines.join("\n");
+}
+
+// src/hooks/handlers/note-relief.ts
+function createNoteBacklogReliefHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
+  const pendingThreshold = dependencies.pendingThreshold ?? NOTE_RELIEF_PENDING_THRESHOLD;
+  const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  return async function handleNoteBacklogRelief(input) {
+    if (input.eventName !== "UserPromptSubmit") {
+      return { continue: true };
+    }
+    if (input.agentId !== void 0) {
+      return { continue: true };
+    }
+    if (!input.sessionId) {
+      return { continue: true };
+    }
+    const session = getSessionByContentId(dependencies.db, input.sessionId);
+    if (!session) {
+      return { continue: true };
+    }
+    const rideTurn = getLatestTurn(dependencies.db, session.id);
+    if (!rideTurn) {
+      return { continue: true };
+    }
+    const relief = getNoteReliefState(dependencies.db, session.id);
+    if (relief.dryTurns < dryTurnsThreshold) {
+      return { continue: true };
+    }
+    const writable = listOpenNoteDebt(dependencies.db, session.id, {
+      latestPromptNumber: rideTurn.promptNumber,
+      agingTurns
+    }).filter((debt) => !debt.wasRolledBack);
+    if (writable.length < pendingThreshold) {
+      return { continue: true };
+    }
+    let claimed = null;
+    try {
+      claimed = writeTransaction(dependencies.db, () => {
+        const settled = getNoteReliefState(dependencies.db, session.id);
+        if (settled.dryTurns < dryTurnsThreshold) {
+          return null;
+        }
+        const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
+          latestPromptNumber: rideTurn.promptNumber,
+          agingTurns
+        }).filter((debt) => !debt.wasRolledBack);
+        if (stillOpen.length < pendingThreshold) {
+          return null;
+        }
+        if (!claimNoteBacklogRelief(dependencies.db, {
+          sessionId: session.id,
+          firePromptNumber: rideTurn.promptNumber,
+          previousReliefPromptNumber: relief.lastReliefPromptNumber,
+          nowEpoch: now()
+        })) {
+          return null;
+        }
+        const view = selectNoteReminderItems(stillOpen, displayLimit);
+        recordNoteIdExposure(dependencies.db, {
+          sessionId: session.id,
+          rideTurnId: rideTurn.id,
+          exposedTurnIds: view.writable.map((debt) => debt.turnId),
+          // `injection`, not `reminder`: this is prompt-time context, and the
+          // reminder path's own gates read the `reminder` rows to decide what
+          // it has already shown. Filing these as `reminder` would silence the
+          // ordinary reminder for the rest of the turn — or not, depending on
+          // which UserPromptSubmit process won the race for the ride turn.
+          source: "injection",
+          nowEpoch: now()
+        });
+        return view;
+      });
+    } catch (error48) {
+      dependencies.logger?.warn?.("note backlog relief not claimed", {
+        sessionId: input.sessionId,
+        reasonCode: "relief-claim-failed",
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return { continue: true };
+    }
+    if (!claimed) {
+      return { continue: true };
+    }
+    return {
+      continue: true,
+      hookSpecificOutput: renderNoteBacklogRelief(claimed)
+    };
+  };
+}
+
+// src/hooks/handlers/prompt-dispatch.ts
+function createPromptDispatchHandler(dependencies = {}) {
+  const { db, now, logger, ...dispatcherDependencies } = dependencies;
+  const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
+  const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
+  async function section(name, run, input) {
+    try {
+      return (await run()).hookSpecificOutput ?? null;
+    } catch (error48) {
+      (logger ?? console).warn?.("prompt-dispatch section failed", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: name,
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return null;
+    }
+  }
+  return async function handlePromptDispatch(input) {
+    const sections = [];
+    const rules = await section(
+      "rule-dispatch",
+      () => ruleDispatcher(input),
+      input
+    );
+    if (rules) {
+      sections.push(rules);
+    }
+    if (backlogRelief) {
+      const relief = await section(
+        "note-relief",
+        () => backlogRelief(input),
+        input
+      );
+      if (relief) {
+        sections.push(relief);
+      }
+    }
+    return sections.length > 0 ? { continue: true, hookSpecificOutput: sections.join("\n\n") } : { continue: true };
+  };
+}
 
 // src/hooks/handlers/note-reminder.ts
-function getLatestTurn2(db, sessionDbId) {
-  return db.query(
-    `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
-  ).get(sessionDbId) ?? null;
-}
 function createNoteReminderHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
@@ -22484,7 +22674,7 @@ function createNoteReminderHandler(dependencies) {
     if (!session) {
       return { continue: true };
     }
-    const rideTurn = getLatestTurn2(dependencies.db, session.id);
+    const rideTurn = getLatestTurn(dependencies.db, session.id);
     if (!rideTurn) {
       return { continue: true };
     }
@@ -24387,7 +24577,16 @@ function getDefaultPreToolUseHandler() {
 }
 function getDefaultUserPromptSubmitDispatcher() {
   if (!defaultUserPromptSubmitDispatcher) {
-    defaultUserPromptSubmitDispatcher = createUserPromptSubmitDispatcher();
+    let db;
+    try {
+      db = getDefaultHookDatabase();
+    } catch (error48) {
+      process.stderr.write(
+        `[HOOK] note backlog relief disabled for this call: ${error48 instanceof Error ? error48.message : String(error48)}
+`
+      );
+    }
+    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
   }
   return defaultUserPromptSubmitDispatcher;
 }

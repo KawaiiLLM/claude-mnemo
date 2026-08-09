@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
+  claimNoteBacklogRelief,
   getExposedTurnIds,
   getNoteDebt,
   hasReminderForRideTurn,
@@ -304,5 +305,55 @@ describe("note debt ledger", () => {
     expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([first]);
     expect(hasReminderForRideTurn(db, sessionId, rideTurn)).toBe(true);
     expect(hasReminderForRideTurn(db, sessionId, first)).toBe(false);
+  });
+
+  test("the relief claim refuses a second claim built on the same watermark", () => {
+    // Two parallel UserPromptSubmit processes, each holding a different ride
+    // turn because only one of them had its `session-init` sibling create the
+    // newest turn row — but both computed eligibility from watermark 0. A claim
+    // that merely took the maximum would let both through, the later ride turn
+    // simply overwriting the earlier one, and the agent would be handed the
+    // standing authorisation twice.
+    const earlier = claimNoteBacklogRelief(db, {
+      sessionId,
+      firePromptNumber: 6,
+      previousReliefPromptNumber: 0,
+      nowEpoch: 500,
+    });
+    const later = claimNoteBacklogRelief(db, {
+      sessionId,
+      firePromptNumber: 7,
+      previousReliefPromptNumber: 0,
+      nowEpoch: 500,
+    });
+
+    expect([earlier, later]).toEqual([true, false]);
+    expect(
+      db
+        .query<{ lastRelief: number }, [number]>(
+          `SELECT last_relief_prompt_number AS lastRelief
+           FROM note_debt_cursor WHERE session_id = ?`,
+        )
+        .get(sessionId)?.lastRelief,
+    ).toBe(6);
+
+    // A caller that did read the current watermark still claims, and the
+    // watermark never moves backwards.
+    expect(
+      claimNoteBacklogRelief(db, {
+        sessionId,
+        firePromptNumber: 12,
+        previousReliefPromptNumber: 6,
+        nowEpoch: 600,
+      }),
+    ).toBe(true);
+    expect(
+      claimNoteBacklogRelief(db, {
+        sessionId,
+        firePromptNumber: 8,
+        previousReliefPromptNumber: 12,
+        nowEpoch: 600,
+      }),
+    ).toBe(false);
   });
 });

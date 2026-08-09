@@ -16,6 +16,6 @@
 - [ ] writer_model 由 worker 从 transcript 机械回填（票 02 实测：MCP 进程拿不到模型名，message.model 是唯一机械来源；capture 侧解析时回填 shadow_notes.writer_model）
 - [ ] 追加（交叉审查 P2-1）：note 只接受**台账中有未清债**或**已有影子笔记**的 turn，其余返回参数错误——跨会话乱写被结构性挡住，ride_turn 语义由此自洽
 - [ ] 追加（交叉审查 P2-2）：recall 的观测层不再渲染 excluded 观测（含计数）；dream 读工具的 read_turn_detail 同样过滤
-- [ ] 追加（0.9.0 上线后裁决 21，spec D2）：UserPromptSubmit 泄压批次——pending ≥5 且连续 5 轮未写笔记时注入一次性纯笔记批次授权；干轮距离由 shadow_notes 最近 ride turn 派生；触发后重臂状态记入会话游标行；此路径列出的 id 记入曝光台账；授权措辞明限 note 调用
+- [x] 追加（0.9.0 上线后裁决 21，spec D2）：UserPromptSubmit 泄压批次——pending ≥5 且连续 5 轮未写笔记时注入一次性纯笔记批次授权；干轮距离由 shadow_notes 最近 ride turn 派生；触发后重臂状态记入会话游标行；此路径列出的 id 记入曝光台账；授权措辞明限 note 调用
 
 **已知有界行为（复核轮裁定不改码）**：展示上限 5 由最老 writable 债优先占用——积压 ≥5 时新债与回滚通告可能长期不被渲染（不曝光、不重复提醒），由两道既有边界兜底：≥3 条时的收权措辞推动清账，50-turn 老化兜住尾部。解读遵从率时用 `unreached`/`reach` 列区分「agent 不写」与「没轮到展示」。

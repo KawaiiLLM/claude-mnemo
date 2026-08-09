@@ -1369,6 +1369,106 @@ describe("initializeSchema", () => {
     db.close();
   });
 
+  test("a column migration survives a second process running it at the same moment", () => {
+    // Claude Code starts an event's hooks with Promise.all, so `session-init`
+    // and `prompt-dispatch` open the same database at the same instant. On a
+    // database that still predates a column, both read "missing" and both issue
+    // the ALTER; the one SQLite serialises second gets "duplicate column name".
+    // Before the guard that failure propagated out of schema initialisation,
+    // and `session-init`'s non-blocking error path then dropped the turn row of
+    // the prompt being submitted.
+    const directory = mkdtempSync(join(tmpdir(), "claude-mnemo-migration-"));
+    const databasePath = join(directory, "mnemo.db");
+    const columnsOf = (database: Database, table: string): string[] =>
+      database
+        .query<{ name: string }, []>(
+          `SELECT name FROM pragma_table_info('${table}')`,
+        )
+        .all()
+        .map((row) => row.name);
+
+    const fixture = createDatabase(databasePath);
+    initializeSchema(fixture);
+    // Back out one migration to get a pre-0.9.1 database.
+    fixture.exec(
+      "ALTER TABLE note_debt_cursor DROP COLUMN last_relief_prompt_number",
+    );
+    expect(columnsOf(fixture, "note_debt_cursor")).not.toContain(
+      "last_relief_prompt_number",
+    );
+    fixture.close();
+
+    const winner = createDatabase(databasePath);
+    const loser = createDatabase(databasePath);
+    let overtaken = false;
+
+    try {
+      // The loser has already read "column missing"; the winner's ALTER lands
+      // in the gap before the loser's own runs.
+      const loserExec = loser.exec.bind(loser);
+      (loser as unknown as { exec: (sql: string, ...rest: unknown[]) => void }).exec =
+        (sql: string, ...rest: unknown[]) => {
+          if (
+            !overtaken &&
+            sql.includes("ADD COLUMN") &&
+            sql.includes("last_relief_prompt_number")
+          ) {
+            overtaken = true;
+            initializeSchema(winner);
+          }
+          (loserExec as (sql: string, ...rest: unknown[]) => void)(sql, ...rest);
+        };
+
+      expect(() => initializeSchema(loser)).not.toThrow();
+      expect(overtaken).toBe(true);
+
+      // Both connections end up on the same, correct schema — one column, with
+      // the legacy reading (never relieved) as its default.
+      for (const database of [winner, loser]) {
+        const columns = columnsOf(database, "note_debt_cursor");
+        expect(
+          columns.filter((name) => name === "last_relief_prompt_number"),
+        ).toEqual(["last_relief_prompt_number"]);
+      }
+
+      const session = upsertSession(loser, {
+        contentSessionId: "session-migration-race",
+        project: "/tmp/project",
+        title: null,
+        insight: null,
+        createdAtEpoch: 100,
+        updatedAtEpoch: null,
+        completedAtEpoch: null,
+      }).id;
+      loser
+        .query<unknown, [number]>(
+          `INSERT INTO note_debt_cursor (
+             session_id, last_classified_prompt_number, updated_at_epoch
+           ) VALUES (?, 3, 100)`,
+        )
+        .run(session);
+      expect(
+        winner
+          .query<{ lastRelief: number }, [number]>(
+            `SELECT last_relief_prompt_number AS lastRelief
+             FROM note_debt_cursor WHERE session_id = ?`,
+          )
+          .get(session)?.lastRelief,
+      ).toBe(0);
+
+      // And re-opening either of them changes nothing.
+      expect(() => initializeSchema(loser)).not.toThrow();
+      expect(() => initializeSchema(winner)).not.toThrow();
+      expect(columnsOf(winner, "note_debt_cursor")).toEqual(
+        columnsOf(loser, "note_debt_cursor"),
+      );
+    } finally {
+      winner.close();
+      loser.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("recreates an FTS table that has trigram+prompt but is missing the response column", () => {
     const db = createDatabase(":memory:");
     // Partial/intermediate schema: trigram + prompt, but NO response column.

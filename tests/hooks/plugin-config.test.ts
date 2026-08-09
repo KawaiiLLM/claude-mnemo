@@ -55,6 +55,25 @@ test("SessionStart diary backfill also runs when a session resumes", () => {
   ]);
 });
 
+test("UserPromptSubmit keeps exactly two entries, split the same way", () => {
+  const config = readHookConfig();
+  const commands = config.hooks.UserPromptSubmit?.[0]?.hooks.map(
+    (hook) => hook.command,
+  );
+
+  // The note backlog relief (裁决 21) rides `prompt-dispatch` rather than a
+  // third registration, for the same reason the reminder rides
+  // `result-dispatch`: the split is by response shape — `session-init` owns the
+  // turn row and returns no context, `prompt-dispatch` answers with
+  // `additionalContext` — and a third entry would only add another process to
+  // every prompt the user types.
+  expect(config.hooks.UserPromptSubmit).toHaveLength(1);
+  expect(commands).toEqual([
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs session-init",
+    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs prompt-dispatch",
+  ]);
+});
+
 test("PostToolUse keeps exactly two entries, one async and one synchronous", () => {
   const config = readHookConfig();
   const commands = config.hooks.PostToolUse?.[0]?.hooks.map(

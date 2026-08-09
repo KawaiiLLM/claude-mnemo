@@ -484,6 +484,151 @@ export function closePendingNoteDebtsAsClosed(
     .run(nowEpoch, nowEpoch, sessionId).changes;
 }
 
+export interface NoteReliefState {
+  /** Prompt number of the ride turn of this session's most recent note. */
+  lastNotePromptNumber: number;
+  /** Prompt number of the turn the last backlog relief rode (0 = never). */
+  lastReliefPromptNumber: number;
+  /** The newest turn the async side has classified as finished. */
+  classifiedThroughPromptNumber: number;
+  /** max(lastNotePromptNumber, lastReliefPromptNumber). */
+  anchorPromptNumber: number;
+  /** Finished turns since the anchor — the dry streak, in whole turns. */
+  dryTurns: number;
+}
+
+/**
+ * The two facts the backlog relief (裁决 21) needs beyond the debt list: how
+ * long the session has gone without writing a note, and whether a relief has
+ * already fired inside that streak. READ ONLY, like the reminder's list.
+ *
+ * The streak is counted against `last_classified_prompt_number` — the async
+ * side's "this turn has finished" watermark — rather than against the newest
+ * turn row. UserPromptSubmit hooks run in parallel (Claude Code awaits them with
+ * Promise.all), so at the moment this runs, the row for the prompt being
+ * submitted may or may not have been created yet by the `session-init` entry.
+ * Counting finished turns is immune to that race; counting rows is not, and the
+ * difference would be a trigger that fires a turn early or late depending on
+ * process scheduling.
+ *
+ * The dry streak needs no bookkeeping of its own: a note's `ride_turn_id` is
+ * already the turn the session was on when it was written, so the newest one is
+ * exactly "when a note was last written".
+ */
+export function getNoteReliefState(
+  db: Database,
+  sessionId: number,
+): NoteReliefState {
+  const lastNotePromptNumber =
+    db
+      .query<{ promptNumber: number | null }, [number]>(
+        `SELECT MAX(t.prompt_number) AS promptNumber
+         FROM shadow_notes n
+         JOIN turns t ON t.id = n.ride_turn_id
+         WHERE t.session_id = ?`,
+      )
+      .get(sessionId)?.promptNumber ?? 0;
+
+  const cursor = db
+    .query<
+      { classifiedThrough: number; lastRelief: number },
+      [number]
+    >(
+      `SELECT last_classified_prompt_number AS classifiedThrough,
+              last_relief_prompt_number AS lastRelief
+       FROM note_debt_cursor WHERE session_id = ?`,
+    )
+    .get(sessionId);
+  const classifiedThroughPromptNumber = cursor?.classifiedThrough ?? 0;
+  const lastReliefPromptNumber = cursor?.lastRelief ?? 0;
+  const anchorPromptNumber = Math.max(
+    lastNotePromptNumber,
+    lastReliefPromptNumber,
+  );
+
+  const dryTurns =
+    db
+      .query<{ count: number }, [number, number, number]>(
+        `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?`,
+      )
+      .get(sessionId, anchorPromptNumber, classifiedThroughPromptNumber)
+      ?.count ?? 0;
+
+  return {
+    lastNotePromptNumber,
+    lastReliefPromptNumber,
+    classifiedThroughPromptNumber,
+    anchorPromptNumber,
+    dryTurns,
+  };
+}
+
+export interface ClaimNoteBacklogReliefInput {
+  sessionId: number;
+  /** The turn the injection rides; also the re-arm anchor. */
+  firePromptNumber: number;
+  /**
+   * The watermark the caller's eligibility check was computed from. The claim
+   * lands only while the row still holds it; 0 also covers "no cursor row yet",
+   * which is how `getNoteReliefState` reads an absent row.
+   */
+  previousReliefPromptNumber: number;
+  nowEpoch: number;
+}
+
+/**
+ * Claim the one-shot backlog relief for this session, re-arming it at the turn
+ * that fired. A compare-and-swap on the watermark, not a monotonic maximum: the
+ * update lands only while the row still holds the value the caller's
+ * eligibility check read, so a claim computed from a stale view of the session
+ * loses instead of overwriting the winner.
+ *
+ * The maximum form let a real race through. UserPromptSubmit hooks run in
+ * parallel (Claude Code awaits them with Promise.all), so two processes reach
+ * this point looking at different ride turns — one at the turn the user just
+ * submitted, one at the turn before it, depending on whether the `session-init`
+ * entry had created the row yet. Both then see the same open backlog, and under
+ * `existing < incoming` both claims succeed: the older ride turn writes first,
+ * the newer one is larger and overwrites it. The agent gets the standing
+ * authorisation twice. Under the swap the two contend for one value and exactly
+ * one wins, whichever ride turn each happened to see.
+ *
+ * The `>` conjunct keeps the watermark monotonic: re-arming at an older turn
+ * would shorten the silence the relief just bought.
+ *
+ * This is the ONLY write the relief path performs on the ledger besides its
+ * exposure rows: no debt changes status here. Debt transitions stay on the
+ * asynchronous side (R2#P2-6), and an injection that closed debts would be
+ * claiming the agent had answered a request it has not answered yet.
+ */
+export function claimNoteBacklogRelief(
+  db: Database,
+  input: ClaimNoteBacklogReliefInput,
+): boolean {
+  return (
+    db
+      .query<unknown, [number, number, number, number]>(
+        `INSERT INTO note_debt_cursor (
+           session_id, last_classified_prompt_number,
+           last_relief_prompt_number, updated_at_epoch
+         ) VALUES (?, 0, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_relief_prompt_number = excluded.last_relief_prompt_number,
+           updated_at_epoch = excluded.updated_at_epoch
+         WHERE note_debt_cursor.last_relief_prompt_number = ?
+           AND excluded.last_relief_prompt_number
+               > note_debt_cursor.last_relief_prompt_number`,
+      )
+      .run(
+        input.sessionId,
+        input.firePromptNumber,
+        input.nowEpoch,
+        input.previousReliefPromptNumber,
+      ).changes > 0
+  );
+}
+
 export type NoteIdExposureSource = "reminder" | "injection";
 
 export interface RecordNoteIdExposureInput {

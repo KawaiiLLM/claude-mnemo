@@ -555,6 +555,26 @@ export function getMaxPromptNumber(
 }
 
 /**
+ * The turn the session is on right now — the one a synchronous hook's output
+ * will ride. Both note paths (the PostToolUse reminder and the UserPromptSubmit
+ * backlog relief) attribute their exposure rows to it, so they read it here
+ * rather than each keeping a copy of the query.
+ */
+export function getLatestTurn(
+  db: Database,
+  sessionId: number,
+): { id: number; promptNumber: number } | null {
+  return (
+    db
+      .query<{ id: number; promptNumber: number }, [number]>(
+        `SELECT id, prompt_number AS promptNumber FROM turns
+         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`,
+      )
+      .get(sessionId) ?? null
+  );
+}
+
+/**
  * Highest turn id in the session right now. SessionEnd snapshots it alongside
  * the activity gate so its later orphan pass is fenced to turns that already
  * existed — anything a concurrent UserPromptSubmit (or the repair itself)

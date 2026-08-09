@@ -7676,6 +7676,7 @@ function initializeSchema(db) {
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
   ensureNoteDebtClosedReason(db);
+  ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
 function ensureNoteDebtClosedReason(db) {
@@ -7701,12 +7702,21 @@ function ensureNoteDebtClosedReason(db) {
     db.exec(NOTE_DEBT_INDEX_DDL);
   })();
 }
+function ensureNoteDebtCursorReliefColumn(db) {
+  addColumnIfMissing(
+    db,
+    "note_debt_cursor",
+    "last_relief_prompt_number",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+}
 function ensureObservationExtractionExclusionColumn(db) {
-  if (!hasColumn(db, "observations", "excluded_from_extraction")) {
-    db.exec(
-      "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "observations",
+    "excluded_from_extraction",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureRepairLedgerClaimColumns(db) {
   const columns = [
@@ -7716,37 +7726,35 @@ function ensureRepairLedgerClaimColumns(db) {
     ["deferral_attempts", "INTEGER NOT NULL DEFAULT 0"]
   ];
   for (const [column, definition] of columns) {
-    if (!hasColumn(db, "repair_ledger", column)) {
-      db.exec(`ALTER TABLE repair_ledger ADD COLUMN ${column} ${definition}`);
-    }
+    addColumnIfMissing(db, "repair_ledger", column, definition);
   }
 }
 function ensureSettlementClaimGenerationColumn(db) {
-  if (!hasColumn(db, "settlement_jobs", "claim_generation")) {
-    db.exec(
-      "ALTER TABLE settlement_jobs ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "settlement_jobs",
+    "claim_generation",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureDiaryDayStateTerminalColumn(db) {
-  if (hasColumn(db, "diary_day_state", "terminal")) {
-    return;
-  }
-  db.exec(
-    "ALTER TABLE diary_day_state ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "terminal",
+    "INTEGER NOT NULL DEFAULT 0"
   );
 }
 function ensureDiaryDayStateRetryDispositionColumn(db) {
-  if (!hasColumn(db, "diary_day_state", "retry_disposition")) {
-    db.exec(
-      `ALTER TABLE diary_day_state
-       ADD COLUMN retry_disposition TEXT
-       CHECK (
-         retry_disposition IS NULL OR
-         retry_disposition IN ('transient', 'permanent')
-       )`
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "diary_day_state",
+    "retry_disposition",
+    `TEXT CHECK (
+       retry_disposition IS NULL OR
+       retry_disposition IN ('transient', 'permanent')
+     )`
+  );
   db.exec(
     `UPDATE diary_day_state
      SET retry_disposition = 'permanent'
@@ -7758,119 +7766,78 @@ function dropRetiredMaintenanceState(db) {
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 function ensureSessionLastAgentSessionIdColumn(db) {
-  if (hasColumn(db, "sessions", "last_agent_session_id")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN last_agent_session_id TEXT");
+  addColumnIfMissing(db, "sessions", "last_agent_session_id", "TEXT");
 }
 function ensureSessionTranscriptPathColumn(db) {
-  if (hasColumn(db, "sessions", "transcript_path")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN transcript_path TEXT");
+  addColumnIfMissing(db, "sessions", "transcript_path", "TEXT");
 }
 function ensureSessionSummaryUpdatedAtEpochColumn(db) {
-  if (hasColumn(db, "sessions", "summary_updated_at_epoch")) {
-    return;
-  }
-  db.exec("ALTER TABLE sessions ADD COLUMN summary_updated_at_epoch INTEGER");
+  addColumnIfMissing(db, "sessions", "summary_updated_at_epoch", "INTEGER");
 }
 function ensureSessionSummaryFieldColumns(db) {
   for (const column of ["decision", "done", "current", "reference"]) {
-    if (!hasColumn(db, "sessions", column)) {
-      db.exec(`ALTER TABLE sessions ADD COLUMN "${column}" TEXT`);
-    }
+    addColumnIfMissing(db, "sessions", column, "TEXT");
   }
 }
 function ensureTurnTranscriptLineStartColumn(db) {
-  if (hasColumn(db, "turns", "transcript_line_start")) {
-    return;
-  }
-  db.exec("ALTER TABLE turns ADD COLUMN transcript_line_start INTEGER");
+  addColumnIfMissing(db, "turns", "transcript_line_start", "INTEGER");
 }
 function ensureTurnAssistantTranscriptColumn(db) {
-  if (hasColumn(db, "turns", "assistant_transcript")) {
-    return;
-  }
-  db.exec("ALTER TABLE turns ADD COLUMN assistant_transcript TEXT");
+  addColumnIfMissing(db, "turns", "assistant_transcript", "TEXT");
 }
 function ensureTurnInvalidationColumns(db) {
-  if (!hasColumn(db, "turns", "was_interrupted")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_interrupted INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "turns", "was_rolled_back")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN was_rolled_back INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
 }
 function ensureTurnExtractionStallRetryColumns(db) {
-  if (!hasColumn(db, "turns", "extraction_stall_attempts")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_attempts INTEGER NOT NULL DEFAULT 0
-       CHECK (extraction_stall_attempts >= 0)`
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_at_ms")) {
-    db.exec("ALTER TABLE turns ADD COLUMN extraction_stall_retry_at_ms INTEGER");
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_after_seq")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN extraction_stall_retry_after_seq INTEGER"
-    );
-  }
-  if (!hasColumn(db, "turns", "extraction_stall_retry_mode")) {
-    db.exec(
-      `ALTER TABLE turns
-       ADD COLUMN extraction_stall_retry_mode TEXT
-       CHECK (
-         extraction_stall_retry_mode IS NULL OR
-         extraction_stall_retry_mode IN ('resume', 'forceFresh')
-       )`
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_attempts",
+    "INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)"
+  );
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_at_ms", "INTEGER");
+  addColumnIfMissing(db, "turns", "extraction_stall_retry_after_seq", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "turns",
+    "extraction_stall_retry_mode",
+    `TEXT CHECK (
+       extraction_stall_retry_mode IS NULL OR
+       extraction_stall_retry_mode IN ('resume', 'forceFresh')
+     )`
+  );
 }
 function ensureTurnSignificanceGradeColumn(db) {
-  if (hasColumn(db, "turns", "significance_grade")) {
-    return;
-  }
-  db.exec(
-    `ALTER TABLE turns
-     ADD COLUMN significance_grade INTEGER
-     CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)`
+  addColumnIfMissing(
+    db,
+    "turns",
+    "significance_grade",
+    "INTEGER CHECK (significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4)"
   );
 }
 function ensureTurnCitationsSchema(db) {
-  if (!hasColumn(db, "turns", "cites_recorded")) {
-    db.exec(
-      "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(db, "turns", "cites_recorded", "INTEGER NOT NULL DEFAULT 0");
 }
 function ensureTurnConsultedMemoriesColumn(db) {
-  if (!hasColumn(db, "turns", "consulted_memories")) {
-    db.exec("ALTER TABLE turns ADD COLUMN consulted_memories TEXT");
-  }
+  addColumnIfMissing(db, "turns", "consulted_memories", "TEXT");
 }
 function ensureSessionScanCursorColumns(db) {
-  if (!hasColumn(db, "sessions", "scan_cursor_byte_offset")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0"
-    );
-  }
-  if (!hasColumn(db, "sessions", "scan_cursor_line")) {
-    db.exec(
-      "ALTER TABLE sessions ADD COLUMN scan_cursor_line INTEGER NOT NULL DEFAULT 0"
-    );
-  }
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_byte_offset",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "scan_cursor_line",
+    "INTEGER NOT NULL DEFAULT 0"
+  );
 }
 function ensureTurnCompactBoundarySchema(db) {
-  if (!hasColumn(db, "turns", "compact_boundary_uuid")) {
-    db.exec("ALTER TABLE turns ADD COLUMN compact_boundary_uuid TEXT");
-  }
+  addColumnIfMissing(db, "turns", "compact_boundary_uuid", "TEXT");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_compact_boundary_uuid
       ON turns(session_id, compact_boundary_uuid)
@@ -7878,14 +7845,16 @@ function ensureTurnCompactBoundarySchema(db) {
   `);
 }
 function ensureForkLineageColumns(db) {
-  if (!hasColumn(db, "turns", "parent_turn_id")) {
-    db.exec("ALTER TABLE turns ADD COLUMN parent_turn_id INTEGER");
+  if (addColumnIfMissing(db, "turns", "parent_turn_id", "INTEGER")) {
     backfillAllIntraChains(db);
   }
-  if (!hasColumn(db, "sessions", "parent_session_id"))
-    db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id INTEGER");
-  if (!hasColumn(db, "sessions", "lineage_status"))
-    db.exec("ALTER TABLE sessions ADD COLUMN lineage_status TEXT NOT NULL DEFAULT 'unchecked'");
+  addColumnIfMissing(db, "sessions", "parent_session_id", "INTEGER");
+  addColumnIfMissing(
+    db,
+    "sessions",
+    "lineage_status",
+    "TEXT NOT NULL DEFAULT 'unchecked'"
+  );
 }
 function backfillAllIntraChains(db) {
   db.query(
@@ -7941,6 +7910,23 @@ function ensureTurnPromptIdIndex(db) {
 function dropLegacyMemoriesTable(db) {
   db.exec("DROP TABLE IF EXISTS memories");
   db.exec("DELETE FROM memory_fts WHERE layer = 'memory'");
+}
+function isDuplicateColumnError(error48) {
+  const message = error48 instanceof Error ? error48.message : String(error48);
+  return /duplicate column name/i.test(message);
+}
+function addColumnIfMissing(db, table, column, definition) {
+  if (hasColumn(db, table, column)) {
+    return false;
+  }
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN "${column}" ${definition}`);
+  } catch (error48) {
+    if (!isDuplicateColumnError(error48)) {
+      throw error48;
+    }
+  }
+  return true;
 }
 function hasColumn(db, table, column) {
   const rows = db.query(`SELECT name FROM pragma_table_info('${table}')`).all();
@@ -8268,9 +8254,17 @@ var init_schema = __esm({
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
   -- trivial turn \u2014 which by design leaves no ledger row \u2014 would be re-examined
   -- on every tool call for the life of the session.
+  --
+  -- last_relief_prompt_number is the re-arm state of the backlog-relief
+  -- injection (\u88C1\u51B3 21): the turn the last relief rode, 0 when it has never
+  -- fired. It lives here rather than in its own table because it is the same
+  -- kind of fact as the classification cursor \u2014 one per-session watermark the
+  -- ledger reads to decide what to do next \u2014 and because eligibility compares
+  -- the two in one row read.
   CREATE TABLE IF NOT EXISTS note_debt_cursor (
     session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    last_relief_prompt_number INTEGER NOT NULL DEFAULT 0,
     updated_at_epoch INTEGER NOT NULL
   );
 
