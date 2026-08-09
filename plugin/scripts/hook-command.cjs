@@ -529,9 +529,17 @@ var SCHEMA_SQL = `
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
   -- trivial turn \u2014 which by design leaves no ledger row \u2014 would be re-examined
   -- on every tool call for the life of the session.
+  --
+  -- last_relief_prompt_number is the re-arm state of the backlog-relief
+  -- injection (\u88C1\u51B3 21): the turn the last relief rode, 0 when it has never
+  -- fired. It lives here rather than in its own table because it is the same
+  -- kind of fact as the classification cursor \u2014 one per-session watermark the
+  -- ledger reads to decide what to do next \u2014 and because eligibility compares
+  -- the two in one row read.
   CREATE TABLE IF NOT EXISTS note_debt_cursor (
     session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    last_relief_prompt_number INTEGER NOT NULL DEFAULT 0,
     updated_at_epoch INTEGER NOT NULL
   );
 
@@ -864,7 +872,15 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
+}
+function ensureNoteDebtCursorReliefColumn(db) {
+  if (!hasColumn(db, "note_debt_cursor", "last_relief_prompt_number")) {
+    db.exec(
+      "ALTER TABLE note_debt_cursor ADD COLUMN last_relief_prompt_number INTEGER NOT NULL DEFAULT 0"
+    );
+  }
 }
 function ensureObservationExtractionExclusionColumn(db) {
   if (!hasColumn(db, "observations", "excluded_from_extraction")) {
@@ -2607,7 +2623,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslgy8b3" : "dev";
+var BUILD_ID = true ? "0.9.1-mslhuwzm" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3807,6 +3823,12 @@ function getMaxPromptNumber(db, sessionId) {
     "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
   ).get(sessionId);
   return row?.max ?? null;
+}
+function getLatestTurn(db, sessionId) {
+  return db.query(
+    `SELECT id, prompt_number AS promptNumber FROM turns
+         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+  ).get(sessionId) ?? null;
 }
 function getMaxTurnId(db, sessionId) {
   const row = db.query(
@@ -21364,6 +21386,49 @@ function listOpenNoteDebt(db, sessionId, options) {
     pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
   })).filter((debt) => debt.pendingTurns <= agingTurns);
 }
+function getNoteReliefState(db, sessionId) {
+  const lastNotePromptNumber = db.query(
+    `SELECT MAX(t.prompt_number) AS promptNumber
+         FROM shadow_notes n
+         JOIN turns t ON t.id = n.ride_turn_id
+         WHERE t.session_id = ?`
+  ).get(sessionId)?.promptNumber ?? 0;
+  const cursor = db.query(
+    `SELECT last_classified_prompt_number AS classifiedThrough,
+              last_relief_prompt_number AS lastRelief
+       FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId);
+  const classifiedThroughPromptNumber = cursor?.classifiedThrough ?? 0;
+  const lastReliefPromptNumber = cursor?.lastRelief ?? 0;
+  const anchorPromptNumber = Math.max(
+    lastNotePromptNumber,
+    lastReliefPromptNumber
+  );
+  const dryTurns = db.query(
+    `SELECT COUNT(*) AS count FROM turns
+         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?`
+  ).get(sessionId, anchorPromptNumber, classifiedThroughPromptNumber)?.count ?? 0;
+  return {
+    lastNotePromptNumber,
+    lastReliefPromptNumber,
+    classifiedThroughPromptNumber,
+    anchorPromptNumber,
+    dryTurns
+  };
+}
+function claimNoteBacklogRelief(db, input) {
+  return db.query(
+    `INSERT INTO note_debt_cursor (
+           session_id, last_classified_prompt_number,
+           last_relief_prompt_number, updated_at_epoch
+         ) VALUES (?, 0, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_relief_prompt_number = excluded.last_relief_prompt_number,
+           updated_at_epoch = excluded.updated_at_epoch
+         WHERE note_debt_cursor.last_relief_prompt_number
+               < excluded.last_relief_prompt_number`
+  ).run(input.sessionId, input.firePromptNumber, input.nowEpoch).changes > 0;
+}
 function recordNoteIdExposure(db, input) {
   const statement = db.query(
     `INSERT OR IGNORE INTO note_id_exposures (
@@ -21426,7 +21491,7 @@ function stringifyToolPayload(value) {
   const normalized = typeof value === "string" ? value : JSON.stringify(value);
   return stripPrivateTags(normalized);
 }
-function getLatestTurn(db, sessionDbId) {
+function getLatestTurn2(db, sessionDbId) {
   const row = db.query(
     `SELECT id, status FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionDbId);
@@ -21469,7 +21534,7 @@ function createPostToolUseHandler(dependencies) {
           error: error48 instanceof Error ? error48.message : String(error48)
         });
       }
-      const latestTurn = getLatestTurn(dependencies.db, session.id);
+      const latestTurn = getLatestTurn2(dependencies.db, session.id);
       if (!latestTurn) {
         return { outcome: "no-root-turn", turnId: null };
       }
@@ -21995,6 +22060,8 @@ function createPostToolUseDispatcher(dependencies = {}) {
 // src/hooks/note-reminder.ts
 var NOTE_REMINDER_DISPLAY_LIMIT = 5;
 var NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
+var NOTE_RELIEF_PENDING_THRESHOLD = 5;
+var NOTE_RELIEF_DRY_TURNS = 5;
 var PROMPT_PREFIX_CHARACTERS = 40;
 function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
   const ordered = [...open2].sort(
@@ -22026,12 +22093,13 @@ function formatPromptPrefix(userPrompt) {
 function pendingSuffix(pendingTurns) {
   return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
 }
+function formatDebtLine(debt) {
+  return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
+}
 function renderNoteReminder(view) {
   const lines = ["mnemo pending notes:"];
   for (const debt of view.writable) {
-    lines.push(
-      `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`
-    );
+    lines.push(formatDebtLine(debt));
   }
   for (const debt of view.rolledBack) {
     lines.push(
@@ -22052,14 +22120,139 @@ function renderNoteReminder(view) {
   }
   return lines.join("\n");
 }
+function renderNoteBacklogRelief(view) {
+  const lines = ["mnemo pending notes (backlog relief):"];
+  for (const debt of view.writable) {
+    lines.push(formatDebtLine(debt));
+  }
+  lines.push(
+    `${view.writableTotal} turns are waiting for notes. This once, after you answer, append a dedicated batch containing ONLY note calls for the turns above \u2014 the standing rule against starting a tool call just to write notes is waived for this batch only, and for nothing else in it.`
+  );
+  return lines.join("\n");
+}
+
+// src/hooks/handlers/note-relief.ts
+function createNoteBacklogReliefHandler(dependencies) {
+  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
+  const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
+  const pendingThreshold = dependencies.pendingThreshold ?? NOTE_RELIEF_PENDING_THRESHOLD;
+  const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
+  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  return async function handleNoteBacklogRelief(input) {
+    if (input.eventName !== "UserPromptSubmit") {
+      return { continue: true };
+    }
+    if (input.agentId !== void 0) {
+      return { continue: true };
+    }
+    if (!input.sessionId) {
+      return { continue: true };
+    }
+    const session = getSessionByContentId(dependencies.db, input.sessionId);
+    if (!session) {
+      return { continue: true };
+    }
+    const rideTurn = getLatestTurn(dependencies.db, session.id);
+    if (!rideTurn) {
+      return { continue: true };
+    }
+    const relief = getNoteReliefState(dependencies.db, session.id);
+    if (relief.dryTurns < dryTurnsThreshold) {
+      return { continue: true };
+    }
+    const writable = listOpenNoteDebt(dependencies.db, session.id, {
+      latestPromptNumber: rideTurn.promptNumber,
+      agingTurns
+    }).filter((debt) => !debt.wasRolledBack);
+    if (writable.length < pendingThreshold) {
+      return { continue: true };
+    }
+    const view = selectNoteReminderItems(writable, displayLimit);
+    const renderedTurnIds = view.writable.map((debt) => debt.turnId);
+    try {
+      const claimed = writeTransaction(dependencies.db, () => {
+        if (!claimNoteBacklogRelief(dependencies.db, {
+          sessionId: session.id,
+          firePromptNumber: rideTurn.promptNumber,
+          nowEpoch: now()
+        })) {
+          return false;
+        }
+        recordNoteIdExposure(dependencies.db, {
+          sessionId: session.id,
+          rideTurnId: rideTurn.id,
+          exposedTurnIds: renderedTurnIds,
+          // `injection`, not `reminder`: this is prompt-time context, and the
+          // reminder path's own gates read the `reminder` rows to decide what
+          // it has already shown. Filing these as `reminder` would silence the
+          // ordinary reminder for the rest of the turn — or not, depending on
+          // which UserPromptSubmit process won the race for the ride turn.
+          source: "injection",
+          nowEpoch: now()
+        });
+        return true;
+      });
+      if (!claimed) {
+        return { continue: true };
+      }
+    } catch (error48) {
+      dependencies.logger?.warn?.("note backlog relief not claimed", {
+        sessionId: input.sessionId,
+        reasonCode: "relief-claim-failed",
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return { continue: true };
+    }
+    return {
+      continue: true,
+      hookSpecificOutput: renderNoteBacklogRelief(view)
+    };
+  };
+}
+
+// src/hooks/handlers/prompt-dispatch.ts
+function createPromptDispatchHandler(dependencies = {}) {
+  const { db, now, logger, ...dispatcherDependencies } = dependencies;
+  const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
+  const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
+  async function section(name, run, input) {
+    try {
+      return (await run()).hookSpecificOutput ?? null;
+    } catch (error48) {
+      (logger ?? console).warn?.("prompt-dispatch section failed", {
+        sessionId: input.sessionId ?? null,
+        reasonCode: name,
+        error: error48 instanceof Error ? error48.message : String(error48)
+      });
+      return null;
+    }
+  }
+  return async function handlePromptDispatch(input) {
+    const sections = [];
+    const rules = await section(
+      "rule-dispatch",
+      () => ruleDispatcher(input),
+      input
+    );
+    if (rules) {
+      sections.push(rules);
+    }
+    if (backlogRelief) {
+      const relief = await section(
+        "note-relief",
+        () => backlogRelief(input),
+        input
+      );
+      if (relief) {
+        sections.push(relief);
+      }
+    }
+    return sections.length > 0 ? { continue: true, hookSpecificOutput: sections.join("\n\n") } : { continue: true };
+  };
+}
 
 // src/hooks/handlers/note-reminder.ts
-function getLatestTurn2(db, sessionDbId) {
-  return db.query(
-    `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
-  ).get(sessionDbId) ?? null;
-}
 function createNoteReminderHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
@@ -22082,7 +22275,7 @@ function createNoteReminderHandler(dependencies) {
     if (!session) {
       return { continue: true };
     }
-    const rideTurn = getLatestTurn2(dependencies.db, session.id);
+    const rideTurn = getLatestTurn(dependencies.db, session.id);
     if (!rideTurn) {
       return { continue: true };
     }
@@ -23982,7 +24175,16 @@ function getDefaultPreToolUseHandler() {
 }
 function getDefaultUserPromptSubmitDispatcher() {
   if (!defaultUserPromptSubmitDispatcher) {
-    defaultUserPromptSubmitDispatcher = createUserPromptSubmitDispatcher();
+    let db;
+    try {
+      db = getDefaultHookDatabase();
+    } catch (error48) {
+      process.stderr.write(
+        `[HOOK] note backlog relief disabled for this call: ${error48 instanceof Error ? error48.message : String(error48)}
+`
+      );
+    }
+    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
   }
   return defaultUserPromptSubmitDispatcher;
 }

@@ -19,6 +19,17 @@ export const NOTE_REMINDER_DISPLAY_LIMIT = 5;
  */
 export const NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
 
+/**
+ * Backlog relief (裁决 21). Both gates are five, and both are deliberately
+ * coarse: the injection is the single sanctioned exception to "never start a
+ * tool call just to write a note", so it is safe only while it stays rare.
+ * `NOTE_RELIEF_PENDING_THRESHOLD` is a count of open writable debts;
+ * `NOTE_RELIEF_DRY_TURNS` is how many finished turns must pass with no note
+ * written and no relief fired before the next one may fire.
+ */
+export const NOTE_RELIEF_PENDING_THRESHOLD = 5;
+export const NOTE_RELIEF_DRY_TURNS = 5;
+
 const PROMPT_PREFIX_CHARACTERS = 40;
 
 export interface NoteReminderView {
@@ -94,15 +105,22 @@ function pendingSuffix(pendingTurns: number): string {
     : `(pending ${pendingTurns} turns)`;
 }
 
+/**
+ * One item line, shared by every path that lists a debt. The address format is
+ * what the agent is told to cite with, so a second copy of this string would be
+ * a second citation dialect the moment either drifts.
+ */
+function formatDebtLine(debt: OpenNoteDebt): string {
+  return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
+}
+
 export function renderNoteReminder(view: NoteReminderView): string {
   // No <system-reminder> wrapper here: Claude Code already wraps PostToolUse
   // additionalContext in one, and nesting the tag would render doubled.
   const lines = ["mnemo pending notes:"];
 
   for (const debt of view.writable) {
-    lines.push(
-      `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`,
-    );
+    lines.push(formatDebtLine(debt));
   }
 
   for (const debt of view.rolledBack) {
@@ -123,6 +141,39 @@ export function renderNoteReminder(view: NoteReminderView): string {
       `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of this batch; skip if busy.`,
     );
   }
+
+  return lines.join("\n");
+}
+
+/**
+ * The backlog-relief injection (裁决 21) — the one reminder that arrives at the
+ * start of a turn instead of on a tool result.
+ *
+ * Prompting at turn start was ruled out for the ordinary reminder because it
+ * misleads the agent into opening tool calls it did not need. This path is the
+ * sanctioned exception and it is made safe by two things at once: it fires only
+ * from a rare state (a deep backlog that several finished turns have failed to
+ * drain, so the piggyback channel is demonstrably not working), and its wording
+ * spends that exception on note calls explicitly and on nothing else. Without
+ * the second half the injection would simply reproduce the failure it was
+ * carved out of.
+ *
+ * Rolled-back notices never appear here: announcing one closes its debt, and
+ * this path may not write debt transitions (R2#P2-6). Callers pass writable
+ * debts only.
+ */
+export function renderNoteBacklogRelief(view: NoteReminderView): string {
+  // No <system-reminder> wrapper, same as the reminder: Claude Code wraps
+  // UserPromptSubmit additionalContext in one before it reaches the model.
+  const lines = ["mnemo pending notes (backlog relief):"];
+
+  for (const debt of view.writable) {
+    lines.push(formatDebtLine(debt));
+  }
+
+  lines.push(
+    `${view.writableTotal} turns are waiting for notes. This once, after you answer, append a dedicated batch containing ONLY note calls for the turns above — the standing rule against starting a tool call just to write notes is waived for this batch only, and for nothing else in it.`,
+  );
 
   return lines.join("\n");
 }

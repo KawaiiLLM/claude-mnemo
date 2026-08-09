@@ -10,6 +10,7 @@ import {
   NOTE_DEBT_AGING_TURNS,
 } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
+import { getLatestTurn } from "../../db/turns";
 import { isNoteToolName } from "../../shared/note-tool";
 import {
   NOTE_REMINDER_DISPLAY_LIMIT,
@@ -41,20 +42,6 @@ export interface NoteReminderHandlerDependencies {
   displayLimit?: number;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   logger?: Pick<Console, "warn">;
-}
-
-function getLatestTurn(
-  db: Database,
-  sessionDbId: number,
-): { id: number; promptNumber: number } | null {
-  return (
-    db
-      .query<{ id: number; promptNumber: number }, [number]>(
-        `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`,
-      )
-      .get(sessionDbId) ?? null
-  );
 }
 
 export function createNoteReminderHandler(

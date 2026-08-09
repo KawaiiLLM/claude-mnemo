@@ -204,9 +204,17 @@ const SCHEMA_SQL = `
   -- what keeps the sweep O(new turns) instead of O(session): without it, every
   -- trivial turn — which by design leaves no ledger row — would be re-examined
   -- on every tool call for the life of the session.
+  --
+  -- last_relief_prompt_number is the re-arm state of the backlog-relief
+  -- injection (裁决 21): the turn the last relief rode, 0 when it has never
+  -- fired. It lives here rather than in its own table because it is the same
+  -- kind of fact as the classification cursor — one per-session watermark the
+  -- ledger reads to decide what to do next — and because eligibility compares
+  -- the two in one row read.
   CREATE TABLE IF NOT EXISTS note_debt_cursor (
     session_id INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     last_classified_prompt_number INTEGER NOT NULL DEFAULT 0,
+    last_relief_prompt_number INTEGER NOT NULL DEFAULT 0,
     updated_at_epoch INTEGER NOT NULL
   );
 
@@ -540,7 +548,21 @@ export function initializeSchema(db: Database): void {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
+}
+
+// `note_debt_cursor` shipped in 0.9.0 with only the classification watermark,
+// and CREATE TABLE IF NOT EXISTS is a no-op on a database that already has the
+// table — so the relief watermark has to arrive by ALTER or every prompt on an
+// existing database throws "no such column". 0 is the correct legacy reading:
+// relief has never fired on those sessions.
+function ensureNoteDebtCursorReliefColumn(db: Database): void {
+  if (!hasColumn(db, "note_debt_cursor", "last_relief_prompt_number")) {
+    db.exec(
+      "ALTER TABLE note_debt_cursor ADD COLUMN last_relief_prompt_number INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 }
 
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but
