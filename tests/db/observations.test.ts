@@ -52,7 +52,7 @@ describe("observation round trips", () => {
     db.close();
   });
 
-  test("round-trips simplified observation data and only indexes extracted observations", () => {
+  test("round-trips simplified observation data and indexes it at capture time", () => {
     const created = createObservation(db, {
       turnId,
       toolName: "Read",
@@ -86,7 +86,9 @@ describe("observation round trips", () => {
     expect(loaded?.status).toBe("pending");
     expect(loaded?.title).toBeNull();
     expect(loaded?.content).toBeNull();
-    expect(pendingFtsRow).toBeNull();
+    // FTS ingest is decoupled from status (spec D11): a pending observation
+    // is already findable by its raw tool input/output.
+    expect(pendingFtsRow).toEqual({ layer: "observation", sourceId: created.id });
     expect(extracted?.status).toBe("extracted");
     expect(extractedFtsRow).toEqual({ layer: "observation", sourceId: created.id });
   });

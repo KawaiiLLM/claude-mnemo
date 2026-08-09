@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
+import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
 import {
   countUserPromptsInEntries,
@@ -38,15 +39,25 @@ function createPendingTurn(
   prompt: string,
   createdAtEpoch: number,
 ): void {
-  db.query(
-    `INSERT INTO turns (
-      session_id,
-      prompt_number,
-      status,
-      user_prompt,
-      created_at_epoch
-    ) VALUES (?, ?, 'active', ?, ?)`,
-  ).run(sessionId, promptNumber, prompt, createdAtEpoch);
+  const inserted = db
+    .query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)
+      RETURNING id`,
+    )
+    .get(sessionId, promptNumber, prompt, createdAtEpoch);
+
+  // Index at mechanical capture (spec D11): the user's own wording is the most
+  // memorable handle on a turn, and waiting for an extraction to index it left
+  // every in-flight or skipped turn unsearchable by the words that created it.
+  if (inserted) {
+    reindexTurnFromDb(db, inserted.id);
+  }
 }
 
 export function createSessionInitHandler(

@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 import { runWriteTransaction } from "./database";
 import { markSettledDiaryDayStaleForTurn } from "./diary-state";
 
-import { indexTurnToFTS } from "./search";
+import { indexTurnToFTS, reindexTurnFromDb } from "./search";
 
 export type TurnStatus =
   | "active"
@@ -431,13 +431,10 @@ export function updateTurnById(
     return null;
   }
 
-  if (updated.status === "extracted") {
-    indexTurnToFTS(db, updated);
-  } else {
-    db.query(
-      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
-    ).run(turnId);
-  }
+  // Status-blind (spec D11): the row is re-indexed as it now stands, whatever
+  // status the write left it in. A skipped or undone turn keeps its originals
+  // findable; what a reader is SHOWN is decided at render time.
+  indexTurnToFTS(db, updated);
 
   if (
     existing.status !== updated.status ||
@@ -475,9 +472,9 @@ export function resetTurnExtractionFields(
            updated_at_epoch = ?
        WHERE id = ?`,
   ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
-  db.query(
-    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
-  ).run(turnId);
+  // Re-index rather than delete: the extraction fields are gone, but the
+  // prompt and response this turn was captured with are still the record.
+  reindexTurnFromDb(db, turnId);
 
   if (
     existing.status !== "active" ||

@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { reindexTurnFromDb } from "../db/search";
 import { getMaxPromptNumber } from "../db/turns";
 import {
   rewindSessionScanCursor,
@@ -218,10 +219,10 @@ function convertOccupiedTurnToMarker(
     "DELETE FROM turn_citations WHERE citing_turn_id = ?",
   ).run(turnId);
 
-  // The cleared row must not keep answering recall with its old extraction.
-  db.query<unknown, [number]>(
-    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
-  ).run(turnId);
+  // The cleared row must not keep answering recall with its old extraction, so
+  // it is re-indexed from what it now holds (a bare `/compact` marker) rather
+  // than dropped from the index — the index tracks the row, not its status.
+  reindexTurnFromDb(db, turnId);
 
   // Same terminal semantics as SessionEnd orphan finalization
   // (db/orphan-turns.ts): retire pending observations, drop their queue work.

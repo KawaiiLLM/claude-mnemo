@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { captureConsultedMemories } from "../../db/consulted-memories";
 import { runHookWriteTransaction } from "../../db/database";
 import { reconcileNoteDebt } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
@@ -144,6 +145,25 @@ export function createPostToolUseHandler(
 
       if (!inserted) {
         throw new Error("Failed to enqueue observation for worker processing.");
+      }
+
+      // Mechanical retrieval provenance (spec D4/D7): which stored records this
+      // turn's recall/replay calls actually reached. Wrapped like the note-debt
+      // sweep — an observation about memory use must never abort the capture it
+      // rides along with.
+      try {
+        captureConsultedMemories(dependencies.db, latestTurn.id, {
+          toolName,
+          toolInput,
+          toolResult,
+        });
+      } catch (error) {
+        logger.warn?.("consulted memories capture failed", {
+          sessionId: input.sessionId,
+          turnId: latestTurn.id,
+          reasonCode: "post-tool-use-consulted",
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
 
       if (excludedFromExtraction) {

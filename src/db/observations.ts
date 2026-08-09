@@ -119,9 +119,10 @@ export function createObservation(
     throw new Error("Failed to create observation.");
   }
 
-  if (observation.status === "extracted") {
-    indexObservationToFTS(db, observation);
-  }
+  // Indexed at capture, before anything has summarized it (spec D11): the
+  // truncated tool input/output is the observation's own record, and it is
+  // findable whether or not the row ever reaches `extracted`.
+  indexObservationToFTS(db, observation);
 
   return observation;
 }
@@ -171,13 +172,7 @@ export function updateObservation(
     return null;
   }
 
-  if (updated.status === "extracted") {
-    indexObservationToFTS(db, updated);
-  } else {
-    db.query(
-      "DELETE FROM memory_fts WHERE layer = 'observation' AND source_id = ?",
-    ).run(observationId);
-  }
+  indexObservationToFTS(db, updated);
 
   return updated;
 }
