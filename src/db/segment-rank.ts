@@ -149,11 +149,20 @@ export function resolveSegmentAnchorTurnIds(
  * Anchors occupy their slots BEFORE the derived order is consulted, so a turn
  * the settlement pass named as load-bearing cannot be pushed out by a turn that
  * merely scores well mechanically.
+ *
+ * Nothing stops membership from reaching back across the era boundary — a
+ * session open through the switch has turns on both sides and the settlement
+ * pass can claim either. Under a cutoff the member list is therefore the ERA
+ * half alone, so a pre-cutoff turn is read where it was written, in the legacy
+ * arc, and is never counted on both sides of the divider. With no cutoff there
+ * is no boundary to respect and the whole membership renders, which is what
+ * keeps `E<n>` readable before ticket 09 sets one.
  */
 export function rankSegmentMembers(
   db: Database,
   segmentId: number,
   limit?: number,
+  eraCutoffEpoch: number | null = null,
 ): RankedSegmentMember[] {
   const segment = getSegment(db, segmentId);
   if (!segment) {
@@ -161,14 +170,15 @@ export function rankSegmentMembers(
   }
 
   const rows = db
-    .query<MemberRankFacts, [number]>(
+    .query<MemberRankFacts, number[]>(
       `SELECT ${RANK_FACT_COLUMNS}
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
        ${DERIVED_RANK_ORDER}`,
     )
-    .all(segmentId);
+    .all(...(eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]));
 
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
   const anchorPosition = new Map(
@@ -197,8 +207,9 @@ export interface SegmentSpineRow {
   segment: SegmentRecord;
   /** See `deriveDominantType`. */
   dominantType: string | null;
+  /** Era-side members across every session, not only the one being rendered. */
   memberCount: number;
-  /** Members that belong to the session being rendered. */
+  /** Era-side members that belong to the session being rendered. */
   sessionMemberCount: number;
   firstPromptNumber: number | null;
   lastPromptNumber: number | null;
@@ -229,18 +240,30 @@ interface SpineMemberRow {
  * A segment is deliberately not session-bound (spec D6), so its member set can
  * reach outside the session being rendered; `memberCount` reports the whole
  * segment while the prompt span reports only what this session contributed.
+ *
+ * Every count here is over ERA-side members only. A segment that also claims
+ * pre-cutoff turns describes them in the legacy arc below the divider, and one
+ * turn counted on both sides is exactly the mixed reading the boundary exists
+ * to prevent.
+ *
+ * `windowTurnIds` restricts which segments appear — not what their rows say.
+ * A range view asks "what happened in T100..T130", so a chapter none of those
+ * turns belongs to has no business on the screen; but the chapter itself is not
+ * window-bound, so its count and span still report the whole session's share of
+ * it, which is how the reader sees the work continues past the window.
  */
 export function listSegmentSpineForSession(
   db: Database,
   sessionId: number,
   eraCutoffEpoch: number | null,
+  windowTurnIds?: ReadonlySet<number>,
 ): SegmentSpineRow[] {
   if (eraCutoffEpoch === null) {
     return [];
   }
 
   const memberRows = db
-    .query<SpineMemberRow, [number, number]>(
+    .query<SpineMemberRow, [number, number, number]>(
       `SELECT
          sm.segment_id AS segmentId,
          t.id AS turnId,
@@ -250,15 +273,16 @@ export function listSegmentSpineForSession(
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id IN (
-         SELECT sm2.segment_id
-         FROM segment_members sm2
-         JOIN turns t2 ON t2.id = sm2.turn_id
-         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
-       )
+       WHERE t.created_at_epoch >= ?
+         AND sm.segment_id IN (
+           SELECT sm2.segment_id
+           FROM segment_members sm2
+           JOIN turns t2 ON t2.id = sm2.turn_id
+           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+         )
        ORDER BY t.created_at_epoch ASC, t.id ASC`,
     )
-    .all(sessionId, eraCutoffEpoch);
+    .all(eraCutoffEpoch, sessionId, eraCutoffEpoch);
 
   const bySegment = new Map<number, SpineMemberRow[]>();
   for (const row of memberRows) {
@@ -274,6 +298,12 @@ export function listSegmentSpineForSession(
       continue;
     }
     const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    if (
+      windowTurnIds !== undefined &&
+      !sessionMembers.some((member) => windowTurnIds.has(member.turnId))
+    ) {
+      continue;
+    }
     const prompts = sessionMembers.map((member) => member.promptNumber);
 
     rows.push({
@@ -349,7 +379,12 @@ export function deriveDominantType(
   if (best !== null && !tied) {
     return best;
   }
-  return segmentTypes[0] ?? best ?? null;
+  // With no mode and nothing declared on the segment there is no answer to
+  // give. Falling back to `best` here would be answering with "whichever tied
+  // type was written first", which is arrival order wearing a mode's clothes —
+  // and an untyped segment is ordinary, not exotic: `resolveTypeDraft` stores
+  // an EMPTY list whenever the title matches no type prefix.
+  return segmentTypes[0] ?? null;
 }
 
 function collapseRuns(values: readonly string[]): string[] {
@@ -379,11 +414,15 @@ export interface OrphanAnchorRow {
  * tool volume are deliberately NOT signals here — nearly every implementation
  * turn has them, so admitting them would flood the spine with exactly the
  * per-turn flat list the segment structure exists to replace.
+ *
+ * An orphan row IS a turn, so `windowTurnIds` bounds it the way the legacy body
+ * is bounded: a range view never shows a turn outside its range.
  */
 export function listOrphanAnchorTurns(
   db: Database,
   sessionId: number,
   eraCutoffEpoch: number | null,
+  windowTurnIds?: ReadonlySet<number>,
 ): OrphanAnchorRow[] {
   if (eraCutoffEpoch === null) {
     return [];
@@ -404,6 +443,7 @@ export function listOrphanAnchorTurns(
     .all(sessionId, eraCutoffEpoch);
 
   return rows
+    .filter((facts) => windowTurnIds === undefined || windowTurnIds.has(facts.turnId))
     .map((facts) => ({ facts, signals: orphanSignals(facts) }))
     .filter((row) => row.signals.length > 0);
 }

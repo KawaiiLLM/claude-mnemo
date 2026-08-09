@@ -1866,11 +1866,14 @@ export function buildTimelineView(
   // turns are absent from `effGradeByTurnId` and print `—`, which is correct —
   // a grade is legacy semantics and an era turn must not claim one.)
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  // The era side answers to the same window the legacy body does: a range view
+  // shows the chapters its turns belong to and nothing else.
+  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
   const segmentSpine = renderSegments
-    ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch)
+    ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
   const orphanAnchors = renderSegments
-    ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch)
+    ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
   const viewItemTotal =
     viewKind === "turns"

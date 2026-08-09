@@ -517,7 +517,7 @@ export function buildTurnView(
     filesRead: turn.filesRead,
     filesModified: turn.filesModified,
     observations: observations.map((observation) =>
-      buildObservationView(observation, eraCutoffEpoch),
+      buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch),
     ),
   };
 }
@@ -736,7 +736,11 @@ function renderObservationScope(
         continue;
       }
 
-      const observationView = buildObservationView(observation, eraCutoffEpoch);
+      const observationView = buildOwnedObservationView(
+        db,
+        observation,
+        eraCutoffEpoch,
+      );
 
       lines.push(
         renderNode(
@@ -801,7 +805,11 @@ function renderObservationScope(
           continue;
         }
 
-        const observationView = buildObservationView(observation, eraCutoffEpoch);
+        const observationView = buildObservationView(
+          observation,
+          turn.createdAtEpoch,
+          eraCutoffEpoch,
+        );
 
         lines.push(
           renderNode(
@@ -829,9 +837,18 @@ function renderObservationScope(
  * (spec D11): no pipeline summarizes an observation any more, so the tool name
  * and the head of its input and result ARE the row's content. Pre-era rows are
  * untouched — their summary is what they have.
+ *
+ * The era is decided by `ownerCreatedAtEpoch`, the TURN's timestamp, never the
+ * observation's own. An observation has no semantics of its own: whether
+ * anything summarized it is a fact about the turn that produced it, and a
+ * turn's tool calls straddle whatever instant the cutoff falls on. Reading the
+ * observation's own stamp would leak era-only fields out of a legacy turn and
+ * hide them inside an era one. A null owner (impossible under the foreign key)
+ * reads as legacy — the safe half.
  */
 function buildObservationView(
   observation: NonNullable<ReturnType<typeof getObservation>>,
+  ownerCreatedAtEpoch: number | null,
   eraCutoffEpoch: number | null = null,
 ): FormattedObservation {
   const view: FormattedObservation = {
@@ -840,13 +857,29 @@ function buildObservationView(
     content: observation.content,
   };
 
-  if (isSegmentEra(observation.createdAtEpoch, eraCutoffEpoch)) {
+  if (
+    ownerCreatedAtEpoch !== null &&
+    isSegmentEra(ownerCreatedAtEpoch, eraCutoffEpoch)
+  ) {
     view.toolName = observation.toolName;
     view.toolInput = observation.toolInput;
     view.toolResult = observation.toolResult;
   }
 
   return view;
+}
+
+/** `buildObservationView` for a caller that holds the observation but not its turn. */
+function buildOwnedObservationView(
+  db: Database,
+  observation: NonNullable<ReturnType<typeof getObservation>>,
+  eraCutoffEpoch: number | null,
+): FormattedObservation {
+  return buildObservationView(
+    observation,
+    getTurnById(db, observation.turnId)?.createdAtEpoch ?? null,
+    eraCutoffEpoch,
+  );
 }
 
 function renderSessionDetail(
@@ -889,7 +922,7 @@ function renderObservationDetail(
     return "Observation not found.";
   }
 
-  const view = buildObservationView(observation, eraCutoffEpoch);
+  const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
   return renderNode(
     { type: "observation", value: view },
     {
@@ -906,14 +939,18 @@ function renderObservationDetail(
  * dominant type (the member-type mode, spec D9's mechanical prior), the phase
  * trace, and the anchor addresses its own body designates.
  */
-function buildSegmentFacts(db: Database, segment: SegmentRecord): {
+function buildSegmentFacts(
+  db: Database,
+  segment: SegmentRecord,
+  eraCutoffEpoch: number | null = null,
+): {
   memberCount: number;
   dominantType: string | null;
   phaseTrace: string[];
   anchorRefs: string[];
   members: RankedSegmentMember[];
 } {
-  const members = rankSegmentMembers(db, segment.id);
+  const members = rankSegmentMembers(db, segment.id, undefined, eraCutoffEpoch);
   const chronological = [...members].sort((left, right) => {
     if (left.createdAtEpoch !== right.createdAtEpoch) {
       return left.createdAtEpoch - right.createdAtEpoch;
@@ -953,12 +990,13 @@ function renderSegmentSummary(
   db: Database,
   segmentId: number,
   truncate?: number,
+  eraCutoffEpoch: number | null = null,
 ): string | null {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return null;
   }
-  const facts = buildSegmentFacts(db, segment);
+  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
   return renderSegmentHeaderLines({
     segment,
     memberCount: facts.memberCount,
@@ -989,7 +1027,7 @@ function renderSegmentDetail(
     return "Segment not found.";
   }
 
-  const facts = buildSegmentFacts(db, segment);
+  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
   const lines = renderSegmentHeaderLines({
     segment,
     memberCount: facts.memberCount,
@@ -1125,7 +1163,9 @@ function renderGroupedSearchResults(
   // (spec user story 16), and the chapter is the index into the rest.
   const segmentLines = results
     .filter((result) => result.layer === "segment")
-    .map((result) => renderSegmentSummary(db, result.sourceId, truncate))
+    .map((result) =>
+      renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch),
+    )
     .filter((line): line is string => line !== null);
 
   const sessionGroups = new Map<
@@ -1234,7 +1274,11 @@ function renderGroupedSearchResults(
           continue;
         }
 
-        const observationView = buildObservationView(observation, eraCutoffEpoch);
+        const observationView = buildObservationView(
+          observation,
+          turn.createdAtEpoch,
+          eraCutoffEpoch,
+        );
         lines.push(
           renderNode(
             { type: "observation", value: observationView },

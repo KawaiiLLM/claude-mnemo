@@ -87,6 +87,43 @@ describe("recall turn hits are filtered by render status", () => {
     ).toEqual([turnId]);
   });
 
+  test("the session facets answer off rendered turns too", () => {
+    // A session-scoped `tag:`/`type:` asks "does this session hold such a
+    // turn". It has to mean the same turns the turn-scoped query would return,
+    // or a skipped turn re-enters the hit set one level up, as a session.
+    upsertSession(db, {
+      contentSessionId: "session-status-filter",
+      project: "/tmp/project",
+      title: "zebrafish session",
+      content: "zebrafish content",
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+    captureTurn(1, "skipped");
+
+    expect(searchMemory(db, { scope: "sessions", tag: "topic:zebrafish" })).toEqual([]);
+    expect(searchMemory(db, { scope: "sessions", type: "bugfix" })).toEqual([]);
+    expect(
+      searchMemory(db, { scope: "sessions", query: "zebrafish", tag: "topic:zebrafish" }),
+    ).toEqual([]);
+
+    captureTurn(2, "extracted");
+
+    expect(
+      searchMemory(db, { scope: "sessions", tag: "topic:zebrafish" }).map(
+        (hit) => hit.sessionId,
+      ),
+    ).toEqual([sessionId]);
+    expect(
+      searchMemory(db, { scope: "sessions", query: "zebrafish", tag: "topic:zebrafish" }).map(
+        (hit) => hit.sessionId,
+      ),
+    ).toEqual([sessionId]);
+  });
+
   test("direct addressing is unaffected — only the hit set is filtered", () => {
     const turnId = captureTurn(1, "skipped");
 

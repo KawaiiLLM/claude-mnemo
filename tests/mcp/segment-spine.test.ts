@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -25,13 +33,38 @@ import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
  * blend: the spine block holds every era row, the legacy block holds every
  * pre-cutoff row, and a divider says which is which.
  */
-describe("timeline dual-path rendering across the era boundary", () => {
-  let db: Database;
-  let sessionId: number;
-  const CUTOFF = 1_900_000_000;
-  const ids: Record<string, number> = {};
+const CUTOFF = 1_900_000_000;
 
-  function makeTurn(
+/**
+ * One session that straddles the cutoff: two pre-cutoff turns, five era turns,
+ * a segment over three of them, a delivered segment over one, and an unclaimed
+ * era turn something cites.
+ *
+ * `transcriptPath` stays derived except for the byte pin below, which passes a
+ * literal so the rendered `raw:` line does not move with $HOME. It is not the
+ * default because the header's width is part of what the budget tests measure.
+ */
+function seedEraFixture(
+  db: Database,
+  transcriptPath: string | null = null,
+): {
+  sessionId: number;
+  ids: Record<string, number>;
+} {
+  const sessionId = upsertSession(db, {
+    contentSessionId: "session-era",
+    project: "/tmp/project",
+    transcriptPath,
+    title: "Era session",
+    content: null,
+    insight: null,
+    nextSteps: null,
+    createdAtEpoch: CUTOFF - 10_000,
+    updatedAtEpoch: CUTOFF + 5_000,
+    completedAtEpoch: null,
+  }).id;
+
+  const makeTurn = (
     promptNumber: number,
     options: {
       type?: string | null;
@@ -40,8 +73,8 @@ describe("timeline dual-path rendering across the era boundary", () => {
       grade?: number | null;
       tags?: string[];
     } = {},
-  ): number {
-    return db
+  ): number =>
+    db
       .query<
         { id: number },
         [number, number, string | null, number, string | null, number | null, string]
@@ -62,84 +95,82 @@ describe("timeline dual-path rendering across the era boundary", () => {
         options.grade ?? null,
         JSON.stringify(options.tags ?? []),
       )!.id;
-  }
+
+  const ids: Record<string, number> = {};
+  ids.legacyDecision = makeTurn(1, {
+    type: "decision",
+    createdAtEpoch: CUTOFF - 5_000,
+    title: "legacy decision one",
+    grade: 3,
+  });
+  ids.legacyFeature = makeTurn(2, {
+    type: "feature",
+    createdAtEpoch: CUTOFF - 4_000,
+    title: "legacy feature two",
+    grade: 2,
+  });
+
+  ids.research = makeTurn(10, { type: "research", title: "research the spine" });
+  ids.design = makeTurn(11, { type: "design", title: "design the spine" });
+  ids.implement = makeTurn(12, { type: "implement", title: "implement the spine" });
+  ids.orphan = makeTurn(13, { type: "fix", title: "fix the watchdog race" });
+  ids.citer = makeTurn(14, { type: "review", title: "review the fix" });
+
+  writeMemoryEdges(
+    db,
+    [
+      {
+        citing: { kind: "turn", id: ids.citer! },
+        cited: { kind: "turn", id: ids.orphan! },
+        relation: "builds-on",
+        provenance: "judged",
+      },
+    ],
+    CUTOFF,
+  );
+
+  const segment = createSegment(db, {
+    title: "implement the segment spine",
+    type: ["implement"],
+    tags: ["extraction-redesign", "rendering"],
+    nowEpoch: CUTOFF,
+  });
+  ids.segment = segment.id;
+  addSegmentMembers(db, segment.id, [ids.research!, ids.design!, ids.implement!], CUTOFF);
+  applySegmentWrites(
+    db,
+    [
+      {
+        segmentId: segment.id,
+        expectedRevision: getSegment(db, segment.id)!.revision,
+        content: `Spine ships. Load-bearing: [S${sessionId}/T12].`,
+      },
+    ],
+    { nowEpoch: CUTOFF },
+  );
+
+  const delivered = createSegment(db, {
+    title: "review pass",
+    type: ["review"],
+    tags: ["rendering"],
+    status: "delivered",
+    nowEpoch: CUTOFF,
+  });
+  ids.deliveredSegment = delivered.id;
+  addSegmentMembers(db, delivered.id, [ids.citer!], CUTOFF);
+
+  return { sessionId, ids };
+}
+
+describe("timeline dual-path rendering across the era boundary", () => {
+  let db: Database;
+  let sessionId: number;
+  let ids: Record<string, number>;
 
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
-    sessionId = upsertSession(db, {
-      contentSessionId: "session-era",
-      project: "/tmp/project",
-      title: "Era session",
-      content: null,
-      insight: null,
-      nextSteps: null,
-      createdAtEpoch: CUTOFF - 10_000,
-      updatedAtEpoch: CUTOFF + 5_000,
-      completedAtEpoch: null,
-    }).id;
-
-    ids.legacyDecision = makeTurn(1, {
-      type: "decision",
-      createdAtEpoch: CUTOFF - 5_000,
-      title: "legacy decision one",
-      grade: 3,
-    });
-    ids.legacyFeature = makeTurn(2, {
-      type: "feature",
-      createdAtEpoch: CUTOFF - 4_000,
-      title: "legacy feature two",
-      grade: 2,
-    });
-
-    ids.research = makeTurn(10, { type: "research", title: "research the spine" });
-    ids.design = makeTurn(11, { type: "design", title: "design the spine" });
-    ids.implement = makeTurn(12, { type: "implement", title: "implement the spine" });
-    ids.orphan = makeTurn(13, { type: "fix", title: "fix the watchdog race" });
-    ids.citer = makeTurn(14, { type: "review", title: "review the fix" });
-
-    writeMemoryEdges(
-      db,
-      [
-        {
-          citing: { kind: "turn", id: ids.citer! },
-          cited: { kind: "turn", id: ids.orphan! },
-          relation: "builds-on",
-          provenance: "judged",
-        },
-      ],
-      CUTOFF,
-    );
-
-    const segment = createSegment(db, {
-      title: "implement the segment spine",
-      type: ["implement"],
-      tags: ["extraction-redesign", "rendering"],
-      nowEpoch: CUTOFF,
-    });
-    ids.segment = segment.id;
-    addSegmentMembers(db, segment.id, [ids.research!, ids.design!, ids.implement!], CUTOFF);
-    applySegmentWrites(
-      db,
-      [
-        {
-          segmentId: segment.id,
-          expectedRevision: getSegment(db, segment.id)!.revision,
-          content: `Spine ships. Load-bearing: [S${sessionId}/T12].`,
-        },
-      ],
-      { nowEpoch: CUTOFF },
-    );
-
-    const delivered = createSegment(db, {
-      title: "review pass",
-      type: ["review"],
-      tags: ["rendering"],
-      status: "delivered",
-      nowEpoch: CUTOFF,
-    });
-    ids.deliveredSegment = delivered.id;
-    addSegmentMembers(db, delivered.id, [ids.citer!], CUTOFF);
+    ({ sessionId, ids } = seedEraFixture(db));
   });
 
   afterEach(() => {
@@ -218,6 +249,37 @@ describe("timeline dual-path rendering across the era boundary", () => {
     // A claimed turn is represented by its segment, never twice.
     expect(output).not.toContain("⚑ T14");
     expect(output).toContain("1 orphan anchor");
+  });
+
+  test("a segment reaching back across the cutoff contributes only its era half", () => {
+    // Nothing stops the settlement pass from claiming a turn written before the
+    // switch. When it does, the spine row must still describe the era side
+    // ALONE: the pre-cutoff member is a legacy arc row, and a turn cannot be
+    // counted on both sides of the divider.
+    addSegmentMembers(db, ids.segment!, [ids.legacyFeature!], CUTOFF);
+    const output = renderArc(CUTOFF);
+
+    expect(output.split("\n").find((line) => line.includes(`[E${ids.segment}]`))).toBe(
+      "   [E1] 🔧 #extraction-redesign #rendering implement the segment spine [open] · 3 turns · T10–T12 · 🔍→⚖️→🔧",
+    );
+    expect(output.split("── legacy era")[1]).toContain("legacy feature two");
+  });
+
+  test("a range view carries only the segments and orphans its window holds", () => {
+    const output = renderTimeline(
+      buildTimelineView(db, {
+        id: `S${sessionId}/T10..12`,
+        view: "milestones",
+        eraCutoffEpoch: CUTOFF,
+      }),
+    );
+
+    expect(output).toContain(`[E${ids.segment}]`);
+    // T14 (the delivered segment's only member) and T13 (the orphan) are both
+    // outside T10..T12; a range that excludes them from the legacy body must
+    // exclude them from the spine too.
+    expect(output).not.toContain(`[E${ids.deliveredSegment}]`);
+    expect(output).not.toContain("⚑ T13");
   });
 
   test("the era side takes no rows from a session with no segments yet", () => {
@@ -317,6 +379,80 @@ describe("timeline dual-path rendering across the era boundary", () => {
   });
 });
 
+/**
+ * The byte pin behind "a null cutoff changes nothing". Marker absence only
+ * proves the NEW blocks stay silent; it says nothing about whether the legacy
+ * arc still emits the same characters. `PRE_SEGMENT_ARC` was captured by
+ * running commit 5acdf4a — the last commit before the spine existed — over this
+ * exact fixture:
+ *
+ *   renderTimeline(buildTimelineView(db, { id: `S<n>`, view: "milestones" }))
+ *
+ * Regenerate it the same way if the LEGACY arc renderer ever changes on
+ * purpose; a diff here that nobody intended is the regression this guards.
+ *
+ * TZ is pinned because the arc prints local dates and the header's UTC offset,
+ * and the fixture pins `transcriptPath` because the test HOME is a fresh
+ * mkdtemp on every run.
+ */
+describe("a null era cutoff is byte-identical to the pre-segment renderer", () => {
+  const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
+  /tmp/project | 7 turns | 0 tool_calls
+  types: 🟣1 ⚖️1 (session-wide)
+  tz: UTC (+00:00)
+  raw: /tmp/project/session-era.jsonl
+
+── 2030-03-17 Sun · T1–T14 · 2 kept ──
+      T1 ⚖️ G3 the user asked something → legacy decision one
+        body text
+      T14 • G0 the user asked something → review the fix
+        body text
+        … +5 more → timeline(id="S1", view="turns") @ within T2..T13
+
+  shape signals (window T1-T14 = full session):
+    - fastest gap:   after T10 (+1s)
+    - longest gap:   after T2 (+1h 6m)
+    - broken-prompt: T10→T11, T11→T12, T12→T13, T13→T14`;
+
+  let db: Database;
+  let sessionId: number;
+  // Bun resolves the zone from `process.env.TZ` on every read, and DELETING the
+  // variable does not put the system zone back — the name has to be written
+  // back explicitly or every later test file renders in UTC.
+  const originalTz =
+    process.env.TZ ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  beforeAll(() => {
+    process.env.TZ = "UTC";
+  });
+
+  afterAll(() => {
+    process.env.TZ = originalTz;
+  });
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    ({ sessionId } = seedEraFixture(db, "/tmp/project/session-era.jsonl"));
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("the whole arc comes back unchanged", () => {
+    expect(
+      renderTimeline(
+        buildTimelineView(db, {
+          id: `S${sessionId}`,
+          view: "milestones",
+          eraCutoffEpoch: null,
+        }),
+      ),
+    ).toBe(PRE_SEGMENT_ARC);
+  });
+});
+
 describe("deriveDominantType (spec D9's member-type mode)", () => {
   test("an unambiguous mode wins", () => {
     expect(
@@ -333,5 +469,15 @@ describe("deriveDominantType (spec D9's member-type mode)", () => {
   test("no member type at all falls back to the segment's list, then to nothing", () => {
     expect(deriveDominantType([null, null], ["design"])).toBe("design");
     expect(deriveDominantType([null], [])).toBeNull();
+  });
+
+  test("a tie with no segment type of its own resolves to nothing, not to arrival order", () => {
+    // A segment whose title matches no type prefix is stored with an EMPTY type
+    // list (`resolveTypeDraft`), so this is the ordinary shape, not a corner
+    // case. With no mode and no declared type there is nothing to defer to, and
+    // "whichever member happened to be written first" is not an answer.
+    expect(deriveDominantType(["research", "implement"], [])).toBeNull();
+    expect(deriveDominantType(["implement", "research"], [])).toBeNull();
+    expect(deriveDominantType(["fix", "fix", "ops", "ops"], [])).toBeNull();
   });
 });

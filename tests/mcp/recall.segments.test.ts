@@ -149,6 +149,25 @@ describe("recall segment selector and cross-granularity filters", () => {
     expect(lines.some((line) => line.includes("anchors: S"))).toBe(true);
   });
 
+  test("a cross-era segment drills down to its era half only", () => {
+    const legacy = makeTurn(9, {
+      type: "fix",
+      title: "legacy fix before the switch",
+      epoch: CUTOFF - 100,
+    });
+    addSegmentMembers(db, segmentId, [legacy], CUTOFF);
+
+    const era = recallMemory(db, { id: `E${segmentId}`, eraCutoffEpoch: CUTOFF });
+    expect(era).toContain("3 turns");
+    expect(era).not.toContain("legacy fix before the switch");
+
+    // No cutoff means no partition — the whole membership is still readable,
+    // which is what keeps `E<n>` usable before ticket 09 sets a cutoff.
+    const unpartitioned = recallMemory(db, { id: `E${segmentId}` });
+    expect(unpartitioned).toContain("4 turns");
+    expect(unpartitioned).toContain("legacy fix before the switch");
+  });
+
   test("the render budget bounds the member list and says what it cut", () => {
     const output = recallMemory(db, { id: `E${segmentId}`, pageSize: 2 });
 
@@ -293,5 +312,94 @@ describe("observation rows render mechanical fields on the era side", () => {
 
     expect(output).toContain("- in: rg --files...");
     expect(output).toContain("- out: src/worker...");
+  });
+});
+
+/**
+ * An observation has no semantics of its own: whether a pipeline summarized it
+ * is decided by the TURN it belongs to. Its own timestamp is just when the tool
+ * ran, and a turn's tool calls straddle any instant you pick — so judging the
+ * era by the observation row leaks era-only fields out of a legacy turn and
+ * hides them inside an era one.
+ */
+describe("an observation's era is its owning turn's era", () => {
+  let db: Database;
+  let sessionId: number;
+  const CUTOFF = 1_900_000_000;
+
+  function makeTurn(promptNumber: number, createdAtEpoch: number): number {
+    return db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, content, created_at_epoch,
+           user_prompt, assistant_response, tags, files_read, files_modified
+         ) VALUES (?, ?, 'extracted', 'run the sweep', 'swept', ?, 'prompt',
+                   'response', '[]', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, createdAtEpoch)!.id;
+  }
+
+  function makeObservation(turnId: number, createdAtEpoch: number): number {
+    return createObservation(db, {
+      turnId,
+      toolName: "Bash",
+      toolInput: "rg --files-with-matches watchdog src/",
+      toolResult: "src/worker/server.ts",
+      status: "extracted",
+      createdAtEpoch,
+    }).id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-obs-owner-era",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: CUTOFF - 1_000,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a legacy turn whose tool call ran after the cutoff keeps its fields hidden", () => {
+    const turnId = makeTurn(1, CUTOFF - 10);
+    const observationId = makeObservation(turnId, CUTOFF + 5);
+
+    expect(
+      recallMemory(db, { id: `O${observationId}`, eraCutoffEpoch: CUTOFF }),
+    ).not.toContain("- in:");
+    expect(
+      recallMemory(db, {
+        id: `S${sessionId}/T1`,
+        depth: "expanded",
+        eraCutoffEpoch: CUTOFF,
+      }),
+    ).not.toContain("- in:");
+  });
+
+  test("an era turn whose tool call is stamped earlier still shows them", () => {
+    const turnId = makeTurn(2, CUTOFF + 10);
+    const observationId = makeObservation(turnId, CUTOFF - 5);
+
+    expect(
+      recallMemory(db, { id: `O${observationId}`, eraCutoffEpoch: CUTOFF }),
+    ).toContain("- in: rg --files-with-matches watchdog src/");
+    expect(
+      recallMemory(db, {
+        id: `S${sessionId}/T2`,
+        depth: "expanded",
+        eraCutoffEpoch: CUTOFF,
+      }),
+    ).toContain("- in: rg --files-with-matches watchdog src/");
   });
 });

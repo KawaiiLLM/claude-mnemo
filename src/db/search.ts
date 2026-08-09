@@ -690,6 +690,65 @@ function queryRecentObservations(
   );
 }
 
+/**
+ * The `type:`/`file:`/`tag:` facets as a SESSION answers them: "does this
+ * session hold such a turn". Written once for both the text and filter-only
+ * paths — two copies of a predicate are two places for the status rule to go
+ * missing, which is how a skipped turn came back as a session hit.
+ *
+ * Every one of them is scoped by `RENDERED_TURN_STATUS_CLAUSE`, so the turns a
+ * session is judged by are exactly the turns the turn-scoped query would
+ * return; otherwise a hidden turn re-enters the hit set one level up.
+ */
+function buildSessionTurnFacetClauses(options: SearchMemoryOptions): {
+  clauses: string[];
+  params: Array<string | number>;
+} {
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (options.type) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND t.type = ?
+      )`,
+    );
+    params.push(options.type);
+  }
+
+  if (options.file) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+      )`,
+    );
+    params.push(`%${options.file}%`, `%${options.file}%`);
+  }
+
+  if (options.tag) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`,
+    );
+    params.push(options.tag);
+  }
+
+  return { clauses, params };
+}
+
 function querySessionsByScope(
   db: Database,
   options: SearchMemoryOptions,
@@ -698,46 +757,11 @@ function querySessionsByScope(
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
   const sessionClause = buildSessionClause("s.id", options.sessionId);
+  const facets = buildSessionTurnFacetClauses(options);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
-
-    if (options.type) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND t.type = ?
-        )`,
-      );
-      params.push(options.type);
-    }
-
-    if (options.file) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-        )`,
-      );
-      params.push(`%${options.file}%`, `%${options.file}%`);
-    }
-
-    if (options.tag) {
-      whereClauses.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-        )`,
-      );
-      params.push(options.tag);
-    }
+    const whereClauses = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
 
     return queryRows(
       db,
@@ -766,44 +790,8 @@ function querySessionsByScope(
     );
   }
 
-  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
-
-  if (options.type) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND t.type = ?
-      )`,
-    );
-    params.push(options.type);
-  }
-
-  if (options.file) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-      )`,
-    );
-    params.push(`%${options.file}%`, `%${options.file}%`);
-  }
-
-  if (options.tag) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-      )`,
-    );
-    params.push(options.tag);
-  }
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
 
   return queryRows(
     db,

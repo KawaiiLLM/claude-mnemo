@@ -7319,46 +7319,55 @@ function queryRecentObservations(db, options) {
     withLimit([...projectClause.params], options.limit)
   );
 }
+function buildSessionTurnFacetClauses(options) {
+  const clauses = [];
+  const params = [];
+  if (options.type) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND t.type = ?
+      )`
+    );
+    params.push(options.type);
+  }
+  if (options.file) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
+      )`
+    );
+    params.push(`%${options.file}%`, `%${options.file}%`);
+  }
+  if (options.tag) {
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM turns t
+        WHERE t.session_id = s.id
+          AND ${RENDERED_TURN_STATUS_CLAUSE}
+          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
+      )`
+    );
+    params.push(options.tag);
+  }
+  return { clauses, params };
+}
 function querySessionsByScope(db, options, query) {
   const projectClause = buildProjectClause(options.project);
   const dateClause = buildDateClause("s.created_at_epoch", options);
   const sessionClause = buildSessionClause("s.id", options.sessionId);
+  const facets = buildSessionTurnFacetClauses(options);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause];
-    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
-    if (options.type) {
-      whereClauses2.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND t.type = ?
-        )`
-      );
-      params2.push(options.type);
-    }
-    if (options.file) {
-      whereClauses2.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-        )`
-      );
-      params2.push(`%${options.file}%`, `%${options.file}%`);
-    }
-    if (options.tag) {
-      whereClauses2.push(
-        `EXISTS (
-          SELECT 1
-          FROM turns t
-          WHERE t.session_id = s.id
-            AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-        )`
-      );
-      params2.push(options.tag);
-    }
+    const whereClauses2 = ["memory_fts.layer = 'session'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
     return queryRows(
       db,
       applyLimit(`
@@ -7385,41 +7394,8 @@ function querySessionsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause];
-  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
-  if (options.type) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND t.type = ?
-      )`
-    );
-    params.push(options.type);
-  }
-  if (options.file) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND (t.files_read LIKE ? OR t.files_modified LIKE ?)
-      )`
-    );
-    params.push(`%${options.file}%`, `%${options.file}%`);
-  }
-  if (options.tag) {
-    whereClauses.push(
-      `EXISTS (
-        SELECT 1
-        FROM turns t
-        WHERE t.session_id = s.id
-          AND EXISTS (SELECT 1 FROM json_each(t.tags) WHERE value = ?)
-      )`
-    );
-    params.push(options.tag);
-  }
+  const whereClauses = [projectClause.clause, sessionClause.clause, dateClause.clause, ...facets.clauses];
+  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...facets.params];
   return queryRows(
     db,
     applyLimit(`
@@ -8054,6 +8030,7 @@ function shouldRebuildSearchIndex(db) {
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
     { table: "observations", layer: "observation" },
+    { table: "segments", layer: "segment" },
     { table: "rules", layer: "rule" }
   ];
   const hasAnySourceRows = sourceLayers.some(
@@ -33553,7 +33530,7 @@ function resolveSegmentAnchorTurnIds(db, segment) {
   }
   return anchors;
 }
-function rankSegmentMembers(db, segmentId, limit) {
+function rankSegmentMembers(db, segmentId, limit, eraCutoffEpoch = null) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return [];
@@ -33563,8 +33540,9 @@ function rankSegmentMembers(db, segmentId, limit) {
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
        WHERE sm.segment_id = ?
+         ${eraCutoffEpoch === null ? "" : "AND t.created_at_epoch >= ?"}
        ${DERIVED_RANK_ORDER}`
-  ).all(segmentId);
+  ).all(...eraCutoffEpoch === null ? [segmentId] : [segmentId, eraCutoffEpoch]);
   const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
   const anchorPosition = new Map(
     anchorIds.map((turnId, index) => [turnId, index + 1])
@@ -33585,7 +33563,7 @@ function rankSegmentMembers(db, segmentId, limit) {
   }
   return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
 }
-function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds) {
   if (eraCutoffEpoch === null) {
     return [];
   }
@@ -33599,14 +33577,15 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id IN (
-         SELECT sm2.segment_id
-         FROM segment_members sm2
-         JOIN turns t2 ON t2.id = sm2.turn_id
-         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
-       )
+       WHERE t.created_at_epoch >= ?
+         AND sm.segment_id IN (
+           SELECT sm2.segment_id
+           FROM segment_members sm2
+           JOIN turns t2 ON t2.id = sm2.turn_id
+           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+         )
        ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(sessionId, eraCutoffEpoch);
+  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch);
   const bySegment = /* @__PURE__ */ new Map();
   for (const row of memberRows) {
     const bucket = bySegment.get(row.segmentId) ?? [];
@@ -33620,6 +33599,9 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
       continue;
     }
     const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    if (windowTurnIds !== void 0 && !sessionMembers.some((member) => windowTurnIds.has(member.turnId))) {
+      continue;
+    }
     const prompts = sessionMembers.map((member) => member.promptNumber);
     rows.push({
       segment,
@@ -33670,7 +33652,7 @@ function deriveDominantType(memberTypes, segmentTypes) {
   if (best !== null && !tied) {
     return best;
   }
-  return segmentTypes[0] ?? best ?? null;
+  return segmentTypes[0] ?? null;
 }
 function collapseRuns(values) {
   const out = [];
@@ -33681,7 +33663,7 @@ function collapseRuns(values) {
   }
   return out;
 }
-function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch, windowTurnIds) {
   if (eraCutoffEpoch === null) {
     return [];
   }
@@ -33696,7 +33678,7 @@ function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
          )
        ${DERIVED_RANK_ORDER}`
   ).all(sessionId, eraCutoffEpoch);
-  return rows.map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+  return rows.filter((facts) => windowTurnIds === void 0 || windowTurnIds.has(facts.turnId)).map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
 }
 function orphanSignals(facts) {
   const signals = [];
@@ -34868,7 +34850,7 @@ function buildTurnView(db, turn, eraCutoffEpoch = null) {
     filesRead: turn.filesRead,
     filesModified: turn.filesModified,
     observations: observations.map(
-      (observation) => buildObservationView(observation, eraCutoffEpoch)
+      (observation) => buildObservationView(observation, turn.createdAtEpoch, eraCutoffEpoch)
     )
   };
 }
@@ -35016,7 +34998,11 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       if (!observation) {
         continue;
       }
-      const observationView = buildObservationView(observation, eraCutoffEpoch);
+      const observationView = buildOwnedObservationView(
+        db,
+        observation,
+        eraCutoffEpoch
+      );
       lines.push(
         renderNode(
           { type: "observation", value: observationView },
@@ -35071,7 +35057,11 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
         if (!observation) {
           continue;
         }
-        const observationView = buildObservationView(observation, eraCutoffEpoch);
+        const observationView = buildObservationView(
+          observation,
+          turn.createdAtEpoch,
+          eraCutoffEpoch
+        );
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -35091,18 +35081,25 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
   }
   return lines.join("\n");
 }
-function buildObservationView(observation, eraCutoffEpoch = null) {
+function buildObservationView(observation, ownerCreatedAtEpoch, eraCutoffEpoch = null) {
   const view = {
     id: observation.id,
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content
   };
-  if (isSegmentEra(observation.createdAtEpoch, eraCutoffEpoch)) {
+  if (ownerCreatedAtEpoch !== null && isSegmentEra(ownerCreatedAtEpoch, eraCutoffEpoch)) {
     view.toolName = observation.toolName;
     view.toolInput = observation.toolInput;
     view.toolResult = observation.toolResult;
   }
   return view;
+}
+function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
+  return buildObservationView(
+    observation,
+    getTurnById(db, observation.turnId)?.createdAtEpoch ?? null,
+    eraCutoffEpoch
+  );
 }
 function renderSessionDetail(db, sessionId, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const session = getSession(db, sessionId);
@@ -35122,7 +35119,7 @@ function renderObservationDetail(db, observationId, depth, truncate2, truncateCa
   if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
-  const view = buildObservationView(observation, eraCutoffEpoch);
+  const view = buildOwnedObservationView(db, observation, eraCutoffEpoch);
   return renderNode(
     { type: "observation", value: view },
     {
@@ -35133,8 +35130,8 @@ function renderObservationDetail(db, observationId, depth, truncate2, truncateCa
     }
   );
 }
-function buildSegmentFacts(db, segment) {
-  const members = rankSegmentMembers(db, segment.id);
+function buildSegmentFacts(db, segment, eraCutoffEpoch = null) {
+  const members = rankSegmentMembers(db, segment.id, void 0, eraCutoffEpoch);
   const chronological = [...members].sort((left, right) => {
     if (left.createdAtEpoch !== right.createdAtEpoch) {
       return left.createdAtEpoch - right.createdAtEpoch;
@@ -35161,12 +35158,12 @@ function buildSegmentFacts(db, segment) {
     members
   };
 }
-function renderSegmentSummary(db, segmentId, truncate2) {
+function renderSegmentSummary(db, segmentId, truncate2, eraCutoffEpoch = null) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return null;
   }
-  const facts = buildSegmentFacts(db, segment);
+  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
   return renderSegmentHeaderLines({
     segment,
     memberCount: facts.memberCount,
@@ -35181,7 +35178,7 @@ function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeD
   if (!segment) {
     return "Segment not found.";
   }
-  const facts = buildSegmentFacts(db, segment);
+  const facts = buildSegmentFacts(db, segment, eraCutoffEpoch);
   const lines = renderSegmentHeaderLines({
     segment,
     memberCount: facts.memberCount,
@@ -35259,7 +35256,9 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
 function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
-  const segmentLines = results.filter((result) => result.layer === "segment").map((result) => renderSegmentSummary(db, result.sourceId, truncate2)).filter((line) => line !== null);
+  const segmentLines = results.filter((result) => result.layer === "segment").map(
+    (result) => renderSegmentSummary(db, result.sourceId, truncate2, eraCutoffEpoch)
+  ).filter((line) => line !== null);
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
@@ -35342,7 +35341,11 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
         if (!observation) {
           continue;
         }
-        const observationView = buildObservationView(observation, eraCutoffEpoch);
+        const observationView = buildObservationView(
+          observation,
+          turn.createdAtEpoch,
+          eraCutoffEpoch
+        );
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -36629,8 +36632,9 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems2(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
-  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch) : [];
-  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch) : [];
+  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;

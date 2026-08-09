@@ -1388,6 +1388,7 @@ function shouldRebuildSearchIndex(db) {
     { table: "sessions", layer: "session" },
     { table: "turns", layer: "turn" },
     { table: "observations", layer: "observation" },
+    { table: "segments", layer: "segment" },
     { table: "rules", layer: "rule" }
   ];
   const hasAnySourceRows = sourceLayers.some(
@@ -2877,7 +2878,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslitx45" : "dev";
+var BUILD_ID = true ? "0.9.1-mslkwq4j" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -5024,7 +5025,7 @@ var DERIVED_RANK_ORDER = `
            t.created_at_epoch DESC,
            t.id DESC
 `;
-function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch, windowTurnIds) {
   if (eraCutoffEpoch === null) {
     return [];
   }
@@ -5038,14 +5039,15 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
          t.created_at_epoch AS createdAtEpoch
        FROM segment_members sm
        JOIN turns t ON t.id = sm.turn_id
-       WHERE sm.segment_id IN (
-         SELECT sm2.segment_id
-         FROM segment_members sm2
-         JOIN turns t2 ON t2.id = sm2.turn_id
-         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
-       )
+       WHERE t.created_at_epoch >= ?
+         AND sm.segment_id IN (
+           SELECT sm2.segment_id
+           FROM segment_members sm2
+           JOIN turns t2 ON t2.id = sm2.turn_id
+           WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+         )
        ORDER BY t.created_at_epoch ASC, t.id ASC`
-  ).all(sessionId, eraCutoffEpoch);
+  ).all(eraCutoffEpoch, sessionId, eraCutoffEpoch);
   const bySegment = /* @__PURE__ */ new Map();
   for (const row of memberRows) {
     const bucket = bySegment.get(row.segmentId) ?? [];
@@ -5059,6 +5061,9 @@ function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
       continue;
     }
     const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    if (windowTurnIds !== void 0 && !sessionMembers.some((member) => windowTurnIds.has(member.turnId))) {
+      continue;
+    }
     const prompts = sessionMembers.map((member) => member.promptNumber);
     rows.push({
       segment,
@@ -5109,7 +5114,7 @@ function deriveDominantType(memberTypes, segmentTypes) {
   if (best !== null && !tied) {
     return best;
   }
-  return segmentTypes[0] ?? best ?? null;
+  return segmentTypes[0] ?? null;
 }
 function collapseRuns(values) {
   const out = [];
@@ -5120,7 +5125,7 @@ function collapseRuns(values) {
   }
   return out;
 }
-function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch, windowTurnIds) {
   if (eraCutoffEpoch === null) {
     return [];
   }
@@ -5135,7 +5140,7 @@ function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
          )
        ${DERIVED_RANK_ORDER}`
   ).all(sessionId, eraCutoffEpoch);
-  return rows.map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+  return rows.filter((facts) => windowTurnIds === void 0 || windowTurnIds.has(facts.turnId)).map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
 }
 function orphanSignals(facts) {
   const signals = [];
@@ -6543,8 +6548,9 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
   const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
-  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch) : [];
-  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch) : [];
+  const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
