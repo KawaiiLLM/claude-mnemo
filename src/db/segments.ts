@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { indexSegmentToFTS } from "./search";
 import {
   draftTypeFromTitle,
   normalizeTypeValues,
@@ -282,7 +283,19 @@ export function createSegment(
   if (!inserted) {
     throw new Error("Failed to create segment.");
   }
+  indexSegment(db, inserted);
   return inserted;
+}
+
+/** Keep the segment's search row in step with the row it was written from. */
+function indexSegment(db: Database, segment: SegmentRecord): void {
+  indexSegmentToFTS(db, {
+    id: segment.id,
+    title: segment.title,
+    content: segment.content,
+    type: JSON.stringify(segment.type),
+    tags: JSON.stringify(segment.tags),
+  });
 }
 
 /**
@@ -520,6 +533,7 @@ export function applySegmentWrites(
         continue;
       }
 
+      indexSegment(db, updated);
       applied.push(updated);
     }
   } catch (error) {

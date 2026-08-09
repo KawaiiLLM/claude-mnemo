@@ -7142,6 +7142,29 @@ function indexObservationToFTS(db, observation) {
     truncateOriginal(observation.toolResult)
   );
 }
+function indexSegmentToFTS(db, segment) {
+  const facets = [segment.type, segment.tags].flatMap((value) => {
+    if (!value) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  }).join(" ");
+  indexFtsRecord(
+    db,
+    "segment",
+    segment.id,
+    segment.title,
+    segment.content,
+    facets,
+    null,
+    null
+  );
+}
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
   const sessionRows = db.query(
@@ -7190,6 +7213,12 @@ function rebuildSearchIndex(db) {
   ).all();
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
+  }
+  const segmentRows = db.query(
+    "SELECT id, title, content, type, tags FROM segments ORDER BY id"
+  ).all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
   }
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
@@ -7423,7 +7452,7 @@ function queryTurnsByScope(db, options, query) {
   const tagClause = buildTagClause("t.tags", options.tag);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
     const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
     if (options.type) {
       whereClauses2.push("t.type = ?");
@@ -7456,7 +7485,7 @@ function queryTurnsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const whereClauses = [RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
   const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
   if (options.type) {
     whereClauses.push("t.type = ?");
@@ -7487,6 +7516,67 @@ function queryTurnsByScope(db, options, query) {
     `, options.limit),
     withLimit(params, options.limit)
   );
+}
+function querySegmentsByScope(db, options, query) {
+  if (options.file) {
+    return [];
+  }
+  const dateClause = buildDateClause("g.created_at_epoch", options);
+  const tagClause = buildTagClause("g.tags", options.tag);
+  const whereClauses = [];
+  const params = [];
+  if (query) {
+    whereClauses.push("memory_fts.layer = 'segment'", "memory_fts MATCH ?");
+    params.push(query);
+  }
+  whereClauses.push(dateClause.clause, tagClause.clause);
+  params.push(...dateClause.params, ...tagClause.params);
+  if (options.type) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(g.type) WHERE value = ?)");
+    params.push(options.type);
+  }
+  if (options.project !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         JOIN sessions s ON s.id = t.session_id
+         WHERE sm.segment_id = g.id AND s.project = ?
+       )`
+    );
+    params.push(options.project);
+  }
+  if (options.sessionId !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         WHERE sm.segment_id = g.id AND t.session_id = ?
+       )`
+    );
+    params.push(options.sessionId);
+  }
+  const selection = `
+    SELECT
+      'segment' AS layer,
+      g.id AS sourceId,
+      NULL AS sessionId,
+      NULL AS turnId,
+      NULL AS observationId,
+      NULL AS sourceTurnId,
+      '' AS project,
+      g.title AS title,
+      g.content AS content,
+      g.type AS type,
+      NULL AS filesRead,
+      NULL AS filesModified,
+      g.created_at_epoch AS timestampEpoch,
+      ${query ? "bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0)" : "NULL"} AS relevance
+    ${query ? "FROM memory_fts JOIN segments g ON g.id = memory_fts.source_id" : "FROM segments g"}
+    ${combineClauses(whereClauses)}
+    ORDER BY ${query ? "relevance ASC" : "g.created_at_epoch DESC"}
+  `;
+  return queryRows(db, applyLimit(selection, options.limit), withLimit(params, options.limit));
 }
 function queryObservationsByScope(db, options, query) {
   if (options.file) {
@@ -7571,12 +7661,16 @@ function searchMemory(db, options) {
     if (options.scope === "turns") {
       return queryRecentTurns(db, options);
     }
+    if (options.scope === "segments") {
+      return querySegmentsByScope(db, options, query);
+    }
     return queryRecentObservations(db, options);
   }
   if (!options.scope) {
     const results = [];
     if (!options.file) {
       results.push(...querySessionsByScope(db, options, query));
+      results.push(...querySegmentsByScope(db, options, query));
     }
     results.push(...queryTurnsByScope(db, options, query));
     results.push(...queryObservationsByScope(db, options, query));
@@ -7598,13 +7692,17 @@ function searchMemory(db, options) {
   if (options.scope === "turns") {
     return queryTurnsByScope(db, options, query);
   }
+  if (options.scope === "segments") {
+    return querySegmentsByScope(db, options, query);
+  }
   return queryObservationsByScope(db, options, query);
 }
-var OBSERVATION_ORIGINAL_INDEX_CHARS;
+var OBSERVATION_ORIGINAL_INDEX_CHARS, RENDERED_TURN_STATUS_CLAUSE;
 var init_search = __esm({
   "src/db/search.ts"() {
     "use strict";
     OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
+    RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
   }
 });
 
@@ -32491,10 +32589,211 @@ function contentDateAt(epochSeconds, timeZone, boundaryHour) {
 }
 
 // src/shared/config.ts
+var import_node_fs2 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path3 = require("node:path");
+
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+// src/shared/config.ts
+var KNOWN_DREAM_AGENT_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
+  "claude-opus-4-8",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5"
+];
+var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
+var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
+var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+var DEFAULT_STALL_THRESHOLD_MS = 6e4;
+var DEFAULT_CONFIG = {
+  mergeThresholdChars: 1e3,
+  maxQueuedBatches: 3,
+  keepaliveLeadMs: 6e4,
+  cacheMode: "auto",
+  maxMiniTurnChars: 24e3,
+  maxFlushAttempts: 3,
+  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+  compactContextRatio: 0.5,
+  settlementEnabled: false,
+  eraCutoffEpoch: null,
+  dreamAgentEnabled: false,
+  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+  dreamAgentBacklogLimit: 1
+};
+var MIN_MINI_TURN_CHARS = 10240;
+var MIN_FLUSH_ATTEMPTS = 1;
+var MIN_COMPACT_CONTEXT_RATIO = 0.1;
+var MAX_COMPACT_CONTEXT_RATIO = 0.95;
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function clampNumber(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    mergeThresholdChars: config2.mergeThresholdChars,
+    maxQueuedBatches: config2.maxQueuedBatches,
+    keepaliveLeadMs: config2.keepaliveLeadMs,
+    cacheMode: config2.cacheMode,
+    maxMiniTurnChars: clampNumber(
+      config2.maxMiniTurnChars,
+      MIN_MINI_TURN_CHARS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxMiniTurnChars
+    ),
+    maxFlushAttempts: clampNumber(
+      config2.maxFlushAttempts,
+      MIN_FLUSH_ATTEMPTS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    sessionEndTailTimeoutMs: clampInteger(
+      config2.sessionEndTailTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.sessionEndTailTimeoutMs
+    ),
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    stallThresholdMs: clampInteger(
+      config2.stallThresholdMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.stallThresholdMs
+    ),
+    compactContextRatio: clampNumber(
+      config2.compactContextRatio,
+      MIN_COMPACT_CONTEXT_RATIO,
+      MAX_COMPACT_CONTEXT_RATIO,
+      DEFAULT_CONFIG.compactContextRatio
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
 
 // src/db/diary-state.ts
 init_database();
@@ -32934,6 +33233,485 @@ function getObservation(db, observationId) {
 // src/mcp/recall.ts
 init_search();
 
+// src/db/references.ts
+var REFERENCE_PATTERN = /\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]/g;
+function parsePositiveId2(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  REFERENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = REFERENCE_PATTERN.exec(content)) !== null) {
+    const raw = match[0];
+    const segmentId = parsePositiveId2(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId2(match[1]);
+    const promptNumber = parsePositiveId2(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+
+// src/db/segments.ts
+init_search();
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "research",
+  "design",
+  "implement",
+  "fix",
+  "measure",
+  "review",
+  "write",
+  "ops",
+  "chat",
+  "rolled-back"
+];
+var TYPE_GLYPH = {
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  write: "\u270D\uFE0F",
+  ops: "\u2699\uFE0F",
+  chat: "\u{1F4AC}",
+  "rolled-back": "\u21A9\uFE0F"
+};
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_ALIASES = {
+  research: [
+    "research",
+    "investigate",
+    "explore",
+    "survey",
+    "study",
+    "analyze",
+    "analyse",
+    "diagnose",
+    "\u8C03\u7814",
+    "\u7814\u7A76",
+    "\u6392\u67E5",
+    "\u5206\u6790",
+    "\u63A2\u7D22",
+    "\u8BCA\u65AD"
+  ],
+  design: [
+    "design",
+    "spec",
+    "plan",
+    "propose",
+    "decide",
+    "evaluate",
+    "compare",
+    "\u8BBE\u8BA1",
+    "\u65B9\u6848",
+    "\u89C4\u5212",
+    "\u9009\u578B",
+    "\u8BC4\u4F30",
+    "\u5BF9\u6BD4",
+    "\u5B9A\u6848",
+    "\u88C1\u51B3"
+  ],
+  implement: [
+    "implement",
+    "add",
+    "build",
+    "create",
+    "introduce",
+    "wire",
+    "ship",
+    "support",
+    "\u5B9E\u73B0",
+    "\u65B0\u589E",
+    "\u6784\u5EFA",
+    "\u63A5\u5165",
+    "\u843D\u5730",
+    "\u4E0A\u7EBF",
+    "\u8865\u5168"
+  ],
+  fix: [
+    "fix",
+    "repair",
+    "resolve",
+    "correct",
+    "patch",
+    "harden",
+    "hotfix",
+    "\u4FEE\u590D",
+    "\u4FEE\u6B63",
+    "\u89E3\u51B3",
+    "\u7EA0\u6B63",
+    "\u52A0\u56FA",
+    "\u6B62\u8840"
+  ],
+  measure: [
+    "measure",
+    "benchmark",
+    "profile",
+    "count",
+    "verify",
+    "test",
+    "validate",
+    "\u5EA6\u91CF",
+    "\u6D4B\u91CF",
+    "\u7EDF\u8BA1",
+    "\u57FA\u51C6",
+    "\u9A8C\u8BC1",
+    "\u5B9E\u6D4B",
+    "\u538B\u6D4B"
+  ],
+  review: [
+    "review",
+    "audit",
+    "check",
+    "inspect",
+    "assess",
+    "critique",
+    "\u8BC4\u5BA1",
+    "\u5BA1\u67E5",
+    "\u590D\u6838",
+    "\u6838\u5BF9",
+    "\u68C0\u67E5",
+    "\u5BA1\u8BA1"
+  ],
+  write: [
+    "write",
+    "document",
+    "draft",
+    "record",
+    "summarize",
+    "note",
+    "explain",
+    "\u64B0\u5199",
+    "\u7F16\u5199",
+    "\u8BB0\u5F55",
+    "\u6587\u6863",
+    "\u603B\u7ED3",
+    "\u8D77\u8349",
+    "\u8BF4\u660E"
+  ],
+  ops: [
+    "ops",
+    "release",
+    "deploy",
+    "publish",
+    "migrate",
+    "upgrade",
+    "bump",
+    "configure",
+    "clean",
+    "\u53D1\u7248",
+    "\u53D1\u5E03",
+    "\u90E8\u7F72",
+    "\u8FC1\u79FB",
+    "\u5347\u7EA7",
+    "\u914D\u7F6E",
+    "\u6E05\u7406",
+    "\u8FD0\u7EF4"
+  ],
+  chat: [
+    "chat",
+    "discuss",
+    "ask",
+    "answer",
+    "reply",
+    "clarify",
+    "\u95F2\u804A",
+    "\u8BA8\u8BBA",
+    "\u8BE2\u95EE",
+    "\u56DE\u7B54",
+    "\u6F84\u6E05"
+  ]
+};
+var SORTED_ALIASES = Object.entries(TYPE_ALIASES).flatMap(
+  ([type, aliases]) => aliases.map((alias) => ({ alias: alias.toLowerCase(), type }))
+).sort((left, right) => right.alias.length - left.alias.length);
+
+// src/db/segments.ts
+var SEGMENT_COLUMNS = `
+  id,
+  topic_id AS topicId,
+  title,
+  content,
+  type,
+  tags,
+  status,
+  revision,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function parseStringArray(value) {
+  if (!value) {
+    return [];
+  }
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+}
+function mapSegmentRow(row) {
+  return row ? {
+    ...row,
+    type: parseStringArray(row.type),
+    tags: parseStringArray(row.tags)
+  } : null;
+}
+function getSegment(db, segmentId) {
+  return mapSegmentRow(
+    db.query(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
+    ).get(segmentId) ?? null
+  );
+}
+
+// src/db/segment-rank.ts
+var RANK_FACT_COLUMNS = `
+  t.id AS turnId,
+  t.session_id AS sessionId,
+  t.prompt_number AS promptNumber,
+  t.title AS title,
+  t.type AS type,
+  t.status AS status,
+  t.created_at_epoch AS createdAtEpoch,
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isCorrector,
+  -- COALESCE, not a bare comparison: comparing NULL to a literal yields NULL,
+  -- and SQLite sorts NULL FIRST under ASC \u2014 an untyped turn would have
+  -- outranked every typed one on this key by accident of three-valued logic.
+  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  (SELECT COUNT(*) FROM (
+     SELECT DISTINCT e.citing_kind, e.citing_id
+     FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+   )) AS citedBy,
+  (EXISTS (
+     SELECT 1 FROM segment_members dm
+     JOIN segments ds ON ds.id = dm.segment_id
+     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
+   )) AS isDeliveryMember,
+  (CASE WHEN json_valid(t.files_modified)
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+`;
+var DERIVED_RANK_ORDER = `
+  ORDER BY isCorrector DESC,
+           isRolledBack ASC,
+           citedBy DESC,
+           isDeliveryMember DESC,
+           filesModifiedCount DESC,
+           t.created_at_epoch DESC,
+           t.id DESC
+`;
+function resolveSegmentAnchorTurnIds(db, segment) {
+  const references = parseQualifiedReferences(segment.content);
+  if (references.length === 0) {
+    return [];
+  }
+  const lookup = db.query(
+    `SELECT t.id AS id
+     FROM turns t
+     JOIN segment_members sm ON sm.turn_id = t.id
+     WHERE t.session_id = ? AND t.prompt_number = ? AND sm.segment_id = ?`
+  );
+  const anchors = [];
+  for (const reference of references) {
+    if (reference.kind !== "turn") {
+      continue;
+    }
+    const row = lookup.get(reference.sessionId, reference.promptNumber, segment.id);
+    if (row && !anchors.includes(row.id)) {
+      anchors.push(row.id);
+    }
+  }
+  return anchors;
+}
+function rankSegmentMembers(db, segmentId, limit) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+       ${DERIVED_RANK_ORDER}`
+  ).all(segmentId);
+  const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
+  const anchorPosition = new Map(
+    anchorIds.map((turnId, index) => [turnId, index + 1])
+  );
+  const byTurnId = new Map(rows.map((row) => [row.turnId, row]));
+  const ordered = [];
+  for (const turnId of anchorIds) {
+    const row = byTurnId.get(turnId);
+    if (row) {
+      ordered.push({ ...row, anchorPosition: anchorPosition.get(turnId) ?? null });
+    }
+  }
+  for (const row of rows) {
+    if (anchorPosition.has(row.turnId)) {
+      continue;
+    }
+    ordered.push({ ...row, anchorPosition: null });
+  }
+  return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
+}
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const memberRows = db.query(
+    `SELECT
+         sm.segment_id AS segmentId,
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.type AS type,
+         t.created_at_epoch AS createdAtEpoch
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id IN (
+         SELECT sm2.segment_id
+         FROM segment_members sm2
+         JOIN turns t2 ON t2.id = sm2.turn_id
+         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+       )
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(sessionId, eraCutoffEpoch);
+  const bySegment = /* @__PURE__ */ new Map();
+  for (const row of memberRows) {
+    const bucket = bySegment.get(row.segmentId) ?? [];
+    bucket.push(row);
+    bySegment.set(row.segmentId, bucket);
+  }
+  const rows = [];
+  for (const [segmentId, members] of bySegment) {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      continue;
+    }
+    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    const prompts = sessionMembers.map((member) => member.promptNumber);
+    rows.push({
+      segment,
+      dominantType: deriveDominantType(
+        members.map((member) => member.type),
+        segment.type
+      ),
+      memberCount: members.length,
+      sessionMemberCount: sessionMembers.length,
+      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
+      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
+      firstEpoch: members[0].createdAtEpoch,
+      lastEpoch: members[members.length - 1].createdAtEpoch,
+      phaseTrace: collapseRuns(
+        members.map((member) => member.type).filter((type) => type !== null && type !== "")
+      )
+    });
+  }
+  return rows.sort((left, right) => {
+    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    if (leftPrompt !== rightPrompt) {
+      return leftPrompt - rightPrompt;
+    }
+    return left.segment.id - right.segment.id;
+  });
+}
+function deriveDominantType(memberTypes, segmentTypes) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const type of memberTypes) {
+    if (type === null || type === "") {
+      continue;
+    }
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  let tied = false;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+      tied = false;
+    } else if (count === bestCount) {
+      tied = true;
+    }
+  }
+  if (best !== null && !tied) {
+    return best;
+  }
+  return segmentTypes[0] ?? best ?? null;
+}
+function collapseRuns(values) {
+  const out = [];
+  for (const value of values) {
+    if (out[out.length - 1] !== value) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.created_at_epoch >= ?
+         AND t.status NOT IN ('skipped', 'undone')
+         AND NOT EXISTS (
+           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
+         )
+       ${DERIVED_RANK_ORDER}`
+  ).all(sessionId, eraCutoffEpoch);
+  return rows.map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+}
+function orphanSignals(facts) {
+  const signals = [];
+  if (facts.isCorrector) {
+    signals.push("corrector");
+  }
+  if (facts.isRolledBack) {
+    signals.push("rolled-back");
+  }
+  if (facts.citedBy > 0) {
+    signals.push(`cited ${facts.citedBy}`);
+  }
+  return signals;
+}
+
 // src/db/sessions.ts
 init_search();
 var SESSION_SELECT = `
@@ -33026,7 +33804,7 @@ function getSession(db, id) {
 init_paths();
 
 // src/shared/file-tree.ts
-var import_node_path3 = __toESM(require("node:path"), 1);
+var import_node_path4 = __toESM(require("node:path"), 1);
 function createFileTreeNode() {
   return { files: [], dirs: /* @__PURE__ */ new Map() };
 }
@@ -33123,7 +33901,7 @@ function renderFileTree(paths, opts) {
   const root = commonPathPrefix(uniquePaths);
   const tree = createFileTreeNode();
   for (const value of uniquePaths) {
-    const relative = import_node_path3.default.posix.relative(root, value);
+    const relative = import_node_path4.default.posix.relative(root, value);
     if (!relative || relative === "") {
       continue;
     }
@@ -33160,6 +33938,14 @@ function renderFileTree(paths, opts) {
 }
 
 // src/mcp/format.ts
+var TYPE_EMOJI = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F"
+};
 var FIELD_TRUNCATION_SUFFIX = "...";
 var DEFAULT_TRUNCATE = 200;
 var MAX_TRUNCATE = 2e3;
@@ -33271,8 +34057,8 @@ function truncateFileTree(tree, {
     `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
   ];
 }
-function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
+function resolveExplicitTruncate(truncate2, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate2 ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function buildSessionHintId(sessionId) {
   return `S${sessionId}`;
@@ -33330,8 +34116,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -33348,9 +34134,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
+function formatSessionExpandedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap)];
   const hintId = buildSessionHintId(session.id);
   const pushField = (label, value) => {
     if (!value) {
@@ -33395,7 +34181,7 @@ function formatTurnLabel(turn, {
   sessionId,
   mode = "legacy",
   depth = "collapsed",
-  truncate,
+  truncate: truncate2,
   truncateCap,
   includeDbTurnIds = false
 } = {}) {
@@ -33404,7 +34190,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
     limit,
@@ -33439,8 +34225,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap } = {}) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate: truncate2, truncateCap } = {}) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -33453,8 +34239,8 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
   });
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
+  const { indent = "    ", mode = "unified", depth = "expanded", truncate: truncate2 } = options;
+  const limit = resolveExplicitTruncate(truncate2, options.truncateCap);
   const detailIndent = `${indent}  `;
   const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
@@ -33462,7 +34248,7 @@ function formatToolCallExpandedWithMode(toolCall, options = {}) {
       ...options,
       mode,
       depth: "expanded",
-      truncate
+      truncate: truncate2
     })
   ];
   if (toolCall.input !== void 0) {
@@ -33489,7 +34275,7 @@ function renderTurnChildren(turn, depth, options = {}) {
   if (depth === "collapsed") {
     return "";
   }
-  const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate: truncate2 } = options;
   const childIndent = `${indent}  `;
   const childLines = [];
   if (turn.observations && turn.observations.length > 0) {
@@ -33501,7 +34287,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate
+          truncate: truncate2
         })
       );
     }
@@ -33519,7 +34305,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate
+          truncate: truncate2
         })
       );
     }
@@ -33614,21 +34400,32 @@ function formatObservationLabel(observation, { indent = "" } = {}) {
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const hintId = buildObservationHintId(
+    observation.id,
+    options.sessionId,
+    options.turnPromptNumber
+  );
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(
-        observation.content,
-        {
-          limit,
-          mode,
-          hintId: buildObservationHintId(
-            observation.id,
-            options.sessionId,
-            options.turnPromptNumber
-          )
-        }
-      )}`
+      `${indent}  - desc: ${truncateText(observation.content, {
+        limit,
+        mode,
+        hintId
+      })}`
+    );
+  }
+  if (observation.toolName) {
+    lines.push(`${indent}  - tool: \u{1F527} ${observation.toolName}`);
+  }
+  if (observation.toolInput) {
+    lines.push(
+      `${indent}  - in: ${truncateText(observation.toolInput, { limit, mode, hintId })}`
+    );
+  }
+  if (observation.toolResult) {
+    lines.push(
+      `${indent}  - out: ${truncateText(observation.toolResult, { limit, mode, hintId })}`
     );
   }
   return lines.join("\n");
@@ -33651,6 +34448,130 @@ function renderNode(node, options) {
     case "toolCall":
       return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
   }
+}
+
+// src/mcp/segment-spine.ts
+var ORPHAN_GLYPH = "\u2691";
+var SPINE_ROW_INDENT = "   ";
+var SPINE_TAG_CAP = 2;
+function segmentTypeGlyph(type) {
+  if (!type) {
+    return "\u2022";
+  }
+  if (isMemoryType(type)) {
+    return TYPE_GLYPH[type];
+  }
+  return TYPE_EMOJI[type] ?? "\u2022";
+}
+function formatTags(tags) {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+function truncate(text, maxChars) {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026`;
+}
+function sanitize(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function formatPhaseTrace(phaseTrace) {
+  return phaseTrace.map((type) => segmentTypeGlyph(type)).join("\u2192");
+}
+function formatSpan(row) {
+  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
+    return "";
+  }
+  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
+}
+function renderSpineRow(row, titleCap) {
+  const { segment } = row;
+  const parts = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(row.dominantType),
+    formatTags(segment.tags),
+    sanitize(truncate(segment.title, titleCap)),
+    `[${segment.status}]`
+  ].filter((part) => part !== "");
+  const facts = [
+    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
+    formatSpan(row),
+    formatPhaseTrace(row.phaseTrace)
+  ].filter((part) => part !== "");
+  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
+}
+function renderOrphanRow(row, titleCap) {
+  const { facts } = row;
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncate(facts.title, titleCap));
+  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
+    facts.type
+  )} ${label} (${row.signals.join(", ")})`;
+}
+function renderSegmentSpineBlock(input) {
+  const { spine, orphans, titleCap } = input;
+  if (spine.length === 0 && orphans.length === 0) {
+    return [];
+  }
+  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
+  const droppedSegments = spine.length - keptSegments.length;
+  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
+  const droppedOrphans = orphans.length - keptOrphans.length;
+  const headerParts = [
+    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
+  ];
+  if (orphans.length > 0) {
+    headerParts.push(
+      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
+  if (droppedSegments > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
+    );
+  }
+  for (const row of keptSegments) {
+    lines.push(renderSpineRow(row, titleCap));
+  }
+  for (const row of keptOrphans) {
+    lines.push(renderOrphanRow(row, titleCap));
+  }
+  if (droppedOrphans > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  return lines;
+}
+function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
+  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
+  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
+}
+function renderSegmentHeaderLines(input) {
+  const { segment } = input;
+  const tags = formatTags(segment.tags);
+  const head = [
+    `- [E${segment.id}]`,
+    segmentTypeGlyph(input.dominantType),
+    tags,
+    sanitize(segment.title)
+  ].filter((part) => part !== "").join(" ");
+  const lines = [
+    `${head} | ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} | [${segment.status}] | rev ${segment.revision}`
+  ];
+  if (segment.content) {
+    lines.push(`  - desc: ${truncate(segment.content, input.truncate)}`);
+  }
+  const trace = formatPhaseTrace(input.phaseTrace);
+  if (trace !== "") {
+    lines.push(`  - phases: ${trace}`);
+  }
+  if (input.anchorRefs.length > 0) {
+    lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
+  }
+  return lines;
 }
 
 // src/mcp/selectors.ts
@@ -33805,6 +34726,14 @@ function parseRoutedId(value) {
       observationId: Number(observationMatch[1])
     };
   }
+  const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMatch) {
+    const segmentIds = expandNumericSelector(segmentMatch[1]);
+    if (segmentIds === null) {
+      return null;
+    }
+    return { kind: "segments", segmentIds };
+  }
   const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
   if (turnByIdMatch) {
     return {
@@ -33876,9 +34805,9 @@ function parseQueryFilters(query) {
   }
   return filters;
 }
-function buildSessionView(db, session) {
+function buildSessionView(db, session, eraCutoffEpoch = null) {
   const turns = getTurnsForSession(db, session.id).map(
-    (turn) => buildTurnView(db, turn)
+    (turn) => buildTurnView(db, turn, eraCutoffEpoch)
   );
   return {
     id: session.id,
@@ -33920,7 +34849,7 @@ function buildSessionSummary(db, sessionId) {
     jsonlPath: void 0
   };
 }
-function buildTurnView(db, turn) {
+function buildTurnView(db, turn, eraCutoffEpoch = null) {
   const observations = getExtractableObservationsForTurn(db, turn.id);
   return {
     id: turn.id,
@@ -33938,11 +34867,9 @@ function buildTurnView(db, turn) {
     insight: splitInsight(turn.insight),
     filesRead: turn.filesRead,
     filesModified: turn.filesModified,
-    observations: observations.map((observation) => ({
-      id: observation.id,
-      title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-      content: observation.content
-    }))
+    observations: observations.map(
+      (observation) => buildObservationView(observation, eraCutoffEpoch)
+    )
   };
 }
 function previewItems(items, size = 5) {
@@ -33985,8 +34912,8 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds, truncateCap) {
-  const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+function renderSession(db, session, depth, truncate2, turnSelector, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const view = depth === "expanded" ? buildSessionView(db, session, eraCutoffEpoch) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
@@ -33994,7 +34921,7 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
       {
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
-        truncate,
+        truncate: truncate2,
         includeDbTurnIds,
         truncateCap
       }
@@ -34011,14 +34938,14 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
   );
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
   for (const item of preview.items) {
-    const turnView = buildTurnView(db, item);
+    const turnView = buildTurnView(db, item, eraCutoffEpoch);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
         depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
-        truncate,
+        truncate: truncate2,
         includeDbTurnIds,
         truncateCap
       }
@@ -34030,7 +34957,7 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -34049,12 +34976,12 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     );
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
-      const turnView = buildTurnView(db, item);
+      const turnView = buildTurnView(db, item, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -34062,7 +34989,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
             depth,
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -34072,7 +34999,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds, truncateCap) {
+function renderObservationScope(db, observations, depth, includeParents, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -34089,18 +35016,14 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       if (!observation) {
         continue;
       }
-      const observationView = {
-        id: observation.id,
-        title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-        content: observation.content
-      };
+      const observationView = buildObservationView(observation, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "observation", value: observationView },
           {
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
-            truncate,
+            truncate: truncate2,
             truncateCap
           }
         )
@@ -34119,7 +35042,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
@@ -34127,7 +35050,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       (turn) => turnMap.has(turn.id)
     );
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -34135,7 +35058,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -34148,11 +35071,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
         if (!observation) {
           continue;
         }
-        const observationView = {
-          id: observation.id,
-          title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-          content: observation.content
-        };
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -34162,7 +35081,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
+              truncate: truncate2,
               truncateCap
             }
           )
@@ -34172,32 +35091,144 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
   }
   return lines.join("\n");
 }
-function buildObservationView(observation) {
-  return {
+function buildObservationView(observation, eraCutoffEpoch = null) {
+  const view = {
     id: observation.id,
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content
   };
+  if (isSegmentEra(observation.createdAtEpoch, eraCutoffEpoch)) {
+    view.toolName = observation.toolName;
+    view.toolInput = observation.toolInput;
+    view.toolResult = observation.toolResult;
+  }
+  return view;
 }
-function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderSessionDetail(db, sessionId, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap) : "Session not found.";
+  return session ? renderSession(
+    db,
+    session,
+    depth,
+    truncate2,
+    void 0,
+    includeDbTurnIds,
+    truncateCap,
+    eraCutoffEpoch
+  ) : "Session not found.";
 }
-function renderObservationDetail(db, observationId, depth, truncate, truncateCap) {
+function renderObservationDetail(db, observationId, depth, truncate2, truncateCap, eraCutoffEpoch = null) {
   const observation = getObservation(db, observationId);
   if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
-  const view = buildObservationView(observation);
+  const view = buildObservationView(observation, eraCutoffEpoch);
   return renderNode(
     { type: "observation", value: view },
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
-      truncate,
+      truncate: truncate2,
       truncateCap
     }
   );
+}
+function buildSegmentFacts(db, segment) {
+  const members = rankSegmentMembers(db, segment.id);
+  const chronological = [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+  const dominantType = deriveDominantType(
+    chronological.map((member) => member.type),
+    segment.type
+  );
+  const phaseTrace = [];
+  for (const member of chronological) {
+    if (member.type && phaseTrace[phaseTrace.length - 1] !== member.type) {
+      phaseTrace.push(member.type);
+    }
+  }
+  const byTurnId = new Map(members.map((member) => [member.turnId, member]));
+  const anchorRefs = resolveSegmentAnchorTurnIds(db, segment).map((turnId) => byTurnId.get(turnId)).filter((member) => member !== void 0).map((member) => `S${member.sessionId}/T${member.promptNumber}`);
+  return {
+    memberCount: members.length,
+    dominantType,
+    phaseTrace,
+    anchorRefs,
+    members
+  };
+}
+function renderSegmentSummary(db, segmentId, truncate2) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const facts = buildSegmentFacts(db, segment);
+  return renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate2 ?? DEFAULT_TRUNCATE
+  }).join("\n");
+}
+function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  const facts = buildSegmentFacts(db, segment);
+  const lines = renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate2 ?? DEFAULT_TRUNCATE
+  });
+  const shown = facts.members.slice(0, Math.max(0, pageSize));
+  if (facts.members.length > 0) {
+    lines.push(
+      `  - members (anchors first, then derived rank): ${shown.length}/${facts.members.length}`
+    );
+  }
+  for (const member of shown) {
+    const turn = getTurnById(db, member.turnId);
+    if (!turn) {
+      continue;
+    }
+    const rendered = renderNode(
+      { type: "turn", value: buildTurnView(db, turn, eraCutoffEpoch) },
+      {
+        depth,
+        mode: "unified",
+        sessionId: member.sessionId,
+        truncate: truncate2,
+        includeDbTurnIds,
+        truncateCap
+      }
+    );
+    lines.push(
+      member.anchorPosition === null || !rendered.startsWith("  - ") ? rendered : `  \u2693${member.anchorPosition} ${rendered.slice(4)}`
+    );
+  }
+  if (facts.members.length > shown.length) {
+    lines.push(`  +${facts.members.length - shown.length} more`);
+  }
+  return lines.join("\n");
+}
+function listSegmentIds(db, segmentIds) {
+  if (segmentIds && segmentIds.length === 1) {
+    return segmentIds;
+  }
+  if (segmentIds && segmentIds.length > 0) {
+    return segmentIds.filter((segmentId) => getSegment(db, segmentId) !== null);
+  }
+  return db.query("SELECT id FROM segments ORDER BY id DESC").all().map((row) => row.id);
 }
 function listSessionIds(db, sessionIds, after, before) {
   const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
@@ -34227,10 +35258,14 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const segmentLines = results.filter((result) => result.layer === "segment").map((result) => renderSegmentSummary(db, result.sourceId, truncate2)).filter((line) => line !== null);
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
+    if (result.layer === "segment" || result.sessionId === null) {
+      continue;
+    }
     const sessionId = result.sessionId;
     let group = sessionGroups.get(sessionId);
     if (!group) {
@@ -34262,22 +35297,31 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
       return "";
     }
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap);
+      return renderSession(
+        db,
+        session,
+        depth,
+        truncate2,
+        void 0,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      );
     }
     const lines = [
       renderNode(
         {
           type: "session",
-          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session)
+          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch)
         },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     ];
     const turns = getTurnsForSession(db, session.id).filter(
       (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
     );
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       const turnDepth = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? "collapsed" : depth;
       lines.push(
         renderNode(
@@ -34286,7 +35330,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -34298,7 +35342,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
         if (!observation) {
           continue;
         }
-        const observationView = buildObservationView(observation);
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -34308,7 +35352,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
+              truncate: truncate2,
               truncateCap
             }
           )
@@ -34317,9 +35361,9 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
     }
     return lines.join("\n");
   });
-  return sessionLines.filter(Boolean).join("\n");
+  return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -34329,7 +35373,38 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items.map(
-        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
+        (sessionId) => renderSessionDetail(
+          db,
+          sessionId,
+          depth,
+          truncate2,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch
+        )
+      ).join("\n"),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "segments") {
+    const paged = paginateItems(
+      listSegmentIds(db, routed.segmentIds),
+      page,
+      pageSize
+    );
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items.map(
+        (segmentId) => renderSegmentDetail(
+          db,
+          segmentId,
+          depth,
+          pageSize,
+          truncate2,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch
+        )
       ).join("\n"),
       paged.pageCount
     );
@@ -34347,13 +35422,29 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderTurnScope(
+        db,
+        paged.items,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap) : "Turn not found.";
+    return turn ? renderTurnScope(
+      db,
+      [turn],
+      depth,
+      truncate2,
+      includeDbTurnIds,
+      truncateCap,
+      eraCutoffEpoch
+    ) : "Turn not found.";
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
@@ -34376,7 +35467,16 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
@@ -34399,17 +35499,33 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth, truncate, truncateCap);
+    return renderObservationDetail(
+      db,
+      routed.observationId,
+      depth,
+      truncate2,
+      truncateCap,
+      eraCutoffEpoch
+    );
   }
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
+function renderSessionList(db, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const paged = paginateItems(
     listSessionIds(db, void 0, after, before),
     page,
@@ -34418,7 +35534,15 @@ function renderSessionList(db, depth, page, pageSize, truncate, after, before, i
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items.map(
-      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
+      (sessionId) => renderSessionDetail(
+        db,
+        sessionId,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      )
     ).join("\n"),
     paged.pageCount
   );
@@ -34433,15 +35557,19 @@ function searchQueryResults(db, filters, after, before) {
     sessionId: filters.session,
     after,
     before
-  }).filter((r) => r.sessionId !== null);
+    // A segment is not bound to a session (spec D6), so it legitimately carries
+    // a null `sessionId`; only session-layer rows that lost their session are
+    // dropped here.
+  }).filter((r) => r.layer === "segment" || r.sessionId !== null);
 }
 function recallMemory(db, input) {
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const truncate2 = input.truncate ?? DEFAULT_TRUNCATE;
   const truncateCap = input.truncateCap;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -34457,11 +35585,12 @@ function recallMemory(db, input) {
       depth,
       page,
       pageSize,
-      truncate,
+      truncate2,
       timeRange.after,
       timeRange.before,
       includeDbTurnIds,
-      truncateCap
+      truncateCap,
+      eraCutoffEpoch
     );
   }
   if (input.query) {
@@ -34481,7 +35610,15 @@ function recallMemory(db, input) {
     const paged = paginateItems(results, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderGroupedSearchResults(
+        db,
+        paged.items,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
@@ -34490,11 +35627,12 @@ function recallMemory(db, input) {
     depth,
     page,
     pageSize,
-    truncate,
+    truncate2,
     timeRange.after,
     timeRange.before,
     includeDbTurnIds,
-    truncateCap
+    truncateCap,
+    eraCutoffEpoch
   );
 }
 
@@ -35448,6 +36586,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const windowTurns = sorted.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
+  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
+  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -35465,10 +36608,10 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
     session,
-    windowTurns,
+    windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
-    sessionTurns: allTurns,
+    sessionTurns: legacySessionTurns,
     // One read for the whole selection: in-degree, victim demotion and
     // pull-through all consume this map (spec §B). A caller that already read it
     // (settlement) hands its own snapshot in rather than paying for a second.
@@ -35485,6 +36628,9 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     milestoneSelection.overflowByDay
   ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems2(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
+  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch) : [];
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
@@ -35515,7 +36661,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     tz,
     hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
     milestoneTail,
-    breadcrumb
+    breadcrumb,
+    eraCutoffEpoch,
+    eraWindowTurns,
+    segmentSpine,
+    orphanAnchors
   };
 }
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
@@ -36465,12 +37615,30 @@ function renderLineagePointer(view) {
     `  earlier: recall(id="S${view.session.parentSessionId}")`
   ];
 }
+function withLegacyEraHeader(view, bodyLines, hasSpine) {
+  if (!hasSpine || bodyLines.length === 0) {
+    return bodyLines;
+  }
+  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
+  const header = legacyEraHeader(
+    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
+    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
+  );
+  const [first, ...rest] = bodyLines;
+  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
+    spine: view.segmentSpine,
+    orphans: view.orphanAnchors,
+    titleCap
+  }) : [];
   const assemble = (bodyLines) => [
     ...renderSessionHeader(view),
-    ...bodyLines,
+    ...spineLines,
+    ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
@@ -36484,6 +37652,17 @@ function renderTimeline(view, options = {}) {
   if (options.tokenBudget === void 0) {
     return assemble(renderMilestoneBody(view, titleCap));
   }
+  if (spineLines.length > 0) {
+    shedSpineToBudget({
+      view,
+      titleCap,
+      tokenBudget: options.tokenBudget,
+      apply: (candidate) => {
+        spineLines = candidate;
+      },
+      measure: () => estimateDiaryTokens(assemble([]))
+    });
+  }
   return assemble(
     fitMilestoneBodyToBudget(
       view,
@@ -36493,6 +37672,27 @@ function renderTimeline(view, options = {}) {
       (bodyLines) => estimateDiaryTokens(assemble(bodyLines))
     )
   );
+}
+function shedSpineToBudget(options) {
+  const { view, titleCap, tokenBudget, apply, measure } = options;
+  let segments = view.segmentSpine.length;
+  let orphans = view.orphanAnchors.length;
+  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
+    if (orphans > 0) {
+      orphans -= 1;
+    } else {
+      segments -= 1;
+    }
+    apply(
+      renderSegmentSpineBlock({
+        spine: view.segmentSpine,
+        orphans: view.orphanAnchors,
+        titleCap,
+        maxSegments: segments,
+        maxOrphans: orphans
+      })
+    );
+  }
 }
 function timelineQuery(db, input) {
   try {
@@ -36917,6 +38117,13 @@ function rememberTool(db, rawInput) {
 }
 
 // src/mcp/handlers.ts
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {
@@ -36952,6 +38159,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
+  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveConfiguredEraCutoff();
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -36979,12 +38187,16 @@ function createDatabaseBackedHandlers(database, options = {}) {
         pageSize: args.pageSize,
         truncate: args.truncate,
         includeDbTurnIds,
-        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0
+        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0,
+        eraCutoffEpoch
       })
     ),
     remember: (args) => rememberTool(database, args),
     timeline: (args) => workerTextResult(
-      timelineQuery(database, toTimelineQueryInput(args))
+      timelineQuery(database, {
+        ...toTimelineQueryInput(args),
+        eraCutoffEpoch
+      })
     ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to

@@ -35,7 +35,7 @@ __export(hook_command_exports, {
   runHookCommand: () => runHookCommand
 });
 module.exports = __toCommonJS(hook_command_exports);
-var import_node_fs8 = require("node:fs");
+var import_node_fs9 = require("node:fs");
 var import_bun_sqlite2 = require("bun:sqlite");
 
 // src/shared/hook-constants.ts
@@ -290,6 +290,29 @@ function indexObservationToFTS(db, observation) {
     truncateOriginal(observation.toolResult)
   );
 }
+function indexSegmentToFTS(db, segment) {
+  const facets = [segment.type, segment.tags].flatMap((value) => {
+    if (!value) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  }).join(" ");
+  indexFtsRecord(
+    db,
+    "segment",
+    segment.id,
+    segment.title,
+    segment.content,
+    facets,
+    null,
+    null
+  );
+}
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
   const sessionRows = db.query(
@@ -338,6 +361,12 @@ function rebuildSearchIndex(db) {
   ).all();
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
+  }
+  const segmentRows = db.query(
+    "SELECT id, title, content, type, tags FROM segments ORDER BY id"
+  ).all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
   }
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
@@ -2848,7 +2877,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslhp3sq" : "dev";
+var BUILD_ID = true ? "0.9.1-mslitx45" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3124,7 +3153,7 @@ function createCompactHandler(dependencies) {
 }
 
 // src/hooks/handlers/context.ts
-var import_node_path11 = require("node:path");
+var import_node_path12 = require("node:path");
 
 // src/shared/file-tree.ts
 var import_node_path7 = __toESM(require("node:path"), 1);
@@ -3261,6 +3290,14 @@ function renderFileTree(paths, opts) {
 }
 
 // src/mcp/format.ts
+var TYPE_EMOJI = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F"
+};
 var FIELD_TRUNCATION_SUFFIX = "...";
 var DEFAULT_TRUNCATE = 200;
 var MAX_TRUNCATE = 2e3;
@@ -3372,8 +3409,8 @@ function truncateFileTree(tree, {
     `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
   ];
 }
-function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
+function resolveExplicitTruncate(truncate2, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate2 ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function buildSessionHintId(sessionId) {
   return `S${sessionId}`;
@@ -3431,8 +3468,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -3449,9 +3486,9 @@ function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
+function formatSessionExpandedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap)];
   const hintId = buildSessionHintId(session.id);
   const pushField = (label, value) => {
     if (!value) {
@@ -3496,7 +3533,7 @@ function formatTurnLabel(turn, {
   sessionId,
   mode = "legacy",
   depth = "collapsed",
-  truncate,
+  truncate: truncate2,
   truncateCap,
   includeDbTurnIds = false
 } = {}) {
@@ -3505,7 +3542,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
     limit,
@@ -3540,8 +3577,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap } = {}) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate: truncate2, truncateCap } = {}) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -3554,8 +3591,8 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
   });
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
+  const { indent = "    ", mode = "unified", depth = "expanded", truncate: truncate2 } = options;
+  const limit = resolveExplicitTruncate(truncate2, options.truncateCap);
   const detailIndent = `${indent}  `;
   const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
@@ -3563,7 +3600,7 @@ function formatToolCallExpandedWithMode(toolCall, options = {}) {
       ...options,
       mode,
       depth: "expanded",
-      truncate
+      truncate: truncate2
     })
   ];
   if (toolCall.input !== void 0) {
@@ -3590,7 +3627,7 @@ function renderTurnChildren(turn, depth, options = {}) {
   if (depth === "collapsed") {
     return "";
   }
-  const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate: truncate2 } = options;
   const childIndent = `${indent}  `;
   const childLines = [];
   if (turn.observations && turn.observations.length > 0) {
@@ -3602,7 +3639,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate
+          truncate: truncate2
         })
       );
     }
@@ -3620,7 +3657,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate
+          truncate: truncate2
         })
       );
     }
@@ -3715,21 +3752,32 @@ function formatObservationLabel(observation, { indent = "" } = {}) {
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", mode = "legacy" } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const hintId = buildObservationHintId(
+    observation.id,
+    options.sessionId,
+    options.turnPromptNumber
+  );
   const lines = [formatObservationLabel(observation, options)];
   if (observation.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(
-        observation.content,
-        {
-          limit,
-          mode,
-          hintId: buildObservationHintId(
-            observation.id,
-            options.sessionId,
-            options.turnPromptNumber
-          )
-        }
-      )}`
+      `${indent}  - desc: ${truncateText(observation.content, {
+        limit,
+        mode,
+        hintId
+      })}`
+    );
+  }
+  if (observation.toolName) {
+    lines.push(`${indent}  - tool: \u{1F527} ${observation.toolName}`);
+  }
+  if (observation.toolInput) {
+    lines.push(
+      `${indent}  - in: ${truncateText(observation.toolInput, { limit, mode, hintId })}`
+    );
+  }
+  if (observation.toolResult) {
+    lines.push(
+      `${indent}  - out: ${truncateText(observation.toolResult, { limit, mode, hintId })}`
     );
   }
   return lines.join("\n");
@@ -3786,10 +3834,211 @@ function contentDateAt(epochSeconds, timeZone, boundaryHour) {
 }
 
 // src/shared/config.ts
+var import_node_fs4 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path8 = require("node:path");
+
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+// src/shared/config.ts
+var KNOWN_DREAM_AGENT_MODELS = [
+  "opus",
+  "sonnet",
+  "haiku",
+  "claude-opus-4-8",
+  "claude-opus-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5"
+];
+var DEFAULT_DREAM_AGENT_MODEL = "opus";
 var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
+var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
+var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+var DEFAULT_STALL_THRESHOLD_MS = 6e4;
+var DEFAULT_CONFIG = {
+  mergeThresholdChars: 1e3,
+  maxQueuedBatches: 3,
+  keepaliveLeadMs: 6e4,
+  cacheMode: "auto",
+  maxMiniTurnChars: 24e3,
+  maxFlushAttempts: 3,
+  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
+  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
+  compactContextRatio: 0.5,
+  settlementEnabled: false,
+  eraCutoffEpoch: null,
+  dreamAgentEnabled: false,
+  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+  dreamAgentBacklogLimit: 1
+};
+var MIN_MINI_TURN_CHARS = 10240;
+var MIN_FLUSH_ATTEMPTS = 1;
+var MIN_COMPACT_CONTEXT_RATIO = 0.1;
+var MAX_COMPACT_CONTEXT_RATIO = 0.95;
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path8.join)(homePath, ".claude-mnemo", "config.json");
+}
+function clampNumber(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    mergeThresholdChars: config2.mergeThresholdChars,
+    maxQueuedBatches: config2.maxQueuedBatches,
+    keepaliveLeadMs: config2.keepaliveLeadMs,
+    cacheMode: config2.cacheMode,
+    maxMiniTurnChars: clampNumber(
+      config2.maxMiniTurnChars,
+      MIN_MINI_TURN_CHARS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxMiniTurnChars
+    ),
+    maxFlushAttempts: clampNumber(
+      config2.maxFlushAttempts,
+      MIN_FLUSH_ATTEMPTS,
+      Number.MAX_SAFE_INTEGER,
+      DEFAULT_CONFIG.maxFlushAttempts
+    ),
+    sessionEndTailTimeoutMs: clampInteger(
+      config2.sessionEndTailTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.sessionEndTailTimeoutMs
+    ),
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    stallThresholdMs: clampInteger(
+      config2.stallThresholdMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.stallThresholdMs
+    ),
+    compactContextRatio: clampNumber(
+      config2.compactContextRatio,
+      MIN_COMPACT_CONTEXT_RATIO,
+      MAX_COMPACT_CONTEXT_RATIO,
+      DEFAULT_CONFIG.compactContextRatio
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs4.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs4.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
 
 // src/db/diary-state.ts
 function readDreamCalendarBoundary(db) {
@@ -4289,8 +4538,621 @@ function getSessionEffectiveCitations(db, sessionId) {
   return effective;
 }
 
+// src/shared/note-tool.ts
+var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
+var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
+function isNoteToolName(toolName) {
+  return NOTE_TOOL_NAME_PATTERN.test(toolName);
+}
+function isMnemoOwnToolName(toolName) {
+  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
+}
+function isExtractionExcludedToolName(toolName) {
+  return isNoteToolName(toolName);
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_AGING_TURNS = 50;
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function countSubstantiveToolCalls(db, turnId) {
+  const rows = db.query(
+    `SELECT tool_name AS toolName FROM observations
+       WHERE turn_id = ? AND excluded_from_extraction = 0`
+  ).all(turnId);
+  return rows.filter(
+    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
+  ).length;
+}
+function getMaxPromptNumber2(db, sessionId) {
+  return db.query(
+    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+  ).get(sessionId)?.maxPromptNumber ?? 0;
+}
+function getClassificationCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_classified_prompt_number AS cursor
+         FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
+  db.query(
+    `INSERT INTO note_debt_cursor (
+       session_id, last_classified_prompt_number, updated_at_epoch
+     ) VALUES (?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       last_classified_prompt_number = MAX(
+         note_debt_cursor.last_classified_prompt_number,
+         excluded.last_classified_prompt_number
+       ),
+       updated_at_epoch = excluded.updated_at_epoch`
+  ).run(sessionId, promptNumber, nowEpoch);
+}
+function classifyCompletedTurn(db, turn, nowEpoch) {
+  if (getNoteDebt(db, turn.id) !== null) {
+    return false;
+  }
+  const alreadyNoted = db.query(
+    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
+  ).get(turn.id);
+  if (alreadyNoted) {
+    return false;
+  }
+  if (countSubstantiveToolCalls(db, turn.id) === 0) {
+    return false;
+  }
+  db.query(
+    `INSERT OR IGNORE INTO note_debt (
+       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
+     ) VALUES (?, ?, ?, 'pending', ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
+  return true;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeRolledBackNoteDebts(db, turnIds, nowEpoch) {
+  const closed = [];
+  for (const turnId of turnIds) {
+    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
+      closed.push(turnId);
+    }
+  }
+  return closed;
+}
+function reconcileNoteDebt(db, input) {
+  const { sessionId, nowEpoch } = input;
+  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const maxPromptNumber = getMaxPromptNumber2(db, sessionId);
+  const cursor = getClassificationCursor(db, sessionId);
+  let classifyThrough = maxPromptNumber - 1;
+  if (input.completedTurnId !== void 0) {
+    const completed = db.query(
+      `SELECT prompt_number AS promptNumber, session_id AS sessionId
+         FROM turns WHERE id = ?`
+    ).get(input.completedTurnId);
+    if (completed && completed.sessionId === sessionId) {
+      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
+    }
+  }
+  const opened = [];
+  if (classifyThrough > cursor) {
+    const candidates = db.query(
+      `SELECT id, prompt_number AS promptNumber, session_id AS sessionId
+         FROM turns
+         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?
+         ORDER BY prompt_number ASC`
+    ).all(sessionId, cursor, classifyThrough);
+    for (const candidate of candidates) {
+      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
+        opened.push(candidate.id);
+      }
+    }
+    setClassificationCursor(db, sessionId, classifyThrough, nowEpoch);
+  }
+  const pending = db.query(
+    `SELECT
+         d.turn_id AS turnId,
+         d.prompt_number AS promptNumber,
+         t.was_rolled_back AS wasRolledBack,
+         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote,
+         EXISTS(
+           SELECT 1 FROM note_id_exposures e
+           WHERE e.session_id = d.session_id
+             AND e.exposed_turn_id = d.turn_id
+             AND e.source = 'reminder'
+         ) AS wasExposed
+       FROM note_debt d
+       JOIN turns t ON t.id = d.turn_id
+       WHERE d.session_id = ? AND d.status = 'pending'
+       ORDER BY d.prompt_number ASC`
+  ).all(sessionId);
+  const noted = [];
+  const rolledBack = [];
+  const aged = [];
+  for (const row of pending) {
+    if (row.hasNote === 1) {
+      closeDebt(db, row.turnId, "noted", null, nowEpoch);
+      noted.push(row.turnId);
+      continue;
+    }
+    if (row.wasRolledBack === 1 && row.wasExposed === 1) {
+      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
+      rolledBack.push(row.turnId);
+      continue;
+    }
+    if (maxPromptNumber - row.promptNumber > agingTurns) {
+      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
+      aged.push(row.turnId);
+    }
+  }
+  return {
+    opened,
+    noted,
+    aged,
+    rolledBack,
+    classifiedThroughPromptNumber: Math.max(cursor, classifyThrough)
+  };
+}
+function listOpenNoteDebt(db, sessionId, options) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         d.turn_id AS turnId,
+         d.session_id AS sessionId,
+         d.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt,
+         t.was_rolled_back AS wasRolledBack,
+         d.opened_at_epoch AS openedAtEpoch
+       FROM note_debt d
+       JOIN turns t ON t.id = d.turn_id
+       WHERE d.session_id = ? AND d.status = 'pending'
+       ORDER BY d.prompt_number ASC`
+  ).all(sessionId).map((row) => ({
+    turnId: row.turnId,
+    sessionId: row.sessionId,
+    promptNumber: row.promptNumber,
+    userPrompt: row.userPrompt,
+    wasRolledBack: row.wasRolledBack === 1,
+    openedAtEpoch: row.openedAtEpoch,
+    pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
+  })).filter((debt) => debt.pendingTurns <= agingTurns);
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+function getExposedTurnIds(db, sessionId, source) {
+  const rows = source ? db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ? AND source = ?`
+  ).all(sessionId, source) : db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ?`
+  ).all(sessionId);
+  return new Set(rows.map((row) => row.exposedTurnId));
+}
+function hasReminderForRideTurn(db, sessionId, rideTurnId) {
+  return db.query(
+    `SELECT 1 AS present FROM note_id_exposures
+         WHERE session_id = ? AND ride_turn_id = ? AND source = 'reminder'
+         LIMIT 1`
+  ).get(sessionId, rideTurnId) !== null;
+}
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "research",
+  "design",
+  "implement",
+  "fix",
+  "measure",
+  "review",
+  "write",
+  "ops",
+  "chat",
+  "rolled-back"
+];
+var TYPE_GLYPH = {
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  write: "\u270D\uFE0F",
+  ops: "\u2699\uFE0F",
+  chat: "\u{1F4AC}",
+  "rolled-back": "\u21A9\uFE0F"
+};
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_ALIASES = {
+  research: [
+    "research",
+    "investigate",
+    "explore",
+    "survey",
+    "study",
+    "analyze",
+    "analyse",
+    "diagnose",
+    "\u8C03\u7814",
+    "\u7814\u7A76",
+    "\u6392\u67E5",
+    "\u5206\u6790",
+    "\u63A2\u7D22",
+    "\u8BCA\u65AD"
+  ],
+  design: [
+    "design",
+    "spec",
+    "plan",
+    "propose",
+    "decide",
+    "evaluate",
+    "compare",
+    "\u8BBE\u8BA1",
+    "\u65B9\u6848",
+    "\u89C4\u5212",
+    "\u9009\u578B",
+    "\u8BC4\u4F30",
+    "\u5BF9\u6BD4",
+    "\u5B9A\u6848",
+    "\u88C1\u51B3"
+  ],
+  implement: [
+    "implement",
+    "add",
+    "build",
+    "create",
+    "introduce",
+    "wire",
+    "ship",
+    "support",
+    "\u5B9E\u73B0",
+    "\u65B0\u589E",
+    "\u6784\u5EFA",
+    "\u63A5\u5165",
+    "\u843D\u5730",
+    "\u4E0A\u7EBF",
+    "\u8865\u5168"
+  ],
+  fix: [
+    "fix",
+    "repair",
+    "resolve",
+    "correct",
+    "patch",
+    "harden",
+    "hotfix",
+    "\u4FEE\u590D",
+    "\u4FEE\u6B63",
+    "\u89E3\u51B3",
+    "\u7EA0\u6B63",
+    "\u52A0\u56FA",
+    "\u6B62\u8840"
+  ],
+  measure: [
+    "measure",
+    "benchmark",
+    "profile",
+    "count",
+    "verify",
+    "test",
+    "validate",
+    "\u5EA6\u91CF",
+    "\u6D4B\u91CF",
+    "\u7EDF\u8BA1",
+    "\u57FA\u51C6",
+    "\u9A8C\u8BC1",
+    "\u5B9E\u6D4B",
+    "\u538B\u6D4B"
+  ],
+  review: [
+    "review",
+    "audit",
+    "check",
+    "inspect",
+    "assess",
+    "critique",
+    "\u8BC4\u5BA1",
+    "\u5BA1\u67E5",
+    "\u590D\u6838",
+    "\u6838\u5BF9",
+    "\u68C0\u67E5",
+    "\u5BA1\u8BA1"
+  ],
+  write: [
+    "write",
+    "document",
+    "draft",
+    "record",
+    "summarize",
+    "note",
+    "explain",
+    "\u64B0\u5199",
+    "\u7F16\u5199",
+    "\u8BB0\u5F55",
+    "\u6587\u6863",
+    "\u603B\u7ED3",
+    "\u8D77\u8349",
+    "\u8BF4\u660E"
+  ],
+  ops: [
+    "ops",
+    "release",
+    "deploy",
+    "publish",
+    "migrate",
+    "upgrade",
+    "bump",
+    "configure",
+    "clean",
+    "\u53D1\u7248",
+    "\u53D1\u5E03",
+    "\u90E8\u7F72",
+    "\u8FC1\u79FB",
+    "\u5347\u7EA7",
+    "\u914D\u7F6E",
+    "\u6E05\u7406",
+    "\u8FD0\u7EF4"
+  ],
+  chat: [
+    "chat",
+    "discuss",
+    "ask",
+    "answer",
+    "reply",
+    "clarify",
+    "\u95F2\u804A",
+    "\u8BA8\u8BBA",
+    "\u8BE2\u95EE",
+    "\u56DE\u7B54",
+    "\u6F84\u6E05"
+  ]
+};
+var SORTED_ALIASES = Object.entries(TYPE_ALIASES).flatMap(
+  ([type, aliases]) => aliases.map((alias) => ({ alias: alias.toLowerCase(), type }))
+).sort((left, right) => right.alias.length - left.alias.length);
+
+// src/db/segments.ts
+var SEGMENT_COLUMNS = `
+  id,
+  topic_id AS topicId,
+  title,
+  content,
+  type,
+  tags,
+  status,
+  revision,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function parseStringArray(value) {
+  if (!value) {
+    return [];
+  }
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+}
+function mapSegmentRow(row) {
+  return row ? {
+    ...row,
+    type: parseStringArray(row.type),
+    tags: parseStringArray(row.tags)
+  } : null;
+}
+function getSegment(db, segmentId) {
+  return mapSegmentRow(
+    db.query(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
+    ).get(segmentId) ?? null
+  );
+}
+
+// src/db/segment-rank.ts
+var RANK_FACT_COLUMNS = `
+  t.id AS turnId,
+  t.session_id AS sessionId,
+  t.prompt_number AS promptNumber,
+  t.title AS title,
+  t.type AS type,
+  t.status AS status,
+  t.created_at_epoch AS createdAtEpoch,
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isCorrector,
+  -- COALESCE, not a bare comparison: comparing NULL to a literal yields NULL,
+  -- and SQLite sorts NULL FIRST under ASC \u2014 an untyped turn would have
+  -- outranked every typed one on this key by accident of three-valued logic.
+  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  (SELECT COUNT(*) FROM (
+     SELECT DISTINCT e.citing_kind, e.citing_id
+     FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+   )) AS citedBy,
+  (EXISTS (
+     SELECT 1 FROM segment_members dm
+     JOIN segments ds ON ds.id = dm.segment_id
+     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
+   )) AS isDeliveryMember,
+  (CASE WHEN json_valid(t.files_modified)
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+`;
+var DERIVED_RANK_ORDER = `
+  ORDER BY isCorrector DESC,
+           isRolledBack ASC,
+           citedBy DESC,
+           isDeliveryMember DESC,
+           filesModifiedCount DESC,
+           t.created_at_epoch DESC,
+           t.id DESC
+`;
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const memberRows = db.query(
+    `SELECT
+         sm.segment_id AS segmentId,
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.type AS type,
+         t.created_at_epoch AS createdAtEpoch
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id IN (
+         SELECT sm2.segment_id
+         FROM segment_members sm2
+         JOIN turns t2 ON t2.id = sm2.turn_id
+         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+       )
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(sessionId, eraCutoffEpoch);
+  const bySegment = /* @__PURE__ */ new Map();
+  for (const row of memberRows) {
+    const bucket = bySegment.get(row.segmentId) ?? [];
+    bucket.push(row);
+    bySegment.set(row.segmentId, bucket);
+  }
+  const rows = [];
+  for (const [segmentId, members] of bySegment) {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      continue;
+    }
+    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    const prompts = sessionMembers.map((member) => member.promptNumber);
+    rows.push({
+      segment,
+      dominantType: deriveDominantType(
+        members.map((member) => member.type),
+        segment.type
+      ),
+      memberCount: members.length,
+      sessionMemberCount: sessionMembers.length,
+      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
+      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
+      firstEpoch: members[0].createdAtEpoch,
+      lastEpoch: members[members.length - 1].createdAtEpoch,
+      phaseTrace: collapseRuns(
+        members.map((member) => member.type).filter((type) => type !== null && type !== "")
+      )
+    });
+  }
+  return rows.sort((left, right) => {
+    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    if (leftPrompt !== rightPrompt) {
+      return leftPrompt - rightPrompt;
+    }
+    return left.segment.id - right.segment.id;
+  });
+}
+function deriveDominantType(memberTypes, segmentTypes) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const type of memberTypes) {
+    if (type === null || type === "") {
+      continue;
+    }
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  let tied = false;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+      tied = false;
+    } else if (count === bestCount) {
+      tied = true;
+    }
+  }
+  if (best !== null && !tied) {
+    return best;
+  }
+  return segmentTypes[0] ?? best ?? null;
+}
+function collapseRuns(values) {
+  const out = [];
+  for (const value of values) {
+    if (out[out.length - 1] !== value) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.created_at_epoch >= ?
+         AND t.status NOT IN ('skipped', 'undone')
+         AND NOT EXISTS (
+           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
+         )
+       ${DERIVED_RANK_ORDER}`
+  ).all(sessionId, eraCutoffEpoch);
+  return rows.map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+}
+function orphanSignals(facts) {
+  const signals = [];
+  if (facts.isCorrector) {
+    signals.push("corrector");
+  }
+  if (facts.isRolledBack) {
+    signals.push("rolled-back");
+  }
+  if (facts.citedBy > 0) {
+    signals.push(`cited ${facts.citedBy}`);
+  }
+  return signals;
+}
+
 // src/shared/transcript-parser.ts
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 function normalizeAssistantText(text) {
   return text.replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -4418,10 +5280,10 @@ function dedupeTranscriptEntries(entries) {
   return deduped;
 }
 function readAllTranscriptEntries(transcriptPath) {
-  if (!(0, import_node_fs4.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs5.existsSync)(transcriptPath)) {
     return [];
   }
-  const rawTranscript = (0, import_node_fs4.readFileSync)(transcriptPath, "utf8");
+  const rawTranscript = (0, import_node_fs5.readFileSync)(transcriptPath, "utf8");
   if (rawTranscript.trim() === "") {
     return [];
   }
@@ -4613,6 +5475,106 @@ function countUserPromptsInEntries(entries) {
     }
   }
   return count;
+}
+
+// src/mcp/segment-spine.ts
+var ORPHAN_GLYPH = "\u2691";
+var SPINE_ROW_INDENT = "   ";
+var SPINE_TAG_CAP = 2;
+function segmentTypeGlyph(type) {
+  if (!type) {
+    return "\u2022";
+  }
+  if (isMemoryType(type)) {
+    return TYPE_GLYPH[type];
+  }
+  return TYPE_EMOJI[type] ?? "\u2022";
+}
+function formatTags(tags) {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+function truncate(text, maxChars) {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026`;
+}
+function sanitize(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function formatPhaseTrace(phaseTrace) {
+  return phaseTrace.map((type) => segmentTypeGlyph(type)).join("\u2192");
+}
+function formatSpan(row) {
+  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
+    return "";
+  }
+  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
+}
+function renderSpineRow(row, titleCap) {
+  const { segment } = row;
+  const parts = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(row.dominantType),
+    formatTags(segment.tags),
+    sanitize(truncate(segment.title, titleCap)),
+    `[${segment.status}]`
+  ].filter((part) => part !== "");
+  const facts = [
+    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
+    formatSpan(row),
+    formatPhaseTrace(row.phaseTrace)
+  ].filter((part) => part !== "");
+  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
+}
+function renderOrphanRow(row, titleCap) {
+  const { facts } = row;
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncate(facts.title, titleCap));
+  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
+    facts.type
+  )} ${label} (${row.signals.join(", ")})`;
+}
+function renderSegmentSpineBlock(input) {
+  const { spine, orphans, titleCap } = input;
+  if (spine.length === 0 && orphans.length === 0) {
+    return [];
+  }
+  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
+  const droppedSegments = spine.length - keptSegments.length;
+  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
+  const droppedOrphans = orphans.length - keptOrphans.length;
+  const headerParts = [
+    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
+  ];
+  if (orphans.length > 0) {
+    headerParts.push(
+      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
+  if (droppedSegments > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
+    );
+  }
+  for (const row of keptSegments) {
+    lines.push(renderSpineRow(row, titleCap));
+  }
+  for (const row of keptOrphans) {
+    lines.push(renderOrphanRow(row, titleCap));
+  }
+  if (droppedOrphans > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  return lines;
+}
+function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
+  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
+  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
 }
 
 // src/mcp/timeline.ts
@@ -5538,6 +6500,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const windowTurns = sorted.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
+  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
+  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -5555,10 +6522,10 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
     session,
-    windowTurns,
+    windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
-    sessionTurns: allTurns,
+    sessionTurns: legacySessionTurns,
     // One read for the whole selection: in-degree, victim demotion and
     // pull-through all consume this map (spec §B). A caller that already read it
     // (settlement) hands its own snapshot in rather than paying for a second.
@@ -5575,6 +6542,9 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     milestoneSelection.overflowByDay
   ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
+  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch) : [];
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
@@ -5605,7 +6575,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     tz,
     hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
     milestoneTail,
-    breadcrumb
+    breadcrumb,
+    eraCutoffEpoch,
+    eraWindowTurns,
+    segmentSpine,
+    orphanAnchors
   };
 }
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
@@ -6555,12 +7529,30 @@ function renderLineagePointer(view) {
     `  earlier: recall(id="S${view.session.parentSessionId}")`
   ];
 }
+function withLegacyEraHeader(view, bodyLines, hasSpine) {
+  if (!hasSpine || bodyLines.length === 0) {
+    return bodyLines;
+  }
+  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
+  const header = legacyEraHeader(
+    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
+    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
+  );
+  const [first, ...rest] = bodyLines;
+  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
+    spine: view.segmentSpine,
+    orphans: view.orphanAnchors,
+    titleCap
+  }) : [];
   const assemble = (bodyLines) => [
     ...renderSessionHeader(view),
-    ...bodyLines,
+    ...spineLines,
+    ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
@@ -6574,6 +7566,17 @@ function renderTimeline(view, options = {}) {
   if (options.tokenBudget === void 0) {
     return assemble(renderMilestoneBody(view, titleCap));
   }
+  if (spineLines.length > 0) {
+    shedSpineToBudget({
+      view,
+      titleCap,
+      tokenBudget: options.tokenBudget,
+      apply: (candidate) => {
+        spineLines = candidate;
+      },
+      measure: () => estimateDiaryTokens(assemble([]))
+    });
+  }
   return assemble(
     fitMilestoneBodyToBudget(
       view,
@@ -6583,6 +7586,27 @@ function renderTimeline(view, options = {}) {
       (bodyLines) => estimateDiaryTokens(assemble(bodyLines))
     )
   );
+}
+function shedSpineToBudget(options) {
+  const { view, titleCap, tokenBudget, apply, measure } = options;
+  let segments = view.segmentSpine.length;
+  let orphans = view.orphanAnchors.length;
+  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
+    if (orphans > 0) {
+      orphans -= 1;
+    } else {
+      segments -= 1;
+    }
+    apply(
+      renderSegmentSpineBlock({
+        spine: view.segmentSpine,
+        orphans: view.orphanAnchors,
+        titleCap,
+        maxSegments: segments,
+        maxOrphans: orphans
+      })
+    );
+  }
 }
 
 // src/mcp/session-output.ts
@@ -6749,7 +7773,7 @@ function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
 }
 
 // src/diary/persona-render.ts
-var import_node_path8 = require("node:path");
+var import_node_path9 = require("node:path");
 var PROFILE_INJECTION_TOKEN_BUDGET = 2e3;
 var DIARY_INDEX_INJECTION_TOKEN_BUDGET = 1e3;
 var SESSION_INJECTION_TOKEN_BUDGET = 2e3;
@@ -6852,7 +7876,7 @@ function renderPersonaDocumentInjection(document, injectionTokenBudget, displayP
     )
   ];
   const alternateTargets = distinctTargets.length > 0 ? `\uFF1B\u53E6\u89C1 ${distinctTargets.join("\u3001")}` : "";
-  return `\uFF08${(0, import_node_path8.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
+  return `\uFF08${(0, import_node_path9.basename)(displayPath)} \u8FC7\u5927\uFF0C\u5B8C\u6574\u89C1 ${displayPath}${alternateTargets}\uFF09`;
 }
 function renderBoundedInjectionBlock(input) {
   for (let documentBudget = input.tokenBudget; documentBudget >= 0; documentBudget -= 1) {
@@ -6937,7 +7961,7 @@ function hasNewTurnSinceSessionRunStart(db, sessionDbId) {
 }
 
 // src/db/rules.ts
-var import_node_path9 = require("node:path");
+var import_node_path10 = require("node:path");
 
 // node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -20788,7 +21812,7 @@ function validateRule(input) {
     throw new Error("claim must contain at most 300 characters");
   }
   if (input.rationale.length === 0) throw new Error("rationale is required");
-  if (input.scope !== "global" && !(0, import_node_path9.isAbsolute)(input.scope)) {
+  if (input.scope !== "global" && !(0, import_node_path10.isAbsolute)(input.scope)) {
     throw new Error("scope must be global or an absolute project path");
   }
   ruleStatusSchema.parse(input.status);
@@ -21010,7 +22034,7 @@ function createRuleStore(db) {
 }
 
 // src/rules/digest.ts
-var import_node_path10 = require("node:path");
+var import_node_path11 = require("node:path");
 var RULE_DIGEST_TOKEN_BUDGET = 500;
 var STATUS_PRIORITY = {
   confirmed: 0,
@@ -21056,9 +22080,9 @@ function compareRules(left, right) {
   return left.id - right.id;
 }
 function renderRuleDigest(input) {
-  const project = input.project ? (0, import_node_path10.resolve)(input.project) : null;
+  const project = input.project ? (0, import_node_path11.resolve)(input.project) : null;
   const candidates = input.rules.filter(
-    (rule) => ["confirmed", "provisional", "digest_only"].includes(rule.status) && (rule.triggerKind === "none" || rule.status === "digest_only") && (rule.scope === "global" || project !== null && (0, import_node_path10.resolve)(rule.scope) === project)
+    (rule) => ["confirmed", "provisional", "digest_only"].includes(rule.status) && (rule.triggerKind === "none" || rule.status === "digest_only") && (rule.scope === "global" || project !== null && (0, import_node_path11.resolve)(rule.scope) === project)
   ).sort(compareRules);
   if (candidates.length === 0) return "";
   const budget = input.tokenBudget ?? RULE_DIGEST_TOKEN_BUDGET;
@@ -21086,7 +22110,7 @@ async function readPersonaContext(memoryStore) {
     }
     return renderSessionStartPersonaInjection({
       userProfile: memory.userProfile,
-      path: (0, import_node_path11.join)(memoryStore.dataRoot, "memory", "user-profile.md")
+      path: (0, import_node_path12.join)(memoryStore.dataRoot, "memory", "user-profile.md")
     });
   } catch {
     return void 0;
@@ -21250,7 +22274,7 @@ async function readRecentContext(db, fileStore, input) {
       diaryIndex,
       paths: {
         recentSessions: "recall()",
-        diaryIndex: fileStore?.dataRoot ? (0, import_node_path11.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
+        diaryIndex: fileStore?.dataRoot ? (0, import_node_path12.join)(fileStore.dataRoot, "diary", "INDEX.md") : "diary/INDEX.md"
       }
     });
   } catch {
@@ -21555,240 +22579,6 @@ function captureConsultedMemories(db, turnId, call) {
   return recordConsultedMemories(db, turnId, addresses).length;
 }
 
-// src/shared/note-tool.ts
-var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
-var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
-function isNoteToolName(toolName) {
-  return NOTE_TOOL_NAME_PATTERN.test(toolName);
-}
-function isMnemoOwnToolName(toolName) {
-  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
-}
-function isExtractionExcludedToolName(toolName) {
-  return isNoteToolName(toolName);
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_AGING_TURNS = 50;
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function countSubstantiveToolCalls(db, turnId) {
-  const rows = db.query(
-    `SELECT tool_name AS toolName FROM observations
-       WHERE turn_id = ? AND excluded_from_extraction = 0`
-  ).all(turnId);
-  return rows.filter(
-    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
-  ).length;
-}
-function getMaxPromptNumber2(db, sessionId) {
-  return db.query(
-    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
-  ).get(sessionId)?.maxPromptNumber ?? 0;
-}
-function getClassificationCursor(db, sessionId) {
-  return db.query(
-    `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
-}
-function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
-  db.query(
-    `INSERT INTO note_debt_cursor (
-       session_id, last_classified_prompt_number, updated_at_epoch
-     ) VALUES (?, ?, ?)
-     ON CONFLICT(session_id) DO UPDATE SET
-       last_classified_prompt_number = MAX(
-         note_debt_cursor.last_classified_prompt_number,
-         excluded.last_classified_prompt_number
-       ),
-       updated_at_epoch = excluded.updated_at_epoch`
-  ).run(sessionId, promptNumber, nowEpoch);
-}
-function classifyCompletedTurn(db, turn, nowEpoch) {
-  if (getNoteDebt(db, turn.id) !== null) {
-    return false;
-  }
-  const alreadyNoted = db.query(
-    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
-  ).get(turn.id);
-  if (alreadyNoted) {
-    return false;
-  }
-  if (countSubstantiveToolCalls(db, turn.id) === 0) {
-    return false;
-  }
-  db.query(
-    `INSERT OR IGNORE INTO note_debt (
-       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
-     ) VALUES (?, ?, ?, 'pending', ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
-  return true;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeRolledBackNoteDebts(db, turnIds, nowEpoch) {
-  const closed = [];
-  for (const turnId of turnIds) {
-    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
-      closed.push(turnId);
-    }
-  }
-  return closed;
-}
-function reconcileNoteDebt(db, input) {
-  const { sessionId, nowEpoch } = input;
-  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const maxPromptNumber = getMaxPromptNumber2(db, sessionId);
-  const cursor = getClassificationCursor(db, sessionId);
-  let classifyThrough = maxPromptNumber - 1;
-  if (input.completedTurnId !== void 0) {
-    const completed = db.query(
-      `SELECT prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns WHERE id = ?`
-    ).get(input.completedTurnId);
-    if (completed && completed.sessionId === sessionId) {
-      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
-    }
-  }
-  const opened = [];
-  if (classifyThrough > cursor) {
-    const candidates = db.query(
-      `SELECT id, prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns
-         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?
-         ORDER BY prompt_number ASC`
-    ).all(sessionId, cursor, classifyThrough);
-    for (const candidate of candidates) {
-      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
-        opened.push(candidate.id);
-      }
-    }
-    setClassificationCursor(db, sessionId, classifyThrough, nowEpoch);
-  }
-  const pending = db.query(
-    `SELECT
-         d.turn_id AS turnId,
-         d.prompt_number AS promptNumber,
-         t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote,
-         EXISTS(
-           SELECT 1 FROM note_id_exposures e
-           WHERE e.session_id = d.session_id
-             AND e.exposed_turn_id = d.turn_id
-             AND e.source = 'reminder'
-         ) AS wasExposed
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`
-  ).all(sessionId);
-  const noted = [];
-  const rolledBack = [];
-  const aged = [];
-  for (const row of pending) {
-    if (row.hasNote === 1) {
-      closeDebt(db, row.turnId, "noted", null, nowEpoch);
-      noted.push(row.turnId);
-      continue;
-    }
-    if (row.wasRolledBack === 1 && row.wasExposed === 1) {
-      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
-      rolledBack.push(row.turnId);
-      continue;
-    }
-    if (maxPromptNumber - row.promptNumber > agingTurns) {
-      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
-      aged.push(row.turnId);
-    }
-  }
-  return {
-    opened,
-    noted,
-    aged,
-    rolledBack,
-    classifiedThroughPromptNumber: Math.max(cursor, classifyThrough)
-  };
-}
-function listOpenNoteDebt(db, sessionId, options) {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  return db.query(
-    `SELECT
-         d.turn_id AS turnId,
-         d.session_id AS sessionId,
-         d.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt,
-         t.was_rolled_back AS wasRolledBack,
-         d.opened_at_epoch AS openedAtEpoch
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`
-  ).all(sessionId).map((row) => ({
-    turnId: row.turnId,
-    sessionId: row.sessionId,
-    promptNumber: row.promptNumber,
-    userPrompt: row.userPrompt,
-    wasRolledBack: row.wasRolledBack === 1,
-    openedAtEpoch: row.openedAtEpoch,
-    pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
-  })).filter((debt) => debt.pendingTurns <= agingTurns);
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
-}
-function hasReminderForRideTurn(db, sessionId, rideTurnId) {
-  return db.query(
-    `SELECT 1 AS present FROM note_id_exposures
-         WHERE session_id = ? AND ride_turn_id = ? AND source = 'reminder'
-         LIMIT 1`
-  ).get(sessionId, rideTurnId) !== null;
-}
-
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -21961,18 +22751,27 @@ function renderSessionMilestoneInjection(db, sessionId, options = {}) {
     view: "milestones",
     // One page holding every selected row: the token budget, not pagination, is
     // what sizes the injection.
-    pageSize: Number.MAX_SAFE_INTEGER
+    pageSize: Number.MAX_SAFE_INTEGER,
+    eraCutoffEpoch: options.eraCutoffEpoch ?? null
   });
   return renderMilestoneInjection(view, options);
 }
 
 // src/hooks/handlers/context-milestones.ts
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
 function sessionHasTurns(db, sessionId) {
   return db.query(
     "SELECT 1 AS present FROM turns WHERE session_id = ? LIMIT 1"
   ).get(sessionId) !== null;
 }
 function createMilestoneContextHandler(dependencies) {
+  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveConfiguredEraCutoff();
   return async function handleMilestoneContextHook(input) {
     if (!input.sessionId || input.source !== "resume" && input.source !== "compact") {
       return { continue: true };
@@ -21982,7 +22781,9 @@ function createMilestoneContextHandler(dependencies) {
       if (!session || !sessionHasTurns(dependencies.db, session.id)) {
         return { continue: true };
       }
-      const hookSpecificOutput = (dependencies.renderMilestoneInjection ?? renderSessionMilestoneInjection)(dependencies.db, session.id);
+      const hookSpecificOutput = dependencies.renderMilestoneInjection ? dependencies.renderMilestoneInjection(dependencies.db, session.id) : renderSessionMilestoneInjection(dependencies.db, session.id, {
+        eraCutoffEpoch
+      });
       return hookSpecificOutput ? { continue: true, hookSpecificOutput } : { continue: true };
     } catch {
       return { continue: true };
@@ -22025,14 +22826,14 @@ function createNoteTakingContextHandler() {
 }
 
 // src/rules/pretooluse-dispatcher.ts
-var import_node_fs6 = require("node:fs");
+var import_node_fs7 = require("node:fs");
 var import_node_crypto3 = require("node:crypto");
-var import_node_path13 = require("node:path");
+var import_node_path14 = require("node:path");
 
 // src/rules/sidecar-protocol.ts
 var import_node_crypto2 = require("node:crypto");
-var import_node_fs5 = require("node:fs");
-var import_node_path12 = require("node:path");
+var import_node_fs6 = require("node:fs");
+var import_node_path13 = require("node:path");
 var INPUT_SUMMARY_LIMIT = 200;
 var SIDECAR_LOCK_WAIT_MS = 5e3;
 var lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
@@ -22040,7 +22841,7 @@ function isErrorCode(error48, code) {
   return error48 instanceof Error && "code" in error48 && error48.code === code;
 }
 function resolveHitSidecarLockPath(dataRoot) {
-  return (0, import_node_path12.join)(dataRoot, "rules", "hits.lock");
+  return (0, import_node_path13.join)(dataRoot, "rules", "hits.lock");
 }
 function summarizeToolInput(value) {
   const serialized = typeof value === "string" ? value : JSON.stringify(value) ?? "null";
@@ -22049,7 +22850,7 @@ function summarizeToolInput(value) {
 function readLockOwner(path2) {
   try {
     const value = JSON.parse(
-      (0, import_node_fs5.readFileSync)(path2, "utf8")
+      (0, import_node_fs6.readFileSync)(path2, "utf8")
     );
     return Number.isInteger(value.pid) && value.pid > 0 && typeof value.token === "string" ? { pid: value.pid, token: value.token } : null;
   } catch {
@@ -22058,20 +22859,20 @@ function readLockOwner(path2) {
 }
 function withHitSidecarLock(dataRoot, operation, options = {}) {
   const path2 = resolveHitSidecarLockPath(dataRoot);
-  (0, import_node_fs5.mkdirSync)((0, import_node_path12.dirname)(path2), { recursive: true });
+  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
   const waitMs = options.waitMs ?? SIDECAR_LOCK_WAIT_MS;
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new Error("waitMs must be a non-negative finite number");
   }
   const owner = { pid: process.pid, token: (0, import_node_crypto2.randomUUID)() };
   const temporary = `${path2}.${owner.pid}.${owner.token}.tmp`;
-  (0, import_node_fs5.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
+  (0, import_node_fs6.writeFileSync)(temporary, JSON.stringify(owner), { mode: 384 });
   const deadline = performance.now() + waitMs;
   let acquired = false;
   try {
     while (performance.now() <= deadline) {
       try {
-        (0, import_node_fs5.linkSync)(temporary, path2);
+        (0, import_node_fs6.linkSync)(temporary, path2);
         acquired = true;
         break;
       } catch (error48) {
@@ -22085,13 +22886,13 @@ function withHitSidecarLock(dataRoot, operation, options = {}) {
     return operation();
   } finally {
     try {
-      (0, import_node_fs5.unlinkSync)(temporary);
+      (0, import_node_fs6.unlinkSync)(temporary);
     } catch (error48) {
       if (!isErrorCode(error48, "ENOENT")) throw error48;
     }
     if (acquired && readLockOwner(path2)?.token === owner.token) {
       try {
-        (0, import_node_fs5.unlinkSync)(path2);
+        (0, import_node_fs6.unlinkSync)(path2);
       } catch (error48) {
         if (!isErrorCode(error48, "ENOENT")) throw error48;
       }
@@ -22105,10 +22906,10 @@ var SESSION_LOCK_WAIT_MS = 35;
 var STALE_SESSION_LOCK_MS = 3e4;
 var lockWaitArray2 = new Int32Array(new SharedArrayBuffer(4));
 function resolveTriggerIndexPath(dataRoot = DATA_DIR) {
-  return (0, import_node_path13.join)(dataRoot, "rules", "trigger-index.json");
+  return (0, import_node_path14.join)(dataRoot, "rules", "trigger-index.json");
 }
 function resolveSessionStateDirectory(dataRoot = DATA_DIR) {
-  return (0, import_node_path13.join)(dataRoot, "rules", "session-state");
+  return (0, import_node_path14.join)(dataRoot, "rules", "session-state");
 }
 function localDate(tsMs) {
   const date5 = new Date(tsMs);
@@ -22118,16 +22919,16 @@ function localDate(tsMs) {
   return `${year}-${month}-${day}`;
 }
 function resolveHitSidecarPath(dataRoot = DATA_DIR, tsMs = Date.now()) {
-  return (0, import_node_path13.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
+  return (0, import_node_path14.join)(dataRoot, "rules", `hits-${localDate(tsMs)}.jsonl`);
 }
 function sessionStatePath(dataRoot, sessionId) {
   const digest = (0, import_node_crypto3.createHash)("sha256").update(sessionId).digest("hex");
-  return (0, import_node_path13.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
+  return (0, import_node_path14.join)(resolveSessionStateDirectory(dataRoot), `${digest}.json`);
 }
 function readIndex(dataRoot) {
   try {
     return triggerIndexSchema.parse(
-      JSON.parse((0, import_node_fs6.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
+      JSON.parse((0, import_node_fs7.readFileSync)(resolveTriggerIndexPath(dataRoot), "utf8"))
     );
   } catch {
     return void 0;
@@ -22136,7 +22937,7 @@ function readIndex(dataRoot) {
 function readState(dataRoot, sessionId) {
   try {
     const parsed = JSON.parse(
-      (0, import_node_fs6.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
+      (0, import_node_fs7.readFileSync)(sessionStatePath(dataRoot, sessionId), "utf8")
     );
     if (parsed.version !== 1 || !Array.isArray(parsed.rule_ids)) return /* @__PURE__ */ new Set();
     return new Set(
@@ -22150,9 +22951,9 @@ function readState(dataRoot, sessionId) {
 }
 function writeState(dataRoot, sessionId, ruleIds) {
   const path2 = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(path2), { recursive: true });
   const temporary = `${path2}.${process.pid}.${(0, import_node_crypto3.randomUUID)()}.tmp`;
-  (0, import_node_fs6.writeFileSync)(
+  (0, import_node_fs7.writeFileSync)(
     temporary,
     `${JSON.stringify({
       version: 1,
@@ -22161,19 +22962,19 @@ function writeState(dataRoot, sessionId, ruleIds) {
 `,
     { mode: 384 }
   );
-  (0, import_node_fs6.renameSync)(temporary, path2);
+  (0, import_node_fs7.renameSync)(temporary, path2);
 }
 function acquireSessionLock(dataRoot, sessionId) {
   const statePath = sessionStatePath(dataRoot, sessionId);
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(statePath), { recursive: true });
+  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(statePath), { recursive: true });
   const path2 = `${statePath}.lock`;
   const deadline = performance.now() + SESSION_LOCK_WAIT_MS;
   while (performance.now() <= deadline) {
     try {
       return {
-        descriptor: (0, import_node_fs6.openSync)(
+        descriptor: (0, import_node_fs7.openSync)(
           path2,
-          import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_EXCL | import_node_fs6.constants.O_WRONLY,
+          import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_EXCL | import_node_fs7.constants.O_WRONLY,
           384
         ),
         path: path2
@@ -22183,8 +22984,8 @@ function acquireSessionLock(dataRoot, sessionId) {
         throw error48;
       }
       try {
-        if (Date.now() - (0, import_node_fs6.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
-          (0, import_node_fs6.unlinkSync)(path2);
+        if (Date.now() - (0, import_node_fs7.statSync)(path2).mtimeMs > STALE_SESSION_LOCK_MS) {
+          (0, import_node_fs7.unlinkSync)(path2);
           continue;
         }
       } catch {
@@ -22196,27 +22997,27 @@ function acquireSessionLock(dataRoot, sessionId) {
   return void 0;
 }
 function releaseSessionLock(lock) {
-  (0, import_node_fs6.closeSync)(lock.descriptor);
+  (0, import_node_fs7.closeSync)(lock.descriptor);
   try {
-    (0, import_node_fs6.unlinkSync)(lock.path);
+    (0, import_node_fs7.unlinkSync)(lock.path);
   } catch {
   }
 }
 function appendHits(path2, hits) {
-  (0, import_node_fs6.mkdirSync)((0, import_node_path13.dirname)(path2), { recursive: true });
-  const descriptor = (0, import_node_fs6.openSync)(
+  (0, import_node_fs7.mkdirSync)((0, import_node_path14.dirname)(path2), { recursive: true });
+  const descriptor = (0, import_node_fs7.openSync)(
     path2,
-    import_node_fs6.constants.O_APPEND | import_node_fs6.constants.O_CREAT | import_node_fs6.constants.O_WRONLY,
+    import_node_fs7.constants.O_APPEND | import_node_fs7.constants.O_CREAT | import_node_fs7.constants.O_WRONLY,
     384
   );
   try {
-    (0, import_node_fs6.writeFileSync)(
+    (0, import_node_fs7.writeFileSync)(
       descriptor,
       `${hits.map((hit) => JSON.stringify(hit)).join("\n")}
 `
     );
   } finally {
-    (0, import_node_fs6.closeSync)(descriptor);
+    (0, import_node_fs7.closeSync)(descriptor);
   }
 }
 function hasOwnParameter(input, parameter) {
@@ -22256,7 +23057,7 @@ function pathGlobMatches(input, cwd, pathGlob) {
     (value) => typeof value === "string" && value !== ""
   );
   if (!candidate) return false;
-  return globExpression((0, import_node_path13.resolve)(cwd, pathGlob)).test((0, import_node_path13.resolve)(cwd, candidate));
+  return globExpression((0, import_node_path14.resolve)(cwd, pathGlob)).test((0, import_node_path14.resolve)(cwd, candidate));
 }
 function toolTriggerMatches(trigger, input) {
   if (input.toolName !== trigger.tool) return false;
@@ -22342,9 +23143,9 @@ function createDispatcher(eventName, dependencies) {
     }
     const index = readIndex(dataRoot);
     if (!index) return { continue: true };
-    const project = (0, import_node_path13.resolve)(input.cwd);
+    const project = (0, import_node_path14.resolve)(input.cwd);
     const candidates = index.rules.filter(
-      (rule) => rule.scope === "global" || (0, import_node_path13.resolve)(rule.scope) === project
+      (rule) => rule.scope === "global" || (0, import_node_path14.resolve)(rule.scope) === project
     ).slice(0, TRIGGER_INDEX_SLOT_LIMIT).filter((rule) => triggerMatches(eventName, rule.trigger, input));
     if (candidates.length === 0) return { continue: true };
     const lock = acquireSessionLock(dataRoot, input.sessionId);
@@ -22754,7 +23555,7 @@ function enqueueSessionEndSettlementJob(db, sessionId, nowEpoch, hadActivity, op
 }
 
 // src/hooks/transcript-scan.ts
-var import_node_fs7 = require("node:fs");
+var import_node_fs8 = require("node:fs");
 var DEFAULT_SCAN_MAX_LINES = 5e3;
 var DEFAULT_SCAN_MAX_BYTES = 5 * 1024 * 1024;
 var NEWLINE_BYTE = 10;
@@ -22764,27 +23565,27 @@ function readRange(transcriptPath, start, length) {
   }
   let fd = null;
   try {
-    fd = (0, import_node_fs7.openSync)(transcriptPath, "r");
+    fd = (0, import_node_fs8.openSync)(transcriptPath, "r");
     const buffer = Buffer.alloc(length);
-    const bytesRead = (0, import_node_fs7.readSync)(fd, buffer, 0, length, start);
+    const bytesRead = (0, import_node_fs8.readSync)(fd, buffer, 0, length, start);
     return buffer.subarray(0, bytesRead);
   } catch {
     return null;
   } finally {
     if (fd !== null) {
-      (0, import_node_fs7.closeSync)(fd);
+      (0, import_node_fs8.closeSync)(fd);
     }
   }
 }
 function scanTranscriptIncrementally(transcriptPath, cursor, options = {}) {
-  if (!(0, import_node_fs7.existsSync)(transcriptPath)) {
+  if (!(0, import_node_fs8.existsSync)(transcriptPath)) {
     return null;
   }
   const maxLines = options.maxLines ?? DEFAULT_SCAN_MAX_LINES;
   const maxBytes = options.maxBytes ?? DEFAULT_SCAN_MAX_BYTES;
   let fileSize;
   try {
-    fileSize = (0, import_node_fs7.statSync)(transcriptPath).size;
+    fileSize = (0, import_node_fs8.statSync)(transcriptPath).size;
   } catch {
     return null;
   }
@@ -24333,7 +25134,7 @@ function getDefaultRecentContextHandler() {
     return defaultRecentContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs8.existsSync)(databasePath)) {
+  if (!(0, import_node_fs9.existsSync)(databasePath)) {
     defaultRecentContextHandler = async () => ({ continue: true });
     return defaultRecentContextHandler;
   }
@@ -24352,7 +25153,7 @@ function getDefaultMilestoneContextHandler() {
     return defaultMilestoneContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs8.existsSync)(databasePath)) {
+  if (!(0, import_node_fs9.existsSync)(databasePath)) {
     defaultMilestoneContextHandler = async () => ({ continue: true });
     return defaultMilestoneContextHandler;
   }
@@ -24368,7 +25169,7 @@ function getDefaultDigestContextHandler() {
     return defaultDigestContextHandler;
   }
   const databasePath = resolveDatabasePath();
-  if (!(0, import_node_fs8.existsSync)(databasePath)) {
+  if (!(0, import_node_fs9.existsSync)(databasePath)) {
     defaultDigestContextHandler = async () => ({ continue: true });
     return defaultDigestContextHandler;
   }
@@ -24440,7 +25241,7 @@ function getDefaultHandler(handlerKey) {
   return getDefaultHandlers()[handlerKey];
 }
 function readJsonFromStdin() {
-  const input = (0, import_node_fs8.readFileSync)(0, "utf8").trim();
+  const input = (0, import_node_fs9.readFileSync)(0, "utf8").trim();
   if (input === "") {
     return {};
   }

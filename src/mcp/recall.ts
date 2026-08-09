@@ -5,6 +5,13 @@ import {
   getExtractableObservationsForTurn,
 } from "../db/observations";
 import { searchMemory, type SearchMemoryResult } from "../db/search";
+import {
+  deriveDominantType,
+  rankSegmentMembers,
+  resolveSegmentAnchorTurnIds,
+  type RankedSegmentMember,
+} from "../db/segment-rank";
+import { getSegment, type SegmentRecord } from "../db/segments";
 import { getSession } from "../db/sessions";
 import {
   getFirstTurn,
@@ -13,6 +20,7 @@ import {
   getTurnsForSession,
   type TurnRecord,
 } from "../db/turns";
+import { isSegmentEra } from "../segment-era";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 
 import {
@@ -22,6 +30,7 @@ import {
   type FormattedSession,
   type FormattedTurn,
 } from "./format";
+import { renderSegmentHeaderLines } from "./segment-spine";
 import { expandNumericSelector } from "./selectors";
 import { resolveTurnPointers } from "./turn-pointers";
 
@@ -40,6 +49,13 @@ export interface RecallInput {
   includeDbTurnIds?: boolean;
   // Internal audience rendering policy. Public/main callers leave this unset.
   truncateCap?: number;
+  /**
+   * P2 era boundary (spec D11). Observations created at or after it render
+   * their mechanical fields (tool name + input/result prefixes) because nothing
+   * summarizes them any more. `null` — the default — leaves every rendering on
+   * the legacy path.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 interface ParsedTimeRange {
@@ -64,7 +80,8 @@ type RoutedRecallId =
   | { kind: "turn-by-id"; turnId: number }
   | { kind: "session-observation-list"; sessionId: number }
   | { kind: "observation-list"; sessionId: number; promptNumber: number }
-  | { kind: "observation"; observationId: number };
+  | { kind: "observation"; observationId: number }
+  | { kind: "segments"; segmentIds?: number[] };
 
 function splitInsight(insight: string | null): string[] {
   if (!insight) {
@@ -216,6 +233,20 @@ function parseRoutedId(value: string): RoutedRecallId | null {
     };
   }
 
+  // Segment route (spec D11): `E47`, and — symmetric with `S` — `E*` and
+  // `E1..9`. `E` is the SAME token the write grammar uses (`[E47]`, see
+  // db/references.ts), so a citation a settlement wrote is a working address a
+  // reader can paste straight back into recall.
+  const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMatch) {
+    const segmentIds = expandNumericSelector(segmentMatch[1]!);
+    if (segmentIds === null) {
+      return null;
+    }
+
+    return { kind: "segments", segmentIds };
+  }
+
   // Global turn-by-DB-id route. Symmetric with `remember({ id: "T<n>" })` (which
   // also uses the DB id) and with the `<turn id="T<n>">` blocks the memory
   // worker sees, so the worker can recall a truncated turn it is extracting. The
@@ -314,9 +345,10 @@ function parseQueryFilters(query: string | undefined): QueryFilters {
 function buildSessionView(
   db: Database,
   session: NonNullable<ReturnType<typeof getSession>>,
+  eraCutoffEpoch: number | null = null,
 ): FormattedSession {
   const turns = getTurnsForSession(db, session.id).map((turn) =>
-    buildTurnView(db, turn),
+    buildTurnView(db, turn, eraCutoffEpoch),
   );
 
   return {
@@ -421,6 +453,7 @@ export function buildFormattedSession(
   db: Database,
   sessionId: number,
   expandTurns: number[] = [],
+  eraCutoffEpoch: number | null = null,
 ): FormattedSession | null {
   const session = getSession(db, sessionId);
   if (!session) {
@@ -428,7 +461,7 @@ export function buildFormattedSession(
   }
 
   const turns = getTurnsForSession(db, session.id).map((turn) =>
-    buildTurnView(db, turn),
+    buildTurnView(db, turn, eraCutoffEpoch),
   );
 
   return {
@@ -457,7 +490,11 @@ export function buildFormattedSession(
   };
 }
 
-export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
+export function buildTurnView(
+  db: Database,
+  turn: TurnRecord,
+  eraCutoffEpoch: number | null = null,
+): FormattedTurn {
   // Excluded observations (a `note` call) stay out of every reader-facing view:
   // their count, their ids and their tool names are as much of a leak as their
   // payloads would be — the P1 comparison needs the note channel invisible to
@@ -479,11 +516,9 @@ export function buildTurnView(db: Database, turn: TurnRecord): FormattedTurn {
     insight: splitInsight(turn.insight),
     filesRead: turn.filesRead,
     filesModified: turn.filesModified,
-    observations: observations.map((observation) => ({
-      id: observation.id,
-      title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-      content: observation.content,
-    })),
+    observations: observations.map((observation) =>
+      buildObservationView(observation, eraCutoffEpoch),
+    ),
   };
 }
 
@@ -558,10 +593,12 @@ function renderSession(
   turnSelector?: Set<number>,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const view = depth === "expanded"
-    ? buildSessionView(db, session)
-    : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+    ? buildSessionView(db, session, eraCutoffEpoch)
+    : buildSessionSummary(db, session.id) ??
+      buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
@@ -590,7 +627,7 @@ function renderSession(
 
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
   for (const item of preview.items) {
-    const turnView = buildTurnView(db, item);
+    const turnView = buildTurnView(db, item, eraCutoffEpoch);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
@@ -619,6 +656,7 @@ function renderTurnScope(
   truncate?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -649,7 +687,7 @@ function renderTurnScope(
 
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
-      const turnView = buildTurnView(db, item);
+      const turnView = buildTurnView(db, item, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -677,6 +715,7 @@ function renderObservationScope(
   truncate?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -697,11 +736,7 @@ function renderObservationScope(
         continue;
       }
 
-      const observationView: FormattedObservation = {
-        id: observation.id,
-        title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-        content: observation.content,
-      };
+      const observationView = buildObservationView(observation, eraCutoffEpoch);
 
       lines.push(
         renderNode(
@@ -743,7 +778,7 @@ function renderObservationScope(
     );
 
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -766,11 +801,7 @@ function renderObservationScope(
           continue;
         }
 
-        const observationView: FormattedObservation = {
-          id: observation.id,
-          title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-          content: observation.content,
-        };
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
 
         lines.push(
           renderNode(
@@ -793,14 +824,29 @@ function renderObservationScope(
   return lines.join("\n");
 }
 
+/**
+ * One observation row. In the segment era the mechanical fields ride along
+ * (spec D11): no pipeline summarizes an observation any more, so the tool name
+ * and the head of its input and result ARE the row's content. Pre-era rows are
+ * untouched — their summary is what they have.
+ */
 function buildObservationView(
   observation: NonNullable<ReturnType<typeof getObservation>>,
+  eraCutoffEpoch: number | null = null,
 ): FormattedObservation {
-  return {
+  const view: FormattedObservation = {
     id: observation.id,
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content,
   };
+
+  if (isSegmentEra(observation.createdAtEpoch, eraCutoffEpoch)) {
+    view.toolName = observation.toolName;
+    view.toolInput = observation.toolInput;
+    view.toolResult = observation.toolResult;
+  }
+
+  return view;
 }
 
 function renderSessionDetail(
@@ -810,26 +856,21 @@ function renderSessionDetail(
   truncate?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const session = getSession(db, sessionId);
   return session
-    ? renderSession(db, session, depth, truncate, undefined, includeDbTurnIds, truncateCap)
+    ? renderSession(
+        db,
+        session,
+        depth,
+        truncate,
+        undefined,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      )
     : "Session not found.";
-}
-
-function renderTurnDetail(
-  db: Database,
-  sessionId: number,
-  promptNumber: number,
-  depth: "collapsed" | "expanded",
-  truncate?: number,
-  includeDbTurnIds?: boolean,
-  truncateCap?: number,
-): string {
-  const turn = getTurn(db, sessionId, promptNumber);
-  return turn
-    ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap)
-    : "Turn not found.";
 }
 
 function renderObservationDetail(
@@ -838,6 +879,7 @@ function renderObservationDetail(
   depth: "collapsed" | "expanded",
   truncate?: number,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const observation = getObservation(db, observationId);
   // Every listing route already drops excluded rows, so direct addressing must
@@ -847,7 +889,7 @@ function renderObservationDetail(
     return "Observation not found.";
   }
 
-  const view = buildObservationView(observation);
+  const view = buildObservationView(observation, eraCutoffEpoch);
   return renderNode(
     { type: "observation", value: view },
     {
@@ -857,6 +899,159 @@ function renderObservationDetail(
       truncateCap,
     },
   );
+}
+
+/**
+ * Facts a segment's header line reports, all derived from its members: the
+ * dominant type (the member-type mode, spec D9's mechanical prior), the phase
+ * trace, and the anchor addresses its own body designates.
+ */
+function buildSegmentFacts(db: Database, segment: SegmentRecord): {
+  memberCount: number;
+  dominantType: string | null;
+  phaseTrace: string[];
+  anchorRefs: string[];
+  members: RankedSegmentMember[];
+} {
+  const members = rankSegmentMembers(db, segment.id);
+  const chronological = [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+
+  const dominantType = deriveDominantType(
+    chronological.map((member) => member.type),
+    segment.type,
+  );
+
+  const phaseTrace: string[] = [];
+  for (const member of chronological) {
+    if (member.type && phaseTrace[phaseTrace.length - 1] !== member.type) {
+      phaseTrace.push(member.type);
+    }
+  }
+
+  const byTurnId = new Map(members.map((member) => [member.turnId, member] as const));
+  const anchorRefs = resolveSegmentAnchorTurnIds(db, segment)
+    .map((turnId) => byTurnId.get(turnId))
+    .filter((member): member is RankedSegmentMember => member !== undefined)
+    .map((member) => `S${member.sessionId}/T${member.promptNumber}`);
+
+  return {
+    memberCount: members.length,
+    dominantType,
+    phaseTrace,
+    anchorRefs,
+    members,
+  };
+}
+
+/** One collapsed `[E<n>]` line, as a search hit renders it. */
+function renderSegmentSummary(
+  db: Database,
+  segmentId: number,
+  truncate?: number,
+): string | null {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const facts = buildSegmentFacts(db, segment);
+  return renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate ?? DEFAULT_TRUNCATE,
+  }).join("\n");
+}
+
+/**
+ * Segment drill-down (spec D8/D11): the record, then its members — ANCHORS
+ * first, then the derived rank filling the render budget. `pageSize` is that
+ * budget, the same knob every other recall listing is sized by.
+ */
+function renderSegmentDetail(
+  db: Database,
+  segmentId: number,
+  depth: "collapsed" | "expanded",
+  pageSize: number,
+  truncate?: number,
+  includeDbTurnIds?: boolean,
+  truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
+): string {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+
+  const facts = buildSegmentFacts(db, segment);
+  const lines = renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate ?? DEFAULT_TRUNCATE,
+  });
+
+  const shown = facts.members.slice(0, Math.max(0, pageSize));
+  if (facts.members.length > 0) {
+    lines.push(
+      `  - members (anchors first, then derived rank): ${shown.length}/${facts.members.length}`,
+    );
+  }
+
+  for (const member of shown) {
+    const turn = getTurnById(db, member.turnId);
+    if (!turn) {
+      continue;
+    }
+    const rendered = renderNode(
+      { type: "turn", value: buildTurnView(db, turn, eraCutoffEpoch) },
+      {
+        depth,
+        mode: "unified",
+        sessionId: member.sessionId,
+        truncate,
+        includeDbTurnIds,
+        truncateCap,
+      },
+    );
+    // An anchor keeps the ordinary turn row and swaps its bullet for `⚓<n>`,
+    // so the reader can see WHY it holds the slot it holds.
+    lines.push(
+      member.anchorPosition === null || !rendered.startsWith("  - ")
+        ? rendered
+        : `  ⚓${member.anchorPosition} ${rendered.slice(4)}`,
+    );
+  }
+
+  if (facts.members.length > shown.length) {
+    lines.push(`  +${facts.members.length - shown.length} more`);
+  }
+
+  return lines.join("\n");
+}
+
+function listSegmentIds(db: Database, segmentIds: number[] | undefined): number[] {
+  // A single explicit id is a question about THAT segment, so a miss has to be
+  // reported rather than silently yielding an empty page; a range or `*` is a
+  // listing, where a gap is not an error.
+  if (segmentIds && segmentIds.length === 1) {
+    return segmentIds;
+  }
+  if (segmentIds && segmentIds.length > 0) {
+    return segmentIds.filter((segmentId) => getSegment(db, segmentId) !== null);
+  }
+  return db
+    .query<{ id: number }, []>("SELECT id FROM segments ORDER BY id DESC")
+    .all()
+    .map((row) => row.id);
 }
 
 function listSessionIds(
@@ -924,7 +1119,15 @@ function renderGroupedSearchResults(
   truncate?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
+  // Segment hits lead: a `tag:` query returns the chapter AND its member turns
+  // (spec user story 16), and the chapter is the index into the rest.
+  const segmentLines = results
+    .filter((result) => result.layer === "segment")
+    .map((result) => renderSegmentSummary(db, result.sourceId, truncate))
+    .filter((line): line is string => line !== null);
+
   const sessionGroups = new Map<
     number,
     {
@@ -936,8 +1139,10 @@ function renderGroupedSearchResults(
   const sessionOrder: number[] = [];
 
   for (const result of results) {
-    // searchQueryResults guarantees sessionId !== null; Map key requires number
-    const sessionId = result.sessionId!;
+    if (result.layer === "segment" || result.sessionId === null) {
+      continue;
+    }
+    const sessionId = result.sessionId;
     let group = sessionGroups.get(sessionId);
     if (!group) {
       group = {
@@ -973,14 +1178,25 @@ function renderGroupedSearchResults(
     }
 
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate, undefined, includeDbTurnIds, truncateCap);
+      return renderSession(
+        db,
+        session,
+        depth,
+        truncate,
+        undefined,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      );
     }
 
     const lines = [
       renderNode(
         {
           type: "session",
-          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session),
+          value:
+            buildSessionSummary(db, session.id) ??
+            buildSessionView(db, session, eraCutoffEpoch),
         },
         { depth: "collapsed", mode: "unified", truncate, truncateCap },
       ),
@@ -991,7 +1207,7 @@ function renderGroupedSearchResults(
     );
 
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       const turnDepth =
         group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id)
           ? "collapsed"
@@ -1018,7 +1234,7 @@ function renderGroupedSearchResults(
           continue;
         }
 
-        const observationView = buildObservationView(observation);
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -1039,7 +1255,7 @@ function renderGroupedSearchResults(
     return lines.join("\n");
   });
 
-  return sessionLines.filter(Boolean).join("\n");
+  return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
 
 function renderRoutedId(
@@ -1053,6 +1269,7 @@ function renderRoutedId(
   before?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1065,7 +1282,42 @@ function renderRoutedId(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items
         .map((sessionId) =>
-          renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap),
+          renderSessionDetail(
+            db,
+            sessionId,
+            depth,
+            truncate,
+            includeDbTurnIds,
+            truncateCap,
+            eraCutoffEpoch,
+          ),
+        )
+        .join("\n"),
+      paged.pageCount,
+    );
+  }
+
+  if (routed.kind === "segments") {
+    const paged = paginateItems(
+      listSegmentIds(db, routed.segmentIds),
+      page,
+      pageSize,
+    );
+
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items
+        .map((segmentId) =>
+          renderSegmentDetail(
+            db,
+            segmentId,
+            depth,
+            pageSize,
+            truncate,
+            includeDbTurnIds,
+            truncateCap,
+            eraCutoffEpoch,
+          ),
         )
         .join("\n"),
       paged.pageCount,
@@ -1085,7 +1337,15 @@ function renderRoutedId(
     const paged = paginateItems(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderTurnScope(
+        db,
+        paged.items,
+        depth,
+        truncate,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      ),
       paged.pageCount,
     );
   }
@@ -1093,7 +1353,15 @@ function renderRoutedId(
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
     return turn
-      ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap)
+      ? renderTurnScope(
+          db,
+          [turn],
+          depth,
+          truncate,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch,
+        )
       : "Turn not found.";
   }
 
@@ -1122,7 +1390,16 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      ),
       paged.pageCount,
     );
   }
@@ -1150,13 +1427,29 @@ function renderRoutedId(
     const paged = paginateItems(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      ),
       paged.pageCount,
     );
   }
 
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth, truncate, truncateCap);
+    return renderObservationDetail(
+      db,
+      routed.observationId,
+      depth,
+      truncate,
+      truncateCap,
+      eraCutoffEpoch,
+    );
   }
 
   routed satisfies never;
@@ -1173,6 +1466,7 @@ function renderSessionList(
   before?: number,
   includeDbTurnIds?: boolean,
   truncateCap?: number,
+  eraCutoffEpoch: number | null = null,
 ): string {
   const paged = paginateItems(
     listSessionIds(db, undefined, after, before),
@@ -1184,7 +1478,15 @@ function renderSessionList(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items
       .map((sessionId) =>
-        renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap),
+        renderSessionDetail(
+          db,
+          sessionId,
+          depth,
+          truncate,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch,
+        ),
       )
       .join("\n"),
     paged.pageCount,
@@ -1206,7 +1508,10 @@ function searchQueryResults(
     sessionId: filters.session,
     after,
     before,
-  }).filter((r) => r.sessionId !== null);
+    // A segment is not bound to a session (spec D6), so it legitimately carries
+    // a null `sessionId`; only session-layer rows that lost their session are
+    // dropped here.
+  }).filter((r) => r.layer === "segment" || r.sessionId !== null);
 }
 
 export function recallMemory(db: Database, input: RecallInput): string {
@@ -1216,6 +1521,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
   const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const truncateCap = input.truncateCap;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const timeRange = resolveTimeRange(input.time);
 
   if (timeRange.error) {
@@ -1239,6 +1545,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       timeRange.before,
       includeDbTurnIds,
       truncateCap,
+      eraCutoffEpoch,
     );
   }
 
@@ -1276,7 +1583,15 @@ export function recallMemory(db: Database, input: RecallInput): string {
 
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderGroupedSearchResults(
+        db,
+        paged.items,
+        depth,
+        truncate,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch,
+      ),
       paged.pageCount,
     );
   }
@@ -1291,5 +1606,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
     timeRange.before,
     includeDbTurnIds,
     truncateCap,
+    eraCutoffEpoch,
   );
 }

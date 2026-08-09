@@ -4,7 +4,17 @@ import { noteTool } from "./note";
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
+import { loadConfig } from "../shared/config";
 import { stripPrivateTags } from "../shared/tag-stripping";
+
+function resolveConfiguredEraCutoff(): number | null {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    // A config read must never cost a tool call; the legacy path is safe.
+    return null;
+  }
+}
 
 export const WORKER_TOOL_RESULT_MAX_CHARS = 100_000;
 export const WORKER_TOOL_RESULT_TRUNCATION_HINT =
@@ -33,6 +43,7 @@ export interface TimelineQueryInput {
   page?: number;
   pageSize?: number;
   view?: TimelineToolView;
+  eraCutoffEpoch?: number | null;
 }
 
 export interface CreateDatabaseBackedHandlersOptions {
@@ -42,6 +53,12 @@ export interface CreateDatabaseBackedHandlersOptions {
   // main agent uses "main" (default) and keeps the prompt-number labels — this
   // is wired here, NOT in `recallInputShape`, which is strict.
   audience?: "main" | "worker";
+  /**
+   * P2 era boundary (spec D11). Resolved once here rather than per call — it
+   * only changes on a reload — and defaults to the configured value, whose own
+   * default (`null`) keeps every read on the legacy path.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 export function textResult(text: string): ToolResult {
@@ -86,6 +103,10 @@ export function createDatabaseBackedHandlers(
   }
 
   const includeDbTurnIds = options.audience === "worker";
+  const eraCutoffEpoch =
+    options.eraCutoffEpoch !== undefined
+      ? options.eraCutoffEpoch
+      : resolveConfiguredEraCutoff();
   const workerTextResult = (text: string): ToolResult => {
     if (!includeDbTurnIds) {
       return textResult(text);
@@ -116,13 +137,17 @@ export function createDatabaseBackedHandlers(
           truncate: args.truncate as number | undefined,
           includeDbTurnIds,
           truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
+          eraCutoffEpoch,
         }),
       ),
     remember: (args) =>
       rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
     timeline: (args) =>
       workerTextResult(
-        timelineQuery(database, toTimelineQueryInput(args)),
+        timelineQuery(database, {
+          ...toTimelineQueryInput(args),
+          eraCutoffEpoch,
+        }),
       ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to

@@ -69,7 +69,10 @@ describe("FTS ingest is decoupled from status", () => {
     db.close();
   });
 
-  test("a skipped turn's original prompt and response stay searchable", () => {
+  // The index keeps a skipped turn's originals; the RENDER side is what decides
+  // it is not a hit (ticket 08's addendum). The two halves are asserted
+  // separately on purpose — that separation IS the decoupling.
+  test("a skipped turn's original prompt and response stay indexed", () => {
     const turnId = captureTurn(
       1,
       "why does the retry watchdog keep respinning",
@@ -78,27 +81,32 @@ describe("FTS ingest is decoupled from status", () => {
 
     updateTurnById(db, turnId, { status: "skipped", updatedAtEpoch: 200 });
 
-    const byPrompt = searchMemory(db, {
-      scope: "turns",
-      query: "retry watchdog respinning",
-    });
-    const byResponse = searchMemory(db, {
-      scope: "turns",
-      query: "never consumes an attempt",
-    });
+    const indexed = ftsRow("turn", turnId);
+    expect(indexed?.prompt).toBe("why does the retry watchdog keep respinning");
+    expect(indexed?.response).toBe(
+      "because the connection retry never consumes an attempt",
+    );
+    // ... and stays out of the reader's hit set until something extracts it.
+    expect(
+      searchMemory(db, { scope: "turns", query: "retry watchdog respinning" }),
+    ).toEqual([]);
 
-    expect(byPrompt.map((hit) => hit.turnId)).toContain(turnId);
-    expect(byResponse.map((hit) => hit.turnId)).toContain(turnId);
+    updateTurnById(db, turnId, { status: "extracted", updatedAtEpoch: 300 });
+    expect(
+      searchMemory(db, { scope: "turns", query: "retry watchdog respinning" }).map(
+        (hit) => hit.turnId,
+      ),
+    ).toContain(turnId);
   });
 
   test("a turn is indexed at capture, before any extraction exists", () => {
     const turnId = captureTurn(1, "index me at capture time", "acknowledged");
 
+    expect(ftsRow("turn", turnId)?.prompt).toBe("index me at capture time");
+    // In flight (`active`), so not yet a hit — the same rule skipped turns get.
     expect(
-      searchMemory(db, { scope: "turns", query: "index me at capture" }).map(
-        (hit) => hit.turnId,
-      ),
-    ).toEqual([turnId]);
+      searchMemory(db, { scope: "turns", query: "index me at capture" }),
+    ).toEqual([]);
   });
 
   test("no status transition ever removes a turn from the index", () => {

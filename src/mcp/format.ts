@@ -22,6 +22,15 @@ export interface FormattedObservation {
   id: number;
   title: string;
   content?: string | null;
+  /**
+   * Mechanical fields (spec D11: the O layer renders tool name + input prefix +
+   * result prefix). In the segment era nothing summarizes an observation — the
+   * LLM obs pipeline is gone — so what a tool call DID has to come off the call
+   * itself. Left unset by the legacy path, whose output is unchanged.
+   */
+  toolName?: string | null;
+  toolInput?: string | null;
+  toolResult?: string | null;
 }
 
 export interface FormattedToolCall {
@@ -774,22 +783,34 @@ function formatObservationCollapsedWithMode(
 ): string {
   const { indent = "", mode = "legacy" } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const hintId = buildObservationHintId(
+    observation.id,
+    options.sessionId,
+    options.turnPromptNumber,
+  );
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(
-        observation.content,
-        {
-          limit,
-          mode,
-          hintId: buildObservationHintId(
-            observation.id,
-            options.sessionId,
-            options.turnPromptNumber,
-          ),
-        },
-      )}`,
+      `${indent}  - desc: ${truncateText(observation.content, {
+        limit,
+        mode,
+        hintId,
+      })}`,
+    );
+  }
+
+  if (observation.toolName) {
+    lines.push(`${indent}  - tool: 🔧 ${observation.toolName}`);
+  }
+  if (observation.toolInput) {
+    lines.push(
+      `${indent}  - in: ${truncateText(observation.toolInput, { limit, mode, hintId })}`,
+    );
+  }
+  if (observation.toolResult) {
+    lines.push(
+      `${indent}  - out: ${truncateText(observation.toolResult, { limit, mode, hintId })}`,
     );
   }
 

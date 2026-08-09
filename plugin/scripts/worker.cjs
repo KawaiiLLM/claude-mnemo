@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslhp3sq" : "dev";
+var BUILD_ID = true ? "0.9.1-mslitx45" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -263,6 +263,16 @@ function dreamTriggerWindow(input) {
 var import_node_fs2 = require("node:fs");
 var import_node_os2 = require("node:os");
 var import_node_path3 = require("node:path");
+
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+// src/shared/config.ts
 var KNOWN_DREAM_AGENT_MODELS = [
   "opus",
   "sonnet",
@@ -296,6 +306,7 @@ var DEFAULT_CONFIG = {
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
   settlementEnabled: false,
+  eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
   dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
@@ -394,6 +405,9 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       config3.settlementEnabled,
       DEFAULT_CONFIG.settlementEnabled
     ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config3.eraCutoffEpoch),
     dreamAgentEnabled: resolveBoolean(
       config3.dreamAgentEnabled,
       DEFAULT_CONFIG.dreamAgentEnabled
@@ -807,6 +821,7 @@ function truncateOriginal(value) {
 function normalizeTrigramText(value) {
   return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
 }
+var RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
 function parseJsonArray(value) {
   if (!value) {
     return [];
@@ -982,6 +997,29 @@ function indexObservationToFTS(db, observation) {
     truncateOriginal(observation.toolResult)
   );
 }
+function indexSegmentToFTS(db, segment) {
+  const facets = [segment.type, segment.tags].flatMap((value) => {
+    if (!value) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  }).join(" ");
+  indexFtsRecord(
+    db,
+    "segment",
+    segment.id,
+    segment.title,
+    segment.content,
+    facets,
+    null,
+    null
+  );
+}
 function rebuildSearchIndex(db) {
   db.exec("DELETE FROM memory_fts");
   const sessionRows = db.query(
@@ -1030,6 +1068,12 @@ function rebuildSearchIndex(db) {
   ).all();
   for (const observation of observationRows) {
     indexObservationToFTS(db, observation);
+  }
+  const segmentRows = db.query(
+    "SELECT id, title, content, type, tags FROM segments ORDER BY id"
+  ).all();
+  for (const segment of segmentRows) {
+    indexSegmentToFTS(db, segment);
   }
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
@@ -1263,7 +1307,7 @@ function queryTurnsByScope(db, options, query2) {
   const tagClause = buildTagClause("t.tags", options.tag);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query2) {
-    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+    const whereClauses2 = ["memory_fts.layer = 'turn'", "memory_fts MATCH ?", RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
     const params2 = [query2, ...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
     if (options.type) {
       whereClauses2.push("t.type = ?");
@@ -1296,7 +1340,7 @@ function queryTurnsByScope(db, options, query2) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["1 = 1", projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
+  const whereClauses = [RENDERED_TURN_STATUS_CLAUSE, projectClause.clause, sessionClause.clause, dateClause.clause, fileClause.clause, tagClause.clause];
   const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params, ...fileClause.params, ...tagClause.params];
   if (options.type) {
     whereClauses.push("t.type = ?");
@@ -1327,6 +1371,67 @@ function queryTurnsByScope(db, options, query2) {
     `, options.limit),
     withLimit(params, options.limit)
   );
+}
+function querySegmentsByScope(db, options, query2) {
+  if (options.file) {
+    return [];
+  }
+  const dateClause = buildDateClause("g.created_at_epoch", options);
+  const tagClause = buildTagClause("g.tags", options.tag);
+  const whereClauses = [];
+  const params = [];
+  if (query2) {
+    whereClauses.push("memory_fts.layer = 'segment'", "memory_fts MATCH ?");
+    params.push(query2);
+  }
+  whereClauses.push(dateClause.clause, tagClause.clause);
+  params.push(...dateClause.params, ...tagClause.params);
+  if (options.type) {
+    whereClauses.push("EXISTS (SELECT 1 FROM json_each(g.type) WHERE value = ?)");
+    params.push(options.type);
+  }
+  if (options.project !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         JOIN sessions s ON s.id = t.session_id
+         WHERE sm.segment_id = g.id AND s.project = ?
+       )`
+    );
+    params.push(options.project);
+  }
+  if (options.sessionId !== void 0) {
+    whereClauses.push(
+      `EXISTS (
+         SELECT 1 FROM segment_members sm
+         JOIN turns t ON t.id = sm.turn_id
+         WHERE sm.segment_id = g.id AND t.session_id = ?
+       )`
+    );
+    params.push(options.sessionId);
+  }
+  const selection = `
+    SELECT
+      'segment' AS layer,
+      g.id AS sourceId,
+      NULL AS sessionId,
+      NULL AS turnId,
+      NULL AS observationId,
+      NULL AS sourceTurnId,
+      '' AS project,
+      g.title AS title,
+      g.content AS content,
+      g.type AS type,
+      NULL AS filesRead,
+      NULL AS filesModified,
+      g.created_at_epoch AS timestampEpoch,
+      ${query2 ? "bm25(memory_fts, 0.0, 0.0, 10.0, 5.0, 5.0, 3.0, 1.0)" : "NULL"} AS relevance
+    ${query2 ? "FROM memory_fts JOIN segments g ON g.id = memory_fts.source_id" : "FROM segments g"}
+    ${combineClauses(whereClauses)}
+    ORDER BY ${query2 ? "relevance ASC" : "g.created_at_epoch DESC"}
+  `;
+  return queryRows(db, applyLimit(selection, options.limit), withLimit(params, options.limit));
 }
 function queryObservationsByScope(db, options, query2) {
   if (options.file) {
@@ -1411,12 +1516,16 @@ function searchMemory(db, options) {
     if (options.scope === "turns") {
       return queryRecentTurns(db, options);
     }
+    if (options.scope === "segments") {
+      return querySegmentsByScope(db, options, query2);
+    }
     return queryRecentObservations(db, options);
   }
   if (!options.scope) {
     const results = [];
     if (!options.file) {
       results.push(...querySessionsByScope(db, options, query2));
+      results.push(...querySegmentsByScope(db, options, query2));
     }
     results.push(...queryTurnsByScope(db, options, query2));
     results.push(...queryObservationsByScope(db, options, query2));
@@ -1437,6 +1546,9 @@ function searchMemory(db, options) {
   }
   if (options.scope === "turns") {
     return queryTurnsByScope(db, options, query2);
+  }
+  if (options.scope === "segments") {
+    return querySegmentsByScope(db, options, query2);
   }
   return queryObservationsByScope(db, options, query2);
 }
@@ -18446,6 +18558,517 @@ function createRuleStore(db) {
   };
 }
 
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "noted", null, nowEpoch);
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+
+// src/db/references.ts
+var REFERENCE_PATTERN = /\[[ \t]*(?:S(\d+)[ \t]*\/[ \t]*T(\d+)|E(\d+))(?:[ \t]+(?![,\-])[^\]\n\r]*)?[ \t]*\]/g;
+function parsePositiveId2(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function parseQualifiedReferences(content) {
+  if (!content) {
+    return [];
+  }
+  const references = [];
+  const seen = /* @__PURE__ */ new Set();
+  REFERENCE_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = REFERENCE_PATTERN.exec(content)) !== null) {
+    const raw = match[0];
+    const segmentId = parsePositiveId2(match[3]);
+    if (segmentId !== null) {
+      const key2 = `E${segmentId}`;
+      if (!seen.has(key2)) {
+        seen.add(key2);
+        references.push({ kind: "segment", raw, segmentId });
+      }
+      continue;
+    }
+    const sessionId = parsePositiveId2(match[1]);
+    const promptNumber = parsePositiveId2(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    const key = `S${sessionId}/T${promptNumber}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      references.push({ kind: "turn", raw, sessionId, promptNumber });
+    }
+  }
+  return references;
+}
+
+// src/shared/type-vocabulary.ts
+var MEMORY_TYPES = [
+  "research",
+  "design",
+  "implement",
+  "fix",
+  "measure",
+  "review",
+  "write",
+  "ops",
+  "chat",
+  "rolled-back"
+];
+var TYPE_GLYPH = {
+  research: "\u{1F50D}",
+  design: "\u2696\uFE0F",
+  implement: "\u{1F527}",
+  fix: "\u{1F534}",
+  measure: "\u{1F4CA}",
+  review: "\u2705",
+  write: "\u270D\uFE0F",
+  ops: "\u2699\uFE0F",
+  chat: "\u{1F4AC}",
+  "rolled-back": "\u21A9\uFE0F"
+};
+function isMemoryType(value) {
+  return typeof value === "string" && MEMORY_TYPES.includes(value);
+}
+var TYPE_ALIASES = {
+  research: [
+    "research",
+    "investigate",
+    "explore",
+    "survey",
+    "study",
+    "analyze",
+    "analyse",
+    "diagnose",
+    "\u8C03\u7814",
+    "\u7814\u7A76",
+    "\u6392\u67E5",
+    "\u5206\u6790",
+    "\u63A2\u7D22",
+    "\u8BCA\u65AD"
+  ],
+  design: [
+    "design",
+    "spec",
+    "plan",
+    "propose",
+    "decide",
+    "evaluate",
+    "compare",
+    "\u8BBE\u8BA1",
+    "\u65B9\u6848",
+    "\u89C4\u5212",
+    "\u9009\u578B",
+    "\u8BC4\u4F30",
+    "\u5BF9\u6BD4",
+    "\u5B9A\u6848",
+    "\u88C1\u51B3"
+  ],
+  implement: [
+    "implement",
+    "add",
+    "build",
+    "create",
+    "introduce",
+    "wire",
+    "ship",
+    "support",
+    "\u5B9E\u73B0",
+    "\u65B0\u589E",
+    "\u6784\u5EFA",
+    "\u63A5\u5165",
+    "\u843D\u5730",
+    "\u4E0A\u7EBF",
+    "\u8865\u5168"
+  ],
+  fix: [
+    "fix",
+    "repair",
+    "resolve",
+    "correct",
+    "patch",
+    "harden",
+    "hotfix",
+    "\u4FEE\u590D",
+    "\u4FEE\u6B63",
+    "\u89E3\u51B3",
+    "\u7EA0\u6B63",
+    "\u52A0\u56FA",
+    "\u6B62\u8840"
+  ],
+  measure: [
+    "measure",
+    "benchmark",
+    "profile",
+    "count",
+    "verify",
+    "test",
+    "validate",
+    "\u5EA6\u91CF",
+    "\u6D4B\u91CF",
+    "\u7EDF\u8BA1",
+    "\u57FA\u51C6",
+    "\u9A8C\u8BC1",
+    "\u5B9E\u6D4B",
+    "\u538B\u6D4B"
+  ],
+  review: [
+    "review",
+    "audit",
+    "check",
+    "inspect",
+    "assess",
+    "critique",
+    "\u8BC4\u5BA1",
+    "\u5BA1\u67E5",
+    "\u590D\u6838",
+    "\u6838\u5BF9",
+    "\u68C0\u67E5",
+    "\u5BA1\u8BA1"
+  ],
+  write: [
+    "write",
+    "document",
+    "draft",
+    "record",
+    "summarize",
+    "note",
+    "explain",
+    "\u64B0\u5199",
+    "\u7F16\u5199",
+    "\u8BB0\u5F55",
+    "\u6587\u6863",
+    "\u603B\u7ED3",
+    "\u8D77\u8349",
+    "\u8BF4\u660E"
+  ],
+  ops: [
+    "ops",
+    "release",
+    "deploy",
+    "publish",
+    "migrate",
+    "upgrade",
+    "bump",
+    "configure",
+    "clean",
+    "\u53D1\u7248",
+    "\u53D1\u5E03",
+    "\u90E8\u7F72",
+    "\u8FC1\u79FB",
+    "\u5347\u7EA7",
+    "\u914D\u7F6E",
+    "\u6E05\u7406",
+    "\u8FD0\u7EF4"
+  ],
+  chat: [
+    "chat",
+    "discuss",
+    "ask",
+    "answer",
+    "reply",
+    "clarify",
+    "\u95F2\u804A",
+    "\u8BA8\u8BBA",
+    "\u8BE2\u95EE",
+    "\u56DE\u7B54",
+    "\u6F84\u6E05"
+  ]
+};
+var SORTED_ALIASES = Object.entries(TYPE_ALIASES).flatMap(
+  ([type, aliases]) => aliases.map((alias) => ({ alias: alias.toLowerCase(), type }))
+).sort((left, right) => right.alias.length - left.alias.length);
+
+// src/db/segments.ts
+var SEGMENT_COLUMNS = `
+  id,
+  topic_id AS topicId,
+  title,
+  content,
+  type,
+  tags,
+  status,
+  revision,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function parseStringArray(value) {
+  if (!value) {
+    return [];
+  }
+  const parsed = JSON.parse(value);
+  return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+}
+function mapSegmentRow(row) {
+  return row ? {
+    ...row,
+    type: parseStringArray(row.type),
+    tags: parseStringArray(row.tags)
+  } : null;
+}
+function getSegment(db, segmentId) {
+  return mapSegmentRow(
+    db.query(
+      `SELECT ${SEGMENT_COLUMNS} FROM segments WHERE id = ?`
+    ).get(segmentId) ?? null
+  );
+}
+
+// src/db/segment-rank.ts
+var RANK_FACT_COLUMNS = `
+  t.id AS turnId,
+  t.session_id AS sessionId,
+  t.prompt_number AS promptNumber,
+  t.title AS title,
+  t.type AS type,
+  t.status AS status,
+  t.created_at_epoch AS createdAtEpoch,
+  (EXISTS (
+     SELECT 1 FROM memory_edges e
+     WHERE e.citing_kind = 'turn' AND e.citing_id = t.id
+       AND e.relation = 'supersedes'
+   )) AS isCorrector,
+  -- COALESCE, not a bare comparison: comparing NULL to a literal yields NULL,
+  -- and SQLite sorts NULL FIRST under ASC \u2014 an untyped turn would have
+  -- outranked every typed one on this key by accident of three-valued logic.
+  (COALESCE(t.type, '') = 'rolled-back') AS isRolledBack,
+  (SELECT COUNT(*) FROM (
+     SELECT DISTINCT e.citing_kind, e.citing_id
+     FROM memory_edges e
+     WHERE e.cited_kind = 'turn' AND e.cited_id = t.id
+   )) AS citedBy,
+  (EXISTS (
+     SELECT 1 FROM segment_members dm
+     JOIN segments ds ON ds.id = dm.segment_id
+     WHERE dm.turn_id = t.id AND ds.status = 'delivered'
+   )) AS isDeliveryMember,
+  (CASE WHEN json_valid(t.files_modified)
+        THEN json_array_length(t.files_modified) ELSE 0 END) AS filesModifiedCount
+`;
+var DERIVED_RANK_ORDER = `
+  ORDER BY isCorrector DESC,
+           isRolledBack ASC,
+           citedBy DESC,
+           isDeliveryMember DESC,
+           filesModifiedCount DESC,
+           t.created_at_epoch DESC,
+           t.id DESC
+`;
+function resolveSegmentAnchorTurnIds(db, segment) {
+  const references = parseQualifiedReferences(segment.content);
+  if (references.length === 0) {
+    return [];
+  }
+  const lookup = db.query(
+    `SELECT t.id AS id
+     FROM turns t
+     JOIN segment_members sm ON sm.turn_id = t.id
+     WHERE t.session_id = ? AND t.prompt_number = ? AND sm.segment_id = ?`
+  );
+  const anchors = [];
+  for (const reference of references) {
+    if (reference.kind !== "turn") {
+      continue;
+    }
+    const row = lookup.get(reference.sessionId, reference.promptNumber, segment.id);
+    if (row && !anchors.includes(row.id)) {
+      anchors.push(row.id);
+    }
+  }
+  return anchors;
+}
+function rankSegmentMembers(db, segmentId, limit) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id = ?
+       ${DERIVED_RANK_ORDER}`
+  ).all(segmentId);
+  const anchorIds = resolveSegmentAnchorTurnIds(db, segment);
+  const anchorPosition = new Map(
+    anchorIds.map((turnId, index) => [turnId, index + 1])
+  );
+  const byTurnId = new Map(rows.map((row) => [row.turnId, row]));
+  const ordered = [];
+  for (const turnId of anchorIds) {
+    const row = byTurnId.get(turnId);
+    if (row) {
+      ordered.push({ ...row, anchorPosition: anchorPosition.get(turnId) ?? null });
+    }
+  }
+  for (const row of rows) {
+    if (anchorPosition.has(row.turnId)) {
+      continue;
+    }
+    ordered.push({ ...row, anchorPosition: null });
+  }
+  return limit === void 0 ? ordered : ordered.slice(0, Math.max(0, limit));
+}
+function listSegmentSpineForSession(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const memberRows = db.query(
+    `SELECT
+         sm.segment_id AS segmentId,
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.type AS type,
+         t.created_at_epoch AS createdAtEpoch
+       FROM segment_members sm
+       JOIN turns t ON t.id = sm.turn_id
+       WHERE sm.segment_id IN (
+         SELECT sm2.segment_id
+         FROM segment_members sm2
+         JOIN turns t2 ON t2.id = sm2.turn_id
+         WHERE t2.session_id = ? AND t2.created_at_epoch >= ?
+       )
+       ORDER BY t.created_at_epoch ASC, t.id ASC`
+  ).all(sessionId, eraCutoffEpoch);
+  const bySegment = /* @__PURE__ */ new Map();
+  for (const row of memberRows) {
+    const bucket = bySegment.get(row.segmentId) ?? [];
+    bucket.push(row);
+    bySegment.set(row.segmentId, bucket);
+  }
+  const rows = [];
+  for (const [segmentId, members] of bySegment) {
+    const segment = getSegment(db, segmentId);
+    if (!segment) {
+      continue;
+    }
+    const sessionMembers = members.filter((member) => member.sessionId === sessionId);
+    const prompts = sessionMembers.map((member) => member.promptNumber);
+    rows.push({
+      segment,
+      dominantType: deriveDominantType(
+        members.map((member) => member.type),
+        segment.type
+      ),
+      memberCount: members.length,
+      sessionMemberCount: sessionMembers.length,
+      firstPromptNumber: prompts.length > 0 ? Math.min(...prompts) : null,
+      lastPromptNumber: prompts.length > 0 ? Math.max(...prompts) : null,
+      firstEpoch: members[0].createdAtEpoch,
+      lastEpoch: members[members.length - 1].createdAtEpoch,
+      phaseTrace: collapseRuns(
+        members.map((member) => member.type).filter((type) => type !== null && type !== "")
+      )
+    });
+  }
+  return rows.sort((left, right) => {
+    const leftPrompt = left.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    const rightPrompt = right.firstPromptNumber ?? Number.MAX_SAFE_INTEGER;
+    if (leftPrompt !== rightPrompt) {
+      return leftPrompt - rightPrompt;
+    }
+    return left.segment.id - right.segment.id;
+  });
+}
+function deriveDominantType(memberTypes, segmentTypes) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const type of memberTypes) {
+    if (type === null || type === "") {
+      continue;
+    }
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  let best = null;
+  let bestCount = 0;
+  let tied = false;
+  for (const [type, count] of counts) {
+    if (count > bestCount) {
+      best = type;
+      bestCount = count;
+      tied = false;
+    } else if (count === bestCount) {
+      tied = true;
+    }
+  }
+  if (best !== null && !tied) {
+    return best;
+  }
+  return segmentTypes[0] ?? best ?? null;
+}
+function collapseRuns(values) {
+  const out = [];
+  for (const value of values) {
+    if (out[out.length - 1] !== value) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+function listOrphanAnchorTurns(db, sessionId, eraCutoffEpoch) {
+  if (eraCutoffEpoch === null) {
+    return [];
+  }
+  const rows = db.query(
+    `SELECT ${RANK_FACT_COLUMNS}
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.created_at_epoch >= ?
+         AND t.status NOT IN ('skipped', 'undone')
+         AND NOT EXISTS (
+           SELECT 1 FROM segment_members sm WHERE sm.turn_id = t.id
+         )
+       ${DERIVED_RANK_ORDER}`
+  ).all(sessionId, eraCutoffEpoch);
+  return rows.map((facts) => ({ facts, signals: orphanSignals(facts) })).filter((row) => row.signals.length > 0);
+}
+function orphanSignals(facts) {
+  const signals = [];
+  if (facts.isCorrector) {
+    signals.push("corrector");
+  }
+  if (facts.isRolledBack) {
+    signals.push("rolled-back");
+  }
+  if (facts.citedBy > 0) {
+    signals.push(`cited ${facts.citedBy}`);
+  }
+  return signals;
+}
+
 // src/diary/domain.ts
 var import_node_crypto = require("node:crypto");
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
@@ -18495,6 +19118,777 @@ function estimateDiaryTokens(text) {
 var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
 function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
   return createdAtEpoch >= cutoffEpoch;
+}
+
+// src/shared/file-tree.ts
+var import_node_path6 = __toESM(require("node:path"), 1);
+function createFileTreeNode() {
+  return { files: [], dirs: /* @__PURE__ */ new Map() };
+}
+function commonPathPrefix(paths) {
+  if (paths.length === 0) {
+    return "";
+  }
+  if (paths.length === 1) {
+    return paths[0] ?? "";
+  }
+  const allAbsolute = paths.every((value) => value.startsWith("/"));
+  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
+  const common = [];
+  const limit = Math.min(...splitPaths.map((segments) => segments.length));
+  for (let index = 0; index < limit; index += 1) {
+    const segment = splitPaths[0]?.[index];
+    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
+      break;
+    }
+    common.push(segment);
+  }
+  if (common.length === 0) {
+    return allAbsolute ? "/" : ".";
+  }
+  const joined = common.join("/");
+  return allAbsolute ? `/${joined}` : joined;
+}
+function renderTreeNode(name, node, indent) {
+  if (node.files.length === 1 && node.dirs.size === 0) {
+    return [`${indent}${name}/${node.files[0]}`];
+  }
+  if (node.files.length === 0 && node.dirs.size > 0) {
+    const childEntries = [...node.dirs.entries()].sort(
+      ([left], [right]) => left.localeCompare(right)
+    );
+    return childEntries.flatMap(
+      ([childName, childNode]) => renderTreeNode(`${name}/${childName}`, childNode, indent)
+    );
+  }
+  const lines = [`${indent}${name}/`];
+  for (const file2 of [...node.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(`${indent}  ${file2}`);
+  }
+  for (const [childName, childNode] of [...node.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
+  }
+  return lines;
+}
+function isFileLine(line, index) {
+  return index > 0 && !line.endsWith("/");
+}
+function capRenderedTree(lines, totalFiles, maxChars) {
+  const suffixBudget = `
+  ...(+${totalFiles} more files)`.length;
+  const lineBudget = Math.max(0, maxChars - suffixBudget);
+  const kept = [];
+  let keptFiles = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const candidate = kept.length === 0 ? line : `${kept.join("\n")}
+${line}`;
+    if (candidate.length > lineBudget) {
+      break;
+    }
+    kept.push(line);
+    if (isFileLine(line, index)) {
+      keptFiles += 1;
+    }
+  }
+  const omitted = totalFiles - keptFiles;
+  if (omitted <= 0) {
+    return lines.join("\n");
+  }
+  return `${kept.join("\n")}
+  ...(+${omitted} more files)`;
+}
+function renderFileTree(paths, opts) {
+  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
+    (left, right) => left.localeCompare(right)
+  );
+  if (uniquePaths.length === 0) {
+    return "(none)";
+  }
+  if (uniquePaths.length === 1) {
+    const only = uniquePaths[0] ?? "(none)";
+    if (opts?.maxChars !== void 0 && only.length > opts.maxChars) {
+      const marker = "...";
+      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
+    }
+    return only;
+  }
+  const root2 = commonPathPrefix(uniquePaths);
+  const tree = createFileTreeNode();
+  for (const value of uniquePaths) {
+    const relative4 = import_node_path6.default.posix.relative(root2, value);
+    if (!relative4 || relative4 === "") {
+      continue;
+    }
+    const segments = relative4.split("/").filter(Boolean);
+    if (segments.length === 0) {
+      continue;
+    }
+    let node = tree;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index];
+      let next = node.dirs.get(segment);
+      if (!next) {
+        next = createFileTreeNode();
+        node.dirs.set(segment, next);
+      }
+      node = next;
+    }
+    node.files.push(segments[segments.length - 1]);
+  }
+  const lines = [root2];
+  for (const file2 of [...tree.files].sort((left, right) => left.localeCompare(right))) {
+    lines.push(file2);
+  }
+  for (const [childName, childNode] of [...tree.dirs.entries()].sort(
+    ([left], [right]) => left.localeCompare(right)
+  )) {
+    lines.push(...renderTreeNode(childName, childNode, ""));
+  }
+  const rendered = lines.join("\n");
+  if (opts?.maxChars !== void 0 && rendered.length > opts.maxChars) {
+    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
+  }
+  return rendered;
+}
+
+// src/mcp/format.ts
+var TYPE_EMOJI = {
+  bugfix: "\u{1F534}",
+  feature: "\u{1F7E3}",
+  refactor: "\u{1F504}",
+  change: "\u2705",
+  discovery: "\u{1F535}",
+  decision: "\u2696\uFE0F"
+};
+var FIELD_TRUNCATION_SUFFIX = "...";
+var DEFAULT_TRUNCATE = 200;
+var MAX_TRUNCATE = 2e3;
+var DEFAULT_PREVIEW_COUNT = 5;
+function formatEpoch(epoch) {
+  const date6 = new Date(epoch * 1e3);
+  const year = date6.getUTCFullYear();
+  const month = String(date6.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date6.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+function normalizeCount(value) {
+  if (!value || value < 0) {
+    return 0;
+  }
+  return value;
+}
+function formatStats(parts) {
+  return parts.join(" ");
+}
+function formatSessionStats(session) {
+  const parts = [];
+  const turnCount = normalizeCount(session.turnCount ?? session.turns?.length);
+  const observationCount = normalizeCount(
+    session.observationCount ?? session.turns?.reduce(
+      (sum, turn) => sum + normalizeCount(turn.observationCount),
+      0
+    )
+  );
+  if (turnCount > 0) {
+    parts.push(`\u{1F4AC}${turnCount}`);
+  }
+  if (observationCount > 0) {
+    parts.push(`\u{1F4A1}${observationCount}`);
+  }
+  return formatStats(parts);
+}
+function formatTurnStats(turn) {
+  const parts = [];
+  const observationCount = normalizeCount(
+    turn.observationCount ?? turn.observations?.length
+  );
+  const filesReadCount = normalizeCount(
+    turn.filesReadCount ?? turn.filesRead?.length
+  );
+  const filesModifiedCount = normalizeCount(
+    turn.filesModifiedCount ?? turn.filesModified?.length
+  );
+  const toolCallCount = normalizeCount(turn.toolCallCount);
+  if (observationCount > 0) {
+    parts.push(`\u{1F4A1}${observationCount}`);
+  }
+  if (filesReadCount > 0) {
+    parts.push(`\u{1F4D6}${filesReadCount}`);
+  }
+  if (filesModifiedCount > 0) {
+    parts.push(`\u270F\uFE0F${filesModifiedCount}`);
+  }
+  if (toolCallCount > 0) {
+    parts.push(`\u{1F527}${toolCallCount}`);
+  }
+  return formatStats(parts);
+}
+function pushBullets(lines, indent, values) {
+  for (const value of values) {
+    lines.push(`${indent}- ${value}`);
+  }
+}
+function splitBulletField(value) {
+  if (!value) {
+    return [];
+  }
+  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
+}
+function truncateText(text, {
+  limit,
+  mode = "legacy",
+  hintId
+}) {
+  const boundedLimit = Math.max(limit, 1);
+  if (text.length <= boundedLimit) {
+    return text;
+  }
+  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`;
+}
+function truncateFileTree(tree, {
+  limit,
+  mode = "legacy",
+  hintId
+}) {
+  const boundedLimit = Math.max(limit, 1);
+  const lines = tree.split("\n");
+  const kept = [];
+  let used = 0;
+  for (const line of lines) {
+    const nextUsed = used + line.length + 1;
+    if (kept.length > 0 && nextUsed > boundedLimit) {
+      break;
+    }
+    kept.push(line);
+    used = nextUsed;
+  }
+  const omitted = lines.length - kept.length;
+  if (omitted <= 0) {
+    return kept;
+  }
+  return [
+    ...kept,
+    `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
+  ];
+}
+function resolveExplicitTruncate(truncate2, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate2 ?? DEFAULT_TRUNCATE, 1), truncateCap);
+}
+function buildSessionHintId(sessionId) {
+  return `S${sessionId}`;
+}
+function buildTurnHintId(sessionId, promptNumber) {
+  return sessionId === void 0 ? void 0 : `S${sessionId}/T${promptNumber}`;
+}
+function buildObservationHintId(observationId, sessionId, turnPromptNumber) {
+  if (sessionId === void 0 || turnPromptNumber === void 0) {
+    return void 0;
+  }
+  return `S${sessionId}/T${turnPromptNumber}/O${observationId}`;
+}
+function formatStatus(status) {
+  return status ? ` [${status}]` : "";
+}
+function extractKeyParam(name, input) {
+  if (!input || typeof input !== "object") {
+    return null;
+  }
+  const record3 = input;
+  const valueForKey = (...keys) => {
+    for (const key of keys) {
+      const value = record3[key];
+      if (typeof value === "string" && value.trim() !== "") {
+        return value;
+      }
+    }
+    return null;
+  };
+  switch (name) {
+    case "Edit":
+    case "Read":
+    case "Write":
+    case "Glob":
+      return valueForKey("file_path", "path");
+    case "Bash":
+      return valueForKey("command");
+    case "Grep": {
+      const pattern = valueForKey("pattern");
+      const path2 = valueForKey("path");
+      if (pattern && path2) {
+        return `${pattern} ${path2}`;
+      }
+      return pattern ?? path2;
+    }
+    case "Agent":
+      return valueForKey("description");
+    default:
+      for (const value of Object.values(record3)) {
+        if (typeof value === "string" && value.trim() !== "") {
+          return value;
+        }
+      }
+      return null;
+  }
+}
+function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const stats = formatSessionStats(session);
+  const statsSegment = stats ? ` | ${stats}` : "";
+  const lines = [
+    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
+  ];
+  if (session.content) {
+    lines.push(
+      `  - desc: ${truncateText(session.content, {
+        limit,
+        mode,
+        hintId: buildSessionHintId(session.id)
+      })}`
+    );
+  }
+  return lines.join("\n");
+}
+function formatSessionExpandedWithMode(session, mode, truncate2, truncateCap) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const lines = [formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap)];
+  const hintId = buildSessionHintId(session.id);
+  const pushField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+  };
+  const pushBulletField = (label, value) => {
+    if (!value) {
+      return;
+    }
+    const items = splitBulletField(
+      truncateText(value, { limit, mode, hintId })
+    );
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  - ${label}:`);
+    pushBullets(lines, "    ", items);
+  };
+  if (session.jsonlPath) {
+    lines.push(`  raw: ${session.jsonlPath}`);
+  }
+  if (session.decision) {
+    pushBulletField("decision", session.decision);
+  } else if (session.insight && session.insight.length > 0) {
+    lines.push("  - insight:");
+    pushBullets(
+      lines,
+      "    ",
+      session.insight.map((line) => truncateText(line, { limit, mode, hintId }))
+    );
+  }
+  pushBulletField("done", session.done);
+  pushField("current", session.current);
+  pushField("next", session.nextSteps);
+  pushBulletField("reference", session.reference);
+  return lines.join("\n");
+}
+function formatTurnLabel(turn, {
+  indent = "  ",
+  sessionId,
+  mode = "legacy",
+  depth = "collapsed",
+  truncate: truncate2,
+  truncateCap,
+  includeDbTurnIds = false
+} = {}) {
+  const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
+  const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
+  const stats = formatTurnStats(turn);
+  const statsSegment = stats ? ` | ${stats}` : "";
+  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const hintId = buildTurnHintId(sessionId, turn.promptNumber);
+  const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, {
+    limit,
+    mode,
+    hintId
+  })}"` : truncateText(rawTitle, {
+    limit,
+    mode,
+    hintId
+  });
+  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
+  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
+}
+function formatTurnCollapsedWithMode(turn, options = {}) {
+  const { indent = "  ", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const lines = [
+    formatTurnLabel(turn, {
+      ...options,
+      mode,
+      depth: "collapsed"
+    })
+  ];
+  if (turn.content) {
+    lines.push(
+      `${indent}  - desc: ${truncateText(turn.content, {
+        limit,
+        mode,
+        hintId: buildTurnHintId(options.sessionId, turn.promptNumber)
+      })}`
+    );
+  }
+  return lines.join("\n");
+}
+function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate: truncate2, truncateCap } = {}) {
+  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
+  const suffix = keyParam ? ` ${truncateText(keyParam, { limit, mode })}` : "";
+  return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
+}
+function formatToolCallCollapsedWithMode(toolCall, options = {}) {
+  return formatToolCallLabel(toolCall, {
+    ...options,
+    mode: options.mode,
+    depth: "collapsed"
+  });
+}
+function formatToolCallExpandedWithMode(toolCall, options = {}) {
+  const { indent = "    ", mode = "unified", depth = "expanded", truncate: truncate2 } = options;
+  const limit = resolveExplicitTruncate(truncate2, options.truncateCap);
+  const detailIndent = `${indent}  `;
+  const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
+  const lines = [
+    formatToolCallLabel(toolCall, {
+      ...options,
+      mode,
+      depth: "expanded",
+      truncate: truncate2
+    })
+  ];
+  if (toolCall.input !== void 0) {
+    lines.push(
+      `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
+        limit,
+        mode,
+        hintId
+      })}`
+    );
+  }
+  if (toolCall.result) {
+    lines.push(
+      `${detailIndent}- out: ${truncateText(toolCall.result, {
+        limit,
+        mode,
+        hintId
+      })}`
+    );
+  }
+  return lines.join("\n");
+}
+function renderTurnChildren(turn, depth, options = {}) {
+  if (depth === "collapsed") {
+    return "";
+  }
+  const { indent = "  ", sessionId, mode = "legacy", truncate: truncate2 } = options;
+  const childIndent = `${indent}  `;
+  const childLines = [];
+  if (turn.observations && turn.observations.length > 0) {
+    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatObservationExpandedWithMode(observation, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: "expanded",
+          truncate: truncate2
+        })
+      );
+    }
+    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+    return childLines.join("\n");
+  }
+  if (turn.toolCalls && turn.toolCalls.length > 0) {
+    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
+      childLines.push(
+        formatToolCallExpandedWithMode(toolCall, {
+          indent: childIndent,
+          sessionId,
+          turnPromptNumber: turn.promptNumber,
+          mode,
+          depth: "expanded",
+          truncate: truncate2
+        })
+      );
+    }
+    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
+      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
+    }
+  }
+  return childLines.join("\n");
+}
+function formatTurnExpandedWithMode(turn, options = {}) {
+  const {
+    indent = "  ",
+    mode = "legacy",
+    depth = "expanded",
+    includeChildren = mode === "unified"
+  } = options;
+  const detailIndent = `${indent}  `;
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
+  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
+  if (turn.promptPreview) {
+    lines.push(
+      `${detailIndent}- prompt: "${truncateText(
+        turn.promptPreview,
+        {
+          limit,
+          mode,
+          hintId
+        }
+      )}"`
+    );
+  }
+  if (turn.responsePreview) {
+    lines.push(
+      `${detailIndent}- response: "${truncateText(
+        turn.responsePreview,
+        {
+          limit,
+          mode,
+          hintId
+        }
+      )}"`
+    );
+  }
+  if (turn.insight && turn.insight.length > 0) {
+    lines.push(`${detailIndent}- insight:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      turn.insight.map(
+        (line) => truncateText(line, {
+          limit,
+          mode,
+          hintId
+        })
+      )
+    );
+  }
+  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
+    lines.push(`${detailIndent}- files_read:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesRead), {
+        limit,
+        mode,
+        hintId
+      })
+    );
+  }
+  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
+    lines.push(`${detailIndent}- files_modified:`);
+    pushBullets(
+      lines,
+      `${detailIndent}  `,
+      truncateFileTree(renderFileTree(turn.filesModified), {
+        limit,
+        mode,
+        hintId
+      })
+    );
+  }
+  const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
+  if (childBlock) {
+    lines.push(childBlock);
+  }
+  return lines.join("\n");
+}
+function formatObservationLabel(observation, { indent = "" } = {}) {
+  return `${indent}- [O${observation.id}] ${observation.title}`;
+}
+function formatObservationCollapsedWithMode(observation, options = {}) {
+  const { indent = "", mode = "legacy" } = options;
+  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
+  const hintId = buildObservationHintId(
+    observation.id,
+    options.sessionId,
+    options.turnPromptNumber
+  );
+  const lines = [formatObservationLabel(observation, options)];
+  if (observation.content) {
+    lines.push(
+      `${indent}  - desc: ${truncateText(observation.content, {
+        limit,
+        mode,
+        hintId
+      })}`
+    );
+  }
+  if (observation.toolName) {
+    lines.push(`${indent}  - tool: \u{1F527} ${observation.toolName}`);
+  }
+  if (observation.toolInput) {
+    lines.push(
+      `${indent}  - in: ${truncateText(observation.toolInput, { limit, mode, hintId })}`
+    );
+  }
+  if (observation.toolResult) {
+    lines.push(
+      `${indent}  - out: ${truncateText(observation.toolResult, { limit, mode, hintId })}`
+    );
+  }
+  return lines.join("\n");
+}
+function formatObservationExpandedWithMode(observation, options = {}) {
+  const mode = options.mode ?? "legacy";
+  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
+  return lines.join("\n");
+}
+function renderNode(node, options) {
+  const mode = options.mode ?? "unified";
+  const effectiveOptions = options;
+  switch (node.type) {
+    case "session":
+      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap) : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
+    case "turn":
+      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
+    case "observation":
+      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
+    case "toolCall":
+      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
+  }
+}
+
+// src/mcp/segment-spine.ts
+var ORPHAN_GLYPH = "\u2691";
+var SPINE_ROW_INDENT = "   ";
+var SPINE_TAG_CAP = 2;
+function segmentTypeGlyph(type) {
+  if (!type) {
+    return "\u2022";
+  }
+  if (isMemoryType(type)) {
+    return TYPE_GLYPH[type];
+  }
+  return TYPE_EMOJI[type] ?? "\u2022";
+}
+function formatTags(tags) {
+  if (tags.length === 0) {
+    return "";
+  }
+  const shown = tags.slice(0, SPINE_TAG_CAP).map((tag) => `#${tag}`);
+  const hidden = tags.length - shown.length;
+  return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
+}
+function truncate(text, maxChars) {
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026`;
+}
+function sanitize(value) {
+  return value.replaceAll("|", "/").replaceAll("\u2192", "->");
+}
+function formatPhaseTrace(phaseTrace) {
+  return phaseTrace.map((type) => segmentTypeGlyph(type)).join("\u2192");
+}
+function formatSpan(row) {
+  if (row.firstPromptNumber === null || row.lastPromptNumber === null) {
+    return "";
+  }
+  return row.firstPromptNumber === row.lastPromptNumber ? `T${row.firstPromptNumber}` : `T${row.firstPromptNumber}\u2013T${row.lastPromptNumber}`;
+}
+function renderSpineRow(row, titleCap) {
+  const { segment } = row;
+  const parts = [
+    `[E${segment.id}]`,
+    segmentTypeGlyph(row.dominantType),
+    formatTags(segment.tags),
+    sanitize(truncate(segment.title, titleCap)),
+    `[${segment.status}]`
+  ].filter((part) => part !== "");
+  const facts = [
+    `${row.memberCount} ${row.memberCount === 1 ? "turn" : "turns"}`,
+    formatSpan(row),
+    formatPhaseTrace(row.phaseTrace)
+  ].filter((part) => part !== "");
+  return `${SPINE_ROW_INDENT}${parts.join(" ")} \xB7 ${facts.join(" \xB7 ")}`.trimEnd();
+}
+function renderOrphanRow(row, titleCap) {
+  const { facts } = row;
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncate(facts.title, titleCap));
+  return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
+    facts.type
+  )} ${label} (${row.signals.join(", ")})`;
+}
+function renderSegmentSpineBlock(input) {
+  const { spine, orphans, titleCap } = input;
+  if (spine.length === 0 && orphans.length === 0) {
+    return [];
+  }
+  const keptSegments = input.maxSegments === void 0 ? [...spine] : spine.slice(Math.max(0, spine.length - Math.max(0, input.maxSegments)));
+  const droppedSegments = spine.length - keptSegments.length;
+  const keptOrphans = input.maxOrphans === void 0 ? [...orphans] : orphans.slice(0, Math.max(0, input.maxOrphans));
+  const droppedOrphans = orphans.length - keptOrphans.length;
+  const headerParts = [
+    `${spine.length} ${spine.length === 1 ? "segment" : "segments"}`
+  ];
+  if (orphans.length > 0) {
+    headerParts.push(
+      `${orphans.length} orphan ${orphans.length === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  const lines = ["", `\u2500\u2500 segment spine \xB7 ${headerParts.join(" \xB7 ")} \u2500\u2500`];
+  if (droppedSegments > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedSegments} earlier ${droppedSegments === 1 ? "segment" : "segments"}`
+    );
+  }
+  for (const row of keptSegments) {
+    lines.push(renderSpineRow(row, titleCap));
+  }
+  for (const row of keptOrphans) {
+    lines.push(renderOrphanRow(row, titleCap));
+  }
+  if (droppedOrphans > 0) {
+    lines.push(
+      `${SPINE_ROW_INDENT}\u2026 +${droppedOrphans} orphan ${droppedOrphans === 1 ? "anchor" : "anchors"}`
+    );
+  }
+  return lines;
+}
+function legacyEraHeader(firstPromptNumber, lastPromptNumber) {
+  const span = firstPromptNumber === null || lastPromptNumber === null ? "" : ` \xB7 T${firstPromptNumber}\u2013T${lastPromptNumber}`;
+  return `\u2500\u2500 legacy era${span} \u2500\u2500`;
+}
+function renderSegmentHeaderLines(input) {
+  const { segment } = input;
+  const tags = formatTags(segment.tags);
+  const head = [
+    `- [E${segment.id}]`,
+    segmentTypeGlyph(input.dominantType),
+    tags,
+    sanitize(segment.title)
+  ].filter((part) => part !== "").join(" ");
+  const lines = [
+    `${head} | ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} | [${segment.status}] | rev ${segment.revision}`
+  ];
+  if (segment.content) {
+    lines.push(`  - desc: ${truncate(segment.content, input.truncate)}`);
+  }
+  const trace = formatPhaseTrace(input.phaseTrace);
+  if (trace !== "") {
+    lines.push(`  - phases: ${trace}`);
+  }
+  if (input.anchorRefs.length > 0) {
+    lines.push(`  - anchors: ${input.anchorRefs.join(", ")}`);
+  }
+  return lines;
 }
 
 // src/mcp/timeline.ts
@@ -18717,7 +20111,7 @@ function cleanPromptForLabel(raw) {
   const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
   return firstLine.replace(/\s+/g, " ").trim();
 }
-function truncateText(text, maxChars) {
+function truncateText2(text, maxChars) {
   if (text.length <= maxChars) {
     return text;
   }
@@ -19353,7 +20747,7 @@ function pulledAntecedentLabel(turn) {
     return turn.title;
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText(prompt, MILESTONE_PULLED_LABEL_CAP);
+  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP);
 }
 function parseContentReferences(content, cap) {
   return parseInlineCitations(content, cap);
@@ -19423,6 +20817,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const windowTurns = sorted.filter(
     (turn) => turn.promptNumber >= window.startPromptNumber && turn.promptNumber <= window.endPromptNumber
   );
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
+  const isEra = (turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch);
+  const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
+  const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
+  const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -19440,10 +20839,10 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
   const milestoneSelection = selectMilestoneTurns({
     session,
-    windowTurns,
+    windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
-    sessionTurns: allTurns,
+    sessionTurns: legacySessionTurns,
     // One read for the whole selection: in-degree, victim demotion and
     // pull-through all consume this map (spec §B). A caller that already read it
     // (settlement) hands its own snapshot in rather than paying for a second.
@@ -19460,6 +20859,9 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     milestoneSelection.overflowByDay
   ) : [];
   const pagedPhases = viewKind === "phases" ? paginateItems(phases, page, pageSize) : emptyPaginatedItems(phases.length, pageSize);
+  const renderSegments = viewKind === "milestones" && eraCutoffEpoch !== null;
+  const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch) : [];
+  const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch) : [];
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
@@ -19490,7 +20892,11 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     tz,
     hasEarlier: milestoneTail ? pagedMilestones.items.length < milestoneSelection.kept.length : false,
     milestoneTail,
-    breadcrumb
+    breadcrumb,
+    eraCutoffEpoch,
+    eraWindowTurns,
+    segmentSpine,
+    orphanAnchors
   };
 }
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
@@ -19707,7 +21113,7 @@ function milestonePromptPrefix(turn) {
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
+  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
 }
 function initialUnitTrim(unit) {
   return {
@@ -19731,7 +21137,7 @@ function renderUnitLines(unit, trim, titleCap) {
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText(milestone.turn.title ?? "(untitled)", titleCap)
+    truncateText2(milestone.turn.title ?? "(untitled)", titleCap)
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -19753,7 +21159,7 @@ function renderUnitLines(unit, trim, titleCap) {
   for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
     const superseded = antecedent.supersededBy.length > 0;
     const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
-    let label = sanitizeTimelineField(truncateText(antecedent.label, titleCap));
+    let label = sanitizeTimelineField(truncateText2(antecedent.label, titleCap));
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
     }
@@ -20267,7 +21673,7 @@ function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titl
   const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
   const promptCore = turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = turn.type === "compact" ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = sanitizeTimelineField(truncateText(promptWithBadges, promptCap));
+  const promptText = sanitizeTimelineField(truncateText2(promptWithBadges, promptCap));
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "\u2A2F " : "";
   const titleText = sanitizeTimelineField(
@@ -20309,13 +21715,13 @@ function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = nul
   }
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, titleCap)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, titleCap)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -20361,7 +21767,7 @@ function renderPhases(view, titleCap) {
     const leadTurn = turnByPrompt.get(phase.startPromptNumber);
     const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, titleCap));
+    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap));
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
     );
@@ -20440,12 +21846,30 @@ function renderLineagePointer(view) {
     `  earlier: recall(id="S${view.session.parentSessionId}")`
   ];
 }
+function withLegacyEraHeader(view, bodyLines, hasSpine) {
+  if (!hasSpine || bodyLines.length === 0) {
+    return bodyLines;
+  }
+  const legacyPrompts = view.windowTurns.filter((turn) => !isSegmentEra(turn.createdAtEpoch, view.eraCutoffEpoch)).map((turn) => turn.promptNumber);
+  const header = legacyEraHeader(
+    legacyPrompts.length > 0 ? Math.min(...legacyPrompts) : null,
+    legacyPrompts.length > 0 ? Math.max(...legacyPrompts) : null
+  );
+  const [first, ...rest] = bodyLines;
+  return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
+    spine: view.segmentSpine,
+    orphans: view.orphanAnchors,
+    titleCap
+  }) : [];
   const assemble = (bodyLines) => [
     ...renderSessionHeader(view),
-    ...bodyLines,
+    ...spineLines,
+    ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
@@ -20459,6 +21883,17 @@ function renderTimeline(view, options = {}) {
   if (options.tokenBudget === void 0) {
     return assemble(renderMilestoneBody(view, titleCap));
   }
+  if (spineLines.length > 0) {
+    shedSpineToBudget({
+      view,
+      titleCap,
+      tokenBudget: options.tokenBudget,
+      apply: (candidate) => {
+        spineLines = candidate;
+      },
+      measure: () => estimateDiaryTokens(assemble([]))
+    });
+  }
   return assemble(
     fitMilestoneBodyToBudget(
       view,
@@ -20469,6 +21904,27 @@ function renderTimeline(view, options = {}) {
     )
   );
 }
+function shedSpineToBudget(options) {
+  const { view, titleCap, tokenBudget, apply, measure } = options;
+  let segments = view.segmentSpine.length;
+  let orphans = view.orphanAnchors.length;
+  while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
+    if (orphans > 0) {
+      orphans -= 1;
+    } else {
+      segments -= 1;
+    }
+    apply(
+      renderSegmentSpineBlock({
+        spine: view.segmentSpine,
+        orphans: view.orphanAnchors,
+        titleCap,
+        maxSegments: segments,
+        maxOrphans: orphans
+      })
+    );
+  }
+}
 function timelineQuery(db, input) {
   try {
     return renderTimeline(buildTimelineView(db, input));
@@ -20476,140 +21932,6 @@ function timelineQuery(db, input) {
     const message = error49 instanceof Error ? error49.message : String(error49);
     return `timeline error: ${message}`;
   }
-}
-
-// src/shared/file-tree.ts
-var import_node_path6 = __toESM(require("node:path"), 1);
-function createFileTreeNode() {
-  return { files: [], dirs: /* @__PURE__ */ new Map() };
-}
-function commonPathPrefix(paths) {
-  if (paths.length === 0) {
-    return "";
-  }
-  if (paths.length === 1) {
-    return paths[0] ?? "";
-  }
-  const allAbsolute = paths.every((value) => value.startsWith("/"));
-  const splitPaths = paths.map((value) => value.split("/").filter(Boolean));
-  const common = [];
-  const limit = Math.min(...splitPaths.map((segments) => segments.length));
-  for (let index = 0; index < limit; index += 1) {
-    const segment = splitPaths[0]?.[index];
-    if (!segment || splitPaths.some((segments) => segments[index] !== segment)) {
-      break;
-    }
-    common.push(segment);
-  }
-  if (common.length === 0) {
-    return allAbsolute ? "/" : ".";
-  }
-  const joined = common.join("/");
-  return allAbsolute ? `/${joined}` : joined;
-}
-function renderTreeNode(name, node, indent) {
-  if (node.files.length === 1 && node.dirs.size === 0) {
-    return [`${indent}${name}/${node.files[0]}`];
-  }
-  if (node.files.length === 0 && node.dirs.size > 0) {
-    const childEntries = [...node.dirs.entries()].sort(
-      ([left], [right]) => left.localeCompare(right)
-    );
-    return childEntries.flatMap(
-      ([childName, childNode]) => renderTreeNode(`${name}/${childName}`, childNode, indent)
-    );
-  }
-  const lines = [`${indent}${name}/`];
-  for (const file2 of [...node.files].sort((left, right) => left.localeCompare(right))) {
-    lines.push(`${indent}  ${file2}`);
-  }
-  for (const [childName, childNode] of [...node.dirs.entries()].sort(
-    ([left], [right]) => left.localeCompare(right)
-  )) {
-    lines.push(...renderTreeNode(childName, childNode, `${indent}  `));
-  }
-  return lines;
-}
-function isFileLine(line, index) {
-  return index > 0 && !line.endsWith("/");
-}
-function capRenderedTree(lines, totalFiles, maxChars) {
-  const suffixBudget = `
-  ...(+${totalFiles} more files)`.length;
-  const lineBudget = Math.max(0, maxChars - suffixBudget);
-  const kept = [];
-  let keptFiles = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const candidate = kept.length === 0 ? line : `${kept.join("\n")}
-${line}`;
-    if (candidate.length > lineBudget) {
-      break;
-    }
-    kept.push(line);
-    if (isFileLine(line, index)) {
-      keptFiles += 1;
-    }
-  }
-  const omitted = totalFiles - keptFiles;
-  if (omitted <= 0) {
-    return lines.join("\n");
-  }
-  return `${kept.join("\n")}
-  ...(+${omitted} more files)`;
-}
-function renderFileTree(paths, opts) {
-  const uniquePaths = [...new Set(paths.filter((value) => value.trim() !== ""))].sort(
-    (left, right) => left.localeCompare(right)
-  );
-  if (uniquePaths.length === 0) {
-    return "(none)";
-  }
-  if (uniquePaths.length === 1) {
-    const only = uniquePaths[0] ?? "(none)";
-    if (opts?.maxChars !== void 0 && only.length > opts.maxChars) {
-      const marker = "...";
-      return `${only.slice(0, Math.max(0, opts.maxChars - marker.length))}${marker}`;
-    }
-    return only;
-  }
-  const root2 = commonPathPrefix(uniquePaths);
-  const tree = createFileTreeNode();
-  for (const value of uniquePaths) {
-    const relative4 = import_node_path6.default.posix.relative(root2, value);
-    if (!relative4 || relative4 === "") {
-      continue;
-    }
-    const segments = relative4.split("/").filter(Boolean);
-    if (segments.length === 0) {
-      continue;
-    }
-    let node = tree;
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const segment = segments[index];
-      let next = node.dirs.get(segment);
-      if (!next) {
-        next = createFileTreeNode();
-        node.dirs.set(segment, next);
-      }
-      node = next;
-    }
-    node.files.push(segments[segments.length - 1]);
-  }
-  const lines = [root2];
-  for (const file2 of [...tree.files].sort((left, right) => left.localeCompare(right))) {
-    lines.push(file2);
-  }
-  for (const [childName, childNode] of [...tree.dirs.entries()].sort(
-    ([left], [right]) => left.localeCompare(right)
-  )) {
-    lines.push(...renderTreeNode(childName, childNode, ""));
-  }
-  const rendered = lines.join("\n");
-  if (opts?.maxChars !== void 0 && rendered.length > opts.maxChars) {
-    return capRenderedTree(lines, uniquePaths.length, opts.maxChars);
-  }
-  return rendered;
 }
 
 // src/worker/processors.ts
@@ -21457,41 +22779,6 @@ function applySettlementBatchLocked(db, job, items, signals, nowEpoch) {
     );
     return summary;
   });
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "noted", null, nowEpoch);
-}
-function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-       SET status = 'skipped', reason = 'closed',
-           closed_at_epoch = ?, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'pending'`
-  ).run(nowEpoch, nowEpoch, sessionId).changes;
 }
 
 // src/db/note-settlement.ts
@@ -43678,500 +44965,6 @@ function getRidePromptNumber(db, turnId) {
   ).get(turnId)?.promptNumber ?? null;
 }
 
-// src/mcp/format.ts
-var FIELD_TRUNCATION_SUFFIX = "...";
-var DEFAULT_TRUNCATE = 200;
-var MAX_TRUNCATE = 2e3;
-var DEFAULT_PREVIEW_COUNT = 5;
-function formatEpoch(epoch) {
-  const date6 = new Date(epoch * 1e3);
-  const year = date6.getUTCFullYear();
-  const month = String(date6.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(date6.getUTCDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-function normalizeCount(value) {
-  if (!value || value < 0) {
-    return 0;
-  }
-  return value;
-}
-function formatStats(parts) {
-  return parts.join(" ");
-}
-function formatSessionStats(session) {
-  const parts = [];
-  const turnCount = normalizeCount(session.turnCount ?? session.turns?.length);
-  const observationCount = normalizeCount(
-    session.observationCount ?? session.turns?.reduce(
-      (sum, turn) => sum + normalizeCount(turn.observationCount),
-      0
-    )
-  );
-  if (turnCount > 0) {
-    parts.push(`\u{1F4AC}${turnCount}`);
-  }
-  if (observationCount > 0) {
-    parts.push(`\u{1F4A1}${observationCount}`);
-  }
-  return formatStats(parts);
-}
-function formatTurnStats(turn) {
-  const parts = [];
-  const observationCount = normalizeCount(
-    turn.observationCount ?? turn.observations?.length
-  );
-  const filesReadCount = normalizeCount(
-    turn.filesReadCount ?? turn.filesRead?.length
-  );
-  const filesModifiedCount = normalizeCount(
-    turn.filesModifiedCount ?? turn.filesModified?.length
-  );
-  const toolCallCount = normalizeCount(turn.toolCallCount);
-  if (observationCount > 0) {
-    parts.push(`\u{1F4A1}${observationCount}`);
-  }
-  if (filesReadCount > 0) {
-    parts.push(`\u{1F4D6}${filesReadCount}`);
-  }
-  if (filesModifiedCount > 0) {
-    parts.push(`\u270F\uFE0F${filesModifiedCount}`);
-  }
-  if (toolCallCount > 0) {
-    parts.push(`\u{1F527}${toolCallCount}`);
-  }
-  return formatStats(parts);
-}
-function pushBullets(lines, indent, values) {
-  for (const value of values) {
-    lines.push(`${indent}- ${value}`);
-  }
-}
-function splitBulletField(value) {
-  if (!value) {
-    return [];
-  }
-  return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
-}
-function truncateText2(text, {
-  limit,
-  mode = "legacy",
-  hintId
-}) {
-  const boundedLimit = Math.max(limit, 1);
-  if (text.length <= boundedLimit) {
-    return text;
-  }
-  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`;
-}
-function truncateFileTree(tree, {
-  limit,
-  mode = "legacy",
-  hintId
-}) {
-  const boundedLimit = Math.max(limit, 1);
-  const lines = tree.split("\n");
-  const kept = [];
-  let used = 0;
-  for (const line of lines) {
-    const nextUsed = used + line.length + 1;
-    if (kept.length > 0 && nextUsed > boundedLimit) {
-      break;
-    }
-    kept.push(line);
-    used = nextUsed;
-  }
-  const omitted = lines.length - kept.length;
-  if (omitted <= 0) {
-    return kept;
-  }
-  return [
-    ...kept,
-    `... +${omitted} lines${mode === "unified" && hintId ? ` [use mnemo-replay skill \u2192 read ${hintId} for full content]` : ""}`
-  ];
-}
-function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
-}
-function buildSessionHintId(sessionId) {
-  return `S${sessionId}`;
-}
-function buildTurnHintId(sessionId, promptNumber) {
-  return sessionId === void 0 ? void 0 : `S${sessionId}/T${promptNumber}`;
-}
-function buildObservationHintId(observationId, sessionId, turnPromptNumber) {
-  if (sessionId === void 0 || turnPromptNumber === void 0) {
-    return void 0;
-  }
-  return `S${sessionId}/T${turnPromptNumber}/O${observationId}`;
-}
-function formatStatus(status) {
-  return status ? ` [${status}]` : "";
-}
-function extractKeyParam(name, input) {
-  if (!input || typeof input !== "object") {
-    return null;
-  }
-  const record3 = input;
-  const valueForKey = (...keys) => {
-    for (const key of keys) {
-      const value = record3[key];
-      if (typeof value === "string" && value.trim() !== "") {
-        return value;
-      }
-    }
-    return null;
-  };
-  switch (name) {
-    case "Edit":
-    case "Read":
-    case "Write":
-    case "Glob":
-      return valueForKey("file_path", "path");
-    case "Bash":
-      return valueForKey("command");
-    case "Grep": {
-      const pattern = valueForKey("pattern");
-      const path2 = valueForKey("path");
-      if (pattern && path2) {
-        return `${pattern} ${path2}`;
-      }
-      return pattern ?? path2;
-    }
-    case "Agent":
-      return valueForKey("description");
-    default:
-      for (const value of Object.values(record3)) {
-        if (typeof value === "string" && value.trim() !== "") {
-          return value;
-        }
-      }
-      return null;
-  }
-}
-function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const stats = formatSessionStats(session);
-  const statsSegment = stats ? ` | ${stats}` : "";
-  const lines = [
-    `- [S${session.id}] ${session.title ?? "Untitled"}${statsSegment} | ${formatEpoch(session.createdAtEpoch)} | ${session.project}`
-  ];
-  if (session.content) {
-    lines.push(
-      `  - desc: ${truncateText2(session.content, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id)
-      })}`
-    );
-  }
-  return lines.join("\n");
-}
-function formatSessionExpandedWithMode(session, mode, truncate, truncateCap) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
-  const hintId = buildSessionHintId(session.id);
-  const pushField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    lines.push(`  - ${label}: ${truncateText2(value, { limit, mode, hintId })}`);
-  };
-  const pushBulletField = (label, value) => {
-    if (!value) {
-      return;
-    }
-    const items = splitBulletField(
-      truncateText2(value, { limit, mode, hintId })
-    );
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  - ${label}:`);
-    pushBullets(lines, "    ", items);
-  };
-  if (session.jsonlPath) {
-    lines.push(`  raw: ${session.jsonlPath}`);
-  }
-  if (session.decision) {
-    pushBulletField("decision", session.decision);
-  } else if (session.insight && session.insight.length > 0) {
-    lines.push("  - insight:");
-    pushBullets(
-      lines,
-      "    ",
-      session.insight.map((line) => truncateText2(line, { limit, mode, hintId }))
-    );
-  }
-  pushBulletField("done", session.done);
-  pushField("current", session.current);
-  pushField("next", session.nextSteps);
-  pushBulletField("reference", session.reference);
-  return lines.join("\n");
-}
-function formatTurnLabel(turn, {
-  indent = "  ",
-  sessionId,
-  mode = "legacy",
-  depth = "collapsed",
-  truncate,
-  truncateCap,
-  includeDbTurnIds = false
-} = {}) {
-  const turnId = turn.transcriptLineStart === null ? `T${turn.promptNumber}` : `T${turn.promptNumber}:L${turn.transcriptLineStart}`;
-  const prefix = sessionId === void 0 ? `${indent}- [${turnId}]` : `${indent}- [S${sessionId}][${turnId}]`;
-  const stats = formatTurnStats(turn);
-  const statsSegment = stats ? ` | ${stats}` : "";
-  const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const hintId = buildTurnHintId(sessionId, turn.promptNumber);
-  const title = turn.title === null && turn.promptPreview ? `"${truncateText2(turn.promptPreview, {
-    limit,
-    mode,
-    hintId
-  })}"` : truncateText2(rawTitle, {
-    limit,
-    mode,
-    hintId
-  });
-  const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
-  return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
-}
-function formatTurnCollapsedWithMode(turn, options = {}) {
-  const { indent = "  ", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [
-    formatTurnLabel(turn, {
-      ...options,
-      mode,
-      depth: "collapsed"
-    })
-  ];
-  if (turn.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText2(turn.content, {
-        limit,
-        mode,
-        hintId: buildTurnHintId(options.sessionId, turn.promptNumber)
-      })}`
-    );
-  }
-  return lines.join("\n");
-}
-function formatToolCallLabel(toolCall, { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap } = {}) {
-  const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
-  const suffix = keyParam ? ` ${truncateText2(keyParam, { limit, mode })}` : "";
-  return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
-}
-function formatToolCallCollapsedWithMode(toolCall, options = {}) {
-  return formatToolCallLabel(toolCall, {
-    ...options,
-    mode: options.mode,
-    depth: "collapsed"
-  });
-}
-function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
-  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
-  const detailIndent = `${indent}  `;
-  const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
-  const lines = [
-    formatToolCallLabel(toolCall, {
-      ...options,
-      mode,
-      depth: "expanded",
-      truncate
-    })
-  ];
-  if (toolCall.input !== void 0) {
-    lines.push(
-      `${detailIndent}- in: ${truncateText2(JSON.stringify(toolCall.input), {
-        limit,
-        mode,
-        hintId
-      })}`
-    );
-  }
-  if (toolCall.result) {
-    lines.push(
-      `${detailIndent}- out: ${truncateText2(toolCall.result, {
-        limit,
-        mode,
-        hintId
-      })}`
-    );
-  }
-  return lines.join("\n");
-}
-function renderTurnChildren(turn, depth, options = {}) {
-  if (depth === "collapsed") {
-    return "";
-  }
-  const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
-  const childIndent = `${indent}  `;
-  const childLines = [];
-  if (turn.observations && turn.observations.length > 0) {
-    for (const observation of turn.observations.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatObservationExpandedWithMode(observation, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate
-        })
-      );
-    }
-    if (turn.observations.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.observations.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-    return childLines.join("\n");
-  }
-  if (turn.toolCalls && turn.toolCalls.length > 0) {
-    for (const toolCall of turn.toolCalls.slice(0, DEFAULT_PREVIEW_COUNT)) {
-      childLines.push(
-        formatToolCallExpandedWithMode(toolCall, {
-          indent: childIndent,
-          sessionId,
-          turnPromptNumber: turn.promptNumber,
-          mode,
-          depth: "expanded",
-          truncate
-        })
-      );
-    }
-    if (turn.toolCalls.length > DEFAULT_PREVIEW_COUNT) {
-      childLines.push(`${childIndent}+${turn.toolCalls.length - DEFAULT_PREVIEW_COUNT} more`);
-    }
-  }
-  return childLines.join("\n");
-}
-function formatTurnExpandedWithMode(turn, options = {}) {
-  const {
-    indent = "  ",
-    mode = "legacy",
-    depth = "expanded",
-    includeChildren = mode === "unified"
-  } = options;
-  const detailIndent = `${indent}  `;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
-  const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
-  if (turn.promptPreview) {
-    lines.push(
-      `${detailIndent}- prompt: "${truncateText2(
-        turn.promptPreview,
-        {
-          limit,
-          mode,
-          hintId
-        }
-      )}"`
-    );
-  }
-  if (turn.responsePreview) {
-    lines.push(
-      `${detailIndent}- response: "${truncateText2(
-        turn.responsePreview,
-        {
-          limit,
-          mode,
-          hintId
-        }
-      )}"`
-    );
-  }
-  if (turn.insight && turn.insight.length > 0) {
-    lines.push(`${detailIndent}- insight:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      turn.insight.map(
-        (line) => truncateText2(line, {
-          limit,
-          mode,
-          hintId
-        })
-      )
-    );
-  }
-  if (mode === "unified" && turn.filesRead && turn.filesRead.length > 0) {
-    lines.push(`${detailIndent}- files_read:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesRead), {
-        limit,
-        mode,
-        hintId
-      })
-    );
-  }
-  if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
-    lines.push(`${detailIndent}- files_modified:`);
-    pushBullets(
-      lines,
-      `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesModified), {
-        limit,
-        mode,
-        hintId
-      })
-    );
-  }
-  const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
-  if (childBlock) {
-    lines.push(childBlock);
-  }
-  return lines.join("\n");
-}
-function formatObservationLabel(observation, { indent = "" } = {}) {
-  return `${indent}- [O${observation.id}] ${observation.title}`;
-}
-function formatObservationCollapsedWithMode(observation, options = {}) {
-  const { indent = "", mode = "legacy" } = options;
-  const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatObservationLabel(observation, options)];
-  if (observation.content) {
-    lines.push(
-      `${indent}  - desc: ${truncateText2(
-        observation.content,
-        {
-          limit,
-          mode,
-          hintId: buildObservationHintId(
-            observation.id,
-            options.sessionId,
-            options.turnPromptNumber
-          )
-        }
-      )}`
-    );
-  }
-  return lines.join("\n");
-}
-function formatObservationExpandedWithMode(observation, options = {}) {
-  const mode = options.mode ?? "legacy";
-  const lines = [formatObservationCollapsedWithMode(observation, { ...options, mode })];
-  return lines.join("\n");
-}
-function renderNode(node, options) {
-  const mode = options.mode ?? "unified";
-  const effectiveOptions = options;
-  switch (node.type) {
-    case "session":
-      return effectiveOptions.depth === "collapsed" ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap) : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
-    case "turn":
-      return effectiveOptions.depth === "collapsed" ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatTurnExpandedWithMode(node.value, { ...effectiveOptions, mode });
-    case "observation":
-      return effectiveOptions.depth === "collapsed" ? formatObservationCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatObservationExpandedWithMode(node.value, { ...effectiveOptions, mode });
-    case "toolCall":
-      return effectiveOptions.depth === "collapsed" ? formatToolCallCollapsedWithMode(node.value, { ...effectiveOptions, mode }) : formatToolCallExpandedWithMode(node.value, { ...effectiveOptions, mode });
-  }
-}
-
 // src/mcp/selectors.ts
 function expandNumericSelector(value) {
   if (value === "*") {
@@ -44324,6 +45117,14 @@ function parseRoutedId(value) {
       observationId: Number(observationMatch[1])
     };
   }
+  const segmentMatch = /^E(\*|\d+|\d+\.\.\d+)$/i.exec(trimmed);
+  if (segmentMatch) {
+    const segmentIds = expandNumericSelector(segmentMatch[1]);
+    if (segmentIds === null) {
+      return null;
+    }
+    return { kind: "segments", segmentIds };
+  }
   const turnByIdMatch = /^T(\d+)$/i.exec(trimmed);
   if (turnByIdMatch) {
     return {
@@ -44395,9 +45196,9 @@ function parseQueryFilters(query2) {
   }
   return filters;
 }
-function buildSessionView(db, session) {
+function buildSessionView(db, session, eraCutoffEpoch = null) {
   const turns = getTurnsForSession(db, session.id).map(
-    (turn) => buildTurnView(db, turn)
+    (turn) => buildTurnView(db, turn, eraCutoffEpoch)
   );
   return {
     id: session.id,
@@ -44439,7 +45240,7 @@ function buildSessionSummary(db, sessionId) {
     jsonlPath: void 0
   };
 }
-function buildTurnView(db, turn) {
+function buildTurnView(db, turn, eraCutoffEpoch = null) {
   const observations = getExtractableObservationsForTurn(db, turn.id);
   return {
     id: turn.id,
@@ -44457,11 +45258,9 @@ function buildTurnView(db, turn) {
     insight: splitInsight(turn.insight),
     filesRead: turn.filesRead,
     filesModified: turn.filesModified,
-    observations: observations.map((observation) => ({
-      id: observation.id,
-      title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-      content: observation.content
-    }))
+    observations: observations.map(
+      (observation) => buildObservationView(observation, eraCutoffEpoch)
+    )
   };
 }
 function previewItems(items, size = 5) {
@@ -44504,8 +45303,8 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds, truncateCap) {
-  const view = depth === "expanded" ? buildSessionView(db, session) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session);
+function renderSession(db, session, depth, truncate2, turnSelector, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const view = depth === "expanded" ? buildSessionView(db, session, eraCutoffEpoch) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
     renderNode(
@@ -44513,7 +45312,7 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
       {
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
-        truncate,
+        truncate: truncate2,
         includeDbTurnIds,
         truncateCap
       }
@@ -44530,14 +45329,14 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
   );
   const preview = previewItems(turns, CHILD_PREVIEW_SIZE);
   for (const item of preview.items) {
-    const turnView = buildTurnView(db, item);
+    const turnView = buildTurnView(db, item, eraCutoffEpoch);
     const turnLines = renderNode(
       { type: "turn", value: turnView },
       {
         depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
-        truncate,
+        truncate: truncate2,
         includeDbTurnIds,
         truncateCap
       }
@@ -44549,7 +45348,7 @@ function renderSession(db, session, depth, truncate, turnSelector, includeDbTurn
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -44568,12 +45367,12 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     );
     const sessionTurns = grouped.get(session.id) ?? [];
     for (const item of sessionTurns) {
-      const turnView = buildTurnView(db, item);
+      const turnView = buildTurnView(db, item, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -44581,7 +45380,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
             depth,
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -44591,7 +45390,7 @@ function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateC
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds, truncateCap) {
+function renderObservationScope(db, observations, depth, includeParents, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -44608,18 +45407,14 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       if (!observation) {
         continue;
       }
-      const observationView = {
-        id: observation.id,
-        title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-        content: observation.content
-      };
+      const observationView = buildObservationView(observation, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "observation", value: observationView },
           {
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
-            truncate,
+            truncate: truncate2,
             truncateCap
           }
         )
@@ -44638,7 +45433,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
@@ -44646,7 +45441,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
       (turn) => turnMap.has(turn.id)
     );
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       lines.push(
         renderNode(
           { type: "turn", value: turnView },
@@ -44654,7 +45449,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -44667,11 +45462,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
         if (!observation) {
           continue;
         }
-        const observationView = {
-          id: observation.id,
-          title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
-          content: observation.content
-        };
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -44681,7 +45472,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
+              truncate: truncate2,
               truncateCap
             }
           )
@@ -44691,32 +45482,144 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
   }
   return lines.join("\n");
 }
-function buildObservationView(observation) {
-  return {
+function buildObservationView(observation, eraCutoffEpoch = null) {
+  const view = {
     id: observation.id,
     title: observation.title ?? observation.toolName ?? `Observation ${observation.id}`,
     content: observation.content
   };
+  if (isSegmentEra(observation.createdAtEpoch, eraCutoffEpoch)) {
+    view.toolName = observation.toolName;
+    view.toolInput = observation.toolInput;
+    view.toolResult = observation.toolResult;
+  }
+  return view;
 }
-function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderSessionDetail(db, sessionId, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const session = getSession(db, sessionId);
-  return session ? renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap) : "Session not found.";
+  return session ? renderSession(
+    db,
+    session,
+    depth,
+    truncate2,
+    void 0,
+    includeDbTurnIds,
+    truncateCap,
+    eraCutoffEpoch
+  ) : "Session not found.";
 }
-function renderObservationDetail(db, observationId, depth, truncate, truncateCap) {
+function renderObservationDetail(db, observationId, depth, truncate2, truncateCap, eraCutoffEpoch = null) {
   const observation = getObservation(db, observationId);
   if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
   }
-  const view = buildObservationView(observation);
+  const view = buildObservationView(observation, eraCutoffEpoch);
   return renderNode(
     { type: "observation", value: view },
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
-      truncate,
+      truncate: truncate2,
       truncateCap
     }
   );
+}
+function buildSegmentFacts(db, segment) {
+  const members = rankSegmentMembers(db, segment.id);
+  const chronological = [...members].sort((left, right) => {
+    if (left.createdAtEpoch !== right.createdAtEpoch) {
+      return left.createdAtEpoch - right.createdAtEpoch;
+    }
+    return left.turnId - right.turnId;
+  });
+  const dominantType = deriveDominantType(
+    chronological.map((member) => member.type),
+    segment.type
+  );
+  const phaseTrace = [];
+  for (const member of chronological) {
+    if (member.type && phaseTrace[phaseTrace.length - 1] !== member.type) {
+      phaseTrace.push(member.type);
+    }
+  }
+  const byTurnId = new Map(members.map((member) => [member.turnId, member]));
+  const anchorRefs = resolveSegmentAnchorTurnIds(db, segment).map((turnId) => byTurnId.get(turnId)).filter((member) => member !== void 0).map((member) => `S${member.sessionId}/T${member.promptNumber}`);
+  return {
+    memberCount: members.length,
+    dominantType,
+    phaseTrace,
+    anchorRefs,
+    members
+  };
+}
+function renderSegmentSummary(db, segmentId, truncate2) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return null;
+  }
+  const facts = buildSegmentFacts(db, segment);
+  return renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate2 ?? DEFAULT_TRUNCATE
+  }).join("\n");
+}
+function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const segment = getSegment(db, segmentId);
+  if (!segment) {
+    return "Segment not found.";
+  }
+  const facts = buildSegmentFacts(db, segment);
+  const lines = renderSegmentHeaderLines({
+    segment,
+    memberCount: facts.memberCount,
+    dominantType: facts.dominantType,
+    phaseTrace: facts.phaseTrace,
+    anchorRefs: facts.anchorRefs,
+    truncate: truncate2 ?? DEFAULT_TRUNCATE
+  });
+  const shown = facts.members.slice(0, Math.max(0, pageSize));
+  if (facts.members.length > 0) {
+    lines.push(
+      `  - members (anchors first, then derived rank): ${shown.length}/${facts.members.length}`
+    );
+  }
+  for (const member of shown) {
+    const turn = getTurnById(db, member.turnId);
+    if (!turn) {
+      continue;
+    }
+    const rendered = renderNode(
+      { type: "turn", value: buildTurnView(db, turn, eraCutoffEpoch) },
+      {
+        depth,
+        mode: "unified",
+        sessionId: member.sessionId,
+        truncate: truncate2,
+        includeDbTurnIds,
+        truncateCap
+      }
+    );
+    lines.push(
+      member.anchorPosition === null || !rendered.startsWith("  - ") ? rendered : `  \u2693${member.anchorPosition} ${rendered.slice(4)}`
+    );
+  }
+  if (facts.members.length > shown.length) {
+    lines.push(`  +${facts.members.length - shown.length} more`);
+  }
+  return lines.join("\n");
+}
+function listSegmentIds(db, segmentIds) {
+  if (segmentIds && segmentIds.length === 1) {
+    return segmentIds;
+  }
+  if (segmentIds && segmentIds.length > 0) {
+    return segmentIds.filter((segmentId) => getSegment(db, segmentId) !== null);
+  }
+  return db.query("SELECT id FROM segments ORDER BY id DESC").all().map((row) => row.id);
 }
 function listSessionIds(db, sessionIds, after, before) {
   const sessions = sessionIds && sessionIds.length > 0 ? sessionIds.map((sessionId) => getSession(db, sessionId)).filter(
@@ -44746,10 +45649,14 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds, truncateCap) {
+function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
+  const segmentLines = results.filter((result) => result.layer === "segment").map((result) => renderSegmentSummary(db, result.sourceId, truncate2)).filter((line) => line !== null);
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
   for (const result of results) {
+    if (result.layer === "segment" || result.sessionId === null) {
+      continue;
+    }
     const sessionId = result.sessionId;
     let group = sessionGroups.get(sessionId);
     if (!group) {
@@ -44781,22 +45688,31 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
       return "";
     }
     if (group.sessionHit && group.turnIds.size === 0) {
-      return renderSession(db, session, depth, truncate, void 0, includeDbTurnIds, truncateCap);
+      return renderSession(
+        db,
+        session,
+        depth,
+        truncate2,
+        void 0,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      );
     }
     const lines = [
       renderNode(
         {
           type: "session",
-          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session)
+          value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch)
         },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap }
+        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap }
       )
     ];
     const turns = getTurnsForSession(db, session.id).filter(
       (turn) => group.turnIds.has(turn.id) || group.observationIdsByTurnId.has(turn.id)
     );
     for (const turn of turns) {
-      const turnView = buildTurnView(db, turn);
+      const turnView = buildTurnView(db, turn, eraCutoffEpoch);
       const turnDepth = group.observationIdsByTurnId.has(turn.id) && !group.turnIds.has(turn.id) ? "collapsed" : depth;
       lines.push(
         renderNode(
@@ -44805,7 +45721,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
-            truncate,
+            truncate: truncate2,
             includeDbTurnIds,
             truncateCap
           }
@@ -44817,7 +45733,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
         if (!observation) {
           continue;
         }
-        const observationView = buildObservationView(observation);
+        const observationView = buildObservationView(observation, eraCutoffEpoch);
         lines.push(
           renderNode(
             { type: "observation", value: observationView },
@@ -44827,7 +45743,7 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate,
+              truncate: truncate2,
               truncateCap
             }
           )
@@ -44836,9 +45752,9 @@ function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnI
     }
     return lines.join("\n");
   });
-  return sessionLines.filter(Boolean).join("\n");
+  return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   if (routed.kind === "sessions") {
     const paged = paginateItems2(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -44848,7 +45764,38 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
       paged.items.map(
-        (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
+        (sessionId) => renderSessionDetail(
+          db,
+          sessionId,
+          depth,
+          truncate2,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch
+        )
+      ).join("\n"),
+      paged.pageCount
+    );
+  }
+  if (routed.kind === "segments") {
+    const paged = paginateItems2(
+      listSegmentIds(db, routed.segmentIds),
+      page,
+      pageSize
+    );
+    return joinPage(
+      formatPageHeader(page, paged.pageCount, paged.total),
+      paged.items.map(
+        (segmentId) => renderSegmentDetail(
+          db,
+          segmentId,
+          depth,
+          pageSize,
+          truncate2,
+          includeDbTurnIds,
+          truncateCap,
+          eraCutoffEpoch
+        )
       ).join("\n"),
       paged.pageCount
     );
@@ -44866,13 +45813,29 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems2(turns, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderTurnScope(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderTurnScope(
+        db,
+        paged.items,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
   if (routed.kind === "turn-by-id") {
     const turn = getTurnById(db, routed.turnId);
-    return turn ? renderTurnScope(db, [turn], depth, truncate, includeDbTurnIds, truncateCap) : "Turn not found.";
+    return turn ? renderTurnScope(
+      db,
+      [turn],
+      depth,
+      truncate2,
+      includeDbTurnIds,
+      truncateCap,
+      eraCutoffEpoch
+    ) : "Turn not found.";
   }
   if (routed.kind === "observation-list") {
     const turn = getTurn(db, routed.sessionId, routed.promptNumber);
@@ -44895,7 +45858,16 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems2(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
@@ -44918,17 +45890,33 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, befo
     const paged = paginateItems2(observations, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderObservationScope(db, paged.items, depth, true, truncate, includeDbTurnIds, truncateCap),
+      renderObservationScope(
+        db,
+        paged.items,
+        depth,
+        true,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
   if (routed.kind === "observation") {
-    return renderObservationDetail(db, routed.observationId, depth, truncate, truncateCap);
+    return renderObservationDetail(
+      db,
+      routed.observationId,
+      depth,
+      truncate2,
+      truncateCap,
+      eraCutoffEpoch
+    );
   }
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap) {
+function renderSessionList(db, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null) {
   const paged = paginateItems2(
     listSessionIds(db, void 0, after, before),
     page,
@@ -44937,7 +45925,15 @@ function renderSessionList(db, depth, page, pageSize, truncate, after, before, i
   return joinPage(
     formatPageHeader(page, paged.pageCount, paged.total),
     paged.items.map(
-      (sessionId) => renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap)
+      (sessionId) => renderSessionDetail(
+        db,
+        sessionId,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      )
     ).join("\n"),
     paged.pageCount
   );
@@ -44952,15 +45948,19 @@ function searchQueryResults(db, filters, after, before) {
     sessionId: filters.session,
     after,
     before
-  }).filter((r) => r.sessionId !== null);
+    // A segment is not bound to a session (spec D6), so it legitimately carries
+    // a null `sessionId`; only session-layer rows that lost their session are
+    // dropped here.
+  }).filter((r) => r.layer === "segment" || r.sessionId !== null);
 }
 function recallMemory(db, input) {
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
-  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
+  const truncate2 = input.truncate ?? DEFAULT_TRUNCATE;
   const truncateCap = input.truncateCap;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const timeRange = resolveTimeRange(input.time);
   if (timeRange.error) {
     return formatParameterError(timeRange.error);
@@ -44976,11 +45976,12 @@ function recallMemory(db, input) {
       depth,
       page,
       pageSize,
-      truncate,
+      truncate2,
       timeRange.after,
       timeRange.before,
       includeDbTurnIds,
-      truncateCap
+      truncateCap,
+      eraCutoffEpoch
     );
   }
   if (input.query) {
@@ -45000,7 +46001,15 @@ function recallMemory(db, input) {
     const paged = paginateItems2(results, page, pageSize);
     return joinPage(
       formatPageHeader(page, paged.pageCount, paged.total),
-      renderGroupedSearchResults(db, paged.items, depth, truncate, includeDbTurnIds, truncateCap),
+      renderGroupedSearchResults(
+        db,
+        paged.items,
+        depth,
+        truncate2,
+        includeDbTurnIds,
+        truncateCap,
+        eraCutoffEpoch
+      ),
       paged.pageCount
     );
   }
@@ -45009,11 +46018,12 @@ function recallMemory(db, input) {
     depth,
     page,
     pageSize,
-    truncate,
+    truncate2,
     timeRange.after,
     timeRange.before,
     includeDbTurnIds,
-    truncateCap
+    truncateCap,
+    eraCutoffEpoch
   );
 }
 
@@ -45720,6 +46730,13 @@ function rememberTool(db, rawInput) {
 }
 
 // src/mcp/handlers.ts
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {
@@ -45752,6 +46769,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
+  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveConfiguredEraCutoff();
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -45779,12 +46797,16 @@ function createDatabaseBackedHandlers(database, options = {}) {
         pageSize: args.pageSize,
         truncate: args.truncate,
         includeDbTurnIds,
-        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0
+        truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0,
+        eraCutoffEpoch
       })
     ),
     remember: (args) => rememberTool(database, args),
     timeline: (args) => workerTextResult(
-      timelineQuery(database, toTimelineQueryInput(args))
+      timelineQuery(database, {
+        ...toTimelineQueryInput(args),
+        eraCutoffEpoch
+      })
     ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to
