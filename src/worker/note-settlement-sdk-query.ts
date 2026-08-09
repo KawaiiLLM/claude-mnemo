@@ -77,7 +77,7 @@ export function createNoteSettlementSdkQuery(
 
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.9.1",
+      version: "0.9.2",
       tools: [
         toolImpl(
           "recall",
