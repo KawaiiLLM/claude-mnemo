@@ -191,7 +191,7 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
       [
         "mnemo pending notes:",
         `  [S${sessionId}/T1] "下一turn无工具,但是可以等到后面的批次再补写" (pending 1 turn)`,
-        `Append note(turn:"S${sessionId}/T1", ...) at the end of the next tool batch this turn opens; skip if this turn needs no tools.`,
+        `Append note(turn:"S${sessionId}/T1", ...) at the end of the next tool batch this turn opens; if this turn opens none, leave it for backlog relief.`,
       ].join("\n"),
     );
     // No <system-reminder> wrapper: Claude Code adds one around every
@@ -319,7 +319,7 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     expect(result.hookSpecificOutput).toContain(`[S${sessionId}/T2]`);
     // Two left, not three: the ladder counts the open backlog, and the declined
     // turn is no longer part of it.
-    expect(result.hookSpecificOutput).not.toContain("no longer authorized");
+    expect(result.hookSpecificOutput).not.toContain("is not authorized");
   });
 
   test("a rolled-back turn is announced once, and closes in the same flow", async () => {
@@ -506,7 +506,7 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     );
   });
 
-  test("shows the oldest five and withdraws the skip authorisation from three", async () => {
+  test("shows the oldest five and withdraws the deferral authorisation from three", async () => {
     for (let promptNumber = 1; promptNumber <= 7; promptNumber += 1) {
       addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);
     }
@@ -521,9 +521,15 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     expect(result.hookSpecificOutput).not.toContain(`[S${sessionId}/T6]`);
     expect(lines.at(-1)).toBe(
       "Write these notes at the end of the next tool batch this turn opens;" +
-        " skipping is no longer authorized — but never open a batch just to" +
-        " write them.",
+        " deferring them again is not authorized — but never open a batch just" +
+        " to write them. A turn you cannot write honestly is closed with" +
+        " skip:true, which is not a deferral.",
     );
+    // 裁决 24 survives the ladder: escalation withdraws permission to say
+    // nothing, never the honest refusal — and the word "skip" is left to the
+    // tool call that performs it (ticket 12).
+    expect(result.hookSpecificOutput).toContain("skip:true");
+    expect(result.hookSpecificOutput).not.toContain("skipping");
     // Only what was rendered counts as exposed — P2's citation check reads this
     // ledger as "ids the writer was shown", not "ids that existed".
     expect(exposureRows().map((row) => row.exposedTurnId)).toHaveLength(5);
@@ -531,9 +537,9 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
 
   test("the escalation ladder counts the whole backlog, not just the new lines", async () => {
     // Five debts, the first three already asked for. Only two lines are left to
-    // write, but the backlog is still five deep, so the skip authorisation stays
-    // withdrawn — filtering the count as well as the list would have made a deep
-    // backlog read as routine the moment its lines had been shown once.
+    // write, but the backlog is still five deep, so the deferral authorisation
+    // stays withdrawn — filtering the count as well as the list would have made
+    // a deep backlog read as routine the moment its lines had been shown once.
     for (let promptNumber = 1; promptNumber <= 3; promptNumber += 1) {
       addWorkingTurn(promptNumber);
     }
@@ -550,7 +556,7 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
         line.startsWith("  ["),
       ),
     ).toHaveLength(2);
-    expect(result.hookSpecificOutput).toContain("no longer authorized");
+    expect(result.hookSpecificOutput).toContain("is not authorized");
   });
 
   test("a quoted prompt cannot close the wrapper Claude Code puts around this text", async () => {
@@ -594,9 +600,12 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     const result = await handler()(createInput());
 
     expect(result.hookSpecificOutput).toContain(
-      "skip if this turn needs no tools.",
+      "if this turn opens none, leave it for backlog relief.",
     );
-    expect(result.hookSpecificOutput).not.toContain("no longer authorized");
+    expect(result.hookSpecificOutput).not.toContain("is not authorized");
+    // A batch-less turn defers, it does not decline: the routine line must not
+    // spend the word that names the terminal answer (ticket 12).
+    expect(result.hookSpecificOutput).not.toContain("skip");
   });
 
   test("a subagent's prompt carries no reminder", async () => {

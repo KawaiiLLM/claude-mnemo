@@ -13,9 +13,14 @@ import type { OpenNoteDebt } from "../db/note-debt";
 export const NOTE_REMINDER_DISPLAY_LIMIT = 5;
 
 /**
- * At this many pending notes the closing line stops authorising a skip (D2's
+ * At this many pending notes the closing line stops authorising a deferral (D2's
  * wording ladder: 1–2 routine, 3–4 authorisation withdrawn, beyond that the
  * 50-turn aging rule is what actually clears the backlog).
+ *
+ * A deferral is never called a skip. Since 裁决 24 that word belongs to
+ * `note(turn, skip:true)`, the honest close of a debt that cannot be written,
+ * and the ladder keeps authorising that answer at every depth — what it
+ * withdraws is permission to say nothing at all.
  */
 export const NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
 
@@ -150,7 +155,7 @@ function formatDebtLine(debt: OpenNoteDebt): string {
  * The ordinary reminder (裁决 22). It arrives with the user's prompt, and the
  * wording is what keeps that placement from becoming an instruction to act:
  * notes ride a tool batch the turn was going to open anyway, and a turn that
- * needs no tools is told to skip rather than to open one.
+ * needs no tools is told to leave the debt rather than to open one.
  *
  * Prompt-time delivery is not a preference, it is the only cache-safe channel.
  * Claude Code renders PostToolUse `additionalContext` as a floating attachment
@@ -182,12 +187,13 @@ export function renderNoteReminder(view: NoteReminderView): string {
   } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
     lines.push(
       "Write these notes at the end of the next tool batch this turn opens;" +
-        " skipping is no longer authorized — but never open a batch just to" +
-        " write them.",
+        " deferring them again is not authorized — but never open a batch just" +
+        " to write them. A turn you cannot write honestly is closed with" +
+        " skip:true, which is not a deferral.",
     );
   } else {
     lines.push(
-      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; skip if this turn needs no tools.`,
+      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; if this turn opens none, leave it for backlog relief.`,
     );
   }
 

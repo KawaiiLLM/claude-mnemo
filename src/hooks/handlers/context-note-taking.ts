@@ -17,8 +17,9 @@ opens; no list — do nothing.
 Never start a tool call just to write a note: a turn that opens no batch
 writes none, and that is fine.
 When a listed turn holds nothing worth keeping, or its details have left your
-context (e.g. it predates a compact), answer note(turn:"S…/T…", skip:true) —
-never reconstruct a note from the reminder line alone.
+context (e.g. it predates a compact) and no batch you are opening anyway
+recovers them, answer note(turn:"S…/T…", skip:true) — never reconstruct a note
+from the reminder line alone, and never open a lookup just to rescue one.
 Each turn is listed once and not repeated; only a "backlog relief" list
 authorizes a batch of note calls on its own.
 Fields:

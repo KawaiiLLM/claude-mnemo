@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.3-mslyplky" : "dev";
+var BUILD_ID = true ? "0.9.3-mslzumjg" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -22905,8 +22905,9 @@ opens; no list \u2014 do nothing.
 Never start a tool call just to write a note: a turn that opens no batch
 writes none, and that is fine.
 When a listed turn holds nothing worth keeping, or its details have left your
-context (e.g. it predates a compact), answer note(turn:"S\u2026/T\u2026", skip:true) \u2014
-never reconstruct a note from the reminder line alone.
+context (e.g. it predates a compact) and no batch you are opening anyway
+recovers them, answer note(turn:"S\u2026/T\u2026", skip:true) \u2014 never reconstruct a note
+from the reminder line alone, and never open a lookup just to rescue one.
 Each turn is listed once and not repeated; only a "backlog relief" list
 authorizes a batch of note calls on its own.
 Fields:
@@ -23356,11 +23357,11 @@ function renderNoteReminder(view) {
     lines.push("No notes are due.");
   } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
     lines.push(
-      "Write these notes at the end of the next tool batch this turn opens; skipping is no longer authorized \u2014 but never open a batch just to write them."
+      "Write these notes at the end of the next tool batch this turn opens; deferring them again is not authorized \u2014 but never open a batch just to write them. A turn you cannot write honestly is closed with skip:true, which is not a deferral."
     );
   } else {
     lines.push(
-      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; skip if this turn needs no tools.`
+      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; if this turn opens none, leave it for backlog relief.`
     );
   }
   return lines.join("\n");

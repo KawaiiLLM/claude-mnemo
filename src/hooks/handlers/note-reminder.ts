@@ -34,12 +34,12 @@ import type { HookResult, NormalizedHookInput } from "../types";
  * Moving it to turn start costs the property the old placement bought for free —
  * a question-and-answer turn produces no tool result, so it could not be
  * interrupted — and the wording is what buys it back: notes ride a batch the
- * turn was opening anyway, and a turn that needs no tools is told to skip.
+ * turn was opening anyway, and a turn that needs no tools leaves the debt.
  *
  * A debt is listed AT MOST ONCE by this path, and the marker that guarantees it
- * is written in the same transaction as the emission. Skipping is therefore
- * final for this channel; the backlog relief (裁决 21) is the recovery, and it
- * is the only path allowed to ask twice.
+ * is written in the same transaction as the emission. Letting an ask pass is
+ * therefore final for this channel; the backlog relief (裁决 21) is the
+ * recovery, and it is the only path allowed to ask twice.
  */
 
 export interface NoteReminderHandlerDependencies {

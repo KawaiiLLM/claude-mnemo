@@ -58,6 +58,11 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("predates a compact");
     expect(flat).toContain('note(turn:"S…/T…", skip:true)');
     expect(flat).toContain("never reconstruct a note from the reminder line alone");
+    // Ticket 12: "left your context" is not "unrecoverable". A skip is correct
+    // only when recovering the turn would need a tool batch of its own — which
+    // the standing rule forbids opening for a note.
+    expect(flat).toContain("no batch you are opening anyway recovers them");
+    expect(flat).toContain("never open a lookup just to rescue one");
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
     // The note-language rule (裁决 16): without it, agents follow the
     // conversation's language — the S15440 Chinese-notes regression.
