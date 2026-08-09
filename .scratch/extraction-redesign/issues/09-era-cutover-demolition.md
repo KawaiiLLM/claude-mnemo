@@ -11,3 +11,4 @@
 - [ ] worker 任何路径不再创建 SDK 会话（测试断言 + 全库 grep 双重验证）
 - [ ] 全量测试绿；拆除净减代码行数记录在发布说明
 - [ ] 版本号六处一致，构建产物守卫通过
+- [ ] 追加（票 06 实现发现）：切换时跑一次 `migrateTurnCitationsToEdges(db)` 追平迁移（幂等，已导出）——memory_edges 一次性迁移后 legacy remember 仍在写 turn_citations，增量不自动传播，拆除前必须追平

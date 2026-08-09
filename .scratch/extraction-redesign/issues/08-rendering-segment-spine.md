@@ -12,3 +12,4 @@
 - [ ] 孤儿锚点（高机械信号、无段归属）独立成行
 - [ ] 注入的段骨架不超既有预算合同
 - [ ] replay 原文轴零改动（回归断言）
+- [ ] 追加（票 06 实现发现）：FTS 解耦后 `queryTurnsByScope`（src/db/search.ts）无 turn status 谓词，skipped/在飞 turn 已可被检索命中——本票补渲染侧状态过滤（D11：status 只影响渲染）；obs 读路径已有 `status='extracted'` 过滤，不需动
