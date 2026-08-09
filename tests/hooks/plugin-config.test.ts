@@ -61,12 +61,11 @@ test("UserPromptSubmit keeps exactly two entries, split the same way", () => {
     (hook) => hook.command,
   );
 
-  // The note backlog relief (裁决 21) rides `prompt-dispatch` rather than a
-  // third registration, for the same reason the reminder rides
-  // `result-dispatch`: the split is by response shape — `session-init` owns the
-  // turn row and returns no context, `prompt-dispatch` answers with
-  // `additionalContext` — and a third entry would only add another process to
-  // every prompt the user types.
+  // Both pending-notes paths (裁决 21 and 22) and the rule digest ride
+  // `prompt-dispatch` rather than registrations of their own: the split is by
+  // response shape — `session-init` owns the turn row and returns no context,
+  // `prompt-dispatch` answers with `additionalContext` — and a third entry
+  // would only add another process to every prompt the user types.
   expect(config.hooks.UserPromptSubmit).toHaveLength(1);
   expect(commands).toEqual([
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs session-init",
@@ -74,19 +73,24 @@ test("UserPromptSubmit keeps exactly two entries, split the same way", () => {
   ]);
 });
 
-test("PostToolUse keeps exactly two entries, one async and one synchronous", () => {
+test("no tool-adjacent entry can answer with text", () => {
   const config = readHookConfig();
-  const commands = config.hooks.PostToolUse?.[0]?.hooks.map(
-    (hook) => hook.command,
+  const raw = readFileSync(
+    join(process.cwd(), "plugin", "hooks", "hooks.json"),
+    "utf8",
   );
 
-  // The pending-notes reminder rides `result-dispatch` rather than a third
-  // registration: `additionalContext` and `asyncWork` are mutually exclusive per
-  // handler (R1#11), so the split has to be by response shape — `tool-use`
-  // captures and wakes the worker, `result-dispatch` answers with text.
+  // 裁决 23's unified principle. Claude Code renders Pre/PostToolUse
+  // `additionalContext` as a floating attachment and re-renders it at request
+  // assembly, which rewrites the previous turn's tail: the message-side cache
+  // breakpoint dies and the whole prefix re-ingests at cache-write price. So
+  // PostToolUse keeps only the async capture entry, which returns no context,
+  // and PreToolUse — whose only output was rule tips — is not registered at all.
   expect(config.hooks.PostToolUse).toHaveLength(1);
-  expect(commands).toEqual([
+  expect(config.hooks.PostToolUse?.[0]?.hooks.map((hook) => hook.command)).toEqual([
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs tool-use",
-    "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs result-dispatch",
   ]);
+  expect(config.hooks.PreToolUse).toBeUndefined();
+  expect(raw).not.toContain("result-dispatch");
+  expect(raw).not.toContain("pre-tool-dispatch");
 });

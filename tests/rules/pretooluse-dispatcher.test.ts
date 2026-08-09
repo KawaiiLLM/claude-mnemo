@@ -33,6 +33,10 @@ function fixture(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    // The event is named in the payload because there is no subcommand for it
+    // any more: `pre-tool-dispatch` was retired from hooks.json and from the
+    // command's argv table, so nothing maps an argument onto PreToolUse.
+    event_name: "PreToolUse",
     session_id: "session-03",
     cwd: project,
     tool_name: "Bash",
@@ -52,7 +56,7 @@ async function invoke(
   const dispatcher = createPreToolUseDispatcher({ dataRoot, nowMs: () => nowMs });
   const exitCode = await runHookCommand({
     env: {},
-    argv: ["bun", "hook-command.ts", "pre-tool-dispatch"],
+    argv: ["bun", "hook-command.ts"],
     stdout: { write: (chunk) => ((stdout += chunk), true) },
     stderr: { write: (chunk) => ((stderr += chunk), true) },
     readJsonFromStdin: () => rawInput,
@@ -72,6 +76,15 @@ function withTempRoot(run: (dataRoot: string) => void | Promise<void>) {
   };
 }
 
+/**
+ * The matching engine, exercised through the PreToolUse dispatcher. That
+ * dispatcher is NOT registered on any hook event since 裁决 23 — mnemo emits no
+ * `additionalContext` from tool-adjacent events, because Claude Code re-renders
+ * it at request assembly and that rewrites the previous turn's tail and kills
+ * the message-side cache breakpoint. What is covered here is the engine the
+ * live UserPromptSubmit dispatcher shares: trigger matching, scope filtering,
+ * per-session throttling, the session-state lock, and the hit sidecar.
+ */
 describe("PreToolUse dispatcher", () => {
   test(
     "stdin fixture injects matching claims and a non-match is silent without side effects",
@@ -398,22 +411,19 @@ describe("PreToolUse dispatcher", () => {
     }),
   );
 
-  test("plugin registers the PreToolUse subcommand", () => {
-    const config = JSON.parse(
-      readFileSync("plugin/hooks/hooks.json", "utf8"),
-    ) as { hooks: Record<string, Array<{ matcher: string; hooks: Array<{ command: string }> }>> };
-    expect(config.hooks.PreToolUse).toEqual([
-      {
-        matcher: "*",
-        hooks: [
-          {
-            type: "command",
-            command:
-              "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs pre-tool-dispatch",
-            timeout: 5,
-          },
-        ],
-      },
-    ]);
+  test("the plugin registers no PreToolUse entry at all", () => {
+    const raw = readFileSync("plugin/hooks/hooks.json", "utf8");
+    const config = JSON.parse(raw) as {
+      hooks: Record<
+        string,
+        Array<{ matcher: string; hooks: Array<{ command: string }> }>
+      >;
+    };
+
+    // Retired, not merely silenced: a registration that matched but emitted
+    // nothing would still burn each rule's one push per session and write hit
+    // rows for tips the model never saw.
+    expect(config.hooks.PreToolUse).toBeUndefined();
+    expect(raw).not.toContain("pre-tool-dispatch");
   });
 });

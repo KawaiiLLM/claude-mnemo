@@ -1499,6 +1499,131 @@ describe("initializeSchema", () => {
     }
   });
 
+  test("the reminded marker arrives by ALTER, reading NULL on legacy debts", () => {
+    // 裁决 22 makes the ordinary reminder once-per-debt, which needs a marker on
+    // `note_debt` — and CREATE TABLE IF NOT EXISTS is a no-op on a database that
+    // already has the table, so every 0.9.x database would throw "no such
+    // column" on the first prompt without this migration.
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-marker",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 3, 'active', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    db.exec("ALTER TABLE note_debt DROP COLUMN reminded_at_epoch");
+    db.query<unknown, [number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status,
+         opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, 3, 'pending', 100, 100)`,
+    ).run(turnId, sessionId);
+
+    expect(() => initializeSchema(db)).not.toThrow();
+
+    const columns = db
+      .query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('note_debt')",
+      )
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("reminded_at_epoch");
+    // Never asked is the correct legacy reading: the old channel's record of
+    // what it had shown lived in `note_id_exposures`, not on the debt.
+    expect(
+      db
+        .query<{ reminded: number | null }, [number]>(
+          "SELECT reminded_at_epoch AS reminded FROM note_debt WHERE turn_id = ?",
+        )
+        .get(turnId)?.reminded,
+    ).toBeNull();
+    db.close();
+  });
+
+  test("the pre-'closed' rebuild brings the reminded marker with it", () => {
+    // The two note_debt migrations run in sequence and the first REBUILDS the
+    // table from the current DDL. Order matters: if the rebuild ran after the
+    // ALTER it would drop the marker again, and a rebuild that copied into a
+    // table without the column would fail outright.
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-rebuild",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 4, 'active', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+
+    // Back the table out to its 0.9.0 shape: two reasons, no marker.
+    db.exec("DROP TABLE note_debt");
+    db.exec(`
+      CREATE TABLE note_debt (
+        turn_id INTEGER PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+          status IN ('pending', 'noted', 'skipped')
+        ),
+        reason TEXT CHECK (reason IS NULL OR reason IN ('aged', 'rolled-back')),
+        opened_at_epoch INTEGER NOT NULL,
+        closed_at_epoch INTEGER,
+        updated_at_epoch INTEGER NOT NULL
+      );
+    `);
+    db.query<unknown, [number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status,
+         opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, 4, 'pending', 100, 100)`,
+    ).run(turnId, sessionId);
+
+    initializeSchema(db);
+
+    const columns = db
+      .query<{ name: string }, []>(
+        "SELECT name FROM pragma_table_info('note_debt')",
+      )
+      .all()
+      .map((row) => row.name);
+    expect(columns).toContain("reminded_at_epoch");
+    expect(
+      db
+        .query<{ turnId: number; reminded: number | null }, []>(
+          `SELECT turn_id AS turnId, reminded_at_epoch AS reminded
+           FROM note_debt`,
+        )
+        .all(),
+    ).toEqual([{ turnId, reminded: null }]);
+    // The widened reason vocabulary survived the extra column.
+    expect(() =>
+      db
+        .query<unknown, [number]>(
+          "UPDATE note_debt SET status = 'skipped', reason = 'closed' WHERE turn_id = ?",
+        )
+        .run(turnId),
+    ).not.toThrow();
+    db.close();
+  });
+
   test("recreates an FTS table that has trigram+prompt but is missing the response column", () => {
     const db = createDatabase(":memory:");
     // Partial/intermediate schema: trigram + prompt, but NO response column.

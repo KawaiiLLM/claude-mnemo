@@ -445,6 +445,19 @@ function createDispatcher(
   };
 }
 
+/**
+ * NOT REGISTERED on any hook event (裁决 23's unified principle, 0.9.3).
+ *
+ * A dispatcher's only output is `additionalContext`, and Claude Code renders the
+ * tool-adjacent events' context as a floating attachment that it re-renders at
+ * request assembly — which rewrites the previous turn's tail and destroys the
+ * message-side cache breakpoint, re-ingesting the whole prefix at cache-write
+ * price. So mnemo emits nothing from PreToolUse/PostToolUse, and `kind:"tool"`
+ * and `kind:"result"` rules have no delivery channel until a cache-safe one
+ * exists. The matching engine is kept whole rather than deleted: the trigger
+ * vocabulary, the sidecar hit shape, and the ingest side all still speak it, and
+ * whether to retire those is a separate decision.
+ */
 export function createPreToolUseDispatcher(
   dependencies: PreToolUseDispatcherDependencies = {},
 ): HookHandler {
@@ -457,6 +470,7 @@ export function createUserPromptSubmitDispatcher(
   return createDispatcher("UserPromptSubmit", dependencies);
 }
 
+/** NOT REGISTERED — see `createPreToolUseDispatcher` for why. */
 export function createPostToolUseDispatcher(
   dependencies: PreToolUseDispatcherDependencies = {},
 ): HookHandler {

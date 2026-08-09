@@ -1,7 +1,12 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
-import { closeNoteDebtAsNoted, getNoteDebt, type NoteDebtRecord } from "../db/note-debt";
+import {
+  closeNoteDebtAsDeclined,
+  closeNoteDebtAsNoted,
+  getNoteDebt,
+  type NoteDebtRecord,
+} from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn } from "../db/turns";
 import { stripPrivateTags } from "../shared/tag-stripping";
@@ -18,6 +23,7 @@ export interface NoteToolInput {
   title?: unknown;
   content?: unknown;
   insight?: unknown;
+  skip?: unknown;
 }
 
 export interface NoteToolOptions {
@@ -38,6 +44,8 @@ function parameterError(message: string): ToolTextResult {
 /**
  * A note result is a successful write iff it opens with the "Noted …"
  * confirmation. Failures are `Parameter error: …`, matching isRememberSuccess.
+ * A declined turn answers "Skipped …", which is a successful CALL but not a
+ * note, so it deliberately reads as false here.
  */
 export function isNoteSuccess(result: {
   content: Array<{ type: string; text?: string }>;
@@ -131,6 +139,27 @@ type NoteWriteOutcome =
   | { ok: true; existing: boolean }
   | { ok: false; message: string };
 
+/**
+ * May a note be written against this turn?
+ *
+ * An open debt, a note already on record (a rewrite), or a debt the agent itself
+ * declined (裁决 24). The last one is the only closed state a note may reopen:
+ * declining is the agent's judgement about its own turn, so a later note is a
+ * revision rather than an override — and since the reminder never lists a
+ * declined turn again, the only way one arrives is the agent deliberately
+ * choosing to write it. `aged`, `rolled-back` and `closed` stay terminal.
+ */
+function mayWriteNote(
+  hasExistingNote: boolean,
+  debt: NoteDebtRecord | null,
+): boolean {
+  return (
+    hasExistingNote ||
+    debt?.status === "pending" ||
+    (debt?.status === "skipped" && debt.reason === "declined")
+  );
+}
+
 function debtOwesNoNoteMessage(
   address: TurnAddress,
   debt: NoteDebtRecord | null,
@@ -140,6 +169,85 @@ function debtOwesNoNoteMessage(
     `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
     " Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote."
   );
+}
+
+type DeclineOutcome =
+  | { kind: "declined" }
+  | { kind: "already-noted" }
+  | { kind: "already-settled"; settledAs: string }
+  | { kind: "owes-nothing"; debt: NoteDebtRecord | null };
+
+/**
+ * `note(turn, skip: true)` — the agent declining a listed turn (裁决 24).
+ *
+ * A skip is an ANSWER, not silence. The reminder lists each debt exactly once,
+ * so a turn the agent cannot honestly write about would otherwise sit open until
+ * the 50-turn bound aged it out, occupying one of the backlog relief's five
+ * oldest-debt slots the whole time — and a compact strands exactly those oldest
+ * debts, which is the common case this exists for. Declining closes the debt now
+ * and records WHY, so refusal is distinguishable from neglect.
+ *
+ * Same session anchor as a note: an MCP server is told nothing about which
+ * session called it, so an open debt (or an existing note) is the only evidence
+ * that this address belongs to the caller. Skipping a foreign or trivial turn is
+ * therefore a parameter error, exactly as writing one is.
+ */
+function declineTurn(
+  db: Database,
+  address: TurnAddress,
+  options: NoteToolOptions,
+): ToolTextResult {
+  const turn = getTurn(db, address.sessionId, address.promptNumber);
+  if (!turn) {
+    return parameterError(
+      `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`,
+    );
+  }
+
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
+
+  // Fast path, same role as the note path's: it avoids opening a write
+  // transaction for a plainly invalid address. The decision is re-taken inside.
+  if (!getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
+    return parameterError(debtOwesNoNoteMessage(address, null));
+  }
+
+  const outcome = writeTransaction(db, (): DeclineOutcome => {
+    // A note already on record wins: the agent has answered this turn, and a
+    // stray skip must not undo that.
+    if (getShadowNote(db, turn.id) !== null) {
+      return { kind: "already-noted" };
+    }
+
+    const debt = getNoteDebt(db, turn.id);
+    if (debt === null) {
+      return { kind: "owes-nothing", debt: null };
+    }
+    if (debt.status !== "pending") {
+      return { kind: "already-settled", settledAs: debt.reason ?? debt.status };
+    }
+
+    closeNoteDebtAsDeclined(db, turn.id, nowEpoch);
+    return { kind: "declined" };
+  });
+
+  switch (outcome.kind) {
+    case "declined":
+      return textResult(
+        `Skipped ${ref}. Its debt is closed as declined and it will not be listed again;` +
+          " send a real note for this turn if the material comes back.",
+      );
+    case "already-noted":
+      return textResult(`Skipped ${ref} ignored: it already has a note.`);
+    case "already-settled":
+      return textResult(
+        `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`,
+      );
+    case "owes-nothing":
+      return parameterError(debtOwesNoNoteMessage(address, outcome.debt));
+  }
 }
 
 /**
@@ -164,6 +272,19 @@ export function noteTool(
     return parameterError(
       `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`,
     );
+  }
+
+  if (rawInput.skip !== undefined && typeof rawInput.skip !== "boolean") {
+    return parameterError("skip must be a boolean when present.");
+  }
+
+  // 裁决 24: a declined turn needs `turn` alone. Everything a note would carry
+  // is not merely optional here but meaningless — the whole point of the skip is
+  // that there is nothing truthful to put in those fields — so they are ignored
+  // rather than validated, and the tool never has to decide what a half-filled
+  // skip meant.
+  if (rawInput.skip === true) {
+    return declineTurn(db, address, options);
   }
 
   const titleInput = requireText(rawInput.title, "title");
@@ -210,7 +331,7 @@ export function noteTool(
   // invalid address.
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!fastExisting && fastDebt?.status !== "pending") {
+  if (!mayWriteNote(fastExisting !== null, fastDebt)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
 
@@ -246,11 +367,12 @@ export function noteTool(
   // record for a debt whose ledger entry says anything but 'noted'.
   //
   // Age is still not consulted inside the transaction — see
-  // closeNoteDebtAsNoted — only pending-ness, re-read live.
+  // closeNoteDebtAsNoted — only writability (open, already noted, or declined by
+  // the agent itself), re-read live.
   const outcome = writeTransaction(db, (): NoteWriteOutcome => {
     const existing = getShadowNote(db, turn.id);
     const debt = getNoteDebt(db, turn.id);
-    if (!existing && debt?.status !== "pending") {
+    if (!mayWriteNote(existing !== null, debt)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
     }
 

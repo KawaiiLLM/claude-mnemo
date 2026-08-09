@@ -54,6 +54,30 @@ export interface NoteBacklogReliefDependencies {
   logger?: Pick<Console, "warn">;
 }
 
+/**
+ * Why the caller cannot read this off the rendered text: "no text" covers two
+ * opposite states. `not-eligible` means the valve was shut and the ordinary
+ * reminder owns the prompt; `eligible-not-claimed` means the valve was open and
+ * this process lost the one-shot — the relief IS being shown, by the sibling
+ * UserPromptSubmit process that won, or it will be on the next prompt. Letting
+ * the reminder run there would put two contradictory lists on one prompt and,
+ * worse, MARK the debts the relief is re-listing.
+ */
+export type NoteBacklogReliefOutcome =
+  | "fired"
+  | "not-eligible"
+  | "eligible-not-claimed";
+
+export interface NoteBacklogReliefResult extends HookResult {
+  reliefOutcome: NoteBacklogReliefOutcome;
+}
+
+/** What the claim transaction decided, and the list it claimed if it won. */
+interface NoteBacklogReliefClaim {
+  outcome: NoteBacklogReliefOutcome;
+  view: NoteReminderView | null;
+}
+
 export function createNoteBacklogReliefHandler(
   dependencies: NoteBacklogReliefDependencies,
 ) {
@@ -65,25 +89,30 @@ export function createNoteBacklogReliefHandler(
   const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
   const writeTransaction =
     dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  // Defaulted here rather than left optional, the way every other handler in
+  // this directory treats its logger: the production wiring injects none, and
+  // the failure policy below is "stay silent and warn" — without a default the
+  // warn half of it does not exist where it is actually needed.
+  const logger = dependencies.logger ?? console;
 
   return async function handleNoteBacklogRelief(
     input: NormalizedHookInput,
-  ): Promise<HookResult> {
+  ): Promise<NoteBacklogReliefResult> {
     if (input.eventName !== "UserPromptSubmit") {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     // A subagent has neither the ledger's addresses nor the authority to write
     // notes for the root session's turns.
     if (input.agentId !== undefined) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     if (!input.sessionId) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
 
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
 
     // The turn this injection rides. UserPromptSubmit hooks run in parallel, so
@@ -94,7 +123,7 @@ export function createNoteBacklogReliefHandler(
     // only delay the next relief by one turn, never fire one early.
     const rideTurn = getLatestTurn(dependencies.db, session.id);
     if (!rideTurn) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
 
     // Everything from here to the transaction is a fast path: it decides
@@ -104,7 +133,7 @@ export function createNoteBacklogReliefHandler(
     // transaction below settles.
     const relief = getNoteReliefState(dependencies.db, session.id);
     if (relief.dryTurns < dryTurnsThreshold) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
 
     // Writable debts only, on both the gate and the list. A rolled-back notice
@@ -115,12 +144,12 @@ export function createNoteBacklogReliefHandler(
       agingTurns,
     }).filter((debt) => !debt.wasRolledBack);
     if (writable.length < pendingThreshold) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
 
-    let claimed: NoteReminderView | null = null;
+    let claimed: NoteBacklogReliefClaim;
     try {
-      claimed = writeTransaction(dependencies.db, (): NoteReminderView | null => {
+      claimed = writeTransaction(dependencies.db, (): NoteBacklogReliefClaim => {
         // Both gates are re-read here, under the write lock, and the claim
         // swaps on the watermark the fast path saw. That is what makes one
         // relief per streak true rather than likely: two UserPromptSubmit
@@ -132,8 +161,15 @@ export function createNoteBacklogReliefHandler(
         // watermark to its own ride turn, which is at or past every finished
         // turn, so the second finds a dry streak of zero and stands down.
         const settled = getNoteReliefState(dependencies.db, session.id);
+        // A watermark that moved says the streak was spent by someone else, and
+        // that is a lost claim, not a shut valve — read the watermark rather
+        // than the dry streak it feeds, because a note written concurrently
+        // also collapses the streak and that one really is "not eligible".
+        if (settled.lastReliefPromptNumber > relief.lastReliefPromptNumber) {
+          return { outcome: "eligible-not-claimed", view: null };
+        }
         if (settled.dryTurns < dryTurnsThreshold) {
-          return null;
+          return { outcome: "not-eligible", view: null };
         }
 
         const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
@@ -141,7 +177,7 @@ export function createNoteBacklogReliefHandler(
           agingTurns,
         }).filter((debt) => !debt.wasRolledBack);
         if (stillOpen.length < pendingThreshold) {
-          return null;
+          return { outcome: "not-eligible", view: null };
         }
 
         // The claim and the exposure rows commit together: a relief the agent
@@ -156,7 +192,7 @@ export function createNoteBacklogReliefHandler(
             nowEpoch: now(),
           })
         ) {
-          return null;
+          return { outcome: "eligible-not-claimed", view: null };
         }
 
         const view = selectNoteReminderItems(stillOpen, displayLimit);
@@ -172,28 +208,32 @@ export function createNoteBacklogReliefHandler(
           source: "injection",
           nowEpoch: now(),
         });
-        return view;
+        return { outcome: "fired", view };
       });
     } catch (error) {
       // Unlike the reminder, a failed write here costs the injection too. The
       // claim IS the one-shot: rendering without it would repeat this standing
       // authorisation on every prompt until a write finally succeeds. The
       // trigger state persists, so the next prompt tries again.
-      dependencies.logger?.warn?.("note backlog relief not claimed", {
+      logger.warn?.("note backlog relief not claimed", {
         sessionId: input.sessionId,
         reasonCode: "relief-claim-failed",
         error: error instanceof Error ? error.message : String(error),
       });
-      return { continue: true };
+      // Both gates were open when this process looked, so the caller must treat
+      // the prompt as the relief's: a busy timeout here says nothing about
+      // whether a sibling process is showing the list.
+      return { continue: true, reliefOutcome: "eligible-not-claimed" };
     }
 
-    if (!claimed) {
-      return { continue: true };
+    if (!claimed.view) {
+      return { continue: true, reliefOutcome: claimed.outcome };
     }
 
     return {
       continue: true,
-      hookSpecificOutput: renderNoteBacklogRelief(claimed),
+      reliefOutcome: "fired",
+      hookSpecificOutput: renderNoteBacklogRelief(claimed.view),
     };
   };
 }

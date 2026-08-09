@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { runWriteTransaction } from "./database";
 import { rebuildSearchIndex } from "./search";
 
 const MEMORY_FTS_DDL = `
@@ -31,12 +32,15 @@ const NOTE_DEBT_TABLE_DDL = `
     -- Only a skipped debt carries a reason (D4's status vocabulary). 'closed'
     -- is residual settlement's claim-time write (D9): the session is gone, so
     -- the debt is written off rather than left blocking its window forever.
+    -- 'declined' is the agent's own answer (裁决 24) — nothing worth noting, or
+    -- the material has left its context — and is the only reason it writes.
     reason TEXT CHECK (
-      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed')
+      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed', 'declined')
     ),
     opened_at_epoch INTEGER NOT NULL,
     closed_at_epoch INTEGER,
-    updated_at_epoch INTEGER NOT NULL
+    updated_at_epoch INTEGER NOT NULL,
+    reminded_at_epoch INTEGER
   );
 `;
 
@@ -795,47 +799,106 @@ export function initializeSchema(db: Database): void {
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
   ensureShadowNoteWriterOriginColumn(db);
-  ensureNoteDebtClosedReason(db);
+  ensureNoteDebtReasonVocabulary(db);
+  ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
 
-// `note_debt` shipped in 0.9.0 with a two-value reason vocabulary, and residual
-// settlement (D9) needs a third — `closed`. A CHECK constraint is part of the
-// table definition, so it cannot be ALTERed and `CREATE TABLE IF NOT EXISTS` is
-// a no-op on a database that already has the table: without this rebuild the
-// first residual claim on any existing database throws a constraint failure.
+// `note_debt` shipped in 0.9.0 with a two-value reason vocabulary; residual
+// settlement (D9) added `closed` and the agent's explicit skip (裁决 24) adds
+// `declined`. A CHECK constraint is part of the table definition, so it cannot
+// be ALTERed and `CREATE TABLE IF NOT EXISTS` is a no-op on a database that
+// already has the table: without this rebuild the first write of a new reason
+// throws a constraint failure.
 //
-// Detection reads the stored DDL rather than a version counter, so the rebuild
-// runs exactly once and a database created fresh from the new DDL skips it.
-function ensureNoteDebtClosedReason(db: Database): void {
-  const existing = db
-    .query<{ sql: string | null }, []>(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'",
-    )
-    .get();
-  if (!existing?.sql || existing.sql.includes("'closed'")) {
+// Detection reads the stored DDL for the NEWEST value rather than a version
+// counter, so each widening rebuilds exactly once and a database created fresh
+// from the current DDL skips it. Widening again means moving this string.
+function noteDebtReasonVocabularyIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'declined'");
+}
+
+function ensureNoteDebtReasonVocabulary(db: Database): void {
+  // A read, not a decision: it only says whether taking the write lock is worth
+  // it. Two hook processes start on one event, so both can pass here.
+  if (!noteDebtReasonVocabularyIsStale(db)) {
     return;
   }
 
-  // One transaction: a crash between the rename and the copy would otherwise
-  // leave the ledger under a name nothing reads, which reads as "no debts".
-  db.transaction(() => {
+  // One IMMEDIATE transaction with the same busy retry the rest of the write
+  // path uses, and the eligibility re-read INSIDE it. Deciding outside the lock
+  // is what let the loser of a two-hook start rename, copy and drop a ledger the
+  // winner had already rebuilt — on a real `note_debt` that second copy is long
+  // enough to outlive the hook connection's 800ms busy timeout and take schema
+  // initialisation, and with it the caller's real work, down with it.
+  //
+  // The transaction is also what keeps the ledger whole: a crash between the
+  // rename and the copy would leave it under a name nothing reads, which every
+  // reader sees as "no debts".
+  runWriteTransaction(db, () => {
+    if (!noteDebtReasonVocabularyIsStale(db)) {
+      return;
+    }
+
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
+    // The column list is explicit rather than `SELECT *` so the copy survives a
+    // reordering, and `reminded_at_epoch` is included only when the old table
+    // has it: this rebuild runs on databases from either side of that column's
+    // migration, and naming it unconditionally would fail on the older shape
+    // while omitting it would silently re-ask every debt on the newer one.
+    const carried = hasColumn(
+      db,
+      "note_debt_pre_closed_reason",
+      "reminded_at_epoch",
+    )
+      ? ", reminded_at_epoch"
+      : "";
     db.exec(
       `INSERT INTO note_debt (
          turn_id, session_id, prompt_number, status, reason,
-         opened_at_epoch, closed_at_epoch, updated_at_epoch
+         opened_at_epoch, closed_at_epoch, updated_at_epoch${carried}
        )
        SELECT turn_id, session_id, prompt_number, status, reason,
-              opened_at_epoch, closed_at_epoch, updated_at_epoch
+              opened_at_epoch, closed_at_epoch, updated_at_epoch${carried}
        FROM note_debt_pre_closed_reason`,
     );
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     // The index followed the renamed table and died with it.
     db.exec(NOTE_DEBT_INDEX_DDL);
-  })();
+  });
+}
+
+// `reminded_at_epoch` records when the ordinary reminder listed a debt: NULL is
+// "never", and only never-listed debts are eligible for it (裁决 22 — one debt,
+// one ask). The backlog relief ignores the column by design; re-asking is the
+// whole point of that valve.
+//
+// `note_debt` shipped in 0.9.0 without it — the PostToolUse reminder derived
+// what it had shown from `note_id_exposures` — and CREATE TABLE IF NOT EXISTS is
+// a no-op on a database that already has the table, so the column has to arrive
+// by ALTER or the first prompt on any 0.9.x database throws "no such column".
+// NULL is the correct legacy reading: nothing has been asked for under the new
+// rule yet.
+//
+// The column carries no comment inside the DDL on purpose: SQLite's
+// `ALTER TABLE … DROP COLUMN` rewrites the stored CREATE statement by deleting
+// the column's text only, so a comment sitting between the previous column's
+// comma and this one leaves a dangling comma behind and the drop fails with
+// "incomplete input".
+//
+// Runs AFTER `ensureNoteDebtClosedReason`, which rebuilds the table from the
+// current DDL: on a pre-`closed` database the rebuild already brings the column
+// in and this call finds nothing to do.
+function ensureNoteDebtRemindedColumn(db: Database): void {
+  addColumnIfMissing(db, "note_debt", "reminded_at_epoch", "INTEGER");
 }
 
 // `note_debt_cursor` shipped in 0.9.0 with only the classification watermark,
