@@ -11,6 +11,7 @@ import {
   NOTE_SETTLEMENT_MAX_ATTEMPTS,
   NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
   NOTE_SETTLEMENT_RETRY_BASE_MS,
+  advanceNoteSettlementCursor,
   claimNextNoteSettlementJob,
   completeNoteSettlementJob,
   countNoteSettlementJobs,
@@ -783,6 +784,112 @@ describe("note settlement job state machine", () => {
     expect(row.status).toBe("pending");
     expect(row.lastError).toBeNull();
     expect(row.retryAtEpoch).toBe(0);
+  });
+});
+
+/**
+ * The payload settles its own window (ticket 07): the write-back marks the job
+ * `done` inside the very transaction that lands the segments, because the two
+ * must not be separable by a crash. That makes `done` a state the scheduler
+ * finds ALREADY SET when the verdict comes back — and the completion CAS, which
+ * is fenced on `status = 'claimed'`, then matches nothing.
+ *
+ * "Matches nothing" used to be read as one thing only — somebody else owns this
+ * row now — and the drain stopped. These two tests pin the distinction the
+ * scheduler has to draw instead: a row that is `done` under OUR generation is a
+ * settled window, not a stolen one.
+ */
+describe("note settlement drain past a self-settling payload", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  /** What ticket 07's write-back does, minus the model and the segments. */
+  function settleInsideDispatch(
+    job: NoteSettlementJob,
+    nowEpoch: number,
+  ): void {
+    completeNoteSettlementJob(db, job.id, nowEpoch, job.claimGeneration);
+    advanceNoteSettlementCursor(db, job.sessionId, nowEpoch);
+  }
+
+  test("a payload that completes its own job does not strand the rest of the drain", async () => {
+    const sessionDbId = seedSession(db, "content-self-settling");
+    const clock = createClock();
+    const calls: NoteSettlementJob[] = [];
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch: async ({ job }) => {
+        calls.push(job);
+        settleInsideDispatch(job, clock.now());
+        return { ok: true };
+      },
+    });
+
+    // Three full windows come due in one trigger — a backfill, or a session that
+    // ran 150 turns between compacts.
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    const pass = await scheduler.onTurnStop(sessionDbId);
+
+    expect(pass.created).toHaveLength(3);
+    expect(calls).toHaveLength(3);
+    expect(pass.dispatched.map((job) => job.windowStart)).toEqual([1, 51, 101]);
+    expect(listNoteSettlementJobs(db, sessionDbId).map((job) => job.status)).toEqual([
+      "done",
+      "done",
+      "done",
+    ]);
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(
+      3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+    );
+  });
+
+  test("a payload that commits and then errors leaves the window done and keeps draining", async () => {
+    const sessionDbId = seedSession(db, "content-commit-then-error");
+    const clock = createClock();
+    const calls: NoteSettlementJob[] = [];
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch: async ({ job }) => {
+        calls.push(job);
+        settleInsideDispatch(job, clock.now());
+        // The write-back committed; a step AFTER it — a CAS replay round, the
+        // metrics sink — blew up. The verdict is a failure, the window is not.
+        if (calls.length === 1) {
+          return { ok: false, reason: "segment replay exploded after commit" };
+        }
+        return { ok: true };
+      },
+    });
+
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    await scheduler.onTurnStop(sessionDbId);
+
+    expect(calls).toHaveLength(3);
+    const jobs = listNoteSettlementJobs(db, sessionDbId);
+    expect(jobs.map((job) => job.status)).toEqual(["done", "done", "done"]);
+    // No failure was written over the committed row: `done` is the truth, and a
+    // `failed` stamp here would hand the window a retry whose writes already
+    // landed once.
+    expect(jobs[0]!.lastError).toBeNull();
+    expect(jobs[0]!.retryAtEpoch).toBe(0);
+    expect(jobs[0]!.attempts).toBe(1);
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(
+      3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+    );
   });
 });
 
