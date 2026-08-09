@@ -1125,14 +1125,20 @@ function initializeSchema(db) {
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
-function ensureNoteDebtReasonVocabulary(db) {
-  const existing = db.query(
+function noteDebtReasonVocabularyIsStale(db) {
+  const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
-  ).get();
-  if (!existing?.sql || existing.sql.includes("'declined'")) {
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'declined'");
+}
+function ensureNoteDebtReasonVocabulary(db) {
+  if (!noteDebtReasonVocabularyIsStale(db)) {
     return;
   }
-  db.transaction(() => {
+  runWriteTransaction(db, () => {
+    if (!noteDebtReasonVocabularyIsStale(db)) {
+      return;
+    }
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
     const carried = hasColumn(
@@ -1151,7 +1157,7 @@ function ensureNoteDebtReasonVocabulary(db) {
     );
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_INDEX_DDL);
-  })();
+  });
 }
 function ensureNoteDebtRemindedColumn(db) {
   addColumnIfMissing(db, "note_debt", "reminded_at_epoch", "INTEGER");
@@ -2902,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.2-mslxaryb" : "dev";
+var BUILD_ID = true ? "0.9.2-mslye7hn" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23378,48 +23384,52 @@ function createNoteBacklogReliefHandler(dependencies) {
   const pendingThreshold = dependencies.pendingThreshold ?? NOTE_RELIEF_PENDING_THRESHOLD;
   const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
   return async function handleNoteBacklogRelief(input) {
     if (input.eventName !== "UserPromptSubmit") {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     if (input.agentId !== void 0) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     if (!input.sessionId) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     const session = getSessionByContentId(dependencies.db, input.sessionId);
     if (!session) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     const rideTurn = getLatestTurn(dependencies.db, session.id);
     if (!rideTurn) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     const relief = getNoteReliefState(dependencies.db, session.id);
     if (relief.dryTurns < dryTurnsThreshold) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
     const writable = listOpenNoteDebt(dependencies.db, session.id, {
       latestPromptNumber: rideTurn.promptNumber,
       agingTurns
     }).filter((debt) => !debt.wasRolledBack);
     if (writable.length < pendingThreshold) {
-      return { continue: true };
+      return { continue: true, reliefOutcome: "not-eligible" };
     }
-    let claimed = null;
+    let claimed;
     try {
       claimed = writeTransaction(dependencies.db, () => {
         const settled = getNoteReliefState(dependencies.db, session.id);
+        if (settled.lastReliefPromptNumber > relief.lastReliefPromptNumber) {
+          return { outcome: "eligible-not-claimed", view: null };
+        }
         if (settled.dryTurns < dryTurnsThreshold) {
-          return null;
+          return { outcome: "not-eligible", view: null };
         }
         const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
           latestPromptNumber: rideTurn.promptNumber,
           agingTurns
         }).filter((debt) => !debt.wasRolledBack);
         if (stillOpen.length < pendingThreshold) {
-          return null;
+          return { outcome: "not-eligible", view: null };
         }
         if (!claimNoteBacklogRelief(dependencies.db, {
           sessionId: session.id,
@@ -23427,7 +23437,7 @@ function createNoteBacklogReliefHandler(dependencies) {
           previousReliefPromptNumber: relief.lastReliefPromptNumber,
           nowEpoch: now()
         })) {
-          return null;
+          return { outcome: "eligible-not-claimed", view: null };
         }
         const view = selectNoteReminderItems(stillOpen, displayLimit);
         recordNoteIdExposure(dependencies.db, {
@@ -23442,22 +23452,23 @@ function createNoteBacklogReliefHandler(dependencies) {
           source: "injection",
           nowEpoch: now()
         });
-        return view;
+        return { outcome: "fired", view };
       });
     } catch (error48) {
-      dependencies.logger?.warn?.("note backlog relief not claimed", {
+      logger.warn?.("note backlog relief not claimed", {
         sessionId: input.sessionId,
         reasonCode: "relief-claim-failed",
         error: error48 instanceof Error ? error48.message : String(error48)
       });
-      return { continue: true };
+      return { continue: true, reliefOutcome: "eligible-not-claimed" };
     }
-    if (!claimed) {
-      return { continue: true };
+    if (!claimed.view) {
+      return { continue: true, reliefOutcome: claimed.outcome };
     }
     return {
       continue: true,
-      hookSpecificOutput: renderNoteBacklogRelief(claimed)
+      reliefOutcome: "fired",
+      hookSpecificOutput: renderNoteBacklogRelief(claimed.view)
     };
   };
 }
@@ -23474,6 +23485,7 @@ function createNoteReminderHandler(dependencies) {
   const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
   const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const logger = dependencies.logger ?? console;
   return async function handleNoteReminderHook(input) {
     if (input.eventName !== "UserPromptSubmit") {
       return { continue: true };
@@ -23534,7 +23546,7 @@ function createNoteReminderHandler(dependencies) {
         return view;
       });
     } catch (error48) {
-      dependencies.logger?.warn?.("note reminder not claimed", {
+      logger.warn?.("note reminder not claimed", {
         sessionId: input.sessionId,
         reasonCode: "reminder-claim-failed",
         error: error48 instanceof Error ? error48.message : String(error48)
@@ -23553,15 +23565,16 @@ function createNoteReminderHandler(dependencies) {
 
 // src/hooks/handlers/prompt-dispatch.ts
 function createPromptDispatchHandler(dependencies = {}) {
-  const { db, now, logger, ...dispatcherDependencies } = dependencies;
+  const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
+  const logger = injectedLogger ?? console;
   const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
   const noteReminder = db ? createNoteReminderHandler({ db, now, logger }) : void 0;
   async function section(name, run, input) {
     try {
-      return (await run()).hookSpecificOutput ?? null;
+      return await run();
     } catch (error48) {
-      (logger ?? console).warn?.("prompt-dispatch section failed", {
+      logger.warn?.("prompt-dispatch section failed", {
         sessionId: input.sessionId ?? null,
         reasonCode: name,
         error: error48 instanceof Error ? error48.message : String(error48)
@@ -23576,15 +23589,22 @@ function createPromptDispatchHandler(dependencies = {}) {
       () => ruleDispatcher(input),
       input
     );
-    if (rules) {
-      sections.push(rules);
+    if (rules?.hookSpecificOutput) {
+      sections.push(rules.hookSpecificOutput);
     }
     let notes = null;
+    let reliefOutcome = "not-eligible";
     if (backlogRelief) {
-      notes = await section("note-relief", () => backlogRelief(input), input);
+      const relief = await section(
+        "note-relief",
+        () => backlogRelief(input),
+        input
+      );
+      notes = relief?.hookSpecificOutput ?? null;
+      reliefOutcome = relief?.reliefOutcome ?? "not-eligible";
     }
-    if (!notes && noteReminder) {
-      notes = await section("note-reminder", () => noteReminder(input), input);
+    if (reliefOutcome === "not-eligible" && noteReminder) {
+      notes = (await section("note-reminder", () => noteReminder(input), input))?.hookSpecificOutput ?? null;
     }
     if (notes) {
       sections.push(notes);

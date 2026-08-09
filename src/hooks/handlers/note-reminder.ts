@@ -68,6 +68,11 @@ export function createNoteReminderHandler(
   const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
   const writeTransaction =
     dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  // Defaulted here rather than left optional, the way every other handler in
+  // this directory treats its logger: the production wiring injects none, and
+  // the failure policy below is "stay silent and warn" — without a default the
+  // warn half of it does not exist where it is actually needed.
+  const logger = dependencies.logger ?? console;
 
   return async function handleNoteReminderHook(
     input: NormalizedHookInput,
@@ -126,6 +131,16 @@ export function createNoteReminderHandler(
           return null;
         }
 
+        // The marker and the closure commit BEFORE the text reaches stdout, so
+        // a hook killed in between marks a reminder nobody saw. That ordering
+        // is the deliberate one: delivery is unobservable from here — Claude
+        // Code can drop this output after the write too — so the only choice is
+        // which way to fail. Printing first and marking after re-asks whenever
+        // the marker write fails, which breaks the at-most-once rule outright;
+        // marking first loses at most one delivery, and the backlog relief
+        // (which ignores the marker) and the 50-turn aging bound both recover
+        // it. An unseen rolled-back closure loses only a courtesy line: closed
+        // is that debt's designed end state either way.
         const nowEpoch = now();
         markNoteDebtsReminded(
           dependencies.db,
@@ -163,7 +178,7 @@ export function createNoteReminderHandler(
       // prompt until some later reconcile happens to run. Staying silent costs
       // one prompt's reminder — the debts are untouched, so the next prompt
       // tries again.
-      dependencies.logger?.warn?.("note reminder not claimed", {
+      logger.warn?.("note reminder not claimed", {
         sessionId: input.sessionId,
         reasonCode: "reminder-claim-failed",
         error: error instanceof Error ? error.message : String(error),

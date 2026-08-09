@@ -4,7 +4,10 @@ import {
   createUserPromptSubmitDispatcher,
   type PreToolUseDispatcherDependencies,
 } from "../../rules/pretooluse-dispatcher";
-import { createNoteBacklogReliefHandler } from "./note-relief";
+import {
+  createNoteBacklogReliefHandler,
+  type NoteBacklogReliefOutcome,
+} from "./note-relief";
 import { createNoteReminderHandler } from "./note-reminder";
 import type { HookHandler, HookResult, NormalizedHookInput } from "../types";
 
@@ -37,8 +40,11 @@ export interface PromptDispatchDependencies
 export function createPromptDispatchHandler(
   dependencies: PromptDispatchDependencies = {},
 ): HookHandler {
-  const { db, now, logger, ...dispatcherDependencies } = dependencies;
+  const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
+  // The production wiring passes a database and nothing else, so the default is
+  // what every warning below actually runs through.
+  const logger = injectedLogger ?? console;
   const backlogRelief = db
     ? createNoteBacklogReliefHandler({ db, now, logger })
     : undefined;
@@ -53,15 +59,15 @@ export function createPromptDispatchHandler(
    * runHookCommand's catch-all, which answers with a bare non-blocking exit and
    * would silently drop the rule output that shipped long before notes existed.
    */
-  async function section(
+  async function section<Result extends HookResult>(
     name: string,
-    run: () => HookResult | Promise<HookResult>,
+    run: () => Result | Promise<Result>,
     input: NormalizedHookInput,
-  ): Promise<string | null> {
+  ): Promise<Result | null> {
     try {
-      return (await run()).hookSpecificOutput ?? null;
+      return await run();
     } catch (error) {
-      (logger ?? console).warn?.("prompt-dispatch section failed", {
+      logger.warn?.("prompt-dispatch section failed", {
         sessionId: input.sessionId ?? null,
         reasonCode: name,
         error: error instanceof Error ? error.message : String(error),
@@ -80,8 +86,8 @@ export function createPromptDispatchHandler(
       () => ruleDispatcher(input),
       input,
     );
-    if (rules) {
-      sections.push(rules);
+    if (rules?.hookSpecificOutput) {
+      sections.push(rules.hookSpecificOutput);
     }
 
     // One pending-notes paragraph per prompt, and the relief valve outranks the
@@ -94,12 +100,29 @@ export function createPromptDispatchHandler(
     // The reminder is not merely suppressed but never RUN, which is what keeps
     // the suppressed debts unmarked: they are still owed an ask of their own, so
     // they surface on a later prompt instead of being silently spent here.
+    //
+    // Precedence reads the relief's own verdict, never its text. A relief that
+    // was eligible and lost its claim renders nothing, and the sibling process
+    // that won is showing the list right now — treating that silence as "shut"
+    // would run the reminder and MARK the very debts being re-listed, spending
+    // an ask nobody made. Only `not-eligible` hands the prompt over; a section
+    // that threw is `null`, i.e. no verdict at all, and the reminder runs
+    // because the same fault will silence it too.
     let notes: string | null = null;
+    let reliefOutcome: NoteBacklogReliefOutcome = "not-eligible";
     if (backlogRelief) {
-      notes = await section("note-relief", () => backlogRelief(input), input);
+      const relief = await section(
+        "note-relief",
+        () => backlogRelief(input),
+        input,
+      );
+      notes = relief?.hookSpecificOutput ?? null;
+      reliefOutcome = relief?.reliefOutcome ?? "not-eligible";
     }
-    if (!notes && noteReminder) {
-      notes = await section("note-reminder", () => noteReminder(input), input);
+    if (reliefOutcome === "not-eligible" && noteReminder) {
+      notes =
+        (await section("note-reminder", () => noteReminder(input), input))
+          ?.hookSpecificOutput ?? null;
     }
     if (notes) {
       sections.push(notes);

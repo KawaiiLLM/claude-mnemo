@@ -470,6 +470,42 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     );
   });
 
+  test("a failed claim warns even though production injects no logger", async () => {
+    // The wiring in `hook-command` builds this entry with a database and
+    // nothing else, so a handler that only warns through an injected logger is
+    // silent exactly where the diagnostics are needed: a marker write that
+    // fails costs the reminder, and without a line on stderr the loss leaves no
+    // trace anywhere.
+    const owing = addWorkingTurn(1);
+    addTurn(2);
+    // The marker write lands, then the exposure insert hits a table that is no
+    // longer there — the transaction rolls back and the handler takes its
+    // silent path, which is the failure this test is here to hear.
+    db.exec("DROP TABLE note_id_exposures");
+
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    let result: Awaited<ReturnType<ReturnType<typeof createPromptDispatchHandler>>>;
+    try {
+      result = await createPromptDispatchHandler({
+        db,
+        dataRoot,
+        now: () => 500,
+      })(createInput());
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(result.hookSpecificOutput).toBeUndefined();
+    expect(remindedAt(owing)).toBeNull();
+    expect(warnings.map((args) => args[0])).toContain(
+      "note reminder not claimed",
+    );
+  });
+
   test("shows the oldest five and withdraws the skip authorisation from three", async () => {
     for (let promptNumber = 1; promptNumber <= 7; promptNumber += 1) {
       addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);

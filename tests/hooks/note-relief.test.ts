@@ -205,7 +205,7 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
 
     const result = await handler()(createInput());
 
-    expect(result).toEqual({ continue: true });
+    expect(result).toEqual({ continue: true, reliefOutcome: "not-eligible" });
     expect(exposureRows()).toEqual([]);
   });
 
@@ -238,7 +238,10 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     addTurn(12);
     const fires = await handler()(createInput());
 
-    expect(tooSoon).toEqual({ continue: true });
+    // Not eligible, so the ordinary reminder is welcome to this prompt: the
+    // streak reset because a note was actually written, not because a sibling
+    // process took the claim.
+    expect(tooSoon).toEqual({ continue: true, reliefOutcome: "not-eligible" });
     expect(fires.hookSpecificOutput).toContain(
       "mnemo pending notes (backlog relief):",
     );
@@ -305,7 +308,12 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
 
     const result = await racing(createInput());
 
-    expect(result).toEqual({ continue: true });
+    // Silent, but not "shut": the valve was open and the other process took the
+    // shot, so the caller must still keep the ordinary reminder off this prompt.
+    expect(result).toEqual({
+      continue: true,
+      reliefOutcome: "eligible-not-claimed",
+    });
     expect(exposureRows()).toEqual([]);
   });
 
@@ -389,7 +397,10 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     // claim IS the one-shot, so rendering without it would repeat a standing
     // authorisation on every prompt. The trigger state survives, so the next
     // prompt tries again.
-    expect(result).toEqual({ continue: true });
+    expect(result).toEqual({
+      continue: true,
+      reliefOutcome: "eligible-not-claimed",
+    });
     expect(exposureRows()).toEqual([]);
     expect(warnings[0]?.[0]).toBe("note backlog relief not claimed");
   });
@@ -399,7 +410,7 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
 
     const result = await handler()(createInput({ agentId: "child-agent-7" }));
 
-    expect(result).toEqual({ continue: true });
+    expect(result).toEqual({ continue: true, reliefOutcome: "not-eligible" });
     expect(exposureRows()).toEqual([]);
   });
 
@@ -449,6 +460,49 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
         .get()?.count,
     ).toBe(0);
     expect(exposureRows().every((row) => row.source === "injection")).toBe(true);
+  });
+
+  test("a relief that loses its claim still outranks the reminder", async () => {
+    // The precedence cannot be read off the relief's text: "no text" covers
+    // both "the valve was shut" and "the valve was open and another process
+    // took this streak's one shot". In the second case the relief IS being
+    // shown — by the sibling process — so a reminder rendered here would put
+    // the two contradictory lists on the same prompt, and worse, it would MARK
+    // debts the relief is re-listing, spending an ask that was never made.
+    seedBacklog();
+
+    // Another UserPromptSubmit process commits its claim while this one is
+    // between its gate reads and its own write.
+    let raced = false;
+    const realTransaction = db.transaction.bind(db);
+    (db as unknown as { transaction: (fn: () => unknown) => unknown }).transaction =
+      (fn: () => unknown) =>
+        realTransaction(() => {
+          if (!raced) {
+            raced = true;
+            db.query<unknown, [number]>(
+              `UPDATE note_debt_cursor SET last_relief_prompt_number = 6
+               WHERE session_id = ?`,
+            ).run(sessionId);
+          }
+          return fn();
+        });
+
+    const result = await createPromptDispatchHandler({
+      db,
+      dataRoot,
+      now: () => 500,
+    })(createInput());
+
+    expect(result.hookSpecificOutput ?? "").not.toContain("mnemo pending notes");
+    expect(exposureRows()).toEqual([]);
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM note_debt WHERE reminded_at_epoch IS NOT NULL",
+        )
+        .get()?.count,
+    ).toBe(0);
   });
 
   test("the ordinary reminder takes the prompt when the valve stays shut", async () => {

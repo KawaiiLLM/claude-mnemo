@@ -7755,14 +7755,20 @@ function initializeSchema(db) {
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
-function ensureNoteDebtReasonVocabulary(db) {
-  const existing = db.query(
+function noteDebtReasonVocabularyIsStale(db) {
+  const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
-  ).get();
-  if (!existing?.sql || existing.sql.includes("'declined'")) {
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'declined'");
+}
+function ensureNoteDebtReasonVocabulary(db) {
+  if (!noteDebtReasonVocabularyIsStale(db)) {
     return;
   }
-  db.transaction(() => {
+  runWriteTransaction(db, () => {
+    if (!noteDebtReasonVocabularyIsStale(db)) {
+      return;
+    }
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
     const carried = hasColumn(
@@ -7781,7 +7787,7 @@ function ensureNoteDebtReasonVocabulary(db) {
     );
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_INDEX_DDL);
-  })();
+  });
 }
 function ensureNoteDebtRemindedColumn(db) {
   addColumnIfMissing(db, "note_debt", "reminded_at_epoch", "INTEGER");
@@ -8132,6 +8138,7 @@ var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, SCHEMA_SQL, MEMORY
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
+    init_database();
     init_search();
     MEMORY_FTS_DDL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(

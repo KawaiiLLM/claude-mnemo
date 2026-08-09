@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { runWriteTransaction } from "./database";
 import { rebuildSearchIndex } from "./search";
 
 const MEMORY_FTS_DDL = `
@@ -814,19 +815,38 @@ export function initializeSchema(db: Database): void {
 // Detection reads the stored DDL for the NEWEST value rather than a version
 // counter, so each widening rebuilds exactly once and a database created fresh
 // from the current DDL skips it. Widening again means moving this string.
+function noteDebtReasonVocabularyIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'",
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'declined'");
+}
+
 function ensureNoteDebtReasonVocabulary(db: Database): void {
-  const existing = db
-    .query<{ sql: string | null }, []>(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'",
-    )
-    .get();
-  if (!existing?.sql || existing.sql.includes("'declined'")) {
+  // A read, not a decision: it only says whether taking the write lock is worth
+  // it. Two hook processes start on one event, so both can pass here.
+  if (!noteDebtReasonVocabularyIsStale(db)) {
     return;
   }
 
-  // One transaction: a crash between the rename and the copy would otherwise
-  // leave the ledger under a name nothing reads, which reads as "no debts".
-  db.transaction(() => {
+  // One IMMEDIATE transaction with the same busy retry the rest of the write
+  // path uses, and the eligibility re-read INSIDE it. Deciding outside the lock
+  // is what let the loser of a two-hook start rename, copy and drop a ledger the
+  // winner had already rebuilt — on a real `note_debt` that second copy is long
+  // enough to outlive the hook connection's 800ms busy timeout and take schema
+  // initialisation, and with it the caller's real work, down with it.
+  //
+  // The transaction is also what keeps the ledger whole: a crash between the
+  // rename and the copy would leave it under a name nothing reads, which every
+  // reader sees as "no debts".
+  runWriteTransaction(db, () => {
+    if (!noteDebtReasonVocabularyIsStale(db)) {
+      return;
+    }
+
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
     // The column list is explicit rather than `SELECT *` so the copy survives a
@@ -853,7 +873,7 @@ function ensureNoteDebtReasonVocabulary(db: Database): void {
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     // The index followed the renamed table and died with it.
     db.exec(NOTE_DEBT_INDEX_DDL);
-  })();
+  });
 }
 
 // `reminded_at_epoch` records when the ordinary reminder listed a debt: NULL is

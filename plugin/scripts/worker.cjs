@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.2-mslxaryb" : "dev";
+var BUILD_ID = true ? "0.9.2-mslye7hn" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -3101,14 +3101,20 @@ function initializeSchema(db) {
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
-function ensureNoteDebtReasonVocabulary(db) {
-  const existing = db.query(
+function noteDebtReasonVocabularyIsStale(db) {
+  const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
-  ).get();
-  if (!existing?.sql || existing.sql.includes("'declined'")) {
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'declined'");
+}
+function ensureNoteDebtReasonVocabulary(db) {
+  if (!noteDebtReasonVocabularyIsStale(db)) {
     return;
   }
-  db.transaction(() => {
+  runWriteTransaction(db, () => {
+    if (!noteDebtReasonVocabularyIsStale(db)) {
+      return;
+    }
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
     const carried = hasColumn(
@@ -3127,7 +3133,7 @@ function ensureNoteDebtReasonVocabulary(db) {
     );
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_INDEX_DDL);
-  })();
+  });
 }
 function ensureNoteDebtRemindedColumn(db) {
   addColumnIfMissing(db, "note_debt", "reminded_at_epoch", "INTEGER");
