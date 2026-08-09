@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslk3y6e" : "dev";
+var BUILD_ID = true ? "0.9.1-msll0tes" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -21986,15 +21986,52 @@ function createNoteSettlementScheduler(deps) {
           reason: `note settlement dispatch threw: ${error49 instanceof Error ? error49.message : String(error49)}`
         };
       }
-      if (outcome.ok) {
-        const committed = runWriteTransaction(db, () => {
-          if (!completeNoteSettlementJob(
+      const resolution = runWriteTransaction(
+        db,
+        () => {
+          const current = getNoteSettlementJob(db, claimed.id);
+          if (!current || current.claimGeneration !== claimed.claimGeneration) {
+            return "preempted";
+          }
+          if (current.status === "done") {
+            advanceNoteSettlementCursor(
+              db,
+              claimed.sessionId,
+              now(),
+              claimOptions.maxAttempts
+            );
+            return "settled";
+          }
+          if (current.status !== "claimed") {
+            return "preempted";
+          }
+          if (outcome.ok) {
+            if (!completeNoteSettlementJob(
+              db,
+              claimed.id,
+              now(),
+              claimed.claimGeneration
+            )) {
+              return "preempted";
+            }
+            advanceNoteSettlementCursor(
+              db,
+              claimed.sessionId,
+              now(),
+              claimOptions.maxAttempts
+            );
+            return "settled";
+          }
+          const failed = failNoteSettlementJob(
             db,
             claimed.id,
+            outcome.reason,
             now(),
-            claimed.claimGeneration
-          )) {
-            return false;
+            claimed.claimGeneration,
+            { retryBaseMs: deps.retryBaseMs }
+          );
+          if (failed === null) {
+            return "preempted";
           }
           advanceNoteSettlementCursor(
             db,
@@ -22002,42 +22039,30 @@ function createNoteSettlementScheduler(deps) {
             now(),
             claimOptions.maxAttempts
           );
-          return true;
-        });
-        if (!committed) {
-          logger.warn?.("note settlement result discarded, job was reclaimed", {
-            sessionDbId,
-            jobId: claimed.id,
-            claimGeneration: claimed.claimGeneration
-          });
-          break;
+          return "failed";
+        }
+      );
+      if (resolution === "settled") {
+        if (!outcome.ok) {
+          logger.warn?.(
+            "note settlement payload reported a failure after committing its window",
+            {
+              sessionDbId,
+              jobId: claimed.id,
+              reason: outcome.reason
+            }
+          );
         }
         continue;
       }
-      const failed = failNoteSettlementJob(
-        db,
-        claimed.id,
-        outcome.reason,
-        now(),
-        claimed.claimGeneration,
-        { retryBaseMs: deps.retryBaseMs }
-      );
-      if (failed === null) {
-        logger.warn?.("note settlement failure discarded, job was reclaimed", {
+      if (resolution === "preempted") {
+        logger.warn?.("note settlement result discarded, job was reclaimed", {
           sessionDbId,
-          jobId: claimed.id
+          jobId: claimed.id,
+          claimGeneration: claimed.claimGeneration,
+          ok: outcome.ok
         });
-        break;
       }
-      runWriteTransaction(
-        db,
-        () => advanceNoteSettlementCursor(
-          db,
-          claimed.sessionId,
-          now(),
-          claimOptions.maxAttempts
-        )
-      );
       break;
     }
     if (dispatched.length === 0 && !isGracefulExit()) {

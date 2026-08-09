@@ -8,6 +8,7 @@ import {
   enqueueNoteSettlementWindows,
   enqueueResidualNoteSettlementJob,
   failNoteSettlementJob,
+  getNoteSettlementJob,
   listDispatchableNoteSettlementSessions,
   listResidualNoteSettlementCandidates,
   NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER,
@@ -105,6 +106,17 @@ export interface NoteSettlementScheduler {
   onCompact(sessionDbId: number): Promise<NoteSettlementPassResult>;
 }
 
+/**
+ * What the row says happened, after the dispatch has had its say.
+ *
+ *   - `settled`   — the window is durably resolved and the drain goes on;
+ *   - `failed`    — the window is unresolved and the pass stops, so a later
+ *                   window is never settled ahead of an earlier one;
+ *   - `preempted` — the row no longer belongs to this dispatch; whatever it
+ *                   wanted to write is discarded and the pass stops.
+ */
+type NoteSettlementResolution = "settled" | "failed" | "preempted";
+
 const INERT_PASS: NoteSettlementPassResult = {
   triggered: false,
   created: [],
@@ -143,6 +155,9 @@ export function createNoteSettlementScheduler(
    * returns the job to a later trigger instead of burning all three attempts in
    * one loop. A failure also ENDS the pass — settling a later window while an
    * earlier one is unresolved would read an arc whose first half is missing.
+   * "Unresolved" is a property of the ROW, not of the verdict: a payload whose
+   * write-back committed has resolved its window even if it then reported a
+   * failure, and the drain carries on past it.
    *
    * The graceful-exit flag is read on EVERY iteration, not once on the way in.
    * Shutdown arrives asynchronously and a drain can run for minutes, so a flag
@@ -214,65 +229,115 @@ export function createNoteSettlementScheduler(
         };
       }
 
-      if (outcome.ok) {
-        // Completion and cursor advance share one transaction: the cursor is
-        // derived from job statuses, so a crash between them would leave a
-        // resolved window the cursor never learned about.
-        const committed = runWriteTransaction(db, () => {
-          if (
-            !completeNoteSettlementJob(
-              db,
-              claimed.id,
-              now(),
-              claimed.claimGeneration,
-            )
-          ) {
-            return false;
+      // The verdict alone does not say what happened to the ROW. A payload is
+      // allowed to settle its own window — ticket 07's write-back marks the job
+      // `done` inside the same transaction that lands the segments, because a
+      // crash must not be able to separate the two — so a successful settlement
+      // hands the scheduler a row that has already left `claimed`, and the
+      // completion CAS (fenced on `status = 'claimed'`) then matches nothing.
+      //
+      // Reading "matches nothing" as "somebody else owns this row" is what used
+      // to stop the drain on its first success and strand every later window
+      // until an unrelated trigger came along. So the row is re-read and three
+      // cases are told apart: `done` under OUR generation is a settled window
+      // whatever the verdict said; `claimed` under our generation is a window
+      // the verdict still decides; anything else is genuine preemption.
+      //
+      // The re-read sits INSIDE the transaction that acts on it, and every
+      // reclaim path is a BEGIN IMMEDIATE writer too, so nothing can move the
+      // row between the classification and the write it authorises.
+      const resolution = runWriteTransaction(
+        db,
+        (): NoteSettlementResolution => {
+          const current = getNoteSettlementJob(db, claimed.id);
+          if (!current || current.claimGeneration !== claimed.claimGeneration) {
+            return "preempted";
           }
+          if (current.status === "done") {
+            // The window's effects are durable regardless of the verdict: a
+            // payload that committed and then threw on a later step (a segment
+            // CAS replay, the metrics sink) has still settled this window, and
+            // stamping a failure over the `done` row would license a retry of
+            // writes that already landed.
+            advanceNoteSettlementCursor(
+              db,
+              claimed.sessionId,
+              now(),
+              claimOptions.maxAttempts,
+            );
+            return "settled";
+          }
+          if (current.status !== "claimed") {
+            return "preempted";
+          }
+
+          if (outcome.ok) {
+            // Completion and cursor advance share one transaction: the cursor
+            // is derived from job statuses, so a crash between them would leave
+            // a resolved window the cursor never learned about.
+            if (
+              !completeNoteSettlementJob(
+                db,
+                claimed.id,
+                now(),
+                claimed.claimGeneration,
+              )
+            ) {
+              return "preempted";
+            }
+            advanceNoteSettlementCursor(
+              db,
+              claimed.sessionId,
+              now(),
+              claimOptions.maxAttempts,
+            );
+            return "settled";
+          }
+
+          const failed = failNoteSettlementJob(
+            db,
+            claimed.id,
+            outcome.reason,
+            now(),
+            claimed.claimGeneration,
+            { retryBaseMs: deps.retryBaseMs },
+          );
+          if (failed === null) {
+            return "preempted";
+          }
+          // A terminal failure must not park the session forever: the cursor
+          // walks past it and the audit trail stays on the row.
           advanceNoteSettlementCursor(
             db,
             claimed.sessionId,
             now(),
             claimOptions.maxAttempts,
           );
-          return true;
-        });
-        if (!committed) {
-          logger.warn?.("note settlement result discarded, job was reclaimed", {
-            sessionDbId,
-            jobId: claimed.id,
-            claimGeneration: claimed.claimGeneration,
-          });
-          break;
+          return "failed";
+        },
+      );
+
+      if (resolution === "settled") {
+        if (!outcome.ok) {
+          logger.warn?.(
+            "note settlement payload reported a failure after committing its window",
+            {
+              sessionDbId,
+              jobId: claimed.id,
+              reason: outcome.reason,
+            },
+          );
         }
         continue;
       }
-
-      const failed = failNoteSettlementJob(
-        db,
-        claimed.id,
-        outcome.reason,
-        now(),
-        claimed.claimGeneration,
-        { retryBaseMs: deps.retryBaseMs },
-      );
-      if (failed === null) {
-        logger.warn?.("note settlement failure discarded, job was reclaimed", {
+      if (resolution === "preempted") {
+        logger.warn?.("note settlement result discarded, job was reclaimed", {
           sessionDbId,
           jobId: claimed.id,
+          claimGeneration: claimed.claimGeneration,
+          ok: outcome.ok,
         });
-        break;
       }
-      // A terminal failure must not park the session forever: the cursor walks
-      // past it and the audit trail stays on the row.
-      runWriteTransaction(db, () =>
-        advanceNoteSettlementCursor(
-          db,
-          claimed.sessionId,
-          now(),
-          claimOptions.maxAttempts,
-        ),
-      );
       break;
     }
 
