@@ -107,9 +107,10 @@ Fields:
   durable pointers, transferable lessons — and orthogonal to this turn's
   conclusion. Already-known facts, perishable state, and anything one search
   away do not qualify.
-Rules: the note call always goes last in a batch; cite other turns only as
-[S15069/T332] and only ids seen in reminders or injected context; omit
-numbers you are not sure of; never include <private> content.
+Rules: write title/content/insight in English; quoted user phrases keep
+their original language. The note call always goes last in a batch; cite
+other turns only as [S15069/T332] and only ids seen in reminders or injected
+context; omit numbers you are not sure of; never include <private> content.
 </mnemo-note-taking>
 ```
 

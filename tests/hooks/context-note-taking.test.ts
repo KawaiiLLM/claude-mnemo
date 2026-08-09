@@ -44,6 +44,11 @@ describe("note-taking instructions injection", () => {
       "Never start a tool call just to write a note",
     );
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
+    // The note-language rule (裁决 16): without it, agents follow the
+    // conversation's language — the S15440 Chinese-notes regression.
+    expect(NOTE_TAKING_INSTRUCTIONS).toContain(
+      "write title/content/insight in English",
+    );
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("never include <private> content");
     // Budgeted as a cached prefix block (~280 tokens in the spec). Estimated
     // with the 4-chars-per-token rule, not the diary's CJK-weighted one, which

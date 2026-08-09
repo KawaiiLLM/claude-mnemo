@@ -9,7 +9,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   note:
-    "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Re-sending a turn replaces its note. Never include <private> content.",
+    "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note. Never include <private> content.",
 } as const;
 
 export const recallInputShape = {
