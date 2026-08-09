@@ -12,6 +12,7 @@ import {
   recordNoteIdExposure,
   reconcileNoteDebt,
 } from "../../src/db/note-debt";
+import { getDecidedPrefixEnd } from "../../src/db/note-settlement";
 import { initializeDatabase, initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
@@ -20,11 +21,24 @@ describe("note debt ledger", () => {
   let db: Database;
   let sessionId: number;
 
+  /**
+   * A turn whose Stop the hook captured — the ordinary case, and what every
+   * test here means by "a turn that ended". The turn row itself stays `active`
+   * because extraction is a later, separate pipeline; the queued `turn-stop` is
+   * mnemo's own record that the turn's tool batch is closed, and the sweep will
+   * not classify a turn without it (a turn with neither that nor a terminal
+   * status is STRANDED, not finished).
+   */
   function addTurn(
     promptNumber: number,
-    options: { prompt?: string; rolledBack?: boolean } = {},
+    options: {
+      prompt?: string;
+      rolledBack?: boolean;
+      /** Model a turn whose Stop was never captured. */
+      stranded?: boolean;
+    } = {},
   ): number {
-    return db
+    const turnId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
@@ -38,6 +52,24 @@ describe("note debt ledger", () => {
         options.prompt ?? `prompt ${promptNumber}`,
         options.rolledBack ? 1 : 0,
       )!.id;
+    if (!options.stranded) {
+      db.query<unknown, [number, number]>(
+        `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+         VALUES ('turn-stop', ?, ?, 100)`,
+      ).run(turnId, sessionId);
+    }
+    return turnId;
+  }
+
+  function getClassificationCursor(): number {
+    return (
+      db
+        .query<{ cursor: number }, [number]>(
+          `SELECT last_classified_prompt_number AS cursor
+           FROM note_debt_cursor WHERE session_id = ?`,
+        )
+        .get(sessionId)?.cursor ?? 0
+    );
   }
 
   function addObservation(
@@ -235,6 +267,88 @@ describe("note debt ledger", () => {
       status: "skipped",
       reason: "aged",
     });
+  });
+
+  /**
+   * The sweep's premise is that a classified turn's tool batch is FINAL, and a
+   * turn whose Stop mnemo never captured is still nominally open — more
+   * observations can land against it at any time. Classifying it on what has
+   * arrived so far reads zero tool calls as "owed nothing", which is
+   * indistinguishable from a genuinely trivial turn, and the watermark then
+   * walks over it. That is not a delay a later pass corrects: settlement cuts
+   * frozen windows from this watermark, so the misreading becomes a window that
+   * can never be recut.
+   */
+  test("a stranded turn blocks the watermark instead of being read as trivial", () => {
+    // Trivial by design: no observations, so they are decided by absence.
+    for (let promptNumber = 1; promptNumber <= 9; promptNumber += 1) {
+      addTurn(promptNumber);
+    }
+    // Turn 10's Stop never reached mnemo, so nothing has closed its batch.
+    const stranded = addTurn(10, { stranded: true });
+    const later = addTurn(11);
+
+    const blocked = reconcileNoteDebt(db, {
+      sessionId,
+      nowEpoch: 300,
+      completedTurnId: later,
+    });
+
+    expect(getNoteDebt(db, stranded)).toBeNull();
+    // Turn 11 is finished, but the prefix is contiguous: it waits behind 10.
+    expect(getNoteDebt(db, later)).toBeNull();
+    expect(blocked.classifiedThroughPromptNumber).toBe(9);
+    expect(getClassificationCursor()).toBe(9);
+    // The settlement consequence, which is why this matters at all: no window
+    // can be cut over turn 10 while its outcome is unknown.
+    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(9);
+
+    // Proof the batch was not final: a tool call for turn 10 lands late. Had
+    // the sweep classified it above, this work would already have been written
+    // off as a turn that owed nothing.
+    addObservation(stranded, "Edit");
+    // The liveness repair (ticket 10) re-enqueues the missing turn-stop.
+    db.query<unknown, [number, number]>(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, 310)`,
+    ).run(stranded, sessionId);
+
+    const resumed = reconcileNoteDebt(db, {
+      sessionId,
+      nowEpoch: 320,
+      completedTurnId: later,
+    });
+
+    expect(resumed.opened).toEqual([stranded]);
+    expect(getNoteDebt(db, stranded)?.status).toBe("pending");
+    expect(resumed.classifiedThroughPromptNumber).toBe(11);
+    // Now the debt itself — a real, writable one — is what holds the window.
+    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(9);
+
+    upsertShadowNote(db, {
+      turnId: stranded,
+      title: "repair+ledger: the late note lands",
+      content: "…",
+      nowEpoch: 330,
+    });
+    reconcileNoteDebt(db, { sessionId, nowEpoch: 340 });
+    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(11);
+  });
+
+  test("a gap in prompt numbers does not wedge the watermark", () => {
+    addObservation(addTurn(1), "Edit");
+    // Prompt 2 never existed — a cleaned subagent turn leaves exactly this.
+    addObservation(addTurn(3), "Edit");
+    const latest = addTurn(4);
+
+    const result = reconcileNoteDebt(db, {
+      sessionId,
+      nowEpoch: 300,
+      completedTurnId: latest,
+    });
+
+    expect(result.classifiedThroughPromptNumber).toBe(4);
+    expect(getClassificationCursor()).toBe(4);
   });
 
   test("opening the database runs no ledger scan", () => {

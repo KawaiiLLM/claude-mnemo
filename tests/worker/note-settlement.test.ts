@@ -8,11 +8,16 @@ import { listNoteDebt } from "../../src/db/note-debt";
 import {
   NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
   NOTE_SETTLEMENT_LEASE_MS,
+  NOTE_SETTLEMENT_MAX_ATTEMPTS,
   NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
   NOTE_SETTLEMENT_RETRY_BASE_MS,
   claimNextNoteSettlementJob,
+  completeNoteSettlementJob,
   countNoteSettlementJobs,
+  enqueueNoteSettlementWindows,
+  failNoteSettlementJob,
   getNoteSettlementCursor,
+  getNoteSettlementJob,
   listNoteSettlementJobs,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
@@ -343,6 +348,171 @@ describe("note settlement triggers", () => {
   });
 });
 
+describe("note settlement and the graceful-exit window", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a shutdown arriving mid-drain stops the loop claiming anything more", async () => {
+    const sessionDbId = seedSession(db, "content-exit-mid-drain");
+    const clock = createClock();
+    let exiting = false;
+    const calls: NoteSettlementJob[] = [];
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      isGracefulExit: () => exiting,
+      dispatch: async ({ job }) => {
+        calls.push(job);
+        // Shutdown lands while the first payload is still running.
+        exiting = true;
+        return { ok: true };
+      },
+    });
+
+    // Three full windows are due at once, so the loop would otherwise claim and
+    // dispatch all three in this single pass.
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    const pass = await scheduler.onTurnStop(sessionDbId);
+
+    expect(pass.created).toHaveLength(3);
+    expect(calls).toHaveLength(1);
+    const jobs = listNoteSettlementJobs(db, sessionDbId);
+    expect(jobs.map((job) => job.status)).toEqual([
+      "done",
+      "pending",
+      "pending",
+    ]);
+    // Untouched means untouched: no attempt was spent on work exit prevented.
+    expect(jobs[1]!.attempts).toBe(0);
+    expect(jobs[2]!.attempts).toBe(0);
+  });
+
+  test("a claim the shutdown interrupts is handed back with its attempt refunded", async () => {
+    const sessionDbId = seedSession(db, "content-exit-refund");
+    const clock = createClock();
+    const calls: NoteSettlementJob[] = [];
+    // The flag flips between the loop's own check and the claim it guards.
+    // Reads in order: runTrigger's pre-drain check, the loop's top-of-iteration
+    // check, then the post-claim check — which is the one that must catch it.
+    let reads = 0;
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      isGracefulExit: () => {
+        reads += 1;
+        return reads >= 3;
+      },
+      dispatch: async ({ job }) => {
+        calls.push(job);
+        return { ok: true };
+      },
+    });
+
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    const pass = await scheduler.onTurnStop(sessionDbId);
+
+    expect(pass.created).toHaveLength(1);
+    expect(pass.dispatched).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+
+    const job = listNoteSettlementJobs(db, sessionDbId)[0]!;
+    expect(job.status).toBe("pending");
+    // The refund is the point: a payload that never started must leave the job
+    // its full three lives for after the restart.
+    expect(job.attempts).toBe(0);
+    // Released is still a transition out of `claimed`, so the fence moved.
+    expect(job.claimGeneration).toBeGreaterThan(1);
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+  });
+});
+
+describe("note settlement compact boundary", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function setCompactBoundary(sessionDbId: number, promptNumber: number): void {
+    db.query<unknown, [number, number]>(
+      "UPDATE sessions SET last_compact_turn = ? WHERE id = ?",
+    ).run(promptNumber, sessionDbId);
+  }
+
+  test("a compact window stops at the repaired boundary marker", async () => {
+    const sessionDbId = seedSession(db, "content-compact-boundary");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    // The ledger has decided 60 turns, but the compact only closed over 30:
+    // the rest were classified by the queue drain that runs between the anchor
+    // repair and this trigger.
+    seedTurns(db, sessionDbId, 1, 60);
+    setCompactBoundary(sessionDbId, 30);
+
+    const first = await scheduler.onCompact(sessionDbId);
+
+    expect(first.created).toHaveLength(1);
+    expect(first.created[0]!.triggerType).toBe("compact");
+    expect(first.created[0]!.windowStart).toBe(1);
+    // Unbounded, the decided prefix would have cut a 50-turn block here.
+    expect(first.created[0]!.windowEnd).toBe(30);
+    expect(calls).toHaveLength(1);
+
+    // The turns past the boundary are not lost, only deferred to the trigger
+    // that owns them.
+    setCompactBoundary(sessionDbId, 60);
+    const second = await scheduler.onCompact(sessionDbId);
+
+    expect(second.created).toHaveLength(1);
+    expect(second.created[0]!.windowStart).toBe(31);
+    expect(second.created[0]!.windowEnd).toBe(60);
+  });
+
+  test("a session that has never been compacted is not bounded by a missing marker", async () => {
+    const sessionDbId = seedSession(db, "content-no-boundary");
+    const clock = createClock();
+    const { dispatch } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    seedTurns(db, sessionDbId, 1, 25);
+    const pass = await scheduler.onCompact(sessionDbId);
+
+    expect(pass.created).toHaveLength(1);
+    expect(pass.created[0]!.windowEnd).toBe(25);
+  });
+});
+
 describe("note settlement job state machine", () => {
   let db: Database;
 
@@ -418,6 +588,7 @@ describe("note settlement job state machine", () => {
     seedTurns(db, sessionDbId, 1, 50);
     await scheduler.onTurnStop(sessionDbId);
 
+    let previousGeneration = 0;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const claimed = claimNextNoteSettlementJob(
         db,
@@ -426,7 +597,11 @@ describe("note settlement job state machine", () => {
         clock.nowMs(),
       );
       expect(claimed?.attempts).toBe(attempt);
-      expect(claimed?.claimGeneration).toBe(attempt);
+      // Generation counts OWNERSHIP CHANGES, not attempts: reclaiming the
+      // expired lease invalidates the dead owner's fence, and the fresh claim
+      // takes the next one, so it outruns `attempts` by one per reclaim.
+      expect(claimed!.claimGeneration).toBeGreaterThan(previousGeneration);
+      previousGeneration = claimed!.claimGeneration;
       clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
     }
 
@@ -486,13 +661,222 @@ describe("note settlement job state machine", () => {
     seedTurns(db, sessionDbId, 1, 50);
     await scheduler.onTurnStop(sessionDbId);
 
-    expect(reclaimedGeneration).toBe(2);
+    // Claim (1) → reclaim of the expired lease (2) → the reclaimer's claim (3).
+    expect(reclaimedGeneration).toBe(3);
     const job = listNoteSettlementJobs(db, sessionDbId)[0]!;
     // The stale owner's "done" wrote nothing: the row still belongs to the
     // reclaimer, and the cursor never learned of a settlement nobody committed.
     expect(job.status).toBe("claimed");
-    expect(job.claimGeneration).toBe(2);
+    expect(job.claimGeneration).toBe(3);
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+  });
+
+  /**
+   * Ownership ends the moment the row leaves `claimed`, and these three cover
+   * the ways it can leave without anyone taking it over. The fence has to hold
+   * in that gap too: a job that has gone back to the queue, or gone terminal,
+   * must not be writable by the owner it displaced — otherwise a dead worker
+   * reporting late marks a window settled that nobody settled, and the cursor
+   * walks over turns whose notes were never read.
+   */
+  function seedSingleJob(db: Database, contentSessionId: string, nowEpoch: number) {
+    const sessionDbId = seedSession(db, contentSessionId);
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    const [job] = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+          triggerType: "consecutive",
+        },
+      ],
+      nowEpoch,
+    );
+    return { sessionDbId, job: job! };
+  }
+
+  test("a late success after the lease was reclaimed is discarded", () => {
+    const clock = createClock();
+    const { sessionDbId } = seedSingleJob(db, "content-late-reclaim", clock.now());
+
+    const owner = claimNextNoteSettlementJob(
+      db,
+      sessionDbId,
+      clock.now(),
+      clock.nowMs(),
+    )!;
+    clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
+    // Reclaim without re-claiming, which is the window the bug lived in.
+    claimNextNoteSettlementJob(db, sessionDbId, clock.now(), clock.nowMs(), {
+      excludeJobIds: new Set([owner.id]),
+    });
+    expect(getNoteSettlementJob(db, owner.id)!.status).toBe("pending");
+
+    expect(
+      completeNoteSettlementJob(db, owner.id, clock.now(), owner.claimGeneration),
+    ).toBe(false);
+    expect(getNoteSettlementJob(db, owner.id)!.status).toBe("pending");
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
+  });
+
+  test("a late success after the job went terminal cannot resurrect it", () => {
+    const clock = createClock();
+    const { sessionDbId } = seedSingleJob(db, "content-late-terminal", clock.now());
+
+    let lastOwner: NoteSettlementJob | null = null;
+    for (let attempt = 1; attempt <= NOTE_SETTLEMENT_MAX_ATTEMPTS; attempt += 1) {
+      lastOwner = claimNextNoteSettlementJob(
+        db,
+        sessionDbId,
+        clock.now(),
+        clock.nowMs(),
+      );
+      clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
+    }
+    // The claim that finds an exhausted expired lease terminalises it.
+    expect(
+      claimNextNoteSettlementJob(db, sessionDbId, clock.now(), clock.nowMs()),
+    ).toBeNull();
+    expect(getNoteSettlementJob(db, lastOwner!.id)!.status).toBe("failed");
+
+    expect(
+      completeNoteSettlementJob(
+        db,
+        lastOwner!.id,
+        clock.now(),
+        lastOwner!.claimGeneration,
+      ),
+    ).toBe(false);
+    const terminal = getNoteSettlementJob(db, lastOwner!.id)!;
+    expect(terminal.status).toBe("failed");
+    expect(terminal.attempts).toBe(NOTE_SETTLEMENT_MAX_ATTEMPTS);
+  });
+
+  test("a late failure after the lease was reclaimed is discarded", () => {
+    const clock = createClock();
+    const { sessionDbId } = seedSingleJob(db, "content-late-failure", clock.now());
+
+    const owner = claimNextNoteSettlementJob(
+      db,
+      sessionDbId,
+      clock.now(),
+      clock.nowMs(),
+    )!;
+    clock.advance(NOTE_SETTLEMENT_LEASE_MS + 1_000);
+    claimNextNoteSettlementJob(db, sessionDbId, clock.now(), clock.nowMs(), {
+      excludeJobIds: new Set([owner.id]),
+    });
+
+    expect(
+      failNoteSettlementJob(
+        db,
+        owner.id,
+        "late boom",
+        clock.now(),
+        owner.claimGeneration,
+      ),
+    ).toBeNull();
+    const row = getNoteSettlementJob(db, owner.id)!;
+    // Neither the status nor the backoff belongs to the displaced owner now.
+    expect(row.status).toBe("pending");
+    expect(row.lastError).toBeNull();
+    expect(row.retryAtEpoch).toBe(0);
+  });
+});
+
+describe("note settlement window disjointness", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a second plan overlapping a live job's range is refused, not layered", () => {
+    const sessionDbId = seedSession(db, "content-overlap");
+    seedTurns(db, sessionDbId, 1, 60);
+    const nowEpoch = 1_000;
+
+    const first = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: 30,
+          triggerType: "compact",
+        },
+      ],
+      nowEpoch,
+    );
+    expect(first).toHaveLength(1);
+
+    // A plan of a DIFFERENT trigger type starting at the same place: the UNIQUE
+    // key does not collide, so only the range guard can stop it.
+    const second = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: 50,
+          triggerType: "consecutive",
+        },
+      ],
+      nowEpoch,
+    );
+    expect(second).toHaveLength(0);
+    expect(listNoteSettlementJobs(db, sessionDbId)).toHaveLength(1);
+
+    // 先到先得 costs the loser nothing but a trigger: its turns are still
+    // unowned and the next plan cut from the new bound lands normally.
+    const third = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 31,
+          windowEnd: 60,
+          triggerType: "consecutive",
+        },
+      ],
+      nowEpoch,
+    );
+    expect(third).toHaveLength(1);
+    expect(third[0]!.windowStart).toBe(31);
+  });
+
+  test("plans inside one batch see each other, so a stale second window is dropped", () => {
+    const sessionDbId = seedSession(db, "content-overlap-batch");
+    seedTurns(db, sessionDbId, 1, 60);
+
+    const created = enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: sessionDbId,
+          windowStart: 1,
+          windowEnd: 50,
+          triggerType: "consecutive",
+        },
+        {
+          sessionId: sessionDbId,
+          windowStart: 40,
+          windowEnd: 60,
+          triggerType: "compact",
+        },
+      ],
+      1_000,
+    );
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.windowEnd).toBe(50);
   });
 });
 
@@ -643,5 +1027,158 @@ describe("residual settlement of closed sessions", () => {
     expect(
       listNoteDebt(db, tiny).some((debt) => debt.reason === "closed"),
     ).toBe(false);
+  });
+
+  /**
+   * The residual scan derives candidates from TURNS and skips a session that
+   * already has a job row, so once a residual job exists only a dispatch that
+   * starts from the job table can ever run it. A closed session has no trigger
+   * of its own; if this pass does not find its recorded job, nothing will.
+   */
+  test("a residual recorded during the graceful-exit window is dispatched at the next trigger", async () => {
+    const clock = createClock();
+    const nowEpoch = clock.now();
+
+    const live = seedSession(db, "content-live-exit", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    const closed = seedClosedSession(
+      "content-closed-exit",
+      40,
+      nowEpoch - 3 * DAY_SECONDS,
+    );
+
+    const { dispatch, calls } = recordingDispatch();
+    let exiting = true;
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      activeSessionIds: () => [live],
+      isGracefulExit: () => exiting,
+    });
+
+    const during = await scheduler.onTurnStop(live);
+    expect(during.residualSessionIds).toEqual([closed]);
+    expect(calls).toHaveLength(0);
+    expect(listNoteSettlementJobs(db, closed)).toHaveLength(1);
+    expect(listNoteSettlementJobs(db, closed)[0]!.status).toBe("pending");
+
+    // Next ordinary trigger. The residual DERIVATION now skips this session —
+    // it already has a job — so only dispatching from the job row can reach it.
+    exiting = false;
+    const after = await scheduler.onCompact(live);
+
+    expect(after.residualSessionIds).toEqual([]);
+    expect(calls.map((job) => job.sessionId)).toContain(closed);
+    expect(listNoteSettlementJobs(db, closed)[0]!.status).toBe("done");
+  });
+
+  test("a residual whose backoff has come due is re-dispatched, not stranded", async () => {
+    const clock = createClock();
+    const nowEpoch = clock.now();
+
+    const live = seedSession(db, "content-live-retry", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    const closed = seedClosedSession(
+      "content-closed-retry",
+      40,
+      nowEpoch - 3 * DAY_SECONDS,
+    );
+
+    const calls: NoteSettlementJob[] = [];
+    let failNext = true;
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      activeSessionIds: () => [live],
+      dispatch: async ({ job }) => {
+        calls.push(job);
+        if (job.sessionId === closed && failNext) {
+          failNext = false;
+          return { ok: false, reason: "transient" };
+        }
+        return { ok: true };
+      },
+    });
+
+    await scheduler.onTurnStop(live);
+    expect(listNoteSettlementJobs(db, closed)[0]!.status).toBe("failed");
+    expect(listNoteSettlementJobs(db, closed)[0]!.attempts).toBe(1);
+
+    // Before the backoff elapses nothing happens; after it, an unrelated
+    // session's trigger picks the job up in passing. No timer was involved.
+    const beforeBackoff = calls.length;
+    await scheduler.onCompact(live);
+    expect(calls).toHaveLength(beforeBackoff);
+
+    clock.advance(NOTE_SETTLEMENT_RETRY_BASE_MS + 1_000);
+    await scheduler.onCompact(live);
+
+    expect(calls.filter((job) => job.sessionId === closed)).toHaveLength(2);
+    expect(listNoteSettlementJobs(db, closed)[0]!.status).toBe("done");
+  });
+
+  test("recorded and freshly derived residuals share one per-trigger budget", async () => {
+    const clock = createClock();
+    const nowEpoch = clock.now();
+
+    const live = seedSession(db, "content-live-budget", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    const oldest = seedClosedSession(
+      "content-budget-old",
+      40,
+      nowEpoch - 5 * DAY_SECONDS,
+    );
+    const middle = seedClosedSession(
+      "content-budget-mid",
+      40,
+      nowEpoch - 4 * DAY_SECONDS,
+    );
+    const newest = seedClosedSession(
+      "content-budget-new",
+      40,
+      nowEpoch - 3 * DAY_SECONDS,
+    );
+
+    const { dispatch, calls } = recordingDispatch();
+    let exiting = true;
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      activeSessionIds: () => [live],
+      isGracefulExit: () => exiting,
+    });
+
+    // Two recorded, none dispatched.
+    const during = await scheduler.onTurnStop(live);
+    expect(during.residualSessionIds).toEqual([oldest, middle]);
+
+    // The next trigger owes those two a dispatch, and that debt spends the
+    // whole budget: the third closed session waits its turn rather than making
+    // the pass cost three inferences.
+    exiting = false;
+    const after = await scheduler.onCompact(live);
+
+    expect(after.residualSessionIds).toEqual([]);
+    expect(listNoteSettlementJobs(db, newest)).toHaveLength(0);
+    expect(
+      new Set(
+        calls
+          .filter((job) => job.triggerType === "residual")
+          .map((job) => job.sessionId),
+      ),
+    ).toEqual(new Set([oldest, middle]));
+
+    // With the backlog cleared, the budget is free for it.
+    const next = await scheduler.onCompact(live);
+    expect(next.residualSessionIds).toEqual([newest]);
+    expect(calls.map((job) => job.sessionId)).toContain(newest);
   });
 });

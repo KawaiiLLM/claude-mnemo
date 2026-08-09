@@ -35,11 +35,17 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     };
   }
 
+  /**
+   * A turn whose Stop the hook captured. The row stays `active` — extraction is
+   * a separate, later pipeline, and the reminder path needs the newest turn to
+   * be the open one — while the queued `turn-stop` carries the fact the
+   * classification sweep needs: this turn's tool batch is closed.
+   */
   function addTurn(
     promptNumber: number,
     options: { prompt?: string; rolledBack?: boolean } = {},
   ): number {
-    return db
+    const turnId = db
       .query<{ id: number }, [number, number, string, number]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
@@ -53,6 +59,11 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
         options.prompt ?? `prompt ${promptNumber}`,
         options.rolledBack ? 1 : 0,
       )!.id;
+    db.query<unknown, [number, number]>(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, 100)`,
+    ).run(turnId, sessionId);
+    return turnId;
   }
 
   function addObservation(turnId: number, toolName: string): void {

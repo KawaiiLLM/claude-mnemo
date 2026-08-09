@@ -24,8 +24,14 @@ describe("note debt on the asynchronous capture entries", () => {
   let sessionId: number;
   let directory: string;
 
+  /**
+   * A turn whose Stop the hook captured — the queued `turn-stop` is that record
+   * — while extraction has not yet run, so the row is still `active`. The sweep
+   * classifies from that queued item, not from the turn's status, which is what
+   * keeps the ledger off the extraction pipeline's latency.
+   */
   function addTurn(promptNumber: number, prompt = `prompt ${promptNumber}`): number {
-    return db
+    const turnId = db
       .query<{ id: number }, [number, number, string]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt, created_at_epoch
@@ -33,6 +39,11 @@ describe("note debt on the asynchronous capture entries", () => {
          RETURNING id`,
       )
       .get(sessionId, promptNumber, prompt)!.id;
+    db.query<unknown, [number, number]>(
+      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
+       VALUES ('turn-stop', ?, ?, 100)`,
+    ).run(turnId, sessionId);
+    return turnId;
   }
 
   function addObservation(turnId: number, toolName: string): void {
@@ -116,7 +127,13 @@ describe("note debt on the asynchronous capture entries", () => {
     expect(listNoteDebt(db, sessionId)).toEqual([]);
   });
 
-  test("a tool result sweeps turns that ended without a Stop event", async () => {
+  // The Stop handler is not the only way into the ledger: whenever its own
+  // reconcile did not classify a turn — an interrupt, a crash between the queue
+  // write and the reconcile, a restart — the next tool result sweeps it up.
+  // What the sweep will NOT do is classify a turn whose Stop was never captured
+  // at all: that turn is stranded, its batch is not closed, and the liveness
+  // repair owns it (see note-debt.test.ts).
+  test("a tool result sweeps turns the Stop event did not classify", async () => {
     const interrupted = addTurn(1);
     addObservation(interrupted, "Bash");
     addTurn(2);
@@ -138,9 +155,9 @@ describe("note debt on the asynchronous capture entries", () => {
   });
 
   test("the sweep reaches every unclassified turn, not just the previous one", async () => {
-    // A turn that ends without a Stop (interrupt, crash) is followed here by
-    // three pure question-and-answer turns, which produce no tool result of
-    // their own and so cannot trigger a sweep. The classification cursor is what
+    // A turn the Stop event left unclassified is followed here by three pure
+    // question-and-answer turns, which produce no tool result of their own and
+    // so cannot trigger a sweep. The classification cursor is what
     // makes the eventual sweep whole: it walks every prompt number above the
     // cursor, so the working turn is still classified four turns later.
     const working = addTurn(1);
