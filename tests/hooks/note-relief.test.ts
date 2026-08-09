@@ -423,6 +423,52 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     expect(result.asyncWork).toBeUndefined();
   });
 
+  test("the relief outranks the ordinary reminder, and leaves its debts unasked", async () => {
+    // Both would fire on this prompt: five debts none of which has been listed
+    // yet, and a dry streak deep enough to open the valve. Two overlapping lists
+    // with contradictory closing lines — one authorising a dedicated batch, one
+    // forbidding it — is the failure the precedence exists to prevent.
+    seedBacklog();
+
+    const result = await createPromptDispatchHandler({
+      db,
+      dataRoot,
+      now: () => 500,
+    })(createInput());
+
+    expect(result.hookSpecificOutput).toContain("(backlog relief)");
+    // The ordinary header ends in a colon; the relief's does not.
+    expect(result.hookSpecificOutput).not.toContain("mnemo pending notes:");
+    // Suppressed, not spent: the reminder never ran, so nothing was marked and
+    // every debt still has its own ask waiting on a later prompt.
+    expect(
+      db
+        .query<{ count: number }, []>(
+          "SELECT COUNT(*) AS count FROM note_debt WHERE reminded_at_epoch IS NOT NULL",
+        )
+        .get()?.count,
+    ).toBe(0);
+    expect(exposureRows().every((row) => row.source === "injection")).toBe(true);
+  });
+
+  test("the ordinary reminder takes the prompt when the valve stays shut", async () => {
+    // Two debts is below the relief's five-deep gate, so the same entry answers
+    // with the ordinary list instead — one pending-notes paragraph either way.
+    addWorkingTurn(1, "prompt number 1");
+    addWorkingTurn(2, "prompt number 2");
+    addTurn(3);
+
+    const result = await createPromptDispatchHandler({
+      db,
+      dataRoot,
+      now: () => 500,
+    })(createInput());
+
+    expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
+    expect(result.hookSpecificOutput).not.toContain("(backlog relief)");
+    expect(exposureRows().every((row) => row.source === "reminder")).toBe(true);
+  });
+
   test("an injection that throws does not take the rule output down with it", async () => {
     seedBacklog();
     writeTriggerIndex();

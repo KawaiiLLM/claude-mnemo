@@ -39,9 +39,22 @@ function withTempRoot(run: (dataRoot: string) => void | Promise<void>) {
   };
 }
 
+/**
+ * Only the UserPromptSubmit dispatcher is still registered (裁决 23): mnemo
+ * emits no `additionalContext` from tool-adjacent events, so `pre-tool-dispatch`
+ * and `result-dispatch` are gone from hooks.json and from the command's argv
+ * table. The other two dispatchers are driven here by naming their event in the
+ * payload, which is what exercises the shared engine without a subcommand.
+ */
+const EVENT_BY_COMMAND = {
+  "pre-tool-dispatch": "PreToolUse",
+  "prompt-dispatch": "UserPromptSubmit",
+  "result-dispatch": "PostToolUse",
+} as const;
+
 async function invoke(
   dataRoot: string,
-  command: "pre-tool-dispatch" | "prompt-dispatch" | "result-dispatch",
+  command: keyof typeof EVENT_BY_COMMAND,
   rawInput: Record<string, unknown>,
 ) {
   const dispatchers = {
@@ -53,7 +66,7 @@ async function invoke(
       dataRoot,
       nowMs: () => fixedNowMs,
     }),
-    "PostToolUse:rule-dispatch": createPostToolUseDispatcher({
+    PostToolUse: createPostToolUseDispatcher({
       dataRoot,
       nowMs: () => fixedNowMs,
     }),
@@ -62,10 +75,16 @@ async function invoke(
   let stderr = "";
   const exitCode = await runHookCommand({
     env: {},
-    argv: ["bun", "hook-command.ts", command],
+    argv:
+      command === "prompt-dispatch"
+        ? ["bun", "hook-command.ts", command]
+        : ["bun", "hook-command.ts"],
     stdout: { write: (chunk) => ((stdout += chunk), true) },
     stderr: { write: (chunk) => ((stderr += chunk), true) },
-    readJsonFromStdin: () => rawInput,
+    readJsonFromStdin: () => ({
+      event_name: EVENT_BY_COMMAND[command],
+      ...rawInput,
+    }),
     handlers: dispatchers,
   });
   return { stdout, stderr, exitCode };
@@ -407,10 +426,9 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
     }),
   );
 
-  test("plugin registers prompt and result dispatcher subcommands", () => {
-    const config = JSON.parse(
-      readFileSync("plugin/hooks/hooks.json", "utf8"),
-    ) as {
+  test("the plugin registers the prompt dispatcher and nothing tool-adjacent", () => {
+    const raw = readFileSync("plugin/hooks/hooks.json", "utf8");
+    const config = JSON.parse(raw) as {
       hooks: Record<
         string,
         Array<{ matcher: string; hooks: Array<{ command: string }> }>
@@ -420,9 +438,9 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
       .toContain(
         "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs prompt-dispatch",
       );
-    expect(config.hooks.PostToolUse[0]?.hooks.map((hook) => hook.command))
-      .toContain(
-        "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs result-dispatch",
-      );
+    // `result-dispatch` was the PostToolUse text channel; it is retired whole,
+    // leaving the async capture entry as the only PostToolUse registration.
+    expect(raw).not.toContain("result-dispatch");
+    expect(config.hooks.PostToolUse[0]?.hooks).toHaveLength(1);
   });
 });

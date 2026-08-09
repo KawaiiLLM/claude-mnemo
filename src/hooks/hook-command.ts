@@ -21,11 +21,9 @@ import { createPostToolUseHandler } from "./handlers/post-tool-use";
 import { createMilestoneContextHandler } from "./handlers/context-milestones";
 import { createNoteTakingContextHandler } from "./handlers/context-note-taking";
 import { createPromptDispatchHandler } from "./handlers/prompt-dispatch";
-import { createResultDispatchHandler } from "./handlers/result-dispatch";
 import { createSessionEndHandler } from "./handlers/session-end";
 import { createSessionInitHandler } from "./handlers/session-init";
 import { createStopHandler } from "./handlers/stop";
-import { createPreToolUseDispatcher } from "../rules/pretooluse-dispatcher";
 import type { HookEventName, HookHandler, HookResult } from "./types";
 
 export interface HookCommandDependencies {
@@ -44,9 +42,7 @@ let defaultRecentContextHandler: HookHandler | undefined;
 let defaultDigestContextHandler: HookHandler | undefined;
 let defaultMilestoneContextHandler: HookHandler | undefined;
 let defaultNoteTakingContextHandler: HookHandler | undefined;
-let defaultPreToolUseHandler: HookHandler | undefined;
 let defaultUserPromptSubmitDispatcher: HookHandler | undefined;
-let defaultResultDispatchHandler: HookHandler | undefined;
 let defaultHookDatabase: ReturnType<typeof createDatabase> | undefined;
 const HOOK_DB_BUSY_TIMEOUT_MS = 800;
 
@@ -204,19 +200,16 @@ function getDefaultDigestContextHandler(): HookHandler {
   return defaultDigestContextHandler;
 }
 
-function getDefaultPreToolUseHandler(): HookHandler {
-  if (!defaultPreToolUseHandler) {
-    defaultPreToolUseHandler = createPreToolUseDispatcher();
-  }
-  return defaultPreToolUseHandler;
-}
-
-// The synchronous UserPromptSubmit entry. Like its PostToolUse twin it needs a
-// writable handle — the backlog relief records the ids it just injected and
-// re-arms itself in the same transaction — and like its twin it must survive
-// failing to get one: `session-init` runs in a parallel process on the very
-// same event and can hold the write lock past the busy timeout. A database that
-// cannot be opened costs the relief alone, never the rule digest.
+// The one synchronous entry mnemo has left, and the only one that returns
+// `additionalContext` at all: the tool-adjacent entries were retired because
+// Claude Code re-renders their context at request assembly, which rewrites the
+// previous turn's tail and destroys the message-side cache breakpoint.
+//
+// It needs a writable handle — both pending-notes paths record the ids they just
+// showed and take their claim in the same transaction — and it must survive
+// failing to get one: `session-init` runs in a parallel process on the very same
+// event and can hold the write lock past the busy timeout. A database that
+// cannot be opened costs the notes sections alone, never the rule digest.
 function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   if (!defaultUserPromptSubmitDispatcher) {
     let db: ReturnType<typeof createDatabase> | undefined;
@@ -224,7 +217,7 @@ function getDefaultUserPromptSubmitDispatcher(): HookHandler {
       db = getDefaultHookDatabase();
     } catch (error) {
       process.stderr.write(
-        `[HOOK] note backlog relief disabled for this call: ${
+        `[HOOK] pending-notes sections disabled for this call: ${
           error instanceof Error ? error.message : String(error)
         }\n`,
       );
@@ -232,34 +225,6 @@ function getDefaultUserPromptSubmitDispatcher(): HookHandler {
     defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
   }
   return defaultUserPromptSubmitDispatcher;
-}
-
-// The synchronous PostToolUse entry. It needs a writable handle: rendering a
-// pending-notes reminder is also the act of recording that those ids were shown
-// (the exposure ledger), and only the renderer can know that.
-//
-// Opening that handle is allowed to fail. This runs in a fresh process on every
-// single tool call, and `initializeDatabase` takes a write lock that a
-// concurrent `tool-use` process can hold past the busy timeout. Without the
-// guard that failure escapes to runHookCommand's catch-all and the whole entry
-// answers with a bare non-blocking exit — which would drop the rule-digest
-// output too, a feature that never needed a database. So a database that cannot
-// be opened costs the reminder alone.
-function getDefaultResultDispatchHandler(): HookHandler {
-  if (!defaultResultDispatchHandler) {
-    let db: ReturnType<typeof createDatabase> | undefined;
-    try {
-      db = getDefaultHookDatabase();
-    } catch (error) {
-      process.stderr.write(
-        `[HOOK] note reminder disabled for this call: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    }
-    defaultResultDispatchHandler = createResultDispatchHandler({ db });
-  }
-  return defaultResultDispatchHandler;
 }
 
 function getDefaultNoteTakingContextHandler(): HookHandler {
@@ -270,14 +235,8 @@ function getDefaultNoteTakingContextHandler(): HookHandler {
 }
 
 function getDefaultHandler(handlerKey: string): HookHandler | undefined {
-  if (handlerKey === "PreToolUse") {
-    return getDefaultPreToolUseHandler();
-  }
   if (handlerKey === "UserPromptSubmit:rule-dispatch") {
     return getDefaultUserPromptSubmitDispatcher();
-  }
-  if (handlerKey === "PostToolUse:rule-dispatch") {
-    return getDefaultResultDispatchHandler();
   }
   if (handlerKey === "SessionStart:notes") {
     return getDefaultNoteTakingContextHandler();
@@ -315,12 +274,8 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
       return "SessionEnd";
     case "tool-use":
       return "PostToolUse";
-    case "pre-tool-dispatch":
-      return "PreToolUse";
     case "prompt-dispatch":
       return "UserPromptSubmit";
-    case "result-dispatch":
-      return "PostToolUse";
     case "compact":
       return "PreCompact";
     case "session-init":
@@ -332,17 +287,12 @@ function eventNameFromCommandArgument(arg?: string): string | undefined {
   }
 }
 
+// `prompt-dispatch` and `session-init` are both UserPromptSubmit, so the
+// subcommand — not the event name — is what picks the handler.
 function ruleDispatcherKeyFromCommandArgument(
   arg?: string,
-): "UserPromptSubmit:rule-dispatch" | "PostToolUse:rule-dispatch" | undefined {
-  switch (arg) {
-    case "prompt-dispatch":
-      return "UserPromptSubmit:rule-dispatch";
-    case "result-dispatch":
-      return "PostToolUse:rule-dispatch";
-    default:
-      return undefined;
-  }
+): "UserPromptSubmit:rule-dispatch" | undefined {
+  return arg === "prompt-dispatch" ? "UserPromptSubmit:rule-dispatch" : undefined;
 }
 
 function contextSectionFromCommandArguments(

@@ -133,7 +133,13 @@ describe("release artifacts", () => {
     // fails here instead of shipping a stale bundle.
     const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
     expect(hookCommand).toContain("renderPersonaDocumentInjection");
-    expect(hookCommand).toContain("pre-tool-dispatch");
+    // The pending-notes reminder's once-per-debt marker (裁决 22). The retired
+    // tool-adjacent subcommands are asserted absent instead: a stale bundle
+    // would still register `pre-tool-dispatch` and `result-dispatch`, whose
+    // additionalContext is what breaks the message-side cache breakpoint.
+    expect(hookCommand).toContain("reminded_at_epoch");
+    expect(hookCommand).not.toContain("pre-tool-dispatch");
+    expect(hookCommand).not.toContain("result-dispatch");
     // The SessionStart milestones section is the unified renderer's budget
     // fitter now, not the old four-stage cap ladder; a stale bundle would still
     // carry the ladder and re-render the whole view once per candidate count.

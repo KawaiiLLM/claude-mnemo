@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.2-msllolrn" : "dev";
+var BUILD_ID = true ? "0.9.2-mslxaryb" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2374,12 +2374,15 @@ var NOTE_DEBT_TABLE_DDL = `
     -- Only a skipped debt carries a reason (D4's status vocabulary). 'closed'
     -- is residual settlement's claim-time write (D9): the session is gone, so
     -- the debt is written off rather than left blocking its window forever.
+    -- 'declined' is the agent's own answer (\u88C1\u51B3 24) \u2014 nothing worth noting, or
+    -- the material has left its context \u2014 and is the only reason it writes.
     reason TEXT CHECK (
-      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed')
+      reason IS NULL OR reason IN ('aged', 'rolled-back', 'closed', 'declined')
     ),
     opened_at_epoch INTEGER NOT NULL,
     closed_at_epoch INTEGER,
-    updated_at_epoch INTEGER NOT NULL
+    updated_at_epoch INTEGER NOT NULL,
+    reminded_at_epoch INTEGER
   );
 `;
 var NOTE_DEBT_INDEX_DDL = `
@@ -3093,32 +3096,41 @@ function initializeSchema(db) {
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
   ensureShadowNoteWriterOriginColumn(db);
-  ensureNoteDebtClosedReason(db);
+  ensureNoteDebtReasonVocabulary(db);
+  ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
   dropLegacyMemoriesTable(db);
 }
-function ensureNoteDebtClosedReason(db) {
+function ensureNoteDebtReasonVocabulary(db) {
   const existing = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_debt'"
   ).get();
-  if (!existing?.sql || existing.sql.includes("'closed'")) {
+  if (!existing?.sql || existing.sql.includes("'declined'")) {
     return;
   }
   db.transaction(() => {
     db.exec("ALTER TABLE note_debt RENAME TO note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_TABLE_DDL);
+    const carried = hasColumn(
+      db,
+      "note_debt_pre_closed_reason",
+      "reminded_at_epoch"
+    ) ? ", reminded_at_epoch" : "";
     db.exec(
       `INSERT INTO note_debt (
          turn_id, session_id, prompt_number, status, reason,
-         opened_at_epoch, closed_at_epoch, updated_at_epoch
+         opened_at_epoch, closed_at_epoch, updated_at_epoch${carried}
        )
        SELECT turn_id, session_id, prompt_number, status, reason,
-              opened_at_epoch, closed_at_epoch, updated_at_epoch
+              opened_at_epoch, closed_at_epoch, updated_at_epoch${carried}
        FROM note_debt_pre_closed_reason`
     );
     db.exec("DROP TABLE note_debt_pre_closed_reason");
     db.exec(NOTE_DEBT_INDEX_DDL);
   })();
+}
+function ensureNoteDebtRemindedColumn(db) {
+  addColumnIfMissing(db, "note_debt", "reminded_at_epoch", "INTEGER");
 }
 function ensureNoteDebtCursorReliefColumn(db) {
   addColumnIfMissing(
@@ -17841,7 +17853,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  note: "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note. Never include <private> content."
+  note: "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a listed turn that holds nothing worth keeping or whose details have left your context (e.g. it predates a compact) \u2014 never invent a note from the reminder line instead. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note, including after a skip. Never include <private> content."
 };
 var recallInputShape = {
   id: external_exports.string().optional(),
@@ -17902,9 +17914,10 @@ var rememberInputShape = {
 };
 var noteInputShape = {
   turn: external_exports.string().min(1),
-  title: external_exports.string().min(1),
-  content: external_exports.string().min(1),
-  insight: external_exports.string().optional()
+  title: external_exports.string().min(1).optional(),
+  content: external_exports.string().min(1).optional(),
+  insight: external_exports.string().optional(),
+  skip: external_exports.boolean().optional()
 };
 var timelineInputShape = {
   id: external_exports.string().min(1),
@@ -18571,7 +18584,16 @@ function closeDebt(db, turnId, status, reason, nowEpoch) {
   ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
 }
 function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "noted", null, nowEpoch);
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
 }
 function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
   return db.query(
@@ -47295,8 +47317,53 @@ function requireText(value, field) {
   }
   return { ok: true, value };
 }
+function mayWriteNote(hasExistingNote, debt) {
+  return hasExistingNote || debt?.status === "pending" || debt?.status === "skipped" && debt.reason === "declined";
+}
 function debtOwesNoNoteMessage(address, debt) {
   return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.`;
+}
+function declineTurn(db, address, options) {
+  const turn = getTurn(db, address.sessionId, address.promptNumber);
+  if (!turn) {
+    return parameterError(
+      `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
+    );
+  }
+  const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
+  const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
+  if (!getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
+    return parameterError(debtOwesNoNoteMessage(address, null));
+  }
+  const outcome = writeTransaction(db, () => {
+    if (getShadowNote(db, turn.id) !== null) {
+      return { kind: "already-noted" };
+    }
+    const debt = getNoteDebt(db, turn.id);
+    if (debt === null) {
+      return { kind: "owes-nothing", debt: null };
+    }
+    if (debt.status !== "pending") {
+      return { kind: "already-settled", settledAs: debt.reason ?? debt.status };
+    }
+    closeNoteDebtAsDeclined(db, turn.id, nowEpoch);
+    return { kind: "declined" };
+  });
+  switch (outcome.kind) {
+    case "declined":
+      return textResult(
+        `Skipped ${ref}. Its debt is closed as declined and it will not be listed again; send a real note for this turn if the material comes back.`
+      );
+    case "already-noted":
+      return textResult(`Skipped ${ref} ignored: it already has a note.`);
+    case "already-settled":
+      return textResult(
+        `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`
+      );
+    case "owes-nothing":
+      return parameterError(debtOwesNoNoteMessage(address, outcome.debt));
+  }
 }
 function noteTool(db, rawInput, options = {}) {
   if (typeof rawInput.turn !== "string") {
@@ -47309,6 +47376,12 @@ function noteTool(db, rawInput, options = {}) {
     return parameterError(
       `turn must be a fully qualified "S<session>/T<prompt>" address, e.g. "S15069/T332"; got "${rawInput.turn}".`
     );
+  }
+  if (rawInput.skip !== void 0 && typeof rawInput.skip !== "boolean") {
+    return parameterError("skip must be a boolean when present.");
+  }
+  if (rawInput.skip === true) {
+    return declineTurn(db, address, options);
   }
   const titleInput = requireText(rawInput.title, "title");
   if (!titleInput.ok) {
@@ -47329,7 +47402,7 @@ function noteTool(db, rawInput, options = {}) {
   }
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!fastExisting && fastDebt?.status !== "pending") {
+  if (!mayWriteNote(fastExisting !== null, fastDebt)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
   const rawTitle = titleInput.value;
@@ -47346,7 +47419,7 @@ function noteTool(db, rawInput, options = {}) {
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);
     const debt = getNoteDebt(db, turn.id);
-    if (!existing && debt?.status !== "pending") {
+    if (!mayWriteNote(existing !== null, debt)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
     }
     upsertShadowNote(db, {

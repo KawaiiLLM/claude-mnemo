@@ -50,17 +50,27 @@ export interface NoteReminderView {
  * Writable debts take the slots first because they are the ones that need an
  * action; a rolled-back notice only needs to be seen once, and it closes its
  * debt the moment it renders, so it drains as fast as it gets shown.
+ *
+ * `canDisplay` filters which writable debts may take a slot — the ordinary
+ * reminder passes "never asked for before" (裁决 22) — but `writableTotal`
+ * counts every open writable debt regardless. The escalation ladder is about how
+ * deep the backlog is, not about how much of it is new, so filtering the count
+ * too would have made a five-deep backlog read as routine the moment its lines
+ * had all been shown once.
  */
 export function selectNoteReminderItems(
   open: OpenNoteDebt[],
   displayLimit = NOTE_REMINDER_DISPLAY_LIMIT,
+  canDisplay: (debt: OpenNoteDebt) => boolean = () => true,
 ): NoteReminderView {
   const ordered = [...open].sort((left, right) =>
     left.promptNumber - right.promptNumber,
   );
   const writable = ordered.filter((debt) => !debt.wasRolledBack);
   const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
-  const shownWritable = writable.slice(0, Math.max(0, displayLimit));
+  const shownWritable = writable
+    .filter(canDisplay)
+    .slice(0, Math.max(0, displayLimit));
 
   return {
     writable: shownWritable,
@@ -136,9 +146,24 @@ function formatDebtLine(debt: OpenNoteDebt): string {
   return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
 }
 
+/**
+ * The ordinary reminder (裁决 22). It arrives with the user's prompt, and the
+ * wording is what keeps that placement from becoming an instruction to act:
+ * notes ride a tool batch the turn was going to open anyway, and a turn that
+ * needs no tools is told to skip rather than to open one.
+ *
+ * Prompt-time delivery is not a preference, it is the only cache-safe channel.
+ * Claude Code renders PostToolUse `additionalContext` as a floating attachment
+ * that is re-rendered at request assembly, so a reminder whose bytes change as
+ * the pending list evolves rewrites the tail of the previous turn and destroys
+ * the message-side cache breakpoint — the whole prefix then re-ingests at
+ * cache-write price. UserPromptSubmit context is written once into the user
+ * message and never re-rendered.
+ */
 export function renderNoteReminder(view: NoteReminderView): string {
-  // No <system-reminder> wrapper here: Claude Code already wraps PostToolUse
-  // additionalContext in one, and nesting the tag would render doubled.
+  // No <system-reminder> wrapper here: Claude Code already wraps
+  // UserPromptSubmit additionalContext in one, and nesting the tag would render
+  // doubled.
   const lines = ["mnemo pending notes:"];
 
   for (const debt of view.writable) {
@@ -156,11 +181,13 @@ export function renderNoteReminder(view: NoteReminderView): string {
     lines.push("No notes are due.");
   } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
     lines.push(
-      "Write the pending notes in this batch; skipping is no longer authorized.",
+      "Write these notes at the end of the next tool batch this turn opens;" +
+        " skipping is no longer authorized — but never open a batch just to" +
+        " write them.",
     );
   } else {
     lines.push(
-      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of this batch; skip if busy.`,
+      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; skip if this turn needs no tools.`,
     );
   }
 
@@ -168,17 +195,18 @@ export function renderNoteReminder(view: NoteReminderView): string {
 }
 
 /**
- * The backlog-relief injection (裁决 21) — the one reminder that arrives at the
- * start of a turn instead of on a tool result.
+ * The backlog-relief injection (裁决 21) — the only pending-notes text allowed
+ * to ask for a debt a second time, and the only one allowed to authorise a
+ * dedicated batch.
  *
- * Prompting at turn start was ruled out for the ordinary reminder because it
- * misleads the agent into opening tool calls it did not need. This path is the
- * sanctioned exception and it is made safe by two things at once: it fires only
- * from a rare state (a deep backlog that several finished turns have failed to
- * drain, so the piggyback channel is demonstrably not working), and its wording
- * spends that exception on note calls explicitly and on nothing else. Without
- * the second half the injection would simply reproduce the failure it was
- * carved out of.
+ * Both paths now arrive with the user's prompt (裁决 22), so placement no longer
+ * distinguishes them; the marker does. The ordinary reminder lists each debt at
+ * most once and never authorises opening a batch. This one ignores the marker
+ * entirely and it is made safe by two things at once: it fires only from a rare
+ * state (a deep backlog that several finished turns have failed to drain, so the
+ * ordinary channel is demonstrably not working), and its wording spends that
+ * exception on note calls explicitly and on nothing else. Without the second
+ * half the injection would simply reproduce the failure it was carved out of.
  *
  * Rolled-back notices never appear here: announcing one closes its debt, and
  * this path may not write debt transitions (R2#P2-6). Callers pass writable

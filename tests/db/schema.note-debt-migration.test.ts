@@ -29,7 +29,13 @@ function downgradeNoteDebtToPreClosedReason(db: Database): void {
       closed_at_epoch INTEGER,
       updated_at_epoch INTEGER NOT NULL
     );
-    INSERT INTO note_debt SELECT * FROM note_debt_old;
+    INSERT INTO note_debt (
+      turn_id, session_id, prompt_number, status, reason,
+      opened_at_epoch, closed_at_epoch, updated_at_epoch
+    )
+    SELECT turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+    FROM note_debt_old;
     DROP TABLE note_debt_old;
     CREATE INDEX IF NOT EXISTS idx_note_debt_open
       ON note_debt(session_id, status, prompt_number);

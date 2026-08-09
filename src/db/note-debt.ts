@@ -5,15 +5,16 @@ import { isMnemoOwnToolName } from "../shared/note-tool";
 /**
  * The P1 note-debt ledger (spec D2/D3).
  *
- * Ownership is split on purpose and the split is the point (R2#P2-6): every
- * WRITE in this module runs on the asynchronous ingest side (the Stop handler's
- * completion event and the PostToolUse capture entry), while the synchronous
- * PostToolUse entry that returns the reminder only ever calls the read
- * functions. A hook result carrying `additionalContext` cannot also carry
- * `asyncWork` — the runner emits one or the other — so a single handler that
- * both maintained the ledger and rendered the reminder would have to give up the
- * worker wake, and two handlers that both maintained it would race on the same
- * rows every batch.
+ * Ownership is split on purpose and the split is the point (R2#P2-6): every DEBT
+ * TRANSITION in this module runs on the asynchronous ingest side (the Stop
+ * handler's completion event and the PostToolUse capture entry), while the
+ * synchronous UserPromptSubmit entry that returns the reminder only reads the
+ * ledger and writes what the renderer alone can know — the reminded marker and
+ * the rolled-back closure it announces. A hook result carrying
+ * `additionalContext` cannot also carry `asyncWork` — the runner emits one or
+ * the other — so a single handler that both maintained the ledger and rendered
+ * the reminder would have to give up the worker wake, and two handlers that both
+ * maintained it would race on the same rows every prompt.
  */
 
 /** Turns a debt may wait before it is written off (spec D3's only hard bound). */
@@ -25,8 +26,17 @@ export type NoteDebtStatus = "pending" | "noted" | "skipped";
  * live registration and no activity for a day will never get its notes written,
  * so its open debts are converted at claim time. Without that conversion the
  * unsettled window is permanently blocked behind a debt nobody will ever pay.
+ *
+ * `declined` is the only reason the AGENT writes (裁决 24): it answered the
+ * reminder with `note(turn, skip: true)` because the turn held nothing worth
+ * keeping, or because its details had left the context window (a compact
+ * routinely strands the oldest debts that way) and the only alternative was
+ * inventing a note from the reminder line. It is deliberately distinct from
+ * `aged`: refusal and neglect look identical in a ledger that conflates them,
+ * and the relief valve's "oldest five" window fills up with unwritable debts
+ * unless declining removes them.
  */
-export type NoteDebtReason = "aged" | "rolled-back" | "closed";
+export type NoteDebtReason = "aged" | "rolled-back" | "closed" | "declined";
 
 export interface NoteDebtRecord {
   turnId: number;
@@ -47,6 +57,11 @@ export interface OpenNoteDebt {
   userPrompt: string | null;
   wasRolledBack: boolean;
   openedAtEpoch: number;
+  /**
+   * When the ordinary reminder listed this debt, or null if it never has
+   * (裁决 22 — one debt, one ask). The relief valve ignores it.
+   */
+  remindedAtEpoch: number | null;
   /** How many turns the session has moved on since this turn ended. */
   pendingTurns: number;
 }
@@ -279,13 +294,50 @@ function closeDebt(
  * ledger's durable state true at the moment it changes: a session whose last act
  * is a note would otherwise leave that debt `pending` forever, since reconcile
  * only ever runs from a later Stop or tool call that may never come.
+ *
+ * This is the ONE close that can overwrite another outcome, and only that one:
+ * `skipped(declined)` → `noted`. A decline is the agent's own judgement about
+ * its own turn (裁决 24), so the agent is entitled to revise it — and it can
+ * only do so by deliberately calling `note` for an address the reminder will
+ * never show again. `aged`, `rolled-back` and `closed` are the system's
+ * judgements and stay terminal, as does every close reconcile performs.
  */
 export function closeNoteDebtAsNoted(
   db: Database,
   turnId: number,
   nowEpoch: number,
 ): boolean {
-  return closeDebt(db, turnId, "noted", null, nowEpoch);
+  return (
+    db
+      .query<unknown, [number, number, number]>(
+        `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`,
+      )
+      .run(nowEpoch, nowEpoch, turnId).changes > 0
+  );
+}
+
+/**
+ * Close a debt because the agent declined it — `note(turn, skip: true)`, the
+ * explicit half of 裁决 24's skip rule.
+ *
+ * A skip is a real answer, not silence: it takes the debt out of the reminder
+ * and relief selections (both read `status = 'pending'`) so a turn the agent
+ * cannot write about stops occupying the relief window's oldest-five slots, and
+ * it records WHICH kind of settlement happened, which `aged` cannot say.
+ *
+ * Same `WHERE status = 'pending'` guard as every other close, so a debt a note
+ * has already settled keeps its `noted` outcome and the skip is a no-op.
+ */
+export function closeNoteDebtAsDeclined(
+  db: Database,
+  turnId: number,
+  nowEpoch: number,
+): boolean {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
 }
 
 /**
@@ -308,6 +360,38 @@ export function closeRolledBackNoteDebts(
     }
   }
   return closed;
+}
+
+/**
+ * Mark debts as asked-for, and report how many marks actually landed.
+ *
+ * This is the ordinary reminder's claim, not bookkeeping written after the fact
+ * (裁决 22). `WHERE reminded_at_epoch IS NULL` is what makes "one debt, one ask"
+ * true under concurrency rather than likely: two processes that both selected
+ * the same unmarked debts contend on this UPDATE, the first marks them, and the
+ * second sees zero changes and renders nothing. A count is returned rather than
+ * a boolean so a caller that re-read its list inside the same transaction can
+ * assert it marked everything it is about to render.
+ *
+ * Not a debt transition: `status` is untouched, so this respects the rule that
+ * only the asynchronous side settles a debt. Being asked is not being answered.
+ */
+export function markNoteDebtsReminded(
+  db: Database,
+  turnIds: Iterable<number>,
+  nowEpoch: number,
+): number {
+  const statement = db.query<unknown, [number, number]>(
+    `UPDATE note_debt
+     SET reminded_at_epoch = ?
+     WHERE turn_id = ? AND reminded_at_epoch IS NULL`,
+  );
+
+  let marked = 0;
+  for (const turnId of turnIds) {
+    marked += statement.run(nowEpoch, turnId).changes;
+  }
+  return marked;
 }
 
 /**
@@ -471,9 +555,12 @@ export interface ListOpenNoteDebtOptions {
  * Aging is applied here as a filter rather than an update: a debt past the bound
  * is never rendered again from the moment it crosses it, which is the behaviour
  * "lazily aged at read time" is asking for, while the durable `skipped(aged)`
- * transition happens on the next reconcile from the async side. The alternative
- * — writing from the reminder path — would put ledger mutation on the one entry
- * that cannot wake the worker.
+ * transition happens on the next reconcile from the async side.
+ *
+ * The reminded marker is returned rather than filtered on, because the two
+ * callers need different halves of it: the ordinary reminder shows only unmarked
+ * debts, the relief valve deliberately ignores the marker, and the escalation
+ * ladder counts the whole open backlog either way.
  */
 export function listOpenNoteDebt(
   db: Database,
@@ -491,6 +578,7 @@ export function listOpenNoteDebt(
         userPrompt: string | null;
         wasRolledBack: number;
         openedAtEpoch: number;
+        remindedAtEpoch: number | null;
       },
       [number]
     >(
@@ -500,7 +588,8 @@ export function listOpenNoteDebt(
          d.prompt_number AS promptNumber,
          t.user_prompt AS userPrompt,
          t.was_rolled_back AS wasRolledBack,
-         d.opened_at_epoch AS openedAtEpoch
+         d.opened_at_epoch AS openedAtEpoch,
+         d.reminded_at_epoch AS remindedAtEpoch
        FROM note_debt d
        JOIN turns t ON t.id = d.turn_id
        WHERE d.session_id = ? AND d.status = 'pending'
@@ -514,6 +603,7 @@ export function listOpenNoteDebt(
       userPrompt: row.userPrompt,
       wasRolledBack: row.wasRolledBack === 1,
       openedAtEpoch: row.openedAtEpoch,
+      remindedAtEpoch: row.remindedAtEpoch,
       pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber),
     }))
     .filter((debt) => debt.pendingTurns <= agingTurns);
@@ -754,21 +844,4 @@ export function getExposedTurnIds(
         .all(sessionId);
 
   return new Set(rows.map((row) => row.exposedTurnId));
-}
-
-/** Has a reminder already been delivered during this turn? (at most one). */
-export function hasReminderForRideTurn(
-  db: Database,
-  sessionId: number,
-  rideTurnId: number,
-): boolean {
-  return (
-    db
-      .query<{ present: number }, [number, number]>(
-        `SELECT 1 AS present FROM note_id_exposures
-         WHERE session_id = ? AND ride_turn_id = ? AND source = 'reminder'
-         LIMIT 1`,
-      )
-      .get(sessionId, rideTurnId) !== null
-  );
 }

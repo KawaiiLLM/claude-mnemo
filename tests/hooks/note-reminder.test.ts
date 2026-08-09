@@ -5,16 +5,26 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
+import {
+  closeNoteDebtAsDeclined,
+  getNoteDebt,
+  reconcileNoteDebt,
+} from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 import { createNoteReminderHandler } from "../../src/hooks/handlers/note-reminder";
-import { createResultDispatchHandler } from "../../src/hooks/handlers/result-dispatch";
+import { createPromptDispatchHandler } from "../../src/hooks/handlers/prompt-dispatch";
 import { resolveTriggerIndexPath } from "../../src/rules/pretooluse-dispatcher";
 import type { NormalizedHookInput } from "../../src/hooks/types";
 
-describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
+/**
+ * The ordinary pending-notes reminder (裁决 22). It arrives with the user's
+ * prompt — the tool-result placement it replaced re-rendered on every request
+ * assembly and destroyed the message-side cache breakpoint — and it lists each
+ * debt exactly once.
+ */
+describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => {
   let db: Database;
   let sessionId: number;
   let dataRoot: string;
@@ -23,12 +33,10 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     overrides: Partial<NormalizedHookInput> = {},
   ): NormalizedHookInput {
     return {
-      eventName: "PostToolUse",
+      eventName: "UserPromptSubmit",
       sessionId: "session-reminder",
       cwd: "/tmp/project",
-      toolName: "Read",
-      toolInput: { file_path: "src/auth.ts" },
-      toolResponse: "line 1",
+      prompt: "and now the next question",
       stopHookActive: false,
       raw: {},
       ...overrides,
@@ -86,10 +94,24 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     return turnId;
   }
 
-  function debtSnapshot(): unknown {
+  /** The ledger's settlement columns — everything except the reminded marker. */
+  function settlementSnapshot(): unknown {
     return db
-      .query<unknown, []>("SELECT * FROM note_debt ORDER BY turn_id")
+      .query<unknown, []>(
+        `SELECT turn_id, status, reason, closed_at_epoch
+         FROM note_debt ORDER BY turn_id`,
+      )
       .all();
+  }
+
+  function remindedAt(turnId: number): number | null {
+    return (
+      db
+        .query<{ remindedAtEpoch: number | null }, [number]>(
+          "SELECT reminded_at_epoch AS remindedAtEpoch FROM note_debt WHERE turn_id = ?",
+        )
+        .get(turnId)?.remindedAtEpoch ?? null
+    );
   }
 
   function exposureRows(): Array<{
@@ -115,6 +137,26 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     return createNoteReminderHandler({ db, now: () => 500 });
   }
 
+  function writeTriggerIndex(): void {
+    const indexPath = resolveTriggerIndexPath(dataRoot);
+    mkdirSync(dirname(indexPath), { recursive: true });
+    writeFileSync(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: 1,
+            name: "billing-tip",
+            claim: "先校准计量口径。",
+            scope: "global",
+            trigger: { kind: "prompt", keywords: ["billing"] },
+          },
+        ],
+      }),
+    );
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -136,22 +178,27 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     rmSync(dataRoot, { recursive: true, force: true });
   });
 
-  test("renders the pending list in the D2 form, once per turn", async () => {
+  test("renders the pending list at prompt time, once per debt", async () => {
     const owing = addWorkingTurn(1, "下一turn无工具,但是可以等到后面的批次再补写");
     addTurn(2);
 
     const first = await handler()(createInput());
-    const second = await handler()(createInput({ toolName: "Bash" }));
+    // A later prompt, a later ride turn: the debt has had its one ask.
+    addTurn(3);
+    const second = await handler()(createInput());
 
     expect(first.hookSpecificOutput).toBe(
       [
         "mnemo pending notes:",
         `  [S${sessionId}/T1] "下一turn无工具,但是可以等到后面的批次再补写" (pending 1 turn)`,
-        `Append note(turn:"S${sessionId}/T1", ...) at the end of this batch; skip if busy.`,
+        `Append note(turn:"S${sessionId}/T1", ...) at the end of the next tool batch this turn opens; skip if this turn needs no tools.`,
       ].join("\n"),
     );
-    // At most one reminder per turn, however many tool results the batch has.
+    // No <system-reminder> wrapper: Claude Code adds one around every
+    // UserPromptSubmit additionalContext before the model sees it.
+    expect(first.hookSpecificOutput).not.toContain("<system-reminder>");
     expect(second.hookSpecificOutput).toBeUndefined();
+    expect(remindedAt(owing)).toBe(500);
     expect(exposureRows()).toEqual([
       { rideTurnId: 2, exposedTurnId: owing, source: "reminder" },
     ]);
@@ -169,14 +216,18 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(result.continue).toBe(true);
   });
 
-  test("rendering the reminder does not touch the debt ledger", async () => {
-    addWorkingTurn(1);
+  test("asking is not settling: the marker moves, the debt does not", async () => {
+    const owing = addWorkingTurn(1);
     addTurn(2);
-    const before = debtSnapshot();
+    const before = settlementSnapshot();
 
     await handler()(createInput());
 
-    expect(debtSnapshot()).toEqual(before);
+    // Being asked is not being answered — every status transition stays on the
+    // asynchronous side (R2#P2-6).
+    expect(settlementSnapshot()).toEqual(before);
+    expect(getNoteDebt(db, owing)?.status).toBe("pending");
+    expect(remindedAt(owing)).toBe(500);
   });
 
   test("a turn with no tool calls, or only mnemo's own, is never listed", async () => {
@@ -194,34 +245,18 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(result).toEqual({ continue: true });
   });
 
-  // Both mount shapes. The reminder must not ride the result of the very call
-  // it asked for, or every note would ask for the next one.
-  for (const toolName of [
-    "mcp__mnemo__note",
-    "mcp__plugin_claude-mnemo_mnemo__note",
-  ] as const) {
-    test(`${toolName} results carry no reminder`, async () => {
-      addWorkingTurn(1);
-      addTurn(2);
-
-      const result = await handler()(createInput({ toolName }));
-
-      expect(result).toEqual({ continue: true });
-      expect(exposureRows()).toEqual([]);
-    });
-  }
-
-  test("skipping is not punished with repeats until the list grows", async () => {
+  test("a skipped debt is not re-asked; only new debts are", async () => {
+    // 裁决 22: one debt, one ask. The agent skipping is a real loss for this
+    // channel — the backlog relief is the recovery, not a repeat here.
     const owing = addWorkingTurn(1);
     addTurn(2);
     const first = await handler()(createInput());
 
-    // The agent skipped. A new turn, nothing new in the ledger: silence.
+    // A new prompt, nothing new in the ledger: silence.
     const third = addTurn(3);
     const quiet = await handler()(createInput());
 
-    // That turn did real work and ended: a genuinely new debt, so it reminds
-    // again — and the un-written first debt rides along.
+    // That turn did real work and ended: a genuinely new debt, and only it.
     addObservation(third, "Edit");
     addTurn(4);
     reconcileNoteDebt(db, { sessionId, nowEpoch: 400 });
@@ -230,6 +265,7 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(first.hookSpecificOutput).toContain(`[S${sessionId}/T1]`);
     expect(quiet.hookSpecificOutput).toBeUndefined();
     expect(afterGrowth.hookSpecificOutput).toContain(`[S${sessionId}/T3]`);
+    expect(afterGrowth.hookSpecificOutput).not.toContain(`[S${sessionId}/T1]`);
     expect(getNoteDebt(db, owing)?.status).toBe("pending");
   });
 
@@ -237,7 +273,7 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     const owing = addWorkingTurn(1);
     const second = addWorkingTurn(2);
     const third = addTurn(3);
-    await handler()(createInput());
+    const first = await handler()(createInput());
 
     upsertShadowNote(db, {
       turnId: owing,
@@ -245,7 +281,7 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
       content: "…",
       nowEpoch: 300,
     });
-    // The asynchronous side owns the closure; the reminder path only reads.
+    // The asynchronous side owns the closure; the reminder path only marks.
     reconcileNoteDebt(db, { sessionId, nowEpoch: 310 });
 
     addObservation(third, "Edit");
@@ -253,11 +289,37 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     reconcileNoteDebt(db, { sessionId, nowEpoch: 320 });
     const next = await handler()(createInput());
 
+    expect(first.hookSpecificOutput).toContain(`[S${sessionId}/T1]`);
     expect(getNoteDebt(db, owing)?.status).toBe("noted");
-    expect(next.hookSpecificOutput).toContain(`[S${sessionId}/T2]`);
+    // T1 and T2 have both had their ask; only the new debt is listed.
     expect(next.hookSpecificOutput).toContain(`[S${sessionId}/T3]`);
     expect(next.hookSpecificOutput).not.toContain(`[S${sessionId}/T1]`);
+    expect(next.hookSpecificOutput).not.toContain(`[S${sessionId}/T2]`);
     expect(getNoteDebt(db, second)?.status).toBe("pending");
+  });
+
+  test("a declined turn drops out of the list and out of the backlog count", async () => {
+    // 裁决 24's skip is a real settlement: the debt leaves the pending set, so
+    // it is neither listed again nor counted by the escalation ladder — which
+    // is what keeps a compact-stranded turn from occupying a relief slot until
+    // the 50-turn bound.
+    const declined = addWorkingTurn(1);
+    addWorkingTurn(2);
+    addWorkingTurn(3);
+    addTurn(4);
+    closeNoteDebtAsDeclined(db, declined, 400);
+
+    const result = await handler()(createInput());
+
+    expect(getNoteDebt(db, declined)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+    });
+    expect(result.hookSpecificOutput).not.toContain(`[S${sessionId}/T1]`);
+    expect(result.hookSpecificOutput).toContain(`[S${sessionId}/T2]`);
+    // Two left, not three: the ladder counts the open backlog, and the declined
+    // turn is no longer part of it.
+    expect(result.hookSpecificOutput).not.toContain("no longer authorized");
   });
 
   test("a rolled-back turn is announced once, and closes in the same flow", async () => {
@@ -302,24 +364,28 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     });
   });
 
-  test("a backlog deeper than the display limit does not repeat itself", async () => {
-    // Seven debts, five lines. The gate used to ask "has every OPEN debt been
-    // shown?", which a backlog of seven can never satisfy — so the identical
-    // five-line reminder fired on every tool result for the rest of the session.
-    // The gate asks about the lines it is about to write instead.
+  test("a backlog deeper than the display limit drains across prompts", async () => {
+    // Seven debts, five lines. The window advances instead of repeating: the
+    // five that were asked for are marked, so the next prompt shows the two that
+    // have never been asked, and the prompt after that says nothing.
     for (let promptNumber = 1; promptNumber <= 7; promptNumber += 1) {
       addWorkingTurn(promptNumber, `prompt number ${promptNumber}`);
     }
     addTurn(8);
 
     const first = await handler()(createInput());
-    // A second ride turn, so the once-per-turn rule is not what silences it.
     addTurn(9);
-    const second = await handler()(createInput({ toolName: "Bash" }));
+    const second = await handler()(createInput());
+    addTurn(10);
+    const third = await handler()(createInput());
 
     expect(first.hookSpecificOutput).toContain(`[S${sessionId}/T1]`);
-    expect(second.hookSpecificOutput).toBeUndefined();
-    expect(exposureRows()).toHaveLength(5);
+    expect(first.hookSpecificOutput).not.toContain(`[S${sessionId}/T6]`);
+    expect(second.hookSpecificOutput).toContain(`[S${sessionId}/T6]`);
+    expect(second.hookSpecificOutput).toContain(`[S${sessionId}/T7]`);
+    expect(second.hookSpecificOutput).not.toContain(`[S${sessionId}/T1]`);
+    expect(third.hookSpecificOutput).toBeUndefined();
+    expect(exposureRows()).toHaveLength(7);
   });
 
   test("writable and rolled-back lines share one five-line budget", async () => {
@@ -350,38 +416,33 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     ).toBe(2);
   });
 
-  test("the once-per-turn rule is a claim, not a check", async () => {
-    // A batch of parallel tool calls runs this hook in several processes at
-    // once, all riding the same turn. The read that opens the handler is only a
-    // fast path; the exclusive decision has to be the write itself.
+  test("the once-per-debt rule is a claim, not a check", async () => {
+    // The read that opens the handler is only a fast path; the exclusive
+    // decision has to be the write itself, so the list is re-read under the
+    // write lock and the marker is what the loser trips over.
     addWorkingTurn(1);
     addTurn(2);
-    let rendered = 0;
 
     const racing = createNoteReminderHandler({
       db,
       now: () => 500,
       runHookWriteTransaction: (database, fn) => {
-        // Another process committed its reminder for this ride turn while this
-        // one was between its read and its write.
+        // Another process committed its reminder for this debt while this one
+        // was between its read and its write.
         db.query(
-          `INSERT INTO note_id_exposures (
-             session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-           ) VALUES (?, ?, ?, 'reminder', 400)`,
-        ).run(sessionId, 2, 1);
+          "UPDATE note_debt SET reminded_at_epoch = 400 WHERE reminded_at_epoch IS NULL",
+        ).run();
         return fn();
       },
     });
-    if ((await racing(createInput())).hookSpecificOutput) {
-      rendered += 1;
-    }
+    const result = await racing(createInput());
 
-    expect(rendered).toBe(0);
-    expect(exposureRows()).toHaveLength(1);
+    expect(result).toEqual({ continue: true });
+    expect(exposureRows()).toEqual([]);
   });
 
-  test("a failed exposure write costs the bookkeeping, never the reminder", async () => {
-    addWorkingTurn(1);
+  test("a failed claim costs this prompt's reminder, not the debt", async () => {
+    const owing = addWorkingTurn(1);
     addTurn(2);
     const warnings: unknown[][] = [];
 
@@ -394,11 +455,19 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
       logger: { warn: (...args: unknown[]) => warnings.push(args) },
     })(createInput());
 
-    // Rendering is the point; the exposure row is bookkeeping. Losing it risks
-    // showing the same line twice, which beats never mentioning the debt.
-    expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
+    // The marker IS the at-most-once rule, so text without it would re-ask on
+    // the next prompt — and a rolled-back notice rendered without its closure
+    // would repeat forever. Silence costs one prompt; the debt is untouched.
+    expect(result).toEqual({ continue: true });
     expect(exposureRows()).toEqual([]);
-    expect(warnings[0]?.[0]).toBe("note reminder exposure not recorded");
+    expect(remindedAt(owing)).toBeNull();
+    expect(warnings[0]?.[0]).toBe("note reminder not claimed");
+
+    // The next prompt tries again and succeeds.
+    addTurn(3);
+    expect((await handler()(createInput())).hookSpecificOutput).toContain(
+      `[S${sessionId}/T1]`,
+    );
   });
 
   test("shows the oldest five and withdraws the skip authorisation from three", async () => {
@@ -415,11 +484,37 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(lines).toContain(`  [S${sessionId}/T5] "prompt number 5" (pending 3 turns)`);
     expect(result.hookSpecificOutput).not.toContain(`[S${sessionId}/T6]`);
     expect(lines.at(-1)).toBe(
-      "Write the pending notes in this batch; skipping is no longer authorized.",
+      "Write these notes at the end of the next tool batch this turn opens;" +
+        " skipping is no longer authorized — but never open a batch just to" +
+        " write them.",
     );
     // Only what was rendered counts as exposed — P2's citation check reads this
     // ledger as "ids the writer was shown", not "ids that existed".
     expect(exposureRows().map((row) => row.exposedTurnId)).toHaveLength(5);
+  });
+
+  test("the escalation ladder counts the whole backlog, not just the new lines", async () => {
+    // Five debts, the first three already asked for. Only two lines are left to
+    // write, but the backlog is still five deep, so the skip authorisation stays
+    // withdrawn — filtering the count as well as the list would have made a deep
+    // backlog read as routine the moment its lines had been shown once.
+    for (let promptNumber = 1; promptNumber <= 3; promptNumber += 1) {
+      addWorkingTurn(promptNumber);
+    }
+    addTurn(4);
+    await handler()(createInput());
+
+    addWorkingTurn(5);
+    addWorkingTurn(6);
+    addTurn(7);
+    const result = await handler()(createInput());
+
+    expect(
+      (result.hookSpecificOutput ?? "").split("\n").filter((line) =>
+        line.startsWith("  ["),
+      ),
+    ).toHaveLength(2);
+    expect(result.hookSpecificOutput).toContain("no longer authorized");
   });
 
   test("a quoted prompt cannot close the wrapper Claude Code puts around this text", async () => {
@@ -462,11 +557,13 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
 
     const result = await handler()(createInput());
 
-    expect(result.hookSpecificOutput).toContain("skip if busy.");
+    expect(result.hookSpecificOutput).toContain(
+      "skip if this turn needs no tools.",
+    );
     expect(result.hookSpecificOutput).not.toContain("no longer authorized");
   });
 
-  test("a subagent's tool results carry no reminder", async () => {
+  test("a subagent's prompt carries no reminder", async () => {
     addWorkingTurn(1);
     addTurn(2);
 
@@ -487,65 +584,68 @@ describe("pending-notes reminder (synchronous PostToolUse entry)", () => {
     expect(result).toEqual({ continue: true });
   });
 
-  test("result-dispatch carries the reminder alongside the rule digest", async () => {
+  test("prompt-dispatch carries the reminder alongside the rule digest", async () => {
     addWorkingTurn(1);
     addTurn(2);
+    writeTriggerIndex();
 
-    const dispatch = createResultDispatchHandler({
+    const dispatch = createPromptDispatchHandler({
       db,
       dataRoot,
       now: () => 500,
     });
-    const result = await dispatch(createInput());
+    const result = await dispatch(
+      createInput({ prompt: "check the BILLING regression" }),
+    );
 
+    expect(result.hookSpecificOutput).toContain("先校准计量口径。");
     expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
     expect(result.asyncWork).toBeUndefined();
   });
 
   test("a reminder that throws does not take the rule output down with it", async () => {
-    // Two features share one hook process, so they must not share one fate: an
-    // uncaught throw here reaches the command's catch-all, which answers with a
-    // bare non-blocking exit and silently drops the rule digest — a regression
+    // Several features share one hook process, so they must not share one fate:
+    // an uncaught throw here reaches the command's catch-all, which answers with
+    // a bare non-blocking exit and silently drops the rule digest — a regression
     // against behaviour that shipped long before the reminder existed.
     addWorkingTurn(1);
     addTurn(2);
     const warnings: unknown[][] = [];
-
-    const indexPath = resolveTriggerIndexPath(dataRoot);
-    mkdirSync(dirname(indexPath), { recursive: true });
-    writeFileSync(
-      indexPath,
-      JSON.stringify({
-        version: 1,
-        rules: [
-          {
-            id: 1,
-            name: "read-tip",
-            claim: "Read the whole file before editing.",
-            scope: "global",
-            trigger: { kind: "result", patterns: ["line 1"] },
-          },
-        ],
-      }),
-    );
+    writeTriggerIndex();
 
     // A closed handle makes every reminder query throw; the rule dispatcher
     // reads no database at all, so it is unaffected.
     const brokenDb = createDatabase(":memory:");
     brokenDb.close();
 
-    const dispatch = createResultDispatchHandler({
+    const dispatch = createPromptDispatchHandler({
       db: brokenDb,
       dataRoot,
       now: () => 500,
       logger: { warn: (...args: unknown[]) => warnings.push(args) },
     });
-    const result = await dispatch(createInput());
-
-    expect(result.hookSpecificOutput).toContain(
-      "Read the whole file before editing.",
+    const result = await dispatch(
+      createInput({ prompt: "check the BILLING regression" }),
     );
+
+    expect(result.hookSpecificOutput).toContain("先校准计量口径。");
     expect(result.hookSpecificOutput).not.toContain("mnemo pending notes:");
-    expect(warnings[0]?.[0]).toBe("result-dispatch section failed");
+    expect(warnings[0]?.[0]).toBe("prompt-dispatch section failed");
+  });
+
+  test("it stays out of the tool-adjacent events entirely", async () => {
+    // 裁决 23's unified principle: mnemo returns no additionalContext from
+    // PreToolUse or PostToolUse, because Claude Code re-renders it at request
+    // assembly and that rewrites the previous turn's tail.
+    addWorkingTurn(1);
+    addTurn(2);
+
+    for (const eventName of ["PostToolUse", "PreToolUse"] as const) {
+      const result = await handler()(
+        createInput({ eventName, toolName: "Read", toolResponse: "line 1" }),
+      );
+      expect(result).toEqual({ continue: true });
+    }
+    expect(exposureRows()).toEqual([]);
   });
 });

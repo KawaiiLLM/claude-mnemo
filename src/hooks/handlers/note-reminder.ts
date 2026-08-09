@@ -3,15 +3,13 @@ import type { Database } from "bun:sqlite";
 import { runHookWriteTransaction } from "../../db/database";
 import {
   closeRolledBackNoteDebts,
-  getExposedTurnIds,
-  hasReminderForRideTurn,
   listOpenNoteDebt,
+  markNoteDebtsReminded,
   recordNoteIdExposure,
   NOTE_DEBT_AGING_TURNS,
 } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
 import { getLatestTurn } from "../../db/turns";
-import { isNoteToolName } from "../../shared/note-tool";
 import {
   NOTE_REMINDER_DISPLAY_LIMIT,
   renderNoteReminder,
@@ -21,18 +19,27 @@ import {
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
- * The synchronous half of the PostToolUse pair (spec D2, R1#11/R2#P2-6): it
- * returns the pending-notes reminder as `additionalContext` and therefore may
- * never return `asyncWork` — the hook runner emits one or the other. Everything
- * it needs about the ledger it reads; what it writes is exactly what only the
- * renderer can know — the exposure rows for the ids it just rendered, and the
- * closure of the rolled-back debts whose notice those rows record. Both are
- * best-effort: a write failure costs bookkeeping, never the reminder itself.
+ * The ordinary pending-notes reminder, a section of the synchronous
+ * UserPromptSubmit entry (裁决 22).
  *
- * The reminder rides a tool result rather than a turn boundary on purpose: a
- * pure question-and-answer turn produces no tool result, so it structurally
- * cannot be interrupted by memory housekeeping, and the agent is never nudged
- * into starting a tool call it did not need.
+ * It used to ride a tool result. That placement is not merely suboptimal, it is
+ * unaffordable: Claude Code renders PostToolUse `additionalContext` as a
+ * floating attachment which is re-rendered every time the request is assembled,
+ * so text whose bytes change as the pending list evolves rewrites the tail of
+ * the previous turn at each boundary, kills the message-side cache breakpoint,
+ * and re-ingests the whole conversation prefix at cache-write price. Context
+ * that arrives with the user's prompt is written into the user message once and
+ * never re-rendered, so it can change freely between turns.
+ *
+ * Moving it to turn start costs the property the old placement bought for free —
+ * a question-and-answer turn produces no tool result, so it could not be
+ * interrupted — and the wording is what buys it back: notes ride a batch the
+ * turn was opening anyway, and a turn that needs no tools is told to skip.
+ *
+ * A debt is listed AT MOST ONCE by this path, and the marker that guarantees it
+ * is written in the same transaction as the emission. Skipping is therefore
+ * final for this channel; the backlog relief (裁决 21) is the recovery, and it
+ * is the only path allowed to ask twice.
  */
 
 export interface NoteReminderHandlerDependencies {
@@ -42,6 +49,15 @@ export interface NoteReminderHandlerDependencies {
   displayLimit?: number;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   logger?: Pick<Console, "warn">;
+}
+
+/** 裁决 22: the ordinary path asks for a debt exactly once, ever. */
+function neverAsked(debt: { remindedAtEpoch: number | null }): boolean {
+  return debt.remindedAtEpoch === null;
+}
+
+function hasSomethingToSay(view: NoteReminderView): boolean {
+  return view.writable.length > 0 || view.rolledBack.length > 0;
 }
 
 export function createNoteReminderHandler(
@@ -56,7 +72,7 @@ export function createNoteReminderHandler(
   return async function handleNoteReminderHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
-    if (input.eventName !== "PostToolUse") {
+    if (input.eventName !== "UserPromptSubmit") {
       return { continue: true };
     }
     // A subagent has neither the ledger's addresses nor the authority to write
@@ -64,12 +80,7 @@ export function createNoteReminderHandler(
     if (input.agentId !== undefined) {
       return { continue: true };
     }
-    if (!input.sessionId || !input.toolName) {
-      return { continue: true };
-    }
-    // Self-excitation guard (D2): the note call's own result must not carry the
-    // reminder that asks for another note.
-    if (isNoteToolName(input.toolName)) {
+    if (!input.sessionId) {
       return { continue: true };
     }
 
@@ -78,59 +89,58 @@ export function createNoteReminderHandler(
       return { continue: true };
     }
 
+    // The turn this reminder rides. UserPromptSubmit hooks run in parallel, so
+    // depending on which process wins, this is either the turn the user just
+    // submitted (the `session-init` entry created it) or the one before it.
+    // Either is a valid ride turn for the exposure rows, and neither changes
+    // which debts are eligible — the marker does that, and it is per debt.
     const rideTurn = getLatestTurn(dependencies.db, session.id);
     if (!rideTurn) {
       return { continue: true };
     }
 
+    // A fast path only: it decides whether opening a write transaction is worth
+    // it at all. The decision itself is re-made under the write lock below.
     const open = listOpenNoteDebt(dependencies.db, session.id, {
       latestPromptNumber: rideTurn.promptNumber,
       agingTurns,
     });
-    if (open.length === 0) {
+    if (!hasSomethingToSay(selectNoteReminderItems(open, displayLimit, neverAsked))) {
       return { continue: true };
     }
 
-    if (hasReminderForRideTurn(dependencies.db, session.id, rideTurn.id)) {
-      return { continue: true };
-    }
-
-    // The gate is on what this reminder would RENDER, not on the whole ledger.
-    // Testing the ledger meant a backlog deeper than the display limit could
-    // never be fully exposed — the sixth debt stayed unshown, "everything has
-    // been shown" stayed false, and the identical five-line reminder repeated on
-    // every single tool result. An item the agent has already been shown does
-    // not earn a second interruption, so the reminder fires only when the lines
-    // it is about to write contain at least one turn id this session has never
-    // shown.
-    const view: NoteReminderView = selectNoteReminderItems(open, displayLimit);
-    const renderedTurnIds = [
-      ...view.writable.map((debt) => debt.turnId),
-      ...view.rolledBack.map((debt) => debt.turnId),
-    ];
-    const exposed = getExposedTurnIds(dependencies.db, session.id, "reminder");
-    if (renderedTurnIds.every((turnId) => exposed.has(turnId))) {
-      return { continue: true };
-    }
-
+    let claimed: NoteReminderView | null = null;
     try {
-      // A batch of parallel tool calls fires this hook in several processes at
-      // once, all riding the same turn, so the at-most-once rule needs a claim
-      // rather than a check: the re-read and the exposure insert run together
-      // inside one immediate transaction, and the loser of that race renders
-      // nothing. (The read above is only a fast path that avoids opening a write
-      // transaction for a turn that plainly needs no reminder.)
-      const claimed = writeTransaction(dependencies.db, () => {
-        if (hasReminderForRideTurn(dependencies.db, session.id, rideTurn.id)) {
-          return false;
+      claimed = writeTransaction(dependencies.db, (): NoteReminderView | null => {
+        // The list is re-read inside the transaction and the marker is written
+        // from it, so the claim and the emission cannot disagree. A second
+        // process that selected the same debts finds them marked here, renders
+        // nothing, and writes nothing — "one debt, one ask" holds under
+        // concurrency rather than merely being likely.
+        const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
+          latestPromptNumber: rideTurn.promptNumber,
+          agingTurns,
+        });
+        const view = selectNoteReminderItems(stillOpen, displayLimit, neverAsked);
+        if (!hasSomethingToSay(view)) {
+          return null;
         }
 
+        const nowEpoch = now();
+        markNoteDebtsReminded(
+          dependencies.db,
+          view.writable.map((debt) => debt.turnId),
+          nowEpoch,
+        );
         recordNoteIdExposure(dependencies.db, {
           sessionId: session.id,
           rideTurnId: rideTurn.id,
-          exposedTurnIds: renderedTurnIds,
+          exposedTurnIds: [
+            ...view.writable.map((debt) => debt.turnId),
+            ...view.rolledBack.map((debt) => debt.turnId),
+          ],
           source: "reminder",
-          nowEpoch: now(),
+          nowEpoch,
         });
 
         // A rolled-back notice is closed by the act of showing it (user story
@@ -140,29 +150,34 @@ export function createNoteReminderHandler(
         closeRolledBackNoteDebts(
           dependencies.db,
           view.rolledBack.map((debt) => debt.turnId),
-          now(),
+          nowEpoch,
         );
-        return true;
+        return view;
       });
-
-      if (!claimed) {
-        return { continue: true };
-      }
     } catch (error) {
-      // A contended database must not cost the agent the reminder. Rendering is
-      // the point; the exposure row is bookkeeping, and losing it only risks
-      // showing the same line again, which is strictly better than a debt that
-      // never gets mentioned. The failure is logged, never swallowed silently.
-      dependencies.logger?.warn?.("note reminder exposure not recorded", {
+      // A failed write now costs the reminder itself, where the PostToolUse
+      // version rendered anyway and treated the exposure row as mere
+      // bookkeeping. Two things changed with 裁决 22: the marker IS the
+      // at-most-once rule, so text without it re-asks on the next prompt; and a
+      // rolled-back notice that renders without its closure repeats on every
+      // prompt until some later reconcile happens to run. Staying silent costs
+      // one prompt's reminder — the debts are untouched, so the next prompt
+      // tries again.
+      dependencies.logger?.warn?.("note reminder not claimed", {
         sessionId: input.sessionId,
-        reasonCode: "exposure-write-failed",
+        reasonCode: "reminder-claim-failed",
         error: error instanceof Error ? error.message : String(error),
       });
+      return { continue: true };
+    }
+
+    if (!claimed) {
+      return { continue: true };
     }
 
     return {
       continue: true,
-      hookSpecificOutput: renderNoteReminder(view),
+      hookSpecificOutput: renderNoteReminder(claimed),
     };
   };
 }

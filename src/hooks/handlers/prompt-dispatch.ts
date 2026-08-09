@@ -5,19 +5,26 @@ import {
   type PreToolUseDispatcherDependencies,
 } from "../../rules/pretooluse-dispatcher";
 import { createNoteBacklogReliefHandler } from "./note-relief";
+import { createNoteReminderHandler } from "./note-reminder";
 import type { HookHandler, HookResult, NormalizedHookInput } from "../types";
 
 /**
  * The `prompt-dispatch` UserPromptSubmit entry: everything that answers a new
- * user prompt with text for the model.
+ * user prompt with text for the model — and, since 裁决 22, the ONLY entry
+ * mnemo has that returns `additionalContext` at all.
  *
  * UserPromptSubmit keeps exactly two registrations, split by response shape
- * rather than by feature — the same rule PostToolUse follows (R1#11/R2#P2-6).
- * `session-init` owns the turn row and returns no context; this one returns
- * `additionalContext` and writes nothing but its own claim. A third
- * registration would buy nothing and cost another process on every prompt the
- * user types, so the rule-digest tips and the note backlog relief share this
- * one.
+ * rather than by feature: `session-init` owns the turn row and returns no
+ * context; this one returns `additionalContext` and writes nothing but its own
+ * claims. A third registration would buy nothing and cost another process on
+ * every prompt the user types, so the rule-digest tips and both pending-notes
+ * paths share this one.
+ *
+ * PostToolUse and PreToolUse now return no context at all. Claude Code renders
+ * their `additionalContext` as a floating attachment that is re-rendered at
+ * request assembly, which rewrites the previous turn's tail and destroys the
+ * message-side cache breakpoint; prompt-time context is written into the user
+ * message once and stays put.
  */
 
 export interface PromptDispatchDependencies
@@ -35,11 +42,14 @@ export function createPromptDispatchHandler(
   const backlogRelief = db
     ? createNoteBacklogReliefHandler({ db, now, logger })
     : undefined;
+  const noteReminder = db
+    ? createNoteReminderHandler({ db, now, logger })
+    : undefined;
 
   /**
-   * Two features share one process, so they must not share one fate: the rule
-   * digest is pure file/rule state, while the relief touches a database a
-   * concurrent `session-init` process may hold. An uncaught throw would reach
+   * Several features share one process, so they must not share one fate: the
+   * rule digest is pure file/rule state, while the notes paths touch a database
+   * a concurrent `session-init` process may hold. An uncaught throw would reach
    * runHookCommand's catch-all, which answers with a bare non-blocking exit and
    * would silently drop the rule output that shipped long before notes existed.
    */
@@ -74,15 +84,25 @@ export function createPromptDispatchHandler(
       sections.push(rules);
     }
 
+    // One pending-notes paragraph per prompt, and the relief valve outranks the
+    // ordinary reminder. Both would otherwise fire on the same prompt — the
+    // valve opens precisely when the backlog is deep, which is also when new
+    // debts keep arriving — and the agent would read two overlapping lists with
+    // contradictory closing lines, one authorising a dedicated batch and one
+    // forbidding it.
+    //
+    // The reminder is not merely suppressed but never RUN, which is what keeps
+    // the suppressed debts unmarked: they are still owed an ask of their own, so
+    // they surface on a later prompt instead of being silently spent here.
+    let notes: string | null = null;
     if (backlogRelief) {
-      const relief = await section(
-        "note-relief",
-        () => backlogRelief(input),
-        input,
-      );
-      if (relief) {
-        sections.push(relief);
-      }
+      notes = await section("note-relief", () => backlogRelief(input), input);
+    }
+    if (!notes && noteReminder) {
+      notes = await section("note-reminder", () => noteReminder(input), input);
+    }
+    if (notes) {
+      sections.push(notes);
     }
 
     return sections.length > 0

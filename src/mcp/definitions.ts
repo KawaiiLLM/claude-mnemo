@@ -9,7 +9,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   note:
-    "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note. Never include <private> content.",
+    "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a listed turn that holds nothing worth keeping or whose details have left your context (e.g. it predates a compact) — never invent a note from the reminder line instead. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note, including after a skip. Never include <private> content.",
 } as const;
 
 export const recallInputShape = {
@@ -83,14 +83,21 @@ export const rememberInputShape = {
   reference: z.string().optional(),
 };
 
-// Spec D1: exactly four parameters. Everything else the shadow row records
+// Spec D1 plus 裁决 24's explicit skip. Everything else the shadow row records
 // (writer_model, ride_turn, timestamps) is filled mechanically — asking the
 // caller for provenance invites the caller to invent it.
+//
+// `title` and `content` are required for a real note but OPTIONAL here, because
+// `skip: true` needs `turn` alone. The pairing is enforced in `noteTool`, which
+// answers a missing field with a `Parameter error:` the model can read and act
+// on; leaving them required in the schema would have the SDK reject every skip
+// before the tool ever ran.
 export const noteInputShape = {
   turn: z.string().min(1),
-  title: z.string().min(1),
-  content: z.string().min(1),
+  title: z.string().min(1).optional(),
+  content: z.string().min(1).optional(),
   insight: z.string().optional(),
+  skip: z.boolean().optional(),
 };
 
 export const timelineInputShape = {

@@ -11,10 +11,16 @@ import type { HookResult, NormalizedHookInput } from "../types";
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns (episodic memory across sessions).
-Trigger: after a tool result you may see a "pending notes" reminder. When it
-appears, append a note call for the listed turns at the end of the current
-batch. No reminder — do nothing. Never start a tool call just to write a note.
-Skip when the main task is critical; the system will remind you again.
+Trigger: with the user's message you may see a "pending notes" list. Append a
+note call for each listed turn at the end of the first tool batch this turn
+opens; no list — do nothing.
+Never start a tool call just to write a note: a turn that opens no batch
+writes none, and that is fine.
+When a listed turn holds nothing worth keeping, or its details have left your
+context (e.g. it predates a compact), answer note(turn:"S…/T…", skip:true) —
+never reconstruct a note from the reminder line alone.
+Each turn is listed once and not repeated; only a "backlog relief" list
+authorizes a batch of note calls on its own.
 Fields:
 - title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
   words (research/design/implement/fix/measure/review/write/ops) must state
@@ -28,6 +34,7 @@ Fields:
   durable pointers, transferable lessons — and orthogonal to this turn's
   conclusion. Already-known facts, perishable state, and anything one search
   away do not qualify.
+- skip: true with turn alone, for the refusal above; a later note replaces it.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
 other turns only as [S15069/T332] and only ids seen in reminders or injected

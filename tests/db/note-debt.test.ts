@@ -6,9 +6,9 @@ import {
   claimNoteBacklogRelief,
   getExposedTurnIds,
   getNoteDebt,
-  hasReminderForRideTurn,
   listNoteDebt,
   listOpenNoteDebt,
+  markNoteDebtsReminded,
   recordNoteIdExposure,
   reconcileNoteDebt,
 } from "../../src/db/note-debt";
@@ -417,8 +417,30 @@ describe("note debt ledger", () => {
       [first, second].sort(),
     );
     expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([first]);
-    expect(hasReminderForRideTurn(db, sessionId, rideTurn)).toBe(true);
-    expect(hasReminderForRideTurn(db, sessionId, first)).toBe(false);
+  });
+
+  test("the reminded marker is a claim: only the first mark counts", () => {
+    // 裁决 22's "one debt, one ask" is enforced by this UPDATE, not by a check
+    // before it: two processes that selected the same unmarked debts contend
+    // here, and the second must come away with nothing to render.
+    const first = addTurn(1);
+    addObservation(first, "Edit");
+    const second = addTurn(2);
+    addObservation(second, "Edit");
+    addTurn(3);
+    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
+
+    expect(markNoteDebtsReminded(db, [first, second], 300)).toBe(2);
+    expect(markNoteDebtsReminded(db, [first, second], 400)).toBe(0);
+
+    const open = listOpenNoteDebt(db, sessionId, { latestPromptNumber: 3 });
+    // The mark is not a settlement: the debts are still owed, just no longer
+    // eligible for the ordinary reminder.
+    expect(open.map((debt) => [debt.turnId, debt.remindedAtEpoch])).toEqual([
+      [first, 300],
+      [second, 300],
+    ]);
+    expect(getNoteDebt(db, first)?.status).toBe("pending");
   });
 
   test("the relief claim refuses a second claim built on the same watermark", () => {
