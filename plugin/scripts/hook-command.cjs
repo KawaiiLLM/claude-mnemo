@@ -536,6 +536,16 @@ var SCHEMA_SQL = `
     -- "how long did this note wait" a fact rather than a reconstruction.
     writer_model TEXT,
     ride_turn_id INTEGER REFERENCES turns(id) ON DELETE SET NULL,
+    -- Who authored this note. 'agent' is the main agent writing its own turn
+    -- (the only P1 writer); 'settlement' is the P2 settlement pass reconstructing
+    -- an INTERIOR HOLE \u2014 a turn whose debt was written off at residual-claim time
+    -- but which later turns in the same window still depend on (spec D9, \u88C1\u51B3 20).
+    -- The column exists so the P1 measurements never mistake a hindsight
+    -- reconstruction for the agent's own compliance: every metric that counts
+    -- notes filters on 'agent'.
+    writer_origin TEXT NOT NULL DEFAULT 'agent' CHECK (
+      writer_origin IN ('agent', 'settlement')
+    ),
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER NOT NULL
   );
@@ -1069,6 +1079,7 @@ function initializeSchema(db) {
   ensureSettlementClaimGenerationColumn(db);
   ensureRepairLedgerClaimColumns(db);
   ensureObservationExtractionExclusionColumn(db);
+  ensureShadowNoteWriterOriginColumn(db);
   ensureNoteDebtClosedReason(db);
   dropLegacyMemoriesTable(db);
 }
@@ -1099,6 +1110,13 @@ function ensureObservationExtractionExclusionColumn(db) {
   if (!hasColumn(db, "observations", "excluded_from_extraction")) {
     db.exec(
       "ALTER TABLE observations ADD COLUMN excluded_from_extraction INTEGER NOT NULL DEFAULT 0"
+    );
+  }
+}
+function ensureShadowNoteWriterOriginColumn(db) {
+  if (!hasColumn(db, "shadow_notes", "writer_origin")) {
+    db.exec(
+      "ALTER TABLE shadow_notes ADD COLUMN writer_origin TEXT NOT NULL DEFAULT 'agent'"
     );
   }
 }
@@ -2848,7 +2866,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.1-mslhp3sq" : "dev";
+var BUILD_ID = true ? "0.9.1-mslilo7u" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

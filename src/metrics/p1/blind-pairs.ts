@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { agentAuthoredNotePredicate } from "../../db/shadow-notes";
 import { formatTurnAddress } from "../../hooks/note-reminder";
 
 /**
@@ -254,7 +255,8 @@ export function collectPairCandidates(
       n.writer_model AS writerModel
     FROM shadow_notes n
     JOIN turns t ON t.id = n.turn_id
-    ${options.sessionId === undefined ? "" : "WHERE t.session_id = ?"}
+    WHERE ${agentAuthoredNotePredicate()}
+    ${options.sessionId === undefined ? "" : "AND t.session_id = ?"}
     ORDER BY t.session_id ASC, t.prompt_number ASC
   `;
 
