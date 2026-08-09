@@ -162,10 +162,12 @@ describe("turn queries", () => {
 
     expect(turn.status).toBe("skipped");
     expect(getTurnsForSession(db, sessionId)).toHaveLength(1);
-    expect(ftsCount).toBe(0);
+    // Skipped means "not worth rendering", never "unfindable": the captured
+    // prompt and response stay indexed (spec D11).
+    expect(ftsCount).toBe(1);
   });
 
-  test("supports explicit undone status by clearing observations and FTS while retaining the turn row", () => {
+  test("supports explicit undone status by clearing observations while retaining the turn row and its index entry", () => {
     const firstSave = saveTurn(db, {
       sessionId,
       promptNumber: 5,
@@ -216,7 +218,9 @@ describe("turn queries", () => {
     expect(secondSave.id).toBe(firstSave.id);
     expect(secondSave.status).toBe("undone");
     expect(observationCount).toBe(0);
-    expect(ftsCount).toBe(0);
+    // The observation rows are gone (so their index rows go too), but the turn
+    // row survives and stays indexed — status drives rendering, not ingest.
+    expect(ftsCount).toBe(1);
   });
 
   test("updateTurnById can set transcriptLineStart", () => {
@@ -428,7 +432,7 @@ describe("turn queries", () => {
     expect(updated?.status).toBe("extracted");
   });
 
-  test("resetTurnExtractionFields clears agent output, keeps internal tags, drops FTS", () => {
+  test("resetTurnExtractionFields clears agent output, keeps internal tags, re-indexes originals", () => {
     // Insert a provisional turn with partial extraction output and an assistant_response
     const turnId = db
       .query<{ id: number }, [number]>(
@@ -456,8 +460,15 @@ describe("turn queries", () => {
     expect(t.type).toBeNull();
     expect(t.tags).toEqual(["delivery:dropped:notify-pending"]); // freeform dropped, internal kept
     expect(t.assistantResponse).toBe("r");                       // source kept
-    const fts = db.query("SELECT COUNT(*) AS n FROM memory_fts WHERE layer='turn' AND source_id=?").get(turnId) as { n: number };
-    expect(fts.n).toBe(0);
+    // The extraction fields leave the index, but the captured originals stay:
+    // FTS ingest is status-blind (spec D11), so the row is re-indexed, not dropped.
+    const fts = db
+      .query("SELECT title, content, extra, response FROM memory_fts WHERE layer='turn' AND source_id=?")
+      .get(turnId) as { title: string | null; content: string | null; extra: string; response: string };
+    expect(fts.title).toBeNull();
+    expect(fts.content).toBeNull();
+    expect(fts.extra).toBe("");
+    expect(fts.response).toBe("r");
   });
 
   test("getStrandedTurns selects re-extractable failures in prompt_number order", () => {

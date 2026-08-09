@@ -193,6 +193,13 @@ function runHookWriteTransaction(db, fn, options = {}) {
 }
 
 // src/db/search.ts
+var OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
+function truncateOriginal(value) {
+  if (!value) {
+    return null;
+  }
+  return value.length > OBSERVATION_ORIGINAL_INDEX_CHARS ? value.slice(0, OBSERVATION_ORIGINAL_INDEX_CHARS) : value;
+}
 function normalizeTrigramText(value) {
   return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
 }
@@ -255,6 +262,22 @@ function indexTurnToFTS(db, turn) {
     turn.assistantResponse
   );
 }
+function reindexTurnFromDb(db, turnId) {
+  const turn = db.query(
+    `SELECT
+         id,
+         title,
+         content,
+         insight,
+         user_prompt AS userPrompt,
+         assistant_response AS assistantResponse
+       FROM turns
+       WHERE id = ?`
+  ).get(turnId);
+  if (turn) {
+    indexTurnToFTS(db, turn);
+  }
+}
 function indexObservationToFTS(db, observation) {
   indexFtsRecord(
     db,
@@ -263,8 +286,8 @@ function indexObservationToFTS(db, observation) {
     observation.title,
     observation.content,
     "",
-    null,
-    null
+    truncateOriginal(observation.toolInput),
+    truncateOriginal(observation.toolResult)
   );
 }
 function rebuildSearchIndex(db) {
@@ -297,7 +320,6 @@ function rebuildSearchIndex(db) {
           user_prompt AS userPrompt,
           assistant_response AS assistantResponse
         FROM turns
-        WHERE status = 'extracted'
       `
   ).all();
   for (const turn of turnRows) {
@@ -309,17 +331,13 @@ function rebuildSearchIndex(db) {
           id,
           title,
           content,
-          status
+          substr(tool_input, 1, ${OBSERVATION_ORIGINAL_INDEX_CHARS}) AS toolInput,
+          substr(tool_result, 1, ${OBSERVATION_ORIGINAL_INDEX_CHARS}) AS toolResult
         FROM observations
-        WHERE status = 'extracted'
       `
   ).all();
   for (const observation of observationRows) {
-    indexObservationToFTS(db, {
-      id: observation.id,
-      title: observation.title,
-      content: observation.content
-    });
+    indexObservationToFTS(db, observation);
   }
   const ruleRows = db.query("SELECT id, name, claim FROM rules ORDER BY id").all();
   for (const rule of ruleRows) {
@@ -397,6 +415,11 @@ var SCHEMA_SQL = `
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
     cites_recorded INTEGER NOT NULL DEFAULT 0,
+    -- Which stored records this turn's recall/replay calls actually hit (D4).
+    -- JSON array of {ref, strength}, where ref is a type-prefixed global id
+    -- (turn:8942, session:15069, obs:77, segment:4) so the namespace stays
+    -- unambiguous when a later pass turns these into retrieval edges.
+    consulted_memories TEXT,
     compact_boundary_uuid TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
@@ -554,6 +577,74 @@ var SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
     ON note_id_exposures(session_id, exposed_turn_id);
+
+  -- Topic registry (spec D6): the one place a theme's name and its alternate
+  -- spellings live, so "continuous work on the same theme reuses the same word"
+  -- is enforceable rather than aspirational. The aliases column is a JSON array of
+  -- the other names the same theme has been written as; the settlement pass folds
+  -- new spellings in here instead of minting a near-duplicate topic.
+  CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    aliases TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(aliases)),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+      status IN ('active', 'dormant', 'retired')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  -- Segments (spec D6): one coherent chapter of work on one topic. Same field
+  -- shape as a turn \u2014 title / content / type / tag / status \u2014 because the
+  -- reading surfaces (recall's type:/tag: filters, FTS, the glyph) are meant to
+  -- work across granularities without a second vocabulary.
+  --
+  -- Deliberately NOT bound to a session: a topic outruns any one session, and a
+  -- segment that had to name one would have to pick arbitrarily among its
+  -- members' sessions. Membership (segment_members) carries that relation.
+  --
+  -- type and tags are JSON arrays (multi-value; a segment's type is the
+  -- union of its members'). revision is the write fence: an open segment is a
+  -- living document that concurrent settlements may both want to rewrite, so
+  -- every write CASes on the revision it read (see db/segments.ts).
+  CREATE TABLE IF NOT EXISTS segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    -- open = still accepting members and rewrites; delivered = closed by a
+    -- shipped/merged/settled outcome; abandoned = went silent. Only open
+    -- segments are writable \u2014 a closed one is frozen and gets overturned by an
+    -- edge, never by a rewrite (spec D6: freeze history, not the present).
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
+    ON segments(topic_id, status, updated_at_epoch);
+
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+
+  -- Segment membership (spec D6). Many-to-many on purpose: member turns need
+  -- not be contiguous, and one turn can legitimately belong to two segments
+  -- (a fix that also closes a review). The pair is the primary key, so
+  -- re-asserting a membership is idempotent.
+  CREATE TABLE IF NOT EXISTS segment_members (
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (segment_id, turn_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segment_members_turn
+    ON segment_members(turn_id);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -840,6 +931,58 @@ var SCHEMA_SQL = `
 
   ${MEMORY_FTS_DDL}
 `;
+var MEMORY_EDGES_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edges (
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment')),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
+    cited_id INTEGER NOT NULL,
+    relation TEXT NOT NULL CHECK (
+      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    ),
+    provenance TEXT NOT NULL CHECK (
+      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+    ON memory_edges(cited_kind, cited_id, relation);
+`;
+function hasTable(db, table) {
+  return db.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+  ).get(table) !== null;
+}
+function ensureMemoryEdgesSchema(db) {
+  const isFirstCreation = !hasTable(db, "memory_edges");
+  db.exec(MEMORY_EDGES_DDL);
+  if (isFirstCreation) {
+    migrateTurnCitationsToEdges(db);
+  }
+}
+function migrateTurnCitationsToEdges(db) {
+  if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
+    return 0;
+  }
+  const result = db.query(
+    `
+        INSERT INTO memory_edges (
+          citing_kind, citing_id, cited_kind, cited_id,
+          relation, provenance, created_at_epoch
+        )
+        SELECT 'turn', citing_turn_id, 'turn', cited_turn_id,
+               relation, 'judged', created_at_epoch
+        FROM turn_citations
+        WHERE true
+        ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+          DO NOTHING
+        RETURNING 1 AS migrated
+      `
+  ).all().length;
+  return result;
+}
 function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
@@ -854,6 +997,8 @@ function initializeSchema(db) {
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
+  ensureTurnConsultedMemoriesColumn(db);
+  ensureMemoryEdgesSchema(db);
   ensureSessionScanCursorColumns(db);
   ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
@@ -1013,6 +1158,11 @@ function ensureTurnCitationsSchema(db) {
     db.exec(
       "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0"
     );
+  }
+}
+function ensureTurnConsultedMemoriesColumn(db) {
+  if (!hasColumn(db, "turns", "consulted_memories")) {
+    db.exec("ALTER TABLE turns ADD COLUMN consulted_memories TEXT");
   }
 }
 function ensureSessionScanCursorColumns(db) {
@@ -1194,6 +1344,10 @@ function resetSchema(db) {
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_members");
+  db.exec("DROP TABLE IF EXISTS segments");
+  db.exec("DROP TABLE IF EXISTS topics");
+  db.exec("DROP TABLE IF EXISTS memory_edges");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
   db.exec("DROP TABLE IF EXISTS settlement_cursors");
@@ -2607,7 +2761,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.0-mskq32sc" : "dev";
+var BUILD_ID = true ? "0.9.0-mslhji0d" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3738,13 +3892,7 @@ function updateTurnById(db, turnId, input) {
   if (!updated) {
     return null;
   }
-  if (updated.status === "extracted") {
-    indexTurnToFTS(db, updated);
-  } else {
-    db.query(
-      "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
-    ).run(turnId);
-  }
+  indexTurnToFTS(db, updated);
   if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
     markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
   }
@@ -3767,9 +3915,7 @@ function resetTurnExtractionFields(db, turnId, updatedAtEpoch) {
            updated_at_epoch = ?
        WHERE id = ?`
   ).run(stringifyArray(keptTags), updatedAtEpoch, turnId);
-  db.query(
-    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
-  ).run(turnId);
+  reindexTurnFromDb(db, turnId);
   if (existing.status !== "active" || existing.title !== null || existing.content !== null || existing.insight !== null) {
     markSettledDiaryDayStaleForTurn(db, existing.createdAtEpoch);
   }
@@ -21167,6 +21313,161 @@ function createContextHandler(dependencies, section = "sessions") {
   };
 }
 
+// src/db/consulted-memories.ts
+var ADDRESS_PATTERN = /S(\d+)(?:\s*\/\s*T(\d+)(?:\s*\/\s*O(\d+))?)?/g;
+var REPLAY_COMMAND_PATTERN = /turn-detail\.sh[^\n]*?\bS(\d+)\s+(\d+)/g;
+var RETRIEVAL_TOOL_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:recall|timeline)$/;
+function isRetrievalToolName(toolName) {
+  return RETRIEVAL_TOOL_PATTERN.test(toolName);
+}
+function parseId(digits) {
+  if (digits === void 0) {
+    return null;
+  }
+  const value = Number.parseInt(digits, 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function scanAddresses(text, strength) {
+  if (!text) {
+    return [];
+  }
+  const addresses = [];
+  ADDRESS_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = ADDRESS_PATTERN.exec(text)) !== null) {
+    const sessionId = parseId(match[1]);
+    if (sessionId === null) {
+      continue;
+    }
+    const promptNumber = parseId(match[2]);
+    const observationId = parseId(match[3]);
+    if (observationId !== null) {
+      addresses.push({ kind: "observation", observationId, strength });
+      continue;
+    }
+    if (promptNumber !== null) {
+      addresses.push({ kind: "turn", sessionId, promptNumber, strength });
+      continue;
+    }
+    addresses.push({ kind: "session", sessionId, strength });
+  }
+  return addresses;
+}
+function isExpandedRead(toolInput) {
+  return toolInput !== null && /"depth"\s*:\s*"expanded"/.test(toolInput);
+}
+function deriveConsultedAddresses(call) {
+  if (!call.toolName) {
+    return [];
+  }
+  if (isRetrievalToolName(call.toolName)) {
+    const resultStrength = isExpandedRead(call.toolInput) ? "strong" : "weak";
+    return [
+      ...scanAddresses(call.toolInput, "strong"),
+      ...scanAddresses(call.toolResult, resultStrength)
+    ];
+  }
+  const command = call.toolInput;
+  if (!command) {
+    return [];
+  }
+  const addresses = [];
+  REPLAY_COMMAND_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = REPLAY_COMMAND_PATTERN.exec(command)) !== null) {
+    const sessionId = parseId(match[1]);
+    const promptNumber = parseId(match[2]);
+    if (sessionId === null || promptNumber === null) {
+      continue;
+    }
+    addresses.push({ kind: "turn", sessionId, promptNumber, strength: "strong" });
+  }
+  return addresses;
+}
+function parseConsultedColumn(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter(
+      (entry) => typeof entry === "object" && entry !== null && typeof entry.ref === "string" && (entry.strength === "weak" || entry.strength === "strong")
+    );
+  } catch {
+    return [];
+  }
+}
+function getConsultedMemories(db, turnId) {
+  const row = db.query(
+    "SELECT consulted_memories AS consultedMemories FROM turns WHERE id = ?"
+  ).get(turnId);
+  return parseConsultedColumn(row?.consultedMemories ?? null);
+}
+function recordConsultedMemories(db, turnId, addresses) {
+  if (addresses.length === 0) {
+    return getConsultedMemories(db, turnId);
+  }
+  const merged = /* @__PURE__ */ new Map();
+  for (const entry of getConsultedMemories(db, turnId)) {
+    merged.set(entry.ref, entry.strength);
+  }
+  const turnLookup = db.query(
+    "SELECT id FROM turns WHERE session_id = ? AND prompt_number = ?"
+  );
+  const sessionLookup = db.query(
+    "SELECT id FROM sessions WHERE id = ?"
+  );
+  const observationLookup = db.query(
+    "SELECT id FROM observations WHERE id = ?"
+  );
+  let changed = false;
+  const remember = (ref, strength) => {
+    const current = merged.get(ref);
+    if (current === strength || current === "strong") {
+      return;
+    }
+    merged.set(ref, strength);
+    changed = true;
+  };
+  for (const address of addresses) {
+    if (address.kind === "turn") {
+      const row2 = turnLookup.get(address.sessionId, address.promptNumber);
+      if (row2 && row2.id !== turnId) {
+        remember(`turn:${row2.id}`, address.strength);
+      }
+      continue;
+    }
+    if (address.kind === "session") {
+      const row2 = sessionLookup.get(address.sessionId);
+      if (row2) {
+        remember(`session:${row2.id}`, address.strength);
+      }
+      continue;
+    }
+    const row = observationLookup.get(address.observationId);
+    if (row) {
+      remember(`obs:${row.id}`, address.strength);
+    }
+  }
+  const result = [...merged.entries()].map(([ref, strength]) => ({ ref, strength })).sort((left, right) => left.ref.localeCompare(right.ref));
+  if (changed) {
+    db.query(
+      "UPDATE turns SET consulted_memories = ? WHERE id = ?"
+    ).run(JSON.stringify(result), turnId);
+  }
+  return result;
+}
+function captureConsultedMemories(db, turnId, call) {
+  const addresses = deriveConsultedAddresses(call);
+  if (addresses.length === 0) {
+    return 0;
+  }
+  return recordConsultedMemories(db, turnId, addresses).length;
+}
+
 // src/shared/note-tool.ts
 var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
 var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
@@ -21498,6 +21799,20 @@ function createPostToolUseHandler(dependencies) {
       );
       if (!inserted) {
         throw new Error("Failed to enqueue observation for worker processing.");
+      }
+      try {
+        captureConsultedMemories(dependencies.db, latestTurn.id, {
+          toolName,
+          toolInput,
+          toolResult
+        });
+      } catch (error48) {
+        logger.warn?.("consulted memories capture failed", {
+          sessionId: input.sessionId,
+          turnId: latestTurn.id,
+          reasonCode: "post-tool-use-consulted",
+          error: error48 instanceof Error ? error48.message : String(error48)
+        });
       }
       if (excludedFromExtraction) {
         return { outcome: "excluded", turnId: latestTurn.id };
@@ -22555,9 +22870,7 @@ function convertOccupiedTurnToMarker(db, turnId, claim, nowEpoch) {
   db.query(
     "DELETE FROM turn_citations WHERE citing_turn_id = ?"
   ).run(turnId);
-  db.query(
-    "DELETE FROM memory_fts WHERE layer = 'turn' AND source_id = ?"
-  ).run(turnId);
+  reindexTurnFromDb(db, turnId);
   db.query(
     `UPDATE observations SET status = 'skipped'
      WHERE turn_id = ? AND status = 'pending'`
@@ -23304,15 +23617,19 @@ function detectAndCleanSubagentTurnsFromParsed(db, sessionDbId, parsedTurns, upd
 
 // src/hooks/handlers/session-init.ts
 function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch) {
-  db.query(
+  const inserted = db.query(
     `INSERT INTO turns (
-      session_id,
-      prompt_number,
-      status,
-      user_prompt,
-      created_at_epoch
-    ) VALUES (?, ?, 'active', ?, ?)`
-  ).run(sessionId, promptNumber, prompt, createdAtEpoch);
+        session_id,
+        prompt_number,
+        status,
+        user_prompt,
+        created_at_epoch
+      ) VALUES (?, ?, 'active', ?, ?)
+      RETURNING id`
+  ).get(sessionId, promptNumber, prompt, createdAtEpoch);
+  if (inserted) {
+    reindexTurnFromDb(db, inserted.id);
+  }
 }
 function createSessionInitHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
@@ -23767,6 +24084,7 @@ function createStopHandler(dependencies) {
             WHERE id = ?
           `
       ).run(assistantResponse, epoch, turn.id);
+      reindexTurnFromDb(dependencies.db, turn.id);
       if (assistantResponse !== null && assistantResponse !== turn.assistantResponse) {
         markSettledDiaryDayStaleForTurn(
           dependencies.db,

@@ -4,11 +4,22 @@
 
 **Blocked by:** None（可与 05 并行）。开工前提同 05：P1 达标裁决。
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] 边表迁移保留全部既有引用边，数据零丢失
-- [ ] 解析器：三类合法格式通过；未曝光/不存在 id 拒收进日志
-- [ ] CAS 冲突路径单测：并发写同一开放段，后写被拒并取回最新 revision
-- [ ] skipped turn 的原文可被 FTS 命中；obs 截断原文入索引
-- [ ] consulted_memories 按命中类型与强度记录
-- [ ] type 草稿：前缀命中落枚举值、未命中落 unknown、回退值拒绝非结算写入
+- [x] 边表迁移保留全部既有引用边，数据零丢失
+- [x] 解析器：三类合法格式通过；未曝光/不存在 id 拒收进日志
+- [x] CAS 冲突路径单测：并发写同一开放段，后写被拒并取回最新 revision
+- [x] skipped turn 的原文可被 FTS 命中；obs 截断原文入索引
+- [x] consulted_memories 按命中类型与强度记录
+- [x] type 草稿：前缀命中落枚举值、未命中落 unknown、回退值拒绝非结算写入
+
+## Comments
+
+**实现记录（本票落地时的取舍，后续票需知）**
+
+- 「三类合法格式」按裁决 15 解读为：全限定 `[S/T]`、带注释 `[S/T 说明]`、段 `[E<n>]`；裸 `[T<n>]` 与逗号列表明确不解析（整个方括号丢弃，沿用旧文法「不做部分打捞」）。
+- 曝光台账（`note_id_exposures`）只记 turn（列有 `REFERENCES turns(id)`），故段引用默认只查存在性；`validateReferences` 留 `exposedSegmentIds` 参数，调用方一旦能提供段曝光集即自动启用同一道闸。
+- 通用边表 `memory_edges` 不进 `SCHEMA_SQL`：一次性迁移的闸门是「本次 open 前表不存在」。`migrateTurnCitationsToEdges` 另导出且幂等，P2 切换前可再跑一次补齐迁移后旧路径新写的边（本票不做双写——超出「只改 FTS + consulted_memories」的活行为边界）。
+- 旧 `turn_citations` 行迁入时 provenance 落 `judged`（那批边只来自提取 agent 的显式 `cites`，是模型判定，不是作者文本引用）。
+- provenance 不进主键：同一 (citing, cited, relation) 重复写只做**升级**（judged > text-ref > rollback > retrieval），`created_at_epoch` 保留首次。
+- FTS 解耦的连带效应：recall 的 turn 查询本就没有 status 过滤，所以 `skipped`/`undone`/在途 turn 现在会进搜索结果（08 渲染票需补 status 过滤）；obs 读路径仍有 `status='extracted'` 过滤，故 obs 截断原文只在索引层可验证。

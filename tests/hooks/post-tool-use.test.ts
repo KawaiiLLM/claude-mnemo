@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
+import { getConsultedMemories } from "../../src/db/consulted-memories";
 import { createDatabase } from "../../src/db/database";
 import {
   getExtractableObservationsForTurn,
@@ -316,6 +317,48 @@ describe("handlePostToolUseHook", () => {
     db.query("UPDATE observations SET status = 'skipped' WHERE status = 'pending'").run();
 
     expect(hasSkippedObservationsForTurn(db, turnId)).toBe(false);
+  });
+
+  test("records what a recall call consulted on the ride turn", async () => {
+    // A past session, so the ride turn stays this session's latest turn.
+    const pastSessionId = upsertSession(db, {
+      contentSessionId: "session-tool-past",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 50,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    const citedTurnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 2, 'extracted', 60)
+         RETURNING id`,
+      )
+      .get(pastSessionId)!.id;
+    const handler = createPostToolUseHandler({ db, now: () => 500 });
+
+    await handler(
+      createInput({
+        toolName: "mcp__mnemo__recall",
+        toolInput: { id: `S${pastSessionId}/T2`, depth: "expanded" },
+        toolResponse: `S${pastSessionId}/T2 the cited turn`,
+      }),
+    );
+
+    expect(getConsultedMemories(db, turnId)).toEqual([
+      { ref: `turn:${citedTurnId}`, strength: "strong" },
+    ]);
+  });
+
+  test("a tool call that consults nothing leaves the column untouched", async () => {
+    const handler = createPostToolUseHandler({ db, now: () => 500 });
+
+    await handler(createInput());
+
+    expect(getConsultedMemories(db, turnId)).toEqual([]);
   });
 
   test("keeps capturing and enqueuing the other mnemo tools unchanged", async () => {

@@ -72,6 +72,11 @@ const SCHEMA_SQL = `
     tool_call_count INTEGER,
     transcript_line_start INTEGER,
     cites_recorded INTEGER NOT NULL DEFAULT 0,
+    -- Which stored records this turn's recall/replay calls actually hit (D4).
+    -- JSON array of {ref, strength}, where ref is a type-prefixed global id
+    -- (turn:8942, session:15069, obs:77, segment:4) so the namespace stays
+    -- unambiguous when a later pass turns these into retrieval edges.
+    consulted_memories TEXT,
     compact_boundary_uuid TEXT,
     created_at_epoch INTEGER NOT NULL,
     updated_at_epoch INTEGER,
@@ -229,6 +234,74 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_note_id_exposures_exposed
     ON note_id_exposures(session_id, exposed_turn_id);
+
+  -- Topic registry (spec D6): the one place a theme's name and its alternate
+  -- spellings live, so "continuous work on the same theme reuses the same word"
+  -- is enforceable rather than aspirational. The aliases column is a JSON array of
+  -- the other names the same theme has been written as; the settlement pass folds
+  -- new spellings in here instead of minting a near-duplicate topic.
+  CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    aliases TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(aliases)),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (
+      status IN ('active', 'dormant', 'retired')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  -- Segments (spec D6): one coherent chapter of work on one topic. Same field
+  -- shape as a turn — title / content / type / tag / status — because the
+  -- reading surfaces (recall's type:/tag: filters, FTS, the glyph) are meant to
+  -- work across granularities without a second vocabulary.
+  --
+  -- Deliberately NOT bound to a session: a topic outruns any one session, and a
+  -- segment that had to name one would have to pick arbitrarily among its
+  -- members' sessions. Membership (segment_members) carries that relation.
+  --
+  -- type and tags are JSON arrays (multi-value; a segment's type is the
+  -- union of its members'). revision is the write fence: an open segment is a
+  -- living document that concurrent settlements may both want to rewrite, so
+  -- every write CASes on the revision it read (see db/segments.ts).
+  CREATE TABLE IF NOT EXISTS segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER REFERENCES topics(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    content TEXT,
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    tags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+    -- open = still accepting members and rewrites; delivered = closed by a
+    -- shipped/merged/settled outcome; abandoned = went silent. Only open
+    -- segments are writable — a closed one is frozen and gets overturned by an
+    -- edge, never by a rewrite (spec D6: freeze history, not the present).
+    status TEXT NOT NULL DEFAULT 'open' CHECK (
+      status IN ('open', 'delivered', 'abandoned')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segments_topic_status
+    ON segments(topic_id, status, updated_at_epoch);
+
+  CREATE INDEX IF NOT EXISTS idx_segments_status_updated
+    ON segments(status, updated_at_epoch);
+
+  -- Segment membership (spec D6). Many-to-many on purpose: member turns need
+  -- not be contiguous, and one turn can legitimately belong to two segments
+  -- (a fix that also closes a review). The pair is the primary key, so
+  -- re-asserting a membership is idempotent.
+  CREATE TABLE IF NOT EXISTS segment_members (
+    segment_id INTEGER NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+    turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (segment_id, turn_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_segment_members_turn
+    ON segment_members(turn_id);
 
   CREATE INDEX IF NOT EXISTS idx_turns_session_prompt
     ON turns(session_id, prompt_number);
@@ -516,6 +589,100 @@ const SCHEMA_SQL = `
   ${MEMORY_FTS_DDL}
 `;
 
+// The universal edge table (spec D7). Nodes are (kind, id) pairs — `turn` or
+// `segment` — because the 0.8.4 turn_citations table cannot express a segment
+// endpoint at all, and a citation graph split across two tables would need every
+// reader to union them.
+//
+// PRIMARY KEY (citing, cited, relation) with `provenance` OUTSIDE the key: the
+// same pair discovered by retrieval and again by a text reference is ONE edge
+// (spec D8's de-duplication), and provenance is the audit layer telling you how
+// it was learned. Conflicting writes upgrade the provenance rather than
+// duplicating the edge — see db/memory-edges.ts.
+//
+// Kept out of SCHEMA_SQL on purpose: the turn_citations migration must run
+// exactly once, and "the table did not exist before this open" is the only
+// gate that survives a crash without a second bookkeeping row. The same idiom
+// as ensureForkLineageColumns' one-time backfill.
+const MEMORY_EDGES_DDL = `
+  CREATE TABLE IF NOT EXISTS memory_edges (
+    citing_kind TEXT NOT NULL CHECK (citing_kind IN ('turn', 'segment')),
+    citing_id INTEGER NOT NULL,
+    cited_kind TEXT NOT NULL CHECK (cited_kind IN ('turn', 'segment')),
+    cited_id INTEGER NOT NULL,
+    relation TEXT NOT NULL CHECK (
+      relation IN ('builds-on', 'implements', 'supersedes', 'evidence-for')
+    ),
+    provenance TEXT NOT NULL CHECK (
+      provenance IN ('retrieval', 'text-ref', 'rollback', 'judged')
+    ),
+    created_at_epoch INTEGER NOT NULL,
+    PRIMARY KEY (citing_kind, citing_id, cited_kind, cited_id, relation)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_edges_cited
+    ON memory_edges(cited_kind, cited_id, relation);
+`;
+
+function hasTable(db: Database, table: string): boolean {
+  return (
+    db
+      .query<{ name: string }, [string]>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .get(table) !== null
+  );
+}
+
+function ensureMemoryEdgesSchema(db: Database): void {
+  const isFirstCreation = !hasTable(db, "memory_edges");
+  db.exec(MEMORY_EDGES_DDL);
+
+  if (isFirstCreation) {
+    migrateTurnCitationsToEdges(db);
+  }
+}
+
+/**
+ * Fold every turn↔turn citation edge into the universal table (spec D13:
+ * "收编重造"). Idempotent — the edge primary key absorbs a re-run — so it is
+ * safe to call again at the P2 switch to sweep up edges the legacy remember
+ * path wrote after the one-time migration.
+ *
+ * Legacy rows land on `judged` provenance: `turn_citations` was only ever
+ * written from an extraction agent's explicit `cites` array, i.e. a model
+ * assigned that relation. Calling them `text-ref` would claim the writer typed
+ * the reference in prose, which the edge table cannot know.
+ *
+ * Returns the number of edges present for the migrated pairs, so a caller (and
+ * the migration test) can assert zero loss against the source table.
+ */
+export function migrateTurnCitationsToEdges(db: Database): number {
+  if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
+    return 0;
+  }
+
+  const result = db
+    .query<{ migrated: number }, []>(
+      `
+        INSERT INTO memory_edges (
+          citing_kind, citing_id, cited_kind, cited_id,
+          relation, provenance, created_at_epoch
+        )
+        SELECT 'turn', citing_turn_id, 'turn', cited_turn_id,
+               relation, 'judged', created_at_epoch
+        FROM turn_citations
+        WHERE true
+        ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id, relation)
+          DO NOTHING
+        RETURNING 1 AS migrated
+      `,
+    )
+    .all().length;
+
+  return result;
+}
+
 export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
@@ -530,6 +697,8 @@ export function initializeSchema(db: Database): void {
   ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
+  ensureTurnConsultedMemoriesColumn(db);
+  ensureMemoryEdgesSchema(db);
   ensureSessionScanCursorColumns(db);
   ensureTurnCompactBoundarySchema(db);
   dropRetiredMaintenanceState(db);
@@ -760,6 +929,15 @@ function ensureTurnCitationsSchema(db: Database): void {
     db.exec(
       "ALTER TABLE turns ADD COLUMN cites_recorded INTEGER NOT NULL DEFAULT 0",
     );
+  }
+}
+
+// Mechanical retrieval provenance (spec D4). Old rows stay NULL, which reads as
+// "never observed" rather than "consulted nothing" — the column only starts
+// meaning something for turns captured after it existed.
+function ensureTurnConsultedMemoriesColumn(db: Database): void {
+  if (!hasColumn(db, "turns", "consulted_memories")) {
+    db.exec("ALTER TABLE turns ADD COLUMN consulted_memories TEXT");
   }
 }
 
@@ -1005,6 +1183,10 @@ function resetSchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS note_debt_cursor");
   db.exec("DROP TABLE IF EXISTS note_debt");
   db.exec("DROP TABLE IF EXISTS observations");
+  db.exec("DROP TABLE IF EXISTS segment_members");
+  db.exec("DROP TABLE IF EXISTS segments");
+  db.exec("DROP TABLE IF EXISTS topics");
+  db.exec("DROP TABLE IF EXISTS memory_edges");
   db.exec("DROP TABLE IF EXISTS turn_citations");
   db.exec("DROP TABLE IF EXISTS settlement_jobs");
   db.exec("DROP TABLE IF EXISTS settlement_cursors");

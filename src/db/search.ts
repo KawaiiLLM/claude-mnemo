@@ -25,6 +25,26 @@ export interface ObservationFtsRecord {
   id: number;
   title: string | null;
   content: string | null;
+  toolInput?: string | null;
+  toolResult?: string | null;
+}
+
+/**
+ * How much of an observation's raw tool input and output reaches the index
+ * (spec D11). The full corpus is ~1.3 GB and cannot be indexed; the head of a
+ * payload is where the identifying material lives (the path, the command, the
+ * first error line), so a truncated original buys most of the recall at a
+ * fraction of the size.
+ */
+export const OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
+
+function truncateOriginal(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  return value.length > OBSERVATION_ORIGINAL_INDEX_CHARS
+    ? value.slice(0, OBSERVATION_ORIGINAL_INDEX_CHARS)
+    : value;
 }
 
 export interface RuleFtsRecord {
@@ -325,6 +345,17 @@ export function indexSessionToFTS(db: Database, session: SessionFtsRecord): void
   );
 }
 
+/**
+ * Index a turn. Called at MECHANICAL CAPTURE time and again on every content
+ * write, with no reference to the turn's status (spec D11, R1#5/R2#4).
+ *
+ * The index and the rendering answer different questions. "Was this ever
+ * written down" is a property of the text; "is this worth showing you" is a
+ * judgement that changes as a turn is extracted, skipped or aged. Binding the
+ * index to the judgement is what made a `skipped` turn's own prompt
+ * unfindable — the one artefact whose wording the user is most likely to
+ * remember. Status filtering now lives entirely on the rendering side.
+ */
 export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
   indexFtsRecord(
     db,
@@ -338,6 +369,33 @@ export function indexTurnToFTS(db: Database, turn: TurnFtsRecord): void {
   );
 }
 
+/** Re-index a turn from its current row; a no-op if the turn is gone. */
+export function reindexTurnFromDb(db: Database, turnId: number): void {
+  const turn = db
+    .query<TurnFtsRecord, [number]>(
+      `SELECT
+         id,
+         title,
+         content,
+         insight,
+         user_prompt AS userPrompt,
+         assistant_response AS assistantResponse
+       FROM turns
+       WHERE id = ?`,
+    )
+    .get(turnId);
+
+  if (turn) {
+    indexTurnToFTS(db, turn);
+  }
+}
+
+/**
+ * Index an observation, likewise status-blind. The raw tool input and output go
+ * into the prompt/response slots truncated (see
+ * OBSERVATION_ORIGINAL_INDEX_CHARS) so a tool call is findable by what it
+ * actually did, whether or not anything ever summarized it.
+ */
 export function indexObservationToFTS(
   db: Database,
   observation: ObservationFtsRecord,
@@ -349,8 +407,8 @@ export function indexObservationToFTS(
     observation.title,
     observation.content,
     "",
-    null,
-    null,
+    truncateOriginal(observation.toolInput),
+    truncateOriginal(observation.toolResult),
   );
 }
 
@@ -413,7 +471,6 @@ export function rebuildSearchIndex(db: Database): void {
           user_prompt AS userPrompt,
           assistant_response AS assistantResponse
         FROM turns
-        WHERE status = 'extracted'
       `,
     )
     .all();
@@ -428,7 +485,8 @@ export function rebuildSearchIndex(db: Database): void {
         id: number;
         title: string | null;
         content: string | null;
-        status: string;
+        toolInput: string | null;
+        toolResult: string | null;
       },
       []
     >(
@@ -437,19 +495,15 @@ export function rebuildSearchIndex(db: Database): void {
           id,
           title,
           content,
-          status
+          substr(tool_input, 1, ${OBSERVATION_ORIGINAL_INDEX_CHARS}) AS toolInput,
+          substr(tool_result, 1, ${OBSERVATION_ORIGINAL_INDEX_CHARS}) AS toolResult
         FROM observations
-        WHERE status = 'extracted'
       `,
     )
     .all();
 
   for (const observation of observationRows) {
-    indexObservationToFTS(db, {
-      id: observation.id,
-      title: observation.title,
-      content: observation.content,
-    });
+    indexObservationToFTS(db, observation);
   }
 
   const ruleRows = db

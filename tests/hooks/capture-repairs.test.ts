@@ -482,13 +482,16 @@ describe("capture repairs", () => {
 
       expect(getOrphanTurns(db, sessionId)).toEqual([]);
       expect(getStrandedTurns(db, sessionId)).toEqual([]);
-      expect(
-        db
-          .query<{ count: number }, [number]>(
-            "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
-          )
-          .get(turnId)?.count,
-      ).toBe(0);
+      // The marker stays indexed (FTS ingest is status-blind, spec D11) but the
+      // old extraction no longer answers for it: the row is re-indexed as the
+      // bare /compact marker it now is.
+      const indexed = db
+        .query<{ title: string | null; content: string | null }, [number]>(
+          "SELECT title, content FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
+        )
+        .get(turnId);
+      expect(indexed?.title).toBe("/compact");
+      expect(indexed?.content).toBeNull();
     });
   });
 

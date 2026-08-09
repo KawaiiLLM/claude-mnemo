@@ -189,9 +189,11 @@ export function saveTurnFixture(
       throw new Error("Failed to reload saved turn.");
     }
 
-    if (status === "extracted") {
-      indexTurnToFTS(db, turn);
+    // Status-blind, like the production capture path (spec D11): a turn is in
+    // the index because it was captured, not because it was extracted.
+    indexTurnToFTS(db, turn);
 
+    if (status === "extracted") {
       for (const observation of input.observations) {
         createObservation(db, {
           turnId,

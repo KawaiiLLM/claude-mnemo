@@ -11,6 +11,7 @@ import {
 } from "../../db/orphan-turns";
 import { relinkSessionLineageFromEntries } from "../../db/lineage";
 import { recoverStrandedAncestors } from "../../db/recover-stranded";
+import { reindexTurnFromDb } from "../../db/search";
 import { getTurnsForSession } from "../../db/turns";
 import {
   parseReplayTranscript,
@@ -184,6 +185,10 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           `,
         )
         .run(assistantResponse, epoch, turn.id);
+
+      // The response is the second half of the turn's original text; index it
+      // now, at capture, rather than when (or if) an extraction runs.
+      reindexTurnFromDb(dependencies.db, turn.id);
 
       if (
         assistantResponse !== null &&

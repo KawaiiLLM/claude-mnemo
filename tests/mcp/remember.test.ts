@@ -234,7 +234,7 @@ describe("remember tool routing and validation", () => {
     expect(result.content[0]?.text).toContain("observation remember");
   });
 
-  test("removes skipped observations and finalized skipped or undone turns from FTS", () => {
+  test("keeps skipped observations and undone turns in FTS, with the originals intact", () => {
     rememberTool(db, {
       id: `T${turnId}`,
       title: "Fix auth race",
@@ -274,20 +274,22 @@ describe("remember tool routing and validation", () => {
       status: "skipped",
     });
 
+    // FTS ingest is decoupled from status (spec D11): a terminal status changes
+    // what a reader is SHOWN, never whether the text can be found.
     expect(
       db
         .query<{ count: number }, []>(
           "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'turn' AND source_id = ?",
         )
         .get(turnId)?.count,
-    ).toBe(0);
+    ).toBe(1);
     expect(
       db
         .query<{ count: number }, []>(
           "SELECT COUNT(*) AS count FROM memory_fts WHERE layer = 'observation' AND source_id = ?",
         )
         .get(observationId)?.count,
-    ).toBe(0);
+    ).toBe(1);
   });
 
   test("rewrites the whole session summary by S{id}", () => {
