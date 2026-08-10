@@ -50,6 +50,13 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("with the user's message");
     expect(flat).toContain("The note describes this turn only");
     expect(flat).toContain("the newer note replaces");
+    // 裁决 26: sealing at the first batch was 0.9.4's rule and it survived the
+    // protocol change — S18993/T93 filed its note two seconds after dispatching
+    // a worker, so the report that arrived next never entered it. The note now
+    // waits for the batch that looks final, and any later result reopens it.
+    expect(flat).toContain("the batch you expect to be this turn's last");
+    expect(flat).toContain("let it wait rather than seal the turn early");
+    expect(flat).toContain("in this turn or a following one");
     expect(flat).toContain("Never start a tool call just to write a note");
     expect(flat).toContain('"backlog relief" list');
     // 裁决 24: the refusal is explicit, and a note invented from a listed line
