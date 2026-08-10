@@ -283,6 +283,100 @@ describe("bounded extraction stall escalation", () => {
     ).toBe(0);
   });
 
+  // The stall floor is the extraction pipeline giving up on a turn. In the
+  // segment era that pipeline no longer owns the record, so what it floors to
+  // has to be read off the row rather than assumed lost.
+  describe("the stall floor reads an era turn's own note", () => {
+    const ERA_CUTOFF = 5;
+
+    function seedStalledTurn(
+      promptNumber: number,
+      createdAtEpoch: number,
+      note: { title: string; content: string } | null,
+    ): number {
+      const turnId = db
+        .query<
+          { id: number },
+          [number, number, string | null, string | null, number]
+        >(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             title, content, extraction_stall_attempts, created_at_epoch
+           ) VALUES (?, ?, 'provisional', 'prompt', 'response', ?, ?, 3, ?)
+           RETURNING id`,
+        )
+        .get(
+          sessionId,
+          promptNumber,
+          note?.title ?? null,
+          note?.content ?? null,
+          createdAtEpoch,
+        )!.id;
+      db.query(
+        `INSERT INTO pending_queue (
+           kind, target_id, session_db_id, enqueued_at_epoch
+         ) VALUES ('turn-stop', ?, ?, ?)`,
+      ).run(turnId, sessionId, 100 + promptNumber);
+      return turnId;
+    }
+
+    function createFlooringCore(eraCutoffEpoch: number | null) {
+      return createWorkerCore({
+        db,
+        now: () => 123,
+        nowMs: () => 1_000,
+        config: { ...DEFAULT_CONFIG, eraCutoffEpoch },
+        logger: { warn() {}, error() {} },
+        createWorkerQuerySessionImpl: (() => {
+          throw new Error("a turn at its stall limit must never be dispatched");
+        }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
+        isProcessAliveImpl: () => false,
+      });
+    }
+
+    test("a noted era turn floors to extracted, an un-noted one to skipped", async () => {
+      const notedTurnId = seedStalledTurn(1, 10, {
+        title: "the agent's own note",
+        content: "First-person record of this turn.",
+      });
+      const unnotedTurnId = seedStalledTurn(2, 10, null);
+
+      await createFlooringCore(ERA_CUTOFF).scanAndDrainQueue();
+
+      // `failed` would hide a record that is on the row and correct.
+      expect(getTurnById(db, notedTurnId)).toMatchObject({
+        status: "extracted",
+        title: "the agent's own note",
+      });
+      // Nobody noted it, and a hole has always been `skipped`.
+      expect(getTurnById(db, unnotedTurnId)?.status).toBe("skipped");
+    });
+
+    test("a pre-cutoff turn still floors to failed", async () => {
+      const legacyNotedTurnId = seedStalledTurn(1, 1, {
+        title: "partial extraction",
+        content: "half a record",
+      });
+      const legacyTurnId = seedStalledTurn(2, 1, null);
+
+      await createFlooringCore(ERA_CUTOFF).scanAndDrainQueue();
+
+      expect(getTurnById(db, legacyNotedTurnId)?.status).toBe("failed");
+      expect(getTurnById(db, legacyTurnId)?.status).toBe("failed");
+    });
+
+    test("with no cutoff configured every turn floors to failed", async () => {
+      const turnId = seedStalledTurn(1, 10, {
+        title: "the agent's own note",
+        content: "First-person record of this turn.",
+      });
+
+      await createFlooringCore(null).scanAndDrainQueue();
+
+      expect(getTurnById(db, turnId)?.status).toBe("failed");
+    });
+  });
+
   test("a partial turn still consumes a stall when its final slice remembers nothing", async () => {
     const turnId = queueTurn(1);
     updateTurnById(db, turnId, {

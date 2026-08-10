@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msniso3b" : "dev";
+var BUILD_ID = true ? "0.9.5-msnkv697" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -442,6 +442,13 @@ function clampConfig(config3, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       DEFAULT_CONFIG.dreamAgentBacklogLimit
     )
   };
+}
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
 }
 function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
   const path2 = resolveConfigPath(homePath);
@@ -22894,13 +22901,6 @@ function createWorkerProcessors(db) {
 }
 
 // src/worker/settlement.ts
-function resolveConfiguredEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
 var DEMOTION_CANDIDATE_GRADE = 3;
 var ROLLED_BACK_TAG = "rolled-back";
 function deriveInDegree(citations) {
@@ -47665,18 +47665,31 @@ var RegradeTargetMissingError = class extends Error {
   targetId;
 };
 function settleEraTurnWithoutNote(db, turnId, current) {
-  const settled = current.status === "undone" ? "undone" : current.title !== null || current.content !== null ? "extracted" : "skipped";
-  if (settled !== current.status) {
-    updateTurnById(db, turnId, {
-      status: settled,
-      updatedAtEpoch: Math.floor(Date.now() / 1e3)
-    });
+  const changed = db.query(
+    `UPDATE turns
+         SET status = CASE
+               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
+               ELSE 'skipped'
+             END,
+             updated_at_epoch = ?
+         WHERE id = ? AND status IN ('active', 'provisional')`
+  ).run(Math.floor(Date.now() / 1e3), turnId).changes > 0;
+  const settled = getTurnById(db, turnId) ?? current;
+  if (changed) {
+    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
   }
   return textResult2(
-    `Updated turn T${turnId} with status ${settled}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
+    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
   );
 }
 function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult2(`Turn T${turnId} not found.`);
+  }
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
+  }
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -47684,13 +47697,6 @@ function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
   );
   if (statusError) {
     return parameterError2(statusError);
-  }
-  const current = getTurnById(db, turnId);
-  if (!current) {
-    return textResult2(`Turn T${turnId} not found.`);
-  }
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
   }
   const gradeError = validateGrade(input.grade, "grade");
   if (gradeError) {
@@ -47884,13 +47890,6 @@ function rememberTool(db, rawInput, options = {}) {
 }
 
 // src/mcp/handlers.ts
-function resolveConfiguredEraCutoff2() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {
@@ -47923,7 +47922,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
-  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveConfiguredEraCutoff2();
+  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveConfiguredEraCutoff();
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -53115,8 +53114,11 @@ function readStrandedTurnEvidence(db, turnId) {
 function sameEvidence(left, right) {
   return left.status === right.status && left.latestObservationId === right.latestObservationId && left.turnStopSeqs.length === right.turnStopSeqs.length && left.turnStopSeqs.every((seq, index) => seq === right.turnStopSeqs[index]);
 }
-function completionFloorStatus(turn) {
-  return turn.title !== null || turn.content !== null ? "extracted" : "failed";
+function completionFloorStatus(turn, eraCutoffEpoch = null) {
+  if (turn.title !== null || turn.content !== null) {
+    return "extracted";
+  }
+  return isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch) ? "skipped" : "failed";
 }
 function finalizeUnreachableStrandedTurns(db, unreachableTurns, options) {
   const results = [];
@@ -53139,7 +53141,10 @@ function finalizeUnreachableStrandedTurns(db, unreachableTurns, options) {
       if (!current || !sameEvidence(current, candidate.evidence)) {
         return null;
       }
-      const status = completionFloorStatus(turn);
+      const status = completionFloorStatus(
+        turn,
+        options.eraCutoffEpoch ?? null
+      );
       db.query(
         "UPDATE turns SET status = ? WHERE id = ?"
       ).run(status, turnId);
@@ -53553,7 +53558,11 @@ function createWorkerCore(deps) {
       return;
     }
     if (turn.status !== "undone") {
-      updateTurnById(deps.db, turnId, { status: "failed" });
+      const stalledStatus = isSegmentEra(
+        turn.createdAtEpoch,
+        config3.eraCutoffEpoch
+      ) ? turn.title !== null || turn.content !== null ? "extracted" : "skipped" : "failed";
+      updateTurnById(deps.db, turnId, { status: stalledStatus });
     }
     deps.db.query(
       `UPDATE observations
@@ -54074,7 +54083,7 @@ ${coldStart}
       if (!turn) {
         continue;
       }
-      const floorStatus = completionFloorStatus(turn);
+      const floorStatus = completionFloorStatus(turn, config3.eraCutoffEpoch);
       if (turn.status === "extracted" || floorStatus === "extracted") {
         if (turn.status !== "extracted") {
           updateTurnById(deps.db, turnId, { status: "extracted" });
@@ -54084,10 +54093,11 @@ ${coldStart}
           { turnId }
         );
       } else {
-        updateTurnById(deps.db, turnId, { status: "failed" });
-        logger.warn?.("derailment floor: turn failed (no extraction)", {
-          turnId
-        });
+        updateTurnById(deps.db, turnId, { status: floorStatus });
+        logger.warn?.(
+          floorStatus === "skipped" ? "derailment floor: era turn left unnoted (finalized skipped)" : "derailment floor: turn failed (no extraction)",
+          { turnId }
+        );
       }
     }
   }
@@ -55099,7 +55109,8 @@ ${coldStart}
         deps.db,
         repair.unreachable,
         {
-          hasRegisteredSessionEnv: (sessionDbId) => getRegisteredSessionEnv(sessionDbId) !== void 0
+          hasRegisteredSessionEnv: (sessionDbId) => getRegisteredSessionEnv(sessionDbId) !== void 0,
+          eraCutoffEpoch: config3.eraCutoffEpoch
         }
       );
       for (const item of floored) {

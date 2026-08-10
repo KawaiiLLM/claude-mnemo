@@ -35,6 +35,39 @@ function snapshotTurnRow(db: Database, turnId: number): string {
   );
 }
 
+/**
+ * Run `fire` the instant after the next read of a turns row, then get out of
+ * the way. The main agent notes its own turn while the turn is still running,
+ * so a note transaction really can commit between a writeback's read of the row
+ * and its write; this reproduces that interleave deterministically.
+ */
+function fireAfterNextTurnRead(db: Database, fire: () => void): void {
+  const originalQuery = db.query.bind(db);
+  let armed = true;
+  (db as unknown as { query: (sql: string) => unknown }).query = (
+    sql: string,
+  ) => {
+    const statement = originalQuery(sql) as unknown as {
+      get: (...args: unknown[]) => unknown;
+    };
+    if (!armed || !/^\s*SELECT/i.test(sql) || !/FROM turns/i.test(sql)) {
+      return statement;
+    }
+    const originalGet = statement.get.bind(statement);
+    statement.get = (...args: unknown[]) => {
+      const row = originalGet(...args);
+      if (armed) {
+        armed = false;
+        statement.get = originalGet;
+        (db as unknown as { query: unknown }).query = originalQuery;
+        fire();
+      }
+      return row;
+    };
+    return statement;
+  };
+}
+
 describe("era cutover write path", () => {
   let db: Database;
   let sessionId: number;
@@ -374,6 +407,112 @@ describe("era cutover write path", () => {
       expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
         eraTurnId,
       );
+    });
+
+    test("decides from the row as it stands when a note commits mid-settle", () => {
+      fireAfterNextTurnRead(db, () => {
+        noteTool(
+          db,
+          {
+            turn: `S${sessionId}/T11`,
+            title: "the agent's own note",
+            content: "Written while the writeback was still deciding.",
+          },
+          { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
+        );
+      });
+
+      const result = rememberTool(
+        db,
+        { id: `T${eraTurnId}`, grade: 1, title: "the observer's version" },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      // A decision taken before the note committed would force `skipped` onto a
+      // turn that now holds a record — hiding it from search.
+      expect(isRememberSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("status extracted");
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.title).toBe("the agent's own note");
+      expect(turn.status).toBe("extracted");
+    });
+
+    test("leaves an already-terminal turn exactly as it found it", () => {
+      // The extraction pipeline's own floor may have settled the turn first
+      // (worker/server.ts markExtractionFailedAndSkip); a late writeback is not
+      // a licence to move a terminal status, in either direction.
+      db.query<unknown, [number]>(
+        "UPDATE turns SET status = 'failed' WHERE id = ?",
+      ).run(eraTurnId);
+      db.query<unknown, [number]>(
+        "UPDATE turns SET status = 'undone' WHERE id = ?",
+      ).run(rideTurnId);
+      const beforeFailed = snapshotTurnRow(db, eraTurnId);
+      const beforeUndone = snapshotTurnRow(db, rideTurnId);
+
+      const failedResult = rememberTool(
+        db,
+        { id: `T${eraTurnId}`, title: "late observer" },
+        { eraCutoffEpoch: CUTOFF },
+      );
+      const undoneResult = rememberTool(
+        db,
+        { id: `T${rideTurnId}`, title: "late observer" },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isRememberSuccess(failedResult)).toBe(true);
+      expect(resultText(failedResult)).toContain("status failed");
+      expect(snapshotTurnRow(db, eraTurnId)).toBe(beforeFailed);
+      expect(isRememberSuccess(undoneResult)).toBe(true);
+      expect(snapshotTurnRow(db, rideTurnId)).toBe(beforeUndone);
+    });
+
+    test("settles an era turn whose status field the turn route would reject", () => {
+      // `extracted` is not in the turn route's allowed set, and the validation
+      // that says so used to run before the turn was even loaded — so an era
+      // turn came back `Parameter error`, leaving its id unresolved in the
+      // worker's work unit and starting the derailment ladder.
+      const result = rememberTool(
+        db,
+        {
+          id: `T${eraTurnId}`,
+          status: "extracted",
+          title: "observer's reconstruction",
+        },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isRememberSuccess(result)).toBe(true);
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.status).toBe("skipped");
+      expect(turn.title).toBeNull();
+    });
+
+    test("still rejects that status on a pre-cutoff turn", () => {
+      const result = rememberTool(
+        db,
+        {
+          id: `T${legacyTurnId}`,
+          grade: 2,
+          status: "extracted",
+          title: "legacy extraction",
+        },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(resultText(result)).toContain("Parameter error");
+      expect(getTurnById(db, legacyTurnId)!.title).toBeNull();
+    });
+
+    test("answers a missing turn with not-found, whatever the payload", () => {
+      const result = rememberTool(
+        db,
+        { id: "T999999", status: "extracted" },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(resultText(result)).toBe("Turn T999999 not found.");
     });
 
     test("extracts a pre-cutoff turn exactly as before while the era is on", () => {

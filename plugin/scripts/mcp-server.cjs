@@ -32801,6 +32801,13 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
     )
   };
 }
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
 function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
   const path2 = resolveConfigPath(homePath);
   if (!(0, import_node_fs2.existsSync)(path2)) {
@@ -38075,18 +38082,31 @@ var RegradeTargetMissingError = class extends Error {
   targetId;
 };
 function settleEraTurnWithoutNote(db, turnId, current) {
-  const settled = current.status === "undone" ? "undone" : current.title !== null || current.content !== null ? "extracted" : "skipped";
-  if (settled !== current.status) {
-    updateTurnById(db, turnId, {
-      status: settled,
-      updatedAtEpoch: Math.floor(Date.now() / 1e3)
-    });
+  const changed = db.query(
+    `UPDATE turns
+         SET status = CASE
+               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
+               ELSE 'skipped'
+             END,
+             updated_at_epoch = ?
+         WHERE id = ? AND status IN ('active', 'provisional')`
+  ).run(Math.floor(Date.now() / 1e3), turnId).changes > 0;
+  const settled = getTurnById(db, turnId) ?? current;
+  if (changed) {
+    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
   }
   return textResult2(
-    `Updated turn T${turnId} with status ${settled}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
+    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
   );
 }
 function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult2(`Turn T${turnId} not found.`);
+  }
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
+  }
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -38094,13 +38114,6 @@ function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
   );
   if (statusError) {
     return parameterError2(statusError);
-  }
-  const current = getTurnById(db, turnId);
-  if (!current) {
-    return textResult2(`Turn T${turnId} not found.`);
-  }
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
   }
   const gradeError = validateGrade(input.grade, "grade");
   if (gradeError) {
@@ -38294,13 +38307,6 @@ function rememberTool(db, rawInput, options = {}) {
 }
 
 // src/mcp/handlers.ts
-function resolveConfiguredEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {

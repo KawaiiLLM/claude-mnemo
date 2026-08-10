@@ -6,6 +6,7 @@ import {
   type ReplaceTurnCitationsResult,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
+import { markSettledDiaryDayStaleForTurn } from "../db/diary-state";
 import { updateObservation } from "../db/observations";
 import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
 import {
@@ -296,6 +297,13 @@ class RegradeTargetMissingError extends Error {
  * path must never demote one), `skipped` when nobody noted it, which is exactly
  * the shape a turn with nothing to extract has always had.
  *
+ * It is ONE conditional statement, not a read followed by a decision followed
+ * by a write. The main agent notes its own turn while the turn is still running
+ * (裁决 26), so a note transaction can commit between any two of those steps;
+ * a decision taken before it then wrote `skipped` over a row that had just been
+ * noted. The CASE reads the row in the same statement that writes it, and the
+ * WHERE leaves `undone` and every already-terminal row alone.
+ *
  * The result deliberately reads as a success. A `Parameter error:` would leave
  * the turn id unresolved in the worker's work unit, and the derailment machine
  * answers an unresolved id with corrective resends and finally a `failed`
@@ -307,22 +315,29 @@ function settleEraTurnWithoutNote(
   turnId: number,
   current: TurnRecord,
 ): ToolTextResult {
-  const settled: TurnStatus =
-    current.status === "undone"
-      ? "undone"
-      : current.title !== null || current.content !== null
-        ? "extracted"
-        : "skipped";
+  const changed =
+    db
+      .query<unknown, [number, number]>(
+        `UPDATE turns
+         SET status = CASE
+               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
+               ELSE 'skipped'
+             END,
+             updated_at_epoch = ?
+         WHERE id = ? AND status IN ('active', 'provisional')`,
+      )
+      .run(Math.floor(Date.now() / 1000), turnId).changes > 0;
 
-  if (settled !== current.status) {
-    updateTurnById(db, turnId, {
-      status: settled,
-      updatedAtEpoch: Math.floor(Date.now() / 1000),
-    });
+  const settled = getTurnById(db, turnId) ?? current;
+  if (changed) {
+    // `updateTurnById` carried this before; a settled day whose turn just
+    // reached a terminal status has to be regenerated. No FTS re-index: the
+    // index is status-blind and nothing else on the row moved.
+    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
   }
 
   return textResult(
-    `Updated turn T${turnId} with status ${settled}. Turns in this era are ` +
+    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are ` +
       "noted by the session's own agent, so nothing this call supplied was stored.",
   );
 }
@@ -333,6 +348,21 @@ function handleTurnRemember(
   input: RememberToolInput,
   eraCutoffEpoch: number | null | undefined,
 ): ToolTextResult {
+  // The turn is loaded before anything is validated, because which rules apply
+  // is a property of the turn and not of the payload. For an era turn none of
+  // the validated fields is going to be stored, so rejecting the call over one
+  // of them trades a dropped note for a derailment: a `Parameter error:` leaves
+  // the turn id unresolved in the work unit, and the floor that ends that
+  // ladder overwrites the very status this settles.
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult(`Turn T${turnId} not found.`);
+  }
+
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
+  }
+
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -341,23 +371,6 @@ function handleTurnRemember(
 
   if (statusError) {
     return parameterError(statusError);
-  }
-
-  // DB-aware predecessor predicate, mirroring the read-side pull-through guard
-  // (timeline.ts selectMilestoneTurns): a bare `T<n>` is bracketed only if the
-  // cited turn exists, shares this turn's session, and precedes it by
-  // prompt_number. `current` is null only when the turn itself is missing, in
-  // which case updateTurnById below returns null → "not found".
-  const current = getTurnById(db, turnId);
-  if (!current) {
-    return textResult(`Turn T${turnId} not found.`);
-  }
-
-  // Before every other validation: for an era turn the fields being validated
-  // are not going to be stored, so rejecting the call over one of them would
-  // only trade a dropped note for a derailment.
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
   }
 
   const gradeError = validateGrade(input.grade, "grade");
@@ -395,6 +408,10 @@ function handleTurnRemember(
     }
   }
 
+  // DB-aware predecessor predicate, mirroring the read-side pull-through guard
+  // (timeline.ts selectMilestoneTurns): a bare `T<n>` is bracketed only if the
+  // cited turn exists, shares this turn's session, and precedes it by
+  // prompt_number.
   const isValidPredecessor = (candidateId: number): boolean => {
     if (candidateId === turnId) {
       return false;

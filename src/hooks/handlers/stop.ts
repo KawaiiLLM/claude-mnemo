@@ -24,6 +24,7 @@ import {
   computeInvalidationSets,
 } from "../../worker/invalidation";
 import { detectAndCleanSubagentTurnsFromParsed } from "../../worker/subagent-filter";
+import { resolveConfiguredEraCutoff } from "../../shared/config";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import {
   backfillFromTranscript,
@@ -38,7 +39,14 @@ export interface StopHandlerDependencies {
   workerEnv?: NodeJS.ProcessEnv;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   logger?: Pick<Console, "warn">;
+  /**
+   * P2 era boundary (spec D11), read once at handler construction. The ancestor
+   * climb needs it so an era turn's promoted note survives the recovery.
+   * Omitted, it comes from config, whose default (`null`) is the legacy path.
+   */
+  eraCutoffEpoch?: number | null;
 }
+
 
 function getLatestTurn(
   db: Database,
@@ -96,6 +104,10 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const logger = dependencies.logger ?? console;
+  const eraCutoffEpoch =
+    dependencies.eraCutoffEpoch !== undefined
+      ? dependencies.eraCutoffEpoch
+      : resolveConfiguredEraCutoff();
 
   return async function handleStopHook(
     input: NormalizedHookInput,
@@ -171,7 +183,12 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
         transcriptEntries,
         epoch,
       );
-      recoverStrandedAncestors(dependencies.db, session.id, epoch);
+      recoverStrandedAncestors(
+        dependencies.db,
+        session.id,
+        epoch,
+        eraCutoffEpoch,
+      );
 
       enqueueOrphanTurnStops(dependencies.db, session.id, epoch, orphanTurns);
 

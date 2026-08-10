@@ -136,6 +136,80 @@ test("connection-released work stays recoverable while terminal turns stay exclu
 });
 
 // ===========================================================================
+// The era exception: a promoted note is a record, not a stale extraction
+// ===========================================================================
+
+const ERA_CUTOFF = 2_000;
+
+// A noted era turn as `note` leaves it: title/content/insight on the row and
+// `provisional` because the note was written inside its own turn (裁决 26).
+function seedNotedEraTurn(sessionDbId: number, promptNumber: number): number {
+  return db
+    .query<{ id: number }, [number, number]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, assistant_response,
+         title, content, insight, created_at_epoch
+       )
+       VALUES (?, ?, 'provisional', 'r', 'the agent''s own note',
+               'First-person record of this turn.', 'why it mattered', 3000)
+       RETURNING id`,
+    )
+    .get(sessionDbId, promptNumber)!.id;
+}
+
+function seedLegacyStrandedTurn(promptNumber: number): number {
+  return db
+    .query<{ id: number }, [number, number]>(
+      `INSERT INTO turns (
+         session_id, prompt_number, status, assistant_response,
+         title, content, created_at_epoch
+       )
+       VALUES (?, ?, 'provisional', 'r', 'partial extraction', 'half a record', 1000)
+       RETURNING id`,
+    )
+    .get(sessionId, promptNumber)!.id;
+}
+
+test("re-enqueues an era turn without wiping the note that is its record", () => {
+  const eraTurnId = seedNotedEraTurn(sessionId, 1);
+  const legacyTurnId = seedLegacyStrandedTurn(2);
+
+  const recovered = recoverStrandedTurns(db, sessionId, 5000, ERA_CUTOFF);
+
+  expect(recovered).toBe(2);
+  // The note survives untouched, and its status is left for the turn's own end
+  // (the writeback settles it) rather than reset to `active`.
+  expect(getTurnById(db, eraTurnId)).toMatchObject({
+    status: "provisional",
+    title: "the agent's own note",
+    content: "First-person record of this turn.",
+    insight: "why it mattered",
+  });
+  expect(queueItemExistsForTurn(db, "turn-stop", eraTurnId)).toBe(true);
+  // Pre-cutoff turns keep the destructive reset: their fields are an
+  // extraction's, and the re-enqueued extraction rewrites them.
+  expect(getTurnById(db, legacyTurnId)).toMatchObject({
+    status: "active",
+    title: null,
+    content: null,
+  });
+  expect(queueItemExistsForTurn(db, "turn-stop", legacyTurnId)).toBe(true);
+});
+
+test("a null cutoff resets an era-dated turn exactly as before", () => {
+  const eraTurnId = seedNotedEraTurn(sessionId, 1);
+
+  expect(recoverStrandedTurns(db, sessionId, 5000)).toBe(1);
+
+  expect(getTurnById(db, eraTurnId)).toMatchObject({
+    status: "active",
+    title: null,
+    content: null,
+    insight: null,
+  });
+});
+
+// ===========================================================================
 // recoverStrandedAncestors — walk the parent chain, recover stranded tails
 // ===========================================================================
 
@@ -176,6 +250,20 @@ test("recoverStrandedAncestors walks the chain + re-enqueues the parent tail", (
   expect(queueItemExistsForTurn(db, "turn-stop", parentStranded)).toBe(true);
 });
 
+test("recoverStrandedAncestors carries the cutoff to every ancestor", () => {
+  const parent = makeSession("ancestor-era-parent", 1);
+  const parentNoted = seedNotedEraTurn(parent, 7);
+  setSessionParent(db, sessionId, parent);
+
+  expect(recoverStrandedAncestors(db, sessionId, 5000, ERA_CUTOFF)).toBe(1);
+
+  expect(getTurnById(db, parentNoted)).toMatchObject({
+    status: "provisional",
+    title: "the agent's own note",
+  });
+  expect(queueItemExistsForTurn(db, "turn-stop", parentNoted)).toBe(true);
+});
+
 test("recoverStrandedAncestors guards against parent-chain cycles", () => {
   const a = makeSession("cycle-a", 1);
   const b = makeSession("cycle-b", 2);
@@ -211,7 +299,7 @@ test("recoverStrandedAncestors stops at the depth cap", () => {
   }
 
   // maxDepth = 2 → only the first two ancestors are visited/recovered.
-  const recovered = recoverStrandedAncestors(db, sessionId, 5000, 2);
+  const recovered = recoverStrandedAncestors(db, sessionId, 5000, null, 2);
   expect(recovered).toBe(2);
   expect(queueItemExistsForTurn(db, "turn-stop", ancestorTurns[0]!)).toBe(true);
   expect(queueItemExistsForTurn(db, "turn-stop", ancestorTurns[1]!)).toBe(true);

@@ -14,7 +14,7 @@ import {
 } from "../db/settlement";
 import { runWriteTransaction } from "../db/database";
 import { getTurnById, updateTurnById, type TurnRecord } from "../db/turns";
-import { loadConfig } from "../shared/config";
+import { resolveConfiguredEraCutoff } from "../shared/config";
 import {
   buildCorrectionGraph,
   buildTimelineView,
@@ -32,20 +32,6 @@ import {
  * allowed to SAY back, and what one accepted answer WRITES.
  */
 
-/**
- * The configured era boundary (spec D11). The arc view this module shows the
- * settle agent is the SAME renderer every read surface uses, so it has to be
- * told where the era starts or it keeps drawing era turns as legacy arc rows
- * after the switch. Resolved here rather than plumbed from the worker because
- * the value only changes on a reload; the default (`null`) is the legacy path.
- */
-function resolveConfiguredEraCutoff(): number | null {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
 
 /** Grade a provisional turn must currently hold to be a demotion candidate. */
 const DEMOTION_CANDIDATE_GRADE = 3;

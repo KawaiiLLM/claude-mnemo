@@ -247,6 +247,30 @@ describe("stranded-turn liveness repair", () => {
     expect(getObservation(db, 1)?.status).toBe("skipped");
   });
 
+  test("an un-noted era turn is floored as a hole, not as a failure", () => {
+    // The two floors have to agree on what an un-noted turn looks like: the era
+    // writeback (mcp/remember.ts) settles a live one to `skipped`, so this one
+    // must not call the same turn `failed` merely because it became
+    // unreachable. A note on the row still wins — that IS the record.
+    const noted = seedTurn({
+      promptNumber: 1,
+      status: "provisional",
+      title: "own note",
+      content: "written by the session's agent",
+      interrupted: true,
+    });
+    const hole = seedTurn({ promptNumber: 2, interrupted: true });
+
+    const floored = finalizeUnreachableStrandedTurns(db, repair().unreachable, {
+      hasRegisteredSessionEnv: () => false,
+      eraCutoffEpoch: DUE_EPOCH - 1,
+    });
+
+    expect(getTurnById(db, noted)?.status).toBe("extracted");
+    expect(getTurnById(db, hole)?.status).toBe("skipped");
+    expect(floored.map((item) => item.status)).toEqual(["extracted", "skipped"]);
+  });
+
   test("a session that re-registers between the scan and the floor is spared", () => {
     // The caller awaits a drain in that window, and a session whose environment
     // comes back is being resumed, not abandoned. Flooring on the stale verdict

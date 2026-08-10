@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
-import { loadConfig } from "../../shared/config";
+import { resolveConfiguredEraCutoff } from "../../shared/config";
 import { renderSessionMilestoneInjection } from "../milestone-injection";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -16,14 +16,6 @@ export interface MilestoneContextHandlerDependencies {
   eraCutoffEpoch?: number | null;
 }
 
-function resolveConfiguredEraCutoff(): number | null {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    // A config read must never cost the injection; the legacy path is safe.
-    return null;
-  }
-}
 
 function sessionHasTurns(db: Database, sessionId: number): boolean {
   return db

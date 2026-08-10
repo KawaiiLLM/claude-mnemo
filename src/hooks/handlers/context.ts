@@ -14,6 +14,7 @@ import type {
   FormattedSession,
 } from "../../mcp/format";
 import { renderCurrentSessionStateOutput } from "../../mcp/session-output";
+import { resolveConfiguredEraCutoff } from "../../shared/config";
 import { parseMarkdownSections } from "../../shared/markdown-sections";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -50,6 +51,13 @@ export interface ContextHandlerDependencies
   workerClientDeps?: WorkerClientDeps;
   workerEnv?: NodeJS.ProcessEnv;
   enableSessionEnvCapture?: boolean;
+  /**
+   * P2 era boundary (spec D11), read once at handler construction. The stranded
+   * recovery below needs it to tell a turn whose record is the main agent's own
+   * note from one whose extraction fields it may reset. Omitted, it comes from
+   * config, whose default (`null`) makes every turn legacy.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 export type ContextSection = "sessions" | "persona" | "recent" | "digest";
@@ -340,9 +348,11 @@ function readRuleDigestContext(
   }
 }
 
+
 function buildContextOutput(
   db: Database,
   input: NormalizedHookInput,
+  eraCutoffEpoch: number | null,
 ): string | undefined {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
@@ -376,6 +386,7 @@ function buildContextOutput(
       db,
       currentSession.id,
       Math.floor(Date.now() / 1000),
+      eraCutoffEpoch,
     );
   }
 
@@ -490,6 +501,11 @@ export function createContextHandler(
     return createReadOnlyContextHandler(dependencies, section);
   }
 
+  const eraCutoffEpoch =
+    dependencies.eraCutoffEpoch !== undefined
+      ? dependencies.eraCutoffEpoch
+      : resolveConfiguredEraCutoff();
+
   return async function handleContextHook(
     input: NormalizedHookInput,
   ): Promise<HookResult> {
@@ -504,7 +520,11 @@ export function createContextHandler(
         dependencies.workerEnv,
       );
     }
-    const hookSpecificOutput = buildContextOutput(dependencies.db, input);
+    const hookSpecificOutput = buildContextOutput(
+      dependencies.db,
+      input,
+      eraCutoffEpoch,
+    );
     if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
       // compact belongs to the current Claude run. Ensure a missing marker,

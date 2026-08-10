@@ -4,17 +4,9 @@ import { noteTool } from "./note";
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
-import { loadConfig } from "../shared/config";
+import { resolveConfiguredEraCutoff } from "../shared/config";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
-function resolveConfiguredEraCutoff(): number | null {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    // A config read must never cost a tool call; the legacy path is safe.
-    return null;
-  }
-}
 
 export const WORKER_TOOL_RESULT_MAX_CHARS = 100_000;
 export const WORKER_TOOL_RESULT_TRUNCATION_HINT =

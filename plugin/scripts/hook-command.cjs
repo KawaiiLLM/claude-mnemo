@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msniso3b" : "dev";
+var BUILD_ID = true ? "0.9.5-msnkv697" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4046,6 +4046,13 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       DEFAULT_CONFIG.dreamAgentBacklogLimit
     )
   };
+}
+function resolveConfiguredEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
 }
 function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
   const path2 = resolveConfigPath(homePath);
@@ -7819,14 +7826,16 @@ function queueItemExistsForTurn(db, kind, targetId) {
 }
 
 // src/db/recover-stranded.ts
-function recoverStrandedTurns(db, sessionDbId, nowEpoch) {
+function recoverStrandedTurns(db, sessionDbId, nowEpoch, eraCutoffEpoch = null) {
   const stranded = getStrandedTurns(db, sessionDbId);
   let recovered = 0;
   for (const turn of stranded) {
     if (queueItemExistsForTurn(db, "turn-stop", turn.id)) {
       continue;
     }
-    resetTurnExtractionFields(db, turn.id, nowEpoch);
+    if (!isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch)) {
+      resetTurnExtractionFields(db, turn.id, nowEpoch);
+    }
     enqueueQueueItem(db, {
       kind: "turn-stop",
       targetId: turn.id,
@@ -7837,14 +7846,14 @@ function recoverStrandedTurns(db, sessionDbId, nowEpoch) {
   }
   return recovered;
 }
-function recoverStrandedAncestors(db, childSessionId, nowEpoch, maxDepth = 16) {
+function recoverStrandedAncestors(db, childSessionId, nowEpoch, eraCutoffEpoch = null, maxDepth = 16) {
   let recovered = 0;
   const visited = /* @__PURE__ */ new Set([childSessionId]);
   let current = getSession(db, childSessionId)?.parentSessionId ?? null;
   let depth = 0;
   while (current != null && depth < maxDepth && !visited.has(current)) {
     visited.add(current);
-    recovered += recoverStrandedTurns(db, current, nowEpoch);
+    recovered += recoverStrandedTurns(db, current, nowEpoch, eraCutoffEpoch);
     current = getSession(db, current)?.parentSessionId ?? null;
     depth += 1;
   }
@@ -22370,7 +22379,7 @@ function readRuleDigestContext(db, input) {
     return void 0;
   }
 }
-function buildContextOutput(db, input) {
+function buildContextOutput(db, input, eraCutoffEpoch) {
   if (input.sessionId && !getSessionByContentId(db, input.sessionId)) {
     upsertSession(db, {
       contentSessionId: input.sessionId,
@@ -22396,7 +22405,8 @@ function buildContextOutput(db, input) {
     recoverStrandedTurns(
       db,
       currentSession.id,
-      Math.floor(Date.now() / 1e3)
+      Math.floor(Date.now() / 1e3),
+      eraCutoffEpoch
     );
   }
   if (input.source !== "resume" && input.source !== "compact") {
@@ -22480,6 +22490,7 @@ function createContextHandler(dependencies, section = "sessions") {
   if (section !== "sessions") {
     return createReadOnlyContextHandler(dependencies, section);
   }
+  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveConfiguredEraCutoff();
   return async function handleContextHook(input) {
     if (dependencies.enableSessionEnvCapture && input.sessionId) {
       void notifyWorkerTrigger(
@@ -22492,7 +22503,11 @@ function createContextHandler(dependencies, section = "sessions") {
         dependencies.workerEnv
       );
     }
-    const hookSpecificOutput = buildContextOutput(dependencies.db, input);
+    const hookSpecificOutput = buildContextOutput(
+      dependencies.db,
+      input,
+      eraCutoffEpoch
+    );
     if (input.sessionId) {
       const session = getSessionByContentId(dependencies.db, input.sessionId);
       if (session && (input.source !== "compact" || !hasSessionRunStart(dependencies.db, session.id))) {
@@ -22837,13 +22852,6 @@ function renderSessionMilestoneInjection(db, sessionId, options = {}) {
 }
 
 // src/hooks/handlers/context-milestones.ts
-function resolveConfiguredEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
 function sessionHasTurns(db, sessionId) {
   return db.query(
     "SELECT 1 AS present FROM turns WHERE session_id = ? LIMIT 1"
@@ -23468,7 +23476,7 @@ function getOrphanTurns(db, sessionDbId, beforeTurnId) {
           t.prompt_number AS promptNumber
         FROM turns t
         WHERE t.session_id = ?
-          AND t.status = 'active'
+          AND t.status IN ('active', 'provisional')
           AND t.id < ?
           AND t.assistant_response IS NULL
           AND NOT EXISTS (
@@ -25004,6 +25012,7 @@ function createStopHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const logger = dependencies.logger ?? console;
+  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveConfiguredEraCutoff();
   return async function handleStopHook(input) {
     if (input.stopHookActive || !input.sessionId) {
       return {
@@ -25054,7 +25063,12 @@ function createStopHandler(dependencies) {
         transcriptEntries,
         epoch
       );
-      recoverStrandedAncestors(dependencies.db, session.id, epoch);
+      recoverStrandedAncestors(
+        dependencies.db,
+        session.id,
+        epoch,
+        eraCutoffEpoch
+      );
       enqueueOrphanTurnStops(dependencies.db, session.id, epoch, orphanTurns);
       dependencies.db.query(
         `

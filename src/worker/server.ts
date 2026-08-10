@@ -49,6 +49,7 @@ import {
 import { initializeDatabase } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
 import { MNEMO_ALLOWED_TOOLS } from "../mcp/definitions";
+import { isSegmentEra } from "../segment-era";
 import { getSessionEffectiveCitations } from "../db/citations";
 import {
   claimNextSettlementJob,
@@ -1004,7 +1005,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       return;
     }
     if (turn.status !== "undone") {
-      updateTurnById(deps.db, turnId, { status: "failed" });
+      // An era turn's record is the main agent's note, which a stalled
+      // extraction says nothing about: `failed` would hide a note that is
+      // already on the row (db/search.ts renders `extracted` only). Floor by
+      // what the row carries — a note is `extracted`, an un-noted era turn is
+      // the hole `skipped` has always meant. Pre-era, the stall really did lose
+      // the only record there was, so `failed` stands.
+      const stalledStatus = isSegmentEra(
+        turn.createdAtEpoch,
+        config.eraCutoffEpoch,
+      )
+        ? turn.title !== null || turn.content !== null
+          ? "extracted"
+          : "skipped"
+        : "failed";
+      updateTurnById(deps.db, turnId, { status: stalledStatus });
     }
     deps.db
       .query<unknown, [number]>(
@@ -1726,7 +1741,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       // Already-extracted turns are terminal — a real remember already ran;
       // leave them. A partial extraction (title/content set, e.g. a provisional
       // turn a mid-slice wrote) is finalized to extracted, keeping the partial.
-      const floorStatus = completionFloorStatus(turn);
+      const floorStatus = completionFloorStatus(turn, config.eraCutoffEpoch);
       if (turn.status === "extracted" || floorStatus === "extracted") {
         if (turn.status !== "extracted") {
           updateTurnById(deps.db, turnId, { status: "extracted" });
@@ -1736,11 +1751,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           { turnId },
         );
       } else {
-        // Content-less, never extracted (active or empty provisional) → failed.
-        updateTurnById(deps.db, turnId, { status: "failed" });
-        logger.warn?.("derailment floor: turn failed (no extraction)", {
-          turnId,
-        });
+        // Content-less, never extracted (active or empty provisional). Pre-era
+        // that is a failure — the extraction was the only writer there was; in
+        // the new era nobody but the session's own agent was ever going to note
+        // it, so an un-noted turn is the ordinary hole `skipped` names.
+        updateTurnById(deps.db, turnId, { status: floorStatus });
+        logger.warn?.(
+          floorStatus === "skipped"
+            ? "derailment floor: era turn left unnoted (finalized skipped)"
+            : "derailment floor: turn failed (no extraction)",
+          { turnId },
+        );
       }
     }
   }
@@ -3168,6 +3189,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         {
           hasRegisteredSessionEnv: (sessionDbId) =>
             getRegisteredSessionEnv(sessionDbId) !== undefined,
+          eraCutoffEpoch: config.eraCutoffEpoch,
         },
       );
 

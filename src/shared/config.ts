@@ -306,6 +306,23 @@ function clampConfig(
   };
 }
 
+/**
+ * The P2 era boundary as configured, for the callers that hold no config of
+ * their own — tool handlers, hook handlers, settlement entry points. It never
+ * throws: a config that cannot be read must not cost a tool call or an
+ * injection, and `null` is the legacy path, which is always safe.
+ *
+ * One copy on purpose. It had grown five identical private ones, and five
+ * places to forget the try/catch is how a config read ends up failing a hook.
+ */
+export function resolveConfiguredEraCutoff(): number | null {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
+
 export function loadConfig(
   homePath = homedir(),
   logger: ConfigWarningLogger = { warn: (message) => console.warn(message) },

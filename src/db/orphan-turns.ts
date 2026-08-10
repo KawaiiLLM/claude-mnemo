@@ -8,12 +8,19 @@ export interface OrphanTurnRef {
 }
 
 /**
- * Turns whose extraction was never triggered: still `active`, no
+ * Turns whose extraction was never triggered: still non-terminal, no
  * assistant_response (interrupted before the Stop hook could fire), and no
  * pending `turn-stop` item. Distinct from the stranded class
  * (recover-stranded.ts), which requires a non-null assistant_response.
  * `beforeTurnId` excludes the turn currently being stopped (Stop-hook path);
  * omit it to scan the whole session (SessionEnd path).
+ *
+ * `provisional` counts as non-terminal here, exactly as it does in the skip
+ * path below and in every other stranded selector. A turn the main agent noted
+ * mid-turn sits `provisional` until its own end carries it further; if the
+ * session dies before Stop captures a response, an `active`-only selector never
+ * sees it again and the note stays out of search forever (db/search.ts renders
+ * `extracted` only).
  */
 export function getOrphanTurns(
   db: Database,
@@ -28,7 +35,7 @@ export function getOrphanTurns(
           t.prompt_number AS promptNumber
         FROM turns t
         WHERE t.session_id = ?
-          AND t.status = 'active'
+          AND t.status IN ('active', 'provisional')
           AND t.id < ?
           AND t.assistant_response IS NULL
           AND NOT EXISTS (
