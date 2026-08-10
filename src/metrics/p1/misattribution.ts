@@ -26,10 +26,14 @@ import { formatTurnAddress } from "../../hooks/note-reminder";
  *   `detectShiftCandidates` below approximates the missing half for the shadow
  *   channel: a note whose vocabulary matches a NEIGHBOUR turn's prompt+response
  *   clearly better than its own turn's is a shift candidate. Candidates, not
- *   victims — a dispatch turn's note legitimately shares vocabulary with the
- *   turn where the dispatched work lands, so the list is for adjudication, not
- *   a rate. The heuristic was validated on the S19773 chain (two consecutive
- *   notes each describing the next turn's work, found by eye first).
+ *   victims. False positives: a dispatch turn's note legitimately shares
+ *   vocabulary with the turn where the dispatched work lands, and any
+ *   same-topic run inflates neighbour overlap. False negatives: a shift onto a
+ *   turn beyond ±2, a note paraphrased away from the response's wording, and
+ *   notes whose own turn has no captured response are not evaluated at all
+ *   (reported as skipped, never as clean). The heuristic was validated on the
+ *   S19773 chain — two consecutive notes each describing the next turn's work,
+ *   found by eye first.
  *
  * Three channels share the rule so the numbers are comparable:
  *   - `response`     turns.assistant_response, the transcript-derived capture;
@@ -303,19 +307,33 @@ export interface ShiftCandidateReport {
   margin: number;
   floor: number;
   neighborDistance: number;
+  /** Notes actually evaluated — ones with tokens AND their own turn's text. */
   notesConsidered: number;
+  /** Notes skipped for lack of either, so "0 flagged" cannot pose as clean. */
+  notesSkipped: number;
   candidates: ShiftCandidate[];
 }
 
 /**
- * Words long enough to be discriminating: latin runs of four or more, CJK runs
- * of two or more. Shorter tokens are shared by every turn of a session and
- * would flatten the overlap signal to noise.
+ * Words long enough to be discriminating: latin runs of four or more, and CJK
+ * BIGRAMS. A whole CJK run as one token would only match when the two texts
+ * share the entire run — Chinese has no spaces, so a shared phrase inside two
+ * different sentences would never register; sliding bigrams are the standard
+ * cure. Shorter latin tokens are shared by every turn of a session and would
+ * flatten the overlap signal to noise.
  */
 function overlapTokens(text: string): Set<string> {
-  return new Set(
-    (text.toLowerCase().match(/[a-z]{4,}|[一-鿿]{2,}/gu) ?? []),
-  );
+  const tokens = new Set<string>();
+  const lowered = text.toLowerCase();
+  for (const latin of lowered.match(/[a-z]{4,}/gu) ?? []) {
+    tokens.add(latin);
+  }
+  for (const run of lowered.match(/[一-鿿]{2,}/gu) ?? []) {
+    for (let index = 0; index + 2 <= run.length; index += 1) {
+      tokens.add(run.slice(index, index + 2));
+    }
+  }
+  return tokens;
 }
 
 function overlapShare(note: Set<string>, turn: Set<string>): number {
@@ -351,6 +369,7 @@ export function detectShiftCandidates(
       floor,
       neighborDistance: SHIFT_NEIGHBOR_DISTANCE,
       notesConsidered: 0,
+      notesSkipped: 0,
       candidates: [],
     };
   }
@@ -396,12 +415,16 @@ export function detectShiftCandidates(
   }
 
   const candidates: ShiftCandidate[] = [];
+  let evaluated = 0;
+  let skipped = 0;
   for (const note of notes) {
     const tokens = overlapTokens(`${note.title} ${note.content}`);
     const own = turnTokens.get(`${note.sessionId}/${note.promptNumber}`);
     if (tokens.size === 0 || !own) {
+      skipped += 1;
       continue;
     }
+    evaluated += 1;
     const ownOverlap = overlapShare(tokens, own);
 
     let neighborOverlap = 0;
@@ -453,7 +476,8 @@ export function detectShiftCandidates(
     margin,
     floor,
     neighborDistance: SHIFT_NEIGHBOR_DISTANCE,
-    notesConsidered: notes.length,
+    notesConsidered: evaluated,
+    notesSkipped: skipped,
     candidates,
   };
 }

@@ -38,19 +38,36 @@ function createPendingTurn(
   promptNumber: number,
   prompt: string,
   createdAtEpoch: number,
+  isSidechain: boolean,
 ): void {
+  // A sidechain prompt's row is born already marked — status `undone` with the
+  // pending tag — instead of waiting for the next root prompt's transcript scan
+  // to find it. The scan stays as the retroactive path for rows created before
+  // the hook knew the agent id; for rows created WITH it, pre-marking is what
+  // keeps the root session's newest live turn ITS OWN turn: an active sidechain
+  // row would sit at the top of the prompt order for the whole delegation
+  // window, and the note tool's current-turn check (裁决 25) would reject the
+  // root turn's own note against it.
   const inserted = db
-    .query<{ id: number }, [number, number, string, number]>(
+    .query<{ id: number }, [number, number, string, string, string, number]>(
       `INSERT INTO turns (
         session_id,
         prompt_number,
         status,
+        tags,
         user_prompt,
         created_at_epoch
-      ) VALUES (?, ?, 'active', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
       RETURNING id`,
     )
-    .get(sessionId, promptNumber, prompt, createdAtEpoch);
+    .get(
+      sessionId,
+      promptNumber,
+      isSidechain ? "undone" : "active",
+      isSidechain ? '["subagent:pending"]' : "[]",
+      prompt,
+      createdAtEpoch,
+    );
 
   // Index at mechanical capture (spec D11): the user's own wording is the most
   // memorable handle on a turn, and waiting for an extraction to index it left
@@ -172,6 +189,7 @@ export function createSessionInitHandler(
         promptNumber,
         prompt,
         epoch,
+        isSubagent,
       );
 
       return { sessionDbId: session.id, promptNumber };

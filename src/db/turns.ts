@@ -555,10 +555,12 @@ export function getMaxPromptNumber(
 }
 
 /**
- * The turn the session is on right now — the one a synchronous hook's output
- * will ride. Both note paths (the PostToolUse reminder and the UserPromptSubmit
- * backlog relief) attribute their exposure rows to it, so they read it here
- * rather than each keeping a copy of the query.
+ * The turn the session is on right now — the one the backlog relief's
+ * injection rides and attributes its exposure rows to.
+ *
+ * `undone` rows are excluded: a sidechain prompt's row (born `undone`, or
+ * marked so by the transcript scan) sits above the root turn in prompt order
+ * for the whole delegation window, and it is not a turn the session is "on".
  */
 export function getLatestTurn(
   db: Database,
@@ -568,7 +570,8 @@ export function getLatestTurn(
     db
       .query<{ id: number; promptNumber: number }, [number]>(
         `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`,
+         WHERE session_id = ? AND status != 'undone'
+         ORDER BY prompt_number DESC LIMIT 1`,
       )
       .get(sessionId) ?? null
   );

@@ -526,7 +526,7 @@ export interface ListOpenNoteDebtOptions {
 }
 
 /**
- * The open debts a reminder may show — READ ONLY, by contract.
+ * The open debts the backlog relief may list — READ ONLY, by contract.
  *
  * Aging is applied here as a filter rather than an update: a debt past the bound
  * is never rendered again from the moment it crosses it, which is the behaviour

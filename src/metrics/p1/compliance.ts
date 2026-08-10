@@ -73,7 +73,10 @@ export interface BucketRow {
   counts: OutcomeCounts;
   /** noted / (noted + defaulted) — null when nothing has settled yet. */
   complianceRate: number | null;
-  /** exposed / non-waived — how often the reminder actually reached the debt. */
+  /**
+   * exposed / non-waived — how often a listing channel (per-debt reminder or
+   * backlog relief) actually reached the debt.
+   */
   reachRate: number | null;
 }
 
@@ -91,8 +94,17 @@ export interface ComplianceReport {
   byWriterModel: BucketRow[];
   latency: LatencySummary;
   sessionsCovered: number;
-  /** Notes written for turns the ledger never opened a debt for. */
+  /**
+   * Notes written for turns the ledger never opened a debt for, EXCLUDING the
+   * current-turn protocol's (裁决 25) — a genuine anomaly count again.
+   */
   notesWithoutDebt: number;
+  /**
+   * Debtless notes whose ride turn is their own turn — 裁决 25 working as
+   * designed. The ledger tables above never see these; the trial's cross-era
+   * read splits here.
+   */
+  currentTurnNotes: number;
   inferredWriterModels: number;
   agingTurns: number;
 }
@@ -245,7 +257,7 @@ export function collectDebtFacts(
       (SELECT COUNT(*) FROM note_id_exposures e
         WHERE e.session_id = d.session_id
           AND e.exposed_turn_id = d.turn_id
-          AND e.source = 'reminder') AS reminderExposures
+          AND e.source IN ('reminder', 'injection')) AS reminderExposures
     FROM note_debt d
     JOIN turns t ON t.id = d.turn_id
     JOIN session_size z ON z.sessionId = d.session_id
@@ -405,9 +417,27 @@ function summarizeLatency(facts: DebtFact[]): LatencySummary {
   };
 }
 
-function countNotesWithoutDebt(db: Database, sessionId?: number): number {
+/**
+ * Debtless notes, split by protocol era. Under 裁决 25 a successful
+ * current-turn note is written while its turn is live, classification then
+ * absorbs the turn without ever opening a debt, and `ride_turn_id = turn_id` is
+ * that protocol's signature (the reminder era wrote notes riding a LATER turn,
+ * so the two never overlap). Those notes are the new protocol working as
+ * designed and must not be reported as an anomaly; a debtless note that rode a
+ * different turn still is one. The ledger-based tables above only ever see the
+ * reminder era — the trial's cross-era read hangs on this split, since no
+ * deploy epoch is recorded anywhere.
+ */
+function countNotesWithoutDebt(
+  db: Database,
+  sessionId?: number,
+): { anomalous: number; currentTurn: number } {
   const sql = `
-    SELECT COUNT(*) AS count
+    SELECT
+      COALESCE(SUM(CASE WHEN n.ride_turn_id = n.turn_id THEN 1 ELSE 0 END), 0)
+        AS currentTurn,
+      COALESCE(SUM(CASE WHEN n.ride_turn_id = n.turn_id THEN 0 ELSE 1 END), 0)
+        AS anomalous
     FROM shadow_notes n
     JOIN turns t ON t.id = n.turn_id
     LEFT JOIN note_debt d ON d.turn_id = n.turn_id
@@ -415,11 +445,13 @@ function countNotesWithoutDebt(db: Database, sessionId?: number): number {
     ${sessionId === undefined ? "" : "AND t.session_id = ?"}
   `;
 
-  return (
-    (sessionId === undefined
-      ? db.query<{ count: number }, []>(sql).get()
-      : db.query<{ count: number }, [number]>(sql).get(sessionId))?.count ?? 0
-  );
+  const row =
+    sessionId === undefined
+      ? db.query<{ anomalous: number; currentTurn: number }, []>(sql).get()
+      : db
+          .query<{ anomalous: number; currentTurn: number }, [number]>(sql)
+          .get(sessionId);
+  return { anomalous: row?.anomalous ?? 0, currentTurn: row?.currentTurn ?? 0 };
 }
 
 export function computeCompliance(
@@ -427,6 +459,7 @@ export function computeCompliance(
   options: CollectDebtFactsOptions = {},
 ): ComplianceReport {
   const facts = collectDebtFacts(db, options);
+  const debtless = countNotesWithoutDebt(db, options.sessionId);
   const overallCounts = emptyCounts();
   for (const fact of facts) {
     accumulate(overallCounts, fact);
@@ -447,7 +480,8 @@ export function computeCompliance(
     byWriterModel: bucketBy(facts, (fact) => fact.writerModel),
     latency: summarizeLatency(facts),
     sessionsCovered: new Set(facts.map((fact) => fact.sessionId)).size,
-    notesWithoutDebt: countNotesWithoutDebt(db, options.sessionId),
+    notesWithoutDebt: debtless.anomalous,
+    currentTurnNotes: debtless.currentTurn,
     inferredWriterModels: facts.filter((fact) => fact.writerModelInferred).length,
     agingTurns: options.agingTurns ?? NOTE_DEBT_AGING_TURNS,
   };

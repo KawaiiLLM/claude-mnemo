@@ -109,15 +109,27 @@ describe("handleSessionInitHook", () => {
     );
   });
 
-  test("a subagent's prompt gets a turn row but no current-turn line", async () => {
+  test("a subagent's prompt gets a pre-marked sidechain row and no current-turn line", async () => {
     // The address is an instruction to write a note, and a subagent has no
-    // authority over the root session's ledger.
+    // authority over the root session's ledger. Its row is born `undone` with
+    // the pending tag — an active sidechain row would outrank the root turn in
+    // prompt order for the whole delegation window and make the note tool
+    // reject the root turn's own note.
     const result = await createSessionInitHandler({ db })(
       createInput({ agentId: "agent-123", prompt: "delegated work" }),
     );
 
     const session = getSessionByContentId(db, "session-1");
-    expect(getTurn(db, session!.id, 1)?.userPrompt).toBe("delegated work");
+    const turn = getTurn(db, session!.id, 1);
+    expect(turn?.userPrompt).toBe("delegated work");
+    expect(turn?.status).toBe("undone");
+    expect(
+      db
+        .query<{ tags: string }, [number]>(
+          "SELECT tags FROM turns WHERE id = ?",
+        )
+        .get(turn!.id)?.tags,
+    ).toBe('["subagent:pending"]');
     expect(result).toEqual({
       continue: true,
       suppressOutput: true,

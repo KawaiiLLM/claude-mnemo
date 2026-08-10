@@ -22,26 +22,26 @@ import {
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
- * The backlog-relief injection (spec D2's 积压泄压批次, 裁决 21): the only
- * pending-notes text that arrives at the START of a turn.
+ * The backlog-relief injection (spec D2's 积压泄压批次, 裁决 21): since 裁决 25
+ * the only pending-notes list mnemo has at all — the current-turn protocol
+ * writes each turn's note during the turn itself, and the turns it misses
+ * accumulate here.
  *
- * The ordinary reminder deliberately rides a tool result. Prompting at turn
- * start was tried and ruled out — it reads as an instruction to act, and the
- * agent opens tool calls it did not need. That ruling stands; this path is a
- * narrow exception to it, and its safety is entirely in the two properties that
- * bound it:
+ * Authorising a dedicated batch of note calls contradicts the standing rule
+ * ("never start a tool call just to write a note"), and its safety is entirely
+ * in the two properties that bound it:
  *
- *  - it fires only from a state that proves the piggyback channel has stopped
- *    working (a five-deep writable backlog that five finished turns failed to
- *    drain), so a session where notes get written normally never sees it; and
+ *  - it fires only from a state that proves the ordinary protocol has stopped
+ *    keeping up (a five-deep writable backlog that five finished turns failed
+ *    to drain), so a session where notes get written normally never sees it;
+ *    and
  *  - the text it injects spends the exception explicitly and only on note
  *    calls, so the batch it authorises cannot become the "started a tool call
  *    for housekeeping" failure the standing rule exists to prevent.
  *
- * Ledger ownership is unchanged (R2#P2-6): this entry writes exactly what the
- * PostToolUse reminder writes — its claim and its exposure rows — and no debt
- * transition. It also never lists a rolled-back debt, because announcing one is
- * what closes it, and closing is a transition this side may not perform.
+ * Ledger ownership is unchanged (R2#P2-6): this entry writes its claim and its
+ * exposure rows, and no debt transition. It never lists a rolled-back debt —
+ * those close silently at reconcile (裁决 25).
  */
 
 export interface NoteBacklogReliefDependencies {

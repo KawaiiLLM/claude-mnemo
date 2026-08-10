@@ -112,15 +112,49 @@ export function resolveWriterModel(
  * The turn the session is on right now — the turn the note is riding, as
  * opposed to the turn the note is ABOUT. Derived from the address's session, so
  * it needs no caller input and no session identity in the MCP process.
+ *
+ * `undone` rows are excluded: a sidechain prompt's row is born `undone` and
+ * outranks the root turn in prompt order for the whole delegation window; it
+ * is neither a valid ride nor a turn the session is "on". `status` is returned
+ * so the current-turn admission below can additionally require a LIVE turn.
  */
-function getRideTurnId(db: Database, sessionId: number): number | null {
+function getSessionCurrentTurn(
+  db: Database,
+  sessionId: number,
+): { id: number; status: string } | null {
   const row = db
-    .query<{ id: number }, [number]>(
-      "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1",
+    .query<{ id: number; status: string }, [number]>(
+      `SELECT id, status FROM turns
+       WHERE session_id = ? AND status != 'undone'
+       ORDER BY prompt_number DESC LIMIT 1`,
     )
     .get(sessionId);
 
-  return row?.id ?? null;
+  return row ?? null;
+}
+
+/**
+ * Is this turn the one its session is living right now (裁决 25)?
+ *
+ * Latest is not enough on its own: every idle session has a latest turn, its
+ * address is one recall query away, and admitting it debtless would leave every
+ * session's last turn permanently writable from anywhere. Requiring the row to
+ * still be live (`active`/`provisional` — the same pair the completion-evidence
+ * predicate treats as unfinished) shrinks the exposure to sessions that are
+ * mid-turn at this instant, which is the only time the current-turn protocol
+ * has any business writing. The anchor stays best-effort — the MCP process
+ * cannot ask "is this my own session?" — and the instruction-side rule (only
+ * ids seen in injected context) carries the rest.
+ */
+function isSessionCurrentTurn(
+  current: { id: number; status: string } | null,
+  turnId: number,
+): boolean {
+  return (
+    current !== null &&
+    current.id === turnId &&
+    (current.status === "active" || current.status === "provisional")
+  );
 }
 
 function requireText(
@@ -216,7 +250,10 @@ function declineTurn(
   // The current turn may be declined before its debt exists (裁决 25), exactly
   // as it may be noted: classification has not run because the turn has not
   // ended, and the refusal must not be rejected for being early.
-  const isCurrentTurn = getRideTurnId(db, turn.sessionId) === turn.id;
+  const isCurrentTurn = isSessionCurrentTurn(
+    getSessionCurrentTurn(db, turn.sessionId),
+    turn.id,
+  );
 
   // Fast path, same role as the note path's: it avoids opening a write
   // transaction for a plainly invalid address. The decision is re-taken inside.
@@ -337,11 +374,13 @@ export function noteTool(
   // This is the guard against a mistyped or borrowed address, and it is the only
   // one available: an MCP server is told nothing about which session is calling
   // it, so "is this my own turn?" cannot be asked directly. An open debt — or
-  // being the addressed session's newest turn, the address the current-turn line
-  // hands out (裁决 25) — is the session anchor instead, and it makes ride_turn
-  // coherent as a side effect, since ride_turn is derived from the address's
-  // session. Without it, a note addressed at another session's turn silently
-  // attributes itself to THAT session's newest turn.
+  // being the addressed session's newest STILL-LIVE turn, the address the
+  // current-turn line hands out (裁决 25; see isSessionCurrentTurn for why
+  // "latest" alone would leave every idle session's last turn writable) — is
+  // the session anchor instead, and it makes ride_turn coherent as a side
+  // effect, since ride_turn is derived from the address's session. Without it,
+  // a note addressed at another session's turn silently attributes itself to
+  // THAT session's newest turn.
   //
   // This read is a fast path only, not the authorising one: the hook-side
   // reconcile (Stop handler, PostToolUse capture) runs in another process and
@@ -350,8 +389,16 @@ export function noteTool(
   // actually decides is the one taken inside that transaction; skipping the
   // fast path here would only cost an avoidable BEGIN IMMEDIATE for a plainly
   // invalid address.
-  const currentTurnId = getRideTurnId(db, turn.sessionId);
-  const isCurrentTurn = currentTurnId === turn.id;
+  //
+  // `isCurrentTurn` is deliberately NOT recomputed inside the transaction. The
+  // benign race — a new prompt lands between this read and the commit — would
+  // otherwise reject a note that was composed while its turn genuinely was the
+  // current one, and lose it; the stale answer admits it, which is the same
+  // grace every late-but-honest note gets. Nothing widens: the value was true
+  // of a live turn of the addressed session moments ago, and the debt-based
+  // admissions are re-read fresh inside the transaction as before.
+  const current = getSessionCurrentTurn(db, turn.sessionId);
+  const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
   if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
@@ -376,7 +423,7 @@ export function noteTool(
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-  const rideTurnId = currentTurnId;
+  const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
   // The debt validation, the note write and the debt's closure are one

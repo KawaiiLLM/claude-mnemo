@@ -228,12 +228,15 @@ export function renderCompliance(report: ComplianceReport): string {
   lines.push("(a) NOTE COMPLIANCE — note_debt ledger");
   lines.push(
     `sessions ${report.sessionsCovered} · aging bound ${report.agingTurns} turns · ` +
-      `notes without a debt row ${report.notesWithoutDebt} · ` +
+      `anomalous notes without a debt row ${report.notesWithoutDebt} · ` +
+      `current-turn notes (裁决 25, no debt by design) ${report.currentTurnNotes} · ` +
       `writer_model inferred from session for ${report.inferredWriterModels} debts`,
   );
   lines.push(
     "compliance = written / (written + defaulted); a debt that aged out without " +
-      "ever being shown counts as unreached, not as a miss.",
+      "ever being shown counts as unreached, not as a miss. The ledger tables " +
+      "cover the reminder era only — current-turn notes never open a debt, so " +
+      "the two protocols do not mix in these rows.",
   );
   lines.push("");
   lines.push(
@@ -428,10 +431,14 @@ export function renderMisattribution(
         "legitimately shares vocabulary with the turn where its work lands.",
     );
     if (shifts.candidates.length === 0) {
-      lines.push(`  none of ${shifts.notesConsidered} notes flagged.`);
+      lines.push(
+        `  none of ${shifts.notesConsidered} evaluated notes flagged` +
+          `${shifts.notesSkipped > 0 ? ` (${shifts.notesSkipped} skipped: no own-turn text or no tokens)` : ""}.`,
+      );
     } else {
       lines.push(
-        `  ${shifts.candidates.length} of ${shifts.notesConsidered} notes flagged:`,
+        `  ${shifts.candidates.length} of ${shifts.notesConsidered} evaluated notes flagged` +
+          `${shifts.notesSkipped > 0 ? ` (${shifts.notesSkipped} skipped: no own-turn text or no tokens)` : ""}:`,
       );
       for (const candidate of shifts.candidates.slice(0, limit)) {
         lines.push(

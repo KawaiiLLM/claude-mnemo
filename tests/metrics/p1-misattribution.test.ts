@@ -183,4 +183,49 @@ describe("P1 shift candidates (pure-shift approximation)", () => {
     const report = detectShiftCandidates(db, { sessionId, margin: 0.95 });
     expect(report.candidates).toHaveLength(0);
   });
+
+  test("CJK notes match on shared bigrams, not whole runs", () => {
+    // Chinese has no spaces: whole-run tokens would only match when two texts
+    // share an entire unbroken run, so a shared phrase inside two different
+    // sentences would never register (Codex review P2-6).
+    const own = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch)
+         VALUES (?, 10, 'extracted', 'prompt', '本轮结论：文档排版已经完成，无需继续修改。', 1000)
+         RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    db.query<{ id: number }, [number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch)
+       VALUES (?, 11, 'extracted', 'prompt', '排查了代理环境失败的根因，SOCKS变量破坏了启动检查。', 1000)
+       RETURNING id`,
+    ).get(sessionId);
+    db.query<unknown, [number]>(
+      `INSERT INTO shadow_notes (turn_id, title, content, created_at_epoch, updated_at_epoch)
+       VALUES (?, 'fix+proxy', '定位代理环境失败：SOCKS变量破坏启动检查的根因', 1000, 1000)`,
+    ).run(own);
+
+    const report = detectShiftCandidates(db, { sessionId });
+    const flagged = report.candidates.find((candidate) => candidate.turnId === own);
+    expect(flagged).toBeDefined();
+    expect(flagged!.bestNeighborRef).toBe(`S${sessionId}/T11`);
+  });
+
+  test("notes without their own turn's text are reported skipped, not clean", () => {
+    const orphan = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 20, 'active', 'prompt', 1000) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    db.query<unknown, [number]>(
+      `INSERT INTO shadow_notes (turn_id, title, content, created_at_epoch, updated_at_epoch)
+       VALUES (?, 'ops+pending', 'written before the turn response was captured', 1000, 1000)`,
+    ).run(orphan);
+
+    const report = detectShiftCandidates(db, { sessionId });
+    expect(report.notesSkipped).toBeGreaterThanOrEqual(1);
+    // The evaluated count excludes it, so "N evaluated" stays honest.
+    expect(report.notesConsidered).toBeGreaterThanOrEqual(2);
+  });
 });

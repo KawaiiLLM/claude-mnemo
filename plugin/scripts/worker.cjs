@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msmzpwje" : "dev";
+var BUILD_ID = true ? "0.9.4-msn0ijwt" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -47316,11 +47316,16 @@ function resolveWriterModel(env = process.env) {
   }
   return null;
 }
-function getRideTurnId(db, sessionId) {
+function getSessionCurrentTurn(db, sessionId) {
   const row = db.query(
-    "SELECT id FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1"
+    `SELECT id, status FROM turns
+       WHERE session_id = ? AND status != 'undone'
+       ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionId);
-  return row?.id ?? null;
+  return row ?? null;
+}
+function isSessionCurrentTurn(current, turnId) {
+  return current !== null && current.id === turnId && (current.status === "active" || current.status === "provisional");
 }
 function requireText(value, field) {
   if (typeof value !== "string") {
@@ -47347,7 +47352,10 @@ function declineTurn(db, address, options) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
-  const isCurrentTurn = getRideTurnId(db, turn.sessionId) === turn.id;
+  const isCurrentTurn = isSessionCurrentTurn(
+    getSessionCurrentTurn(db, turn.sessionId),
+    turn.id
+  );
   if (!isCurrentTurn && !getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
     return parameterError(debtOwesNoNoteMessage(address, null));
   }
@@ -47418,8 +47426,8 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
-  const currentTurnId = getRideTurnId(db, turn.sessionId);
-  const isCurrentTurn = currentTurnId === turn.id;
+  const current = getSessionCurrentTurn(db, turn.sessionId);
+  const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
   if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
@@ -47434,7 +47442,7 @@ function noteTool(db, rawInput, options = {}) {
   const stripped = title !== rawTitle || content !== rawContent || insight !== rawInsight;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-  const rideTurnId = currentTurnId;
+  const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);

@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msmzpwje" : "dev";
+var BUILD_ID = true ? "0.9.4-msn0ijwt" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4324,7 +4324,8 @@ function getMaxPromptNumber(db, sessionId) {
 function getLatestTurn(db, sessionId) {
   return db.query(
     `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
+         WHERE session_id = ? AND status != 'undone'
+         ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionId) ?? null;
 }
 function getMaxTurnId(db, sessionId) {
@@ -24577,17 +24578,25 @@ function detectAndCleanSubagentTurnsFromParsed(db, sessionDbId, parsedTurns, upd
 }
 
 // src/hooks/handlers/session-init.ts
-function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch) {
+function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch, isSidechain) {
   const inserted = db.query(
     `INSERT INTO turns (
         session_id,
         prompt_number,
         status,
+        tags,
         user_prompt,
         created_at_epoch
-      ) VALUES (?, ?, 'active', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
       RETURNING id`
-  ).get(sessionId, promptNumber, prompt, createdAtEpoch);
+  ).get(
+    sessionId,
+    promptNumber,
+    isSidechain ? "undone" : "active",
+    isSidechain ? '["subagent:pending"]' : "[]",
+    prompt,
+    createdAtEpoch
+  );
   if (inserted) {
     reindexTurnFromDb(db, inserted.id);
   }
@@ -24661,7 +24670,8 @@ function createSessionInitHandler(dependencies) {
         session.id,
         promptNumber,
         prompt,
-        epoch
+        epoch,
+        isSubagent
       );
       return { sessionDbId: session.id, promptNumber };
     });

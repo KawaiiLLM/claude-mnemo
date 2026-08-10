@@ -61,11 +61,11 @@ test("UserPromptSubmit keeps exactly two entries, split the same way", () => {
     (hook) => hook.command,
   );
 
-  // Both pending-notes paths (裁决 21 and 22) and the rule digest ride
-  // `prompt-dispatch` rather than registrations of their own: the split is by
-  // response shape — `session-init` owns the turn row and returns no context,
-  // `prompt-dispatch` answers with `additionalContext` — and a third entry
-  // would only add another process to every prompt the user types.
+  // The backlog relief (裁决 21) and the rule digest ride `prompt-dispatch`
+  // rather than registrations of their own; `session-init` owns the turn row
+  // and emits the current-turn address line (裁决 25) — the one thing only the
+  // row's creator can say without racing. A third entry would only add another
+  // process to every prompt the user types.
   expect(config.hooks.UserPromptSubmit).toHaveLength(1);
   expect(commands).toEqual([
     "node ${CLAUDE_PLUGIN_ROOT}/scripts/bun-runner.js ${CLAUDE_PLUGIN_ROOT}/scripts/hook-command.cjs session-init",
