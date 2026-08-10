@@ -1514,106 +1514,9 @@ function initializeDatabase(db) {
   }
 }
 
-// src/diary/file-store.ts
-var import_promises = require("node:fs/promises");
-var import_node_path3 = require("node:path");
-var DiaryFileStore = class {
-  constructor(dataRoot) {
-    this.dataRoot = dataRoot;
-  }
-  dataRoot;
-  async readIndex() {
-    const diaryRoot = (0, import_node_path3.join)(this.dataRoot, "diary");
-    try {
-      const rootMetadata = await (0, import_promises.lstat)(diaryRoot);
-      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
-        throw new Error(`Diary root must be a real directory: ${diaryRoot}`);
-      }
-    } catch (error48) {
-      if (error48.code !== "ENOENT") throw error48;
-    }
-    const indexPath = (0, import_node_path3.join)(diaryRoot, "INDEX.md");
-    try {
-      const indexMetadata = await (0, import_promises.lstat)(indexPath);
-      if (indexMetadata.isSymbolicLink() || !indexMetadata.isFile()) {
-        throw new Error(`Diary index must be a regular file: ${indexPath}`);
-      }
-    } catch (error48) {
-      if (error48.code !== "ENOENT") throw error48;
-    }
-    return (0, import_promises.readFile)(indexPath);
-  }
-};
-
-// src/diary/memory-store.ts
-var import_node_crypto = require("node:crypto");
-var import_promises2 = require("node:fs/promises");
-var import_node_path5 = require("node:path");
-
-// src/shared/markdown-sections.ts
-var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
-var ATX_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
-function splitDocumentLines(document) {
-  if (document.length === 0) return [];
-  const lines = document.split(/\r?\n/);
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
-}
-function openingFence(line) {
-  const match = FENCE_START.exec(line);
-  if (!match) return null;
-  const run = match[1];
-  return {
-    marker: run[0],
-    length: run.length
-  };
-}
-function closesFence(line, fence) {
-  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
-  return Boolean(
-    match && match[1][0] === fence.marker && match[1].length >= fence.length
-  );
-}
-function parseMarkdownSections(document) {
-  const lines = splitDocumentLines(document);
-  if (lines.length === 0) return [];
-  const sections = [];
-  let current = null;
-  let fence = null;
-  for (const line of lines) {
-    if (fence) {
-      current ??= { title: "", level: 0, bodyLines: [] };
-      current.bodyLines.push(line);
-      if (closesFence(line, fence)) fence = null;
-      continue;
-    }
-    const nextFence = openingFence(line);
-    if (nextFence) {
-      current ??= { title: "", level: 0, bodyLines: [] };
-      current.bodyLines.push(line);
-      fence = nextFence;
-      continue;
-    }
-    const heading = ATX_HEADING.exec(line);
-    if (heading) {
-      if (current) sections.push(current);
-      current = {
-        title: heading[2],
-        level: heading[1].length,
-        bodyLines: []
-      };
-      continue;
-    }
-    current ??= { title: "", level: 0, bodyLines: [] };
-    current.bodyLines.push(line);
-  }
-  if (current) sections.push(current);
-  return sections;
-}
-
 // src/shared/logger.ts
 var import_node_fs2 = require("node:fs");
-var import_node_path4 = require("node:path");
+var import_node_path3 = require("node:path");
 
 // src/shared/error-sanitizer.ts
 var REDACTED = "[REDACTED]";
@@ -1746,7 +1649,7 @@ function sanitizeLogValue(value, sensitiveEnv = process.env) {
 }
 
 // src/shared/logger.ts
-var LOG_PATH = (0, import_node_path4.join)(DATA_DIR, "claude-mnemo.log");
+var LOG_PATH = (0, import_node_path3.join)(DATA_DIR, "claude-mnemo.log");
 var dirEnsured = false;
 function ensureLogDir() {
   if (!dirEnsured) {
@@ -1787,6 +1690,103 @@ function createLogger(component, options = {}) {
       writeLog("error", component, message, context, sensitiveEnv);
     }
   };
+}
+
+// src/diary/file-store.ts
+var import_promises = require("node:fs/promises");
+var import_node_path4 = require("node:path");
+var DiaryFileStore = class {
+  constructor(dataRoot) {
+    this.dataRoot = dataRoot;
+  }
+  dataRoot;
+  async readIndex() {
+    const diaryRoot = (0, import_node_path4.join)(this.dataRoot, "diary");
+    try {
+      const rootMetadata = await (0, import_promises.lstat)(diaryRoot);
+      if (rootMetadata.isSymbolicLink() || !rootMetadata.isDirectory()) {
+        throw new Error(`Diary root must be a real directory: ${diaryRoot}`);
+      }
+    } catch (error48) {
+      if (error48.code !== "ENOENT") throw error48;
+    }
+    const indexPath = (0, import_node_path4.join)(diaryRoot, "INDEX.md");
+    try {
+      const indexMetadata = await (0, import_promises.lstat)(indexPath);
+      if (indexMetadata.isSymbolicLink() || !indexMetadata.isFile()) {
+        throw new Error(`Diary index must be a regular file: ${indexPath}`);
+      }
+    } catch (error48) {
+      if (error48.code !== "ENOENT") throw error48;
+    }
+    return (0, import_promises.readFile)(indexPath);
+  }
+};
+
+// src/diary/memory-store.ts
+var import_node_crypto = require("node:crypto");
+var import_promises2 = require("node:fs/promises");
+var import_node_path5 = require("node:path");
+
+// src/shared/markdown-sections.ts
+var FENCE_START = /^ {0,3}(`{3,}|~{3,})/;
+var ATX_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+function splitDocumentLines(document) {
+  if (document.length === 0) return [];
+  const lines = document.split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+function openingFence(line) {
+  const match = FENCE_START.exec(line);
+  if (!match) return null;
+  const run = match[1];
+  return {
+    marker: run[0],
+    length: run.length
+  };
+}
+function closesFence(line, fence) {
+  const match = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+  return Boolean(
+    match && match[1][0] === fence.marker && match[1].length >= fence.length
+  );
+}
+function parseMarkdownSections(document) {
+  const lines = splitDocumentLines(document);
+  if (lines.length === 0) return [];
+  const sections = [];
+  let current = null;
+  let fence = null;
+  for (const line of lines) {
+    if (fence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      if (closesFence(line, fence)) fence = null;
+      continue;
+    }
+    const nextFence = openingFence(line);
+    if (nextFence) {
+      current ??= { title: "", level: 0, bodyLines: [] };
+      current.bodyLines.push(line);
+      fence = nextFence;
+      continue;
+    }
+    const heading = ATX_HEADING.exec(line);
+    if (heading) {
+      if (current) sections.push(current);
+      current = {
+        title: heading[2],
+        level: heading[1].length,
+        bodyLines: []
+      };
+      continue;
+    }
+    current ??= { title: "", level: 0, bodyLines: [] };
+    current.bodyLines.push(line);
+  }
+  if (current) sections.push(current);
+  return sections;
 }
 
 // src/diary/diary-index.ts
@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msm04avc" : "dev";
+var BUILD_ID = true ? "0.9.4-msmrxlh7" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23385,7 +23385,7 @@ function createNoteBacklogReliefHandler(dependencies) {
   const pendingThreshold = dependencies.pendingThreshold ?? NOTE_RELIEF_PENDING_THRESHOLD;
   const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
-  const logger = dependencies.logger ?? console;
+  const logger = dependencies.logger ?? createLogger("HOOK");
   return async function handleNoteBacklogRelief(input) {
     if (input.eventName !== "UserPromptSubmit") {
       return { continue: true, reliefOutcome: "not-eligible" };
@@ -23486,7 +23486,7 @@ function createNoteReminderHandler(dependencies) {
   const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
   const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
-  const logger = dependencies.logger ?? console;
+  const logger = dependencies.logger ?? createLogger("HOOK");
   return async function handleNoteReminderHook(input) {
     if (input.eventName !== "UserPromptSubmit") {
       return { continue: true };
@@ -23568,7 +23568,7 @@ function createNoteReminderHandler(dependencies) {
 function createPromptDispatchHandler(dependencies = {}) {
   const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
-  const logger = injectedLogger ?? console;
+  const logger = injectedLogger ?? createLogger("HOOK");
   const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
   const noteReminder = db ? createNoteReminderHandler({ db, now, logger }) : void 0;
   async function section(name, run, input) {
@@ -25509,6 +25509,7 @@ async function runHookCommand(dependencies = {}) {
   const stderr = dependencies.stderr ?? process.stderr;
   const readJson = dependencies.readJsonFromStdin ?? readJsonFromStdin;
   const normalizeInput = dependencies.normalizeHookInputImpl ?? normalizeHookInput;
+  const logger = dependencies.logger ?? createLogger("HOOK");
   if (env.CLAUDE_CODE_ENTRYPOINT === "sdk-ts") {
     return HOOK_SUCCESS_EXIT_CODE;
   }
@@ -25536,6 +25537,14 @@ async function runHookCommand(dependencies = {}) {
     return result.exitCode ?? HOOK_SUCCESS_EXIT_CODE;
   } catch (error48) {
     const message = error48 instanceof Error ? error48.message : "Unknown hook failure";
+    if (isSqliteBusy(error48)) {
+      logger.warn("hook write lost to database contention", {
+        command: argv[2] ?? null,
+        reasonCode: "hook-write-contention",
+        error: message
+      });
+      return HOOK_SUCCESS_EXIT_CODE;
+    }
     stderr.write(`[HOOK] ${message}
 `);
     return HOOK_NON_BLOCKING_EXIT_CODE;

@@ -5,8 +5,9 @@ import {
   HOOK_NON_BLOCKING_EXIT_CODE,
   HOOK_SUCCESS_EXIT_CODE,
 } from "../shared/hook-constants";
-import { createDatabase } from "../db/database";
+import { createDatabase, isSqliteBusy } from "../db/database";
 import { initializeDatabase } from "../db/schema";
+import { createLogger } from "../shared/logger";
 import { DiaryFileStore } from "../diary/file-store";
 import { DreamMemoryStore } from "../diary/memory-store";
 import { DATA_DIR, resolveDatabasePath } from "../shared/paths";
@@ -34,6 +35,11 @@ export interface HookCommandDependencies {
   readJsonFromStdin?: () => Record<string, unknown>;
   normalizeHookInputImpl?: typeof normalizeHookInput;
   handlers?: Record<string, HookHandler>;
+  logger?: HookCommandLogger;
+}
+
+export interface HookCommandLogger {
+  warn: (message: string, context?: Record<string, unknown>) => void;
 }
 
 let defaultHandlers: Record<string, HookHandler> | undefined;
@@ -346,6 +352,7 @@ export async function runHookCommand(
   const readJson = dependencies.readJsonFromStdin ?? readJsonFromStdin;
   const normalizeInput =
     dependencies.normalizeHookInputImpl ?? normalizeHookInput;
+  const logger = dependencies.logger ?? createLogger("HOOK");
 
   if (env.CLAUDE_CODE_ENTRYPOINT === "sdk-ts") {
     return HOOK_SUCCESS_EXIT_CODE;
@@ -387,6 +394,25 @@ export async function runHookCommand(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown hook failure";
+
+    // Losing the write lock is not a hook failure. Every write mnemo makes from
+    // a hook is best-effort capture that cannot block the user's turn, so a race
+    // lost to the worker's own write burst must cost that capture and nothing
+    // else. Reporting it costs more than it saves: a non-blocking exit renders a
+    // red banner in the user's transcript at exactly the moments contention
+    // peaks — a compact, a worker restart, a large ingest — and names a fault
+    // there is no user action for. It goes to the log every other mnemo fault
+    // goes to instead, where the frequency is diagnosable rather than merely
+    // startling. Any other failure keeps the banner: it is a real defect.
+    if (isSqliteBusy(error)) {
+      logger.warn("hook write lost to database contention", {
+        command: argv[2] ?? null,
+        reasonCode: "hook-write-contention",
+        error: message,
+      });
+      return HOOK_SUCCESS_EXIT_CODE;
+    }
+
     stderr.write(`[HOOK] ${message}\n`);
     return HOOK_NON_BLOCKING_EXIT_CODE;
   }

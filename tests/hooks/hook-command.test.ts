@@ -14,6 +14,7 @@ import {
   runHookCommand,
 } from "../../src/hooks/hook-command";
 import {
+  HOOK_NON_BLOCKING_EXIT_CODE,
   HOOK_SUCCESS_EXIT_CODE,
 } from "../../src/shared/hook-constants";
 import type { HookHandler, HookResult, NormalizedHookInput } from "../../src/hooks/types";
@@ -504,5 +505,68 @@ describe("runHookCommand", () => {
       }),
     );
     expect(runner.writes).toEqual(['{"async":true}\n']);
+  });
+
+  // A hook that loses the write lock to the worker's own burst used to exit
+  // non-blocking, which Claude Code renders as a red error in the user's
+  // transcript — at a compact or a worker restart, the moments contention peaks.
+  // The capture is gone either way; only the banner was ever in question.
+  test("treats a lost write lock as a silent, logged loss rather than a hook failure", async () => {
+    const stderr = { write: mock(() => true) };
+    const warn = mock(() => {});
+    const busy = Object.assign(new Error("database is locked"), {
+      code: "SQLITE_BUSY",
+    });
+
+    const exitCode = await runHookCommand({
+      env: {},
+      argv: ["bun", "hook-command.ts", "session-init"],
+      stdout: { write: mock(() => true) },
+      stderr,
+      logger: { warn },
+      readJsonFromStdin: () => ({ event_name: "Stop" }),
+      normalizeHookInputImpl: () => createNormalizedInput(),
+      handlers: {
+        Stop: async () => {
+          throw busy;
+        },
+      },
+    });
+
+    expect(exitCode).toBe(HOOK_SUCCESS_EXIT_CODE);
+    expect(stderr.write).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "hook write lost to database contention",
+      expect.objectContaining({
+        command: "session-init",
+        reasonCode: "hook-write-contention",
+      }),
+    );
+  });
+
+  test("still reports every other failure to stderr with a non-blocking exit", async () => {
+    const stderr = { write: mock(() => true) };
+    const warn = mock(() => {});
+
+    const exitCode = await runHookCommand({
+      env: {},
+      argv: ["bun", "hook-command.ts", "session-init"],
+      stdout: { write: mock(() => true) },
+      stderr,
+      logger: { warn },
+      readJsonFromStdin: () => ({ event_name: "Stop" }),
+      normalizeHookInputImpl: () => createNormalizedInput(),
+      handlers: {
+        Stop: async () => {
+          throw new Error("no such column: nope");
+        },
+      },
+    });
+
+    expect(exitCode).toBe(HOOK_NON_BLOCKING_EXIT_CODE);
+    expect(stderr.write).toHaveBeenCalledWith(
+      "[HOOK] no such column: nope\n",
+    );
+    expect(warn).not.toHaveBeenCalled();
   });
 });

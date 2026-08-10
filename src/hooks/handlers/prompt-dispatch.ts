@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { createLogger } from "../../shared/logger";
 import {
   createUserPromptSubmitDispatcher,
   type PreToolUseDispatcherDependencies,
@@ -43,8 +44,10 @@ export function createPromptDispatchHandler(
   const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
   // The production wiring passes a database and nothing else, so the default is
-  // what every warning below actually runs through.
-  const logger = injectedLogger ?? console;
+  // what every warning below actually runs through. It is the log file rather
+  // than `console`: a hook that returns successfully has its stderr discarded,
+  // so a console warning here would be written nowhere anyone can read it.
+  const logger = injectedLogger ?? createLogger("HOOK");
   const backlogRelief = db
     ? createNoteBacklogReliefHandler({ db, now, logger })
     : undefined;

@@ -470,12 +470,12 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     );
   });
 
-  test("a failed claim warns even though production injects no logger", async () => {
-    // The wiring in `hook-command` builds this entry with a database and
-    // nothing else, so a handler that only warns through an injected logger is
-    // silent exactly where the diagnostics are needed: a marker write that
-    // fails costs the reminder, and without a line on stderr the loss leaves no
-    // trace anywhere.
+  test("a failed claim warns, and never through the console", async () => {
+    // A marker write that fails costs the reminder, so the loss has to leave a
+    // trace: the handler warns. Where it warns is the other half of the rule —
+    // this hook still exits successfully, and a successful hook's stderr is
+    // discarded unread, so the production default is the log file and `console`
+    // would be the same silence with extra steps.
     const owing = addWorkingTurn(1);
     addTurn(2);
     // The marker write lands, then the exposure insert hits a table that is no
@@ -484,9 +484,10 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     db.exec("DROP TABLE note_id_exposures");
 
     const warnings: unknown[][] = [];
+    const consoleWarnings: unknown[][] = [];
     const originalWarn = console.warn;
     console.warn = (...args: unknown[]) => {
-      warnings.push(args);
+      consoleWarnings.push(args);
     };
     let result: Awaited<ReturnType<ReturnType<typeof createPromptDispatchHandler>>>;
     try {
@@ -494,6 +495,11 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
         db,
         dataRoot,
         now: () => 500,
+        logger: {
+          warn: (...args: unknown[]) => {
+            warnings.push(args);
+          },
+        } as unknown as Pick<Console, "warn">,
       })(createInput());
     } finally {
       console.warn = originalWarn;
@@ -504,6 +510,20 @@ describe("pending-notes reminder (synchronous UserPromptSubmit section)", () => 
     expect(warnings.map((args) => args[0])).toContain(
       "note reminder not claimed",
     );
+
+    // The same failure through the production wiring — a database and nothing
+    // else. It must still say nothing on the console.
+    console.warn = (...args: unknown[]) => {
+      consoleWarnings.push(args);
+    };
+    try {
+      await createPromptDispatchHandler({ db, dataRoot, now: () => 500 })(
+        createInput(),
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(consoleWarnings).toEqual([]);
   });
 
   test("shows the oldest five and withdraws the deferral authorisation from three", async () => {

@@ -10,6 +10,7 @@ import {
 } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
 import { getLatestTurn } from "../../db/turns";
+import { createLogger } from "../../shared/logger";
 import {
   NOTE_REMINDER_DISPLAY_LIMIT,
   renderNoteReminder,
@@ -71,8 +72,10 @@ export function createNoteReminderHandler(
   // Defaulted here rather than left optional, the way every other handler in
   // this directory treats its logger: the production wiring injects none, and
   // the failure policy below is "stay silent and warn" — without a default the
-  // warn half of it does not exist where it is actually needed.
-  const logger = dependencies.logger ?? console;
+  // warn half of it does not exist where it is actually needed. The log file,
+  // not `console`: this hook returns successfully after a lost claim, and a
+  // successful hook's stderr is discarded unread.
+  const logger = dependencies.logger ?? createLogger("HOOK");
 
   return async function handleNoteReminderHook(
     input: NormalizedHookInput,
