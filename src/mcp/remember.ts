@@ -14,6 +14,7 @@ import {
   type TurnRecord,
   type TurnStatus,
 } from "../db/turns";
+import { isSegmentEra } from "../segment-era";
 import {
   CURRENT_SESSION_STATE_TOKEN_BUDGET,
   measureSessionStateTokens,
@@ -278,10 +279,59 @@ class RegradeTargetMissingError extends Error {
   }
 }
 
+/**
+ * Settle an era turn the extraction subagent just tried to write a note for,
+ * storing nothing of what it wrote (裁决 27, ticket 09).
+ *
+ * The payload is dropped whole rather than merged. Half-accepting it — keeping
+ * the tags, say, or the grade — would put an observer's reconstruction back
+ * into the record the cutover just took away from it, and grade/cites/regrade
+ * are the retired era's vocabulary anyway (D13).
+ *
+ * Status still moves, because a hole is a hole and not a stall: a turn left
+ * `active`/`provisional` is re-selected by the stranded repair on every end
+ * event and re-offered to the agent forever. The derivation is the one
+ * `deriveTurnStatus` applies to a remember's INPUT, read off the stored record
+ * instead — `extracted` when the main agent's note is already on the row (this
+ * path must never demote one), `skipped` when nobody noted it, which is exactly
+ * the shape a turn with nothing to extract has always had.
+ *
+ * The result deliberately reads as a success. A `Parameter error:` would leave
+ * the turn id unresolved in the worker's work unit, and the derailment machine
+ * answers an unresolved id with corrective resends and finally a `failed`
+ * floor — turning "this era does not want your note" into a retry loop that
+ * damages the very status this is settling.
+ */
+function settleEraTurnWithoutNote(
+  db: Database,
+  turnId: number,
+  current: TurnRecord,
+): ToolTextResult {
+  const settled: TurnStatus =
+    current.status === "undone"
+      ? "undone"
+      : current.title !== null || current.content !== null
+        ? "extracted"
+        : "skipped";
+
+  if (settled !== current.status) {
+    updateTurnById(db, turnId, {
+      status: settled,
+      updatedAtEpoch: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  return textResult(
+    `Updated turn T${turnId} with status ${settled}. Turns in this era are ` +
+      "noted by the session's own agent, so nothing this call supplied was stored.",
+  );
+}
+
 function handleTurnRemember(
   db: Database,
   turnId: number,
   input: RememberToolInput,
+  eraCutoffEpoch: number | null | undefined,
 ): ToolTextResult {
   const statusError = validateStatusForRoute(
     input.status,
@@ -301,6 +351,13 @@ function handleTurnRemember(
   const current = getTurnById(db, turnId);
   if (!current) {
     return textResult(`Turn T${turnId} not found.`);
+  }
+
+  // Before every other validation: for an era turn the fields being validated
+  // are not going to be stored, so rejecting the call over one of them would
+  // only trade a dropped note for a derailment.
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
   }
 
   const gradeError = validateGrade(input.grade, "grade");
@@ -554,9 +611,20 @@ function handleSessionRemember(
   return textResult(`Updated session ${sessionId}.`);
 }
 
+export interface RememberToolOptions {
+  /**
+   * P2 era boundary (spec D11/D12), resolved by the handler layer — see
+   * `NoteToolOptions.eraCutoffEpoch` for why it is passed rather than read.
+   * Absent or `null` = every turn is legacy, which is this tool's behaviour
+   * before ticket 09 and the rollback.
+   */
+  eraCutoffEpoch?: number | null;
+}
+
 export function rememberTool(
   db: Database,
   rawInput: RememberToolInput,
+  options: RememberToolOptions = {},
 ): ToolTextResult {
   const input = decodeRememberInput(rawInput);
 
@@ -573,7 +641,7 @@ export function rememberTool(
 
   const turnId = parseTurnId(input.id);
   if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input);
+    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
   }
 
   const sessionId = parseSessionId(input.id);

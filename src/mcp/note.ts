@@ -9,7 +9,8 @@ import {
   type NoteDebtRecord,
 } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
-import { getTurn } from "../db/turns";
+import { getTurn, promoteTurnFromNote } from "../db/turns";
+import { isSegmentEra } from "../segment-era";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 type ToolTextResult = {
@@ -32,6 +33,13 @@ export interface NoteToolOptions {
   env?: NodeJS.ProcessEnv;
   /** Injected for tests: lets a race with a concurrent reconcile be simulated. */
   runWriteTransaction?: typeof runWriteTransaction;
+  /**
+   * P2 era boundary (spec D11/D12), resolved by the handler layer and never
+   * read from config here — `loadConfig` hits the filesystem on every call and
+   * a tool call must not pay for that. Absent or `null` = every turn is legacy,
+   * which is the P1 behaviour (shadow row only) and the rollback.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 function textResult(text: string): ToolTextResult {
@@ -307,10 +315,15 @@ function declineTurn(
 }
 
 /**
- * `note` — the main agent's own turn note (spec D1), written to the P1 shadow
- * store. It never writes `turns`: the legacy extraction pipeline keeps sole
- * ownership of every turn column including status, which is what keeps the
- * trial's two summary sources independent enough to compare.
+ * `note` — the main agent's own turn note (spec D1).
+ *
+ * Two behaviours, chosen per turn by the era predicate (spec D11/D12, ticket
+ * 09). A turn created before the cutoff keeps the P1 arrangement exactly: the
+ * note lands in the shadow store and `turns` is not touched at all, because the
+ * legacy extraction pipeline still owns every column of those rows including
+ * status. A turn created at or after it is promoted — the note becomes the
+ * official record. The shadow row is written either way: it is the provenance
+ * of who authored the text, and the trial's metrics read it.
  */
 export function noteTool(
   db: Database,
@@ -425,6 +438,10 @@ export function noteTool(
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const promotesTurnRecord = isSegmentEra(
+    turn.createdAtEpoch,
+    options.eraCutoffEpoch,
+  );
 
   // The debt validation, the note write and the debt's closure are one
   // transaction, and the validation inside it is the one that counts: an
@@ -456,6 +473,21 @@ export function noteTool(
       nowEpoch,
     });
     closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+
+    // The cutover itself (裁决 27): in the new era this note is not a shadow
+    // record beside the official one, it IS the official one. It shares the
+    // transaction with the shadow row and the debt closure rather than
+    // following them, so no reader can observe a turn whose record, whose
+    // provenance and whose ledger disagree about whether it was noted.
+    if (promotesTurnRecord) {
+      promoteTurnFromNote(db, turn.id, {
+        title,
+        content,
+        insight,
+        updatedAtEpoch: nowEpoch,
+      });
+    }
+
     return { ok: true, existing: existing !== null };
   });
 

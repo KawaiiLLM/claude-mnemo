@@ -54,9 +54,12 @@ export interface CreateDatabaseBackedHandlersOptions {
   // is wired here, NOT in `recallInputShape`, which is strict.
   audience?: "main" | "worker";
   /**
-   * P2 era boundary (spec D11). Resolved once here rather than per call — it
-   * only changes on a reload — and defaults to the configured value, whose own
-   * default (`null`) keeps every read on the legacy path.
+   * P2 era boundary (spec D11/D12). Resolved once here rather than per call —
+   * it only changes on a reload — and defaults to the configured value, whose
+   * own default (`null`) keeps every turn on the legacy path. This is the one
+   * place the value is read for tool calls: reads (recall/timeline) and writes
+   * (note/remember) are handed the same number, so a turn cannot be written
+   * under one era's rules and rendered under the other's.
    */
   eraCutoffEpoch?: number | null;
 }
@@ -141,7 +144,11 @@ export function createDatabaseBackedHandlers(
         }),
       ),
     remember: (args) =>
-      rememberTool(database, args as unknown as Parameters<typeof rememberTool>[1]),
+      rememberTool(
+        database,
+        args as unknown as Parameters<typeof rememberTool>[1],
+        { eraCutoffEpoch },
+      ),
     timeline: (args) =>
       workerTextResult(
         timelineQuery(database, {
@@ -152,6 +159,9 @@ export function createDatabaseBackedHandlers(
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to
     // truncate or re-strip.
-    note: (args) => noteTool(database, args as Parameters<typeof noteTool>[1]),
+    note: (args) =>
+      noteTool(database, args as Parameters<typeof noteTool>[1], {
+        eraCutoffEpoch,
+      }),
   };
 }

@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msnhzjyw" : "dev";
+var BUILD_ID = true ? "0.9.5-msniso3b" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1941,6 +1941,34 @@ function updateTurnById(db, turnId, input) {
   }
   indexTurnToFTS(db, updated);
   if (existing.status !== updated.status || existing.userPrompt !== updated.userPrompt || existing.assistantResponse !== updated.assistantResponse || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
+  return updated;
+}
+function promoteTurnFromNote(db, turnId, input) {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
+  }
+  const nextStatus = existing.status === "undone" ? "undone" : existing.status === "active" || existing.status === "provisional" ? "provisional" : "extracted";
+  db.query(
+    `UPDATE turns
+     SET title = ?, content = ?, insight = ?, status = ?, updated_at_epoch = ?
+     WHERE id = ?`
+  ).run(
+    input.title,
+    input.content,
+    input.insight,
+    nextStatus,
+    input.updatedAtEpoch,
+    turnId
+  );
+  const updated = getTurnById(db, turnId);
+  if (!updated) {
+    return null;
+  }
+  indexTurnToFTS(db, updated);
+  if (existing.status !== updated.status || existing.title !== updated.title || existing.content !== updated.content || existing.insight !== updated.insight) {
     markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
   }
   return updated;
@@ -47444,6 +47472,10 @@ function noteTool(db, rawInput, options = {}) {
   const writerModel = resolveWriterModel(options.env ?? process.env);
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
+  const promotesTurnRecord = isSegmentEra(
+    turn.createdAtEpoch,
+    options.eraCutoffEpoch
+  );
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);
     const debt = getNoteDebt(db, turn.id);
@@ -47460,6 +47492,14 @@ function noteTool(db, rawInput, options = {}) {
       nowEpoch
     });
     closeNoteDebtAsNoted(db, turn.id, nowEpoch);
+    if (promotesTurnRecord) {
+      promoteTurnFromNote(db, turn.id, {
+        title,
+        content,
+        insight,
+        updatedAtEpoch: nowEpoch
+      });
+    }
     return { ok: true, existing: existing !== null };
   });
   if (!outcome.ok) {
@@ -47624,7 +47664,19 @@ var RegradeTargetMissingError = class extends Error {
   }
   targetId;
 };
-function handleTurnRemember(db, turnId, input) {
+function settleEraTurnWithoutNote(db, turnId, current) {
+  const settled = current.status === "undone" ? "undone" : current.title !== null || current.content !== null ? "extracted" : "skipped";
+  if (settled !== current.status) {
+    updateTurnById(db, turnId, {
+      status: settled,
+      updatedAtEpoch: Math.floor(Date.now() / 1e3)
+    });
+  }
+  return textResult2(
+    `Updated turn T${turnId} with status ${settled}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
+  );
+}
+function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
   const statusError = validateStatusForRoute(
     input.status,
     TURN_REMEMBER_STATUSES,
@@ -47636,6 +47688,9 @@ function handleTurnRemember(db, turnId, input) {
   const current = getTurnById(db, turnId);
   if (!current) {
     return textResult2(`Turn T${turnId} not found.`);
+  }
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
   }
   const gradeError = validateGrade(input.grade, "grade");
   if (gradeError) {
@@ -47801,7 +47856,7 @@ function handleSessionRemember(db, sessionId, input) {
   }
   return textResult2(`Updated session ${sessionId}.`);
 }
-function rememberTool(db, rawInput) {
+function rememberTool(db, rawInput, options = {}) {
   const input = decodeRememberInput(rawInput);
   if (!input.id) {
     return parameterError2(
@@ -47814,7 +47869,7 @@ function rememberTool(db, rawInput) {
   }
   const turnId = parseTurnId(input.id);
   if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input);
+    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
   }
   const sessionId = parseSessionId(input.id);
   if (sessionId !== null) {
@@ -47900,7 +47955,11 @@ function createDatabaseBackedHandlers(database, options = {}) {
         eraCutoffEpoch
       })
     ),
-    remember: (args) => rememberTool(database, args),
+    remember: (args) => rememberTool(
+      database,
+      args,
+      { eraCutoffEpoch }
+    ),
     timeline: (args) => workerTextResult(
       timelineQuery(database, {
         ...toTimelineQueryInput(args),
@@ -47910,7 +47969,9 @@ function createDatabaseBackedHandlers(database, options = {}) {
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to
     // truncate or re-strip.
-    note: (args) => noteTool(database, args)
+    note: (args) => noteTool(database, args, {
+      eraCutoffEpoch
+    })
   };
 }
 

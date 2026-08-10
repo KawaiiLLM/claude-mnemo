@@ -450,6 +450,90 @@ export function updateTurnById(
   return updated;
 }
 
+export interface PromoteTurnFromNoteInput {
+  title: string;
+  content: string;
+  insight: string | null;
+  updatedAtEpoch: number;
+}
+
+/**
+ * Write a main agent's own note onto the turn row — the era cutover's whole
+ * point (spec D4/D12, ticket 09).
+ *
+ * Separate from `updateTurnById` because the contract differs, not the SQL:
+ * every field there coalesces (`input.x ?? existing.x`), which is right for an
+ * extraction that fills a record in pieces and wrong here. In the new era the
+ * note IS the record, so a rewrite that drops its insight has to store the NULL
+ * rather than silently inherit the previous note's.
+ *
+ * Status advances one step of the ordinary lifecycle, and which step depends on
+ * whether the turn is over:
+ *
+ *  - still open (`active`/`provisional`) → `provisional`. In this era a note is
+ *    written DURING its own turn (裁决 26), so `extracted` would stop meaning
+ *    "this turn is over" — and readers use it with exactly that meaning. The
+ *    one that bites is observation capture (hooks/handlers/post-tool-use.ts),
+ *    which drops every observation once the session's newest turn reads
+ *    terminal: a note mid-turn would silently truncate the raw axis for the
+ *    rest of it. `provisional` is the lifecycle's existing word for "a record
+ *    has been written, the turn is not final yet", and the turn's own end
+ *    carries it the rest of the way.
+ *  - already finished (`extracted`/`skipped`/`failed` — a late note answering a
+ *    backlog relief) → `extracted`, which is what holding a record means:
+ *    db/search.ts renders only `extracted` turns.
+ *  - `undone` → left alone. A sidechain row is not part of this session's arc,
+ *    and promoting it would put it back in view.
+ */
+export function promoteTurnFromNote(
+  db: Database,
+  turnId: number,
+  input: PromoteTurnFromNoteInput,
+): TurnRecord | null {
+  const existing = getTurnById(db, turnId);
+  if (!existing) {
+    return null;
+  }
+
+  const nextStatus: TurnStatus =
+    existing.status === "undone"
+      ? "undone"
+      : existing.status === "active" || existing.status === "provisional"
+        ? "provisional"
+        : "extracted";
+
+  db.query<unknown, [string, string, string | null, string, number, number]>(
+    `UPDATE turns
+     SET title = ?, content = ?, insight = ?, status = ?, updated_at_epoch = ?
+     WHERE id = ?`,
+  ).run(
+    input.title,
+    input.content,
+    input.insight,
+    nextStatus,
+    input.updatedAtEpoch,
+    turnId,
+  );
+
+  const updated = getTurnById(db, turnId);
+  if (!updated) {
+    return null;
+  }
+
+  indexTurnToFTS(db, updated);
+
+  if (
+    existing.status !== updated.status ||
+    existing.title !== updated.title ||
+    existing.content !== updated.content ||
+    existing.insight !== updated.insight
+  ) {
+    markSettledDiaryDayStaleForTurn(db, updated.createdAtEpoch);
+  }
+
+  return updated;
+}
+
 export function resetTurnExtractionFields(
   db: Database,
   turnId: number,

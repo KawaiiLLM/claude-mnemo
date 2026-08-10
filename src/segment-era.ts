@@ -1,5 +1,5 @@
 /**
- * The P2 era boundary (spec D11, R2#7).
+ * The P2 era boundary (spec D11/D12, R2#7).
  *
  * A turn belongs to the segment era when it was created at or after the cutoff.
  * The comparison is per TURN, not per session: a session that was open across
@@ -8,9 +8,17 @@
  * different semantics and no backfill reconciles them (spec D11: old data is
  * read-only and does not evolve). This is the task-causality-era precedent.
  *
- * The cutoff is `null` until ticket 09 sets it, and `null` means EVERY turn is
- * legacy — merging the rendering work is therefore inert in production, and a
- * test opts a fixture into the new path by passing an epoch.
+ * Ticket 09 made it a WRITE gate as well as a read one, and deliberately reuses
+ * this same function rather than restating the comparison: the turn whose note
+ * `note` promotes onto the row must be exactly the turn the renderer draws as
+ * era, or a turn could be written under one era's rules and read under the
+ * other's. Read side — recall/timeline/settlement context; write side —
+ * `mcp/note.ts` (promotion) and `mcp/remember.ts` (the extraction subagent's
+ * writeback, refused from here on).
+ *
+ * The cutoff is `null` in the product default, and `null` means EVERY turn is
+ * legacy — every path guarded by this is therefore inert until an operator sets
+ * an epoch, which is also the rollback.
  */
 export function isSegmentEra(
   createdAtEpoch: number,
