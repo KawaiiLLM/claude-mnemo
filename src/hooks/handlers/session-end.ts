@@ -13,7 +13,6 @@ import {
   type WorkerClientDeps,
 } from "../../worker/client";
 import { getMaxTurnId } from "../../db/turns";
-import { enqueueSessionEndSettlementJob } from "../../db/settlement";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
 import { runCaptureRepair, type CaptureRepairLog } from "../capture-repair";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -200,36 +199,6 @@ export function createSessionEndHandler(
           skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
       }
-    }
-
-    // Settlement tail gate (spec §A). A session that ends mid-window has no
-    // further extraction coming to cross the next boundary, so its trailing
-    // turns would keep their provisional grades forever. Gated on the SAME
-    // pre-repair activity snapshot the orphan pass uses — a bare resume glance
-    // must not spend an inference re-grading a window nothing changed in — and
-    // on the terminal count having passed the last SUCCESSFULLY settled
-    // boundary. Enqueue only: the settle itself runs in the worker, so this
-    // stays a single INSERT inside the SessionEnd budget.
-    //
-    // Runs AFTER the orphan pass, deliberately. The tail's boundary and its
-    // frozen cohort are both computed from the session's terminal turns, and an
-    // orphan the line above just marked `skipped` is one of them. Enqueueing
-    // first froze a cohort one short and set a boundary no later event will ever
-    // cross again, leaving that last turn permanently provisional. The activity
-    // SNAPSHOT still comes from before the repair — only this enqueue moved.
-    try {
-      enqueueSessionEndSettlementJob(
-        dependencies.db,
-        session.id,
-        now(),
-        hadNewTurnBeforeRepair,
-      );
-    } catch (error) {
-      repairLog(
-        `session-end settlement enqueue failed for session ${session.id}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
     }
 
     return {

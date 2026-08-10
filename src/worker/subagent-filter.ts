@@ -225,29 +225,3 @@ export function detectAndCleanSubagentTurns(
     ),
   );
 }
-
-export function getPendingSubagentTurns(
-  db: Database,
-  sessionDbId: number,
-): TurnRecord[] {
-  return getTurnsForSession(db, sessionDbId)
-    .filter(
-      (turn) =>
-        turn.status === "undone" && turn.tags.includes(SUBAGENT_PENDING_TAG),
-    )
-    .sort((left, right) => left.promptNumber - right.promptNumber);
-}
-
-export function markSubagentTurnsNotified(
-  db: Database,
-  turns: TurnRecord[],
-  updatedAtEpoch: number,
-): void {
-  for (const turn of turns) {
-    updateTurnById(db, turn.id, {
-      status: turn.status,
-      replaceTags: markSubagentNotifiedTags(turn.tags),
-      updatedAtEpoch,
-    });
-  }
-}

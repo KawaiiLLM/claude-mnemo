@@ -25,7 +25,7 @@ import {
   WORKER_TOOL_RESULT_MAX_CHARS,
   WORKER_TOOL_RESULT_TRUNCATION_HINT,
 } from "../mcp/handlers";
-import { resolveClaudeCodeExecutablePath } from "./agent-session";
+import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type { DiaryAgentQueryRequest } from "./diary-agent-runner";
 import {
   dreamCheckBudgetInputShape,

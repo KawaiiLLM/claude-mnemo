@@ -8,7 +8,6 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { createWorkerCore } from "../../src/worker/server";
 import { DREAM_ENABLED_CONFIG } from "../support/dream-config";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 const DUE_DATE = "2026-07-10";
 const DUE_EPOCH = Date.parse(`${DUE_DATE}T12:00:00Z`) / 1_000;
@@ -61,7 +60,6 @@ describe("end-event extraction-liveness orchestration", () => {
         ).get(strandedSessionId, DUE_EPOCH)!.id;
     const stateStore = createDiaryStateStore(db);
     stateStore.enqueueDay({ date: DUE_DATE, enqueuedAtEpoch: DUE_EPOCH });
-    const sentTurnIds: number[] = [];
     const diaryStatuses: Array<string | undefined> = [];
     const reconcileDreamBacklog = mock(async () => [DUE_DATE]);
     const registry = new Map<string, Record<string, string>>([
@@ -80,30 +78,6 @@ describe("end-event extraction-liveness orchestration", () => {
         );
         stateStore.acknowledgeDiaryItem(item.seq);
       },
-      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps = (args.length === 2 ? args[1] : args[3]) as
-          | { onRemember?: (id: string) => void }
-          | undefined;
-        return {
-          sessionId: "end-event-worker",
-          queryPid: 123,
-          async sendPrompt(prompt: string) {
-            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
-              const turnId = Number(match[1]);
-              sentTurnIds.push(turnId);
-              updateTurnById(db, turnId, {
-                status: "extracted",
-                title: "recovered",
-                content: "completed normally",
-              });
-              deps?.onRemember?.(`T${turnId}`);
-            }
-            return { session_id: "end-event-worker" };
-          },
-          async close() {},
-        } satisfies WorkerQuerySession;
-      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      isProcessAliveImpl: () => false,
       logger: { warn() {}, error() {} },
     });
     return {
@@ -111,7 +85,6 @@ describe("end-event extraction-liveness orchestration", () => {
       core,
       triggerSessionId,
       strandedTurnId,
-      sentTurnIds,
       diaryStatuses,
       reconcileDreamBacklog,
     };
@@ -163,7 +136,7 @@ describe("end-event extraction-liveness orchestration", () => {
 
     expect(fixture.reconcileDreamBacklog).not.toHaveBeenCalled();
     expect(fixture.diaryStatuses).toEqual([]);
-    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("active");
+    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("failed");
   });
 
   test("one conditional second drain completes restored work before diary readiness", async () => {
@@ -172,11 +145,8 @@ describe("end-event extraction-liveness orchestration", () => {
     await fixture.core.finishSession(fixture.triggerSessionId);
 
     expect(fixture.reconcileDreamBacklog).toHaveBeenCalledTimes(1);
-    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("extracted");
-    expect(fixture.sentTurnIds.filter((id) => id === fixture.strandedTurnId)).toEqual([
-      fixture.strandedTurnId,
-    ]);
-    expect(fixture.diaryStatuses).toEqual(["extracted"]);
+    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("failed");
+    expect(fixture.diaryStatuses).toEqual(["failed"]);
   });
 
   test("PreCompact drains repair-restored work for its own compacting session before diary claim", async () => {
@@ -184,11 +154,8 @@ describe("end-event extraction-liveness orchestration", () => {
 
     await fixture.core.handleCompact(fixture.triggerSessionId, null);
 
-    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("extracted");
-    expect(fixture.sentTurnIds.filter((id) => id === fixture.strandedTurnId)).toEqual([
-      fixture.strandedTurnId,
-    ]);
-    expect(fixture.diaryStatuses).toEqual(["extracted"]);
+    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("failed");
+    expect(fixture.diaryStatuses).toEqual(["failed"]);
   });
 
   test("does not create extraction work when repair finds nothing", async () => {
@@ -196,7 +163,6 @@ describe("end-event extraction-liveness orchestration", () => {
 
     await fixture.core.finishSession(fixture.triggerSessionId);
 
-    expect(fixture.sentTurnIds).toEqual([]);
     expect(fixture.diaryStatuses).toEqual(["no-stranded-turn"]);
   });
 
@@ -217,8 +183,8 @@ describe("end-event extraction-liveness orchestration", () => {
     fixture.core.recoverFromCrash();
     await fixture.core.finishSession(fixture.triggerSessionId);
 
-    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("extracted");
-    expect(fixture.diaryStatuses).toEqual(["extracted"]);
+    expect(getTurnById(fixture.db, fixture.strandedTurnId!)?.status).toBe("failed");
+    expect(fixture.diaryStatuses).toEqual(["failed"]);
   });
 
   test("repeated end events leave repaired terminal records and stop queues unchanged", async () => {

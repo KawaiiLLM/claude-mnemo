@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { settleCompletedTurn } from "./turn-completion";
 import { isMnemoOwnToolName } from "../shared/note-tool";
 
 /**
@@ -76,6 +77,11 @@ export interface ReconcileNoteDebtInput {
    */
   completedTurnId?: number;
   agingTurns?: number;
+  /**
+   * P2 era boundary (spec D11). Only decides what an un-noted turn is settled
+   * to — `skipped` in the new era, `failed` before it. Omitted = legacy.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 export interface ReconcileNoteDebtResult {
@@ -83,6 +89,8 @@ export interface ReconcileNoteDebtResult {
   noted: number[];
   aged: number[];
   rolledBack: number[];
+  /** Turns this pass carried to a terminal status (see `settleCompletedTurn`). */
+  settled: number[];
   classifiedThroughPromptNumber: number;
 }
 
@@ -205,8 +213,12 @@ function setClassificationCursor(
  *     to avoid, and it would also leave a repaired turn blocked until its
  *     re-extraction finished.
  *
- * Reading `turns` is allowed under P1 isolation; WRITING it is not, and nothing
- * here writes.
+ * Since the extraction subagent was removed (ticket 15) this predicate is also
+ * where the turn gets its terminal status: `settleCompletedTurn` runs on every
+ * turn the walk below admits. The `turn-stop` clause therefore still earns its
+ * place — it is what the Stop hook and the stranded repair leave behind, and it
+ * is evidence BEFORE the settlement in the same pass has written the status the
+ * first clause tests.
  */
 const COMPLETION_EVIDENCE_SQL = `(
   t.status NOT IN ('active', 'provisional')
@@ -389,6 +401,7 @@ export function reconcileNoteDebt(
   input: ReconcileNoteDebtInput,
 ): ReconcileNoteDebtResult {
   const { sessionId, nowEpoch } = input;
+  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
   const maxPromptNumber = getMaxPromptNumber(db, sessionId);
   const cursor = getClassificationCursor(db, sessionId);
@@ -409,6 +422,7 @@ export function reconcileNoteDebt(
   }
 
   const opened: number[] = [];
+  const settled: number[] = [];
   let classifiedThrough = cursor;
   if (classifyThrough > cursor) {
     const candidates = db
@@ -443,6 +457,15 @@ export function reconcileNoteDebt(
       ) {
         blockedAtPromptNumber = candidate.promptNumber;
         break;
+      }
+      // This is the point at which a turn is known to be over, and the row is
+      // right here — which is why the mechanical settlement lives here rather
+      // than in a scan of its own (ticket 15). With the extraction subagent
+      // gone nothing else will ever carry the row to a terminal status, and a
+      // turn left `active`/`provisional` is re-selected by the stranded repair
+      // on every end event, forever.
+      if (settleCompletedTurn(db, candidate.id, eraCutoffEpoch, nowEpoch)) {
+        settled.push(candidate.id);
       }
       if (classifyCompletedTurn(db, candidate, nowEpoch)) {
         opened.push(candidate.id);
@@ -515,6 +538,7 @@ export function reconcileNoteDebt(
     noted,
     aged,
     rolledBack,
+    settled,
     classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough),
   };
 }

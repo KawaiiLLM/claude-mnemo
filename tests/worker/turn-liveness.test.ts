@@ -8,7 +8,6 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { createWorkerCore } from "../../src/worker/server";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
 import {
   finalizeUnreachableStrandedTurns,
   listStrandedRepairDates,
@@ -168,42 +167,18 @@ describe("stranded-turn liveness repair", () => {
     expect(first.unreachable).toEqual([]);
   });
 
-  test("runs a restored stop through ordinary extraction when the environment is available", async () => {
+  test("settles a restored stop mechanically when the environment is available", async () => {
     const stranded = seedTurn({ promptNumber: 1, interrupted: true });
     repair(new Set([sessionId]));
     const core = createWorkerCore({
       db,
       now: () => DUE_EPOCH + 100,
       sessionEnvRegistry: new Map([["stranded-session", {}]]),
-      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps = (args.length === 2 ? args[1] : args[3]) as
-          | { onRemember?: (id: string) => void }
-          | undefined;
-        return {
-          sessionId: "liveness-worker",
-          queryPid: 123,
-          async sendPrompt(prompt: string) {
-            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
-              const id = Number(match[1]);
-              updateTurnById(db, id, {
-                status: "extracted",
-                title: "recovered",
-                content: "ordinary completion",
-              });
-              deps?.onRemember?.(`T${id}`);
-            }
-            return { session_id: "liveness-worker" };
-          },
-          async close() {},
-        } satisfies WorkerQuerySession;
-      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      isProcessAliveImpl: () => false,
     });
 
     await core.scanAndDrainQueue();
-    await core.flushSession(sessionId);
 
-    expect(getTurnById(db, stranded)?.status).toBe("extracted");
+    expect(getTurnById(db, stranded)?.status).toBe("failed");
     expect(listPendingQueueItems(db)).toEqual([]);
   });
 

@@ -9,7 +9,6 @@ import {
   getSessionByContentId,
   setSessionTranscriptPathIfAbsent,
   updateCompactAnchor,
-  updateLastAgentSessionId,
   upsertSession,
 } from "../../src/db/sessions";
 
@@ -174,33 +173,6 @@ describe("session queries", () => {
 
     expect(updated.id).toBe(created.id);
     expect(updated.nextSteps).toBe("- keep working");
-  });
-
-  test("reads and updates lastAgentSessionId separately from upsertSession", () => {
-    const session = upsertSession(db, {
-      contentSessionId: "content-10",
-      project: "claude-mnemo",
-      title: "Agent session tracking",
-      content: "Track agent resume state",
-      insight: null,
-      createdAtEpoch: 500,
-      updatedAtEpoch: null,
-      completedAtEpoch: null,
-    });
-
-    expect(session.lastAgentSessionId).toBeNull();
-
-    updateLastAgentSessionId(db, session.id, "agent-session-123");
-
-    expect(getSession(db, session.id)?.lastAgentSessionId).toBe(
-      "agent-session-123",
-    );
-    expect(getSessionByContentId(db, "content-10")?.lastAgentSessionId).toBe(
-      "agent-session-123",
-    );
-    expect(getRecentSessions(db)[0]?.lastAgentSessionId).toBe(
-      "agent-session-123",
-    );
   });
 
   test("getRecentSessions orders by createdAtEpoch descending", () => {

@@ -92,7 +92,6 @@ describe("initializeSchema", () => {
       "current",
       "reference",
       "last_compact_turn",
-      "last_agent_session_id",
       "summary_updated_at_epoch",
       "scan_cursor_byte_offset",
       "scan_cursor_line",
@@ -192,81 +191,6 @@ describe("initializeSchema", () => {
 
     expect(columns).toContain("was_interrupted");
     expect(columns).toContain("was_rolled_back");
-  });
-
-  test("creates a non-negative durable extraction stall counter on turns", () => {
-    initializeSchema(db);
-
-    const sessionId = db
-      .query<{ id: number }, []>(
-        "INSERT INTO sessions (content_session_id, project, created_at_epoch) VALUES ('stall-schema', 'claude-mnemo', 1) RETURNING id",
-      )
-      .get()!.id;
-    const turnId = db
-      .query<{ id: number }, [number]>(
-        "INSERT INTO turns (session_id, prompt_number, created_at_epoch) VALUES (?, 1, 2) RETURNING id",
-      )
-      .get(sessionId)!.id;
-
-    expect(getTurnById(db, turnId)?.extractionStallAttempts).toBe(0);
-    expect(() =>
-      db.query(
-        "UPDATE turns SET extraction_stall_attempts = -1 WHERE id = ?",
-      ).run(turnId),
-    ).toThrow();
-  });
-
-  test("adds extraction_stall_attempts to an existing turns table without resetting rows", () => {
-    db.exec(`
-      CREATE TABLE sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content_session_id TEXT UNIQUE NOT NULL,
-        project TEXT NOT NULL,
-        created_at_epoch INTEGER NOT NULL
-      );
-      CREATE TABLE turns (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id INTEGER NOT NULL,
-        prompt_number INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at_epoch INTEGER NOT NULL
-      );
-      INSERT INTO sessions (content_session_id, project, created_at_epoch)
-      VALUES ('stall-migration', 'claude-mnemo', 1);
-      INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
-      VALUES (1, 1, 'active', 2);
-    `);
-
-    initializeSchema(db);
-    initializeSchema(db);
-
-    const row = db
-      .query<
-        {
-          attempts: number;
-          retryAtMs: number | null;
-          retryAfterSeq: number | null;
-          retryMode: string | null;
-          status: string;
-        },
-        []
-      >(
-        `SELECT
-           extraction_stall_attempts AS attempts,
-           extraction_stall_retry_at_ms AS retryAtMs,
-           extraction_stall_retry_after_seq AS retryAfterSeq,
-           extraction_stall_retry_mode AS retryMode,
-           status
-         FROM turns WHERE id = 1`,
-      )
-      .get();
-    expect(row).toEqual({
-      attempts: 0,
-      retryAtMs: null,
-      retryAfterSeq: null,
-      retryMode: null,
-      status: "active",
-    });
   });
 
   test("creates a nullable, range-constrained significance grade on turns", () => {
@@ -549,7 +473,6 @@ describe("initializeSchema", () => {
       "current",
       "reference",
       "last_compact_turn",
-      "last_agent_session_id",
       "summary_updated_at_epoch",
       "scan_cursor_byte_offset",
       "scan_cursor_line",
@@ -619,60 +542,6 @@ describe("initializeSchema", () => {
         .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM sessions")
         .get().count,
     ).toBe(1);
-  });
-
-  test("initializeSchema adds last_agent_session_id to an existing sessions table without resetting data", () => {
-    db.exec(`
-      CREATE TABLE sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        content_session_id TEXT UNIQUE NOT NULL,
-        project TEXT NOT NULL,
-        title TEXT,
-        content TEXT,
-        insight TEXT,
-        next_steps TEXT,
-        last_compact_turn INTEGER,
-        created_at_epoch INTEGER NOT NULL,
-        updated_at_epoch INTEGER,
-        completed_at_epoch INTEGER
-      );
-    `);
-    db.query(
-      `
-        INSERT INTO sessions (
-          content_session_id,
-          project,
-          title,
-          created_at_epoch
-        ) VALUES (?, ?, ?, ?)
-      `,
-    ).run("existing-session", "claude-mnemo", "Existing", 1);
-
-    initializeSchema(db);
-
-    const columns = db
-      .query<{ name: string }, []>("PRAGMA table_info(sessions)")
-      .all()
-      .map((row) => row.name);
-    const session = db
-      .query<
-        { contentSessionId: string; lastAgentSessionId: string | null },
-        []
-      >(
-        `
-          SELECT
-            content_session_id AS contentSessionId,
-            last_agent_session_id AS lastAgentSessionId
-          FROM sessions
-        `,
-      )
-      .get();
-
-    expect(columns).toContain("last_agent_session_id");
-    expect(session).toEqual({
-      contentSessionId: "existing-session",
-      lastAgentSessionId: null,
-    });
   });
 
   test("initializeSchema adds transcript_line_start to an existing turns table without resetting data", () => {

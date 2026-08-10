@@ -27,7 +27,6 @@ export interface SessionRecord {
   current: string | null;
   reference: string | null;
   lastCompactTurn: number | null;
-  lastAgentSessionId: string | null;
   summaryUpdatedAtEpoch: number | null;
   /** Byte offset of the first not-yet-scanned transcript byte (spec §F). */
   scanCursorByteOffset: number;
@@ -76,7 +75,6 @@ const SESSION_SELECT = `
     "current" AS current,
     "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
-    last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
     scan_cursor_byte_offset AS scanCursorByteOffset,
     scan_cursor_line AS scanCursorLine,
@@ -138,8 +136,7 @@ export function upsertSession(
         "current" AS current,
         "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
-        last_agent_session_id AS lastAgentSessionId,
-        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         scan_cursor_byte_offset AS scanCursorByteOffset,
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
@@ -240,8 +237,7 @@ export function updateSessionSummaryRewrite(
         "current" AS current,
         "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
-        last_agent_session_id AS lastAgentSessionId,
-        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         scan_cursor_byte_offset AS scanCursorByteOffset,
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
@@ -421,18 +417,6 @@ export function setSessionTranscriptPathIfAbsent(
       )
       .run(transcriptPath, sessionId).changes > 0
   );
-}
-
-export function updateLastAgentSessionId(
-  db: Database,
-  sessionId: number,
-  agentSessionId: string,
-): void {
-  db.query(
-    `UPDATE sessions
-     SET last_agent_session_id = ?
-     WHERE id = ?`,
-  ).run(agentSessionId, sessionId);
 }
 
 export function setSessionParent(

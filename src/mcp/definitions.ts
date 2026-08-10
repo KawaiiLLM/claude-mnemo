@@ -111,12 +111,3 @@ export const recallInputSchema = z.object(recallInputShape).strict();
 export const rememberInputSchema = z.object(rememberInputShape).strict();
 export const timelineInputSchema = z.object(timelineInputShape).strict();
 export const noteInputSchema = z.object(noteInputShape).strict();
-
-// `timeline` joins the worker's surface for settlement (spec §A): re-grading a
-// trailing window means reading the arc that window sits in, and the arc view is
-// a timeline call. It stays read-only, so extraction may also reach for it.
-export const MNEMO_ALLOWED_TOOLS = [
-  "mcp__mnemo__remember",
-  "mcp__mnemo__recall",
-  "mcp__mnemo__timeline",
-] as const;

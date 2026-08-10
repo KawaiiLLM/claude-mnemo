@@ -304,11 +304,16 @@ class RegradeTargetMissingError extends Error {
  * noted. The CASE reads the row in the same statement that writes it, and the
  * WHERE leaves `undone` and every already-terminal row alone.
  *
- * The result deliberately reads as a success. A `Parameter error:` would leave
- * the turn id unresolved in the worker's work unit, and the derailment machine
- * answers an unresolved id with corrective resends and finally a `failed`
- * floor — turning "this era does not want your note" into a retry loop that
- * damages the very status this is settling.
+ * The result deliberately reads as a success: "this era does not want your
+ * note" is not a caller error, and answering with a `Parameter error:` would
+ * make a well-formed call look broken.
+ *
+ * Reachable only from a hand-written `remember(T…)` now — the extraction
+ * subagent that used to drive it is gone (ticket 15) and a turn's own
+ * completion settles it (db/turn-completion.ts). What keeps this branch here is
+ * the OTHER half of D13: without it an era turn's `remember` would fall back to
+ * the legacy route below and be held to that route's grade/regrade/cites
+ * enforcement, which the new era abolished.
  */
 function settleEraTurnWithoutNote(
   db: Database,
@@ -351,9 +356,8 @@ function handleTurnRemember(
   // The turn is loaded before anything is validated, because which rules apply
   // is a property of the turn and not of the payload. For an era turn none of
   // the validated fields is going to be stored, so rejecting the call over one
-  // of them trades a dropped note for a derailment: a `Parameter error:` leaves
-  // the turn id unresolved in the work unit, and the floor that ends that
-  // ladder overwrites the very status this settles.
+  // of them would report a parameter problem about a payload nobody was going
+  // to keep.
   const current = getTurnById(db, turnId);
   if (!current) {
     return textResult(`Turn T${turnId} not found.`);

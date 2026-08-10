@@ -6,6 +6,7 @@ import {
   HOOK_SUCCESS_EXIT_CODE,
 } from "../shared/hook-constants";
 import { createDatabase, isSqliteBusy } from "../db/database";
+import { ensureRecordedEraCutoff } from "../db/era";
 import { initializeDatabase } from "../db/schema";
 import { createLogger } from "../shared/logger";
 import { DiaryFileStore } from "../diary/file-store";
@@ -121,6 +122,13 @@ function getDefaultHookDatabase(): ReturnType<typeof createDatabase> {
       busyTimeoutMs: HOOK_DB_BUSY_TIMEOUT_MS,
     });
     initializeDatabase(defaultHookDatabase);
+    // The era begins the first time a build without an extraction agent runs
+    // (db/era.ts). Here rather than in `initializeDatabase`, which every test
+    // database also runs: this is the production boundary, and a turn created
+    // before the boundary exists would be a legacy turn nobody can write a
+    // record for. INSERT OR IGNORE, so this costs one indexed read forever
+    // after.
+    ensureRecordedEraCutoff(defaultHookDatabase, Math.floor(Date.now() / 1000));
   }
   return defaultHookDatabase;
 }

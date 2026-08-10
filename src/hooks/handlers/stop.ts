@@ -24,7 +24,7 @@ import {
   computeInvalidationSets,
 } from "../../worker/invalidation";
 import { detectAndCleanSubagentTurnsFromParsed } from "../../worker/subagent-filter";
-import { resolveConfiguredEraCutoff } from "../../shared/config";
+import { resolveEraCutoff } from "../../db/era";
 import { HOOK_SUCCESS_EXIT_CODE } from "../../shared/hook-constants";
 import {
   backfillFromTranscript,
@@ -107,7 +107,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
   const eraCutoffEpoch =
     dependencies.eraCutoffEpoch !== undefined
       ? dependencies.eraCutoffEpoch
-      : resolveConfiguredEraCutoff();
+      : resolveEraCutoff(dependencies.db);
 
   return async function handleStopHook(
     input: NormalizedHookInput,
@@ -258,6 +258,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           sessionId: session.id,
           nowEpoch: epoch,
           completedTurnId: turn.id,
+          eraCutoffEpoch,
         });
 
         if (parsedTurns) {

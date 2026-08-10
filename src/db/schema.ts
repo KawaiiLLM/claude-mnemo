@@ -64,7 +64,6 @@ const SCHEMA_SQL = `
     current TEXT,
     reference TEXT,
     last_compact_turn INTEGER,
-    last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
     scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
     scan_cursor_line INTEGER NOT NULL DEFAULT 0,
@@ -80,15 +79,6 @@ const SCHEMA_SQL = `
     content_prompt_id TEXT,
     was_interrupted INTEGER NOT NULL DEFAULT 0,
     was_rolled_back INTEGER NOT NULL DEFAULT 0,
-    extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (
-      extraction_stall_attempts >= 0
-    ),
-    extraction_stall_retry_at_ms INTEGER,
-    extraction_stall_retry_after_seq INTEGER,
-    extraction_stall_retry_mode TEXT CHECK (
-      extraction_stall_retry_mode IS NULL OR
-      extraction_stall_retry_mode IN ('resume', 'forceFresh')
-    ),
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -484,6 +474,15 @@ const SCHEMA_SQL = `
     value TEXT NOT NULL
   );
 
+  -- When the P2 era began (db/era.ts). One row, written once, by whichever
+  -- production process looks first: the boundary has to survive restarts and
+  -- clock changes because turns are already written against it.
+  CREATE TABLE IF NOT EXISTS era_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
@@ -776,14 +775,12 @@ export function initializeSchema(db: Database): void {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
-  ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
-  ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
@@ -1012,10 +1009,6 @@ function dropRetiredMaintenanceState(db: Database): void {
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
 
-function ensureSessionLastAgentSessionIdColumn(db: Database): void {
-  addColumnIfMissing(db, "sessions", "last_agent_session_id", "TEXT");
-}
-
 // `project` is overwritten with the latest cwd on every hook upsert, but the
 // transcript directory is fixed at the session's starting cwd — so deriving the
 // transcript path from `project` silently misses the file for any session that
@@ -1057,26 +1050,6 @@ function ensureTurnAssistantTranscriptColumn(db: Database): void {
 function ensureTurnInvalidationColumns(db: Database): void {
   addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
-}
-
-function ensureTurnExtractionStallRetryColumns(db: Database): void {
-  addColumnIfMissing(
-    db,
-    "turns",
-    "extraction_stall_attempts",
-    "INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)",
-  );
-  addColumnIfMissing(db, "turns", "extraction_stall_retry_at_ms", "INTEGER");
-  addColumnIfMissing(db, "turns", "extraction_stall_retry_after_seq", "INTEGER");
-  addColumnIfMissing(
-    db,
-    "turns",
-    "extraction_stall_retry_mode",
-    `TEXT CHECK (
-       extraction_stall_retry_mode IS NULL OR
-       extraction_stall_retry_mode IN ('resume', 'forceFresh')
-     )`,
-  );
 }
 
 function ensureTurnSignificanceGradeColumn(db: Database): void {

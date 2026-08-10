@@ -4,7 +4,7 @@ import { noteTool } from "./note";
 import { recallMemory } from "./recall";
 import { rememberTool } from "./remember";
 import { timelineQuery } from "./timeline";
-import { resolveConfiguredEraCutoff } from "../shared/config";
+import { resolveEraCutoff } from "../db/era";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 
@@ -101,7 +101,7 @@ export function createDatabaseBackedHandlers(
   const eraCutoffEpoch =
     options.eraCutoffEpoch !== undefined
       ? options.eraCutoffEpoch
-      : resolveConfiguredEraCutoff();
+      : resolveEraCutoff(database);
   const workerTextResult = (text: string): ToolResult => {
     if (!includeDbTurnIds) {
       return textResult(text);

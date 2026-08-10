@@ -7727,14 +7727,12 @@ function initializeSchema(db) {
   db.exec(SCHEMA_SQL);
   ensureDiaryDayStateTerminalColumn(db);
   ensureDiaryDayStateRetryDispositionColumn(db);
-  ensureSessionLastAgentSessionIdColumn(db);
   ensureSessionTranscriptPathColumn(db);
   ensureSessionSummaryUpdatedAtEpochColumn(db);
   ensureSessionSummaryFieldColumns(db);
   ensureTurnTranscriptLineStartColumn(db);
   ensureTurnAssistantTranscriptColumn(db);
   ensureTurnInvalidationColumns(db);
-  ensureTurnExtractionStallRetryColumns(db);
   ensureTurnSignificanceGradeColumn(db);
   ensureTurnCitationsSchema(db);
   ensureTurnConsultedMemoriesColumn(db);
@@ -7862,9 +7860,6 @@ function dropRetiredMaintenanceState(db) {
   db.exec("DROP TABLE IF EXISTS persona_operation_state");
   db.exec("DROP INDEX IF EXISTS idx_turns_status");
 }
-function ensureSessionLastAgentSessionIdColumn(db) {
-  addColumnIfMissing(db, "sessions", "last_agent_session_id", "TEXT");
-}
 function ensureSessionTranscriptPathColumn(db) {
   addColumnIfMissing(db, "sessions", "transcript_path", "TEXT");
 }
@@ -7885,25 +7880,6 @@ function ensureTurnAssistantTranscriptColumn(db) {
 function ensureTurnInvalidationColumns(db) {
   addColumnIfMissing(db, "turns", "was_interrupted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(db, "turns", "was_rolled_back", "INTEGER NOT NULL DEFAULT 0");
-}
-function ensureTurnExtractionStallRetryColumns(db) {
-  addColumnIfMissing(
-    db,
-    "turns",
-    "extraction_stall_attempts",
-    "INTEGER NOT NULL DEFAULT 0 CHECK (extraction_stall_attempts >= 0)"
-  );
-  addColumnIfMissing(db, "turns", "extraction_stall_retry_at_ms", "INTEGER");
-  addColumnIfMissing(db, "turns", "extraction_stall_retry_after_seq", "INTEGER");
-  addColumnIfMissing(
-    db,
-    "turns",
-    "extraction_stall_retry_mode",
-    `TEXT CHECK (
-       extraction_stall_retry_mode IS NULL OR
-       extraction_stall_retry_mode IN ('resume', 'forceFresh')
-     )`
-  );
 }
 function ensureTurnSignificanceGradeColumn(db) {
   addColumnIfMissing(
@@ -8193,7 +8169,6 @@ var init_schema = __esm({
     current TEXT,
     reference TEXT,
     last_compact_turn INTEGER,
-    last_agent_session_id TEXT,
     summary_updated_at_epoch INTEGER,
     scan_cursor_byte_offset INTEGER NOT NULL DEFAULT 0,
     scan_cursor_line INTEGER NOT NULL DEFAULT 0,
@@ -8209,15 +8184,6 @@ var init_schema = __esm({
     content_prompt_id TEXT,
     was_interrupted INTEGER NOT NULL DEFAULT 0,
     was_rolled_back INTEGER NOT NULL DEFAULT 0,
-    extraction_stall_attempts INTEGER NOT NULL DEFAULT 0 CHECK (
-      extraction_stall_attempts >= 0
-    ),
-    extraction_stall_retry_at_ms INTEGER,
-    extraction_stall_retry_after_seq INTEGER,
-    extraction_stall_retry_mode TEXT CHECK (
-      extraction_stall_retry_mode IS NULL OR
-      extraction_stall_retry_mode IN ('resume', 'forceFresh')
-    ),
     status TEXT NOT NULL DEFAULT 'active',
     user_prompt TEXT,
     assistant_response TEXT,
@@ -8611,6 +8577,15 @@ var init_schema = __esm({
   CREATE TABLE IF NOT EXISTS diary_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+  );
+
+  -- When the P2 era began (db/era.ts). One row, written once, by whichever
+  -- production process looks first: the boundary has to survive restarts and
+  -- clock changes because turns are already written against it.
+  CREATE TABLE IF NOT EXISTS era_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    cutoff_epoch INTEGER NOT NULL,
+    recorded_at_epoch INTEGER NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS rules (
@@ -32482,110 +32457,69 @@ var noteInputSchema = external_exports3.object(noteInputShape).strict();
 // src/mcp/note.ts
 init_database();
 
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
+// src/db/observations.ts
+init_search();
+var OBSERVATION_COLUMNS = `
+  id,
   turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
+  tool_name AS toolName,
+  tool_input AS toolInput,
+  tool_result AS toolResult,
   status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-
-// src/db/shadow-notes.ts
-var SHADOW_NOTE_COLUMNS = `
-  turn_id AS turnId,
   title,
   content,
-  insight,
-  writer_model AS writerModel,
-  writer_origin AS writerOrigin,
-  ride_turn_id AS rideTurnId,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
+  excluded_from_extraction AS excludedFromExtraction,
+  created_at_epoch AS createdAtEpoch
 `;
-function upsertShadowNote(db, input) {
-  const written = db.query(
-    `
-        INSERT INTO shadow_notes (
-          turn_id,
-          title,
-          content,
-          insight,
-          writer_model,
-          writer_origin,
-          ride_turn_id,
-          created_at_epoch,
-          updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(turn_id) DO UPDATE SET
-          title = excluded.title,
-          content = excluded.content,
-          insight = excluded.insight,
-          writer_model = excluded.writer_model,
-          writer_origin = excluded.writer_origin,
-          ride_turn_id = excluded.ride_turn_id,
-          updated_at_epoch = excluded.updated_at_epoch
-        RETURNING ${SHADOW_NOTE_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.title,
-    input.content,
-    input.insight ?? null,
-    input.writerModel ?? null,
-    input.writerOrigin ?? "agent",
-    input.rideTurnId ?? null,
-    input.nowEpoch,
-    input.nowEpoch
-  );
-  if (!written) {
-    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
+var OBSERVATION_SELECT = `
+  SELECT ${OBSERVATION_COLUMNS}
+  FROM observations
+`;
+function mapObservationRow(row) {
+  if (!row) {
+    return null;
   }
-  return written;
+  return row;
 }
-function getShadowNote(db, turnId) {
+function updateObservation(db, observationId, input) {
+  const existing = getObservation(db, observationId);
+  if (!existing) {
+    return null;
+  }
+  const updated = mapObservationRow(
+    db.query(
+      `
+          UPDATE observations
+          SET
+            title = ?,
+            content = ?,
+            status = ?
+          WHERE id = ?
+          RETURNING ${OBSERVATION_COLUMNS}
+        `
+    ).get(
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.status ?? existing.status,
+      observationId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  indexObservationToFTS(db, updated);
+  return updated;
+}
+function getExtractableObservationsForTurn(db, turnId) {
   return db.query(
-    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
-  ).get(turnId) ?? null;
+    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
+  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
 }
-
-// src/db/turns.ts
-init_database();
+function getObservation(db, observationId) {
+  return mapObservationRow(
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+  );
+}
 
 // src/diary/calendar.ts
 var dateFormatters = /* @__PURE__ */ new Map();
@@ -32649,20 +32583,9 @@ var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
 var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
 var DEFAULT_DREAM_AGENT_HOUR = 4;
-var DEFAULT_SESSION_END_TAIL_TIMEOUT_MS = 6e4;
 var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-var DEFAULT_STALL_THRESHOLD_MS = 6e4;
 var DEFAULT_CONFIG = {
-  mergeThresholdChars: 1e3,
-  maxQueuedBatches: 3,
-  keepaliveLeadMs: 6e4,
-  cacheMode: "auto",
-  maxMiniTurnChars: 24e3,
-  maxFlushAttempts: 3,
-  sessionEndTailTimeoutMs: DEFAULT_SESSION_END_TAIL_TIMEOUT_MS,
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
-  compactContextRatio: 0.5,
   // On by default because it is a kill switch, not the cutover switch: with no
   // era cutoff configured this changes nothing at all.
   settlementEnabled: true,
@@ -32675,18 +32598,8 @@ var DEFAULT_CONFIG = {
   dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
   dreamAgentBacklogLimit: 1
 };
-var MIN_MINI_TURN_CHARS = 10240;
-var MIN_FLUSH_ATTEMPTS = 1;
-var MIN_COMPACT_CONTEXT_RATIO = 0.1;
-var MAX_COMPACT_CONTEXT_RATIO = 0.95;
 function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
   return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function clampNumber(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
 }
 function resolveDreamAgentModel(value, logger) {
   if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
@@ -32721,45 +32634,11 @@ function clampInteger(value, min, max, fallback) {
 }
 function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
   return {
-    mergeThresholdChars: config2.mergeThresholdChars,
-    maxQueuedBatches: config2.maxQueuedBatches,
-    keepaliveLeadMs: config2.keepaliveLeadMs,
-    cacheMode: config2.cacheMode,
-    maxMiniTurnChars: clampNumber(
-      config2.maxMiniTurnChars,
-      MIN_MINI_TURN_CHARS,
-      Number.MAX_SAFE_INTEGER,
-      DEFAULT_CONFIG.maxMiniTurnChars
-    ),
-    maxFlushAttempts: clampNumber(
-      config2.maxFlushAttempts,
-      MIN_FLUSH_ATTEMPTS,
-      Number.MAX_SAFE_INTEGER,
-      DEFAULT_CONFIG.maxFlushAttempts
-    ),
-    sessionEndTailTimeoutMs: clampInteger(
-      config2.sessionEndTailTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.sessionEndTailTimeoutMs
-    ),
     hardExitTimeoutMs: clampInteger(
       config2.hardExitTimeoutMs,
       1e3,
       3e5,
       DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    stallThresholdMs: clampInteger(
-      config2.stallThresholdMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.stallThresholdMs
-    ),
-    compactContextRatio: clampNumber(
-      config2.compactContextRatio,
-      MIN_COMPACT_CONTEXT_RATIO,
-      MAX_COMPACT_CONTEXT_RATIO,
-      DEFAULT_CONFIG.compactContextRatio
     ),
     settlementEnabled: resolveBoolean(
       config2.settlementEnabled,
@@ -32802,13 +32681,6 @@ function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger)
       DEFAULT_CONFIG.dreamAgentBacklogLimit
     )
   };
-}
-function resolveConfiguredEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
 }
 function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
   const path2 = resolveConfigPath(homePath);
@@ -32877,10 +32749,6 @@ var TURN_SELECT = `
     transcript_line_start AS transcriptLineStart,
     was_interrupted AS wasInterrupted,
     was_rolled_back AS wasRolledBack,
-    extraction_stall_attempts AS extractionStallAttempts,
-    extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
-    extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
-    extraction_stall_retry_mode AS extractionStallRetryMode,
     status,
     user_prompt AS userPrompt,
     assistant_response AS assistantResponse,
@@ -32986,10 +32854,6 @@ function updateTurnById(db, turnId, input) {
             content_prompt_id AS contentPromptId,
             was_interrupted AS wasInterrupted,
             was_rolled_back AS wasRolledBack,
-            extraction_stall_attempts AS extractionStallAttempts,
-            extraction_stall_retry_at_ms AS extractionStallRetryAtMs,
-            extraction_stall_retry_after_seq AS extractionStallRetryAfterSeq,
-            extraction_stall_retry_mode AS extractionStallRetryMode,
             status,
             user_prompt AS userPrompt,
             assistant_response AS assistantResponse,
@@ -33076,6 +32940,108 @@ function getFirstTurn(db, sessionId) {
       `${TURN_SELECT} WHERE session_id = ? ORDER BY prompt_number ASC LIMIT 1`
     ).get(sessionId) ?? null
   );
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+
+// src/db/shadow-notes.ts
+var SHADOW_NOTE_COLUMNS = `
+  turn_id AS turnId,
+  title,
+  content,
+  insight,
+  writer_model AS writerModel,
+  writer_origin AS writerOrigin,
+  ride_turn_id AS rideTurnId,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function upsertShadowNote(db, input) {
+  const written = db.query(
+    `
+        INSERT INTO shadow_notes (
+          turn_id,
+          title,
+          content,
+          insight,
+          writer_model,
+          writer_origin,
+          ride_turn_id,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          insight = excluded.insight,
+          writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
+          ride_turn_id = excluded.ride_turn_id,
+          updated_at_epoch = excluded.updated_at_epoch
+        RETURNING ${SHADOW_NOTE_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.title,
+    input.content,
+    input.insight ?? null,
+    input.writerModel ?? null,
+    input.writerOrigin ?? "agent",
+    input.rideTurnId ?? null,
+    input.nowEpoch,
+    input.nowEpoch
+  );
+  if (!written) {
+    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
+  }
+  return written;
+}
+function getShadowNote(db, turnId) {
+  return db.query(
+    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
+  ).get(turnId) ?? null;
 }
 
 // src/shared/tag-stripping.ts
@@ -33308,70 +33274,6 @@ function getRidePromptNumber(db, turnId) {
   return db.query(
     "SELECT prompt_number AS promptNumber FROM turns WHERE id = ?"
   ).get(turnId)?.promptNumber ?? null;
-}
-
-// src/db/observations.ts
-init_search();
-var OBSERVATION_COLUMNS = `
-  id,
-  turn_id AS turnId,
-  tool_name AS toolName,
-  tool_input AS toolInput,
-  tool_result AS toolResult,
-  status,
-  title,
-  content,
-  excluded_from_extraction AS excludedFromExtraction,
-  created_at_epoch AS createdAtEpoch
-`;
-var OBSERVATION_SELECT = `
-  SELECT ${OBSERVATION_COLUMNS}
-  FROM observations
-`;
-function mapObservationRow(row) {
-  if (!row) {
-    return null;
-  }
-  return row;
-}
-function updateObservation(db, observationId, input) {
-  const existing = getObservation(db, observationId);
-  if (!existing) {
-    return null;
-  }
-  const updated = mapObservationRow(
-    db.query(
-      `
-          UPDATE observations
-          SET
-            title = ?,
-            content = ?,
-            status = ?
-          WHERE id = ?
-          RETURNING ${OBSERVATION_COLUMNS}
-        `
-    ).get(
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      input.status ?? existing.status,
-      observationId
-    ) ?? null
-  );
-  if (!updated) {
-    return null;
-  }
-  indexObservationToFTS(db, updated);
-  return updated;
-}
-function getExtractableObservationsForTurn(db, turnId) {
-  return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
-  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
-}
-function getObservation(db, observationId) {
-  return mapObservationRow(
-    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
-  );
 }
 
 // src/mcp/recall.ts
@@ -33878,7 +33780,6 @@ var SESSION_SELECT = `
     "current" AS current,
     "reference" AS reference,
     last_compact_turn AS lastCompactTurn,
-    last_agent_session_id AS lastAgentSessionId,
     summary_updated_at_epoch AS summaryUpdatedAtEpoch,
     scan_cursor_byte_offset AS scanCursorByteOffset,
     scan_cursor_line AS scanCursorLine,
@@ -33918,8 +33819,7 @@ function updateSessionSummaryRewrite(db, sessionId, fields, nowEpoch) {
         "current" AS current,
         "reference" AS reference,
         last_compact_turn AS lastCompactTurn,
-        last_agent_session_id AS lastAgentSessionId,
-        summary_updated_at_epoch AS summaryUpdatedAtEpoch,
+            summary_updated_at_epoch AS summaryUpdatedAtEpoch,
         scan_cursor_byte_offset AS scanCursorByteOffset,
         scan_cursor_line AS scanCursorLine,
         parent_session_id AS parentSessionId,
@@ -35819,10 +35719,438 @@ function estimateDiaryTokens(text) {
   return Math.ceil(weightedCodePoints * 1.2);
 }
 
-// src/task-causality-era.ts
-var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
-function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
-  return createdAtEpoch >= cutoffEpoch;
+// src/mcp/session-output.ts
+var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
+function capCodePoints(value, max) {
+  if (!value) {
+    return value;
+  }
+  const codePoints = Array.from(value);
+  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+}
+function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
+  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
+  const lines = [
+    `[S${input.id}] ${title}`
+  ];
+  const pushField = (label, value, cap) => {
+    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
+    if (rendered) {
+      lines.push(`  ${label}: ${rendered}`);
+    }
+  };
+  const pushBulletField = (label, value) => {
+    const items = splitBulletField(value);
+    if (items.length === 0) {
+      return;
+    }
+    lines.push(`  ${label}:`);
+    for (const item of items) {
+      lines.push(`    - ${item}`);
+    }
+  };
+  pushField("content", input.content, 400);
+  pushField("current", input.current, 400);
+  pushField("next", input.nextSteps, 200);
+  if (!includeHistoricalFields) {
+    return lines;
+  }
+  if (input.decision) {
+    pushBulletField("decision", input.decision);
+  } else if ((input.legacyInsight?.length ?? 0) > 0) {
+    lines.push("  insight:");
+    for (const item of input.legacyInsight ?? []) {
+      lines.push(`    - ${item}`);
+    }
+  }
+  pushBulletField("done", input.done);
+  pushBulletField("reference", input.reference);
+  return lines;
+}
+function renderSessionStateOutput(input) {
+  return buildSessionStateLines(input).join("\n");
+}
+function measureSessionStateTokens(input) {
+  const fieldTokens = (label, value, bullet = false) => {
+    if (!value) {
+      return 0;
+    }
+    const rendered = bullet ? [`  ${label}:`, ...splitBulletField(value).map((item) => `    - ${item}`)].join("\n") : `  ${label}: ${value}`;
+    return estimateDiaryTokens(rendered);
+  };
+  const full = renderSessionStateOutput(input);
+  return {
+    title: estimateDiaryTokens(
+      `[S${input.id}] ${input.title ?? "(untitled session)"}`
+    ),
+    content: fieldTokens("content", input.content),
+    current: fieldTokens("current", input.current),
+    nextSteps: fieldTokens("next", input.nextSteps),
+    decision: fieldTokens("decision", input.decision, true),
+    done: fieldTokens("done", input.done, true),
+    reference: fieldTokens("reference", input.reference, true),
+    total: estimateDiaryTokens(full)
+  };
+}
+
+// src/mcp/remember.ts
+var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
+var OBSERVATION_REMEMBER_STATUSES = [
+  "pending",
+  "extracted",
+  "skipped"
+];
+var SESSION_SUMMARY_KEYS = [
+  "title",
+  "content",
+  "decision",
+  "done",
+  "current",
+  "next_steps",
+  "reference"
+];
+var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
+function decodeHtmlEntities(value) {
+  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
+}
+function decodeRememberInput(input) {
+  const decoded = { ...input };
+  for (const key of [
+    "id",
+    "type",
+    "title",
+    "content",
+    "insight",
+    "next_steps",
+    "decision",
+    "done",
+    "current",
+    "reference"
+  ]) {
+    const value = decoded[key];
+    if (typeof value === "string") {
+      decoded[key] = decodeHtmlEntities(value);
+    }
+  }
+  if (decoded.tags) {
+    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
+  }
+  return decoded;
+}
+function textResult2(text) {
+  return {
+    content: [{ type: "text", text }]
+  };
+}
+function parameterError2(message) {
+  return textResult2(`Parameter error: ${message}`);
+}
+function parseSessionId(value) {
+  const match = /^S(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseTurnId(value) {
+  const match = /^T(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function parseObservationId(value) {
+  const match = /^O(\d+)$/i.exec(value.trim());
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+function bracketBareTurnReferences(content, isValidPredecessor) {
+  if (!content) {
+    return content;
+  }
+  return content.replace(
+    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
+    (match, lead, digits) => {
+      const id = Number.parseInt(digits, 10);
+      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
+        return match;
+      }
+      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
+      const prefix = needsSpace ? `${lead} ` : lead;
+      return `${prefix}[T${id}]`;
+    }
+  );
+}
+function validateStatusForRoute(status, allowedStatuses, routeLabel) {
+  if (status === void 0) {
+    return null;
+  }
+  if (allowedStatuses === null) {
+    return `${routeLabel} does not accept a status field.`;
+  }
+  if (!allowedStatuses.includes(status)) {
+    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
+    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
+  }
+  return null;
+}
+function validateGrade(value, label) {
+  if (value === void 0) {
+    return null;
+  }
+  if (!Number.isInteger(value) || value < 0 || value > 4) {
+    return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+function deriveTurnStatus(input) {
+  if (input.status === "undone") {
+    return "undone";
+  }
+  if (input.status === "skipped") {
+    return "skipped";
+  }
+  if (input.status === "active") {
+    return "active";
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveObservationStatus(input) {
+  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
+    return input.status;
+  }
+  return input.title || input.content ? "extracted" : "skipped";
+}
+function deriveTurnStatusForUpdate(current, input) {
+  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
+    return void 0;
+  }
+  return deriveTurnStatus(input);
+}
+var RegradeTargetMissingError = class extends Error {
+  constructor(targetId) {
+    super(`regrade target T${targetId} no longer exists`);
+    this.targetId = targetId;
+    this.name = "RegradeTargetMissingError";
+  }
+  targetId;
+};
+function settleEraTurnWithoutNote(db, turnId, current) {
+  const changed = db.query(
+    `UPDATE turns
+         SET status = CASE
+               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
+               ELSE 'skipped'
+             END,
+             updated_at_epoch = ?
+         WHERE id = ? AND status IN ('active', 'provisional')`
+  ).run(Math.floor(Date.now() / 1e3), turnId).changes > 0;
+  const settled = getTurnById(db, turnId) ?? current;
+  if (changed) {
+    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
+  }
+  return textResult2(
+    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
+  );
+}
+function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
+  const current = getTurnById(db, turnId);
+  if (!current) {
+    return textResult2(`Turn T${turnId} not found.`);
+  }
+  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
+    return settleEraTurnWithoutNote(db, turnId, current);
+  }
+  const statusError = validateStatusForRoute(
+    input.status,
+    TURN_REMEMBER_STATUSES,
+    "turn remember"
+  );
+  if (statusError) {
+    return parameterError2(statusError);
+  }
+  const gradeError = validateGrade(input.grade, "grade");
+  if (gradeError) {
+    return parameterError2(gradeError);
+  }
+  if ((current.status === "active" || current.status === "provisional") && input.grade === void 0) {
+    return parameterError2(
+      "grade is required when extracting a new turn (integer 0 through 4)."
+    );
+  }
+  let regradeTarget = null;
+  if (input.regrade !== void 0) {
+    const regradeError = validateGrade(input.regrade.grade, "regrade.grade");
+    if (regradeError) {
+      return parameterError2(regradeError);
+    }
+    const regradeId = parseTurnId(input.regrade.id);
+    if (regradeId === null) {
+      return parameterError2("regrade.id must be a T<n> turn reference.");
+    }
+    regradeTarget = getTurnById(db, regradeId);
+    if (!regradeTarget || regradeTarget.sessionId !== current.sessionId || regradeTarget.promptNumber >= current.promptNumber) {
+      return parameterError2(
+        "regrade must target an earlier turn in the same session."
+      );
+    }
+  }
+  const isValidPredecessor = (candidateId) => {
+    if (candidateId === turnId) {
+      return false;
+    }
+    const cited = getTurnById(db, candidateId);
+    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
+  };
+  const nowEpoch = Math.floor(Date.now() / 1e3);
+  let written;
+  try {
+    written = runWriteTransaction(db, () => {
+      const turn = updateTurnById(db, turnId, {
+        status: deriveTurnStatusForUpdate(current, input),
+        title: input.title ?? null,
+        content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
+        insight: input.insight ?? null,
+        type: input.type ?? null,
+        significanceGrade: input.grade,
+        tags: input.tags ?? [],
+        updatedAtEpoch: nowEpoch
+      });
+      if (!turn) {
+        return null;
+      }
+      const citations = input.cites === void 0 ? null : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
+      if (regradeTarget && input.regrade) {
+        const regraded = updateTurnById(db, regradeTarget.id, {
+          significanceGrade: input.regrade.grade
+        });
+        if (!regraded) {
+          throw new RegradeTargetMissingError(regradeTarget.id);
+        }
+      }
+      return { turn, citations };
+    });
+  } catch (error48) {
+    if (error48 instanceof RegradeTargetMissingError) {
+      return parameterError2(
+        `regrade target T${error48.targetId} no longer exists; nothing was written.`
+      );
+    }
+    throw error48;
+  }
+  if (!written) {
+    return textResult2(`Turn T${turnId} not found.`);
+  }
+  let message = `Updated turn T${turnId} with status ${written.turn.status}.`;
+  if (regradeTarget && input.regrade) {
+    message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
+  }
+  if (written.citations) {
+    message += ` Recorded ${written.citations.written.length} citation(s).`;
+    if (written.citations.droppedIds.length > 0) {
+      message += ` Dropped unresolvable: ${written.citations.droppedIds.map((id) => `T${id}`).join(", ")}.`;
+    }
+  }
+  return textResult2(message);
+}
+function handleObservationRemember(db, observationId, input) {
+  const statusError = validateStatusForRoute(
+    input.status,
+    OBSERVATION_REMEMBER_STATUSES,
+    "observation remember"
+  );
+  if (statusError) {
+    return parameterError2(statusError);
+  }
+  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
+    return parameterError2(
+      "observation remember only accepts title, content, and status."
+    );
+  }
+  const observation = updateObservation(db, observationId, {
+    title: input.title,
+    content: input.content,
+    status: deriveObservationStatus(input)
+  });
+  if (!observation) {
+    return textResult2(`Observation O${observationId} not found.`);
+  }
+  return textResult2(`Updated observation O${observationId} with status ${observation.status}.`);
+}
+function handleSessionRemember(db, sessionId, input) {
+  const statusError = validateStatusForRoute(input.status, null, "session remember");
+  if (statusError) {
+    return parameterError2(statusError);
+  }
+  if (input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0) {
+    return parameterError2(
+      "session remember does not accept grade, regrade, or cites."
+    );
+  }
+  const session = getSession(db, sessionId);
+  if (!session) {
+    return textResult2(`Session ${sessionId} not found.`);
+  }
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  if (missing.length > 0) {
+    return parameterError2(
+      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
+        ", "
+      )}). Missing: ${missing.join(", ")}.`
+    );
+  }
+  const tokenReport = measureSessionStateTokens({
+    id: session.id,
+    title: input.title ?? "",
+    content: input.content ?? "",
+    decision: input.decision ?? "",
+    done: input.done ?? "",
+    current: input.current ?? "",
+    nextSteps: input.next_steps ?? "",
+    reference: input.reference ?? ""
+  });
+  if (tokenReport.total > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
+    return parameterError2(
+      `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; title=${tokenReport.title}, content=${tokenReport.content}, current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, decision=${tokenReport.decision}, done=${tokenReport.done}, reference=${tokenReport.reference}, total=${tokenReport.total}. Trim fields and retry.`
+    );
+  }
+  const updated = updateSessionSummaryRewrite(
+    db,
+    sessionId,
+    {
+      title: input.title ?? "",
+      content: input.content ?? "",
+      decision: input.decision ?? "",
+      done: input.done ?? "",
+      current: input.current ?? "",
+      nextSteps: input.next_steps ?? "",
+      reference: input.reference ?? ""
+    },
+    Math.floor(Date.now() / 1e3)
+  );
+  if (!updated) {
+    return textResult2(`Session ${sessionId} not found.`);
+  }
+  return textResult2(`Updated session ${sessionId}.`);
+}
+function rememberTool(db, rawInput, options = {}) {
+  const input = decodeRememberInput(rawInput);
+  if (!input.id) {
+    return parameterError2(
+      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
+    );
+  }
+  const observationId = parseObservationId(input.id);
+  if (observationId !== null) {
+    return handleObservationRemember(db, observationId, input);
+  }
+  const turnId = parseTurnId(input.id);
+  if (turnId !== null) {
+    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
+  }
+  const sessionId = parseSessionId(input.id);
+  if (sessionId !== null) {
+    return handleSessionRemember(db, sessionId, input);
+  }
+  if (/^M\d+$/i.test(input.id)) {
+    return parameterError2(
+      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
+    );
+  }
+  return textResult2(`Unsupported id selector: ${input.id}`);
 }
 
 // src/mcp/timeline.ts
@@ -35831,6 +36159,12 @@ init_paths();
 // src/shared/transcript-parser.ts
 function isKnownSystemInjectedContent(content) {
   return content.startsWith("<task-notification>") || content.startsWith("<local-command-") || content.startsWith("<command-name>") || content.startsWith("<command-args>") || content.startsWith("<command-message>") || content.startsWith("\u23FA Ran ");
+}
+
+// src/task-causality-era.ts
+var TASK_CAUSALITY_ERA_CUTOFF_EPOCH = 1784711427;
+function isTaskCausalityEra(createdAtEpoch, cutoffEpoch = TASK_CAUSALITY_ERA_CUTOFF_EPOCH) {
+  return createdAtEpoch >= cutoffEpoch;
 }
 
 // src/mcp/timeline.ts
@@ -37874,438 +38208,22 @@ function timelineQuery(db, input) {
   }
 }
 
-// src/mcp/session-output.ts
-var CURRENT_SESSION_STATE_TOKEN_BUDGET = 2e3;
-function capCodePoints(value, max) {
-  if (!value) {
-    return value;
-  }
-  const codePoints = Array.from(value);
-  return codePoints.length <= max ? value : `${codePoints.slice(0, Math.max(0, max - 1)).join("")}\u2026`;
+// src/db/era.ts
+function getRecordedEraCutoff(db) {
+  const row = db.query(
+    "SELECT cutoff_epoch AS cutoffEpoch FROM era_state WHERE id = 1"
+  ).get();
+  return row && Number.isFinite(row.cutoffEpoch) ? row.cutoffEpoch : null;
 }
-function buildSessionStateLines(input, capPriorityFields = false, includeHistoricalFields = true) {
-  const title = (capPriorityFields ? capCodePoints(input.title, 100) : input.title) ?? "(untitled session)";
-  const lines = [
-    `[S${input.id}] ${title}`
-  ];
-  const pushField = (label, value, cap) => {
-    const rendered = capPriorityFields && cap ? capCodePoints(value ?? null, cap) : value;
-    if (rendered) {
-      lines.push(`  ${label}: ${rendered}`);
-    }
-  };
-  const pushBulletField = (label, value) => {
-    const items = splitBulletField(value);
-    if (items.length === 0) {
-      return;
-    }
-    lines.push(`  ${label}:`);
-    for (const item of items) {
-      lines.push(`    - ${item}`);
-    }
-  };
-  pushField("content", input.content, 400);
-  pushField("current", input.current, 400);
-  pushField("next", input.nextSteps, 200);
-  if (!includeHistoricalFields) {
-    return lines;
-  }
-  if (input.decision) {
-    pushBulletField("decision", input.decision);
-  } else if ((input.legacyInsight?.length ?? 0) > 0) {
-    lines.push("  insight:");
-    for (const item of input.legacyInsight ?? []) {
-      lines.push(`    - ${item}`);
-    }
-  }
-  pushBulletField("done", input.done);
-  pushBulletField("reference", input.reference);
-  return lines;
+function resolveEraCutoff(db) {
+  return loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
 }
-function renderSessionStateOutput(input) {
-  return buildSessionStateLines(input).join("\n");
-}
-function measureSessionStateTokens(input) {
-  const fieldTokens = (label, value, bullet = false) => {
-    if (!value) {
-      return 0;
-    }
-    const rendered = bullet ? [`  ${label}:`, ...splitBulletField(value).map((item) => `    - ${item}`)].join("\n") : `  ${label}: ${value}`;
-    return estimateDiaryTokens(rendered);
-  };
-  const full = renderSessionStateOutput(input);
-  return {
-    title: estimateDiaryTokens(
-      `[S${input.id}] ${input.title ?? "(untitled session)"}`
-    ),
-    content: fieldTokens("content", input.content),
-    current: fieldTokens("current", input.current),
-    nextSteps: fieldTokens("next", input.nextSteps),
-    decision: fieldTokens("decision", input.decision, true),
-    done: fieldTokens("done", input.done, true),
-    reference: fieldTokens("reference", input.reference, true),
-    total: estimateDiaryTokens(full)
-  };
-}
-
-// src/mcp/remember.ts
-var TURN_REMEMBER_STATUSES = ["skipped", "undone", "active"];
-var OBSERVATION_REMEMBER_STATUSES = [
-  "pending",
-  "extracted",
-  "skipped"
-];
-var SESSION_SUMMARY_KEYS = [
-  "title",
-  "content",
-  "decision",
-  "done",
-  "current",
-  "next_steps",
-  "reference"
-];
-var HTML_ENTITY_MAP = { lt: "<", gt: ">", amp: "&" };
-function decodeHtmlEntities(value) {
-  return value.replace(/&(lt|gt|amp);/g, (_match, name) => HTML_ENTITY_MAP[name]);
-}
-function decodeRememberInput(input) {
-  const decoded = { ...input };
-  for (const key of [
-    "id",
-    "type",
-    "title",
-    "content",
-    "insight",
-    "next_steps",
-    "decision",
-    "done",
-    "current",
-    "reference"
-  ]) {
-    const value = decoded[key];
-    if (typeof value === "string") {
-      decoded[key] = decodeHtmlEntities(value);
-    }
-  }
-  if (decoded.tags) {
-    decoded.tags = decoded.tags.map((tag) => decodeHtmlEntities(tag));
-  }
-  return decoded;
-}
-function textResult2(text) {
-  return {
-    content: [{ type: "text", text }]
-  };
-}
-function parameterError2(message) {
-  return textResult2(`Parameter error: ${message}`);
-}
-function parseSessionId(value) {
-  const match = /^S(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseTurnId(value) {
-  const match = /^T(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function parseObservationId(value) {
-  const match = /^O(\d+)$/i.exec(value.trim());
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-function bracketBareTurnReferences(content, isValidPredecessor) {
-  if (!content) {
-    return content;
-  }
-  return content.replace(
-    /(^|[^[\w])\(?T(\d+)\)?(?![\]\w])/g,
-    (match, lead, digits) => {
-      const id = Number.parseInt(digits, 10);
-      if (!Number.isFinite(id) || !isValidPredecessor(id)) {
-        return match;
-      }
-      const needsSpace = lead !== "" && !/\s/.test(lead) && !"([{".includes(lead);
-      const prefix = needsSpace ? `${lead} ` : lead;
-      return `${prefix}[T${id}]`;
-    }
-  );
-}
-function validateStatusForRoute(status, allowedStatuses, routeLabel) {
-  if (status === void 0) {
-    return null;
-  }
-  if (allowedStatuses === null) {
-    return `${routeLabel} does not accept a status field.`;
-  }
-  if (!allowedStatuses.includes(status)) {
-    const allowedText = allowedStatuses.map((value) => `"${value}"`).join(", ");
-    return `status "${status}" is not valid for ${routeLabel}. Allowed: ${allowedText}.`;
-  }
-  return null;
-}
-function validateGrade(value, label) {
-  if (value === void 0) {
-    return null;
-  }
-  if (!Number.isInteger(value) || value < 0 || value > 4) {
-    return `${label} must be an integer from 0 through 4.`;
-  }
-  return null;
-}
-function deriveTurnStatus(input) {
-  if (input.status === "undone") {
-    return "undone";
-  }
-  if (input.status === "skipped") {
-    return "skipped";
-  }
-  if (input.status === "active") {
-    return "active";
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveObservationStatus(input) {
-  if (input.status === "pending" || input.status === "extracted" || input.status === "skipped") {
-    return input.status;
-  }
-  return input.title || input.content ? "extracted" : "skipped";
-}
-function deriveTurnStatusForUpdate(current, input) {
-  if (current?.status === "extracted" && input.status === void 0 && input.title === void 0 && input.content === void 0) {
-    return void 0;
-  }
-  return deriveTurnStatus(input);
-}
-var RegradeTargetMissingError = class extends Error {
-  constructor(targetId) {
-    super(`regrade target T${targetId} no longer exists`);
-    this.targetId = targetId;
-    this.name = "RegradeTargetMissingError";
-  }
-  targetId;
-};
-function settleEraTurnWithoutNote(db, turnId, current) {
-  const changed = db.query(
-    `UPDATE turns
-         SET status = CASE
-               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
-               ELSE 'skipped'
-             END,
-             updated_at_epoch = ?
-         WHERE id = ? AND status IN ('active', 'provisional')`
-  ).run(Math.floor(Date.now() / 1e3), turnId).changes > 0;
-  const settled = getTurnById(db, turnId) ?? current;
-  if (changed) {
-    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
-  }
-  return textResult2(
-    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
-  );
-}
-function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
-  const current = getTurnById(db, turnId);
-  if (!current) {
-    return textResult2(`Turn T${turnId} not found.`);
-  }
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
-  }
-  const statusError = validateStatusForRoute(
-    input.status,
-    TURN_REMEMBER_STATUSES,
-    "turn remember"
-  );
-  if (statusError) {
-    return parameterError2(statusError);
-  }
-  const gradeError = validateGrade(input.grade, "grade");
-  if (gradeError) {
-    return parameterError2(gradeError);
-  }
-  if ((current.status === "active" || current.status === "provisional") && input.grade === void 0) {
-    return parameterError2(
-      "grade is required when extracting a new turn (integer 0 through 4)."
-    );
-  }
-  let regradeTarget = null;
-  if (input.regrade !== void 0) {
-    const regradeError = validateGrade(input.regrade.grade, "regrade.grade");
-    if (regradeError) {
-      return parameterError2(regradeError);
-    }
-    const regradeId = parseTurnId(input.regrade.id);
-    if (regradeId === null) {
-      return parameterError2("regrade.id must be a T<n> turn reference.");
-    }
-    regradeTarget = getTurnById(db, regradeId);
-    if (!regradeTarget || regradeTarget.sessionId !== current.sessionId || regradeTarget.promptNumber >= current.promptNumber) {
-      return parameterError2(
-        "regrade must target an earlier turn in the same session."
-      );
-    }
-  }
-  const isValidPredecessor = (candidateId) => {
-    if (candidateId === turnId) {
-      return false;
-    }
-    const cited = getTurnById(db, candidateId);
-    return cited !== null && cited.sessionId === current.sessionId && cited.promptNumber < current.promptNumber;
-  };
-  const nowEpoch = Math.floor(Date.now() / 1e3);
-  let written;
+function loadConfigEraCutoff() {
   try {
-    written = runWriteTransaction(db, () => {
-      const turn = updateTurnById(db, turnId, {
-        status: deriveTurnStatusForUpdate(current, input),
-        title: input.title ?? null,
-        content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
-        insight: input.insight ?? null,
-        type: input.type ?? null,
-        significanceGrade: input.grade,
-        tags: input.tags ?? [],
-        updatedAtEpoch: nowEpoch
-      });
-      if (!turn) {
-        return null;
-      }
-      const citations = input.cites === void 0 ? null : replaceTurnCitations(db, turnId, input.cites, nowEpoch);
-      if (regradeTarget && input.regrade) {
-        const regraded = updateTurnById(db, regradeTarget.id, {
-          significanceGrade: input.regrade.grade
-        });
-        if (!regraded) {
-          throw new RegradeTargetMissingError(regradeTarget.id);
-        }
-      }
-      return { turn, citations };
-    });
-  } catch (error48) {
-    if (error48 instanceof RegradeTargetMissingError) {
-      return parameterError2(
-        `regrade target T${error48.targetId} no longer exists; nothing was written.`
-      );
-    }
-    throw error48;
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
   }
-  if (!written) {
-    return textResult2(`Turn T${turnId} not found.`);
-  }
-  let message = `Updated turn T${turnId} with status ${written.turn.status}.`;
-  if (regradeTarget && input.regrade) {
-    message += ` Regraded turn T${regradeTarget.id} to ${input.regrade.grade}.`;
-  }
-  if (written.citations) {
-    message += ` Recorded ${written.citations.written.length} citation(s).`;
-    if (written.citations.droppedIds.length > 0) {
-      message += ` Dropped unresolvable: ${written.citations.droppedIds.map((id) => `T${id}`).join(", ")}.`;
-    }
-  }
-  return textResult2(message);
-}
-function handleObservationRemember(db, observationId, input) {
-  const statusError = validateStatusForRoute(
-    input.status,
-    OBSERVATION_REMEMBER_STATUSES,
-    "observation remember"
-  );
-  if (statusError) {
-    return parameterError2(statusError);
-  }
-  if (input.type !== void 0 || input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0 || input.insight !== void 0 || input.tags !== void 0 || input.next_steps !== void 0 || input.decision !== void 0 || input.done !== void 0 || input.current !== void 0 || input.reference !== void 0) {
-    return parameterError2(
-      "observation remember only accepts title, content, and status."
-    );
-  }
-  const observation = updateObservation(db, observationId, {
-    title: input.title,
-    content: input.content,
-    status: deriveObservationStatus(input)
-  });
-  if (!observation) {
-    return textResult2(`Observation O${observationId} not found.`);
-  }
-  return textResult2(`Updated observation O${observationId} with status ${observation.status}.`);
-}
-function handleSessionRemember(db, sessionId, input) {
-  const statusError = validateStatusForRoute(input.status, null, "session remember");
-  if (statusError) {
-    return parameterError2(statusError);
-  }
-  if (input.grade !== void 0 || input.regrade !== void 0 || input.cites !== void 0) {
-    return parameterError2(
-      "session remember does not accept grade, regrade, or cites."
-    );
-  }
-  const session = getSession(db, sessionId);
-  if (!session) {
-    return textResult2(`Session ${sessionId} not found.`);
-  }
-  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
-  if (missing.length > 0) {
-    return parameterError2(
-      `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
-        ", "
-      )}). Missing: ${missing.join(", ")}.`
-    );
-  }
-  const tokenReport = measureSessionStateTokens({
-    id: session.id,
-    title: input.title ?? "",
-    content: input.content ?? "",
-    decision: input.decision ?? "",
-    done: input.done ?? "",
-    current: input.current ?? "",
-    nextSteps: input.next_steps ?? "",
-    reference: input.reference ?? ""
-  });
-  if (tokenReport.total > CURRENT_SESSION_STATE_TOKEN_BUDGET) {
-    return parameterError2(
-      `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; title=${tokenReport.title}, content=${tokenReport.content}, current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, decision=${tokenReport.decision}, done=${tokenReport.done}, reference=${tokenReport.reference}, total=${tokenReport.total}. Trim fields and retry.`
-    );
-  }
-  const updated = updateSessionSummaryRewrite(
-    db,
-    sessionId,
-    {
-      title: input.title ?? "",
-      content: input.content ?? "",
-      decision: input.decision ?? "",
-      done: input.done ?? "",
-      current: input.current ?? "",
-      nextSteps: input.next_steps ?? "",
-      reference: input.reference ?? ""
-    },
-    Math.floor(Date.now() / 1e3)
-  );
-  if (!updated) {
-    return textResult2(`Session ${sessionId} not found.`);
-  }
-  return textResult2(`Updated session ${sessionId}.`);
-}
-function rememberTool(db, rawInput, options = {}) {
-  const input = decodeRememberInput(rawInput);
-  if (!input.id) {
-    return parameterError2(
-      "id is required: O<n> (observation), T<n> (turn), or S<n> (session). Durable memory creation was removed."
-    );
-  }
-  const observationId = parseObservationId(input.id);
-  if (observationId !== null) {
-    return handleObservationRemember(db, observationId, input);
-  }
-  const turnId = parseTurnId(input.id);
-  if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
-  }
-  const sessionId = parseSessionId(input.id);
-  if (sessionId !== null) {
-    return handleSessionRemember(db, sessionId, input);
-  }
-  if (/^M\d+$/i.test(input.id)) {
-    return parameterError2(
-      "Durable memory (M<n>) was removed. Use O<n> (observation), T<n> (turn), or S<n> (session)."
-    );
-  }
-  return textResult2(`Unsupported id selector: ${input.id}`);
 }
 
 // src/mcp/handlers.ts
@@ -38344,7 +38262,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
-  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveConfiguredEraCutoff();
+  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);

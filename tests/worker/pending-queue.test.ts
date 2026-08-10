@@ -10,8 +10,8 @@ import {
 } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { getTurnById } from "../../src/db/turns";
 import { createWorkerCore } from "../../src/worker/server";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 describe("pending queue helpers", () => {
   let db: Database;
@@ -104,29 +104,8 @@ describe("terminal-owner queue hygiene", () => {
     return observationId;
   }
 
-  function makeCore(sentPrompts: string[] = []) {
-    return createWorkerCore({
-      db,
-      now: () => 100,
-      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps = (args.length === 2 ? args[1] : args[3]) as
-          | { onRemember?: (id: string) => void }
-          | undefined;
-        return {
-          sessionId: "queue-hygiene-worker",
-          queryPid: 123,
-          async sendPrompt(prompt: string) {
-            sentPrompts.push(prompt);
-            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
-              deps?.onRemember?.(`T${match[1]}`);
-            }
-            return { session_id: "queue-hygiene-worker" };
-          },
-          async close() {},
-        } satisfies WorkerQuerySession;
-      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      isProcessAliveImpl: () => false,
-    });
+  function makeCore() {
+    return createWorkerCore({ db, now: () => 100 });
   }
 
   for (const status of ["extracted", "skipped", "failed", "undone"] as const) {
@@ -156,13 +135,17 @@ describe("terminal-owner queue hygiene", () => {
     db.exec(`CREATE TRIGGER reject_queue_delete BEFORE DELETE ON pending_queue
       BEGIN SELECT RAISE(ABORT, 'delete rejected'); END`);
 
-    await expect(makeCore().scanAndDrainQueue()).rejects.toThrow("delete rejected");
+    // Retirement and deletion share one transaction, so a rejected delete must
+    // leave the observation exactly as it was. The drain itself does not throw:
+    // it releases the claim and moves on, which is what keeps one poisoned row
+    // from wedging every other session's work.
+    await makeCore().scanAndDrainQueue();
 
     expect(getObservation(db, observationId)?.status).toBe("pending");
     expect(listQueueItems(db)).toHaveLength(1);
   });
 
-  test("processes a valid turn-stop after retiring terminal-owner pollution", async () => {
+  test("settles a valid turn-stop after retiring terminal-owner pollution", async () => {
     seedObservation("extracted", 1);
     const liveTurnId = db.query<{ id: number }, [number]>(
       `INSERT INTO turns (
@@ -174,13 +157,13 @@ describe("terminal-owner queue hygiene", () => {
       `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
        VALUES ('turn-stop', ?, ?, 40)`,
     ).run(liveTurnId, sessionId);
-    const sentPrompts: string[] = [];
-    const core = makeCore(sentPrompts);
+    const core = makeCore();
 
     await core.scanAndDrainQueue();
-    await core.flushSession(sessionId);
 
-    expect(sentPrompts.some((prompt) => prompt.includes(`id="T${liveTurnId}"`))).toBe(true);
+    // No era configured, so an un-noted turn nobody will ever write is `failed`
+    // (db/turn-completion.ts) — the same floor the stranded repair applies.
+    expect(getTurnById(db, liveTurnId)?.status).toBe("failed");
     expect(listQueueItems(db)).toEqual([]);
   });
 });

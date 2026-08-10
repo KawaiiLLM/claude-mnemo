@@ -201,11 +201,7 @@ function convertOccupiedTurnToMarker(
          files_modified = NULL,
          tool_call_count = NULL,
          was_interrupted = 0,
-         was_rolled_back = 0,
-         extraction_stall_attempts = 0,
-         extraction_stall_retry_at_ms = NULL,
-         extraction_stall_retry_after_seq = NULL,
-         extraction_stall_retry_mode = NULL
+         was_rolled_back = 0
      WHERE id = ?`,
   ).run(
     claim.uuid,

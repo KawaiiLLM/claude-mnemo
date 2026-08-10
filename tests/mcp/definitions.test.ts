@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
 import {
-  MNEMO_ALLOWED_TOOLS,
   MNEMO_TOOL_DESCRIPTIONS,
   timelineInputSchema,
   recallInputSchema,
@@ -57,11 +56,6 @@ describe("tool surface", () => {
     // `note` is deliberately absent: it is the MAIN agent's own note channel
     // (spec D1). Handing it to the extraction worker would let the pipeline
     // write the notes the P1 trial exists to compare it against.
-    expect(MNEMO_ALLOWED_TOOLS).toEqual([
-      "mcp__mnemo__remember",
-      "mcp__mnemo__recall",
-      "mcp__mnemo__timeline",
-    ]);
     expect(Object.keys(MNEMO_TOOL_DESCRIPTIONS).sort()).toEqual([
       "note",
       "recall",

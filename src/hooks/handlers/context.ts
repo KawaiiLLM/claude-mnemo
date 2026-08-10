@@ -14,7 +14,7 @@ import type {
   FormattedSession,
 } from "../../mcp/format";
 import { renderCurrentSessionStateOutput } from "../../mcp/session-output";
-import { resolveConfiguredEraCutoff } from "../../shared/config";
+import { resolveEraCutoff } from "../../db/era";
 import { parseMarkdownSections } from "../../shared/markdown-sections";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
 import type { HookResult, NormalizedHookInput } from "../types";
@@ -504,7 +504,7 @@ export function createContextHandler(
   const eraCutoffEpoch =
     dependencies.eraCutoffEpoch !== undefined
       ? dependencies.eraCutoffEpoch
-      : resolveConfiguredEraCutoff();
+      : resolveEraCutoff(dependencies.db);
 
   return async function handleContextHook(
     input: NormalizedHookInput,

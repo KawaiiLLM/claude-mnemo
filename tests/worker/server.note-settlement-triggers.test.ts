@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
@@ -19,7 +21,6 @@ import {
   SETTLEMENT_ERA_CUTOFF_EPOCH,
   SETTLEMENT_KILLED_CONFIG,
 } from "../support/settlement-config";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 /**
  * The worker-module boundary (spec Testing Decisions): events in, DB rows and
@@ -81,40 +82,67 @@ function seedDecidedSession(
 interface Harness {
   core: ReturnType<typeof createWorkerCore>;
   dispatched: NoteSettlementJob[];
-  agentSessionsCreated: () => number;
+}
+
+/**
+ * Every `@anthropic-ai/claude-agent-sdk` import reachable from the worker's
+ * turn-processing path.
+ *
+ * The old form of this check counted agent sessions through an injected factory
+ * seam, and it could only ever be compared ACROSS a trigger because the resident
+ * extraction agent opened sessions from the same drain. Ticket 15 removed that
+ * agent, so the honest assertion is absolute and structural: nothing on the path
+ * from a captured turn to a settled row may so much as import a model client.
+ *
+ * Two subtrees are cut, and they are the only two the spec still allows the
+ * worker to START (never to host): the D9 settlement payload and the nightly
+ * dream. Both are constructed exclusively in `main`, both are config-gated, and
+ * neither is reachable from `createWorkerCore` — the core receives the
+ * settlement payload as an injected function and defaults to none.
+ */
+const MODEL_SUBPROCESS_ENTRY_POINTS = [
+  "src/worker/note-settlement-sdk-query.ts",
+  "src/worker/diary-runtime.ts",
+];
+
+function sdkImportsReachableFromWorkerCore(): string[] {
+  const root = resolve(import.meta.dir, "../..");
+  const cut = new Set(
+    MODEL_SUBPROCESS_ENTRY_POINTS.map((path) => resolve(root, path)),
+  );
+  const seen = new Set<string>();
+  const offenders: string[] = [];
+  const visit = (file: string): void => {
+    const resolved = file.endsWith(".ts") ? file : `${file}.ts`;
+    if (seen.has(resolved) || cut.has(resolved) || !existsSync(resolved)) {
+      return;
+    }
+    seen.add(resolved);
+    const source = readFileSync(resolved, "utf8");
+    if (source.includes("@anthropic-ai/claude-agent-sdk")) {
+      offenders.push(resolved.slice(root.length + 1));
+    }
+    for (const match of source.matchAll(/from "(\.[^"]+)"/g)) {
+      visit(resolve(dirname(resolved), match[1]!));
+    }
+  };
+  visit(resolve(root, "src/worker/server.ts"));
+  return offenders;
 }
 
 function createHarness(db: Database, config: MnemoConfig): Harness {
   const dispatched: NoteSettlementJob[] = [];
-  let agentSessionsCreated = 0;
 
   const core = createWorkerCore({
     db,
     config,
-    processBatchImpl: async () => {},
-    pushSessionSummaryPromptImpl: async () => {},
-    closeSessionQueryImpl: async () => {},
-    readAgentContextTokensImpl: () => null,
-    isProcessAliveImpl: () => false,
     noteSettlementDispatchImpl: async ({ job }) => {
       dispatched.push(job);
       return { ok: true };
     },
-    // Any settlement path that reached for a model would have to come through
-    // here; it stays at zero for the whole lifecycle.
-    createWorkerQuerySessionImpl: (() => {
-      agentSessionsCreated += 1;
-      return {
-        sessionId: `agent-${agentSessionsCreated}`,
-        queryPid: 1,
-        sendPrompt: async () => ({ session_id: `agent-${agentSessionsCreated}` }),
-        compact: async () => {},
-        close: async () => {},
-      } satisfies WorkerQuerySession;
-    }) as unknown as typeof import("../../src/worker/query-session").createWorkerQuerySession,
   });
 
-  return { core, dispatched, agentSessionsCreated: () => agentSessionsCreated };
+  return { core, dispatched };
 }
 
 describe("worker settlement trigger surface", () => {
@@ -135,10 +163,7 @@ describe("worker settlement trigger surface", () => {
       "content-worker-triggers",
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS + NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
     );
-    const { core, dispatched, agentSessionsCreated } = createHarness(
-      db,
-      SETTLEMENT_ENABLED_CONFIG,
-    );
+    const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
 
     await core.handleTurnStop(sessionDbId);
     expect(dispatched.map((job) => job.triggerType)).toEqual(["consecutive"]);
@@ -155,7 +180,7 @@ describe("worker settlement trigger surface", () => {
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS + NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
     );
-    expect(agentSessionsCreated()).toBe(0);
+    expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   });
 
   test("sessionEnd, resume, worker start and every timer settle nothing", async () => {
@@ -164,10 +189,7 @@ describe("worker settlement trigger surface", () => {
       "content-non-triggers",
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2,
     );
-    const { core, dispatched, agentSessionsCreated } = createHarness(
-      db,
-      SETTLEMENT_ENABLED_CONFIG,
-    );
+    const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
 
     // Worker start.
     core.recoverFromCrash();
@@ -176,9 +198,6 @@ describe("worker settlement trigger surface", () => {
       PATH: "/usr/bin",
     });
     // Timers.
-    await core.runRetryTick(2_000_000);
-    await core.runKeepaliveTick(2_000_000);
-    await core.abortStalledSessions(2_000_000);
     core.runTranscriptRepairTick();
     // SessionEnd.
     await core.finishSession(sessionDbId);
@@ -189,15 +208,9 @@ describe("worker settlement trigger surface", () => {
 
     // The same session settles the moment a real trigger arrives, so the zeros
     // above are about the paths, not about an un-settleable fixture.
-    //
-    // The agent-session count is compared ACROSS the trigger rather than to
-    // zero: the legacy P1 extraction agent still opens sessions from the drain
-    // this test also exercises (D10 removes it in P2), and an absolute zero
-    // would be asserting that instead of the settlement path.
-    const agentSessionsBefore = agentSessionsCreated();
     await core.handleTurnStop(sessionDbId);
     expect(dispatched).toHaveLength(2);
-    expect(agentSessionsCreated()).toBe(agentSessionsBefore);
+    expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   });
 
   test("the era cutoff alone brings settlement up", async () => {
@@ -228,7 +241,7 @@ describe("worker settlement trigger surface", () => {
       contentSessionId,
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2,
     );
-    const { core, dispatched, agentSessionsCreated } = createHarness(db, config);
+    const { core, dispatched } = createHarness(db, config);
 
     await core.handleTurnStop(sessionDbId);
     await core.handleCompact(sessionDbId);
@@ -250,7 +263,7 @@ describe("worker settlement trigger surface", () => {
         )
         .get()!.count,
     ).toBe(0);
-    expect(agentSessionsCreated()).toBe(0);
+    expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   }
 
   test("the product default settles nothing at either trigger", async () => {
@@ -270,19 +283,9 @@ describe("worker settlement trigger surface", () => {
       "content-default-stub",
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
     );
-    let agentSessionsCreated = 0;
     const core = createWorkerCore({
       db,
       config: SETTLEMENT_ENABLED_CONFIG,
-      processBatchImpl: async () => {},
-      pushSessionSummaryPromptImpl: async () => {},
-      closeSessionQueryImpl: async () => {},
-      readAgentContextTokensImpl: () => null,
-      isProcessAliveImpl: () => false,
-      createWorkerQuerySessionImpl: (() => {
-        agentSessionsCreated += 1;
-        throw new Error("settlement must never open an agent session");
-      }) as unknown as typeof import("../../src/worker/query-session").createWorkerQuerySession,
     });
 
     await core.handleTurnStop(sessionDbId);
@@ -290,6 +293,6 @@ describe("worker settlement trigger surface", () => {
     const jobs = listNoteSettlementJobs(db, sessionDbId);
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.status).toBe("done");
-    expect(agentSessionsCreated).toBe(0);
+    expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   });
 });

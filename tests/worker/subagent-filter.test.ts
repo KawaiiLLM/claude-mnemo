@@ -17,7 +17,6 @@ import {
 import {
   detectAndCleanSubagentTurns,
   detectAndCleanSubagentTurnsFromParsed,
-  getPendingSubagentTurns,
 } from "../../src/worker/subagent-filter";
 
 function writeTranscript(lines: unknown[]): { directory: string; path: string } {
@@ -202,9 +201,6 @@ describe("worker subagent filter helpers", () => {
     expect(detectAndCleanSubagentTurns(db, sessionId, transcript.path, 500)).toEqual([1]);
     expect(getTurnById(db, turnId)?.status).toBe("undone");
     expect(getTurnById(db, turnId)?.tags).toContain("subagent:pending");
-    expect(
-      getPendingSubagentTurns(db, sessionId).map((turn) => turn.promptNumber),
-    ).toEqual([1]);
   });
 
   test("detectAndCleanSubagentTurnsFromParsed matches the path wrapper", () => {
@@ -249,11 +245,6 @@ describe("worker subagent filter helpers", () => {
     expect(summarizeSubagentTarget(db, parsedTarget)).toEqual(
       summarizeSubagentTarget(db, pathTarget),
     );
-    expect(
-      getPendingSubagentTurns(db, parsedTarget.sessionId).map(
-        (turn) => turn.promptNumber,
-      ),
-    ).toEqual([1]);
   });
 
   test("detectAndCleanSubagentTurns wrapper uses the retrying write transaction", () => {

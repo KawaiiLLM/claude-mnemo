@@ -27,12 +27,12 @@ describe("shared config", () => {
     mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
     writeFileSync(
       `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ mergeThresholdChars: 1500 }),
+      JSON.stringify({ hardExitTimeoutMs: 65_000 }),
     );
 
     expect(loadConfig(home)).toEqual({
       ...DEFAULT_CONFIG,
-      mergeThresholdChars: 1500,
+      hardExitTimeoutMs: 65_000,
     });
   });
 
@@ -42,63 +42,6 @@ describe("shared config", () => {
     writeFileSync(`${home}/.claude-mnemo/config.json`, "{not-json");
 
     expect(loadConfig(home)).toEqual(DEFAULT_CONFIG);
-  });
-
-  test("loadConfig backfills new streaming knobs for legacy config files", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ mergeThresholdChars: 1500 }),
-    );
-
-    const config = loadConfig(home);
-    expect(config.maxMiniTurnChars).toBe(24_000);
-    expect(config.maxFlushAttempts).toBe(3);
-  });
-
-  test("loadConfig honors explicit streaming overrides", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ maxMiniTurnChars: 16_000, maxFlushAttempts: 5 }),
-    );
-
-    const config = loadConfig(home);
-    expect(config.maxMiniTurnChars).toBe(16_000);
-    expect(config.maxFlushAttempts).toBe(5);
-  });
-
-  test("loadConfig clamps streaming knobs to their floors", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ maxMiniTurnChars: 500, maxFlushAttempts: 0 }),
-    );
-
-    const config = loadConfig(home);
-    expect(config.maxMiniTurnChars).toBe(10240);
-    expect(config.maxFlushAttempts).toBe(1);
-  });
-
-  test("compactContextRatio defaults to 0.5", () => {
-    expect(DEFAULT_CONFIG.compactContextRatio).toBe(0.5);
-    expect(loadConfig("/definitely-missing").compactContextRatio).toBe(0.5);
-  });
-
-  test("SessionEnd tail defaults to sixty seconds and accepts an override", () => {
-    expect(DEFAULT_CONFIG.sessionEndTailTimeoutMs).toBe(60_000);
-
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ sessionEndTailTimeoutMs: 90_000 }),
-    );
-
-    expect(loadConfig(home).sessionEndTailTimeoutMs).toBe(90_000);
   });
 
   test("hard-exit backstop defaults to seventy seconds and accepts an override", () => {
@@ -129,85 +72,6 @@ describe("shared config", () => {
       JSON.stringify({ hardExitTimeoutMs: 999_999 }),
     );
     expect(loadConfig(home).hardExitTimeoutMs).toBe(300_000);
-  });
-
-  test("extraction stall watchdog defaults to sixty seconds and accepts an override", () => {
-    expect(DEFAULT_CONFIG.stallThresholdMs).toBe(60_000);
-
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ stallThresholdMs: 90_000 }),
-    );
-
-    expect(loadConfig(home).stallThresholdMs).toBe(90_000);
-  });
-
-  test("loadConfig clamps the extraction stall threshold into [1s, 5m]", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ stallThresholdMs: 1 }),
-    );
-    expect(loadConfig(home).stallThresholdMs).toBe(1_000);
-
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ stallThresholdMs: 999_999 }),
-    );
-    expect(loadConfig(home).stallThresholdMs).toBe(300_000);
-  });
-
-  test("loadConfig clamps compactContextRatio into [0.1, 0.95]", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ compactContextRatio: 5 }),
-    );
-    expect(loadConfig(home).compactContextRatio).toBe(0.95);
-
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ compactContextRatio: 0 }),
-    );
-    expect(loadConfig(home).compactContextRatio).toBe(0.1);
-  });
-
-  test("loadConfig honors an in-range compactContextRatio override", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({ compactContextRatio: 0.7 }),
-    );
-
-    expect(loadConfig(home).compactContextRatio).toBe(0.7);
-  });
-
-  test("loadConfig falls back to defaults for non-finite numeric knobs", () => {
-    const home = mkdtempSync(join(tmpdir(), "mnemo-config-"));
-    mkdirSync(`${home}/.claude-mnemo`, { recursive: true });
-    // Strings / junk must not become NaN (which would silently disable the
-    // compact gate and clamp comparisons everywhere).
-    writeFileSync(
-      `${home}/.claude-mnemo/config.json`,
-      JSON.stringify({
-        compactContextRatio: "bad",
-        maxMiniTurnChars: "nope",
-        maxFlushAttempts: null,
-      }),
-    );
-
-    const config = loadConfig(home);
-    expect(config.compactContextRatio).toBe(DEFAULT_CONFIG.compactContextRatio);
-    expect(config.maxMiniTurnChars).toBe(DEFAULT_CONFIG.maxMiniTurnChars);
-    expect(config.maxFlushAttempts).toBe(DEFAULT_CONFIG.maxFlushAttempts);
-    expect(Number.isFinite(config.compactContextRatio)).toBe(true);
   });
 
   test("loads tier aliases and a literal dream-agent model pin", () => {

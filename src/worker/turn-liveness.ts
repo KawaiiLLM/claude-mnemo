@@ -2,8 +2,8 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
 import { calendarDayBounds, contentDateAt } from "../diary/calendar";
-import { getTurnById, type TurnRecord } from "../db/turns";
-import { isSegmentEra } from "../segment-era";
+import { getTurnById } from "../db/turns";
+import { completionFloorStatus } from "../db/turn-completion";
 
 export interface RestoreStrandedTurnStopsOptions {
   /** Content-days to scan — see `listStrandedRepairDates`, the only producer. */
@@ -278,28 +278,6 @@ function sameEvidence(
     left.turnStopSeqs.length === right.turnStopSeqs.length &&
     left.turnStopSeqs.every((seq, index) => seq === right.turnStopSeqs[index])
   );
-}
-
-/**
- * What a turn nobody can extract any more should be left as.
- *
- * A record on the row wins outright — a partial extraction, or in the new era
- * the main agent's own note, is the record. Without one the answer depends on
- * whether anybody was ever going to write it: pre-era the extraction really did
- * lose the only summary that turn would have had, which is a failure; in the
- * new era a turn its own agent chose not to note is a hole, and `skipped` is
- * what a hole has always been called (the era writeback in mcp/remember.ts
- * settles live ones the same way — the two floors must not disagree about what
- * an un-noted turn looks like).
- */
-export function completionFloorStatus(
-  turn: Pick<TurnRecord, "title" | "content" | "createdAtEpoch">,
-  eraCutoffEpoch: number | null = null,
-): "extracted" | "skipped" | "failed" {
-  if (turn.title !== null || turn.content !== null) {
-    return "extracted";
-  }
-  return isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch) ? "skipped" : "failed";
 }
 
 /**

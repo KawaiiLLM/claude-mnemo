@@ -19,50 +19,20 @@ import {
   getSession,
   getSessionByContentId,
   updateCompactAnchor,
-  updateLastAgentSessionId,
 } from "../db/sessions";
-import {
-  getObservation,
-  hasSkippedObservationsForTurn,
-} from "../db/observations";
-import {
-  clearExtractionStallRetries,
-  getTurnById,
-  listExtractionStallRetries,
-  recordExtractionStalls,
-  type ExtractionStallRetryMode,
-  updateTurnById,
-} from "../db/turns";
-import {
-  parseReplayTranscript,
-  readLatestContextTokens,
-} from "../shared/transcript-parser";
+import { reconcileNoteDebt } from "../db/note-debt";
+import { getTurnById } from "../db/turns";
 import {
   claimNextItem,
   countQueueItemsForSession,
   deleteQueueItem,
   releaseQueueClaim,
   resetClaimedQueueItems,
-  resetClaimedQueueItemsForSession,
   type PendingQueueItem,
 } from "../db/pending-queue";
-import { initializeDatabase } from "../db/schema";
+import { ensureRecordedEraCutoff } from "../db/era";
+import { initializeDatabase, migrateTurnCitationsToEdges } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
-import { MNEMO_ALLOWED_TOOLS } from "../mcp/definitions";
-import { isSegmentEra } from "../segment-era";
-import { getSessionEffectiveCitations } from "../db/citations";
-import {
-  claimNextSettlementJob,
-  enqueueSettlementBoundaries,
-  failSettlementJob,
-  type SettlementJob,
-} from "../db/settlement";
-import {
-  applySettlementBatch,
-  buildSettlementPrompt,
-  computeSettlementSignals,
-  parseSettlementBatch,
-} from "./settlement";
 import {
   createNoteSettlementScheduler,
   type NoteSettlementDispatch,
@@ -74,59 +44,16 @@ import {
   DATA_DIR,
   WORKER_PID_PATH,
   WORKER_STARTING_PATH,
-  resolveTranscriptPath,
 } from "../shared/paths";
 import { DEFAULT_CONFIG, loadConfig, type MnemoConfig } from "../shared/config";
 import { createLogger } from "../shared/logger";
-import {
-  flagDeliveryDropped,
-  getReminderItems,
-  getSilencedReminderItems,
-  markReminderItemsNotified,
-  type ReminderItem,
-} from "./invalidation";
-import {
-  detectAndCleanSubagentTurns,
-  getPendingSubagentTurns,
-  markSubagentTurnsNotified,
-} from "./subagent-filter";
-import { detectCacheTtl } from "./cache-ttl";
-import {
-  buildBatchPrompt,
-  buildTurnSignificanceCalibration,
-  createWorkerProcessors,
-  FINAL_SLICE_OVERHEAD,
-  renderMiniTurn,
-  STALE_TURN_THRESHOLD,
-  STREAMING_SLICE_OVERHEAD,
-  type MiniTurnPayload,
-} from "./processors";
-import {
-  createWorkerQuerySession,
-  isExtractionAgentActivity,
-  type WorkerQuerySession,
-} from "./query-session";
-import {
-  buildCorrectiveResend,
-  classifyWorkUnitResponse,
-  deriveRequiredTargetIds,
-  type WorkUnitShape,
-} from "./derailment";
+import { detectAndCleanSubagentTurns } from "./subagent-filter";
 import {
   createDiaryRuntime,
   type CreateDiaryRuntimeOptions,
   type DiaryRuntime,
 } from "./diary-runtime";
-import { renderCurrentSessionOutput } from "../mcp/session-output";
-import { buildSessionSummary } from "../mcp/recall";
 import {
-  classifyWorkerError,
-  createWorkerAbortError,
-  resolveWorkerRetryDelayMs,
-  WorkerAbortError,
-} from "./error-classifier";
-import {
-  completionFloorStatus,
   finalizeUnreachableStrandedTurns,
   listStrandedRepairDates,
   restoreStrandedTurnStops,
@@ -140,30 +67,25 @@ import {
 const WORKER_PORT = 37778;
 const STARTING_STALE_MS = 10_000;
 const WATCHDOG_INTERVAL_MS = 10_000;
-const CONNECTION_RETRY_BACKOFF_MS = 10_000;
-const BILLING_BLOCKED_RETRY_FLOOR_MS = 24 * 60 * 60 * 1_000;
-const IDLE_QUERY_SESSION_MS = 30 * 60 * 1000;
 const IDLE_WORKER_HTTP_MS = 30 * 60 * 1000;
-const OBS_TIMEOUT_MS = 15_000;
-const TURN_STOP_TIMEOUT_MS = 30_000;
-// Memory agent runs on claude-sonnet-5 (1M window). Used to turn
-// config.compactContextRatio into an absolute token gate for /compact.
-const AGENT_CONTEXT_WINDOW_TOKENS = 1_000_000;
-// Hard ceiling on the /compact trigger. Even with the 1M window we keep each
-// memory-agent turn lean by compacting no later than 100K context, so the gate
-// is min(window * ratio, this). With the 1M window this cap governs for every
-// in-range ratio (0.1..0.95 → 100K..950K), pinning the effective trigger at
-// 100K; the ratio only re-engages if the window is set below 200K.
-const AGENT_COMPACT_MAX_TOKENS = 100_000;
 
-// Wall-clock budget for one worker-driven /compact. Compaction time scales with
-// the context being compacted, so too tight a budget is self-defeating: the
-// sessions that most need compacting are exactly the ones that time out.
-const COMPACT_BUDGET_MS = 300_000;
-// Once every content session has exited, an in-flight compact is the only thing
-// keeping the worker alive; a graceful exit must not wait out the full budget.
-const SHUTDOWN_COMPACT_BUDGET_MS = 60_000;
-const COMPACT_POLL_MS = 1_000;
+/**
+ * The worker is a librarian, not a reader (spec D10, ticket 15).
+ *
+ * It owns the serialized write to the database, the mechanical retirement of
+ * captured work, the two note-settlement triggers and the nightly dream claim —
+ * and it hosts NO language model of its own on any path. The resident extraction
+ * agent that used to live here (its SDK session, compact management, resume
+ * pointer, stall watchdog, obs summary pipeline, per-session summary pass and
+ * two-phase grade settlement) was removed whole: a turn's record is now written
+ * by the agent that lived the turn, and the turn's own completion event settles
+ * the row arithmetically (db/turn-completion.ts, reached through the note-debt
+ * classification path).
+ *
+ * The one subprocess the worker can still start is the note-settlement payload,
+ * and it is doubly gated: no era cutoff, or the kill switch off, and nothing is
+ * even constructed (see `main`).
+ */
 
 export interface QueueDrain {
   (sessionFilter?: number): Promise<void>;
@@ -171,184 +93,6 @@ export interface QueueDrain {
 
 interface DrainQueueResult {
   turnStopSessionDbIds: Set<number>;
-}
-
-export interface BufferState {
-  items: PendingQueueItem[];
-}
-
-// A flush unit = one outgoing message (D6). The discriminant pins the two
-// shapes at the type level: "merged" carries multiple short-turn mini-turns
-// that may be merged up to mergeThresholdChars; "slice" carries exactly one
-// mini-turn (streaming or final) from a turn that has streamed, never merged.
-type BatchEntry =
-  | {
-      kind: "merged";
-      miniTurns: MiniTurnPayload[];
-      attempts: number;
-      sessionUpdated: boolean;
-      size: number;
-      oldestTurnEpoch: number;
-    }
-  | {
-      kind: "slice";
-      miniTurn: MiniTurnPayload;
-      attempts: number;
-      sessionUpdated: boolean;
-      size: number;
-      oldestTurnEpoch: number;
-    };
-
-interface StallRetryPlan {
-  nextMode: ExtractionStallRetryMode;
-  turnIds: number[];
-  retryAtMs: number;
-  latestTurnStopSeq: number;
-}
-
-function compareStallRetryPlans(
-  left: StallRetryPlan,
-  right: StallRetryPlan,
-): number {
-  if (left.nextMode === right.nextMode) {
-    return 0;
-  }
-  return left.nextMode === "resume" ? -1 : 1;
-}
-
-interface SessionSuspension {
-  retryAtMs: number;
-  latestTurnStopSeq: number;
-  releasePolicy: "event-or-backoff" | "event-and-backoff";
-  retryPlans: StallRetryPlan[];
-}
-
-function batchMiniTurns(batch: BatchEntry): MiniTurnPayload[] {
-  return batch.kind === "merged" ? batch.miniTurns : [batch.miniTurn];
-}
-
-function batchTurnIds(batch: BatchEntry): number[] {
-  return [...new Set(batchMiniTurns(batch).map((item) => item.turnId))];
-}
-
-// The minimal {turnId}-only shape the derailment module needs for one flush
-// unit (D1 required-id derivation + D5 floor granularity). Merged → all turn
-// ids; any slice (streaming mid / final) → its single turn id.
-function batchWorkUnitShape(batch: BatchEntry): WorkUnitShape {
-  if (batch.kind === "merged") {
-    return {
-      kind: "merged",
-      miniTurns: batch.miniTurns.map((miniTurn) => ({ turnId: miniTurn.turnId })),
-    };
-  }
-  return { kind: "slice", miniTurn: { turnId: batch.miniTurn.turnId } };
-}
-
-// A flush unit is a completion point (eligible for T3 re-session + the D5
-// floor) unless it is a streaming mid slice (a later/final slice still carries
-// the turn). A merged batch is always short turns (completion points).
-function batchIsCompletionPoint(batch: BatchEntry): boolean {
-  return !(batch.kind === "slice" && batch.miniTurn.role === "streaming");
-}
-
-// Result state machine (D8) — flushOneBatchLocked never throws for control flow.
-type FlushOutcome =
-  | "flushed"
-  | "retryLater"
-  | "suspended"
-  | "dropped"
-  | "empty";
-
-// Thrown by sendWorkUnit when a completion-point unit still fails to extract
-// after K corrective resends AND a fresh-session cold-start retry (the
-// derailment floor). The caller (Task 10) decides the drop/flag side effects.
-export class DerailmentFloorError extends Error {
-  constructor(public requiredIds: Set<number>) {
-    super("derailment floor");
-    this.name = "DerailmentFloorError";
-  }
-}
-
-export interface SessionState {
-  sessionDbId: number;
-  querySession: WorkerQuerySession | null;
-  contentSessionId: string | null;
-  project: string | null;
-  /** Authoritative transcript path from the session row; null → derive. */
-  transcriptPath: string | null;
-  batchQueue: BatchEntry[];
-  // turnId -> next streaming partIndex. Presence means the turn has streamed
-  // at least one slice this process lifetime (D2/D6). Lost on restart; the
-  // turn-stop role decision also consults turn.status as a durable signal.
-  streamedParts: Map<number, number>;
-  cacheTtlMs: number;
-  lastInjectedSummaryEpoch?: number;
-  nextBatchNeedsSessionContext: boolean;
-  lastPushAt: number;
-  lastMessageAt: number;
-  lastActivity: number;
-  lastAgentActivityAt: number;
-  requestInFlight: boolean;
-  queryPid?: number;
-  agentSessionId?: string;
-  // Set by the onCompactBoundary callback when the SDK auto-compacts the agent
-  // mid-stream (no explicit compact() awaiting). Re-prime can't be injected
-  // mid-stream, so the next work unit re-primes before its turn batch, then
-  // clears this flag. The worker-driven compact path re-primes synchronously and
-  // never sets this (see handleCompact / query-session compact_boundary gating).
-  needsReprime?: boolean;
-  /**
-   * Set when this session's agent transcript must NOT be resumed again — today
-   * only after a compact that never landed, which leaves a context too large to
-   * ever compact. The next `ensureQuerySession` opens a fresh agent and clears
-   * the flag; until then the session simply has no runtime, so a session that
-   * never gets more work never pays for one.
-   */
-  forceFreshNextQuery?: boolean;
-  /** Bumped per runtime build; callbacks from older runtimes are ignored. */
-  queryGeneration?: number;
-  processingLock: Promise<void>;
-  closing?: Promise<void>;
-  /**
-   * `withEnvelopes: false` sends the prompt WITHOUT the reminder / subagent
-   * envelopes. Those envelopes ask the agent to re-extract invalidated turns,
-   * and they are marked notified once delivered — attaching them to a settle
-   * message (which is answered with JSON and no tool call) would consume the
-   * notice while nothing acts on it.
-   */
-  pushMessage: (
-    prompt: string,
-    options?: { withEnvelopes?: boolean },
-  ) => Promise<void>;
-  // Transient per-work-unit signal accumulation (one outgoing message → its
-  // result). Reset before each unit and after a cold-start (D1). The SDK
-  // onMessage stream populates these; sendWorkUnit reads them to classify.
-  unitSignals: {
-    rememberedIds: Set<number>;
-    rememberedSessionIds: Set<number>;
-    hadSubstantiveText: boolean;
-    hadIllegalTool: boolean;
-    retryableError: Error | null;
-    /**
-     * Assistant text blocks of the current work unit, in arrival order. Every
-     * other message class discards prose; the settle class (spec §A) answers
-     * with a JSON batch instead of a tool call, because its grades, back-links,
-     * change summary and cursor have to commit in one transaction — which no
-     * per-record remember() could do.
-     */
-    assistantText: string[];
-  };
-}
-
-// Clear the transient per-work-unit signals between units (and after a
-// cold-start render, which is exempt from derailment detection).
-function resetUnitSignals(state: SessionState): void {
-  state.unitSignals.rememberedIds.clear();
-  state.unitSignals.rememberedSessionIds.clear();
-  state.unitSignals.hadSubstantiveText = false;
-  state.unitSignals.hadIllegalTool = false;
-  state.unitSignals.retryableError = null;
-  state.unitSignals.assistantText.length = 0;
 }
 
 export interface WorkerCoreDeps {
@@ -367,22 +111,10 @@ export interface WorkerCoreDeps {
     delayMs: number,
   ) => unknown;
   clearTimeoutImpl?: (handle: unknown) => void;
-  pushSessionSummaryPromptImpl?: (
-    state: SessionState,
-    sessionId: number,
-    // Optional sender so the standalone <session> summary can be routed through
-    // the derailment state machine (D1/T2/T3). Defaults to state.pushMessage.
-    send?: (message: string) => Promise<void>,
-  ) => Promise<void>;
-  closeSessionQueryImpl?: (sessionId: number) => Promise<void>;
-  createWorkerQuerySessionImpl?: typeof createWorkerQuerySession;
-  isProcessAliveImpl?: typeof isProcessAlive;
-  /** Live context size (tokens) of the memory agent, by agent session id. */
-  readAgentContextTokensImpl?: (agentSessionId: string) => number | null;
   /**
-   * P2 note settlement payload (spec D9, ticket 05). Defaults to the no-op stub,
-   * which is what keeps "the worker never calls a model" true of the shipped
-   * wiring; ticket 07 supplies the real Sonnet subprocess here.
+   * P2 note settlement payload (spec D9). Defaults to undefined, which is what
+   * keeps "the worker never calls a model" true of the shipped wiring; `main`
+   * supplies the real Sonnet subprocess only when both switches are on.
    */
   noteSettlementDispatchImpl?: NoteSettlementDispatch;
   /** Forces the record-only graceful-exit window in tests. */
@@ -427,11 +159,13 @@ export interface WorkerServerDeps extends Partial<WorkerCoreDeps> {
   isProcessAliveImpl?: typeof isProcessAlive;
   shutdownGracefullyImpl?: () => Promise<void>;
   hardExitTimerImpl?: HardExitTimer;
-  hasLiveQuerySessionsImpl?: () => boolean;
+  /** True while any content session is still registered with the worker. */
+  hasLiveSessionsImpl?: () => boolean;
   getGlobalScanInFlightImpl?: () => Promise<void> | null;
   isDreamRunningImpl?: () => boolean;
   abortDreamImpl?: () => Promise<void>;
-  abortAllExtractionSessionsImpl?: () => Promise<void>;
+  /** Latches the record-only settlement window before the process exits. */
+  beginGracefulExitImpl?: () => void;
   processImpl?: Pick<NodeJS.Process, "pid" | "on" | "exit">;
   env?: NodeJS.ProcessEnv;
 }
@@ -452,7 +186,7 @@ export interface HardExitTimer {
 interface HardExitTimerDeps extends WorkerServerDeps {
   config: MnemoConfig;
   sessionEnvRegistry: Map<string, CapturedSessionEnv>;
-  abortAllExtractionSessionsImpl: () => Promise<void>;
+  beginGracefulExitImpl: () => void;
 }
 
 /**
@@ -464,41 +198,25 @@ export type ManualDreamResult =
   | { ok: false; status: number; message: string };
 
 export interface WorkerCore {
-  sessions: Map<number, SessionState>;
-  buffers: Map<number, BufferState>;
-  compactingSessions: Set<number>;
   recoverFromCrash(): void;
   scanAndDrainQueue(sessionFilter?: number): Promise<void>;
   handleTurnStop(sessionDbId: number): Promise<void>;
-  processClaimedItem(item: PendingQueueItem): Promise<void>;
-  flushSession(sessionDbId: number): Promise<void>;
   finishSession(sessionDbId: number): Promise<void>;
   drainSessionCompletely(sessionDbId: number): Promise<void>;
   /**
-   * Enqueue newly crossed boundaries and drain this session's settlement jobs
-   * (spec §A). Runs after the extraction queue is empty; exposed so the two-phase
-   * grade pass can be driven directly in tests.
-   */
-  settleSession(sessionDbId: number): Promise<void>;
-  /**
-   * P2 note settlement (spec D9, ticket 05). Exposed so the trigger surface can
-   * be driven directly; the worker itself calls it from exactly two places —
+   * P2 note settlement (spec D9). Exposed so the trigger surface can be driven
+   * directly; the worker itself calls it from exactly two places —
    * `handleTurnStop` and `handleCompact`.
    */
   noteSettlement: NoteSettlementScheduler;
-  closeSessionQuery(sessionDbId: number): Promise<void>;
-  /**
-   * Build (or return) this session's agent runtime. Exposed so the
-   * failed-compact recovery — which must open a runtime that does NOT resume
-   * the abandoned transcript — can be driven directly in tests.
-   */
-  ensureQuerySession(state: SessionState): WorkerQuerySession;
-  abortAllExtractionSessionsForShutdown(): Promise<void>;
   handleCompact(sessionDbId: number, transcriptPath?: string | null): Promise<void>;
   triggerManualDream(date: unknown): ManualDreamResult;
-  abortStalledSessions(nowMs?: number): Promise<void>;
-  runKeepaliveTick(nowMs?: number): Promise<void>;
-  runRetryTick(nowMs?: number): Promise<void>;
+  /**
+   * Enter the record-only window: from here settlement records jobs and
+   * dispatches nothing, because anything started now would be killed before it
+   * reported back and would burn an attempt for no work.
+   */
+  beginGracefulExit(): void;
   /**
    * One bounded slice of the `sessions.transcript_path` repair. The worker is
    * the only long-lived process, so it is the only place this belongs — hosting
@@ -507,25 +225,13 @@ export interface WorkerCore {
    * once the repair completes there is nothing left to call.
    */
   runTranscriptRepairTick(): void;
-  /** Ticket 02 calls this when a fresh session env capture is registered. */
-  clearBlockedSession(sessionDbId: number): void;
   registerSessionEnv(
     contentSessionId: string,
     sessionDbId: number | undefined,
     env: NodeJS.ProcessEnv,
   ): Promise<number | null>;
   clearSessionEnv(contentSessionId: string, sessionDbId?: number): void;
-  hasLiveQuerySessions(): boolean;
   getGlobalScanInFlight(): Promise<void> | null;
-  // D1/T2/T3 derailment state machine. Task 10 wires the flush callers to it;
-  // exposed here so it can be unit-tested in isolation.
-  sendWorkUnit(
-    state: SessionState,
-    message: string,
-    requiredIds: Set<number>,
-    isCompletionPoint: boolean,
-  ): Promise<void>;
-  reopenQuerySessionFresh(state: SessionState): Promise<void>;
 }
 
 function defaultNoopDrain(): Promise<void> {
@@ -576,11 +282,9 @@ export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
         }
 
         try {
-          void deps.abortAllExtractionSessionsImpl().catch((error) => {
-            logger.error?.("hard-exit extraction abort failed", { error });
-          });
+          deps.beginGracefulExitImpl();
         } catch (error) {
-          logger.error?.("hard-exit extraction abort failed", { error });
+          logger.error?.("hard-exit graceful-exit latch failed", { error });
         } finally {
           createHardExitCleanup(deps);
         }
@@ -610,19 +314,6 @@ export function createHardExitTimer(deps: HardExitTimerDeps): HardExitTimer {
   };
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  message: string,
-): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(message)), ms);
-    }),
-  ]);
-}
-
 export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -630,168 +321,6 @@ export function isProcessAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
-}
-
-function buildSubagentInvalidationEnvelope(turnIds: number[]): string {
-  // DB turn ids — consistent with the <turn id="T..."> blocks the agent matches
-  // these against.
-  const labels = turnIds.map((turnId) => `T${turnId}`).join(", ");
-  return `<subagent_invalidated>
-  ${labels} originated from a Task subagent transcript and are out-of-scope
-  for session memory.
-</subagent_invalidated>`;
-}
-
-// Pure line grammar over resolved reason hits — never names a concrete reason.
-// Each reason on a turn contributes its own render fragments (flagToken /
-// parenExtra / bodyLead / tail); this function only assembles them (D0).
-export function buildReminderEnvelope(
-  items: ReadonlyArray<ReminderItem>,
-): string {
-  function truncateReminderContent(value: string | null): string | null {
-    const text = value?.trim().replace(/\s+/g, " ");
-    if (!text) {
-      return null;
-    }
-    if (text.length <= 120) {
-      return text;
-    }
-    return `${text.slice(0, 117)}...`;
-  }
-
-  const lines = items.map((item) => {
-    const flags = item.reasons.map((reason) => reason.flagToken).join("+");
-    const parenExtras = item.reasons
-      .map((reason) => reason.parenExtra)
-      .filter((extra): extra is string => extra !== null);
-    const parenInner = [flags, ...parenExtras].join(", ");
-
-    const leadParts: string[] = [];
-    if (item.priorTitle) {
-      leadParts.push(`"${item.priorTitle}"`);
-    }
-    for (const reason of item.reasons) {
-      if (reason.bodyLead) {
-        leadParts.push(reason.bodyLead);
-      }
-    }
-
-    const reasonTails = item.reasons
-      .map((reason) => reason.tail)
-      .filter((tail): tail is string => tail !== null);
-    const truncatedContent = truncateReminderContent(item.priorContent);
-    const tailParts =
-      reasonTails.length > 0
-        ? reasonTails
-        : truncatedContent
-          ? [truncatedContent]
-          : [];
-
-    const bodyParts = [...leadParts, ...tailParts];
-    const bodyClause = bodyParts.length > 0 ? `: ${bodyParts.join(" -- ")}` : "";
-    // DB turn id — the same id the agent sees in <turn id="T..."> blocks and
-    // passes to remember()/recall(), so the reminder is actionable in sessions
-    // where prompt_number and DB id diverge (adopted/gapped sessions).
-    return `  - T${item.turnId} (${parenInner})${bodyClause}`;
-  });
-
-  return `<reminder>
-  The following turns were invalidated and need one-time attention.
-${lines.join("\n")}
-</reminder>`;
-}
-
-function pruneBufferedUndoneItems(
-  db: Database,
-  items: PendingQueueItem[],
-): { activeItems: PendingQueueItem[]; prunedSeqs: Set<number> } {
-  const activeItems: PendingQueueItem[] = [];
-  const prunedSeqs = new Set<number>();
-
-  for (const item of items) {
-    if (item.kind === "obs") {
-      const observation = getObservation(db, item.targetId);
-      const turn = observation ? getTurnById(db, observation.turnId) : null;
-
-      if (!observation || !turn || turn.status === "undone") {
-        deleteQueueItem(db, item.seq);
-        prunedSeqs.add(item.seq);
-        continue;
-      }
-
-      activeItems.push(item);
-      continue;
-    }
-
-    const turn = getTurnById(db, item.targetId);
-    if (!turn || turn.status === "undone") {
-      deleteQueueItem(db, item.seq);
-      prunedSeqs.add(item.seq);
-      continue;
-    }
-
-    activeItems.push(item);
-  }
-
-  return { activeItems, prunedSeqs };
-}
-
-function retireObservationIfOwnerIsNotLive(
-  db: Database,
-  item: PendingQueueItem,
-): boolean {
-  if (item.kind !== "obs") {
-    return false;
-  }
-
-  return runWriteTransaction(db, () => {
-    const owner = db
-      .query<
-        { observationId: number | null; turnStatus: string | null },
-        [number]
-      >(
-        `SELECT o.id AS observationId, t.status AS turnStatus
-         FROM pending_queue q
-         LEFT JOIN observations o ON o.id = q.target_id
-         LEFT JOIN turns t ON t.id = o.turn_id
-         WHERE q.seq = ? AND q.kind = 'obs'`,
-      )
-      .get(item.seq);
-
-    if (!owner) {
-      return true;
-    }
-    if (owner.turnStatus === "active" || owner.turnStatus === "provisional") {
-      return false;
-    }
-
-    if (owner.observationId !== null) {
-      db.query<unknown, [number]>(
-        "UPDATE observations SET status = 'skipped' WHERE id = ?",
-      ).run(owner.observationId);
-    }
-    db.query<unknown, [number]>("DELETE FROM pending_queue WHERE seq = ?").run(
-      item.seq,
-    );
-    return true;
-  });
-}
-
-function capturedEnvsEqual(
-  left: CapturedSessionEnv | undefined,
-  right: CapturedSessionEnv,
-): boolean {
-  if (!left) {
-    return false;
-  }
-
-  const leftEntries = Object.entries(left);
-  const rightEntries = Object.entries(right);
-  if (leftEntries.length !== rightEntries.length) {
-    return false;
-  }
-
-  return rightEntries.every(([key, value]) => left[key as keyof CapturedSessionEnv] === value);
 }
 
 export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
@@ -807,58 +336,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       clearTimeout(handle as ReturnType<typeof setTimeout>));
   const logger = deps.logger ?? console;
   const config = deps.config ?? DEFAULT_CONFIG;
-  const sessions = new Map<number, SessionState>();
-  const buffers = new Map<number, BufferState>();
-  const compactingSessions = new Set<number>();
-  const suspendedUntilBySession = new Map<
-    number,
-    SessionSuspension
-  >();
-  const pendingStallRetryBySession = new Map<number, StallRetryPlan[]>();
-  const blockedUntilBySession = new Map<number, number>();
-  for (const retry of listExtractionStallRetries(deps.db)) {
-    let suspension = suspendedUntilBySession.get(retry.sessionDbId);
-    if (!suspension) {
-      suspension = {
-        retryAtMs: retry.retryAtMs,
-        latestTurnStopSeq: retry.retryAfterSeq,
-        releasePolicy: "event-and-backoff",
-        retryPlans: [],
-      };
-      suspendedUntilBySession.set(retry.sessionDbId, suspension);
-    }
-    suspension.retryAtMs = Math.max(suspension.retryAtMs, retry.retryAtMs);
-    suspension.latestTurnStopSeq = Math.max(
-      suspension.latestTurnStopSeq,
-      retry.retryAfterSeq,
-    );
-    let plan = suspension.retryPlans.find(
-      (candidate) =>
-        candidate.nextMode === retry.nextMode &&
-        candidate.retryAtMs === retry.retryAtMs &&
-        candidate.latestTurnStopSeq === retry.retryAfterSeq,
-    );
-    if (!plan) {
-      plan = {
-        nextMode: retry.nextMode,
-        turnIds: [],
-        retryAtMs: retry.retryAtMs,
-        latestTurnStopSeq: retry.retryAfterSeq,
-      };
-      suspension.retryPlans.push(plan);
-      suspension.retryPlans.sort(compareStallRetryPlans);
-    }
-    plan.turnIds.push(retry.turnId);
-  }
-  const sessionEnvRegistry = deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
-  const enforceSessionEnvPresence = deps.sessionEnvRegistry !== undefined;
+  const sessionEnvRegistry =
+    deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
   const contentSessionIdByDbId = new Map<number, string>();
-  const isSessionRetryGated = (sessionDbId: number): boolean =>
-    suspendedUntilBySession.has(sessionDbId) ||
-    blockedUntilBySession.has(sessionDbId);
-  // Latched by the shutdown abort path. Inside this window settlement records
-  // jobs and dispatches nothing — a payload launched here would be killed
-  // before it reported back and would burn an attempt for no work.
+  // Latched by the shutdown path. Inside this window settlement records jobs and
+  // dispatches nothing.
   let gracefulExitWindow = false;
   const noteSettlement: NoteSettlementScheduler = createNoteSettlementScheduler({
     db: deps.db,
@@ -875,8 +357,8 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
   /**
    * Run one settlement trigger. Wrapped so a settlement fault can never fail the
-   * content event that carried it — capture and extraction outrank settlement,
-   * and a settled window is recoverable from the durable job row anyway.
+   * content event that carried it — capture outranks settlement, and a settled
+   * window is recoverable from the durable job row anyway.
    */
   async function runNoteSettlementTrigger(
     sessionDbId: number,
@@ -896,6 +378,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       });
     }
   }
+
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer: unknown | null = null;
   let pendingDiaryTriggerSessionDbId: number | null | undefined;
@@ -903,365 +386,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   // Latches once the transcript-path repair reports it has nothing left to do,
   // so the steady state costs zero — not even the ledger's indexed read.
   let transcriptRepairRetired = false;
-  const createWorkerQuerySessionImpl =
-    deps.createWorkerQuerySessionImpl ?? createWorkerQuerySession;
-  const isProcessAliveImpl = deps.isProcessAliveImpl ?? isProcessAlive;
-  const readAgentContextTokensImpl =
-    deps.readAgentContextTokensImpl ??
-    ((agentSessionId: string) =>
-      readLatestContextTokens(resolveTranscriptPath(DATA_DIR, agentSessionId)));
-
-  const processors = createWorkerProcessors(deps.db);
-  const pushSessionSummaryPromptImpl =
-    deps.pushSessionSummaryPromptImpl ?? (async () => {});
-  const closeSessionQueryImpl = deps.closeSessionQueryImpl ?? (async () => {});
-
-  function hasPriorSessionSummary(sessionId: number): boolean {
-    const session = getSession(deps.db, sessionId);
-    if (!session) {
-      return false;
-    }
-
-    return (
-      (session.title ?? "") !== "" ||
-      (session.content ?? "") !== "" ||
-      (session.insight ?? "") !== "" ||
-      (session.nextSteps ?? "") !== "" ||
-      (session.decision ?? "") !== "" ||
-      (session.done ?? "") !== "" ||
-      (session.current ?? "") !== "" ||
-      (session.reference ?? "") !== ""
-    );
-  }
-
-  // D5: how many extracted turns have landed since the summary was last
-  // refreshed. baseline uses COALESCE so a never-refreshed summary (NULL epoch)
-  // measures against session creation instead of comparing against NULL (which
-  // would make the > comparison always false and never flag staleness).
-  function countTurnsSinceSummary(sessionId: number): number {
-    const row = deps.db
-      .query<{ n: number }, [number, number]>(
-        `SELECT COUNT(*) AS n
-         FROM turns
-         WHERE session_id = ?
-           AND status = 'extracted'
-           AND updated_at_epoch > (
-             SELECT COALESCE(summary_updated_at_epoch, created_at_epoch, 0)
-             FROM sessions WHERE id = ?
-           )`,
-      )
-      .get(sessionId, sessionId);
-
-    return row?.n ?? 0;
-  }
-
-  function latestTurnStopSeqForSession(sessionDbId: number): number {
-    return (
-      deps.db
-        .query<{ seq: number | null }, [number]>(
-          `SELECT MAX(seq) AS seq
-           FROM pending_queue
-           WHERE session_db_id = ?
-             AND kind = 'turn-stop'`,
-        )
-        .get(sessionDbId)?.seq ?? 0
-    );
-  }
-
-  function removeTurnFromBuffer(sessionDbId: number, turnId: number): void {
-    const buffer = buffers.get(sessionDbId);
-    if (!buffer) {
-      return;
-    }
-    buffer.items = buffer.items.filter((item) => {
-      if (item.kind === "turn-stop") {
-        return item.targetId !== turnId;
-      }
-      return getObservation(deps.db, item.targetId)?.turnId !== turnId;
-    });
-    if (buffer.items.length === 0) {
-      buffers.delete(sessionDbId);
-    }
-  }
-
-  function resetInterruptedSessionWork(
-    sessionDbId: number,
-    state = sessions.get(sessionDbId),
-  ): void {
-    resetClaimedQueueItemsForSession(deps.db, sessionDbId);
-    buffers.delete(sessionDbId);
-    if (state) {
-      state.batchQueue = [];
-      state.streamedParts.clear();
-    }
-  }
-
-  function markExtractionFailedAndSkip(
-    sessionDbId: number,
-    turnId: number,
-  ): void {
-    const turn = getTurnById(deps.db, turnId);
-    if (!turn) {
-      return;
-    }
-    if (turn.status !== "undone") {
-      // An era turn's record is the main agent's note, which a stalled
-      // extraction says nothing about: `failed` would hide a note that is
-      // already on the row (db/search.ts renders `extracted` only). Floor by
-      // what the row carries — a note is `extracted`, an un-noted era turn is
-      // the hole `skipped` has always meant. Pre-era, the stall really did lose
-      // the only record there was, so `failed` stands.
-      const stalledStatus = isSegmentEra(
-        turn.createdAtEpoch,
-        config.eraCutoffEpoch,
-      )
-        ? turn.title !== null || turn.content !== null
-          ? "extracted"
-          : "skipped"
-        : "failed";
-      updateTurnById(deps.db, turnId, { status: stalledStatus });
-    }
-    deps.db
-      .query<unknown, [number]>(
-        `UPDATE observations
-         SET status = 'skipped'
-         WHERE turn_id = ? AND status = 'pending'`,
-      )
-      .run(turnId);
-    deps.db
-      .query<unknown, [number, number]>(
-        `DELETE FROM pending_queue
-         WHERE (kind = 'turn-stop' AND target_id = ?)
-            OR (kind = 'obs' AND target_id IN (
-              SELECT id FROM observations WHERE turn_id = ?
-            ))`,
-      )
-      .run(turnId, turnId);
-    removeTurnFromBuffer(sessionDbId, turnId);
-  }
-
-  function getOrCreateBuffer(sessionDbId: number): BufferState {
-    let buffer = buffers.get(sessionDbId);
-    if (buffer) {
-      return buffer;
-    }
-
-    buffer = { items: [] };
-    buffers.set(sessionDbId, buffer);
-    return buffer;
-  }
-
-  function clearBuffer(sessionDbId: number): void {
-    buffers.delete(sessionDbId);
-  }
-
-  function removeBufferedItemsBySeq(
-    sessionDbId: number,
-    seqs: Set<number>,
-  ): void {
-    if (seqs.size === 0) {
-      return;
-    }
-
-    const buffer = buffers.get(sessionDbId);
-    if (!buffer) {
-      return;
-    }
-
-    buffer.items = buffer.items.filter((item) => !seqs.has(item.seq));
-    if (buffer.items.length === 0) {
-      buffers.delete(sessionDbId);
-    }
-  }
-
-  function replaceBufferItems(
-    sessionDbId: number,
-    items: PendingQueueItem[],
-  ): void {
-    if (items.length === 0) {
-      buffers.delete(sessionDbId);
-      return;
-    }
-
-    const buffer = getOrCreateBuffer(sessionDbId);
-    buffer.items = items;
-  }
-
-  function refreshPendingSessionContextFlag(state: SessionState): void {
-    const session = getSession(deps.db, state.sessionDbId);
-    if (!session) {
-      return;
-    }
-
-    // Skip if a queued batch already carries session context — avoid stacking.
-    if (state.batchQueue.some((batch) => batch.sessionUpdated)) {
-      return;
-    }
-
-    const summaryEpoch = session.summaryUpdatedAtEpoch ?? 0;
-    if (summaryEpoch > (state.lastInjectedSummaryEpoch ?? 0)) {
-      // Summary was refreshed elsewhere — show the agent the new summary.
-      state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
-      return;
-    }
-
-    // D5: summary fell behind by >= threshold extracted turns. Nudge a full
-    // refresh even when no summary exists yet (a long pre-compact session).
-    if (countTurnsSinceSummary(state.sessionDbId) >= STALE_TURN_THRESHOLD) {
-      state.nextBatchNeedsSessionContext = true;
-    }
-  }
-
-  function recalculateBatchSize(batch: BatchEntry): void {
-    batch.size = batchMiniTurns(batch).reduce(
-      (total, miniTurn) => total + miniTurn.size,
-      0,
-    );
-  }
-
-  function releaseBatchClaims(batch: BatchEntry): void {
-    for (const miniTurn of batchMiniTurns(batch)) {
-      for (const item of miniTurn.obsItems) {
-        releaseQueueClaim(deps.db, item.seq);
-      }
-      if (miniTurn.turnStopItem) {
-        releaseQueueClaim(deps.db, miniTurn.turnStopItem.seq);
-      }
-    }
-  }
-
-  function deleteMiniTurnQueueItems(miniTurn: MiniTurnPayload): void {
-    for (const item of miniTurn.obsItems) {
-      deleteQueueItem(deps.db, item.seq);
-    }
-    if (miniTurn.turnStopItem) {
-      deleteQueueItem(deps.db, miniTurn.turnStopItem.seq);
-    }
-  }
-
-  // Assign the pending session-context flag to a batch (at most one batch
-  // carries it). Returns whether it was assigned, so the caller can restore it
-  // if the batch is later dropped (D6).
-  function assignSessionContextLocked(
-    state: SessionState,
-    batch: BatchEntry,
-  ): boolean {
-    if (!batch.sessionUpdated && state.nextBatchNeedsSessionContext) {
-      batch.sessionUpdated = true;
-      state.nextBatchNeedsSessionContext = false;
-      return true;
-    }
-    return false;
-  }
-
-  // A turn's streaming state is done once its final slice leaves the queue.
-  function clearStreamedPartsForBatch(
-    state: SessionState,
-    batch: BatchEntry,
-  ): void {
-    clearExtractionStallRetries(deps.db, batchTurnIds(batch));
-    for (const miniTurn of batchMiniTurns(batch)) {
-      if (miniTurn.isFinal) {
-        state.streamedParts.delete(miniTurn.turnId);
-      }
-    }
-  }
-
-  function pruneInProgressBuffer(sessionDbId: number): void {
-    const buffer = buffers.get(sessionDbId);
-    if (!buffer) {
-      return;
-    }
-
-    const activeItems: PendingQueueItem[] = [];
-    const prunedSeqs = new Set<number>();
-    const { activeItems: prunedItems, prunedSeqs: deletedSeqs } =
-      pruneBufferedUndoneItems(deps.db, buffer.items);
-
-    for (const item of prunedItems) {
-      if (item.kind === "obs") {
-        activeItems.push(item);
-      } else {
-        deleteQueueItem(deps.db, item.seq);
-        prunedSeqs.add(item.seq);
-      }
-    }
-
-    if (deletedSeqs.size > 0 || prunedSeqs.size > 0) {
-      replaceBufferItems(sessionDbId, activeItems);
-      return;
-    }
-
-    buffer.items = activeItems;
-    if (buffer.items.length === 0) {
-      buffers.delete(sessionDbId);
-    }
-  }
-
-  function pruneBatchQueueLocked(state: SessionState): void {
-    const nextQueue: BatchEntry[] = [];
-
-    for (const batch of state.batchQueue) {
-      if (batch.kind === "slice") {
-        const turn = getTurnById(deps.db, batch.miniTurn.turnId);
-        if (!turn || turn.status === "undone") {
-          deleteMiniTurnQueueItems(batch.miniTurn);
-          continue;
-        }
-        nextQueue.push(batch);
-        continue;
-      }
-
-      const keptMiniTurns = batch.miniTurns.filter((miniTurn) => {
-        const turn = getTurnById(deps.db, miniTurn.turnId);
-        if (!turn || turn.status === "undone") {
-          deleteMiniTurnQueueItems(miniTurn);
-          return false;
-        }
-        return true;
-      });
-
-      if (keptMiniTurns.length === 0) {
-        continue;
-      }
-
-      const nextBatch: BatchEntry = {
-        ...batch,
-        miniTurns: keptMiniTurns,
-      };
-      recalculateBatchSize(nextBatch);
-      nextQueue.push(nextBatch);
-    }
-
-    state.batchQueue = nextQueue;
-  }
-
-  function collectTurnObsItemsLocked(
-    sessionDbId: number,
-    turnId: number,
-  ): PendingQueueItem[] {
-    pruneInProgressBuffer(sessionDbId);
-    const buffer = buffers.get(sessionDbId);
-    if (!buffer) {
-      return [];
-    }
-
-    const selected = buffer.items.filter((item) => {
-      const observation = getObservation(deps.db, item.targetId);
-      return observation?.turnId === turnId;
-    });
-
-    if (selected.length === 0) {
-      return [];
-    }
-
-    removeBufferedItemsBySeq(
-      sessionDbId,
-      new Set(selected.map((item) => item.seq)),
-    );
-
-    return selected;
-  }
 
   function getRegisteredSessionEnv(
     sessionDbId: number,
@@ -1283,554 +407,61 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     return captured;
   }
 
-  function getOrCreateSessionState(sessionDbId: number): SessionState {
-    let state = sessions.get(sessionDbId);
-
-    if (state) {
-      return state;
-    }
-
-    state = {
-      sessionDbId,
-      querySession: null,
-      contentSessionId: null,
-      project: null,
-      transcriptPath: null,
-      batchQueue: [],
-      streamedParts: new Map<number, number>(),
-      cacheTtlMs: 300_000,
-      lastInjectedSummaryEpoch: 0,
-      nextBatchNeedsSessionContext: hasPriorSessionSummary(sessionDbId),
-      lastPushAt: 0,
-      lastMessageAt: 0,
-      lastActivity: nowMs(),
-      lastAgentActivityAt: 0,
-      requestInFlight: false,
-      processingLock: Promise.resolve(),
-      unitSignals: {
-        rememberedIds: new Set<number>(),
-        rememberedSessionIds: new Set<number>(),
-        hadSubstantiveText: false,
-        hadIllegalTool: false,
-        retryableError: null,
-        assistantText: [],
-      },
-      async pushMessage(
-        prompt: string,
-        options: { withEnvelopes?: boolean } = {},
-      ): Promise<void> {
-        const runtime = ensureQuerySession(state!);
-        const withEnvelopes = options.withEnvelopes !== false;
-        // Prefer the session's recorded transcript path; the cwd-derived form is
-        // the legacy fallback and misses the file for any session that `cd`ed.
-        const mainTranscriptPath =
-          state!.transcriptPath ??
-          (state!.contentSessionId && state!.project
-            ? resolveTranscriptPath(state!.project, state!.contentSessionId)
-            : undefined);
-        const pendingSubagentTurns = withEnvelopes
-          ? getPendingSubagentTurns(deps.db, state!.sessionDbId)
-          : [];
-        const reminderItems = withEnvelopes
-          ? getReminderItems(deps.db, state!.sessionDbId, mainTranscriptPath)
-          : [];
-        const silencedReminderItems = withEnvelopes
-          ? getSilencedReminderItems(
-              deps.db,
-              state!.sessionDbId,
-              mainTranscriptPath,
+  /**
+   * Retire one claimed queue item.
+   *
+   * This is the whole of what the queue does now. An `obs` row was only ever a
+   * wake signal plus a place in the extraction agent's input stream; with the
+   * agent gone the observation is already captured, already FTS-indexed and
+   * already readable, so the row is simply dropped — except when its owning turn
+   * is already terminal (or gone), which is queue pollution: the turn's own
+   * settlement has been and gone, so nothing else will ever retire that
+   * observation and it would stay `pending` forever. Retirement and deletion
+   * share one transaction, so a failed delete cannot leave a retired-but-queued
+   * row behind.
+   *
+   * A `turn-stop` row is the turn's completion event, and completion is what
+   * settles the row — through `reconcileNoteDebt`, the one place that knows both
+   * "this turn is over" and "here is what it carries". Settling BEFORE the
+   * delete matters: the ledger's completion-evidence predicate counts a queued
+   * turn-stop as evidence, so a row deleted first would leave a turn with no
+   * evidence and no terminal status, which the stranded repair would re-enqueue
+   * on every end event forever.
+   */
+  function retireQueueItem(item: PendingQueueItem): void {
+    runWriteTransaction(deps.db, () => {
+      if (item.kind === "turn-stop") {
+        const turn = getTurnById(deps.db, item.targetId);
+        if (turn) {
+          reconcileNoteDebt(deps.db, {
+            sessionId: turn.sessionId,
+            nowEpoch: now(),
+            completedTurnId: turn.id,
+            eraCutoffEpoch: config.eraCutoffEpoch,
+          });
+        }
+      } else if (item.kind === "obs") {
+        const owner = deps.db
+          .query<{ observationId: number | null; turnStatus: string | null }, [number]>(
+            `SELECT o.id AS observationId, t.status AS turnStatus
+             FROM pending_queue q
+             LEFT JOIN observations o ON o.id = q.target_id
+             LEFT JOIN turns t ON t.id = o.turn_id
+             WHERE q.seq = ? AND q.kind = 'obs'`,
+          )
+          .get(item.seq);
+        const ownerIsLive =
+          owner?.turnStatus === "active" || owner?.turnStatus === "provisional";
+        if (owner?.observationId !== null && owner !== null && !ownerIsLive) {
+          deps.db
+            .query<unknown, [number]>(
+              "UPDATE observations SET status = 'skipped' WHERE id = ?",
             )
-          : [];
-        const envelopeBlocks: string[] = [];
-        if (pendingSubagentTurns.length > 0) {
-          envelopeBlocks.push(
-            buildSubagentInvalidationEnvelope(
-              pendingSubagentTurns.map((turn) => turn.id),
-            ),
-          );
+            .run(owner!.observationId!);
         }
-        if (reminderItems.length > 0) {
-          envelopeBlocks.push(buildReminderEnvelope(reminderItems));
-        }
-        const promptWithEnvelopes =
-          envelopeBlocks.length > 0
-            ? `${envelopeBlocks.join("\n\n")}\n\n${prompt}`
-            : prompt;
-        const requestStartedAt = nowMs();
-        state!.lastActivity = requestStartedAt;
-        state!.lastAgentActivityAt = requestStartedAt;
-        state!.lastPushAt = requestStartedAt;
-        state!.requestInFlight = true;
-        let result;
-        try {
-          result = await runtime.sendPrompt(promptWithEnvelopes);
-        } finally {
-          state!.requestInFlight = false;
-        }
-        state!.lastMessageAt = nowMs();
-        state!.queryPid = runtime.queryPid;
-        state!.agentSessionId = result.session_id;
-        void detectCacheTtl(result.session_id, runtimeProjectPath)
-          .then((ttlMs) => {
-            if (ttlMs) {
-              state!.cacheTtlMs = ttlMs;
-            }
-          })
-          .catch(() => {});
-        if (pendingSubagentTurns.length > 0) {
-          try {
-            markSubagentTurnsNotified(deps.db, pendingSubagentTurns, now());
-          } catch (error) {
-            logger.error?.("failed to mark subagent turns notified", {
-              sessionDbId: state!.sessionDbId,
-              error,
-            });
-          }
-        }
-        if (reminderItems.length > 0 || silencedReminderItems.length > 0) {
-          try {
-            markReminderItemsNotified(
-              deps.db,
-              [...reminderItems, ...silencedReminderItems],
-              now(),
-            );
-          } catch (error) {
-            logger.error?.("failed to mark reminder items notified", {
-              sessionDbId: state!.sessionDbId,
-              error,
-            });
-          }
-        }
-      },
-    };
-    const runtimeProjectPath = DATA_DIR;
-    sessions.set(sessionDbId, state);
-    return state;
-  }
-
-  // forceFresh (T3): build a brand-new query that NEVER resumes the (poisoned)
-  // agent transcript and does NOT seed state.agentSessionId from the persisted
-  // lastAgentSessionId — the caller re-cold-starts the worker on it.
-  function ensureQuerySession(
-    state: SessionState,
-    options: { forceFresh?: boolean } = {},
-  ): WorkerQuerySession {
-    if (state.querySession) {
-      return state.querySession;
-    }
-
-    // A session marked by the failed-compact path must not resume its old
-    // transcript, whoever asks for the runtime next. The flag is cleared only
-    // once a runtime actually exists: every step below can throw (missing
-    // session row, missing captured env, a factory that fails to spawn), and a
-    // flag dropped on the way out would let the retry resume the transcript we
-    // just abandoned.
-    const mustOpenFresh = options.forceFresh === true || state.forceFreshNextQuery === true;
-    options = { ...options, forceFresh: mustOpenFresh };
-
-    const session = getSession(deps.db, state.sessionDbId);
-    if (!session) {
-      throw new Error(`Missing session ${state.sessionDbId} for worker query setup.`);
-    }
-
-    state.contentSessionId = session.contentSessionId;
-    state.project = session.project;
-    state.transcriptPath = session.transcriptPath;
-    state.nextBatchNeedsSessionContext =
-      state.nextBatchNeedsSessionContext || hasPriorSessionSummary(state.sessionDbId);
-    if (!options.forceFresh && session.lastAgentSessionId) {
-      state.agentSessionId = session.lastAgentSessionId;
-    }
-    // Callbacks below capture `state`, which outlives the runtime they belong
-    // to (recycle nulls the runtime, keeps the state). A message arriving from
-    // an ALREADY-ABANDONED runtime must touch nothing: the worst case is the
-    // one this whole change exists to prevent — the dead runtime's session id
-    // being written back as the resume target.
-    const generation = (state.queryGeneration ?? 0) + 1;
-    state.queryGeneration = generation;
-    const isStaleRuntime = (): boolean => state.queryGeneration !== generation;
-
-    const capturedSessionEnv = getRegisteredSessionEnv(state.sessionDbId);
-    if (enforceSessionEnvPresence && !capturedSessionEnv) {
-      throw new Error(`Missing captured env for worker session ${state.sessionDbId}.`);
-    }
-    state.querySession = createWorkerQuerySessionImpl(
-      {
-        db: deps.db,
-        sessionDbId: state.sessionDbId,
-        contentSessionId: session.contentSessionId,
-        project: session.project,
-        agentEnv: capturedSessionEnv
-          ? buildIsolatedEnv(
-              deps.workerEnv ?? process.env,
-              capturedSessionEnv,
-            )
-          : buildIsolatedEnv(deps.workerEnv ?? process.env),
-        config,
-        resumeAgentSessionId: options.forceFresh
-          ? null
-          : session.lastAgentSessionId,
-      },
-      {
-        onMessage: (message) => {
-          if (isStaleRuntime()) {
-            return;
-          }
-          const messageClassification = classifyWorkerError(message);
-          const isRetryableSignal =
-            messageClassification === "connection" ||
-            messageClassification === "blocked";
-          if (isRetryableSignal) {
-            state!.unitSignals.retryableError = new Error(
-              messageClassification === "blocked"
-                ? "Agent stream reported a blocked account."
-                : "Agent stream reported a transient connection failure.",
-              { cause: message },
-            );
-          }
-          if (
-            !isRetryableSignal &&
-            isExtractionAgentActivity(message)
-          ) {
-            const activityAt = nowMs();
-            state!.lastAgentActivityAt = activityAt;
-            state!.lastActivity = activityAt;
-          }
-          if (
-            "session_id" in message &&
-            typeof message.session_id === "string" &&
-            message.session_id !== ""
-          ) {
-            const newAgentSessionId = message.session_id;
-            const isFirstObservation =
-              state!.agentSessionId !== newAgentSessionId;
-            state!.agentSessionId = newAgentSessionId;
-            if (isFirstObservation) {
-              try {
-                updateLastAgentSessionId(
-                  deps.db,
-                  state!.sessionDbId,
-                  newAgentSessionId,
-                );
-              } catch (error) {
-                logger.error?.("updateLastAgentSessionId failed", {
-                  sessionDbId: state!.sessionDbId,
-                  error,
-                });
-              }
-            }
-          }
-          // D1 signal accumulation: inspect assistant content blocks for this
-          // work unit. thinking blocks are ignored; substantive text and any
-          // non-mnemo tool_use are strikes.
-          if (
-            !isRetryableSignal &&
-            message.type === "assistant" &&
-            Array.isArray((message as { message?: { content?: unknown } }).message?.content)
-          ) {
-            const content = (
-              message as { message: { content: Array<Record<string, unknown>> } }
-            ).message.content;
-            for (const block of content) {
-              if (
-                block.type === "text" &&
-                typeof block.text === "string" &&
-                block.text.trim().length > 0
-              ) {
-                state!.unitSignals.hadSubstantiveText = true;
-                state!.unitSignals.assistantText.push(block.text);
-                state!.lastMessageAt = nowMs();
-                state!.lastActivity = nowMs();
-              } else if (
-                block.type === "tool_use" &&
-                block.name === "mcp__mnemo__remember"
-              ) {
-                state!.lastMessageAt = nowMs();
-                state!.lastActivity = nowMs();
-              } else if (
-                block.type === "tool_use" &&
-                typeof block.name === "string" &&
-                !(MNEMO_ALLOWED_TOOLS as readonly string[]).includes(block.name)
-              ) {
-                state!.unitSignals.hadIllegalTool = true;
-              }
-            }
-          }
-        },
-        onPid: (pid) => {
-          if (isStaleRuntime()) {
-            return;
-          }
-          state!.queryPid = pid;
-        },
-        // SDK-auto compact: an unsolicited compact_boundary wiped the agent's
-        // history. Re-prime can't be injected mid-stream, so flag it; the next
-        // work unit re-primes before its turn batch and clears the flag.
-        onCompactBoundary: () => {
-          if (isStaleRuntime()) {
-            return;
-          }
-          state!.needsReprime = true;
-        },
-        onRemember: (id: string) => {
-          if (isStaleRuntime()) {
-            return;
-          }
-          const activityAt = nowMs();
-          state!.lastMessageAt = activityAt;
-          state!.lastAgentActivityAt = activityAt;
-          state!.lastActivity = activityAt;
-          const t = /^T(\d+)$/i.exec(id);
-          if (t) {
-            state!.unitSignals.rememberedIds.add(Number(t[1]));
-            return;
-          }
-          const sMatch = /^S(\d+)$/i.exec(id);
-          if (sMatch) {
-            state!.unitSignals.rememberedSessionIds.add(Number(sMatch[1]));
-          }
-        },
-      },
-    );
-
-    state.forceFreshNextQuery = false;
-    return state.querySession;
-  }
-
-  function ensureQuerySessionFresh(state: SessionState): WorkerQuerySession {
-    return ensureQuerySession(state, { forceFresh: true });
-  }
-
-  // Re-cold-start the (existing) query session with bounded session state, the
-  // task-causality arc skeleton, and its bare recent-turn DB-id index. The re-prime
-  // response is exempt from derailment detection. Used by both the derailment
-  // reopen and the post-compact (worker-driven + SDK-auto) re-prime paths.
-  async function sendSessionReprime(state: SessionState): Promise<void> {
-    const runtime = ensureQuerySession(state);
-    const formatted = buildSessionSummary(deps.db, state.sessionDbId);
-    const session = getSession(deps.db, state.sessionDbId);
-    if (formatted && session) {
-      const coldStart = renderCurrentSessionOutput(deps.db, formatted, session);
-      resetUnitSignals(state);
-      await runtime.sendPrompt(
-        `<context note="Session so far. CONTEXT ONLY — do not remember anything from this message; await the next message.">\n${coldStart}\n</context>`,
-      );
-      if (state.unitSignals.retryableError) {
-        throw state.unitSignals.retryableError;
       }
-    }
-    resetUnitSignals(state); // re-prime response is exempt from detection
-  }
-
-  // Tear down the current (poisoned) query and bring up a brand-new one that
-  // never resumes the old transcript (T3). Re-cold-start it with the shared
-  // SessionStart render so the fresh agent has the session's structured state;
-  // the cold-start response is exempt from derailment detection.
-  async function reopenQuerySessionFresh(state: SessionState): Promise<void> {
-    try {
-      await state.querySession?.close();
-    } catch {
-      /* best-effort */
-    }
-    state.querySession = null;
-    state.agentSessionId = undefined;
-    ensureQuerySessionFresh(state);
-    await sendSessionReprime(state);
-  }
-
-  const MAX_REMINDERS = 2; // K
-
-  // D1/T2/T3 work-unit state machine. Sends `message`, classifies the agent's
-  // response against `requiredIds`, and on a strike escalates: up to K
-  // corrective resends (T2), then — only at a completion point — one fresh
-  // session + cold start (T3); if that still fails, throw DerailmentFloorError.
-  // A streaming mid slice (isCompletionPoint=false) is skipped after the
-  // resends with no re-session and no floor.
-  async function sendWorkUnit(
-    state: SessionState,
-    message: string,
-    requiredIds: Set<number>,
-    isCompletionPoint: boolean,
-  ): Promise<void> {
-    const evaluate = () =>
-      classifyWorkUnitResponse({
-        requiredIds,
-        rememberedIds: state.unitSignals.rememberedIds,
-        rememberedSessionIds: state.unitSignals.rememberedSessionIds,
-        sessionDbId: state.sessionDbId,
-        hadSubstantiveText: state.unitSignals.hadSubstantiveText,
-        hadIllegalTool: state.unitSignals.hadIllegalTool,
-      });
-
-    // Only a standalone session summary has an empty required set; its
-    // corrective resend must point the agent at the session route (re-supply
-    // all summary fields), never the turn-only skipped form
-    // (remember({ id: "T<n>", status: "skipped", grade: 0, title })).
-    const resendKind = requiredIds.size === 0 ? "session-summary" : "turn";
-
-    resetUnitSignals(state);
-    await state.pushMessage(message);
-    if (state.unitSignals.retryableError) {
-      throw state.unitSignals.retryableError;
-    }
-    if (evaluate() === "resolved") {
-      return;
-    }
-
-    for (let i = 0; i < MAX_REMINDERS; i++) {
-      resetUnitSignals(state);
-      await state.pushMessage(buildCorrectiveResend(message, resendKind));
-      if (state.unitSignals.retryableError) {
-        throw state.unitSignals.retryableError;
-      }
-      if (evaluate() === "resolved") {
-        return;
-      }
-    }
-
-    // Streaming mid slice: skip the slice, leave the turn row as-is, continue.
-    // No re-session, no floor (a later slice / the final slice carries the turn).
-    if (!isCompletionPoint) {
-      logger.warn?.("derailment: skipping mid slice after reminders", {
-        sessionDbId: state.sessionDbId,
-        requiredIds: [...requiredIds],
-      });
-      return;
-    }
-
-    // T3 (completion points only): fresh session + cold start, reprocess once.
-    await reopenQuerySessionFresh(state);
-    resetUnitSignals(state);
-    await state.pushMessage(buildCorrectiveResend(message, resendKind));
-    if (state.unitSignals.retryableError) {
-      throw state.unitSignals.retryableError;
-    }
-    if (evaluate() === "resolved") {
-      return;
-    }
-
-    throw new DerailmentFloorError(requiredIds);
-  }
-
-  // D5 finalize-by-content. Reached only when a completion-point unit hits the
-  // derailment floor. A turn's record is built incrementally; finalize each
-  // unresolved turn TERMINALLY by whether it carries usable content, so a turn
-  // never lingers non-terminal (active/provisional) — otherwise getStrandedTurns
-  // re-enqueues it on every resume and it re-derails forever (no terminal bound):
-  //   - has a partial extraction (title or content set, e.g. a provisional turn
-  //     a mid-slice wrote) → finalize as `extracted` (keeps the partial);
-  //   - content-less (never extracted) → `failed`.
-  // A standalone session-summary refresh is abandoned (idempotent; the next
-  // compact retries it) with no turn touched.
-  function applyFloor(
-    unit: WorkUnitShape,
-    unresolved: Set<number>,
-    sessionDbId: number,
-  ): void {
-    if (unit.kind === "session-summary") {
-      logger.warn?.("derailment floor: abandoning session-summary refresh", {
-        sessionDbId,
-      });
-      return;
-    }
-    for (const turnId of unresolved) {
-      const turn = getTurnById(deps.db, turnId);
-      if (!turn) {
-        continue;
-      }
-      // Already-extracted turns are terminal — a real remember already ran;
-      // leave them. A partial extraction (title/content set, e.g. a provisional
-      // turn a mid-slice wrote) is finalized to extracted, keeping the partial.
-      const floorStatus = completionFloorStatus(turn, config.eraCutoffEpoch);
-      if (turn.status === "extracted" || floorStatus === "extracted") {
-        if (turn.status !== "extracted") {
-          updateTurnById(deps.db, turnId, { status: "extracted" });
-        }
-        logger.warn?.(
-          "derailment floor: keeping partial extraction (finalized extracted)",
-          { turnId },
-        );
-      } else {
-        // Content-less, never extracted (active or empty provisional). Pre-era
-        // that is a failure — the extraction was the only writer there was; in
-        // the new era nobody but the session's own agent was ever going to note
-        // it, so an un-noted turn is the ordinary hole `skipped` names.
-        updateTurnById(deps.db, turnId, { status: floorStatus });
-        logger.warn?.(
-          floorStatus === "skipped"
-            ? "derailment floor: era turn left unnoted (finalized skipped)"
-            : "derailment floor: turn failed (no extraction)",
-          { turnId },
-        );
-      }
-    }
-  }
-
-  async function closeSessionQuery(
-    sessionDbId: number,
-    abortError?: Error,
-  ): Promise<void> {
-    const state = sessions.get(sessionDbId);
-    if (!state) {
-      return;
-    }
-
-    if (state.closing) {
-      return state.closing;
-    }
-
-    state.closing = (async () => {
-      try {
-        await Promise.race([
-          state.querySession?.close(abortError) ?? Promise.resolve(),
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, 5_000);
-          }),
-        ]);
-
-        if (state.queryPid && isProcessAliveImpl(state.queryPid)) {
-          try {
-            process.kill(state.queryPid, "SIGKILL");
-          } catch {}
-        }
-
-        await closeSessionQueryImpl(sessionDbId);
-      } finally {
-        sessions.delete(sessionDbId);
-      }
-    })();
-
-    return state.closing;
-  }
-
-  async function recycleSessionQueryLocked(state: SessionState): Promise<void> {
-    if (!state.querySession) {
-      return;
-    }
-
-    const runtime = state.querySession;
-    const queryPid = state.queryPid;
-    await Promise.race([
-      runtime.close(),
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, 5_000);
-      }),
-    ]);
-    if (queryPid && isProcessAliveImpl(queryPid)) {
-      try {
-        process.kill(queryPid, "SIGKILL");
-      } catch {}
-    }
-    state.querySession = null;
-    state.queryPid = undefined;
-    // Retire the generation here, not at the next build: between the two, the
-    // torn-down runtime can still emit, and until something invalidates its
-    // callbacks they are indistinguishable from the live ones.
-    state.queryGeneration = (state.queryGeneration ?? 0) + 1;
-    state.lastPushAt = 0;
-    state.lastMessageAt = 0;
-    state.lastAgentActivityAt = 0;
-    state.requestInFlight = false;
+      deleteQueueItem(deps.db, item.seq);
+    });
   }
 
   async function registerSessionEnv(
@@ -1838,28 +469,19 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     sessionDbId: number | undefined,
     rawEnv: NodeJS.ProcessEnv,
   ): Promise<number | null> {
-    const captured = captureSessionEnv(rawEnv);
-    const previous = sessionEnvRegistry.get(contentSessionId);
-    const changed = !capturedEnvsEqual(previous, captured);
-    sessionEnvRegistry.set(contentSessionId, captured);
+    sessionEnvRegistry.set(contentSessionId, captureSessionEnv(rawEnv));
 
-    const suppliedSession = sessionDbId === undefined
-      ? null
-      : getSession(deps.db, sessionDbId);
-    const dbSession = suppliedSession?.contentSessionId === contentSessionId
-      ? suppliedSession
-      : getSessionByContentId(deps.db, contentSessionId);
+    const suppliedSession =
+      sessionDbId === undefined ? null : getSession(deps.db, sessionDbId);
+    const dbSession =
+      suppliedSession?.contentSessionId === contentSessionId
+        ? suppliedSession
+        : getSessionByContentId(deps.db, contentSessionId);
     if (!dbSession) {
       return null;
     }
 
     contentSessionIdByDbId.set(dbSession.id, contentSessionId);
-    blockedUntilBySession.delete(dbSession.id);
-    if (changed && sessions.get(dbSession.id)?.querySession) {
-      await withSessionProcessingLock(dbSession.id, async (state) => {
-        await recycleSessionQueryLocked(state);
-      });
-    }
     return dbSession.id;
   }
 
@@ -1875,1031 +497,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       if (knownContentSessionId === contentSessionId) {
         contentSessionIdByDbId.delete(dbId);
       }
-    }
-  }
-
-  async function suspendSessionAfterRetryableError(
-    sessionDbId: number,
-    error: unknown,
-    retryPlans: StallRetryPlan[] = [],
-  ): Promise<void> {
-    const classification = classifyWorkerError(error);
-    const isExtractionStall = classification === "extraction-stall";
-    const currentMs = nowMs();
-    const retryAfterMs = isExtractionStall && retryPlans[0]
-      ? Math.max(0, retryPlans[0].retryAtMs - currentMs)
-      : classification === "blocked"
-        ? Math.max(
-            BILLING_BLOCKED_RETRY_FLOOR_MS,
-            resolveWorkerRetryDelayMs(
-              error,
-              BILLING_BLOCKED_RETRY_FLOOR_MS,
-              currentMs,
-            ),
-          )
-        : resolveWorkerRetryDelayMs(
-            error,
-            CONNECTION_RETRY_BACKOFF_MS,
-            currentMs,
-          );
-    if (classification === "blocked") {
-      suspendedUntilBySession.delete(sessionDbId);
-      pendingStallRetryBySession.delete(sessionDbId);
-      blockedUntilBySession.set(sessionDbId, currentMs + retryAfterMs);
-    } else {
-      blockedUntilBySession.delete(sessionDbId);
-      pendingStallRetryBySession.delete(sessionDbId);
-      suspendedUntilBySession.set(sessionDbId, {
-        retryAtMs: retryPlans[0]?.retryAtMs ?? currentMs + retryAfterMs,
-        latestTurnStopSeq:
-          retryPlans[0]?.latestTurnStopSeq ??
-          latestTurnStopSeqForSession(sessionDbId),
-        releasePolicy: isExtractionStall
-          ? "event-and-backoff"
-          : "event-or-backoff",
-        retryPlans,
-      });
-    }
-
-    // Per-session crash recovery: every claimed row becomes eligible for a
-    // clean rebuild, and no in-memory slice/batch survives the interrupted
-    // request. The durable turn/observation rows remain untouched.
-    resetInterruptedSessionWork(sessionDbId);
-
-    logger.warn?.("mini-turn flush suspended after retryable failure", {
-      sessionDbId,
-      classification,
-      retryAfterMs,
-      nextRetryModes: retryPlans.map((plan) => plan.nextMode),
-      retryTurnIds: retryPlans.flatMap((plan) => plan.turnIds),
-      error,
-    });
-    await closeSessionQuery(
-      sessionDbId,
-      error instanceof Error ? error : undefined,
-    ).catch((closeError) => {
-      logger.error?.("connection suspension failed to close query session", {
-        sessionDbId,
-        error: closeError,
-      });
-    });
-  }
-
-  async function withSessionProcessingLock<T>(
-    sessionDbId: number,
-    work: (state: SessionState) => Promise<T>,
-  ): Promise<T> {
-    const state = getOrCreateSessionState(sessionDbId);
-    const myTurn = state.processingLock;
-    let release!: () => void;
-    state.processingLock = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await myTurn;
-
-    const workPromise = Promise.resolve(work(state));
-    const completion = workPromise.finally(() => {
-      release();
-    });
-    completion.catch(() => {});
-
-    return workPromise;
-  }
-
-  async function processClaimedItem(item: PendingQueueItem): Promise<void> {
-    if (item.kind === "obs") {
-      throw new Error("processClaimedItem no longer supports standalone obs pushes");
-    }
-
-    const workPromise = withSessionProcessingLock(item.sessionDbId, async (state) => {
-      await processTurnStopLocked(state, item);
-    });
-
-    await withTimeout(
-      workPromise,
-      TURN_STOP_TIMEOUT_MS,
-      `${item.kind} ${item.targetId} timeout after ${TURN_STOP_TIMEOUT_MS}ms`,
-    );
-  }
-
-  // Render a flush unit (one or more mini-turns) and push it as one message.
-  // prior_turn is read fresh here (D4) so each slice reflects the latest T
-  // record written by earlier slices. Throws on push failure (caller decides
-  // retry vs drop).
-  async function pushMiniTurnBatch(
-    state: SessionState,
-    batch: BatchEntry,
-  ): Promise<void> {
-    const session = getSession(deps.db, state.sessionDbId);
-    if (!session) {
-      return;
-    }
-
-    await prepareStallRetryForBatch(state, batch);
-
-    // SDK-auto re-prime boundary: an unsolicited compact wiped the agent's
-    // history since the last work unit. Re-prime now — before this turn batch —
-    // so the agent regains the session's structured state + recent-turn DB-id
-    // index. Clear the flag only AFTER a successful re-prime so a transient
-    // send failure is retried by the next batch; on failure, proceed with this
-    // batch anyway so a doomed re-prime never wedges throughput.
-    if (state.needsReprime) {
-      try {
-        await sendSessionReprime(state);
-        state.needsReprime = false;
-      } catch (error) {
-        if (classifyWorkerError(error) !== "deterministic") {
-          throw error;
-        }
-        logger.error?.("session re-prime failed; will retry next batch", {
-          sessionDbId: state.sessionDbId,
-          error,
-        });
-      }
-    }
-
-    const miniTurns = batchMiniTurns(batch);
-    let currentPrompt: string | null = null;
-    let latestPromptNumber = Number.NEGATIVE_INFINITY;
-    const blocks = miniTurns.map((miniTurn) => {
-      let priorTurn = null;
-      if (miniTurn.needsPriorTurn) {
-        const turn = getTurnById(deps.db, miniTurn.turnId);
-        if (turn) {
-          priorTurn = {
-            title: turn.title,
-            content: turn.content,
-            insight: turn.insight,
-          };
-        }
-      }
-      if (miniTurn.promptNumber > latestPromptNumber) {
-        latestPromptNumber = miniTurn.promptNumber;
-        currentPrompt = miniTurn.prompt;
-      }
-      return renderMiniTurn(miniTurn, priorTurn);
-    });
-
-    const sessionUpdated = batch.sessionUpdated;
-    const staleTurns = sessionUpdated
-      ? countTurnsSinceSummary(session.id)
-      : 0;
-    const message = buildBatchPrompt({
-      sessionId: session.id,
-      project: session.project,
-      sessionTitle: session.title,
-      currentPrompt,
-      prior: sessionUpdated
-        ? {
-            title: session.title,
-            content: session.content,
-            decision: session.decision,
-            done: session.done,
-            current: session.current,
-            nextSteps: session.nextSteps,
-            reference: session.reference,
-          }
-        : null,
-      sessionUpdated,
-      staleTurns,
-      significanceCalibration: buildTurnSignificanceCalibration(
-        deps.db,
-        session.id,
-        latestPromptNumber,
-      ),
-      completedTurnBlocks: blocks,
-    });
-    // Route through the D1/T2/T3 derailment state machine. A DerailmentFloorError
-    // (completion point exhausted resends + a fresh-session retry) is resolved
-    // by D5 finalize-by-status; any other throw (push/delivery failure) is left
-    // to flushOneBatchLocked's retry/drop handling.
-    const shape = batchWorkUnitShape(batch);
-    try {
-      await sendWorkUnit(
-        state,
-        message,
-        deriveRequiredTargetIds(shape),
-        batchIsCompletionPoint(batch),
-      );
-    } catch (e) {
-      if (e instanceof DerailmentFloorError) {
-        applyFloor(shape, e.requiredIds, state.sessionDbId);
-      } else {
-        throw e;
-      }
-    }
-
-    const freshSession = getSession(deps.db, session.id);
-    state.lastInjectedSummaryEpoch = freshSession?.summaryUpdatedAtEpoch ?? 0;
-  }
-
-  async function prepareStallRetryForBatch(
-    state: SessionState,
-    batch: BatchEntry,
-  ): Promise<void> {
-    const carriedTurnIds = batchTurnIds(batch);
-    const retryPlans = pendingStallRetryBySession.get(state.sessionDbId);
-    if (!retryPlans || retryPlans.length === 0) {
-      return;
-    }
-    const planIndex = retryPlans.findIndex((candidate) =>
-      candidate.turnIds.some((turnId) => carriedTurnIds.includes(turnId)),
-    );
-    if (planIndex < 0) {
-      return;
-    }
-    const retryPlan = retryPlans[planIndex]!;
-    const remainingTurnIds = retryPlan.turnIds.filter(
-      (turnId) => !carriedTurnIds.includes(turnId),
-    );
-    if (remainingTurnIds.length === 0) {
-      retryPlans.splice(planIndex, 1);
-    } else {
-      retryPlans[planIndex] = {
-        ...retryPlan,
-        // One fresh construction satisfies the whole work group, including
-        // later batches split only for size.
-        nextMode: "resume",
-        turnIds: remainingTurnIds,
-      };
-    }
-    if (retryPlans.length === 0) {
-      pendingStallRetryBySession.delete(state.sessionDbId);
-    }
-
-    if (retryPlan.nextMode === "forceFresh") {
-      await reopenQuerySessionFresh(state);
-    }
-  }
-
-  function resolvedTurnIdsInStalledBatch(
-    batch: BatchEntry,
-    state: SessionState,
-  ): Set<number> {
-    return new Set(
-      batchMiniTurns(batch).flatMap((miniTurn) => {
-        if (state.unitSignals.rememberedIds.has(miniTurn.turnId)) {
-          return [miniTurn.turnId];
-        }
-        // A short merged turn can have resolved on an earlier corrective send
-        // before the next send stalled. Final slices, however, are already
-        // partial by construction and require a remember in this send.
-        if (miniTurn.role !== "short") {
-          return [];
-        }
-        const turn = getTurnById(deps.db, miniTurn.turnId);
-        if (
-          turn?.status === "extracted" &&
-          (turn.title !== null || turn.content !== null)
-        ) {
-          return [miniTurn.turnId];
-        }
-        return [];
-      }),
-    );
-  }
-
-  async function handleExtractionStall(
-    state: SessionState,
-    batch: BatchEntry,
-    error: unknown,
-  ): Promise<void> {
-    // Ownership is the exact unresolved set carried by the stalled flush.
-    // Successfully remembered merged siblings are finalized normally and do
-    // not consume a stall attempt or risk being downgraded.
-    const resolvedTurnIds = resolvedTurnIdsInStalledBatch(batch, state);
-    for (const miniTurn of batchMiniTurns(batch)) {
-      if (resolvedTurnIds.has(miniTurn.turnId)) {
-        processors.applyMiniTurnSideEffects(miniTurn);
-      }
-    }
-    clearExtractionStallRetries(deps.db, resolvedTurnIds);
-
-    const turnIds = batchTurnIds(batch).filter(
-      (turnId) => !resolvedTurnIds.has(turnId),
-    );
-    const retryAtMs = nowMs() + CONNECTION_RETRY_BACKOFF_MS;
-    const retryAfterSeq = latestTurnStopSeqForSession(state.sessionDbId);
-    const attemptsByTurnId = recordExtractionStalls(
-      deps.db,
-      turnIds,
-      retryAtMs,
-      retryAfterSeq,
-    );
-    const retryPlansByMode = new Map<ExtractionStallRetryMode, StallRetryPlan>();
-
-    for (const turnId of turnIds) {
-      const result = attemptsByTurnId.get(turnId);
-      if (!result) {
-        continue;
-      }
-      if (result.attempts >= 3) {
-        markExtractionFailedAndSkip(state.sessionDbId, turnId);
-        logger.error?.("extraction stall limit reached; turn failed and skipped", {
-          sessionDbId: state.sessionDbId,
-          turnId,
-          stallAttempts: result.attempts,
-          escalation: "skip",
-        });
-        continue;
-      }
-      if (!result.nextMode) {
-        continue;
-      }
-      let plan = retryPlansByMode.get(result.nextMode);
-      if (!plan) {
-        plan = {
-          nextMode: result.nextMode,
-          turnIds: [],
-          retryAtMs,
-          latestTurnStopSeq: retryAfterSeq,
-        };
-        retryPlansByMode.set(result.nextMode, plan);
-      }
-      plan.turnIds.push(turnId);
-      logger.warn?.("extraction stalled; scheduling bounded retry", {
-        sessionDbId: state.sessionDbId,
-        turnId,
-        stallAttempts: result.attempts,
-        escalation: result.nextMode,
-      });
-    }
-
-    const retryPlans = [...retryPlansByMode.values()].sort(
-      compareStallRetryPlans,
-    );
-    if (retryPlans.length > 0) {
-      await suspendSessionAfterRetryableError(
-        state.sessionDbId,
-        error,
-        retryPlans,
-      );
-      return;
-    }
-
-    // Every unresolved turn reached the terminal bound (or every carried turn
-    // had already resolved). Release other claimed work without a fourth gate.
-    suspendedUntilBySession.delete(state.sessionDbId);
-    pendingStallRetryBySession.delete(state.sessionDbId);
-    resetInterruptedSessionWork(state.sessionDbId, state);
-    await closeSessionQuery(
-      state.sessionDbId,
-      error instanceof Error ? error : undefined,
-    );
-  }
-
-  /** A settlement pass may carry a hard wall-clock ceiling; see `finishSession`. */
-  interface SettlementPassOptions {
-    /** Absolute `nowMs()` past which the pass abandons its wait. */
-    deadlineMs?: number;
-  }
-
-  /**
-   * Settlement's cancellation boundary (spec §A, SessionEnd tail).
-   *
-   * `finishSession` bounds the tail with `sessionEndTailTimeoutMs`, but on
-   * timeout it still awaits the drain it raced — so without a bound INSIDE the
-   * drain, one settle `sendPrompt` that never returns holds SessionEnd open
-   * forever, and the tail budget describes nothing. The deadline is the same
-   * clock finishSession races on, pushed down to the only unbounded await in the
-   * settle path.
-   *
-   * Abandoning the WAIT is all this does. The job stays `claimed` and the
-   * ten-minute lease recovers it, which is the correct disposition for an answer
-   * that never arrived — and the claim-generation fence makes the abandoned
-   * attempt's late reply, if one ever lands, a no-op.
-   */
-  class SettlementDeadlineError extends Error {
-    constructor() {
-      super("settlement wait exceeded the SessionEnd tail deadline");
-      this.name = "SettlementDeadlineError";
-    }
-  }
-
-  async function awaitWithSettlementDeadline(
-    work: Promise<void>,
-    deadlineMs: number | undefined,
-  ): Promise<void> {
-    if (deadlineMs === undefined) {
-      await work;
-      return;
-    }
-    const remainingMs = Math.max(0, deadlineMs - nowMs());
-    let timeoutHandle: unknown;
-    // The abandoned push keeps running; `Promise.race` already subscribed to it,
-    // so a later rejection is handled, and this second handler makes that
-    // independent of how the race is implemented.
-    work.catch(() => {});
-    try {
-      await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeoutImpl(
-            () => reject(new SettlementDeadlineError()),
-            remainingMs,
-          );
-        }),
-      ]);
-    } finally {
-      if (timeoutHandle !== undefined) {
-        clearTimeoutImpl(timeoutHandle);
-      }
-    }
-  }
-
-  /**
-   * Outcome of one settlement attempt.
-   *
-   *   - `settled` — the batch was applied and committed;
-   *   - `failed`  — a MODEL-side fault (bad batch, apply error). The claim's
-   *     attempt is spent and the job is durably `failed`, retryable until three;
-   *   - `abandoned` — nothing was decided and the row was deliberately left
-   *     `claimed`: shutdown cut the push off, the tail deadline expired, or the
-   *     lease was reclaimed under this worker. All three are INFRASTRUCTURE
-   *     events, not the model's answer, and the ten-minute lease is what
-   *     resolves them. Marking them `failed` would spend an attempt on a
-   *     question the model never got to answer.
-   */
-  type SettlementOutcome = "settled" | "failed" | "abandoned";
-
-  function isShutdownAbort(error: unknown): boolean {
-    return (
-      error instanceof WorkerAbortError && error.workerAbortReason === "shutdown"
-    );
-  }
-
-  /**
-   * Run one settlement job end to end (spec §A).
-   *
-   * The job's cohort is read from `frozen_member_ids`, never recomputed: a turn
-   * that finalized after this boundary was enqueued belongs to the NEXT window,
-   * and re-deriving the cohort here would let a retry grade a different set than
-   * the attempt before it.
-   *
-   * Model-side failure paths land on `failed` rather than throwing: the claim
-   * already consumed an attempt, so a job fails at most three times before it is
-   * terminal, and a bad settle can never wedge the flush loop behind it.
-   */
-  async function runSettlementJobLocked(
-    state: SessionState,
-    job: SettlementJob,
-    options: SettlementPassOptions = {},
-  ): Promise<SettlementOutcome> {
-    const sessionDbId = state.sessionDbId;
-    const failJob = (reason: string): void => {
-      failSettlementJob(deps.db, job.id, reason, now(), job.claimGeneration);
-    };
-    const cohort = job.frozenMemberIds
-      .map((turnId) => getTurnById(deps.db, turnId))
-      .filter((turn): turn is NonNullable<typeof turn> => turn !== null);
-
-    if (cohort.length === 0) {
-      failJob("frozen cohort is empty");
-      logger.warn?.("settlement job has no surviving members", {
-        sessionDbId,
-        boundary: job.boundary,
-      });
-      return "failed";
-    }
-
-    // ONE citation read for the whole job. The mechanical signals and the arc
-    // view the model reads are two descriptions of the same graph; deriving them
-    // from two separate reads lets a citation landing in between put an edge in
-    // one and not the other.
-    const citations = getSessionEffectiveCitations(deps.db, sessionDbId);
-    const signals = computeSettlementSignals(deps.db, sessionDbId, cohort, {
-      citations,
-    });
-    const prompt = buildSettlementPrompt({
-      db: deps.db,
-      sessionId: sessionDbId,
-      job,
-      cohort,
-      signals,
-      citations,
-    });
-
-    resetUnitSignals(state);
-    try {
-      // No reminder/subagent envelopes: this message is answered with JSON, so
-      // an attached turn-work notice would be marked delivered and then ignored.
-      await awaitWithSettlementDeadline(
-        state.pushMessage(prompt, { withEnvelopes: false }),
-        options.deadlineMs,
-      );
-    } catch (error) {
-      if (error instanceof SettlementDeadlineError || isShutdownAbort(error)) {
-        // The push never reached the model. Leave the row `claimed` and let the
-        // lease recover it: with the claim-generation fence a late reply from
-        // this attempt writes nothing, so waiting costs only latency.
-        logger.warn?.("settlement push abandoned, left for lease reclaim", {
-          sessionDbId,
-          boundary: job.boundary,
-          reason:
-            error instanceof SettlementDeadlineError ? "tail-deadline" : "shutdown",
-        });
-        return "abandoned";
-      }
-      failJob(
-        `settle push failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      logger.error?.("settlement push failed", {
-        sessionDbId,
-        boundary: job.boundary,
-        error,
-      });
-      return "failed";
-    }
-    if (state.unitSignals.retryableError) {
-      failJob(
-        `settle transport error: ${state.unitSignals.retryableError.message}`,
-      );
-      return "failed";
-    }
-
-    const parsed = parseSettlementBatch(
-      state.unitSignals.assistantText.join("\n"),
-      new Set(job.frozenMemberIds),
-    );
-    resetUnitSignals(state);
-    if (!parsed.ok) {
-      failJob(`settle batch rejected: ${parsed.reason}`);
-      logger.warn?.("settlement batch rejected whole", {
-        sessionDbId,
-        boundary: job.boundary,
-        reason: parsed.reason,
-      });
-      return "failed";
-    }
-
-    try {
-      const applied = applySettlementBatch(
-        deps.db,
-        job,
-        parsed.items,
-        signals,
-        now(),
-      );
-      if (applied === null) {
-        logger.warn?.("settlement result discarded, job was reclaimed", {
-          sessionDbId,
-          boundary: job.boundary,
-        });
-        return "abandoned";
-      }
-    } catch (error) {
-      failJob(
-        `settle apply failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      logger.error?.("settlement apply failed", {
-        sessionDbId,
-        boundary: job.boundary,
-        error,
-      });
-      return "failed";
-    }
-    return "settled";
-  }
-
-  /**
-   * Enqueue any boundary this session has crossed, then drain its settlement
-   * jobs in ascending boundary order.
-   *
-   * A job is attempted at most ONCE per pass (`attempted`): a failed job returns
-   * to pending for a later pass rather than being retried inside this loop,
-   * which would burn all three attempts on one transient fault.
-   */
-  async function settleSessionLocked(
-    state: SessionState,
-    options: SettlementPassOptions = {},
-  ): Promise<void> {
-    try {
-      enqueueSettlementBoundaries(deps.db, state.sessionDbId, now());
-    } catch (error) {
-      logger.error?.("settlement enqueue failed", {
-        sessionDbId: state.sessionDbId,
-        error,
-      });
-      return;
-    }
-
-    const attempted = new Set<number>();
-    while (true) {
-      // Checked before the CLAIM, not just around the wait: a pass that is
-      // already out of budget must not spend an attempt it cannot finish.
-      if (
-        options.deadlineMs !== undefined &&
-        nowMs() >= options.deadlineMs
-      ) {
-        return;
-      }
-      let job: SettlementJob | null = null;
-      try {
-        job = claimNextSettlementJob(
-          deps.db,
-          state.sessionDbId,
-          now(),
-          nowMs(),
-          { excludeJobIds: attempted },
-        );
-      } catch (error) {
-        logger.error?.("settlement claim failed", {
-          sessionDbId: state.sessionDbId,
-          error,
-        });
-        return;
-      }
-      if (!job) {
-        return;
-      }
-      attempted.add(job.id);
-      const outcome = await runSettlementJobLocked(state, job, options);
-      if (outcome !== "settled") {
-        // A failure leaves a gap: the cursor cannot advance past this boundary
-        // within the pass, and settling a LATER window first would grade against
-        // an arc whose earlier half is still provisional. An abandon means this
-        // worker no longer owns the queue at all. Stop the pass either way.
-        return;
-      }
-    }
-  }
-
-  async function settleSession(
-    sessionDbId: number,
-    options: SettlementPassOptions = {},
-  ): Promise<void> {
-    if (isSessionRetryGated(sessionDbId)) {
-      return;
-    }
-    try {
-      await withSessionProcessingLock(sessionDbId, async (state) => {
-        await settleSessionLocked(state, options);
-      });
-    } catch (error) {
-      logger.error?.("settlement pass failed", { sessionDbId, error });
-    }
-  }
-
-  async function flushOneBatchLocked(state: SessionState): Promise<FlushOutcome> {
-    if (isSessionRetryGated(state.sessionDbId)) {
-      state.batchQueue = [];
-      state.streamedParts.clear();
-      return "suspended";
-    }
-    pruneBatchQueueLocked(state);
-    const batch = state.batchQueue[0];
-    if (!batch) {
-      return "empty";
-    }
-
-    try {
-      await pushMiniTurnBatch(state, batch);
-    } catch (error) {
-      const classification = classifyWorkerError(error);
-      if (classification === "extraction-stall") {
-        await handleExtractionStall(state, batch, error);
-        return "suspended";
-      }
-      if (classification !== "deterministic") {
-        await suspendSessionAfterRetryableError(state.sessionDbId, error);
-        return "suspended";
-      }
-
-      batch.attempts += 1;
-      if (batch.attempts < config.maxFlushAttempts) {
-        // Keep the batch at the head with its claims; retry tick re-flushes.
-        logger.warn?.("mini-turn flush failed, will retry", {
-          sessionDbId: state.sessionDbId,
-          attempts: batch.attempts,
-          error,
-        });
-        return "retryLater";
-      }
-      // Dropped: same side effects as a successful flush (so the queue
-      // lifecycle is identical) plus a delivery-dropped reminder per turn (D8).
-      logger.error?.("mini-turn flush dropped after repeated failures", {
-        sessionDbId: state.sessionDbId,
-        attempts: batch.attempts,
-        error,
-      });
-      for (const miniTurn of batchMiniTurns(batch)) {
-        processors.applyMiniTurnSideEffects(miniTurn);
-        flagDeliveryDropped(deps.db, miniTurn.turnId, now());
-      }
-      if (batch.sessionUpdated) {
-        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(state.sessionDbId);
-      }
-      clearStreamedPartsForBatch(state, batch);
-      state.batchQueue.shift();
-      return "dropped";
-    }
-
-    for (const miniTurn of batchMiniTurns(batch)) {
-      processors.applyMiniTurnSideEffects(miniTurn);
-    }
-    clearStreamedPartsForBatch(state, batch);
-    state.batchQueue.shift();
-    refreshPendingSessionContextFlag(state);
-    return "flushed";
-  }
-
-  async function flushAllBatchesLocked(state: SessionState): Promise<void> {
-    while (true) {
-      pruneBatchQueueLocked(state);
-      if (state.batchQueue.length === 0) {
-        return;
-      }
-      const outcome = await flushOneBatchLocked(state);
-      // retryLater leaves the blocking batch at the head (FIFO order holds).
-      // suspended has already released the session's claims and state. Either
-      // outcome stops this drain so it cannot burn attempts in a hot loop.
-      if (
-        outcome === "retryLater" ||
-        outcome === "suspended" ||
-        outcome === "empty"
-      ) {
-        return;
-      }
-    }
-  }
-
-  // End-of-drain policy: every non-tail batch is closed because only the last
-  // merged batch can accept another short turn. Keep one sub-threshold tail
-  // open for the next turn; full-tail and overflow cases are added by the same
-  // policy below rather than synchronously in the per-turn enqueue path.
-  function batchQueueNeedsDrainTailFlush(state: SessionState): boolean {
-    const head = state.batchQueue[0];
-    const hasClosedNonTail = state.batchQueue.length > 1;
-    const hasFullTail =
-      state.batchQueue.length === 1 &&
-      head !== undefined &&
-      head.size >= config.mergeThresholdChars;
-    const exceedsOverflowCap =
-      state.batchQueue.length > config.maxQueuedBatches;
-    return hasClosedNonTail || hasFullTail || exceedsOverflowCap;
-  }
-
-  async function flushClosedBatchesLocked(state: SessionState): Promise<void> {
-    while (true) {
-      pruneBatchQueueLocked(state);
-      if (!batchQueueNeedsDrainTailFlush(state)) {
-        return;
-      }
-
-      const outcome = await flushOneBatchLocked(state);
-      if (
-        outcome === "retryLater" ||
-        outcome === "suspended" ||
-        outcome === "empty"
-      ) {
-        return;
-      }
-    }
-  }
-
-  async function flushDrainTail(sessionFilter?: number): Promise<void> {
-    const sessionIds =
-      sessionFilter === undefined
-        ? [...sessions.keys()]
-        : sessions.has(sessionFilter)
-          ? [sessionFilter]
-          : [];
-    for (const sessionDbId of sessionIds) {
-      if (
-        isSessionRetryGated(sessionDbId) ||
-        compactingSessions.has(sessionDbId)
-      ) {
-        continue;
-      }
-      const state = sessions.get(sessionDbId);
-      // An open tail must not queue behind an unrelated slow inference merely
-      // to discover under the lock that there is nothing to flush.
-      if (!state || !batchQueueNeedsDrainTailFlush(state)) {
-        continue;
-      }
-      await withSessionProcessingLock(sessionDbId, async (state) => {
-        await flushClosedBatchesLocked(state);
-      });
-    }
-  }
-
-  function enqueueSliceLocked(
-    state: SessionState,
-    miniTurn: MiniTurnPayload,
-    oldestTurnEpoch: number,
-  ): void {
-    const batch: BatchEntry = {
-      kind: "slice",
-      miniTurn,
-      attempts: 0,
-      size: miniTurn.size,
-      sessionUpdated: false,
-      oldestTurnEpoch,
-    };
-    assignSessionContextLocked(state, batch);
-    state.batchQueue.push(batch);
-  }
-
-  // Short turns (never streamed) merge into a trailing "merged" batch up to
-  // mergeThresholdChars, exactly as before. A slice batch is never a merge
-  // target (slices are solo).
-  function enqueueMergedTurnLocked(
-    state: SessionState,
-    miniTurn: MiniTurnPayload,
-  ): void {
-    refreshPendingSessionContextFlag(state);
-    const lastBatch = state.batchQueue[state.batchQueue.length - 1];
-    let targetBatch =
-      lastBatch && lastBatch.kind === "merged" ? lastBatch : undefined;
-
-    if (!targetBatch || targetBatch.size + miniTurn.size >= config.mergeThresholdChars) {
-      targetBatch = {
-        kind: "merged",
-        miniTurns: [],
-        attempts: 0,
-        size: 0,
-        sessionUpdated: false,
-        oldestTurnEpoch: miniTurn.turnStopItem?.enqueuedAtEpoch ?? now(),
-      };
-      state.batchQueue.push(targetBatch);
-    }
-
-    targetBatch.miniTurns.push(miniTurn);
-    targetBatch.size += miniTurn.size;
-    assignSessionContextLocked(state, targetBatch);
-  }
-
-  // Peel a streaming slice out of the buffer and flush it immediately (D2).
-  async function enqueueAndFlushStreamingSliceLocked(
-    state: SessionState,
-    turnId: number,
-    chunk: PendingQueueItem[],
-  ): Promise<void> {
-    if (chunk.length === 0) {
-      return;
-    }
-    const turn = getTurnById(deps.db, turnId);
-    const hadPriorDelivery =
-      state.streamedParts.has(turnId) ||
-      (turn ? turn.status !== "active" : false) ||
-      hasSkippedObservationsForTurn(deps.db, turnId);
-    const partIndex = state.streamedParts.get(turnId) ?? 1;
-    const miniTurn = processors.buildMiniTurn(turnId, chunk, {
-      role: "streaming",
-      partIndex,
-      needsPriorTurn: hadPriorDelivery,
-      turnStopItem: null,
-    });
-    if (!miniTurn) {
-      for (const item of chunk) {
-        deleteQueueItem(deps.db, item.seq);
-      }
-      return;
-    }
-    state.streamedParts.set(turnId, partIndex + 1);
-    enqueueSliceLocked(state, miniTurn, chunk[0]?.enqueuedAtEpoch ?? now());
-    await flushAllBatchesLocked(state);
-    // Hold the turn `provisional` until the FINAL completion. The mid-slice's
-    // remember has already landed by the time the await above resolves (the
-    // agent finished responding to this slice's push), so the agent may have
-    // promoted the turn active → extracted. Overwrite that with `provisional`:
-    // a streamed turn is only authoritative once processTurnStopLocked builds
-    // and flushes its FINAL mini-turn (→ extracted / skipped / failed). This is
-    // race-free: it runs under the session processing lock, strictly after the
-    // synchronous flush has fully resolved, and never touches a short turn
-    // (which never enters this function), so role detection at turn-stop still
-    // sees a never-streamed turn as `active`. An interruption mid-stream thus
-    // leaves the turn `provisional`, which the resume scan re-extracts (D6).
-    const heldTurn = getTurnById(deps.db, turnId);
-    if (heldTurn && heldTurn.status !== "undone") {
-      updateTurnById(deps.db, turnId, { status: "provisional" });
-    }
-  }
-
-  // Cheap synchronous pre-check (no lock): do buffered obs for this turn cross
-  // the streaming threshold? Authoritative re-check happens inside the lock.
-  function bufferedTurnObsExceedThreshold(
-    sessionDbId: number,
-    turnId: number,
-  ): boolean {
-    const buffer = buffers.get(sessionDbId);
-    if (!buffer) {
-      return false;
-    }
-    const turnObs = buffer.items.filter(
-      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId,
-    );
-    if (turnObs.length === 0) {
-      return false;
-    }
-    const threshold = config.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
-    return processors.peelMiniTurnObs(turnObs, threshold).rest.length > 0;
-  }
-
-  // During a turn: once buffered obs for the in-progress turn cross the
-  // streaming threshold, peel a chunk and flush it as a streaming slice (D2).
-  async function maybeStreamInProgressTurnLocked(
-    state: SessionState,
-    turnId: number,
-  ): Promise<void> {
-    const turn = getTurnById(deps.db, turnId);
-    if (turn && turn.extractionStallAttempts >= 3) {
-      markExtractionFailedAndSkip(state.sessionDbId, turnId);
-      return;
-    }
-    pruneInProgressBuffer(state.sessionDbId);
-    const buffer = buffers.get(state.sessionDbId);
-    if (!buffer) {
-      return;
-    }
-    const turnObs = buffer.items.filter(
-      (item) => getObservation(deps.db, item.targetId)?.turnId === turnId,
-    );
-    if (turnObs.length === 0) {
-      return;
-    }
-    const threshold = config.maxMiniTurnChars - STREAMING_SLICE_OVERHEAD;
-    const { chunk, rest } = processors.peelMiniTurnObs(turnObs, threshold);
-    if (rest.length === 0) {
-      // Buffered obs still fit under the threshold; keep accumulating.
-      return;
-    }
-    const chunkSeqs = new Set(chunk.map((item) => item.seq));
-    buffer.items = buffer.items.filter((item) => !chunkSeqs.has(item.seq));
-    if (buffer.items.length === 0) {
-      buffers.delete(state.sessionDbId);
-    }
-    await enqueueAndFlushStreamingSliceLocked(state, turnId, chunk);
-  }
-
-  async function processTurnStopLocked(
-    state: SessionState,
-    turnStopItem: PendingQueueItem,
-  ): Promise<void> {
-    const turn = getTurnById(deps.db, turnStopItem.targetId);
-    if (!turn || turn.status === "undone") {
-      deleteQueueItem(deps.db, turnStopItem.seq);
-      return;
-    }
-    if (turn.extractionStallAttempts >= 3) {
-      markExtractionFailedAndSkip(state.sessionDbId, turn.id);
-      return;
-    }
-
-    let obsItems = collectTurnObsItemsLocked(state.sessionDbId, turn.id);
-    try {
-      // Peel streaming slices until the remaining obs fit a final-slice render.
-      // A never-streamed short turn can still overflow once the tail is added,
-      // so peeling here is the budget-correctness backstop (D2).
-      const finalBudget = config.maxMiniTurnChars - FINAL_SLICE_OVERHEAD;
-      while (true) {
-        const { chunk, rest } = processors.peelMiniTurnObs(obsItems, finalBudget);
-        if (rest.length === 0) {
-          obsItems = chunk;
-          break;
-        }
-        await enqueueAndFlushStreamingSliceLocked(state, turn.id, chunk);
-        obsItems = rest;
-      }
-
-      // hadPriorDelivery decides final-slice vs short-turn. streamedParts is
-      // the in-memory signal; turn.status !== "active" and "has skipped obs"
-      // are restart-durable. Skipped obs is the strongest: it is set whenever a
-      // slice was delivered, even if the agent chose not to remember it, so a
-      // restart can't misjudge a streamed turn as a fresh short turn (D6).
-      const hadPriorDelivery =
-        state.streamedParts.has(turn.id) ||
-        turn.status !== "active" ||
-        hasSkippedObservationsForTurn(deps.db, turn.id);
-
-      const miniTurn = processors.buildMiniTurn(turn.id, obsItems, {
-        role: hadPriorDelivery ? "final" : "short",
-        partIndex: hadPriorDelivery ? state.streamedParts.get(turn.id) ?? 1 : 1,
-        needsPriorTurn: hadPriorDelivery,
-        turnStopItem,
-      });
-      if (!miniTurn) {
-        for (const item of obsItems) {
-          deleteQueueItem(deps.db, item.seq);
-        }
-        deleteQueueItem(deps.db, turnStopItem.seq);
-        return;
-      }
-
-      if (hadPriorDelivery) {
-        enqueueSliceLocked(state, miniTurn, turnStopItem.enqueuedAtEpoch);
-      } else {
-        enqueueMergedTurnLocked(state, miniTurn);
-      }
-    } catch (error) {
-      for (const item of obsItems) {
-        releaseQueueClaim(deps.db, item.seq);
-      }
-      releaseQueueClaim(deps.db, turnStopItem.seq);
-      for (const item of obsItems) {
-        getOrCreateBuffer(state.sessionDbId).items.push(item);
-      }
-      throw error;
     }
   }
 
@@ -2936,143 +533,25 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     const result: DrainQueueResult = {
       turnStopSessionDbIds: new Set<number>(),
     };
-    const currentMs = nowMs();
-    for (const [sessionDbId, suspension] of suspendedUntilBySession) {
-      const backoffElapsed = suspension.retryAtMs <= currentMs;
-      const hasNewTurnStop =
-        latestTurnStopSeqForSession(sessionDbId) >
-        suspension.latestTurnStopSeq;
-      const canRetry =
-        suspension.releasePolicy === "event-and-backoff"
-          ? backoffElapsed && hasNewTurnStop
-          : backoffElapsed || hasNewTurnStop;
-      if (canRetry) {
-        suspendedUntilBySession.delete(sessionDbId);
-        if (suspension.retryPlans.length > 0) {
-          pendingStallRetryBySession.set(
-            sessionDbId,
-            suspension.retryPlans,
-          );
-        }
-      }
-    }
-    for (const [sessionDbId, blockedUntilMs] of blockedUntilBySession) {
-      if (blockedUntilMs <= currentMs) {
-        blockedUntilBySession.delete(sessionDbId);
-      }
-    }
-    if (
-      enforceSessionEnvPresence &&
-      sessionFilter !== undefined &&
-      !getRegisteredSessionEnv(sessionFilter)
-    ) {
-      return result;
-    }
-    if (
-      sessionFilter !== undefined &&
-      isSessionRetryGated(sessionFilter)
-    ) {
-      return result;
-    }
-
     const skippedSeqs = new Set<number>();
+
     while (true) {
-      if (
-        sessionFilter !== undefined &&
-        isSessionRetryGated(sessionFilter)
-      ) {
-        return result;
-      }
-      const excludedSessions =
-        sessionFilter === undefined
-          ? new Set([
-              ...compactingSessions,
-              ...suspendedUntilBySession.keys(),
-              ...blockedUntilBySession.keys(),
-            ])
-          : undefined;
       const item = claimNextItem(deps.db, now(), {
         sessionFilter,
         skippedSeqs,
-        excludeSessions: excludedSessions,
       });
-
       if (!item) {
-        await flushDrainTail(sessionFilter);
         return result;
       }
 
-      if (retireObservationIfOwnerIsNotLive(deps.db, item)) {
-        continue;
-      }
-
-      // The newer turn-stop is only the retry signal. Keep its work out of the
-      // stalled batch so every turn retains its own resume/fresh attempt mode.
-      const activeRetryPlan = pendingStallRetryBySession.get(item.sessionDbId)?.[0];
-      const itemTurnId =
-        item.kind === "turn-stop"
-          ? item.targetId
-          : getObservation(deps.db, item.targetId)?.turnId ?? null;
-      if (
-        activeRetryPlan &&
-        (itemTurnId === null || !activeRetryPlan.turnIds.includes(itemTurnId))
-      ) {
-        releaseQueueClaim(deps.db, item.seq);
-        skippedSeqs.add(item.seq);
-        continue;
-      }
-
-      if (
-        enforceSessionEnvPresence &&
-        !getRegisteredSessionEnv(item.sessionDbId)
-      ) {
-        releaseQueueClaim(deps.db, item.seq);
-        skippedSeqs.add(item.seq);
-        continue;
-      }
-
-      if (item.kind === "obs") {
-        getOrCreateBuffer(item.sessionDbId).items.push(item);
-        // Streaming trigger (D2): each per-tool wake buffers the obs, then we
-        // check whether the in-progress turn has crossed the slice threshold.
-        // A cheap lock-free pre-check avoids acquiring the session lock (and
-        // blocking the drain behind an in-flight flush) for the common
-        // under-threshold case; maybeStream re-checks authoritatively.
-        const observation = getObservation(deps.db, item.targetId);
-        if (
-          observation &&
-          !compactingSessions.has(item.sessionDbId) &&
-          bufferedTurnObsExceedThreshold(item.sessionDbId, observation.turnId)
-        ) {
-          try {
-            await withSessionProcessingLock(item.sessionDbId, async (state) => {
-              await maybeStreamInProgressTurnLocked(state, observation.turnId);
-            });
-          } catch (error) {
-            logger.error?.("streaming slice flush failed during drain", {
-              seq: item.seq,
-              error,
-            });
-          }
-        }
-        continue;
-      }
-
-      const bufferedSeqs = [
-        item.seq,
-        ...((buffers.get(item.sessionDbId)?.items ?? []).map(
-          (bufferedItem) => bufferedItem.seq,
-        )),
-      ];
       try {
-        await withSessionProcessingLock(item.sessionDbId, async (state) => {
-          await processTurnStopLocked(state, item);
-        });
-        result.turnStopSessionDbIds.add(item.sessionDbId);
-      } catch (error) {
-        for (const seq of bufferedSeqs) {
-          skippedSeqs.add(seq);
+        retireQueueItem(item);
+        if (item.kind === "turn-stop") {
+          result.turnStopSessionDbIds.add(item.sessionDbId);
         }
+      } catch (error) {
+        releaseQueueClaim(deps.db, item.seq);
+        skippedSeqs.add(item.seq);
         logger.error?.("queue item failed, skipping for this drain", {
           seq: item.seq,
           kind: item.kind,
@@ -3138,10 +617,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
 
     // Read-only, dream-independent: the closed content-days of the stranded
-    // turns themselves. The dream only ever reconciles days that have already
-    // ended, and every turn a due day contributes puts its own (therefore
-    // closed) day into this set, so this covers the old due-day scan exactly —
-    // unioning the due days back in would add no candidate.
+    // turns themselves.
     const repairDates = listStrandedRepairDates(deps.db, {
       timeZone: config.dreamAgentTimeZone,
       boundaryHour: config.dreamAgentHour,
@@ -3160,28 +636,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
       if (repair.enqueuedTurnStopCount > 0) {
         await drainQueue();
-        // A PreCompact end event keeps its session in compactingSessions for
-        // the entire repair window. The ordinary global drain must continue
-        // excluding that session so it cannot race compact-time streaming,
-        // but repair-restored completion work for the triggering session is
-        // part of this same serialized compact operation and must finish
-        // before diary readiness is checked.
-        if (
-          compactingSessions.has(triggeringSessionDbId) &&
-          repair.enqueuedSessionDbIds.includes(triggeringSessionDbId)
-        ) {
-          await drainQueue(triggeringSessionDbId);
-        }
-        for (const sessionDbId of repair.enqueuedSessionDbIds) {
-          await withSessionProcessingLock(sessionDbId, async (state) => {
-            await flushAllBatchesLocked(state);
-          });
-        }
       }
 
       // The environment probe is handed to the finalizer rather than read once
-      // here: the drains above are awaits, and a session that re-registers
-      // during them is being resumed. The finalizer re-asks per turn inside its
+      // here: the drain above is an await, and a session that re-registers
+      // during it is being resumed. The finalizer re-asks per turn inside its
       // write transaction and defers anything that moved.
       const floored = finalizeUnreachableStrandedTurns(
         deps.db,
@@ -3194,7 +653,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       );
 
       for (const item of floored) {
-        removeTurnFromBuffer(item.sessionDbId, item.turnId);
         logger.warn?.("stranded turn completion floor applied", {
           sessionDbId: item.sessionDbId,
           turnId: item.turnId,
@@ -3214,14 +672,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await drainOneDiaryItem(triggeringSessionDbId);
   }
 
-  async function flushTurnStopSessions(result: DrainQueueResult): Promise<void> {
-    for (const sessionDbId of result.turnStopSessionDbIds) {
-      await withSessionProcessingLock(sessionDbId, async (state) => {
-        await flushAllBatchesLocked(state);
-      });
-    }
-  }
-
   function scanAndDrainGlobalQueue(
     requestedTriggerSessionDbId?: number | null,
   ): Promise<void> {
@@ -3239,24 +689,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
 
     let tracked!: Promise<void>;
     tracked = (async () => {
-      const turnStopSessionDbIdsAwaitingTrigger = new Set<number>();
       try {
         do {
-          const requestedTriggerForThisDrain =
-            pendingDiaryTriggerSessionDbId;
+          const requestedTriggerForThisDrain = pendingDiaryTriggerSessionDbId;
           pendingDiaryTriggerSessionDbId = undefined;
-          const drainResult = await drainQueue();
-          for (const sessionDbId of drainResult.turnStopSessionDbIds) {
-            turnStopSessionDbIdsAwaitingTrigger.add(sessionDbId);
-          }
+          await drainQueue();
           if (
             requestedTriggerForThisDrain !== undefined &&
             requestedTriggerForThisDrain !== null
           ) {
-            await flushTurnStopSessions({
-              turnStopSessionDbIds: turnStopSessionDbIdsAwaitingTrigger,
-            });
-            turnStopSessionDbIdsAwaitingTrigger.clear();
             await coordinateEndEvent(requestedTriggerForThisDrain);
           } else if (requestedTriggerForThisDrain === null) {
             await drainOneDiaryItem(null);
@@ -3292,62 +733,20 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     await runNoteSettlementTrigger(sessionDbId, "turn-stop");
   }
 
-  async function drainSessionCompletely(
-    sessionDbId: number,
-    options: SettlementPassOptions = {},
-  ): Promise<void> {
+  async function drainSessionCompletely(sessionDbId: number): Promise<void> {
     let previousCount = Number.POSITIVE_INFINITY;
 
     while (true) {
-      try {
-        await withSessionProcessingLock(sessionDbId, async (state) => {
-          await flushAllBatchesLocked(state);
-        });
-      } catch (error) {
-        logger.error?.("drainSessionCompletely failed to flush buffer", {
-          sessionDbId,
-          error,
-        });
-      }
-
       await scanAndDrainQueue(sessionDbId);
 
-      try {
-        await withSessionProcessingLock(sessionDbId, async (state) => {
-          await flushAllBatchesLocked(state);
-        });
-      } catch (error) {
-        logger.error?.("drainSessionCompletely failed to flush buffer", {
-          sessionDbId,
-          error,
-        });
-      }
-
-      const state = sessions.get(sessionDbId);
-      if (state) {
-        while (true) {
-          const lockBefore = state.processingLock;
-          await lockBefore;
-          if (lockBefore === state.processingLock) {
-            break;
-          }
-        }
-      }
-
       const remaining = countQueueItemsForSession(deps.db, sessionDbId);
-      if (remaining === 0) {
-        // Settle only once the session's extraction queue is empty: a boundary
-        // crossed by work still in flight would freeze a cohort whose last
-        // members have no grades yet.
-        await settleSession(sessionDbId, options);
-        return;
-      }
-
-      if (remaining >= previousCount) {
-        logger.warn?.("drainSessionCompletely: no progress, giving up", {
-          sessionDbId,
-          remaining,
-        });
+      if (remaining === 0 || remaining >= previousCount) {
+        if (remaining > 0) {
+          logger.warn?.("drainSessionCompletely: no progress, giving up", {
+            sessionDbId,
+            remaining,
+          });
+        }
         return;
       }
 
@@ -3355,393 +754,62 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
-  async function flushSession(sessionDbId: number): Promise<void> {
-    await scanAndDrainQueue(sessionDbId);
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      await flushAllBatchesLocked(state);
-    });
-    if (countQueueItemsForSession(deps.db, sessionDbId) === 0) {
-      await settleSession(sessionDbId);
-    }
-  }
-
   async function finishSession(sessionDbId: number): Promise<void> {
-    // The SAME deadline the race below uses, handed to the drain so its
-    // settlement leg is bounded from the inside. Without it the timeout branch
-    // still `await`s this drain, and a settle push that never returns holds
-    // SessionEnd open past the budget it just declared.
-    const tailDeadlineMs = nowMs() + config.sessionEndTailTimeoutMs;
-    const drainPromise = drainSessionCompletely(sessionDbId, {
-      deadlineMs: tailDeadlineMs,
-    });
-    let timeoutHandle: unknown;
-    let outcome: "drained" | "timeout";
-    try {
-      outcome = await Promise.race([
-        drainPromise.then(() => "drained" as const),
-        new Promise<"timeout">((resolve) => {
-          timeoutHandle = setTimeoutImpl(
-            () => resolve("timeout"),
-            config.sessionEndTailTimeoutMs,
-          );
-        }),
-      ]);
-    } finally {
-      if (timeoutHandle !== undefined) {
-        clearTimeoutImpl(timeoutHandle);
-      }
-    }
-
-    if (outcome === "timeout") {
-      const abortError = createWorkerAbortError(
-        "shutdown",
-        `SessionEnd tail timed out after ${config.sessionEndTailTimeoutMs}ms`,
-      );
-      await suspendSessionAfterRetryableError(sessionDbId, abortError);
-      await drainPromise.catch(() => {});
-      // The interrupted drain may have recreated an empty lock state while
-      // unwinding. Remove that tail-only state as part of the same close.
-      await closeSessionQuery(sessionDbId, abortError);
-      return;
-    }
-
+    // SessionEnd is deliberately NOT a settlement trigger (spec D9, 裁决 7):
+    // it drains what capture left behind and nothing else. A closed session's
+    // unsettled window is picked up by another session's residual dispatch.
+    await drainSessionCompletely(sessionDbId);
     await scanAndDrainGlobalQueue(sessionDbId);
-
-    if (isSessionRetryGated(sessionDbId)) {
-      await closeSessionQuery(sessionDbId);
-      return;
-    }
-
-    await closeSessionQuery(sessionDbId);
-  }
-
-  async function abortAllExtractionSessionsForShutdown(): Promise<void> {
-    // Entering the graceful-exit window: from here settlement records but never
-    // dispatches, so nothing is started that shutdown is about to kill.
-    gracefulExitWindow = true;
-    const liveSessionIds = Array.from(sessions.values())
-      .filter((state) => state.querySession !== null)
-      .map((state) => state.sessionDbId);
-
-    await Promise.all(
-      liveSessionIds.map(async (sessionDbId) => {
-        const abortError = createWorkerAbortError(
-          "shutdown",
-          "Worker hard-exit deadline reached",
-        );
-        logger.warn?.("hard-exit shutdown requeue", { sessionDbId });
-        // Accepted degradation: released work may remain orphaned until a
-        // later flush re-scans; resume-on-next-start is intentionally deferred.
-        await suspendSessionAfterRetryableError(sessionDbId, abortError);
-      }),
-    );
-  }
-
-  async function tickKeepaliveSessionLocked(
-    state: SessionState,
-    currentMs: number,
-  ): Promise<void> {
-    pruneBatchQueueLocked(state);
-    if (state.batchQueue.length === 0 || state.lastPushAt <= 0) {
-      return;
-    }
-
-    const age = currentMs - state.lastPushAt;
-    const triggerAt = state.cacheTtlMs - config.keepaliveLeadMs;
-    if (age < triggerAt || age >= state.cacheTtlMs) {
-      return;
-    }
-
-    if (state.lastPushAt > state.lastMessageAt) {
-      return;
-    }
-
-    await flushOneBatchLocked(state);
-  }
-
-  async function tryKeepaliveSession(
-    sessionDbId: number,
-    currentMs: number,
-  ): Promise<void> {
-    if (compactingSessions.has(sessionDbId)) {
-      return;
-    }
-
-    const existingState = sessions.get(sessionDbId);
-    if (!existingState || existingState.lastPushAt <= 0) {
-      return;
-    }
-
-    const age = currentMs - existingState.lastPushAt;
-    const triggerAt = existingState.cacheTtlMs - config.keepaliveLeadMs;
-    if (age < triggerAt || age >= existingState.cacheTtlMs) {
-      return;
-    }
-
-    if (existingState.lastPushAt > existingState.lastMessageAt) {
-      return;
-    }
-
-    await withSessionProcessingLock(sessionDbId, async (state) => {
-      await tickKeepaliveSessionLocked(state, currentMs);
-    });
-  }
-
-  function recoverFromCrash(): void {
-    buffers.clear();
-    // Drop in-memory batch/streaming state so reclaimed obs re-stream from
-    // scratch with attempts reset (a clean retry, D8).
-    for (const state of sessions.values()) {
-      state.batchQueue = [];
-      state.streamedParts.clear();
-    }
-    resetClaimedQueueItems(deps.db);
-  }
-
-  // Gate the worker-driven /compact on the agent's live context size. The most
-  // recent assistant turn's prompt (read from the agent transcript) is the true
-  // context gauge; we only compact once it reaches config.compactContextRatio of
-  // the window, so a small agent session is never needlessly compressed. When
-  // the context can't be read we default to compacting (prior behavior).
-  // Wait for the agent's /compact, but never longer than the worker's own
-  // lifetime needs. While content sessions are live the budget is generous —
-  // compacting a large context genuinely takes minutes. Once every content
-  // session has exited, this call is the only thing keeping the worker alive,
-  // and a graceful exit must not be held for five minutes by a compaction whose
-  // session we discard on failure anyway. Re-evaluated as we wait, so a session
-  // that exits mid-compact still shortens it.
-  async function awaitCompactWithinBudget(
-    runtime: WorkerQuerySession,
-  ): Promise<void> {
-    if (!runtime.compact) {
-      return;
-    }
-
-    const startedAt = nowMs();
-    let sessionsGoneAt: number | null =
-      sessionEnvRegistry.size === 0 ? startedAt : null;
-    let timer: unknown = null;
-    let expired = false;
-
-    const budgetExceeded = new Promise<never>((_resolve, reject) => {
-      const poll = (): void => {
-        if (expired) {
-          return;
-        }
-        const currentMs = nowMs();
-        if (sessionEnvRegistry.size === 0) {
-          sessionsGoneAt ??= currentMs;
-        } else {
-          sessionsGoneAt = null;
-        }
-        const overallBudgetSpent = currentMs - startedAt >= COMPACT_BUDGET_MS;
-        const shutdownBudgetSpent =
-          sessionsGoneAt !== null &&
-          currentMs - sessionsGoneAt >= SHUTDOWN_COMPACT_BUDGET_MS;
-        if (overallBudgetSpent || shutdownBudgetSpent) {
-          expired = true;
-          reject(
-            new Error(
-              shutdownBudgetSpent && !overallBudgetSpent
-                ? `Worker query session compact abandoned after ${SHUTDOWN_COMPACT_BUDGET_MS}ms: every content session exited and the worker is shutting down.`
-                : `Worker query session compact timed out after ${COMPACT_BUDGET_MS}ms.`,
-            ),
-          );
-          return;
-        }
-        timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
-      };
-      timer = setTimeoutImpl(poll, COMPACT_POLL_MS);
-    });
-
-    try {
-      // The runtime keeps its own COMPACT_BUDGET_MS timer; this race only ever
-      // shortens the wait, never lengthens it.
-      await Promise.race([runtime.compact(COMPACT_BUDGET_MS), budgetExceeded]);
-    } finally {
-      expired = true;
-      if (timer !== null) {
-        clearTimeoutImpl(timer);
-      }
-    }
-  }
-
-  function shouldCompactAgent(state: SessionState): boolean {
-    if (!state.agentSessionId) {
-      return true;
-    }
-    let contextTokens: number | null;
-    try {
-      contextTokens = readAgentContextTokensImpl(state.agentSessionId);
-    } catch {
-      // Unreadable / concurrently-deleted transcript: unknown context, so
-      // fall back to compacting (prior behavior) rather than the outer catch
-      // mislabeling it "mnemosyne compact failed".
-      return true;
-    }
-    if (contextTokens === null) {
-      return true;
-    }
-    return (
-      contextTokens >=
-      Math.min(
-        AGENT_CONTEXT_WINDOW_TOKENS * config.compactContextRatio,
-        AGENT_COMPACT_MAX_TOKENS,
-      )
-    );
   }
 
   async function handleCompact(
     sessionDbId: number,
     transcriptPath?: string | null,
   ): Promise<void> {
-    compactingSessions.add(sessionDbId);
+    if (transcriptPath) {
+      detectAndCleanSubagentTurns(deps.db, sessionDbId, transcriptPath, now());
+    }
 
     try {
-      if (transcriptPath) {
-        detectAndCleanSubagentTurns(
-          deps.db,
-          sessionDbId,
-          transcriptPath,
-          now(),
-        );
-      }
-
-      try {
-        updateCompactAnchor(deps.db, sessionDbId);
-      } catch (error) {
-        logger.error?.("updateCompactAnchor failed during compact", {
-          sessionDbId,
-          error,
-        });
-      }
-
-      try {
-        await drainSessionCompletely(sessionDbId);
-      } catch (error) {
-        logger.error?.("drainSessionCompletely failed during compact", {
-          sessionDbId,
-          error,
-        });
-      }
-
-      await scanAndDrainGlobalQueue(sessionDbId);
-
-      // The second settlement trigger (spec D9). Placed here on purpose: the
-      // boundary marker has already been repaired by updateCompactAnchor above
-      // and the queue is drained, so the note-debt ledger is as decided as it
-      // will get for the turns this compact closes over.
-      await runNoteSettlementTrigger(sessionDbId, "compact");
-
-      try {
-        const state = getOrCreateSessionState(sessionDbId);
-        // Standalone <session> summary: requiredIds = ∅, completion point. A
-        // floor here abandons the refresh (idempotent; next compact retries).
-        const summaryShape: WorkUnitShape = { kind: "session-summary" };
-        await pushSessionSummaryPromptImpl(
-          state,
-          sessionDbId,
-          async (message) => {
-            try {
-              await sendWorkUnit(
-                state,
-                message,
-                deriveRequiredTargetIds(summaryShape),
-                true,
-              );
-            } catch (e) {
-              if (e instanceof DerailmentFloorError) {
-                applyFloor(summaryShape, e.requiredIds, sessionDbId);
-              } else {
-                throw e;
-              }
-            }
-          },
-        );
-      } catch (error) {
-        logger.error?.("session summary push failed", {
-          sessionDbId,
-          error,
-        });
-      }
-
-      const compactState = sessions.get(sessionDbId);
-      try {
-        if (compactState?.querySession && shouldCompactAgent(compactState)) {
-          await awaitCompactWithinBudget(compactState.querySession);
-          // Worker-driven path: re-prime synchronously now that the agent's
-          // history has been compacted away. The explicit compact() boundary is
-          // gated out of onCompactBoundary (query-session.ts), so this is the
-          // only re-prime for this compaction — no double re-prime.
-          await sendSessionReprime(compactState);
-        }
-      } catch (error) {
-        logger.error?.("mnemosyne compact failed", {
-          sessionDbId,
-          error,
-        });
-        // The agent's history may already be wiped while the re-prime failed;
-        // flag so the next work unit retries the re-prime rather than running
-        // the agent on compacted-away history.
-        if (compactState) {
-          compactState.needsReprime = true;
-          // Compaction is the ONLY thing that bounds the resident agent's
-          // context, and its cost grows with that context — so a failure here
-          // is self-reinforcing: the session that was too big to compact stays
-          // in service, grows, and becomes even less compactable. Drop it, and
-          // make the NEXT work unit open a fresh agent that never resumes this
-          // transcript; a fresh agent is bounded by construction and the
-          // re-prime restores the session state from the DB, so nothing durable
-          // is lost. Lazy on purpose: if no more work arrives we never pay for
-          // an agent nobody asked for.
-          try {
-            // Under the session lock: `flushSession` / `drainSessionCompletely`
-            // (SessionEnd) never consult compactingSessions, so a concurrent
-            // batch can be mid-flush on this very runtime. Tearing it down from
-            // outside the lock would pull the runtime out from under it.
-            await withSessionProcessingLock(sessionDbId, async (state) => {
-              state.forceFreshNextQuery = true;
-              // Drop the stale pointer too, or shouldCompactAgent would keep
-              // sizing the NEW session against the abandoned context.
-              state.agentSessionId = undefined;
-              await recycleSessionQueryLocked(state);
-            });
-          } catch (recycleError) {
-            logger.error?.("mnemosyne compact recovery failed", {
-              sessionDbId,
-              error: recycleError,
-            });
-          }
-        }
-      }
-    } finally {
-      compactingSessions.delete(sessionDbId);
-      const state = sessions.get(sessionDbId);
-      if (state) {
-        state.lastPushAt = 0;
-        state.lastInjectedSummaryEpoch = 0;
-        state.nextBatchNeedsSessionContext = hasPriorSessionSummary(sessionDbId);
-      }
+      updateCompactAnchor(deps.db, sessionDbId);
+    } catch (error) {
+      logger.error?.("updateCompactAnchor failed during compact", {
+        sessionDbId,
+        error,
+      });
     }
+
+    try {
+      await drainSessionCompletely(sessionDbId);
+    } catch (error) {
+      logger.error?.("drainSessionCompletely failed during compact", {
+        sessionDbId,
+        error,
+      });
+    }
+
+    await scanAndDrainGlobalQueue(sessionDbId);
+
+    // The second settlement trigger (spec D9). Placed here on purpose: the
+    // boundary marker has already been repaired by updateCompactAnchor above
+    // and the queue is drained, so the note-debt ledger is as decided as it
+    // will get for the turns this compact closes over.
+    await runNoteSettlementTrigger(sessionDbId, "compact");
   }
 
   return {
-    sessions,
-    buffers,
-    compactingSessions,
-    recoverFromCrash,
+    recoverFromCrash(): void {
+      resetClaimedQueueItems(deps.db);
+    },
     scanAndDrainQueue,
     handleTurnStop,
-    processClaimedItem,
-    flushSession,
     finishSession,
     drainSessionCompletely,
-    settleSession,
     noteSettlement,
-    closeSessionQuery,
-    ensureQuerySession: (state: SessionState) => ensureQuerySession(state),
-    abortAllExtractionSessionsForShutdown,
     handleCompact,
+    beginGracefulExit(): void {
+      gracefulExitWindow = true;
+    },
     triggerManualDream(date: unknown): ManualDreamResult {
       // Reject before any DB write: a disabled dream must leave no queued day
       // behind that a later re-enable would silently run.
@@ -3760,7 +828,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         Number.isNaN(parsed.getTime()) ||
         parsed.toISOString().slice(0, 10) !== date
       ) {
-        return { ok: false, status: 400, message: "date is not a real calendar day" };
+        return {
+          ok: false,
+          status: 400,
+          message: "date is not a real calendar day",
+        };
       }
       // A dream runs for a completed day; today is not due yet. "today" is the
       // in-progress content-day (4am boundary), so before 4am the just-ended
@@ -3771,7 +843,11 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         config.dreamAgentHour,
       );
       if (date >= today) {
-        return { ok: false, status: 400, message: "date must be a completed past day" };
+        return {
+          ok: false,
+          status: 400,
+          message: "date must be a completed past day",
+        };
       }
       const { cutoverDate } = diaryStateStore.initializeBootstrap(today);
       if (date < cutoverDate) {
@@ -3787,101 +863,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       scheduleDiaryContinuation();
       return { ok: true, date };
     },
-    sendWorkUnit,
-    reopenQuerySessionFresh,
     registerSessionEnv,
     clearSessionEnv,
-    clearBlockedSession(sessionDbId) {
-      blockedUntilBySession.delete(sessionDbId);
-    },
-    hasLiveQuerySessions() {
-      return Array.from(sessions.values()).some(
-        (state) => state.querySession !== null,
-      );
-    },
     getGlobalScanInFlight() {
       return globalScanInFlight;
-    },
-    async abortStalledSessions(nowMsOverride?: number): Promise<void> {
-      const currentMs = nowMsOverride ?? nowMs();
-      await Promise.all(
-        Array.from(sessions.values()).map(async (state) => {
-          if (!state.querySession) {
-            return;
-          }
-
-          if (compactingSessions.has(state.sessionDbId)) {
-            return;
-          }
-
-          const hasInflightRequest = state.requestInFlight;
-
-          if (
-            hasInflightRequest &&
-            currentMs - state.lastAgentActivityAt > config.stallThresholdMs
-          ) {
-            logger.warn?.("query session stalled, aborting", {
-              sessionDbId: state.sessionDbId,
-              lastPushAt: state.lastPushAt,
-              lastMessageAt: state.lastMessageAt,
-              lastAgentActivityAt: state.lastAgentActivityAt,
-              stallThresholdMs: config.stallThresholdMs,
-              queryPid: state.queryPid,
-            });
-            await closeSessionQuery(
-              state.sessionDbId,
-              createWorkerAbortError("extraction-stall-watchdog"),
-            ).catch((error) => {
-              logger.error?.("watchdog closeSessionQuery failed", {
-                sessionDbId: state.sessionDbId,
-                error,
-              });
-            });
-            return;
-          }
-
-          if (
-            !hasInflightRequest &&
-            currentMs - state.lastActivity > IDLE_QUERY_SESSION_MS
-          ) {
-            logger.warn?.("query session idle, closing", {
-              sessionDbId: state.sessionDbId,
-              lastActivity: state.lastActivity,
-              queryPid: state.queryPid,
-            });
-            await closeSessionQuery(state.sessionDbId).catch((error) => {
-              logger.error?.("idle closeSessionQuery failed", {
-                sessionDbId: state.sessionDbId,
-                error,
-              });
-            });
-          }
-        }),
-      );
-    },
-    async runKeepaliveTick(nowMsOverride?: number): Promise<void> {
-      const currentMs = nowMsOverride ?? nowMs();
-      for (const sessionDbId of sessions.keys()) {
-        await tryKeepaliveSession(sessionDbId, currentMs);
-      }
-    },
-    // Reliable >=10s retry beat for flush units left in "retryLater" (D8).
-    // Mirrors the keepalive concurrency discipline: skip compacting sessions
-    // and do all queue work inside the session processing lock.
-    async runRetryTick(): Promise<void> {
-      for (const sessionDbId of [...sessions.keys()]) {
-        if (compactingSessions.has(sessionDbId)) {
-          continue;
-        }
-        await withSessionProcessingLock(sessionDbId, async (state) => {
-          pruneBatchQueueLocked(state);
-          const head = state.batchQueue[0];
-          if (head && head.attempts > 0 && head.attempts < config.maxFlushAttempts) {
-            // Bypass the keepalive cache-age gate: this is a failure retry.
-            await flushOneBatchLocked(state);
-          }
-        });
-      }
     },
     runTranscriptRepairTick(): void {
       if (transcriptRepairRetired) {
@@ -3982,13 +967,6 @@ export function createWorkerFetchHandler(
   const runtimeDb = deps.db ?? createDatabase();
   const sessionEnvRegistry =
     deps.sessionEnvRegistry ?? new Map<string, CapturedSessionEnv>();
-  const runtimeProcessors =
-    deps.scanAndDrainQueue ||
-    deps.handleFlushImpl ||
-    deps.handleCompactImpl ||
-    deps.recoverFromCrashImpl
-      ? undefined
-      : createWorkerProcessors(runtimeDb);
   const runtime =
     deps.scanAndDrainQueue ||
     deps.handleTurnStopImpl ||
@@ -4003,12 +981,6 @@ export function createWorkerFetchHandler(
           now: deps.now,
           nowMs: deps.nowMs,
           config: deps.config,
-          pushSessionSummaryPromptImpl:
-            deps.pushSessionSummaryPromptImpl ??
-            runtimeProcessors?.pushSessionSummaryPrompt,
-          closeSessionQueryImpl: deps.closeSessionQueryImpl,
-          createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
-          isProcessAliveImpl: deps.isProcessAliveImpl,
         });
 
   const scanAndDrainQueue =
@@ -4104,8 +1076,8 @@ export function createWorkerFetchHandler(
         return new Response(
           JSON.stringify({ ok: true, buildId: BUILD_ID, pid: process.pid }),
           {
-          status: 200,
-          headers: { "content-type": "application/json" },
+            status: 200,
+            headers: { "content-type": "application/json" },
           },
         );
       }
@@ -4222,7 +1194,10 @@ export function createWorkerFetchHandler(
           return new Response("session_id is required", { status: 400 });
         }
 
-        const compact = handleCompactImpl(payload.session_id, payload.transcript_path).catch((error) => {
+        const compact = handleCompactImpl(
+          payload.session_id,
+          payload.transcript_path,
+        ).catch((error) => {
           deps.logger?.error?.("compact request failed", {
             sessionId: payload.session_id,
             error,
@@ -4326,22 +1301,23 @@ export async function checkForIdleWorkerShutdown(
 }
 
 /**
- * Exit as soon as the final memory agent is gone. Unlike the 30-minute idle
+ * Exit as soon as the last content session is gone. Unlike the 30-minute idle
  * fallback, this path coordinates every fire-and-forget queue operation and a
  * running dream before invoking the existing pid-cleaning graceful shutdown.
+ *
+ * "Live" used to mean an open extraction agent, which kept the worker resident
+ * for the agent's own idle window. With no agent left, liveness is the content
+ * session registry itself — otherwise the worker would exit between two turns of
+ * the same session and pay a cold start on every prompt.
  */
 export async function checkForLastAgentShutdown(
   state: WorkerServerState,
   deps: WorkerServerDeps = {},
 ): Promise<boolean> {
-  const hasLiveQuerySessions = deps.hasLiveQuerySessionsImpl ?? (() => false);
+  const hasLiveSessions = deps.hasLiveSessionsImpl ?? (() => false);
   const isDreamRunning = deps.isDreamRunningImpl ?? (() => false);
 
-  if (
-    state.shuttingDown ||
-    state.activeRequests > 0 ||
-    hasLiveQuerySessions()
-  ) {
+  if (state.shuttingDown || state.activeRequests > 0 || hasLiveSessions()) {
     return false;
   }
 
@@ -4369,12 +1345,12 @@ export async function checkForLastAgentShutdown(
       ]);
     }
 
-    // Work or a new agent may have appeared while the dream/global drain was
+    // Work or a new session may have appeared while the dream/global drain was
     // unwinding. Graceful exit is allowed only when all four guards hold at
     // this final decision point.
     if (
       state.activeRequests > 0 ||
-      hasLiveQuerySessions() ||
+      hasLiveSessions() ||
       state.globalScanInFlight !== null ||
       (deps.getGlobalScanInFlightImpl?.() ?? null) !== null ||
       isDreamRunning()
@@ -4417,24 +1393,37 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   const logger = deps.logger ?? createLogger("MNEMOSYNE");
 
   initializeDatabase(db);
-  const processors = createWorkerProcessors(db);
-  const diaryRuntime =
-    deps.processDiaryItem
-      ? null
-      : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
-          db,
-          dataRoot: deps.dataRoot ?? DATA_DIR,
-          nowEpoch: deps.now,
-          config,
-          workerEnv: env,
-        });
+  // Same boundary the hook command records, in case the worker is the first
+  // process of this build to open the database (db/era.ts).
+  ensureRecordedEraCutoff(db, Math.floor(Date.now() / 1000));
+  // The cutover catch-up (spec D13, "收编重造"). `turn_citations` was folded into
+  // `memory_edges` once, when the edge table was created, and the legacy
+  // `remember` route kept appending to the source table afterwards — an
+  // increment the one-time migration cannot see. Re-running it here is idempotent
+  // (the edge primary key absorbs it) and belongs to the worker rather than to
+  // `initializeDatabase`, which every hook process runs on its critical path.
+  try {
+    migrateTurnCitationsToEdges(db);
+  } catch (error) {
+    logger.error?.("turn-citation edge catch-up failed", { error });
+  }
+
+  const diaryRuntime = deps.processDiaryItem
+    ? null
+    : (deps.createDiaryRuntimeImpl ?? createDiaryRuntime)({
+        db,
+        dataRoot: deps.dataRoot ?? DATA_DIR,
+        nowEpoch: deps.now,
+        config,
+        workerEnv: env,
+      });
 
   // The real settlement payload is assembled HERE rather than inside the core,
   // because it needs the data root the subprocess runs in and the core has no
   // reason to learn about one. Both switches gate it — no era means nothing to
   // settle, the flag means "not right now" — and with either off nothing is
-  // constructed and the core keeps its no-op stub, so "the worker calls no
-  // model" stays true of the shipped default wiring rather than of a code path.
+  // constructed, so "the worker calls no model" stays true of the shipped
+  // default wiring rather than of a code path.
   const noteSettlementDispatchImpl =
     deps.noteSettlementDispatchImpl ??
     (config.settlementEnabled && config.eraCutoffEpoch !== null
@@ -4460,14 +1449,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     setTimeoutImpl: deps.setTimeoutImpl,
     clearTimeoutImpl: deps.clearTimeoutImpl,
     config,
-    pushSessionSummaryPromptImpl:
-      deps.pushSessionSummaryPromptImpl ?? processors.pushSessionSummaryPrompt,
-    closeSessionQueryImpl: deps.closeSessionQueryImpl,
-    createWorkerQuerySessionImpl: deps.createWorkerQuerySessionImpl,
-    isProcessAliveImpl: deps.isProcessAliveImpl,
-    processDiaryItem:
-      deps.processDiaryItem ??
-      diaryRuntime?.processDreamItem,
+    processDiaryItem: deps.processDiaryItem ?? diaryRuntime?.processDreamItem,
     reconcileDreamBacklog:
       deps.reconcileDreamBacklog ?? diaryRuntime?.reconcileDreamBacklog,
     logger,
@@ -4481,15 +1463,15 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     db,
     config,
     sessionEnvRegistry,
-    hasLiveQuerySessionsImpl: core.hasLiveQuerySessions,
+    hasLiveSessionsImpl: () => sessionEnvRegistry.size > 0,
     getGlobalScanInFlightImpl: core.getGlobalScanInFlight,
     isDreamRunningImpl: () => diaryRuntime?.isDreamRunning?.() ?? false,
     abortDreamImpl: async () => {
       await diaryRuntime?.abortDream?.("shutdown");
     },
-    abortAllExtractionSessionsImpl: async () => {
+    beginGracefulExitImpl: () => {
       serverState.shuttingDown = true;
-      await core.abortAllExtractionSessionsForShutdown();
+      core.beginGracefulExit();
     },
     shutdownGracefullyImpl: async () => {
       await deps.shutdownGracefullyImpl?.();
@@ -4501,8 +1483,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
     ...baseLifecycleDeps,
     config,
     sessionEnvRegistry,
-    abortAllExtractionSessionsImpl:
-      baseLifecycleDeps.abortAllExtractionSessionsImpl!,
+    beginGracefulExitImpl: baseLifecycleDeps.beginGracefulExitImpl!,
   });
   const lifecycleDeps: WorkerServerDeps = {
     ...baseLifecycleDeps,
@@ -4567,9 +1548,6 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   setInterval(() => {
     ensureWorkerPidFile(deps);
-    void core.abortStalledSessions();
-    void core.runKeepaliveTick();
-    void core.runRetryTick();
     // Off the startup path and off every request path: the first slice runs one
     // watchdog interval after boot, each slice is budget-bounded, and the tick
     // retires itself once the repair is done.

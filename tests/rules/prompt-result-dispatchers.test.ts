@@ -11,8 +11,6 @@ import { dirname, join } from "node:path";
 
 import { runHookCommand } from "../../src/hooks/hook-command";
 import {
-  createPostToolUseDispatcher,
-  createPreToolUseDispatcher,
   createUserPromptSubmitDispatcher,
   resolveHitSidecarPath,
   resolveTriggerIndexPath,
@@ -40,57 +38,39 @@ function withTempRoot(run: (dataRoot: string) => void | Promise<void>) {
 }
 
 /**
- * Only the UserPromptSubmit dispatcher is still registered (裁决 23): mnemo
- * emits no `additionalContext` from tool-adjacent events, so `pre-tool-dispatch`
- * and `result-dispatch` are gone from hooks.json and from the command's argv
- * table. The other two dispatchers are driven here by naming their event in the
- * payload, which is what exercises the shared engine without a subcommand.
+ * UserPromptSubmit is the ONLY event mnemo dispatches from (裁决 22/23, ticket
+ * 15). The PreToolUse/PostToolUse dispatchers that used to sit here unregistered
+ * are gone, and with them the only consumers of the `tool` / `result` trigger
+ * classes: mnemo emits no `additionalContext` from tool-adjacent events, because
+ * Claude Code re-renders that context per request and destroys the message-side
+ * cache breakpoint.
  */
-const EVENT_BY_COMMAND = {
-  "pre-tool-dispatch": "PreToolUse",
-  "prompt-dispatch": "UserPromptSubmit",
-  "result-dispatch": "PostToolUse",
-} as const;
-
 async function invoke(
   dataRoot: string,
-  command: keyof typeof EVENT_BY_COMMAND,
   rawInput: Record<string, unknown>,
 ) {
-  const dispatchers = {
-    PreToolUse: createPreToolUseDispatcher({
-      dataRoot,
-      nowMs: () => fixedNowMs,
-    }),
-    "UserPromptSubmit:rule-dispatch": createUserPromptSubmitDispatcher({
-      dataRoot,
-      nowMs: () => fixedNowMs,
-    }),
-    PostToolUse: createPostToolUseDispatcher({
-      dataRoot,
-      nowMs: () => fixedNowMs,
-    }),
-  };
   let stdout = "";
   let stderr = "";
   const exitCode = await runHookCommand({
     env: {},
-    argv:
-      command === "prompt-dispatch"
-        ? ["bun", "hook-command.ts", command]
-        : ["bun", "hook-command.ts"],
+    argv: ["bun", "hook-command.ts", "prompt-dispatch"],
     stdout: { write: (chunk) => ((stdout += chunk), true) },
     stderr: { write: (chunk) => ((stderr += chunk), true) },
     readJsonFromStdin: () => ({
-      event_name: EVENT_BY_COMMAND[command],
+      event_name: "UserPromptSubmit",
       ...rawInput,
     }),
-    handlers: dispatchers,
+    handlers: {
+      "UserPromptSubmit:rule-dispatch": createUserPromptSubmitDispatcher({
+        dataRoot,
+        nowMs: () => fixedNowMs,
+      }),
+    },
   });
   return { stdout, stderr, exitCode };
 }
 
-describe("UserPromptSubmit and PostToolUse dispatchers", () => {
+describe("UserPromptSubmit dispatcher", () => {
   test(
     "prompt keywords support default any and explicit all semantics",
     withTempRoot(async (dataRoot) => {
@@ -115,7 +95,7 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
         },
       ]);
 
-      const anyHit = await invoke(dataRoot, "prompt-dispatch", {
+      const anyHit = await invoke(dataRoot, {
         session_id: "prompt-any-hit",
         cwd: project,
         prompt: "Please investigate the BILLING regression",
@@ -124,21 +104,21 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
         "## Mnemo Tips\n- 先校准计量口径。",
       );
 
-      const anyMiss = await invoke(dataRoot, "prompt-dispatch", {
+      const anyMiss = await invoke(dataRoot, {
         session_id: "prompt-any-miss",
         cwd: project,
         prompt: "Investigate an unrelated latency regression",
       });
       expect(anyMiss).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 
-      const allMiss = await invoke(dataRoot, "prompt-dispatch", {
+      const allMiss = await invoke(dataRoot, {
         session_id: "prompt-all-miss",
         cwd: project,
         prompt: "Check cache invalidation",
       });
       expect(allMiss).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 
-      const allHit = await invoke(dataRoot, "prompt-dispatch", {
+      const allHit = await invoke(dataRoot, {
         session_id: "prompt-all-hit",
         cwd: project,
         prompt: "Audit CACHE keys and identity mapping",
@@ -146,122 +126,6 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
       expect(JSON.parse(allHit.stdout).hookSpecificOutput.additionalContext).toBe(
         "## Mnemo Tips\n- 同时检查缓存身份。",
       );
-    }),
-  );
-
-  test(
-    "result matching scans only the first 8KB and applies pattern OR semantics",
-    withTempRoot(async (dataRoot) => {
-      writeIndex(dataRoot, [
-        {
-          id: 3,
-          name: "connection-result",
-          claim: "先区分瞬时连接错误。",
-          scope: "global",
-          trigger: {
-            kind: "result",
-            tool: "Bash",
-            patterns: ["ECONNRESET", "connection refused"],
-          },
-        },
-      ]);
-
-      const headHit = await invoke(dataRoot, "result-dispatch", {
-        session_id: "result-head-hit",
-        cwd: project,
-        tool_name: "Bash",
-        tool_input: { command: "curl service" },
-        tool_response: `connection refused${"x".repeat(9_000)}`,
-      });
-      expect(JSON.parse(headHit.stdout).hookSpecificOutput.additionalContext).toBe(
-        "## Mnemo Tips\n- 先区分瞬时连接错误。",
-      );
-
-      const tailMiss = await invoke(dataRoot, "result-dispatch", {
-        session_id: "result-tail-miss",
-        cwd: project,
-        tool_name: "Bash",
-        tool_input: { command: "curl service" },
-        tool_response: `${"x".repeat(8 * 1024)}ECONNRESET`,
-      });
-      expect(tailMiss).toEqual({ stdout: "", stderr: "", exitCode: 0 });
-
-      const wrongTool = await invoke(dataRoot, "result-dispatch", {
-        session_id: "result-wrong-tool",
-        cwd: project,
-        tool_name: "Read",
-        tool_input: { file_path: "service.log" },
-        tool_response: "ECONNRESET",
-      });
-      expect(wrongTool).toEqual({ stdout: "", stderr: "", exitCode: 0 });
-    }),
-  );
-
-  test(
-    "stdin fixtures emit the correct hookEventName for all three events",
-    withTempRoot(async (dataRoot) => {
-      writeIndex(dataRoot, [
-        {
-          id: 1,
-          name: "tool",
-          claim: "tool tip",
-          scope: "global",
-          trigger: { kind: "tool", tool: "Bash" },
-        },
-        {
-          id: 2,
-          name: "prompt",
-          claim: "prompt tip",
-          scope: "global",
-          trigger: { kind: "prompt", keywords: ["diagnose"] },
-        },
-        {
-          id: 3,
-          name: "result",
-          claim: "result tip",
-          scope: "global",
-          trigger: { kind: "result", patterns: ["failed"] },
-        },
-      ]);
-      const fixtures = [
-        [
-          "pre-tool-dispatch",
-          "PreToolUse",
-          {
-            session_id: "event-pre",
-            cwd: project,
-            tool_name: "Bash",
-            tool_input: { command: "bun test" },
-          },
-        ],
-        [
-          "prompt-dispatch",
-          "UserPromptSubmit",
-          {
-            session_id: "event-prompt",
-            cwd: project,
-            prompt: "diagnose this",
-          },
-        ],
-        [
-          "result-dispatch",
-          "PostToolUse",
-          {
-            session_id: "event-result",
-            cwd: project,
-            tool_name: "Bash",
-            tool_input: { command: "bun test" },
-            tool_response: "failed",
-          },
-        ],
-      ] as const;
-
-      for (const [command, eventName, rawInput] of fixtures) {
-        const result = await invoke(dataRoot, command, rawInput);
-        expect(JSON.parse(result.stdout).hookSpecificOutput.hookEventName).toBe(
-          eventName,
-        );
-      }
     }),
   );
 
@@ -278,13 +142,13 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
         },
       ]);
       const prompt = `shared-${"界".repeat(240)}`;
-      const first = await invoke(dataRoot, "prompt-dispatch", {
+      const first = await invoke(dataRoot, {
         session_id: "shared-session",
         cwd: project,
         prompt,
       });
       expect(first.stdout).not.toBe("");
-      const repeated = await invoke(dataRoot, "prompt-dispatch", {
+      const repeated = await invoke(dataRoot, {
         session_id: "shared-session",
         cwd: project,
         prompt,
@@ -301,128 +165,6 @@ describe("UserPromptSubmit and PostToolUse dispatchers", () => {
       });
       expect(row.prompt_summary).toBe(Array.from(prompt).slice(0, 200).join(""));
       expect(Array.from(row.prompt_summary)).toHaveLength(200);
-    }),
-  );
-
-  test(
-    "PostToolUse sidecar uses tool identity and the two-hit event cap",
-    withTempRoot(async (dataRoot) => {
-      writeIndex(
-        dataRoot,
-        [5, 6, 7].map((id) => ({
-          id,
-          name: `result-${id}`,
-          claim: `result tip ${id}`,
-          scope: "global",
-          trigger: { kind: "result" as const, patterns: ["failure"] },
-        })),
-      );
-      const result = await invoke(dataRoot, "result-dispatch", {
-        session_id: "result-cap",
-        cwd: project,
-        tool_name: "Bash",
-        tool_use_id: "tool-use-result",
-        tool_input: { command: "bun test" },
-        tool_response: "failure",
-      });
-      expect(JSON.parse(result.stdout).hookSpecificOutput.additionalContext).toBe(
-        "## Mnemo Tips\n- result tip 5\n- result tip 6",
-      );
-      const rows = readFileSync(
-        resolveHitSidecarPath(dataRoot, fixedNowMs),
-        "utf8",
-      )
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(rows).toHaveLength(2);
-      expect(rows[0]).toMatchObject({
-        event_type: "PostToolUse",
-        tool_name: "Bash",
-        tool_use_id: "tool-use-result",
-        tool_input_summary: '{"command":"bun test"}',
-      });
-    }),
-  );
-
-  test(
-    "full 10-rule fixture stays below 50ms p95 for all three events",
-    withTempRoot(async (dataRoot) => {
-      const eventFixtures = [
-        {
-          name: "PreToolUse",
-          create: createPreToolUseDispatcher,
-          trigger: { kind: "tool" as const, tool: "Bash" },
-          input: {
-            eventName: "PreToolUse" as const,
-            cwd: project,
-            toolName: "Bash",
-            toolInput: { command: "bun test" },
-          },
-        },
-        {
-          name: "UserPromptSubmit",
-          create: createUserPromptSubmitDispatcher,
-          trigger: { kind: "prompt" as const, keywords: ["benchmark"] },
-          input: {
-            eventName: "UserPromptSubmit" as const,
-            cwd: project,
-            prompt: "benchmark prompt",
-          },
-        },
-        {
-          name: "PostToolUse",
-          create: createPostToolUseDispatcher,
-          trigger: { kind: "result" as const, patterns: ["benchmark"] },
-          input: {
-            eventName: "PostToolUse" as const,
-            cwd: project,
-            toolName: "Bash",
-            toolInput: { command: "bun test" },
-            toolResponse: "benchmark result",
-          },
-        },
-      ];
-
-      for (const fixture of eventFixtures) {
-        writeIndex(
-          dataRoot,
-          Array.from({ length: 10 }, (_, offset) => ({
-            id: offset + 1,
-            name: `benchmark-${offset + 1}`,
-            claim: `benchmark tip ${offset + 1}`,
-            scope: "global",
-            trigger: fixture.trigger,
-          })),
-        );
-        const dispatcher = fixture.create({
-          dataRoot,
-          nowMs: () => fixedNowMs,
-        });
-        for (let index = 0; index < 5; index += 1) {
-          await dispatcher({
-            ...fixture.input,
-            sessionId: `warmup-${fixture.name}-${index}`,
-            stopHookActive: false,
-            raw: {},
-          });
-        }
-        const samples: number[] = [];
-        for (let index = 0; index < 100; index += 1) {
-          const started = performance.now();
-          await dispatcher({
-            ...fixture.input,
-            sessionId: `sample-${fixture.name}-${index}`,
-            stopHookActive: false,
-            raw: {},
-          });
-          samples.push(performance.now() - started);
-        }
-        samples.sort((left, right) => left - right);
-        const p95 = samples[Math.ceil(samples.length * 0.95) - 1]!;
-        console.log(`${fixture.name} dispatcher p95: ${p95.toFixed(3)}ms`);
-        expect(p95).toBeLessThanOrEqual(50);
-      }
     }),
   );
 

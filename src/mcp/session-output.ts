@@ -4,7 +4,6 @@ import type { SessionRecord } from "../db/sessions";
 import { estimateDiaryTokens } from "../diary/domain";
 import { splitBulletField } from "./format";
 import type { FormattedSession } from "./format";
-import { buildTaskCausalityReprime } from "./task-skeleton";
 
 export const CURRENT_SESSION_STATE_TOKEN_BUDGET = 2_000;
 
@@ -197,26 +196,5 @@ export function renderCurrentSessionStateOutput(
     nextSteps: session.nextSteps ?? null,
     reference: session.reference ?? null,
     legacyInsight: session.insight,
-  });
-}
-
-export interface CurrentSessionReprimeOptions {
-  taskCausalityEraCutoffEpoch?: number;
-  tokenBudget?: number;
-}
-
-// Worker re-prime is task-causality-specific. SessionStart deliberately keeps
-// calling renderCurrentSessionStateOutput, so its independent milestone hook and
-// 2,000-token degradation ladder are unchanged.
-export function renderCurrentSessionOutput(
-  db: Database,
-  session: FormattedSession,
-  sessionRecord: SessionRecord,
-  options: CurrentSessionReprimeOptions = {},
-): string {
-  return buildTaskCausalityReprime(db, {
-    sessionId: sessionRecord.id,
-    sessionState: renderCurrentSessionStateOutput(session, sessionRecord),
-    ...options,
   });
 }

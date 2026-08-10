@@ -124,7 +124,9 @@ describe("handleStopHook", () => {
     expect(result.exitCode).toBe(0);
     expect(typeof result.asyncWork).toBe("function");
     expect(turn.assistantResponse).toBe("Done ");
-    expect(turn.status).toBe("active");
+    // Ticket 15: Stop is the completion event, and completion settles the turn.
+    // No era configured, so an un-noted turn nobody will ever write is `failed`.
+    expect(turn.status).toBe("failed");
     expect(queueRows).toEqual([
       {
         seq: 1,
@@ -168,10 +170,13 @@ describe("handleStopHook", () => {
 
     // Insert directly after settlement to model a turn arriving in the
     // watermark race without invoking the normal invalidation write path.
+    // Already terminal, so Stop's own completion settlement (ticket 15) is a
+    // no-op here and the ONLY thing that can mark the day stale is the response
+    // change this test is about.
     db.query(
       `INSERT INTO turns (
-        session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
-      ) VALUES (?, 1, 'active', 'Pending work', 'Original answer', ?)`,
+        session_id, prompt_number, status, title, user_prompt, assistant_response, created_at_epoch
+      ) VALUES (?, 1, 'extracted', 'settled', 'Pending work', 'Original answer', ?)`,
     ).run(sessionId, createdAtEpoch);
 
     const handler = createStopHandler({ db, now: () => 500 });

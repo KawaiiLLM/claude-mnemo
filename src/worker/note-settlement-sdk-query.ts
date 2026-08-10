@@ -13,7 +13,7 @@ import {
 } from "../mcp/definitions";
 import { createDatabaseBackedHandlers } from "../mcp/handlers";
 import { buildIsolatedEnv } from "../mnemosyne/env";
-import { resolveClaudeCodeExecutablePath } from "./agent-session";
+import { resolveClaudeCodeExecutablePath } from "./claude-executable";
 import type {
   NoteSettlementQuery,
   NoteSettlementQueryRequest,

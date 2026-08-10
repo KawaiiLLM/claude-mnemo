@@ -121,9 +121,20 @@ describe("era cutover write path", () => {
     insertObservation.run(eraTurnId, 3_000);
     insertTurnStop.run(legacyTurnId, sessionId, 1_000);
     insertTurnStop.run(eraTurnId, sessionId, 3_000);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 3_200 });
+    // Ticket 15: the same pass that opens the debts settles the turns, because
+    // no subagent is coming to write their records. The era turn becomes the
+    // hole `skipped` names; the pre-era one becomes `failed`, which is what a
+    // turn whose only writer is gone has always been called.
+    reconcileNoteDebt(db, {
+      sessionId,
+      nowEpoch: 3_200,
+      eraCutoffEpoch: CUTOFF,
+    });
     expect(getNoteDebt(db, legacyTurnId)?.status).toBe("pending");
     expect(getNoteDebt(db, eraTurnId)?.status).toBe("pending");
+    expect(getTurnById(db, eraTurnId)?.status).toBe("skipped");
+    expect(getTurnById(db, legacyTurnId)?.status).toBe("failed");
+    expect(getTurnById(db, rideTurnId)?.status).toBe("active");
   });
 
   afterEach(() => {
@@ -153,17 +164,20 @@ describe("era cutover write path", () => {
       expect(turn.insight).toBe(
         "The cutoff is compared per turn, so a session can span it.",
       );
-      // Not `extracted` yet: the note was written inside its own turn, and
-      // `extracted` is read across the codebase as "this turn is over".
-      expect(turn.status).toBe("provisional");
+      // This turn already ended, so its completion settled it as a hole and the
+      // note is the backlog relief's answer: a record is a record, and a row
+      // holding one is `extracted` (db/search.ts renders only those).
+      expect(turn.status).toBe("extracted");
       expect(turn.updatedAtEpoch).toBe(3_300);
     });
 
     test("keeps the turn live for observation capture while it is still running", () => {
+      // The session's current turn (裁决 25) — the ordinary case now that a
+      // note is written inside the turn it is about.
       noteTool(
         db,
         {
-          turn: `S${sessionId}/T11`,
+          turn: `S${sessionId}/T12`,
           title: "implement+era-cutover: mid-turn note",
           content: "The turn may still call more tools after this.",
         },
@@ -174,8 +188,7 @@ describe("era cutover write path", () => {
       // observation once the session's newest turn stops reading as live, so a
       // promotion straight to `extracted` would silently truncate the raw axis
       // for the rest of the turn.
-      const status = getTurnById(db, eraTurnId)!.status;
-      expect(status === "active" || status === "provisional").toBe(true);
+      expect(getTurnById(db, rideTurnId)!.status).toBe("provisional");
     });
 
     test("a late note on a turn that already ended lands as extracted", () => {
@@ -339,9 +352,11 @@ describe("era cutover write path", () => {
     });
 
     test("a settled hole is not re-offered — nothing spins", () => {
-      // Still open before the writeback: the stranded repair would re-enqueue
-      // it, which is the loop the status advance exists to close.
-      expect(getStrandedTurns(db, sessionId).map((t) => t.id)).toContain(
+      // The turn's own completion already took it out of the selection; the
+      // writeback must not put it back. This is the loop the mechanical
+      // settlement exists to close — the stranded repair re-enqueues anything
+      // left `active`/`provisional` on every end event, forever.
+      expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
         eraTurnId,
       );
 
@@ -397,10 +412,6 @@ describe("era cutover write path", () => {
         },
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
-      // Still selectable while `provisional` — correct, the turn is live.
-      expect(getStrandedTurns(db, sessionId).map((t) => t.id)).toContain(
-        eraTurnId,
-      );
 
       rememberTool(db, { id: `T${eraTurnId}` }, { eraCutoffEpoch: CUTOFF });
 
@@ -438,9 +449,9 @@ describe("era cutover write path", () => {
     });
 
     test("leaves an already-terminal turn exactly as it found it", () => {
-      // The extraction pipeline's own floor may have settled the turn first
-      // (worker/server.ts markExtractionFailedAndSkip); a late writeback is not
-      // a licence to move a terminal status, in either direction.
+      // The stranded repair's floor may have settled the turn first
+      // (worker/turn-liveness.ts); a late writeback is not a licence to move a
+      // terminal status, in either direction.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'failed' WHERE id = ?",
       ).run(eraTurnId);

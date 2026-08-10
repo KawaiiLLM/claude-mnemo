@@ -170,8 +170,10 @@ describe("claude-mnemo smoke test", () => {
     expect(stopResult.exitCode).toBe(0);
     expect(typeof stopResult.asyncWork).toBe("function");
     await stopResult.asyncWork?.();
-    expect(getTurn(db, session.id, 1)?.status).toBe("active");
-    expect(getTurn(db, session.id, 2)?.status).toBe("active");
+    // Stop is the completion event, and completion settles the turn (ticket 15).
+    // No era configured, so an un-noted turn nobody will ever write is `failed`.
+    expect(getTurn(db, session.id, 1)?.status).toBe("failed");
+    expect(getTurn(db, session.id, 2)?.status).toBe("failed");
     expect(getSessionByContentId(db, "session-e2e")?.completedAtEpoch).toBe(300);
 
     const firstTurnId = getTurn(db, session.id, 1)!.id;

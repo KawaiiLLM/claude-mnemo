@@ -9,7 +9,6 @@ import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, updateTurnById } from "../../src/db/turns";
 import { DEFAULT_CONFIG } from "../../src/shared/config";
 import { createWorkerCore } from "../../src/worker/server";
-import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 /**
  * The stranded-turn repair used to reuse the due days the dream backlog
@@ -41,8 +40,14 @@ describe("stranded repair runs with the dream disabled", () => {
     strandedEpoch?: number;
     /** A second stranded turn in the (registered) triggering session. */
     strandTriggerSessionToo?: boolean;
-    /** Runs inside the drain, i.e. after the scan and before the floor. */
-    onSendPrompt?: (registry: Map<string, Record<string, string>>) => void;
+    /**
+     * Make "stranded-session" absent to the reachability SCAN and present to
+     * the FLOOR — the resume race, reproduced through the only surface the two
+     * share. With no agent left there is no mid-drain callback to hang this on,
+     * and a registry that answers differently on the second probe is exactly
+     * what a session re-registering between them looks like.
+     */
+    reRegisterAfterScan?: boolean;
   } = {}) {
     const db = createDatabase(":memory:");
     databases.push(db);
@@ -94,9 +99,22 @@ describe("stranded repair runs with the dream disabled", () => {
 
     const reconcileDreamBacklog = mock(async () => [DUE_DATE]);
     const processDiaryItem = mock(async () => {});
-    const registry = new Map<string, Record<string, string>>([
-      ["trigger-session", {}],
-    ]);
+    const registry = options.reRegisterAfterScan
+      ? (() => {
+          let probes = 0;
+          const map = new Map<string, Record<string, string>>([
+            ["trigger-session", {}],
+          ]);
+          const realGet = map.get.bind(map);
+          map.get = (key: string) => {
+            if (key === "stranded-session" && (probes += 1) > 1) {
+              map.set("stranded-session", {});
+            }
+            return realGet(key);
+          };
+          return map;
+        })()
+      : new Map<string, Record<string, string>>([["trigger-session", {}]]);
     if (options.repairHasEnv) registry.set("stranded-session", {});
     const core = createWorkerCore({
       db,
@@ -105,30 +123,6 @@ describe("stranded repair runs with the dream disabled", () => {
       config: DEFAULT_CONFIG,
       reconcileDreamBacklog,
       processDiaryItem,
-      createWorkerQuerySessionImpl: ((...args: unknown[]) => {
-        const deps = (args.length === 2 ? args[1] : args[3]) as
-          | { onRemember?: (id: string) => void }
-          | undefined;
-        return {
-          sessionId: "decoupled-worker",
-          queryPid: 123,
-          async sendPrompt(prompt: string) {
-            options.onSendPrompt?.(registry);
-            for (const match of prompt.matchAll(/<turn id="T(\d+)"/g)) {
-              const turnId = Number(match[1]);
-              updateTurnById(db, turnId, {
-                status: "extracted",
-                title: "recovered",
-                content: "completed normally",
-              });
-              deps?.onRemember?.(`T${turnId}`);
-            }
-            return { session_id: "decoupled-worker" };
-          },
-          async close() {},
-        } satisfies WorkerQuerySession;
-      }) as typeof import("../../src/worker/query-session").createWorkerQuerySession,
-      isProcessAliveImpl: () => false,
       logger: { warn() {}, error() {} },
     });
     return {
@@ -162,12 +156,12 @@ describe("stranded repair runs with the dream disabled", () => {
     });
   }
 
-  test("a reachable stranded turn is restored and extracted", async () => {
+  test("a reachable stranded turn is restored and settled", async () => {
     const fixture = setup({ repairHasEnv: true });
 
     await fixture.core.finishSession(fixture.triggerSessionId);
 
-    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("extracted");
+    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
     expect(extractionQueue(fixture.db)).toEqual([]);
     expect(fixture.reconcileDreamBacklog).not.toHaveBeenCalled();
   });
@@ -180,7 +174,7 @@ describe("stranded repair runs with the dream disabled", () => {
 
     await fixture.core.handleCompact(fixture.triggerSessionId, null);
 
-    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("extracted");
+    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
     expect(extractionQueue(fixture.db)).toEqual([]);
   });
 
@@ -202,8 +196,7 @@ describe("stranded repair runs with the dream disabled", () => {
     await fixture.core.handleCompact(fixture.triggerSessionId, null);
     await fixture.core.finishSession(fixture.triggerSessionId);
 
-    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("extracted");
-    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.title).toBe("recovered");
+    expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("failed");
     expect(extractionQueue(fixture.db)).toEqual([]);
   });
 
@@ -215,14 +208,14 @@ describe("stranded repair runs with the dream disabled", () => {
     // re-asks, per turn, inside its own write transaction.
     const fixture = setup({
       strandTriggerSessionToo: true,
-      onSendPrompt: (registry) => registry.set("stranded-session", {}),
+      reRegisterAfterScan: true,
     });
 
     await fixture.core.finishSession(fixture.triggerSessionId);
 
-    // The triggering session was reachable all along and completed normally.
+    // The triggering session was reachable all along and settled normally.
     expect(getTurnById(fixture.db, fixture.triggerStrandedTurnId!)?.status).toBe(
-      "extracted",
+      "failed",
     );
     // The one that came back mid-drain kept its live status and its queue row.
     expect(getTurnById(fixture.db, fixture.strandedTurnId)?.status).toBe("active");

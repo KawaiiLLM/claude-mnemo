@@ -148,8 +148,6 @@ describe("release artifacts", () => {
 
     const worker = readFileSync("plugin/scripts/worker.cjs", "utf8");
     for (const marker of [
-      "needsReprime", // compact re-prime, both paths
-      "onCompactBoundary", // SDK-auto compact boundary wiring
       'audience: "worker"', // recall worker DB-id surface
       "dbid:T", // DB-id token the worker recall emits
       "OUTCOME_TAGS", // milestone marker logic
@@ -159,19 +157,31 @@ describe("release artifacts", () => {
       "memory/archive.md", // dream curation workspace
       "last_successful_date", // durable dream completion marker
       "recordDreamFailure", // retryable dream queue path
-      "exceedsG3EvidenceGate", // actual-vs-target calibration deviation gate
-      "settlement_jobs", // two-phase grading: the durable settle work unit
-      "frozen_member_ids", // cohort frozen at enqueue — retries grade one set
+      "note_settlement_jobs", // D9 settlement: the durable settle work unit
+      "frozen_member_ids", // cohort frozen at enqueue — retries settle one set
       "claim_generation", // lease ownership fence — a stale worker commits nothing
-      "parseSettlementBatch", // strict whole-batch settle validation
-      "This message is a SETTLEMENT", // the settle message class contract
-      "Origin duty, arc-scoped", // arc-scoped provisional Grade-4 rubric rule
-      // The [T<n>] inline parser moved here alone: the arc renderer takes its ↳
-      // rows from structured pull-through now, so task-skeleton (worker-side) is
-      // its only remaining caller and the MCP bundle tree-shakes it away.
-      "parseContentReferences",
+      "settleCompletedTurn", // ticket 15: completion settles the row, no agent
+      "completionFloorStatus", // the ONE definition of an un-noted turn's status
+      "reconcileNoteDebt", // the note-debt classification path the worker drains through
     ]) {
       expect(worker).toContain(marker);
+    }
+
+    // The demolished extraction agent (ticket 15, spec D10/D13). A stale worker
+    // bundle would still open an SDK session per content session, resume it, run
+    // the stall watchdog and push obs summaries — none of which any source file
+    // can express any more, so their absence is the only way to see the rebuild.
+    for (const removed of [
+      "needsReprime", // compact re-prime of the resident agent
+      "onCompactBoundary", // SDK-auto compact boundary wiring
+      "extraction_stall_attempts", // the stall watchdog's durable counter
+      "last_agent_session_id", // the resume pointer
+      "exceedsG3EvidenceGate", // obs/turn grade calibration fed to the agent
+      "parseSettlementBatch", // 0.8.4 two-phase grading
+      "This message is a SETTLEMENT", // the settle message class
+      "buildCorrectiveResend", // the derailment ladder
+    ]) {
+      expect(worker).not.toContain(removed);
     }
 
     const mcpServer = readFileSync("plugin/scripts/mcp-server.cjs", "utf8");
@@ -214,9 +224,10 @@ describe("release artifacts", () => {
     // the pre-redesign sub-lines.
     expect(mcpServer).not.toContain("resolveMilestoneReferences");
 
-    expect(worker).toContain("Correcting an earlier turn");
-    expect(worker).toContain('tags: ["rolled-back"]');
-    // Two-class tag contract (bare role + topic: facet) in the extraction prompt.
-    expect(worker).toContain("topic tags NEVER affect milestones");
+    // The extraction agent's batch prompt (its correction rubric, its
+    // rolled-back tag contract and the two-class tag rules it carried) went with
+    // the agent — nothing in the worker addresses a model about a turn any more.
+    expect(worker).not.toContain("Correcting an earlier turn");
+    expect(worker).not.toContain("topic tags NEVER affect milestones");
   });
 });

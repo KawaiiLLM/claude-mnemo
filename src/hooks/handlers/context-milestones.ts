@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { getSessionByContentId } from "../../db/sessions";
-import { resolveConfiguredEraCutoff } from "../../shared/config";
+import { resolveEraCutoff } from "../../db/era";
 import { renderSessionMilestoneInjection } from "../milestone-injection";
 import type { HookResult, NormalizedHookInput } from "../types";
 
@@ -31,7 +31,7 @@ export function createMilestoneContextHandler(
   const eraCutoffEpoch =
     dependencies.eraCutoffEpoch !== undefined
       ? dependencies.eraCutoffEpoch
-      : resolveConfiguredEraCutoff();
+      : resolveEraCutoff(dependencies.db);
 
   return async function handleMilestoneContextHook(
     input: NormalizedHookInput,

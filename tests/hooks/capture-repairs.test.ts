@@ -302,13 +302,11 @@ describe("capture repairs", () => {
            title, content, insight, type, significance_grade, tags,
            files_read, files_modified, tool_call_count,
            was_interrupted, was_rolled_back,
-           extraction_stall_attempts, extraction_stall_retry_at_ms,
-           extraction_stall_retry_after_seq, extraction_stall_retry_mode,
            cites_recorded, created_at_epoch, updated_at_epoch
          ) VALUES (?, 7, 'prompt-9', 41, 'extracted', 'the real prompt',
                    'the real response', 'full narration',
                    'Real title', 'Real content', 'Real insight', 'decision', 3, ?,
-                   ?, ?, 12, 1, 1, 2, 1234, 77, 'resume', ?, 700, 800)`,
+                   ?, ?, 12, 1, 1, ?, 700, 800)`,
       ).run(
         sessionId,
         JSON.stringify(["topic:capture"]),
@@ -381,10 +379,6 @@ describe("capture repairs", () => {
         toolCallCount: null,
         wasInterrupted: false,
         wasRolledBack: false,
-        extractionStallAttempts: 0,
-        extractionStallRetryAtMs: null,
-        extractionStallRetryAfterSeq: null,
-        extractionStallRetryMode: null,
         // untouched by the disposition list
         transcriptLineStart: 41,
         parentTurnId: null,

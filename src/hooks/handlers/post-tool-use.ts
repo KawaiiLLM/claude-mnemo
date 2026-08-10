@@ -4,6 +4,7 @@ import { captureConsultedMemories } from "../../db/consulted-memories";
 import { runHookWriteTransaction } from "../../db/database";
 import { reconcileNoteDebt } from "../../db/note-debt";
 import { getSessionByContentId } from "../../db/sessions";
+import { resolveEraCutoff } from "../../db/era";
 import type { TurnStatus } from "../../db/turns";
 import { isExtractionExcludedToolName } from "../../shared/note-tool";
 import { stripPrivateTags } from "../../shared/tag-stripping";
@@ -17,6 +18,13 @@ export interface PostToolUseHandlerDependencies {
   workerEnv?: NodeJS.ProcessEnv;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   logger?: Pick<Console, "warn">;
+  /**
+   * P2 era boundary (spec D11), read once at handler construction. The ledger's
+   * classification sweep settles the turns it walks, and the era decides what an
+   * un-noted one is settled to. Omitted, it comes from config (default `null` =
+   * legacy).
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 function stringifyToolPayload(value: unknown): string | null {
@@ -48,6 +56,10 @@ export function createPostToolUseHandler(
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const logger = dependencies.logger ?? console;
+  const eraCutoffEpoch =
+    dependencies.eraCutoffEpoch !== undefined
+      ? dependencies.eraCutoffEpoch
+      : resolveEraCutoff(dependencies.db);
 
   return async function handlePostToolUseHook(
     input: NormalizedHookInput,
@@ -98,6 +110,7 @@ export function createPostToolUseHandler(
         reconcileNoteDebt(dependencies.db, {
           sessionId: session.id,
           nowEpoch: createdAtEpoch,
+          eraCutoffEpoch,
         });
       } catch (error) {
         logger.warn?.("note debt reconcile failed", {

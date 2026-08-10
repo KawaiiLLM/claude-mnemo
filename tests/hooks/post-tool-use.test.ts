@@ -5,7 +5,6 @@ import { getConsultedMemories } from "../../src/db/consulted-memories";
 import { createDatabase } from "../../src/db/database";
 import {
   getExtractableObservationsForTurn,
-  hasSkippedObservationsForTurn,
 } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
@@ -308,16 +307,6 @@ describe("handlePostToolUseHook", () => {
       expect(result).toEqual({ continue: true });
     });
   }
-
-  test("a note observation cannot forge the already-delivered signal", async () => {
-    const handler = createPostToolUseHandler({ db, now: () => 500 });
-    await handler(createInput({ toolName: "mcp__mnemo__note" }));
-
-    // Terminal finalizers retire every *pending* observation wholesale.
-    db.query("UPDATE observations SET status = 'skipped' WHERE status = 'pending'").run();
-
-    expect(hasSkippedObservationsForTurn(db, turnId)).toBe(false);
-  });
 
   test("records what a recall call consulted on the ride turn", async () => {
     // A past session, so the ride turn stays this session's latest turn.
