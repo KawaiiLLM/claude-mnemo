@@ -32663,7 +32663,9 @@ var DEFAULT_CONFIG = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
-  settlementEnabled: false,
+  // On by default because it is a kill switch, not the cutover switch: with no
+  // era cutoff configured this changes nothing at all.
+  settlementEnabled: true,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,

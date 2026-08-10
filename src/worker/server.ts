@@ -4431,12 +4431,13 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
 
   // The real settlement payload is assembled HERE rather than inside the core,
   // because it needs the data root the subprocess runs in and the core has no
-  // reason to learn about one. With the flag off nothing is constructed and the
-  // core keeps its no-op stub, so "the worker calls no model" stays true of the
-  // shipped default wiring rather than of a code path.
+  // reason to learn about one. Both switches gate it — no era means nothing to
+  // settle, the flag means "not right now" — and with either off nothing is
+  // constructed and the core keeps its no-op stub, so "the worker calls no
+  // model" stays true of the shipped default wiring rather than of a code path.
   const noteSettlementDispatchImpl =
     deps.noteSettlementDispatchImpl ??
-    (config.settlementEnabled
+    (config.settlementEnabled && config.eraCutoffEpoch !== null
       ? createNoteSettlementDispatch({
           db,
           config,

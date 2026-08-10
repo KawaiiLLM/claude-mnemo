@@ -10,6 +10,11 @@ import { closePendingNoteDebtsAsClosed } from "./note-debt";
  * module exists to make "which turns does this settle" a durable, frozen fact
  * rather than something recomputed on every attempt. Four invariants carry it:
  *
+ *   - a window never reaches back before the ERA. A legacy turn's record was
+ *     written by the extraction agent, not by the turn itself, so there is
+ *     nothing there for settlement to read; the floor is the session's last
+ *     pre-era prompt number, which for a session that straddles the cutover is
+ *     also the value its cursor is born holding;
  *   - a window is cut from the DECIDED CONTIGUOUS PREFIX only. A turn is decided
  *     when the note-debt ledger has finished with it (`noted`/`skipped`) or
  *     never opened a debt for it (trivial turns leave no row by design). The
@@ -162,17 +167,47 @@ export function getNoteSettlementCursor(
 }
 
 /**
- * Where the next window begins: one past the later of the cursor and the highest
- * window already enqueued.
+ * The last prompt number this session ran BEFORE the era, or 0 if it ran none.
+ *
+ * Settlement's floor (spec D11/D12, ticket 14). It is a MAX over prompt numbers
+ * rather than a per-turn filter because a window is a contiguous range: bounding
+ * the range at the highest pre-era prompt number is what makes "no pre-era turn
+ * is inside it" true of the whole window, and it is what stops the switch-on
+ * from grinding every historical session through an inference.
+ */
+export function getEraFloorPromptNumber(
+  db: Database,
+  sessionId: number,
+  eraCutoffEpoch: number,
+): number {
+  return (
+    db
+      .query<{ floor: number | null }, [number, number]>(
+        `SELECT MAX(prompt_number) AS floor FROM turns
+         WHERE session_id = ? AND created_at_epoch < ?`,
+      )
+      .get(sessionId, eraCutoffEpoch)?.floor ?? 0
+  );
+}
+
+/**
+ * Where the next window begins: one past the latest of the cursor, the highest
+ * window already enqueued, and the era floor.
  *
  * Consulting the enqueued windows and not just the cursor is what keeps windows
  * disjoint while a job is still open — the cursor deliberately does not move
  * until a window RESOLVES, so a second trigger arriving mid-flight would
  * otherwise cut a window over turns the in-flight job already owns.
+ *
+ * The era floor is consulted independently of the cursor row rather than only
+ * through it: a session settlement has never written about has no cursor row at
+ * all, and deriving the bound is what lets the below-threshold trigger stay a
+ * pure read (see `planNoteSettlementWindows`).
  */
 export function getNoteSettlementWindowStart(
   db: Database,
   sessionId: number,
+  eraCutoffEpoch: number,
 ): number {
   const highestEnqueued =
     db
@@ -181,7 +216,38 @@ export function getNoteSettlementWindowStart(
          WHERE session_id = ?`,
       )
       .get(sessionId)?.windowEnd ?? 0;
-  return Math.max(getNoteSettlementCursor(db, sessionId), highestEnqueued ?? 0) + 1;
+  return (
+    Math.max(
+      getNoteSettlementCursor(db, sessionId),
+      highestEnqueued ?? 0,
+      getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch),
+    ) + 1
+  );
+}
+
+/**
+ * Create this session's cursor row at the era boundary, once.
+ *
+ * The cursor says "settlement has dealt with everything through here", and for a
+ * session that straddles the cutover the truthful birth value is its last legacy
+ * turn: nothing at or below it will ever be settled. INSERT OR IGNORE, so a
+ * cursor that has already advanced is never pulled back to the boundary.
+ */
+export function ensureNoteSettlementCursor(
+  db: Database,
+  sessionId: number,
+  eraCutoffEpoch: number,
+  nowEpoch: number,
+): void {
+  db.query<unknown, [number, number, number, number]>(
+    `INSERT OR IGNORE INTO note_settlement_cursors (
+       session_id, last_settled_prompt_number, updated_at_epoch
+     )
+     SELECT ?, COALESCE(
+       (SELECT MAX(prompt_number) FROM turns
+        WHERE session_id = ? AND created_at_epoch < ?), 0
+     ), ?`,
+  ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
 }
 
 function getClassifiedThrough(db: Database, sessionId: number): number {
@@ -257,6 +323,11 @@ export function getCompactBoundaryPromptNumber(
 }
 
 export interface NoteSettlementWindowOptions {
+  /**
+   * The era boundary, and required for that reason: there is no such thing as
+   * planning a window without one, so the type says so rather than a comment.
+   */
+  eraCutoffEpoch: number;
   consecutiveTurns?: number;
   minWindowTurns?: number;
 }
@@ -287,14 +358,18 @@ export function planNoteSettlementWindows(
   db: Database,
   sessionId: number,
   trigger: Exclude<NoteSettlementTrigger, "residual">,
-  options: NoteSettlementWindowOptions = {},
+  options: NoteSettlementWindowOptions,
 ): NoteSettlementWindowPlan[] {
   const consecutiveTurns =
     options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
   const minWindowTurns =
     options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
 
-  let windowStart = getNoteSettlementWindowStart(db, sessionId);
+  let windowStart = getNoteSettlementWindowStart(
+    db,
+    sessionId,
+    options.eraCutoffEpoch,
+  );
   let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
   if (trigger === "compact") {
     const boundary = getCompactBoundaryPromptNumber(db, sessionId);
@@ -352,14 +427,15 @@ function insertJob(
   windowEnd: number,
   triggerType: NoteSettlementTrigger,
   nowEpoch: number,
+  eraCutoffEpoch: number,
 ): NoteSettlementJob | null {
-  if (windowStart < getNoteSettlementWindowStart(db, sessionId)) {
+  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
     return null;
   }
   if (windowEnd < windowStart) {
     return null;
   }
-  return (
+  const job =
     db
       .query<
         NoteSettlementJob,
@@ -373,8 +449,15 @@ function insertJob(
          RETURNING${JOB_COLUMNS}`,
       )
       .get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ??
-    null
-  );
+    null;
+  if (job) {
+    // The first job is the first moment settlement writes anything about this
+    // session, and therefore the place its cursor is born — at the era boundary,
+    // so the row states outright that the legacy prefix is out of scope. Written
+    // only on a job that landed: a refused window leaves no trace at all.
+    ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
+  }
+  return job;
 }
 
 /** Persist a plan. Idempotent through UNIQUE(session, window_start, trigger). */
@@ -382,6 +465,7 @@ export function enqueueNoteSettlementWindows(
   db: Database,
   plans: readonly NoteSettlementWindowPlan[],
   nowEpoch: number,
+  eraCutoffEpoch: number,
 ): NoteSettlementJob[] {
   if (plans.length === 0) {
     return [];
@@ -396,6 +480,7 @@ export function enqueueNoteSettlementWindows(
         plan.windowEnd,
         plan.triggerType,
         nowEpoch,
+        eraCutoffEpoch,
       );
       if (job) {
         created.push(job);
@@ -422,6 +507,8 @@ export interface ListResidualNoteSettlementOptions {
    */
   activeSessionIds: ReadonlySet<number>;
   nowEpoch: number;
+  /** The era boundary, floor of every derived window — see the window start. */
+  eraCutoffEpoch: number;
   idleMs?: number;
   minWindowTurns?: number;
   limit?: number;
@@ -442,6 +529,11 @@ export interface ListResidualNoteSettlementOptions {
  * also why the threshold is checked before anything is written: a session under
  * the floor must leave no trace, so reopening it returns it to the live path
  * with its ledger untouched.
+ *
+ * The era floor enters the derived window start exactly as it does on the live
+ * path, which is also what keeps a purely legacy session out: its window would
+ * start one past its last turn, so it counts zero residual turns and never
+ * reaches the threshold.
  */
 export function listResidualNoteSettlementCandidates(
   db: Database,
@@ -458,7 +550,7 @@ export function listResidualNoteSettlementCandidates(
   const scanLimit = limit + options.activeSessionIds.size;
 
   return db
-    .query<ResidualNoteSettlementCandidate, [number, number, number]>(
+    .query<ResidualNoteSettlementCandidate, [number, number, number, number]>(
       `SELECT sessionId, windowStart, windowEnd, lastActivityEpoch,
               windowEnd - windowStart + 1 AS residualTurns
        FROM (
@@ -487,6 +579,11 @@ export function listResidualNoteSettlementCandidates(
                (SELECT MAX(j.window_end) FROM note_settlement_jobs j
                 WHERE j.session_id = s.id),
                0
+             ),
+             COALESCE(
+               (SELECT MAX(t.prompt_number) FROM turns t
+                WHERE t.session_id = s.id AND t.created_at_epoch < ?),
+               0
              )
            ) + 1 AS windowStart
          FROM sessions s
@@ -496,7 +593,7 @@ export function listResidualNoteSettlementCandidates(
        ORDER BY lastActivityEpoch ASC, sessionId ASC
        LIMIT ?`,
     )
-    .all(idleCutoffEpoch, minWindowTurns, scanLimit)
+    .all(options.eraCutoffEpoch, idleCutoffEpoch, minWindowTurns, scanLimit)
     .filter((row) => !options.activeSessionIds.has(row.sessionId))
     .slice(0, limit);
 }
@@ -506,6 +603,7 @@ export function enqueueResidualNoteSettlementJob(
   db: Database,
   candidate: ResidualNoteSettlementCandidate,
   nowEpoch: number,
+  eraCutoffEpoch: number,
 ): NoteSettlementJob | null {
   return runWriteTransaction(db, () =>
     insertJob(
@@ -515,6 +613,7 @@ export function enqueueResidualNoteSettlementJob(
       candidate.windowEnd,
       "residual",
       nowEpoch,
+      eraCutoffEpoch,
     ),
   );
 }

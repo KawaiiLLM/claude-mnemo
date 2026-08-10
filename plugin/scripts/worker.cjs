@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msnkv697" : "dev";
+var BUILD_ID = true ? "0.9.5-msnlwb4d" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -305,7 +305,9 @@ var DEFAULT_CONFIG = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
-  settlementEnabled: false,
+  // On by default because it is a kill switch, not the cutover switch: with no
+  // era cutoff configured this changes nothing at all.
+  settlementEnabled: true,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
@@ -23226,12 +23228,33 @@ function getNoteSettlementCursor(db, sessionId) {
          FROM note_settlement_cursors WHERE session_id = ?`
   ).get(sessionId)?.cursor ?? 0;
 }
-function getNoteSettlementWindowStart(db, sessionId) {
+function getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch) {
+  return db.query(
+    `SELECT MAX(prompt_number) AS floor FROM turns
+         WHERE session_id = ? AND created_at_epoch < ?`
+  ).get(sessionId, eraCutoffEpoch)?.floor ?? 0;
+}
+function getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch) {
   const highestEnqueued = db.query(
     `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
          WHERE session_id = ?`
   ).get(sessionId)?.windowEnd ?? 0;
-  return Math.max(getNoteSettlementCursor(db, sessionId), highestEnqueued ?? 0) + 1;
+  return Math.max(
+    getNoteSettlementCursor(db, sessionId),
+    highestEnqueued ?? 0,
+    getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)
+  ) + 1;
+}
+function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
+  db.query(
+    `INSERT OR IGNORE INTO note_settlement_cursors (
+       session_id, last_settled_prompt_number, updated_at_epoch
+     )
+     SELECT ?, COALESCE(
+       (SELECT MAX(prompt_number) FROM turns
+        WHERE session_id = ? AND created_at_epoch < ?), 0
+     ), ?`
+  ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
 }
 function getClassifiedThrough(db, sessionId) {
   return db.query(
@@ -23258,10 +23281,14 @@ function getCompactBoundaryPromptNumber(db, sessionId) {
     "SELECT last_compact_turn AS boundary FROM sessions WHERE id = ?"
   ).get(sessionId)?.boundary ?? null;
 }
-function planNoteSettlementWindows(db, sessionId, trigger, options = {}) {
+function planNoteSettlementWindows(db, sessionId, trigger, options) {
   const consecutiveTurns = options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
   const minWindowTurns = options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
-  let windowStart = getNoteSettlementWindowStart(db, sessionId);
+  let windowStart = getNoteSettlementWindowStart(
+    db,
+    sessionId,
+    options.eraCutoffEpoch
+  );
   let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
   if (trigger === "compact") {
     const boundary = getCompactBoundaryPromptNumber(db, sessionId);
@@ -23290,14 +23317,14 @@ function planNoteSettlementWindows(db, sessionId, trigger, options = {}) {
   }
   return plans;
 }
-function insertJob2(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch) {
-  if (windowStart < getNoteSettlementWindowStart(db, sessionId)) {
+function insertJob2(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
+  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
     return null;
   }
   if (windowEnd < windowStart) {
     return null;
   }
-  return db.query(
+  const job = db.query(
     `INSERT OR IGNORE INTO note_settlement_jobs (
            session_id, window_start, window_end, trigger_type,
            status, attempts, retry_at_epoch,
@@ -23305,8 +23332,12 @@ function insertJob2(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch
          ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
          RETURNING${JOB_COLUMNS}`
   ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
+  if (job) {
+    ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
+  }
+  return job;
 }
-function enqueueNoteSettlementWindows(db, plans, nowEpoch) {
+function enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch) {
   if (plans.length === 0) {
     return [];
   }
@@ -23319,7 +23350,8 @@ function enqueueNoteSettlementWindows(db, plans, nowEpoch) {
         plan.windowStart,
         plan.windowEnd,
         plan.triggerType,
-        nowEpoch
+        nowEpoch,
+        eraCutoffEpoch
       );
       if (job) {
         created.push(job);
@@ -23363,6 +23395,11 @@ function listResidualNoteSettlementCandidates(db, options) {
                (SELECT MAX(j.window_end) FROM note_settlement_jobs j
                 WHERE j.session_id = s.id),
                0
+             ),
+             COALESCE(
+               (SELECT MAX(t.prompt_number) FROM turns t
+                WHERE t.session_id = s.id AND t.created_at_epoch < ?),
+               0
              )
            ) + 1 AS windowStart
          FROM sessions s
@@ -23371,9 +23408,9 @@ function listResidualNoteSettlementCandidates(db, options) {
          AND windowEnd - windowStart + 1 >= ?
        ORDER BY lastActivityEpoch ASC, sessionId ASC
        LIMIT ?`
-  ).all(idleCutoffEpoch, minWindowTurns, scanLimit).filter((row) => !options.activeSessionIds.has(row.sessionId)).slice(0, limit);
+  ).all(options.eraCutoffEpoch, idleCutoffEpoch, minWindowTurns, scanLimit).filter((row) => !options.activeSessionIds.has(row.sessionId)).slice(0, limit);
 }
-function enqueueResidualNoteSettlementJob(db, candidate, nowEpoch) {
+function enqueueResidualNoteSettlementJob(db, candidate, nowEpoch, eraCutoffEpoch) {
   return runWriteTransaction(
     db,
     () => insertJob2(
@@ -23382,7 +23419,8 @@ function enqueueResidualNoteSettlementJob(db, candidate, nowEpoch) {
       candidate.windowStart,
       candidate.windowEnd,
       "residual",
-      nowEpoch
+      nowEpoch,
+      eraCutoffEpoch
     )
   );
 }
@@ -23744,7 +23782,7 @@ function createNoteSettlementScheduler(deps) {
     }
     return dispatched;
   }
-  function enqueueResiduals(excludeSessionDbIds, limit) {
+  function enqueueResiduals(excludeSessionDbIds, limit, eraCutoffEpoch) {
     if (limit <= 0) {
       return [];
     }
@@ -23755,13 +23793,19 @@ function createNoteSettlementScheduler(deps) {
     const candidates = listResidualNoteSettlementCandidates(db, {
       activeSessionIds: active,
       nowEpoch: now(),
+      eraCutoffEpoch,
       idleMs: deps.residualIdleMs,
       minWindowTurns: deps.minWindowTurns,
       limit
     });
     const created = [];
     for (const candidate of candidates) {
-      const job = enqueueResidualNoteSettlementJob(db, candidate, now());
+      const job = enqueueResidualNoteSettlementJob(
+        db,
+        candidate,
+        now(),
+        eraCutoffEpoch
+      );
       if (job) {
         created.push(job);
       }
@@ -23769,12 +23813,16 @@ function createNoteSettlementScheduler(deps) {
     return created;
   }
   async function runTrigger(sessionDbId, trigger) {
-    if (!config3.settlementEnabled) {
+    const eraCutoffEpoch = config3.eraCutoffEpoch;
+    if (!config3.settlementEnabled || eraCutoffEpoch === null) {
       return inertPass();
     }
     let plans;
     try {
-      plans = planNoteSettlementWindows(db, sessionDbId, trigger, windowOptions);
+      plans = planNoteSettlementWindows(db, sessionDbId, trigger, {
+        ...windowOptions,
+        eraCutoffEpoch
+      });
     } catch (error49) {
       logger.error?.("note settlement planning failed", { sessionDbId, error: error49 });
       return inertPass();
@@ -23787,7 +23835,9 @@ function createNoteSettlementScheduler(deps) {
     const created = [];
     let dueSessionIds = [];
     try {
-      created.push(...enqueueNoteSettlementWindows(db, plans, now()));
+      created.push(
+        ...enqueueNoteSettlementWindows(db, plans, now(), eraCutoffEpoch)
+      );
       dueSessionIds = listDispatchableNoteSettlementSessions(db, {
         excludeSessionIds: /* @__PURE__ */ new Set([sessionDbId]),
         nowEpoch: now(),
@@ -23799,7 +23849,8 @@ function createNoteSettlementScheduler(deps) {
       created.push(
         ...enqueueResiduals(
           [sessionDbId, ...dueSessionIds],
-          otherSessionBudget - dueSessionIds.length
+          otherSessionBudget - dueSessionIds.length,
+          eraCutoffEpoch
         )
       );
     } catch (error49) {
@@ -56028,7 +56079,7 @@ async function main(deps = {}) {
     config: config3,
     workerEnv: env
   });
-  const noteSettlementDispatchImpl = deps.noteSettlementDispatchImpl ?? (config3.settlementEnabled ? createNoteSettlementDispatch({
+  const noteSettlementDispatchImpl = deps.noteSettlementDispatchImpl ?? (config3.settlementEnabled && config3.eraCutoffEpoch !== null ? createNoteSettlementDispatch({
     db,
     config: config3,
     now: deps.now,

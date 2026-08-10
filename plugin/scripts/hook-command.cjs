@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msnkv697" : "dev";
+var BUILD_ID = true ? "0.9.5-msnlwb4d" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3909,7 +3909,9 @@ var DEFAULT_CONFIG = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
-  settlementEnabled: false,
+  // On by default because it is a kill switch, not the cutover switch: with no
+  // era cutoff configured this changes nothing at all.
+  settlementEnabled: true,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,

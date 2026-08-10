@@ -35,7 +35,10 @@ import {
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
 import { createNoteSettlementScheduler } from "../../src/worker/note-settlement";
-import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
+import {
+  SETTLEMENT_ENABLED_CONFIG,
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
+} from "../support/settlement-config";
 
 /**
  * Ticket 07 — the settlement call itself, tested at the worker seam: a fake
@@ -152,6 +155,7 @@ function claimWindow(
       },
     ],
     NOW,
+    SETTLEMENT_ERA_CUTOFF_EPOCH,
   );
   const job = claimNextNoteSettlementJob(db, sessionDbId, NOW, NOW * 1000);
   if (!job) {

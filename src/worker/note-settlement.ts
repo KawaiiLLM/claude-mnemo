@@ -40,6 +40,13 @@ import { DEFAULT_CONFIG, type MnemoConfig } from "../shared/config";
  * SessionEnd, resume, worker start and every timer are explicitly NOT triggers.
  * They are not non-triggers by omission — the worker never calls this module
  * from those paths, and the tests assert the absence.
+ *
+ * Two config values guard the whole module, and they are not the same guard
+ * (ticket 14). `eraCutoffEpoch` is the cutover switch: with none set every turn
+ * is legacy, a legacy turn's record belongs to the extraction agent, and there
+ * is nothing to settle — so a null cutoff makes every path here inert no matter
+ * what else is configured. `settlementEnabled` is the kill switch on top of a
+ * live era, for stopping settlement without taking the era down with it.
  */
 
 export interface NoteSettlementDispatchInput {
@@ -374,6 +381,7 @@ export function createNoteSettlementScheduler(
   function enqueueResiduals(
     excludeSessionDbIds: Iterable<number>,
     limit: number,
+    eraCutoffEpoch: number,
   ): NoteSettlementJob[] {
     if (limit <= 0) {
       return [];
@@ -385,6 +393,7 @@ export function createNoteSettlementScheduler(
     const candidates = listResidualNoteSettlementCandidates(db, {
       activeSessionIds: active,
       nowEpoch: now(),
+      eraCutoffEpoch,
       idleMs: deps.residualIdleMs,
       minWindowTurns: deps.minWindowTurns,
       limit,
@@ -392,7 +401,12 @@ export function createNoteSettlementScheduler(
 
     const created: NoteSettlementJob[] = [];
     for (const candidate of candidates) {
-      const job = enqueueResidualNoteSettlementJob(db, candidate, now());
+      const job = enqueueResidualNoteSettlementJob(
+        db,
+        candidate,
+        now(),
+        eraCutoffEpoch,
+      );
       if (job) {
         created.push(job);
       }
@@ -404,13 +418,19 @@ export function createNoteSettlementScheduler(
     sessionDbId: number,
     trigger: Exclude<NoteSettlementTrigger, "residual">,
   ): Promise<NoteSettlementPassResult> {
-    if (!config.settlementEnabled) {
+    // The era is the switch: with no cutoff every turn is legacy, and a legacy
+    // turn is settled by nothing. `settlementEnabled` only stops a live era.
+    const eraCutoffEpoch = config.eraCutoffEpoch;
+    if (!config.settlementEnabled || eraCutoffEpoch === null) {
       return inertPass();
     }
 
     let plans: NoteSettlementWindowPlan[];
     try {
-      plans = planNoteSettlementWindows(db, sessionDbId, trigger, windowOptions);
+      plans = planNoteSettlementWindows(db, sessionDbId, trigger, {
+        ...windowOptions,
+        eraCutoffEpoch,
+      });
     } catch (error) {
       logger.error?.("note settlement planning failed", { sessionDbId, error });
       return inertPass();
@@ -436,7 +456,9 @@ export function createNoteSettlementScheduler(
     // favour of newly derived work it is overlooked forever.
     let dueSessionIds: number[] = [];
     try {
-      created.push(...enqueueNoteSettlementWindows(db, plans, now()));
+      created.push(
+        ...enqueueNoteSettlementWindows(db, plans, now(), eraCutoffEpoch),
+      );
       dueSessionIds = listDispatchableNoteSettlementSessions(db, {
         excludeSessionIds: new Set([sessionDbId]),
         nowEpoch: now(),
@@ -449,6 +471,7 @@ export function createNoteSettlementScheduler(
         ...enqueueResiduals(
           [sessionDbId, ...dueSessionIds],
           otherSessionBudget - dueSessionIds.length,
+          eraCutoffEpoch,
         ),
       );
     } catch (error) {

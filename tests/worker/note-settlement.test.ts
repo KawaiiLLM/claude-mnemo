@@ -26,8 +26,11 @@ import {
   createNoteSettlementScheduler,
   type NoteSettlementDispatch,
 } from "../../src/worker/note-settlement";
-import { DEFAULT_CONFIG } from "../../src/shared/config";
-import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
+import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
+import {
+  SETTLEMENT_ENABLED_CONFIG,
+  SETTLEMENT_KILLED_CONFIG,
+} from "../support/settlement-config";
 
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -318,13 +321,23 @@ describe("note settlement triggers", () => {
     expect(after.dispatched.map((job) => job.windowStart)).toEqual([1, 51]);
   });
 
-  test("settlementEnabled=false leaves no write anywhere", async () => {
-    const sessionDbId = seedSession(db, "content-disabled");
+  /**
+   * The two switches, and the reason they are two. `eraCutoffEpoch` is the
+   * cutover: no era means every turn is legacy, a legacy turn's record belongs
+   * to the extraction agent, and settlement has nothing to read — so the
+   * PRODUCT DEFAULT is inert even though the kill switch ships on.
+   * `settlementEnabled` is the stop button for a live era.
+   */
+  async function expectNoSettlementTrace(
+    config: MnemoConfig,
+    contentSessionId: string,
+  ): Promise<void> {
+    const sessionDbId = seedSession(db, contentSessionId);
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
     const scheduler = createNoteSettlementScheduler({
       db,
-      config: DEFAULT_CONFIG,
+      config,
       now: clock.now,
       nowMs: clock.nowMs,
       dispatch,
@@ -346,6 +359,187 @@ describe("note settlement triggers", () => {
         .get()!.count,
     ).toBe(0);
     expect(listNoteDebt(db, sessionDbId)).toEqual(debtBefore);
+  }
+
+  test("the product default settles nothing: there is no era", async () => {
+    // Asserted, not assumed: the inertness below has to be the era's doing, and
+    // this line fails loudly if the kill switch ever becomes the gate again.
+    expect(DEFAULT_CONFIG.settlementEnabled).toBe(true);
+    expect(DEFAULT_CONFIG.eraCutoffEpoch).toBeNull();
+
+    await expectNoSettlementTrace(DEFAULT_CONFIG, "content-no-era");
+  });
+
+  test("the kill switch stops settlement while the era stays up", async () => {
+    expect(SETTLEMENT_KILLED_CONFIG.eraCutoffEpoch).not.toBeNull();
+
+    await expectNoSettlementTrace(SETTLEMENT_KILLED_CONFIG, "content-killed");
+  });
+});
+
+/**
+ * Ticket 14 — the era is settlement's floor. A window may only hold turns that
+ * wrote their own record; a legacy turn's record came from the extraction agent,
+ * so a window reaching back over one settles notes nobody in this era wrote —
+ * and switching the era on would drag every historical session through an
+ * inference before touching a single new turn.
+ */
+describe("note settlement and the era boundary", () => {
+  let db: Database;
+
+  const LEGACY_EPOCH = 1_000;
+  const ERA_CUTOFF_EPOCH = 2_000;
+  const ERA_EPOCH = 3_000;
+  const ERA_CONFIG: MnemoConfig = {
+    ...SETTLEMENT_ENABLED_CONFIG,
+    eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+  };
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function countCursorRows(): number {
+    return db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM note_settlement_cursors",
+      )
+      .get()!.count;
+  }
+
+  test("the first window starts at the era boundary, and the cursor is born there", async () => {
+    const sessionDbId = seedSession(db, "content-era-floor");
+    const clock = createClock();
+    const { dispatch } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: ERA_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      // Record only, so the cursor can be read at its birth value instead of
+      // wherever a settled window would have left it.
+      isGracefulExit: () => true,
+    });
+
+    // A session that straddles the cutover: 40 turns under the old rules, then a
+    // full window under the new ones.
+    seedTurns(db, sessionDbId, 1, 40, "noted", LEGACY_EPOCH);
+    seedTurns(
+      db,
+      sessionDbId,
+      41,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+      "noted",
+      ERA_EPOCH,
+    );
+
+    const pass = await scheduler.onTurnStop(sessionDbId);
+
+    expect(pass.created).toHaveLength(1);
+    expect(pass.created[0]!.windowStart).toBe(41);
+    expect(pass.created[0]!.windowEnd).toBe(
+      40 + NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+    );
+    // The cursor states the legacy prefix's disposition outright — settled by
+    // nobody, and never to be re-planned — rather than leaving a zero that the
+    // next window start would read as "begin at turn 1".
+    expect(getNoteSettlementCursor(db, sessionDbId)).toBe(40);
+  });
+
+  test("a session written entirely before the era is settled by nothing", async () => {
+    const sessionDbId = seedSession(db, "content-era-legacy");
+    const clock = createClock();
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: ERA_CONFIG,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+    });
+
+    // Twice the consecutive threshold, all decided: without the floor this is
+    // two full windows the moment the era is switched on.
+    seedTurns(db, sessionDbId, 1, 120, "noted", LEGACY_EPOCH);
+
+    expect((await scheduler.onTurnStop(sessionDbId)).created).toHaveLength(0);
+    expect((await scheduler.onCompact(sessionDbId)).created).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+    expect(countNoteSettlementJobs(db)).toBe(0);
+    expect(countCursorRows()).toBe(0);
+  });
+
+  test("residual windows honour the floor, and an all-legacy residual is left alone", async () => {
+    const clock = createClock();
+    const nowEpoch = clock.now();
+    const cutoffEpoch = nowEpoch - 4 * DAY_SECONDS;
+    const config: MnemoConfig = {
+      ...SETTLEMENT_ENABLED_CONFIG,
+      eraCutoffEpoch: cutoffEpoch,
+    };
+
+    const live = seedSession(db, "content-era-live", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+
+    // Oldest and largest, so it would be picked first on age — but every turn of
+    // it predates the era, so it has no residual at all.
+    const legacyOnly = seedSession(
+      db,
+      "content-era-residual-legacy",
+      nowEpoch - 6 * DAY_SECONDS,
+    );
+    seedTurns(db, legacyOnly, 1, 60, "noted", nowEpoch - 6 * DAY_SECONDS);
+    const legacyOnlyDebtBefore = listNoteDebt(db, legacyOnly);
+
+    // 30 legacy turns then 25 era turns: the residual is the era half only.
+    const straddling = seedSession(
+      db,
+      "content-era-residual-straddle",
+      nowEpoch - 3 * DAY_SECONDS,
+    );
+    seedTurns(db, straddling, 1, 30, "noted", nowEpoch - 5 * DAY_SECONDS);
+    seedTurns(db, straddling, 31, 25, "noted", nowEpoch - 3 * DAY_SECONDS);
+
+    // Same shape, but its era half is under the ≥20 dispatch threshold.
+    const shortEraHalf = seedSession(
+      db,
+      "content-era-residual-short",
+      nowEpoch - 2 * DAY_SECONDS,
+    );
+    seedTurns(db, shortEraHalf, 1, 30, "noted", nowEpoch - 5 * DAY_SECONDS);
+    seedTurns(db, shortEraHalf, 31, 10, "noted", nowEpoch - 2 * DAY_SECONDS);
+
+    const { dispatch, calls } = recordingDispatch();
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config,
+      now: clock.now,
+      nowMs: clock.nowMs,
+      dispatch,
+      activeSessionIds: () => [live],
+    });
+
+    const pass = await scheduler.onTurnStop(live);
+
+    expect(pass.residualSessionIds).toEqual([straddling]);
+    const residual = listNoteSettlementJobs(db, straddling)[0]!;
+    expect(residual.windowStart).toBe(31);
+    expect(residual.windowEnd).toBe(55);
+    expect(calls.map((job) => job.sessionId)).toContain(straddling);
+
+    // The two skipped sessions are untouched in every ledger: below-the-floor is
+    // a derived judgement (裁决 18), so reopening either returns it to the live
+    // path with its debts intact.
+    expect(listNoteSettlementJobs(db, legacyOnly)).toHaveLength(0);
+    expect(listNoteSettlementJobs(db, shortEraHalf)).toHaveLength(0);
+    expect(getNoteSettlementCursor(db, legacyOnly)).toBe(0);
+    expect(listNoteDebt(db, legacyOnly)).toEqual(legacyOnlyDebtBefore);
   });
 });
 

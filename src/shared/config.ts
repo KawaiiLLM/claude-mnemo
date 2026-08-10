@@ -29,17 +29,25 @@ export interface MnemoConfig {
    */
   compactContextRatio: number;
   /**
-   * Master switch for P2 note settlement (spec D9, ticket 05). When false the
-   * scheduler is inert: no job row is written, nothing is claimed, nothing is
-   * dispatched, and the note-debt ledger is never transitioned by this path — so
-   * merging the machinery cannot perturb the P1 shadow trial running beside it.
+   * Kill switch for P2 note settlement (spec D9, ticket 14). It is NOT what
+   * turns settlement on — `eraCutoffEpoch` is. Settling a legacy turn is
+   * meaningless (its record was written by the extraction agent, not by the turn
+   * itself), so a null cutoff leaves settlement inert whatever this says. What
+   * this flag buys is the other direction: stopping settlement while the era
+   * stays up, without touching anything the note write path does.
+   *
+   * False = no job row is written, nothing is claimed, nothing is dispatched,
+   * and the note-debt ledger is never transitioned by this path.
    */
   settlementEnabled: boolean;
   /**
-   * P2 era boundary (spec D11, ticket 09 sets it). A turn created at or after
-   * this epoch renders through the segment spine; everything earlier keeps the
-   * legacy arc rendering, in the same session view. `null` — the product
-   * default — means every turn is legacy, so the segment read path is inert.
+   * P2 era boundary (spec D11/D12), and the single cutover switch. A turn
+   * created at or after this epoch has the main agent's note as its official
+   * record, renders through the segment spine, and is settled; everything
+   * earlier keeps the legacy arrangement, in the same session view. `null` — the
+   * product default — means every turn is legacy, so both the segment read path
+   * and settlement are inert until an operator sets an epoch. Setting it back to
+   * null is the rollback.
    */
   eraCutoffEpoch: number | null;
   /**
@@ -114,7 +122,9 @@ export const DEFAULT_CONFIG: MnemoConfig = {
   hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
   stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   compactContextRatio: 0.5,
-  settlementEnabled: false,
+  // On by default because it is a kill switch, not the cutover switch: with no
+  // era cutoff configured this changes nothing at all.
+  settlementEnabled: true,
   eraCutoffEpoch: null,
   dreamAgentEnabled: false,
   dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,

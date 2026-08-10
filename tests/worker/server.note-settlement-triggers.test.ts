@@ -14,7 +14,11 @@ import {
 } from "../../src/db/note-settlement";
 import { createWorkerCore } from "../../src/worker/server";
 import { DEFAULT_CONFIG, type MnemoConfig } from "../../src/shared/config";
-import { SETTLEMENT_ENABLED_CONFIG } from "../support/settlement-config";
+import {
+  SETTLEMENT_ENABLED_CONFIG,
+  SETTLEMENT_ERA_CUTOFF_EPOCH,
+  SETTLEMENT_KILLED_CONFIG,
+} from "../support/settlement-config";
 import type { WorkerQuerySession } from "../../src/worker/query-session";
 
 /**
@@ -196,16 +200,35 @@ describe("worker settlement trigger surface", () => {
     expect(agentSessionsCreated()).toBe(agentSessionsBefore);
   });
 
-  test("settlementEnabled=false makes both triggers write nothing", async () => {
+  test("the era cutoff alone brings settlement up", async () => {
     const sessionDbId = seedDecidedSession(
       db,
-      "content-gate-off",
+      "content-cutoff-only",
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+    );
+    // The one and only difference from the shipped default (ticket 14): an
+    // operator sets a cutoff, and the whole new era comes up behind it.
+    const { core, dispatched } = createHarness(db, {
+      ...DEFAULT_CONFIG,
+      eraCutoffEpoch: SETTLEMENT_ERA_CUTOFF_EPOCH,
+    });
+
+    await core.handleTurnStop(sessionDbId);
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.windowEnd).toBe(NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+  });
+
+  async function expectBothTriggersWriteNothing(
+    config: MnemoConfig,
+    contentSessionId: string,
+  ): Promise<void> {
+    const sessionDbId = seedDecidedSession(
+      db,
+      contentSessionId,
       NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2,
     );
-    const { core, dispatched, agentSessionsCreated } = createHarness(
-      db,
-      DEFAULT_CONFIG,
-    );
+    const { core, dispatched, agentSessionsCreated } = createHarness(db, config);
 
     await core.handleTurnStop(sessionDbId);
     await core.handleCompact(sessionDbId);
@@ -228,6 +251,17 @@ describe("worker settlement trigger surface", () => {
         .get()!.count,
     ).toBe(0);
     expect(agentSessionsCreated()).toBe(0);
+  }
+
+  test("the product default settles nothing at either trigger", async () => {
+    await expectBothTriggersWriteNothing(DEFAULT_CONFIG, "content-no-era");
+  });
+
+  test("the kill switch stops both triggers while the era stays up", async () => {
+    await expectBothTriggersWriteNothing(
+      SETTLEMENT_KILLED_CONFIG,
+      "content-killed",
+    );
   });
 
   test("the stub payload is the default: no dispatch dep still settles without a model", async () => {
