@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 
 import { openReadOnlyDatabase } from "../../src/metrics/p1/database";
+import { initializeSchema } from "../../src/db/schema";
 import {
   detectMisattribution,
+  detectShiftCandidates,
   type ChannelReport,
 } from "../../src/metrics/p1/misattribution";
 import { createFixtureDatabase, type FixtureIds } from "./p1-fixture";
@@ -98,5 +100,87 @@ describe("P1 mis-attribution signature", () => {
 
     expect(channel(report.channels, "response").eligible).toBe(0);
     expect(channel(report.channels, "legacy-note").victims).toBe(1);
+  });
+});
+
+describe("P1 shift candidates (pure-shift approximation)", () => {
+  // Own database rather than the shared fixture: the shift heuristic needs
+  // turns with disjoint vocabularies, and adding rows to the fixture would
+  // shift every count the signature tests assert.
+  let db: Database;
+  let sessionId: number;
+  let shiftedNoteTurn: number;
+
+  beforeAll(() => {
+    db = new Database(":memory:");
+    initializeSchema(db);
+    sessionId = db
+      .query<{ id: number }, []>(
+        `INSERT INTO sessions (content_session_id, project, created_at_epoch)
+         VALUES ('shift-sess', 'p1-fixture', 1000) RETURNING id`,
+      )
+      .get()!.id;
+
+    const addTurn = (promptNumber: number, response: string): number =>
+      db
+        .query<{ id: number }, [number, number, string]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, user_prompt, assistant_response,
+             created_at_epoch
+           ) VALUES (?, ?, 'extracted', 'prompt', ?, 1000) RETURNING id`,
+        )
+        .get(sessionId, promptNumber, response)!.id;
+
+    const addNote = (turnId: number, title: string, content: string): void => {
+      db.query<unknown, [number, string, string]>(
+        `INSERT INTO shadow_notes (turn_id, title, content, created_at_epoch, updated_at_epoch)
+         VALUES (?, ?, ?, 1000, 1000)`,
+      ).run(turnId, title, content);
+    };
+
+    // T1's work: proxy diagnosis. T2's work: websocket replay hashing.
+    const faithful = addTurn(
+      1,
+      "diagnosed the proxy environment failure: socks variables broke the fastmcp startup banner check",
+    );
+    shiftedNoteTurn = addTurn(
+      2,
+      "verified websocket replay hashes across sixty three tests with canonical receipts and idempotent trajectory records",
+    );
+    addTurn(3, "unrelated closing summary about documentation edits and changelog wording");
+
+    addNote(
+      faithful,
+      "fix+proxy: socks environment broke fastmcp",
+      "diagnosed the proxy environment failure where socks variables broke the fastmcp startup banner",
+    );
+    // The live failure shape: a note filed under T2 whose content is T1's
+    // work — its vocabulary matches the neighbour clearly better than the
+    // turn it sits on.
+    addNote(
+      shiftedNoteTurn,
+      "fix+proxy: socks environment broke fastmcp",
+      "diagnosed the proxy environment failure where socks variables broke the fastmcp startup banner check",
+    );
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  test("flags the note that reads like its neighbour, and only that one", () => {
+    const report = detectShiftCandidates(db, { sessionId });
+
+    expect(report.notesConsidered).toBe(2);
+    expect(report.candidates).toHaveLength(1);
+    const candidate = report.candidates[0]!;
+    expect(candidate.turnId).toBe(shiftedNoteTurn);
+    expect(candidate.bestNeighborRef).toBe(`S${sessionId}/T1`);
+    expect(candidate.neighborOverlap).toBeGreaterThan(candidate.ownOverlap);
+  });
+
+  test("a raised margin silences the flag", () => {
+    const report = detectShiftCandidates(db, { sessionId, margin: 0.95 });
+    expect(report.candidates).toHaveLength(0);
   });
 });

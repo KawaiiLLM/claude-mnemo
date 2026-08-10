@@ -24,7 +24,9 @@ import {
 } from "./database";
 import {
   detectMisattribution,
+  detectShiftCandidates,
   type MisattributionReport,
+  type ShiftCandidateReport,
 } from "./misattribution";
 import { renderTable } from "./render";
 
@@ -356,13 +358,15 @@ export function renderTally(tally: UnblindedTally): string {
 export function renderMisattribution(
   report: MisattributionReport,
   limit: number,
+  shifts?: ShiftCandidateReport,
 ): string {
   const lines: string[] = [];
   lines.push("(c) MIS-ATTRIBUTION — same text on two turns of one session");
   lines.push(
     `min ${report.minCharacters} chars · prefix ratio ${report.prefixRatio} · ` +
       "victims = cluster members after the earliest; a pure shift (each text " +
-      "on exactly one wrong turn) leaves no duplicate and is not visible here.",
+      "on exactly one wrong turn) leaves no duplicate — see the shift " +
+      "candidates below for the shadow channel's approximation.",
   );
   lines.push("");
   lines.push(
@@ -410,6 +414,32 @@ export function renderMisattribution(
       lines.push(
         `  [${cluster.channel}/${cluster.kind}] ${members} :: ${cluster.sample}`,
       );
+    }
+  }
+
+  if (shifts) {
+    lines.push("");
+    lines.push(
+      `shift candidates (shadow notes matching a neighbour turn better · ` +
+        `margin ${shifts.margin} · floor ${shifts.floor} · ±${shifts.neighborDistance} turns):`,
+    );
+    lines.push(
+      "  candidates for adjudication, not victims — a dispatch turn's note " +
+        "legitimately shares vocabulary with the turn where its work lands.",
+    );
+    if (shifts.candidates.length === 0) {
+      lines.push(`  none of ${shifts.notesConsidered} notes flagged.`);
+    } else {
+      lines.push(
+        `  ${shifts.candidates.length} of ${shifts.notesConsidered} notes flagged:`,
+      );
+      for (const candidate of shifts.candidates.slice(0, limit)) {
+        lines.push(
+          `  ${candidate.turnRef} reads like ${candidate.bestNeighborRef} ` +
+            `(own ${candidate.ownOverlap.toFixed(2)} vs ` +
+            `${candidate.neighborOverlap.toFixed(2)}) :: ${candidate.title.slice(0, 60)}`,
+        );
+      }
     }
   }
 
@@ -623,8 +653,10 @@ export async function main(
         minCharacters: options.minCharacters,
         prefixRatio: options.prefixRatio,
       });
+      const shifts = detectShiftCandidates(db, { sessionId });
       jsonPayload.misattribution = report;
-      sections.push(renderMisattribution(report, options.limit));
+      jsonPayload.shiftCandidates = shifts;
+      sections.push(renderMisattribution(report, options.limit, shifts));
     }
 
     if (options.json) {

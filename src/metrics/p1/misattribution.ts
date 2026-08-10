@@ -20,9 +20,16 @@ import { formatTurnAddress } from "../../hooks/note-reminder";
  *   This catches the RE-ATTACH class (the same response written onto a second
  *   turn) and the TRUNCATED re-attach (a prefix). It does NOT catch a pure SHIFT
  *   — every response landing one turn late, each appearing exactly once — which
- *   leaves no duplicate in the database at all and can only be found by
- *   re-deriving ownership from the transcript. The rate is therefore a lower
+ *   leaves no duplicate in the database at all. The rate is therefore a lower
  *   bound, and the trial should read it as one.
+ *
+ *   `detectShiftCandidates` below approximates the missing half for the shadow
+ *   channel: a note whose vocabulary matches a NEIGHBOUR turn's prompt+response
+ *   clearly better than its own turn's is a shift candidate. Candidates, not
+ *   victims — a dispatch turn's note legitimately shares vocabulary with the
+ *   turn where the dispatched work lands, so the list is for adjudication, not
+ *   a rate. The heuristic was validated on the S19773 chain (two consecutive
+ *   notes each describing the next turn's work, found by eye first).
  *
  * Three channels share the rule so the numbers are comparable:
  *   - `response`     turns.assistant_response, the transcript-derived capture;
@@ -276,6 +283,178 @@ function toCluster(
     })),
     victims: ordered.length - 1,
     sample: ordered[0]!.text.slice(0, 120),
+  };
+}
+
+export const DEFAULT_SHIFT_MARGIN = 0.15;
+export const DEFAULT_SHIFT_FLOOR = 0.35;
+const SHIFT_NEIGHBOR_DISTANCE = 2;
+
+export interface ShiftCandidate {
+  turnId: number;
+  turnRef: string;
+  bestNeighborRef: string;
+  ownOverlap: number;
+  neighborOverlap: number;
+  title: string;
+}
+
+export interface ShiftCandidateReport {
+  margin: number;
+  floor: number;
+  neighborDistance: number;
+  notesConsidered: number;
+  candidates: ShiftCandidate[];
+}
+
+/**
+ * Words long enough to be discriminating: latin runs of four or more, CJK runs
+ * of two or more. Shorter tokens are shared by every turn of a session and
+ * would flatten the overlap signal to noise.
+ */
+function overlapTokens(text: string): Set<string> {
+  return new Set(
+    (text.toLowerCase().match(/[a-z]{4,}|[一-鿿]{2,}/gu) ?? []),
+  );
+}
+
+function overlapShare(note: Set<string>, turn: Set<string>): number {
+  if (note.size === 0) {
+    return 0;
+  }
+  let shared = 0;
+  for (const token of note) {
+    if (turn.has(token)) {
+      shared += 1;
+    }
+  }
+  return shared / note.size;
+}
+
+/** The pure-shift complement of `detectMisattribution` — see the module doc. */
+export function detectShiftCandidates(
+  db: Database,
+  options: { sessionId?: number; margin?: number; floor?: number } = {},
+): ShiftCandidateReport {
+  const margin = options.margin ?? DEFAULT_SHIFT_MARGIN;
+  const floor = options.floor ?? DEFAULT_SHIFT_FLOOR;
+
+  const hasShadowNotes =
+    db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'shadow_notes'",
+      )
+      .get() !== null;
+  if (!hasShadowNotes) {
+    return {
+      margin,
+      floor,
+      neighborDistance: SHIFT_NEIGHBOR_DISTANCE,
+      notesConsidered: 0,
+      candidates: [],
+    };
+  }
+
+  interface NoteRow {
+    turnId: number;
+    sessionId: number;
+    promptNumber: number;
+    title: string;
+    content: string;
+  }
+  const whereSession = options.sessionId === undefined ? "" : "AND t.session_id = ?";
+  const noteSql = `
+    SELECT t.id AS turnId, t.session_id AS sessionId,
+           t.prompt_number AS promptNumber, n.title AS title, n.content AS content
+    FROM shadow_notes n
+    JOIN turns t ON t.id = n.turn_id AND ${agentAuthoredNotePredicate()}
+    WHERE 1 = 1 ${whereSession}
+    ORDER BY t.session_id ASC, t.prompt_number ASC`;
+  const notes =
+    options.sessionId === undefined
+      ? db.query<NoteRow, []>(noteSql).all()
+      : db.query<NoteRow, [number]>(noteSql).all(options.sessionId);
+
+  // One turn-text lookup per session actually holding notes, not the whole
+  // corpus: the neighbour window is ±2, so only sessions in play are loaded.
+  const sessionIds = [...new Set(notes.map((note) => note.sessionId))];
+  const turnTokens = new Map<string, Set<string>>();
+  for (const sessionId of sessionIds) {
+    const rows = db
+      .query<
+        { promptNumber: number; text: string },
+        [number]
+      >(
+        `SELECT prompt_number AS promptNumber,
+                COALESCE(user_prompt, '') || ' ' || COALESCE(assistant_response, '') AS text
+         FROM turns WHERE session_id = ? AND assistant_response IS NOT NULL`,
+      )
+      .all(sessionId);
+    for (const row of rows) {
+      turnTokens.set(`${sessionId}/${row.promptNumber}`, overlapTokens(row.text));
+    }
+  }
+
+  const candidates: ShiftCandidate[] = [];
+  for (const note of notes) {
+    const tokens = overlapTokens(`${note.title} ${note.content}`);
+    const own = turnTokens.get(`${note.sessionId}/${note.promptNumber}`);
+    if (tokens.size === 0 || !own) {
+      continue;
+    }
+    const ownOverlap = overlapShare(tokens, own);
+
+    let neighborOverlap = 0;
+    let neighborPrompt: number | null = null;
+    for (
+      let distance = -SHIFT_NEIGHBOR_DISTANCE;
+      distance <= SHIFT_NEIGHBOR_DISTANCE;
+      distance += 1
+    ) {
+      if (distance === 0) {
+        continue;
+      }
+      const other = turnTokens.get(
+        `${note.sessionId}/${note.promptNumber + distance}`,
+      );
+      if (!other) {
+        continue;
+      }
+      const share = overlapShare(tokens, other);
+      if (share > neighborOverlap) {
+        neighborOverlap = share;
+        neighborPrompt = note.promptNumber + distance;
+      }
+    }
+
+    if (
+      neighborPrompt !== null &&
+      neighborOverlap > floor &&
+      neighborOverlap > ownOverlap + margin
+    ) {
+      candidates.push({
+        turnId: note.turnId,
+        turnRef: formatTurnAddress({
+          sessionId: note.sessionId,
+          promptNumber: note.promptNumber,
+        }),
+        bestNeighborRef: formatTurnAddress({
+          sessionId: note.sessionId,
+          promptNumber: neighborPrompt,
+        }),
+        ownOverlap,
+        neighborOverlap,
+        title: note.title,
+      });
+    }
+  }
+
+  return {
+    margin,
+    floor,
+    neighborDistance: SHIFT_NEIGHBOR_DISTANCE,
+    notesConsidered: notes.length,
+    candidates,
   };
 }
 

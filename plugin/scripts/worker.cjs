@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msmzckq5" : "dev";
+var BUILD_ID = true ? "0.9.4-msmzpwje" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
