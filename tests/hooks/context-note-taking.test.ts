@@ -43,25 +43,23 @@ describe("note-taking instructions injection", () => {
     // to keep the injected paragraph narrow, so a sentence that reads as one
     // phrase can be split by a newline at any time.
     const flat = NOTE_TAKING_INSTRUCTIONS.replace(/\s+/gu, " ");
-    // The list now arrives with the user's message, not on a tool result
-    // (裁决 22): Claude Code re-renders tool-adjacent context at request
-    // assembly, which rewrites the previous turn's tail and kills the cache.
-    expect(flat).toContain('"pending notes" list');
+    // 裁决 25: the injection is the current turn's own address, and the note is
+    // written during the turn it describes — the reminder protocol whose
+    // one-turn lag manufactured pure-shift mis-attributions is gone.
+    expect(flat).toContain("mnemo current turn: S…/T…");
     expect(flat).toContain("with the user's message");
+    expect(flat).toContain("The note describes this turn only");
+    expect(flat).toContain("the newer note replaces");
     expect(flat).toContain("Never start a tool call just to write a note");
-    // One ask per turn, with the relief list as the only repeat.
-    expect(flat).toContain("listed once and not repeated");
     expect(flat).toContain('"backlog relief" list');
-    // 裁决 24: the refusal is explicit, and a note invented from the reminder
-    // line — the only thing left when the turn predates a compact — would
-    // poison the corpus with confident fiction.
-    expect(flat).toContain("predates a compact");
+    // 裁决 24: the refusal is explicit, and a note invented from a listed line
+    // — the only thing left when the turn predates a compact — would poison
+    // the corpus with confident fiction. Ticket 12: "left your context" is not
+    // "unrecoverable"; a skip is correct only when recovery would need a tool
+    // batch of its own.
     expect(flat).toContain('note(turn:"S…/T…", skip:true)');
-    expect(flat).toContain("never reconstruct a note from the reminder line alone");
-    // Ticket 12: "left your context" is not "unrecoverable". A skip is correct
-    // only when recovering the turn would need a tool batch of its own — which
-    // the standing rule forbids opening for a note.
-    expect(flat).toContain("no batch you are opening anyway recovers them");
+    expect(flat).toContain("never invent a note from the listed line");
+    expect(flat).toContain("no open batch recovering them in passing");
     expect(flat).toContain("never open a lookup just to rescue one");
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
     // The note-language rule (裁决 16): without it, agents follow the

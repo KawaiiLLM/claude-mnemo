@@ -1,28 +1,20 @@
 import type { OpenNoteDebt } from "../db/note-debt";
 
 /**
- * The pending-notes reminder (spec D2 附). English by 裁决 16, except the quoted
- * user prompt, which keeps its original language because it is a quotation.
+ * The backlog-relief injection's rendering (spec D2 附). English by 裁决 16,
+ * except the quoted user prompt, which keeps its original language because it
+ * is a quotation.
+ *
+ * This module used to render the per-debt reminder too. 裁决 25 abolished it:
+ * the current turn's note is written against the address line `session-init`
+ * injects, during the turn itself, so the only list-bearing text left is the
+ * relief below.
  */
 
 /**
- * Display cap, not a queue cap: the ledger may hold more than it shows. It caps
- * the WHOLE item list — writable debts and rolled-back notices together — so a
- * reminder is at most five item lines however the two mix.
+ * Display cap, not a queue cap: the ledger may hold more than it shows.
  */
 export const NOTE_REMINDER_DISPLAY_LIMIT = 5;
-
-/**
- * At this many pending notes the closing line stops authorising a deferral (D2's
- * wording ladder: 1–2 routine, 3–4 authorisation withdrawn, beyond that the
- * 50-turn aging rule is what actually clears the backlog).
- *
- * A deferral is never called a skip. Since 裁决 24 that word belongs to
- * `note(turn, skip:true)`, the honest close of a debt that cannot be written,
- * and the ladder keeps authorising that answer at every depth — what it
- * withdraws is permission to say nothing at all.
- */
-export const NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
 
 /**
  * Backlog relief (裁决 21). Both gates are five, and both are deliberately
@@ -39,50 +31,25 @@ const PROMPT_PREFIX_CHARACTERS = 40;
 
 export interface NoteReminderView {
   writable: OpenNoteDebt[];
-  rolledBack: OpenNoteDebt[];
   /** Every open writable debt, not just the displayed ones. */
   writableTotal: number;
 }
 
 /**
- * Pick what a single reminder shows: the oldest debts first, writable ones
- * before rolled-back notices, and never more than `displayLimit` lines in total.
- *
- * The budget is shared rather than one cap per kind. Two caps of five made a
- * mixed backlog render ten item lines — twice the interruption the limit exists
- * to bound — and a reminder is a foreign paragraph inserted into somebody
- * else's work, so its size is the constraint the split has to live inside.
- * Writable debts take the slots first because they are the ones that need an
- * action; a rolled-back notice only needs to be seen once, and it closes its
- * debt the moment it renders, so it drains as fast as it gets shown.
- *
- * `canDisplay` filters which writable debts may take a slot — the ordinary
- * reminder passes "never asked for before" (裁决 22) — but `writableTotal`
- * counts every open writable debt regardless. The escalation ladder is about how
- * deep the backlog is, not about how much of it is new, so filtering the count
- * too would have made a five-deep backlog read as routine the moment its lines
- * had all been shown once.
+ * Pick what a single relief shows: the oldest writable debts first, never more
+ * than `displayLimit` item lines. Rolled-back debts never take a slot — they
+ * close silently at reconcile (裁决 25), and this injection is a work list.
  */
 export function selectNoteReminderItems(
   open: OpenNoteDebt[],
   displayLimit = NOTE_REMINDER_DISPLAY_LIMIT,
-  canDisplay: (debt: OpenNoteDebt) => boolean = () => true,
 ): NoteReminderView {
-  const ordered = [...open].sort((left, right) =>
-    left.promptNumber - right.promptNumber,
-  );
-  const writable = ordered.filter((debt) => !debt.wasRolledBack);
-  const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
-  const shownWritable = writable
-    .filter(canDisplay)
-    .slice(0, Math.max(0, displayLimit));
+  const writable = open
+    .filter((debt) => !debt.wasRolledBack)
+    .sort((left, right) => left.promptNumber - right.promptNumber);
 
   return {
-    writable: shownWritable,
-    rolledBack: rolledBack.slice(
-      0,
-      Math.max(0, displayLimit - shownWritable.length),
-    ),
+    writable: writable.slice(0, Math.max(0, displayLimit)),
     writableTotal: writable.length,
   };
 }
@@ -143,78 +110,26 @@ function pendingSuffix(pendingTurns: number): string {
 }
 
 /**
- * One item line, shared by every path that lists a debt. The address format is
- * what the agent is told to cite with, so a second copy of this string would be
- * a second citation dialect the moment either drifts.
+ * One item line. The address format is what the agent is told to cite with, so
+ * a second copy of this string would be a second citation dialect the moment
+ * either drifts.
  */
 function formatDebtLine(debt: OpenNoteDebt): string {
   return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
 }
 
 /**
- * The ordinary reminder (裁决 22). It arrives with the user's prompt, and the
- * wording is what keeps that placement from becoming an instruction to act:
- * notes ride a tool batch the turn was going to open anyway, and a turn that
- * needs no tools is told to leave the debt rather than to open one.
+ * The backlog-relief injection (裁决 21) — the only pending-notes list left
+ * (裁决 25), and the only text allowed to authorise a dedicated note batch.
  *
- * Prompt-time delivery is not a preference, it is the only cache-safe channel.
- * Claude Code renders PostToolUse `additionalContext` as a floating attachment
- * that is re-rendered at request assembly, so a reminder whose bytes change as
- * the pending list evolves rewrites the tail of the previous turn and destroys
- * the message-side cache breakpoint — the whole prefix then re-ingests at
- * cache-write price. UserPromptSubmit context is written once into the user
- * message and never re-rendered.
- */
-export function renderNoteReminder(view: NoteReminderView): string {
-  // No <system-reminder> wrapper here: Claude Code already wraps
-  // UserPromptSubmit additionalContext in one, and nesting the tag would render
-  // doubled.
-  const lines = ["mnemo pending notes:"];
-
-  for (const debt of view.writable) {
-    lines.push(formatDebtLine(debt));
-  }
-
-  for (const debt of view.rolledBack) {
-    lines.push(
-      `  [${formatTurnAddress(debt)}] rolled back — no note needed.`,
-    );
-  }
-
-  const oldest = view.writable[0];
-  if (!oldest) {
-    lines.push("No notes are due.");
-  } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
-    lines.push(
-      "Write these notes at the end of the next tool batch this turn opens;" +
-        " deferring them again is not authorized — but never open a batch just" +
-        " to write them. A turn you cannot write honestly is closed with" +
-        " skip:true, which is not a deferral.",
-    );
-  } else {
-    lines.push(
-      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; if this turn opens none, leave it for backlog relief.`,
-    );
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * The backlog-relief injection (裁决 21) — the only pending-notes text allowed
- * to ask for a debt a second time, and the only one allowed to authorise a
- * dedicated batch.
+ * It is made safe by two things at once: it fires only from a rare state (a
+ * deep backlog that several finished turns have failed to drain, so the
+ * current-turn protocol is demonstrably not keeping up), and its wording spends
+ * that exception on note calls explicitly and on nothing else. Without the
+ * second half the injection would simply reproduce the failure it was carved
+ * out of.
  *
- * Both paths now arrive with the user's prompt (裁决 22), so placement no longer
- * distinguishes them; the marker does. The ordinary reminder lists each debt at
- * most once and never authorises opening a batch. This one ignores the marker
- * entirely and it is made safe by two things at once: it fires only from a rare
- * state (a deep backlog that several finished turns have failed to drain, so the
- * ordinary channel is demonstrably not working), and its wording spends that
- * exception on note calls explicitly and on nothing else. Without the second
- * half the injection would simply reproduce the failure it was carved out of.
- *
- * Rolled-back notices never appear here: announcing one closes its debt, and
+ * Rolled-back debts never appear here: they close silently at reconcile, and
  * this path may not write debt transitions (R2#P2-6). Callers pass writable
  * debts only.
  */

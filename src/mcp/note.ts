@@ -5,6 +5,7 @@ import {
   closeNoteDebtAsDeclined,
   closeNoteDebtAsNoted,
   getNoteDebt,
+  recordDeclinedNoteDebt,
   type NoteDebtRecord,
 } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
@@ -142,18 +143,22 @@ type NoteWriteOutcome =
 /**
  * May a note be written against this turn?
  *
- * An open debt, a note already on record (a rewrite), or a debt the agent itself
- * declined (裁决 24). The last one is the only closed state a note may reopen:
- * declining is the agent's judgement about its own turn, so a later note is a
- * revision rather than an override — and since the reminder never lists a
- * declined turn again, the only way one arrives is the agent deliberately
- * choosing to write it. `aged`, `rolled-back` and `closed` stay terminal.
+ * The session's current turn (裁决 25 — its debt does not exist yet, because
+ * debts only open at classification after the turn ends), an open debt, a note
+ * already on record (a rewrite), or a debt the agent itself declined (裁决 24).
+ * The declined state is the only closed one a note may reopen: declining is the
+ * agent's judgement about its own turn, so a later note is a revision rather
+ * than an override — and since no channel lists a declined turn again, the only
+ * way one arrives is the agent deliberately choosing to write it. `aged`,
+ * `rolled-back` and `closed` stay terminal.
  */
 function mayWriteNote(
   hasExistingNote: boolean,
   debt: NoteDebtRecord | null,
+  isCurrentTurn: boolean,
 ): boolean {
   return (
+    isCurrentTurn ||
     hasExistingNote ||
     debt?.status === "pending" ||
     (debt?.status === "skipped" && debt.reason === "declined")
@@ -167,7 +172,7 @@ function debtOwesNoNoteMessage(
   return (
     `S${address.sessionId}/T${address.promptNumber} owes no note` +
     `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
-    " Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote."
+    " Write notes for the current turn (the mnemo current-turn line's address), for turns listed in a backlog relief, or rewrite a note you already wrote."
   );
 }
 
@@ -208,9 +213,18 @@ function declineTurn(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
 
+  // The current turn may be declined before its debt exists (裁决 25), exactly
+  // as it may be noted: classification has not run because the turn has not
+  // ended, and the refusal must not be rejected for being early.
+  const isCurrentTurn = getRideTurnId(db, turn.sessionId) === turn.id;
+
   // Fast path, same role as the note path's: it avoids opening a write
   // transaction for a plainly invalid address. The decision is re-taken inside.
-  if (!getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
+  if (
+    !isCurrentTurn &&
+    !getShadowNote(db, turn.id) &&
+    getNoteDebt(db, turn.id) === null
+  ) {
     return parameterError(debtOwesNoNoteMessage(address, null));
   }
 
@@ -223,6 +237,11 @@ function declineTurn(
 
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
+      // Born-closed decline for the current turn; anything else with no debt
+      // row is a trivial turn or a borrowed address, and owes nothing.
+      if (isCurrentTurn && recordDeclinedNoteDebt(db, turn, nowEpoch)) {
+        return { kind: "declined" };
+      }
       return { kind: "owes-nothing", debt: null };
     }
     if (debt.status !== "pending") {
@@ -312,15 +331,17 @@ export function noteTool(
     );
   }
 
-  // Only a turn that owes a note, or one already noted, may be written to.
+  // Only the current turn, a turn that owes a note, or one already noted may be
+  // written to.
   //
   // This is the guard against a mistyped or borrowed address, and it is the only
   // one available: an MCP server is told nothing about which session is calling
-  // it, so "is this my own turn?" cannot be asked directly. An open debt is the
-  // session anchor instead — it exists only for turns of the session that ran
-  // them — and it makes ride_turn coherent as a side effect, since ride_turn is
-  // derived from the address's session. Without it, a note addressed at another
-  // session's turn silently attributes itself to THAT session's newest turn.
+  // it, so "is this my own turn?" cannot be asked directly. An open debt — or
+  // being the addressed session's newest turn, the address the current-turn line
+  // hands out (裁决 25) — is the session anchor instead, and it makes ride_turn
+  // coherent as a side effect, since ride_turn is derived from the address's
+  // session. Without it, a note addressed at another session's turn silently
+  // attributes itself to THAT session's newest turn.
   //
   // This read is a fast path only, not the authorising one: the hook-side
   // reconcile (Stop handler, PostToolUse capture) runs in another process and
@@ -329,9 +350,11 @@ export function noteTool(
   // actually decides is the one taken inside that transaction; skipping the
   // fast path here would only cost an avoidable BEGIN IMMEDIATE for a plainly
   // invalid address.
+  const currentTurnId = getRideTurnId(db, turn.sessionId);
+  const isCurrentTurn = currentTurnId === turn.id;
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!mayWriteNote(fastExisting !== null, fastDebt)) {
+  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
 
@@ -353,7 +376,7 @@ export function noteTool(
 
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1000);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-  const rideTurnId = getRideTurnId(db, turn.sessionId);
+  const rideTurnId = currentTurnId;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
 
   // The debt validation, the note write and the debt's closure are one
@@ -372,7 +395,7 @@ export function noteTool(
   const outcome = writeTransaction(db, (): NoteWriteOutcome => {
     const existing = getShadowNote(db, turn.id);
     const debt = getNoteDebt(db, turn.id);
-    if (!mayWriteNote(existing !== null, debt)) {
+    if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
     }
 

@@ -341,58 +341,40 @@ export function closeNoteDebtAsDeclined(
 }
 
 /**
- * Close rolled-back debts at the moment the reminder renders their notice.
+ * Record a decline for a turn whose debt does not exist yet — the current turn
+ * (裁决 25), which classification has not reached because it has not ended.
  *
- * The rule is unchanged — a rolled-back debt closes only after the agent has
- * been told once (user story 5) — but the telling and the closing now happen in
- * one flow instead of leaving the close to a reconcile that a session ending
- * right here would never run.
+ * The row is born closed: `skipped(declined)` from the start, so the later
+ * classification pass finds a debt already present and opens nothing, and the
+ * refusal survives exactly as if the debt had existed first. `INSERT OR IGNORE`
+ * keeps a concurrent classification's `pending` row authoritative; the caller
+ * falls back to the ordinary close in that case.
  */
-export function closeRolledBackNoteDebts(
+export function recordDeclinedNoteDebt(
   db: Database,
-  turnIds: Iterable<number>,
+  turn: { id: number; sessionId: number; promptNumber: number },
   nowEpoch: number,
-): number[] {
-  const closed: number[] = [];
-  for (const turnId of turnIds) {
-    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
-      closed.push(turnId);
-    }
-  }
-  return closed;
+): boolean {
+  return (
+    db
+      .query<unknown, [number, number, number, number, number, number]>(
+        `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`,
+      )
+      .run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch)
+      .changes > 0
+  );
 }
 
 /**
- * Mark debts as asked-for, and report how many marks actually landed.
- *
- * This is the ordinary reminder's claim, not bookkeeping written after the fact
- * (裁决 22). `WHERE reminded_at_epoch IS NULL` is what makes "one debt, one ask"
- * true under concurrency rather than likely: two processes that both selected
- * the same unmarked debts contend on this UPDATE, the first marks them, and the
- * second sees zero changes and renders nothing. A count is returned rather than
- * a boolean so a caller that re-read its list inside the same transaction can
- * assert it marked everything it is about to render.
- *
- * Not a debt transition: `status` is untouched, so this respects the rule that
- * only the asynchronous side settles a debt. Being asked is not being answered.
+ * The `reminded_at_epoch` column survives as history: it was the per-debt
+ * reminder's at-most-once claim (裁决 22), and the trial's reach metric reads
+ * it. 裁决 25 abolished the reminder itself — no live path marks the column
+ * any more, and rolled-back debts close in `reconcileNoteDebt` instead of at a
+ * reminder's rendering.
  */
-export function markNoteDebtsReminded(
-  db: Database,
-  turnIds: Iterable<number>,
-  nowEpoch: number,
-): number {
-  const statement = db.query<unknown, [number, number]>(
-    `UPDATE note_debt
-     SET reminded_at_epoch = ?
-     WHERE turn_id = ? AND reminded_at_epoch IS NULL`,
-  );
-
-  let marked = 0;
-  for (const turnId of turnIds) {
-    marked += statement.run(nowEpoch, turnId).changes;
-  }
-  return marked;
-}
 
 /**
  * Bring the ledger up to date for one session: classify newly finished turns,
@@ -486,7 +468,6 @@ export function reconcileNoteDebt(
         promptNumber: number;
         wasRolledBack: number;
         hasNote: number;
-        wasExposed: number;
       },
       [number]
     >(
@@ -494,13 +475,7 @@ export function reconcileNoteDebt(
          d.turn_id AS turnId,
          d.prompt_number AS promptNumber,
          t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote,
-         EXISTS(
-           SELECT 1 FROM note_id_exposures e
-           WHERE e.session_id = d.session_id
-             AND e.exposed_turn_id = d.turn_id
-             AND e.source = 'reminder'
-         ) AS wasExposed
+         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
        FROM note_debt d
        JOIN turns t ON t.id = d.turn_id
        WHERE d.session_id = ? AND d.status = 'pending'
@@ -519,10 +494,11 @@ export function reconcileNoteDebt(
       continue;
     }
 
-    // A rolled-back turn needs no note, but the debt is not deleted silently:
-    // it closes only after the agent has been shown the "rolled back" line once,
-    // so every debt it ever saw has a visible outcome (user story 5).
-    if (row.wasRolledBack === 1 && row.wasExposed === 1) {
+    // A rolled-back turn needs no note. It used to close only after a reminder
+    // had shown its "rolled back" line once (user story 5); 裁决 25 retired
+    // that channel, so the close is silent here and the timeline's rollback
+    // fold is the notice.
+    if (row.wasRolledBack === 1) {
       closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
       rolledBack.push(row.turnId);
       continue;

@@ -2908,7 +2908,7 @@ var import_node_fs3 = require("node:fs");
 var import_node_path6 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msmrxlh7" : "dev";
+var BUILD_ID = true ? "0.9.4-msmzckq5" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4672,27 +4672,6 @@ function closeDebt(db, turnId, status, reason, nowEpoch) {
          WHERE turn_id = ? AND status = 'pending'`
   ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
 }
-function closeRolledBackNoteDebts(db, turnIds, nowEpoch) {
-  const closed = [];
-  for (const turnId of turnIds) {
-    if (closeDebt(db, turnId, "skipped", "rolled-back", nowEpoch)) {
-      closed.push(turnId);
-    }
-  }
-  return closed;
-}
-function markNoteDebtsReminded(db, turnIds, nowEpoch) {
-  const statement = db.query(
-    `UPDATE note_debt
-     SET reminded_at_epoch = ?
-     WHERE turn_id = ? AND reminded_at_epoch IS NULL`
-  );
-  let marked = 0;
-  for (const turnId of turnIds) {
-    marked += statement.run(nowEpoch, turnId).changes;
-  }
-  return marked;
-}
 function reconcileNoteDebt(db, input) {
   const { sessionId, nowEpoch } = input;
   const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
@@ -4738,13 +4717,7 @@ function reconcileNoteDebt(db, input) {
          d.turn_id AS turnId,
          d.prompt_number AS promptNumber,
          t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote,
-         EXISTS(
-           SELECT 1 FROM note_id_exposures e
-           WHERE e.session_id = d.session_id
-             AND e.exposed_turn_id = d.turn_id
-             AND e.source = 'reminder'
-         ) AS wasExposed
+         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
        FROM note_debt d
        JOIN turns t ON t.id = d.turn_id
        WHERE d.session_id = ? AND d.status = 'pending'
@@ -4759,7 +4732,7 @@ function reconcileNoteDebt(db, input) {
       noted.push(row.turnId);
       continue;
     }
-    if (row.wasRolledBack === 1 && row.wasExposed === 1) {
+    if (row.wasRolledBack === 1) {
       closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
       rolledBack.push(row.turnId);
       continue;
@@ -22899,35 +22872,35 @@ function createMilestoneContextHandler(dependencies) {
 // src/hooks/handlers/context-note-taking.ts
 var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns (episodic memory across sessions).
-Trigger: with the user's message you may see a "pending notes" list. Append a
-note call for each listed turn at the end of the first tool batch this turn
-opens; no list \u2014 do nothing.
+Trigger: "mnemo current turn: S\u2026/T\u2026" with the user's message is this turn's
+own address. Append a note call for that address at the end of the batch
+where this turn's work concludes (usually your last). The note describes
+this turn only; if a later batch overturns it, send it again \u2014 the newer
+note replaces.
 Never start a tool call just to write a note: a turn that opens no batch
-writes none, and that is fine.
-When a listed turn holds nothing worth keeping, or its details have left your
-context (e.g. it predates a compact) and no batch you are opening anyway
-recovers them, answer note(turn:"S\u2026/T\u2026", skip:true) \u2014 never reconstruct a note
-from the reminder line alone, and never open a lookup just to rescue one.
-Each turn is listed once and not repeated; only a "backlog relief" list
-authorizes a batch of note calls on its own.
+writes none. Missed turns accumulate for a "backlog relief" list, the only
+authorization for a dedicated batch of ONLY note calls.
+Answer note(turn:"S\u2026/T\u2026", skip:true) for a relief-listed turn holding
+nothing worth keeping, or whose details left your context (e.g. before a
+compact) with no open batch recovering them in passing \u2014 never invent a
+note from the listed line, never open a lookup just to rescue one.
 Fields:
 - title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
   words (research/design/implement/fix/measure/review/write/ops) must state
-  the real stage \u2014 never claim "finalized" for work still in design.
+  the real stage, never a hoped-for one.
 - content (~100 tokens): conclusion first, then the key steps. Include
   rejected alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
   Do not repeat the title.
-- insight: study notes; empty by default. Only knowledge gained this turn
-  that is worth keeping long-term and hard to reacquire \u2014 pitfalls hit,
-  durable pointers, transferable lessons \u2014 and orthogonal to this turn's
-  conclusion. Already-known facts, perishable state, and anything one search
-  away do not qualify.
+- insight: study notes; empty by default. Only knowledge from this turn
+  worth keeping long-term and hard to reacquire \u2014 pitfalls hit, durable
+  pointers, transferable lessons \u2014 and orthogonal to the conclusion. Known
+  facts and anything one search away do not qualify.
 - skip: true with turn alone, for the refusal above; a later note replaces it.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
-other turns only as [S15069/T332] and only ids seen in reminders or injected
-context; omit numbers you are not sure of; never include <private> content.
+other turns only as [S15069/T332] and only ids seen in injected context;
+omit numbers you are not sure of; never include <private> content.
 </mnemo-note-taking>`;
 function createNoteTakingContextHandler() {
   return async function handleNoteTakingContextHook(input) {
@@ -23304,23 +23277,13 @@ function createUserPromptSubmitDispatcher(dependencies = {}) {
 
 // src/hooks/note-reminder.ts
 var NOTE_REMINDER_DISPLAY_LIMIT = 5;
-var NOTE_REMINDER_ESCALATION_THRESHOLD = 3;
 var NOTE_RELIEF_PENDING_THRESHOLD = 5;
 var NOTE_RELIEF_DRY_TURNS = 5;
 var PROMPT_PREFIX_CHARACTERS = 40;
-function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT, canDisplay = () => true) {
-  const ordered = [...open2].sort(
-    (left, right) => left.promptNumber - right.promptNumber
-  );
-  const writable = ordered.filter((debt) => !debt.wasRolledBack);
-  const rolledBack = ordered.filter((debt) => debt.wasRolledBack);
-  const shownWritable = writable.filter(canDisplay).slice(0, Math.max(0, displayLimit));
+function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
+  const writable = open2.filter((debt) => !debt.wasRolledBack).sort((left, right) => left.promptNumber - right.promptNumber);
   return {
-    writable: shownWritable,
-    rolledBack: rolledBack.slice(
-      0,
-      Math.max(0, displayLimit - shownWritable.length)
-    ),
+    writable: writable.slice(0, Math.max(0, displayLimit)),
     writableTotal: writable.length
   };
 }
@@ -23341,30 +23304,6 @@ function pendingSuffix(pendingTurns) {
 }
 function formatDebtLine(debt) {
   return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
-}
-function renderNoteReminder(view) {
-  const lines = ["mnemo pending notes:"];
-  for (const debt of view.writable) {
-    lines.push(formatDebtLine(debt));
-  }
-  for (const debt of view.rolledBack) {
-    lines.push(
-      `  [${formatTurnAddress(debt)}] rolled back \u2014 no note needed.`
-    );
-  }
-  const oldest = view.writable[0];
-  if (!oldest) {
-    lines.push("No notes are due.");
-  } else if (view.writableTotal >= NOTE_REMINDER_ESCALATION_THRESHOLD) {
-    lines.push(
-      "Write these notes at the end of the next tool batch this turn opens; deferring them again is not authorized \u2014 but never open a batch just to write them. A turn you cannot write honestly is closed with skip:true, which is not a deferral."
-    );
-  } else {
-    lines.push(
-      `Append note(turn:"${formatTurnAddress(oldest)}", ...) at the end of the next tool batch this turn opens; if this turn opens none, leave it for backlog relief.`
-    );
-  }
-  return lines.join("\n");
 }
 function renderNoteBacklogRelief(view) {
   const lines = ["mnemo pending notes (backlog relief):"];
@@ -23474,103 +23413,12 @@ function createNoteBacklogReliefHandler(dependencies) {
   };
 }
 
-// src/hooks/handlers/note-reminder.ts
-function neverAsked(debt) {
-  return debt.remindedAtEpoch === null;
-}
-function hasSomethingToSay(view) {
-  return view.writable.length > 0 || view.rolledBack.length > 0;
-}
-function createNoteReminderHandler(dependencies) {
-  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
-  const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
-  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
-  const logger = dependencies.logger ?? createLogger("HOOK");
-  return async function handleNoteReminderHook(input) {
-    if (input.eventName !== "UserPromptSubmit") {
-      return { continue: true };
-    }
-    if (input.agentId !== void 0) {
-      return { continue: true };
-    }
-    if (!input.sessionId) {
-      return { continue: true };
-    }
-    const session = getSessionByContentId(dependencies.db, input.sessionId);
-    if (!session) {
-      return { continue: true };
-    }
-    const rideTurn = getLatestTurn(dependencies.db, session.id);
-    if (!rideTurn) {
-      return { continue: true };
-    }
-    const open2 = listOpenNoteDebt(dependencies.db, session.id, {
-      latestPromptNumber: rideTurn.promptNumber,
-      agingTurns
-    });
-    if (!hasSomethingToSay(selectNoteReminderItems(open2, displayLimit, neverAsked))) {
-      return { continue: true };
-    }
-    let claimed = null;
-    try {
-      claimed = writeTransaction(dependencies.db, () => {
-        const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
-          latestPromptNumber: rideTurn.promptNumber,
-          agingTurns
-        });
-        const view = selectNoteReminderItems(stillOpen, displayLimit, neverAsked);
-        if (!hasSomethingToSay(view)) {
-          return null;
-        }
-        const nowEpoch = now();
-        markNoteDebtsReminded(
-          dependencies.db,
-          view.writable.map((debt) => debt.turnId),
-          nowEpoch
-        );
-        recordNoteIdExposure(dependencies.db, {
-          sessionId: session.id,
-          rideTurnId: rideTurn.id,
-          exposedTurnIds: [
-            ...view.writable.map((debt) => debt.turnId),
-            ...view.rolledBack.map((debt) => debt.turnId)
-          ],
-          source: "reminder",
-          nowEpoch
-        });
-        closeRolledBackNoteDebts(
-          dependencies.db,
-          view.rolledBack.map((debt) => debt.turnId),
-          nowEpoch
-        );
-        return view;
-      });
-    } catch (error48) {
-      logger.warn?.("note reminder not claimed", {
-        sessionId: input.sessionId,
-        reasonCode: "reminder-claim-failed",
-        error: error48 instanceof Error ? error48.message : String(error48)
-      });
-      return { continue: true };
-    }
-    if (!claimed) {
-      return { continue: true };
-    }
-    return {
-      continue: true,
-      hookSpecificOutput: renderNoteReminder(claimed)
-    };
-  };
-}
-
 // src/hooks/handlers/prompt-dispatch.ts
 function createPromptDispatchHandler(dependencies = {}) {
   const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
   const logger = injectedLogger ?? createLogger("HOOK");
   const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
-  const noteReminder = db ? createNoteReminderHandler({ db, now, logger }) : void 0;
   async function section(name, run, input) {
     try {
       return await run();
@@ -23594,7 +23442,6 @@ function createPromptDispatchHandler(dependencies = {}) {
       sections.push(rules.hookSpecificOutput);
     }
     let notes = null;
-    let reliefOutcome = "not-eligible";
     if (backlogRelief) {
       const relief = await section(
         "note-relief",
@@ -23602,10 +23449,6 @@ function createPromptDispatchHandler(dependencies = {}) {
         input
       );
       notes = relief?.hookSpecificOutput ?? null;
-      reliefOutcome = relief?.reliefOutcome ?? "not-eligible";
-    }
-    if (reliefOutcome === "not-eligible" && noteReminder) {
-      notes = (await section("note-reminder", () => noteReminder(input), input))?.hookSpecificOutput ?? null;
     }
     if (notes) {
       sections.push(notes);
@@ -24759,6 +24602,7 @@ function createSessionInitHandler(dependencies) {
         suppressOutput: true
       };
     }
+    const isSubagent = input.agentId !== void 0;
     const epoch = now();
     const contentSessionId = input.sessionId;
     const project = input.cwd;
@@ -24776,7 +24620,7 @@ function createSessionInitHandler(dependencies) {
       maxLines: dependencies.captureRepairMaxLines ?? DEFAULT_SCAN_MAX_LINES,
       log: dependencies.captureRepairLog
     }) : null;
-    writeTransaction(dependencies.db, () => {
+    const created = writeTransaction(dependencies.db, () => {
       const session = upsertSession(dependencies.db, {
         contentSessionId,
         project,
@@ -24819,10 +24663,17 @@ function createSessionInitHandler(dependencies) {
         prompt,
         epoch
       );
+      return { sessionDbId: session.id, promptNumber };
     });
+    if (isSubagent) {
+      return {
+        continue: true,
+        suppressOutput: true
+      };
+    }
     return {
       continue: true,
-      suppressOutput: true
+      hookSpecificOutput: `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`
     };
   };
 }

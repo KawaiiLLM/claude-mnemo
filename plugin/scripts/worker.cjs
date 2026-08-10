@@ -52,7 +52,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.4-msmrxlh7" : "dev";
+var BUILD_ID = true ? "0.9.4-msmzckq5" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -17859,7 +17859,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  note: "Write your own note about one of your past turns. `turn` is the fully qualified `S<session>/T<prompt>` address copied from a pending-notes reminder or from injected context. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the reminder line. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note, including after a skip. Never include <private> content."
+  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, appended at the end of the tool batch where the turn's work concludes; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note, including after a skip. Never include <private> content."
 };
 var recallInputShape = {
   id: external_exports.string().optional(),
@@ -18600,6 +18600,14 @@ function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
 }
 function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
   return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
 }
 function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
   return db.query(
@@ -47323,11 +47331,11 @@ function requireText(value, field) {
   }
   return { ok: true, value };
 }
-function mayWriteNote(hasExistingNote, debt) {
-  return hasExistingNote || debt?.status === "pending" || debt?.status === "skipped" && debt.reason === "declined";
+function mayWriteNote(hasExistingNote, debt, isCurrentTurn) {
+  return isCurrentTurn || hasExistingNote || debt?.status === "pending" || debt?.status === "skipped" && debt.reason === "declined";
 }
 function debtOwesNoNoteMessage(address, debt) {
-  return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes only for turns listed in a pending-notes reminder, or rewrite a note you already wrote.`;
+  return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes for the current turn (the mnemo current-turn line's address), for turns listed in a backlog relief, or rewrite a note you already wrote.`;
 }
 function declineTurn(db, address, options) {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
@@ -47339,7 +47347,8 @@ function declineTurn(db, address, options) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
-  if (!getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
+  const isCurrentTurn = getRideTurnId(db, turn.sessionId) === turn.id;
+  if (!isCurrentTurn && !getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
     return parameterError(debtOwesNoNoteMessage(address, null));
   }
   const outcome = writeTransaction(db, () => {
@@ -47348,6 +47357,9 @@ function declineTurn(db, address, options) {
     }
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
+      if (isCurrentTurn && recordDeclinedNoteDebt(db, turn, nowEpoch)) {
+        return { kind: "declined" };
+      }
       return { kind: "owes-nothing", debt: null };
     }
     if (debt.status !== "pending") {
@@ -47406,9 +47418,11 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
+  const currentTurnId = getRideTurnId(db, turn.sessionId);
+  const isCurrentTurn = currentTurnId === turn.id;
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!mayWriteNote(fastExisting !== null, fastDebt)) {
+  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
   const rawTitle = titleInput.value;
@@ -47420,12 +47434,12 @@ function noteTool(db, rawInput, options = {}) {
   const stripped = title !== rawTitle || content !== rawContent || insight !== rawInsight;
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writerModel = resolveWriterModel(options.env ?? process.env);
-  const rideTurnId = getRideTurnId(db, turn.sessionId);
+  const rideTurnId = currentTurnId;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);
     const debt = getNoteDebt(db, turn.id);
-    if (!mayWriteNote(existing !== null, debt)) {
+    if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
     }
     upsertShadowNote(db, {

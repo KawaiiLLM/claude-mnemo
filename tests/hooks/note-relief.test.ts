@@ -434,11 +434,10 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     expect(result.asyncWork).toBeUndefined();
   });
 
-  test("the relief outranks the ordinary reminder, and leaves its debts unasked", async () => {
-    // Both would fire on this prompt: five debts none of which has been listed
-    // yet, and a dry streak deep enough to open the valve. Two overlapping lists
-    // with contradictory closing lines — one authorising a dedicated batch, one
-    // forbidding it — is the failure the precedence exists to prevent.
+  test("prompt-dispatch renders the relief and nothing else lists debts", async () => {
+    // 裁决 25: the per-debt reminder is abolished, so the relief is the only
+    // pending-notes text prompt-dispatch can emit, and no path marks
+    // reminded_at_epoch any more.
     seedBacklog();
 
     const result = await createPromptDispatchHandler({
@@ -448,10 +447,6 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     })(createInput());
 
     expect(result.hookSpecificOutput).toContain("(backlog relief)");
-    // The ordinary header ends in a colon; the relief's does not.
-    expect(result.hookSpecificOutput).not.toContain("mnemo pending notes:");
-    // Suppressed, not spent: the reminder never ran, so nothing was marked and
-    // every debt still has its own ask waiting on a later prompt.
     expect(
       db
         .query<{ count: number }, []>(
@@ -462,52 +457,11 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
     expect(exposureRows().every((row) => row.source === "injection")).toBe(true);
   });
 
-  test("a relief that loses its claim still outranks the reminder", async () => {
-    // The precedence cannot be read off the relief's text: "no text" covers
-    // both "the valve was shut" and "the valve was open and another process
-    // took this streak's one shot". In the second case the relief IS being
-    // shown — by the sibling process — so a reminder rendered here would put
-    // the two contradictory lists on the same prompt, and worse, it would MARK
-    // debts the relief is re-listing, spending an ask that was never made.
-    seedBacklog();
-
-    // Another UserPromptSubmit process commits its claim while this one is
-    // between its gate reads and its own write.
-    let raced = false;
-    const realTransaction = db.transaction.bind(db);
-    (db as unknown as { transaction: (fn: () => unknown) => unknown }).transaction =
-      (fn: () => unknown) =>
-        realTransaction(() => {
-          if (!raced) {
-            raced = true;
-            db.query<unknown, [number]>(
-              `UPDATE note_debt_cursor SET last_relief_prompt_number = 6
-               WHERE session_id = ?`,
-            ).run(sessionId);
-          }
-          return fn();
-        });
-
-    const result = await createPromptDispatchHandler({
-      db,
-      dataRoot,
-      now: () => 500,
-    })(createInput());
-
-    expect(result.hookSpecificOutput ?? "").not.toContain("mnemo pending notes");
-    expect(exposureRows()).toEqual([]);
-    expect(
-      db
-        .query<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM note_debt WHERE reminded_at_epoch IS NOT NULL",
-        )
-        .get()?.count,
-    ).toBe(0);
-  });
-
-  test("the ordinary reminder takes the prompt when the valve stays shut", async () => {
-    // Two debts is below the relief's five-deep gate, so the same entry answers
-    // with the ordinary list instead — one pending-notes paragraph either way.
+  test("a shut valve leaves the prompt with no pending-notes text at all", async () => {
+    // Two debts is below the relief's five-deep gate. Before 裁决 25 the
+    // ordinary reminder took this prompt; now the debts simply wait — the
+    // current-turn protocol writes new notes, and the backlog drains only
+    // through the valve.
     addWorkingTurn(1, "prompt number 1");
     addWorkingTurn(2, "prompt number 2");
     addTurn(3);
@@ -518,9 +472,8 @@ describe("note backlog relief (UserPromptSubmit injection)", () => {
       now: () => 500,
     })(createInput());
 
-    expect(result.hookSpecificOutput).toContain("mnemo pending notes:");
-    expect(result.hookSpecificOutput).not.toContain("(backlog relief)");
-    expect(exposureRows().every((row) => row.source === "reminder")).toBe(true);
+    expect(result.hookSpecificOutput ?? "").not.toContain("mnemo pending notes");
+    expect(exposureRows()).toEqual([]);
   });
 
   test("an injection that throws does not take the rule output down with it", async () => {

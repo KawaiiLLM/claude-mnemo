@@ -8,7 +8,7 @@ import {
   getNoteDebt,
   listNoteDebt,
   listOpenNoteDebt,
-  markNoteDebtsReminded,
+  recordDeclinedNoteDebt,
   recordNoteIdExposure,
   reconcileNoteDebt,
 } from "../../src/db/note-debt";
@@ -210,24 +210,15 @@ describe("note debt ledger", () => {
     expect(getNoteDebt(db, working)).toBeNull();
   });
 
-  test("a rolled-back debt closes only after it has been shown once", () => {
+  test("a rolled-back debt closes silently at reconcile", () => {
+    // It used to wait for a reminder to show its notice once (user story 5);
+    // 裁决 25 retired that channel, so the close needs no exposure and the
+    // timeline's rollback fold is the notice.
     const working = addTurn(1, { rolledBack: true });
     addObservation(working, "Edit");
-    const rideTurn = addTurn(2);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
+    addTurn(2);
 
-    // Not yet announced: still pending, so the reminder can still show it.
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 210 });
-    expect(getNoteDebt(db, working)?.status).toBe("pending");
-
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId: rideTurn,
-      exposedTurnIds: [working],
-      source: "reminder",
-      nowEpoch: 215,
-    });
-    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 220 });
+    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
 
     expect(result.rolledBack).toEqual([working]);
     expect(getNoteDebt(db, working)).toMatchObject({
@@ -419,28 +410,41 @@ describe("note debt ledger", () => {
     expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([first]);
   });
 
-  test("the reminded marker is a claim: only the first mark counts", () => {
-    // 裁决 22's "one debt, one ask" is enforced by this UPDATE, not by a check
-    // before it: two processes that selected the same unmarked debts contend
-    // here, and the second must come away with nothing to render.
-    const first = addTurn(1);
-    addObservation(first, "Edit");
-    const second = addTurn(2);
-    addObservation(second, "Edit");
-    addTurn(3);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
+  test("a current turn may be declined before its debt exists", () => {
+    // 裁决 25: the current turn's debt only opens at classification, after the
+    // turn ends, so the decline is recorded as a born-closed row — and the
+    // later classification finds it and opens nothing.
+    const current = addTurn(1);
+    addObservation(current, "Edit");
 
-    expect(markNoteDebtsReminded(db, [first, second], 300)).toBe(2);
-    expect(markNoteDebtsReminded(db, [first, second], 400)).toBe(0);
+    expect(
+      recordDeclinedNoteDebt(
+        db,
+        { id: current, sessionId, promptNumber: 1 },
+        150,
+      ),
+    ).toBe(true);
+    expect(getNoteDebt(db, current)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+    });
 
-    const open = listOpenNoteDebt(db, sessionId, { latestPromptNumber: 3 });
-    // The mark is not a settlement: the debts are still owed, just no longer
-    // eligible for the ordinary reminder.
-    expect(open.map((debt) => [debt.turnId, debt.remindedAtEpoch])).toEqual([
-      [first, 300],
-      [second, 300],
-    ]);
-    expect(getNoteDebt(db, first)?.status).toBe("pending");
+    addTurn(2);
+    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
+    expect(result.opened).toEqual([]);
+    expect(getNoteDebt(db, current)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+    });
+
+    // A pending row already claimed by classification is left authoritative.
+    expect(
+      recordDeclinedNoteDebt(
+        db,
+        { id: current, sessionId, promptNumber: 1 },
+        250,
+      ),
+    ).toBe(false);
   });
 
   test("the relief claim refuses a second claim built on the same watermark", () => {

@@ -76,6 +76,11 @@ export function createSessionInitHandler(
       };
     }
 
+    // A subagent prompt still lands a turn row (liveness owns its fate), but it
+    // gets no current-turn line: a subagent has no authority over the root
+    // session's notes, and telling it an address is telling it to write one.
+    const isSubagent = input.agentId !== undefined;
+
     const epoch = now();
     const contentSessionId = input.sessionId;
     const project = input.cwd;
@@ -109,7 +114,7 @@ export function createSessionInitHandler(
         })
       : null;
 
-    writeTransaction(dependencies.db, () => {
+    const created = writeTransaction(dependencies.db, () => {
       const session = upsertSession(dependencies.db, {
         contentSessionId,
         project,
@@ -168,11 +173,25 @@ export function createSessionInitHandler(
         prompt,
         epoch,
       );
+
+      return { sessionDbId: session.id, promptNumber };
     });
 
+    if (isSubagent) {
+      return {
+        continue: true,
+        suppressOutput: true,
+      };
+    }
+
+    // The current-turn address (裁决 25) — the one piece of context this entry
+    // emits, and the reason it CAN: this process just created the turn row
+    // inside its own transaction, so the number is exact where any other
+    // UserPromptSubmit process would be racing it. Data only; the protocol for
+    // what to do with the address lives in the session-start framework text.
     return {
       continue: true,
-      suppressOutput: true,
+      hookSpecificOutput: `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`,
     };
   };
 }

@@ -11,35 +11,35 @@ import type { HookResult, NormalizedHookInput } from "../types";
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns (episodic memory across sessions).
-Trigger: with the user's message you may see a "pending notes" list. Append a
-note call for each listed turn at the end of the first tool batch this turn
-opens; no list — do nothing.
+Trigger: "mnemo current turn: S…/T…" with the user's message is this turn's
+own address. Append a note call for that address at the end of the batch
+where this turn's work concludes (usually your last). The note describes
+this turn only; if a later batch overturns it, send it again — the newer
+note replaces.
 Never start a tool call just to write a note: a turn that opens no batch
-writes none, and that is fine.
-When a listed turn holds nothing worth keeping, or its details have left your
-context (e.g. it predates a compact) and no batch you are opening anyway
-recovers them, answer note(turn:"S…/T…", skip:true) — never reconstruct a note
-from the reminder line alone, and never open a lookup just to rescue one.
-Each turn is listed once and not repeated; only a "backlog relief" list
-authorizes a batch of note calls on its own.
+writes none. Missed turns accumulate for a "backlog relief" list, the only
+authorization for a dedicated batch of ONLY note calls.
+Answer note(turn:"S…/T…", skip:true) for a relief-listed turn holding
+nothing worth keeping, or whose details left your context (e.g. before a
+compact) with no open batch recovering them in passing — never invent a
+note from the listed line, never open a lookup just to rescue one.
 Fields:
 - title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
   words (research/design/implement/fix/measure/review/write/ops) must state
-  the real stage — never claim "finalized" for work still in design.
+  the real stage, never a hoped-for one.
 - content (~100 tokens): conclusion first, then the key steps. Include
   rejected alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
   Do not repeat the title.
-- insight: study notes; empty by default. Only knowledge gained this turn
-  that is worth keeping long-term and hard to reacquire — pitfalls hit,
-  durable pointers, transferable lessons — and orthogonal to this turn's
-  conclusion. Already-known facts, perishable state, and anything one search
-  away do not qualify.
+- insight: study notes; empty by default. Only knowledge from this turn
+  worth keeping long-term and hard to reacquire — pitfalls hit, durable
+  pointers, transferable lessons — and orthogonal to the conclusion. Known
+  facts and anything one search away do not qualify.
 - skip: true with turn alone, for the refusal above; a later note replaces it.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
-other turns only as [S15069/T332] and only ids seen in reminders or injected
-context; omit numbers you are not sure of; never include <private> content.
+other turns only as [S15069/T332] and only ids seen in injected context;
+omit numbers you are not sure of; never include <private> content.
 </mnemo-note-taking>`;
 
 /**

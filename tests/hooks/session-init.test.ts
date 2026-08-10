@@ -70,13 +70,58 @@ describe("handleSessionInitHook", () => {
     const session = getSessionByContentId(db, "session-1");
     const turn = getTurn(db, session!.id, 1);
 
+    // The current-turn address (裁决 25): this entry created the turn row, so
+    // it is the one process that can announce the address without racing.
     expect(result).toEqual({
       continue: true,
-      suppressOutput: true,
+      hookSpecificOutput: `mnemo current turn: S${session!.id}/T1`,
     });
     expect(session?.project).toBe("/Users/zhaoqixuan/Projects/claude-mnemo");
     expect(turn?.status).toBe("active");
     expect(turn?.userPrompt).toBe("Diagnose the auth race");
+  });
+
+  test("the current-turn line follows the number the transaction actually took", async () => {
+    // A concurrent process grabs prompt number 2 inside the lock window; the
+    // line must name the row this handler really created, not a stale count.
+    const session = upsertSession(db, {
+      contentSessionId: "session-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1000,
+      updatedAtEpoch: 1000,
+      completedAtEpoch: null,
+    });
+    db.query(
+      `INSERT INTO turns (
+        session_id, prompt_number, status, user_prompt, created_at_epoch
+      ) VALUES (?, 1, 'active', 'Existing prompt', 1000)`,
+    ).run(session.id);
+
+    const result = await createSessionInitHandler({ db })(
+      createInput({ prompt: "second" }),
+    );
+
+    expect(result.hookSpecificOutput).toBe(
+      `mnemo current turn: S${session.id}/T2`,
+    );
+  });
+
+  test("a subagent's prompt gets a turn row but no current-turn line", async () => {
+    // The address is an instruction to write a note, and a subagent has no
+    // authority over the root session's ledger.
+    const result = await createSessionInitHandler({ db })(
+      createInput({ agentId: "agent-123", prompt: "delegated work" }),
+    );
+
+    const session = getSessionByContentId(db, "session-1");
+    expect(getTurn(db, session!.id, 1)?.userPrompt).toBe("delegated work");
+    expect(result).toEqual({
+      continue: true,
+      suppressOutput: true,
+    });
   });
 
   test("a prompt after a cd updates project but keeps the first transcript path", async () => {
