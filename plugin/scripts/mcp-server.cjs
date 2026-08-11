@@ -33348,13 +33348,13 @@ function noteTool(db, rawInput, options = {}) {
   const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
+  }
+  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
+    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
   if (fastExisting !== null && !replace) {
     return parameterError(overwriteRequiredMessage(address));

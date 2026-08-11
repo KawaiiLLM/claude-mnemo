@@ -266,6 +266,38 @@ describe("database-backed MCP handlers", () => {
       expect(result.content[0]?.text).toStartWith("Noted ");
     });
 
+    test("a foreign turn that owes nothing is refused for being foreign, and the flag gets past that", async () => {
+      // The commonest foreign address of all: another session's FINISHED turn.
+      // It owes no note, so behind the debt check the identity guard was
+      // unreachable — the call came back "owes no note", which names the wrong
+      // problem, and `crossSession: true` could not get past it either, leaving
+      // the documented escape hatch inoperable for this whole class.
+      db.query<unknown, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 0, 'extracted', 'their finished turn', 1)`,
+      ).run(otherSessionId);
+      const handlers = createDatabaseBackedHandlers(db, {
+        resolveCallerSessionId: () => sessionId,
+      });
+
+      const refused = await handlers.note!({
+        turn: `S${otherSessionId}/T0`,
+        title: "t",
+        content: "c",
+      });
+      expect(refused.content[0]?.text).toContain("crossSession: true");
+
+      // Declaring it clears the identity guard. What answers now is the
+      // debt rule, on its own terms — a different refusal, honestly named.
+      const declared = await handlers.note!({
+        turn: `S${otherSessionId}/T0`,
+        title: "t",
+        content: "c",
+        crossSession: true,
+      });
+      expect(declared.content[0]?.text).not.toContain("crossSession: true");
+    });
+
     test("a supplied resolveCallerSessionId is read fresh on every note call", async () => {
       let current = sessionId;
       const handlers = createDatabaseBackedHandlers(db, {

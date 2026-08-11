@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.7-msoflccf" : "dev";
+var BUILD_ID = true ? "0.9.7-msog13sj" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -45952,13 +45952,13 @@ function noteTool(db, rawInput, options = {}) {
   const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
+  }
+  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
+    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
   if (fastExisting !== null && !replace) {
     return parameterError(overwriteRequiredMessage(address));

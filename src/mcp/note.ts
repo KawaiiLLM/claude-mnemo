@@ -506,19 +506,26 @@ export function noteTool(
   const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
   const fastExisting = getShadowNote(db, turn.id);
   const fastDebt = getNoteDebt(db, turn.id);
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
 
-  // spec D4: identity known and mismatched, and not declared — rejected
-  // before the more expensive checks. No race window exists to protect
-  // against (the caller's identity and the address's session are both fixed
-  // for the duration of this call), so unlike D3 below this is not re-checked
-  // inside the transaction.
+  // spec D4, and BEFORE any debt-state reasoning — the same order `declineTurn`
+  // uses, for the same reason: identity, when known, outranks the debt-based
+  // anchor. Behind the debt check this guard was unreachable for the commonest
+  // foreign address of all, another session's finished turn, which owes nothing
+  // and so was refused as "owes no note" — a true statement that names the
+  // wrong problem and, worse, one that `crossSession: true` could not get past,
+  // leaving the documented escape hatch inoperable for that whole class.
+  //
+  // No race window exists to protect against (the caller's identity and the
+  // address's session are both fixed for the duration of this call), so unlike
+  // D3 below this is not re-checked inside the transaction.
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId as number),
     );
+  }
+
+  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
+    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
 
   // spec D3: fast-path half of the overwrite guard — same role as the

@@ -36,3 +36,15 @@
 - **保留了四处 obs 队列清理语句**（`skipOrphanTurns`、`finalizeUnreachableStrandedTurns`、`convertOccupiedTurnToMarker`、`cleanSubagentTurns`）。它们对新 turn 已永久空转，但仍在为各自所属的终态化流程清理升级前遗留的行。判断是：为零功能收益去改四条互不相关的终态化路径，风险大于收益。**这是有意保留的残留，等遗留行排空后应当再清一次**——记在这里而不是让它无声地留着。
 - **一处可观测行为变化**：某个 turn 若经由上述四条路径以外的方式抵达终态，它的 observation 会停在 `pending` 而不再被队列顺手标成 `skipped`。实测只能用裸 SQL 构造出来，生产路径均已自带 blanket 退役语句。
 - **`observation.status` 的现状**：拆除后它的读者只剩检索的纪元感知过滤，以及 legacy 回写路径的一句回执文案。本票按要求只陈述现状，未改语义、未删列。
+
+**Codex 评审的 P1，经核实降级为无可观测后果（不修，记录理由）**
+
+评审报告：升级前遗留的 `obs` 队列行若属于一个 `undone` turn，通用出队会删掉队列行，但没有任何东西再把该 observation 终态化——`settleCompletedTurn` 有意跳过 `undone`（sidechain 行不属于本会话的弧线）。于是那条 observation 永久停在 `pending`。
+
+事实成立，但**没有任何读者能看出区别**：
+
+- 渲染不看状态——`getExtractableObservationsForTurn` 只过滤 `excluded_from_extraction`；
+- 检索在新纪元不看状态（纪元感知子句放行任意状态），在 legacy 只认 `extracted`，`pending` 与 `skipped` 同样被挡；
+- 拆除之后没有任何东西再扫描 `pending` 的 observation，因此不会永动、不会重新入队。
+
+所以 `pending` 与 `skipped` 对这批行是同义的。为它把刚删掉的状态写入重新加回出队路径，是为一个没人读的列值复活一段机构。**不修**，记在这里；若将来 observation 状态重新获得读者，这条要一并复查。
