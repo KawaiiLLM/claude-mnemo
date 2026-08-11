@@ -26,6 +26,8 @@ export interface NoteToolInput {
   content?: unknown;
   insight?: unknown;
   skip?: unknown;
+  replace?: unknown;
+  crossSession?: unknown;
 }
 
 export interface NoteToolOptions {
@@ -40,6 +42,17 @@ export interface NoteToolOptions {
    * which is the P1 behaviour (shadow row only) and the rollback.
    */
   eraCutoffEpoch?: number | null;
+  /**
+   * The mnemo session the caller belongs to (spec D2), resolved ONLY by the
+   * MCP process's direct-execution entry point (server.ts) from the process
+   * env var through `process_session_map`. Every other construction path —
+   * worker tool channels included, which inherit a hook's environment and
+   * would otherwise "look like" whatever session that hook belonged to — must
+   * leave this absent. Absent or null both mean "unknown", and unknown always
+   * admits: a wrong rejection here silently stops a turn's notes forever,
+   * which spec D2 rules out as the one unacceptable failure mode.
+   */
+  callerSessionId?: number | null;
 }
 
 function textResult(text: string): ToolTextResult {
@@ -51,15 +64,20 @@ function parameterError(message: string): ToolTextResult {
 }
 
 /**
- * A note result is a successful write iff it opens with the "Noted …"
- * confirmation. Failures are `Parameter error: …`, matching isRememberSuccess.
+ * A note result is a successful write iff it opens with "Noted " (a first
+ * write) or "Updated " (spec D5's replace) — the two receipts a real write
+ * can produce. Failures are `Parameter error: …`, matching isRememberSuccess.
  * A declined turn answers "Skipped …", which is a successful CALL but not a
  * note, so it deliberately reads as false here.
+ *
+ * Trial metrics read this predicate directly: widen it whenever the receipt
+ * wording changes, or every write under the new wording counts as a failure.
  */
 export function isNoteSuccess(result: {
   content: Array<{ type: string; text?: string }>;
 }): boolean {
-  return (result.content?.[0]?.text ?? "").startsWith("Noted ");
+  const text = result.content?.[0]?.text ?? "";
+  return text.startsWith("Noted ") || text.startsWith("Updated ");
 }
 
 // Spec D7/裁决 15: the ONLY address form a model ever writes is the fully
@@ -91,12 +109,10 @@ export function parseTurnAddress(value: string): TurnAddress | null {
 
 // Mechanical provenance only (D4): a value is recorded when it is observed and
 // left NULL otherwise. Claude Code passes the MCP server no model identity —
-// not in the process environment (CLAUDE_CODE_SESSION_ID and friends are
-// injected for Bash subprocesses only, and no variable anywhere names the
-// model), and not in the MCP request, which carries no such field. So this
-// reads an explicit override if the operator set one and returns null
-// otherwise; the tool result states the miss rather than letting the trial
-// analyse an invented bucket as fact.
+// no environment variable anywhere names the model, and the MCP request
+// carries no such field either. So this reads an explicit override if the
+// operator set one and returns null otherwise; the tool result states the
+// miss rather than letting the trial analyse an invented bucket as fact.
 const WRITER_MODEL_ENV_KEYS = [
   "CLAUDE_MNEMO_WRITER_MODEL",
   "ANTHROPIC_MODEL",
@@ -218,6 +234,53 @@ function debtOwesNoNoteMessage(
   );
 }
 
+/**
+ * Overwrite must be declared (spec D3). A repeat write to an address that
+ * already has a note is presumptively a mistake — the wrong address copied
+ * from a stale reminder line, most often — and a caller that genuinely means
+ * to revise says so with `replace: true` rather than silently clobbering.
+ */
+function overwriteRequiredMessage(address: TurnAddress): string {
+  return (
+    `S${address.sessionId}/T${address.promptNumber} already has a note.` +
+    " Resend with replace: true to confirm you want to overwrite it."
+  );
+}
+
+/**
+ * Cross-session write must be declared (spec D4). No legitimate use exists
+ * today — every address a caller ever has came from its own session's
+ * current-turn line or backlog relief — so this fires only on a mistyped or
+ * borrowed address, and only when the caller's identity is actually known
+ * (spec D2: unknown always admits, so this is skipped entirely otherwise).
+ */
+function crossSessionRequiredMessage(
+  address: TurnAddress,
+  callerSessionId: number,
+): string {
+  return (
+    `S${address.sessionId}/T${address.promptNumber} belongs to a different session` +
+    ` than this call (S${callerSessionId}).` +
+    " Resend with crossSession: true to confirm the cross-session write."
+  );
+}
+
+/**
+ * Does this call know an identity, and does it disagree with the address?
+ * `callerSessionId` is `undefined`/`null` on every path except the MCP
+ * direct-execution entry, and even there it is null whenever the process
+ * session has no recorded mapping yet — both read as "unknown" here, which is
+ * the only reading spec D2 allows a miss to have.
+ */
+function isCrossSessionWrite(
+  callerSessionId: number | null | undefined,
+  addressSessionId: number,
+): boolean {
+  return (
+    typeof callerSessionId === "number" && callerSessionId !== addressSessionId
+  );
+}
+
 type DeclineOutcome =
   | { kind: "declined" }
   | { kind: "already-noted" }
@@ -234,20 +297,34 @@ type DeclineOutcome =
  * debts, which is the common case this exists for. Declining closes the debt now
  * and records WHY, so refusal is distinguishable from neglect.
  *
- * Same session anchor as a note: an MCP server is told nothing about which
- * session called it, so an open debt (or an existing note) is the only evidence
- * that this address belongs to the caller. Skipping a foreign or trivial turn is
- * therefore a parameter error, exactly as writing one is.
+ * Same session anchor as a note: caller identity is best-effort and often
+ * unknown (spec D2), so an open debt (or an existing note) stays the primary
+ * evidence that this address belongs to the caller. When identity IS known,
+ * the cross-session check below adds a second, independent guard on top of it
+ * — it does not replace it. Skipping a foreign or trivial turn is therefore a
+ * parameter error, exactly as writing one is.
  */
 function declineTurn(
   db: Database,
   address: TurnAddress,
   options: NoteToolOptions,
+  crossSession: boolean,
 ): ToolTextResult {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`,
+    );
+  }
+
+  // spec D4: a foreign-session address is rejected before any debt-state
+  // reasoning runs — identity, when known, outranks the debt-based anchor.
+  if (
+    isCrossSessionWrite(options.callerSessionId, turn.sessionId) &&
+    !crossSession
+  ) {
+    return parameterError(
+      crossSessionRequiredMessage(address, options.callerSessionId as number),
     );
   }
 
@@ -346,14 +423,27 @@ export function noteTool(
   if (rawInput.skip !== undefined && typeof rawInput.skip !== "boolean") {
     return parameterError("skip must be a boolean when present.");
   }
+  if (rawInput.replace !== undefined && typeof rawInput.replace !== "boolean") {
+    return parameterError("replace must be a boolean when present.");
+  }
+  if (
+    rawInput.crossSession !== undefined &&
+    typeof rawInput.crossSession !== "boolean"
+  ) {
+    return parameterError("crossSession must be a boolean when present.");
+  }
+  const replace = rawInput.replace === true;
+  const crossSession = rawInput.crossSession === true;
 
   // 裁决 24: a declined turn needs `turn` alone. Everything a note would carry
   // is not merely optional here but meaningless — the whole point of the skip is
   // that there is nothing truthful to put in those fields — so they are ignored
   // rather than validated, and the tool never has to decide what a half-filled
-  // skip meant.
+  // skip meant. `crossSession` is the one flag a skip still reads (spec D4
+  // applies to every write, and a decline is one); `replace` has nothing to do
+  // with a skip and is silently ignored like title/content/insight are.
   if (rawInput.skip === true) {
-    return declineTurn(db, address, options);
+    return declineTurn(db, address, options, crossSession);
   }
 
   const titleInput = requireText(rawInput.title, "title");
@@ -384,16 +474,18 @@ export function noteTool(
   // Only the current turn, a turn that owes a note, or one already noted may be
   // written to.
   //
-  // This is the guard against a mistyped or borrowed address, and it is the only
-  // one available: an MCP server is told nothing about which session is calling
-  // it, so "is this my own turn?" cannot be asked directly. An open debt — or
-  // being the addressed session's newest STILL-LIVE turn, the address the
-  // current-turn line hands out (裁决 25; see isSessionCurrentTurn for why
-  // "latest" alone would leave every idle session's last turn writable) — is
-  // the session anchor instead, and it makes ride_turn coherent as a side
-  // effect, since ride_turn is derived from the address's session. Without it,
-  // a note addressed at another session's turn silently attributes itself to
-  // THAT session's newest turn.
+  // This is the guard against a mistyped or borrowed address, and — whenever
+  // caller identity is unknown, which spec D2 makes the common case — it is
+  // the only one available: "is this my own turn?" cannot be asked directly
+  // without it. An open debt — or being the addressed session's newest
+  // STILL-LIVE turn, the address the current-turn line hands out (裁决 25; see
+  // isSessionCurrentTurn for why "latest" alone would leave every idle
+  // session's last turn writable) — is the session anchor instead, and it
+  // makes ride_turn coherent as a side effect, since ride_turn is derived from
+  // the address's session. Without it, a note addressed at another session's
+  // turn silently attributes itself to THAT session's newest turn. When
+  // identity IS known, the explicit cross-session check below adds a second,
+  // independent guard on top of this one rather than replacing it.
   //
   // This read is a fast path only, not the authorising one: the hook-side
   // reconcile (Stop handler, PostToolUse capture) runs in another process and
@@ -416,6 +508,27 @@ export function noteTool(
   const fastDebt = getNoteDebt(db, turn.id);
   if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
+  }
+
+  // spec D4: identity known and mismatched, and not declared — rejected
+  // before the more expensive checks. No race window exists to protect
+  // against (the caller's identity and the address's session are both fixed
+  // for the duration of this call), so unlike D3 below this is not re-checked
+  // inside the transaction.
+  if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
+    return parameterError(
+      crossSessionRequiredMessage(address, options.callerSessionId as number),
+    );
+  }
+
+  // spec D3: fast-path half of the overwrite guard — same role as the
+  // mayWriteNote check above, an early exit that avoids opening a write
+  // transaction for a call that is going to be rejected anyway. The
+  // authorising check is the one inside the transaction below, because a
+  // concurrent note to this same address can flip "no existing note" to
+  // "existing note" between this read and that one.
+  if (fastExisting !== null && !replace) {
+    return parameterError(overwriteRequiredMessage(address));
   }
 
   // Same removal the transcript capture path applies (D10). It runs at the
@@ -462,6 +575,13 @@ export function noteTool(
     if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
     }
+    // spec D3, authoritative half: re-read fresh, exactly like the debt check
+    // just above it — a concurrent note between the fast-path read and this
+    // transaction's write lock must not be silently clobbered by a caller who
+    // never declared they meant to overwrite anything.
+    if (existing !== null && !replace) {
+      return { ok: false, message: overwriteRequiredMessage(address) };
+    }
 
     upsertShadowNote(db, {
       turnId: turn.id,
@@ -495,8 +615,11 @@ export function noteTool(
     return parameterError(outcome.message);
   }
 
+  // spec D5: the verb itself carries new-vs-update, not just the trailing
+  // clause — a caller (or a trial metric skimming just the first word) can
+  // tell them apart without parsing the rest of the sentence.
   const parts = [
-    `Noted S${turn.sessionId}/T${turn.promptNumber}${
+    `${outcome.existing ? "Updated" : "Noted"} S${turn.sessionId}/T${turn.promptNumber}${
       outcome.existing ? " (replaced the previous note)" : ""
     }.`,
   ];

@@ -15,8 +15,8 @@ Trigger: "mnemo current turn: S…/T…" with the user's message is this turn's
 own address. Write its note in the batch you expect to be this turn's last:
 while another tool call is still likely, let it wait rather than seal the
 turn early — its address stays writable later. The note describes this turn
-only; when a later result changes it, in this turn or a following one, send
-it again — the newer note replaces.
+only; when a later result changes it, in this turn or a following one,
+resend with replace:true.
 Never start a tool call just to write a note: a turn that opens no batch
 writes none — missed turns accumulate for a "backlog relief" list, the only
 authorization for a batch of ONLY note calls.

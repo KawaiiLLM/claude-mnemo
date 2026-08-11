@@ -212,4 +212,84 @@ describe("database-backed MCP handlers", () => {
       view: "milestones",
     });
   });
+
+  describe("note's caller identity option (spec D2)", () => {
+    let sessionId: number;
+    let otherSessionId: number;
+    let otherTurnId: number;
+
+    beforeEach(() => {
+      sessionId = upsertSession(db, {
+        contentSessionId: "handlers-identity-caller",
+        project: "claude-mnemo",
+        title: null,
+        content: null,
+        insight: null,
+        createdAtEpoch: 1,
+        updatedAtEpoch: 1,
+        completedAtEpoch: null,
+      }).id;
+      otherSessionId = upsertSession(db, {
+        contentSessionId: "handlers-identity-other",
+        project: "claude-mnemo",
+        title: null,
+        content: null,
+        insight: null,
+        createdAtEpoch: 1,
+        updatedAtEpoch: 1,
+        completedAtEpoch: null,
+      }).id;
+      otherTurnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+           VALUES (?, 1, 'active', 'their current turn', 1) RETURNING id`,
+        )
+        .get(otherSessionId)!.id;
+    });
+
+    // Pinned: a worker tool channel calls this same factory (see
+    // note-settlement-sdk-query.ts, diary-agent-tools.ts) and inherits the
+    // hook's process environment wholesale. If `note` ever read identity from
+    // process.env directly instead of this explicit option, a worker process
+    // would silently "look like" whichever session its host hook belonged to.
+    // The factory default (no `resolveCallerSessionId`) must keep identity
+    // unknown so a cross-session write is never wrongly blocked here.
+    test("no resolveCallerSessionId option (the worker/default shape) leaves identity unknown", async () => {
+      const handlers = createDatabaseBackedHandlers(db, { audience: "worker" });
+
+      const result = await handlers.note!({
+        turn: `S${otherSessionId}/T1`,
+        title: "t",
+        content: "c",
+      });
+
+      expect(result.content[0]?.text).toStartWith("Noted ");
+    });
+
+    test("a supplied resolveCallerSessionId is read fresh on every note call", async () => {
+      let current = sessionId;
+      const handlers = createDatabaseBackedHandlers(db, {
+        resolveCallerSessionId: () => current,
+      });
+
+      const blocked = await handlers.note!({
+        turn: `S${otherSessionId}/T1`,
+        title: "t",
+        content: "c",
+      });
+      expect(blocked.content[0]?.text).toStartWith("Parameter error:");
+      expect(blocked.content[0]?.text).toContain("crossSession: true");
+
+      // Simulates the resolver picking up a mapping row written after these
+      // handlers were constructed (spec: the MCP server can connect before
+      // the session's first UserPromptSubmit hook runs).
+      current = otherSessionId;
+      const allowed = await handlers.note!({
+        turn: `S${otherSessionId}/T1`,
+        title: "t",
+        content: "c",
+      });
+      expect(allowed.content[0]?.text).toStartWith("Noted ");
+    });
+  });
 });

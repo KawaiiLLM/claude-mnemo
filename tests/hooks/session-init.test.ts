@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
+import { getMnemoSessionIdForProcessSession } from "../../src/db/process-session-map";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
@@ -556,5 +557,68 @@ describe("handleSessionInitHook", () => {
     expect(getTurn(db, session.id, 1)?.tags).toContain("subagent:pending");
     expect(getTurn(db, session.id, 2)?.status).toBe("active");
     expect(getTurn(db, session.id, 2)?.userPrompt).toBe("Final approach");
+  });
+});
+
+describe("process-session identity map (spec D1)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("upserts the process session id to the mnemo session on every prompt", async () => {
+    const handler = createSessionInitHandler({
+      db,
+      env: { CLAUDE_CODE_SESSION_ID: "proc-abc" },
+    });
+
+    await handler(createInput());
+
+    const session = getSessionByContentId(db, "session-1");
+    expect(getMnemoSessionIdForProcessSession(db, "proc-abc")).toBe(session!.id);
+  });
+
+  test("a missing env var skips the mapping write without affecting the rest of the hook", async () => {
+    const handler = createSessionInitHandler({ db, env: {} });
+
+    const result = await handler(createInput());
+
+    // The rest of the hook's work (the session row, the pending turn, the
+    // current-turn line) must be unaffected by the miss.
+    const session = getSessionByContentId(db, "session-1");
+    expect(session).not.toBeNull();
+    expect(getTurn(db, session!.id, 1)).not.toBeNull();
+    expect(result.hookSpecificOutput).toBe(`mnemo current turn: S${session!.id}/T1`);
+    // No row for anything: an absent env var is not the same as an empty one.
+    expect(getMnemoSessionIdForProcessSession(db, "")).toBeNull();
+  });
+
+  test("a resume/compact process id change still resolves to the same mnemo session", async () => {
+    // Same content session (`session-1`, spec D1's mnemo-session key) across
+    // two prompts, but the process env var — what CLAUDE_CODE_SESSION_ID
+    // names — changes between them, exactly what resume/compact do.
+    await createSessionInitHandler({
+      db,
+      env: { CLAUDE_CODE_SESSION_ID: "proc-before-resume" },
+    })(createInput({ prompt: "before resume" }));
+
+    await createSessionInitHandler({
+      db,
+      env: { CLAUDE_CODE_SESSION_ID: "proc-after-resume" },
+    })(createInput({ prompt: "after resume" }));
+
+    const session = getSessionByContentId(db, "session-1");
+    expect(getMnemoSessionIdForProcessSession(db, "proc-before-resume")).toBe(
+      session!.id,
+    );
+    expect(getMnemoSessionIdForProcessSession(db, "proc-after-resume")).toBe(
+      session!.id,
+    );
   });
 });

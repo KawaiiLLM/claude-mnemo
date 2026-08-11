@@ -9,7 +9,7 @@ export const MNEMO_TOOL_DESCRIPTIONS = {
   timeline:
     "Render the temporal/decision shape of a past session — gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   note:
-    "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address — normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last — while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own — details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note — send it again whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too. Never include <private> content.",
+    "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address — normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last — while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note — only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own — details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) — send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one — every address you are ever given is your own session's, so you should never need it. Never include <private> content.",
 } as const;
 
 export const recallInputShape = {
@@ -98,6 +98,12 @@ export const noteInputShape = {
   content: z.string().min(1).optional(),
   insight: z.string().optional(),
   skip: z.boolean().optional(),
+  // spec D3: declares intent to overwrite an address that already has a note.
+  replace: z.boolean().optional(),
+  // spec D4: declares intent to write a turn outside the caller's own
+  // session. No legitimate use exists today (every address a caller is ever
+  // handed is its own session's) — this is a pure guardrail.
+  crossSession: z.boolean().optional(),
 };
 
 export const timelineInputShape = {

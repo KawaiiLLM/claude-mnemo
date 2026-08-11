@@ -668,6 +668,22 @@ var SCHEMA_SQL = `
     UNIQUE(session_id, prompt_number)
   );
 
+  -- Process-session \u2192 mnemo-session identity map (spec D1, note guardrails
+  -- ticket). CLAUDE_CODE_SESSION_ID names the OS process's session, which is
+  -- NOT the same id mnemo keys sessions on (sessions.content_session_id, the
+  -- hook payload's session_id) \u2014 resume/compact mint a new process id for the
+  -- same ongoing mnemo session. UserPromptSubmit upserts this row every turn,
+  -- so the MCP entry point can turn "which process am I" into "which mnemo
+  -- session is this" without ever reading process.env itself. One process id
+  -- names exactly one mnemo session; a mnemo session accumulates one row per
+  -- process id it has ever run under, and old rows are left in place rather
+  -- than cleaned up \u2014 a stale row just never gets looked up again.
+  CREATE TABLE IF NOT EXISTS process_session_map (
+    process_session_id TEXT PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS turn_citations (
     citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
@@ -3078,7 +3094,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.7-msoe66pr" : "dev";
+var BUILD_ID = true ? "0.9.7-msoflccf" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -22960,8 +22976,8 @@ Trigger: "mnemo current turn: S\u2026/T\u2026" with the user's message is this t
 own address. Write its note in the batch you expect to be this turn's last:
 while another tool call is still likely, let it wait rather than seal the
 turn early \u2014 its address stays writable later. The note describes this turn
-only; when a later result changes it, in this turn or a following one, send
-it again \u2014 the newer note replaces.
+only; when a later result changes it, in this turn or a following one,
+resend with replace:true.
 Never start a tool call just to write a note: a turn that opens no batch
 writes none \u2014 missed turns accumulate for a "backlog relief" list, the only
 authorization for a batch of ONLY note calls.
@@ -24169,6 +24185,18 @@ function createSessionEndHandler(dependencies) {
   };
 }
 
+// src/db/process-session-map.ts
+function upsertProcessSessionMap(db, processSessionId, sessionId, nowEpoch) {
+  db.query(
+    `INSERT INTO process_session_map (
+       process_session_id, session_id, updated_at_epoch
+     ) VALUES (?, ?, ?)
+     ON CONFLICT(process_session_id) DO UPDATE SET
+       session_id = excluded.session_id,
+       updated_at_epoch = excluded.updated_at_epoch`
+  ).run(processSessionId, sessionId, nowEpoch);
+}
+
 // src/worker/invalidation.ts
 var INTERRUPT_PENDING_TAG = "invalidated:notify-pending:interrupt";
 var INTERRUPT_NOTIFIED_TAG = "invalidated:notified:interrupt";
@@ -24441,6 +24469,7 @@ function detectAndCleanSubagentTurnsFromParsed(db, sessionDbId, parsedTurns, upd
 }
 
 // src/hooks/handlers/session-init.ts
+var PROCESS_SESSION_ID_ENV_KEY = "CLAUDE_CODE_SESSION_ID";
 function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch, isSidechain) {
   const inserted = db.query(
     `INSERT INTO turns (
@@ -24467,6 +24496,7 @@ function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch, 
 function createSessionInitHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const env = dependencies.env ?? process.env;
   return async function handleSessionInitHook(input) {
     if (!input.sessionId || !input.cwd || !input.prompt) {
       return {
@@ -24506,6 +24536,10 @@ function createSessionInitHandler(dependencies) {
         updatedAtEpoch: epoch,
         completedAtEpoch: existingSession?.completedAtEpoch ?? null
       });
+      const processSessionId = env[PROCESS_SESSION_ID_ENV_KEY];
+      if (processSessionId) {
+        upsertProcessSessionMap(dependencies.db, processSessionId, session.id, epoch);
+      }
       if (transcriptEntries && invalidationSets && parsedTurns) {
         applyInvalidationSets(
           dependencies.db,

@@ -54,6 +54,18 @@ export interface CreateDatabaseBackedHandlersOptions {
    * under one era's rules and rendered under the other's.
    */
   eraCutoffEpoch?: number | null;
+  /**
+   * Resolves the caller's mnemo session id for `note` (spec D2), called fresh
+   * on every `note` invocation rather than once here — the process-session
+   * mapping this reads can be written by a UserPromptSubmit hook that runs
+   * AFTER these handlers are built (the MCP server connects before the
+   * session's first prompt), so resolving once at construction time would
+   * permanently miss it. Only the MCP direct-execution entry point
+   * (server.ts) ever supplies this; every other construction path — every
+   * worker tool channel included — must leave it undefined, which `note`
+   * reads as "caller identity unknown" and always admits.
+   */
+  resolveCallerSessionId?: () => number | null;
 }
 
 export function textResult(text: string): ToolResult {
@@ -159,6 +171,7 @@ export function createDatabaseBackedHandlers(
     note: (args) =>
       noteTool(database, args as Parameters<typeof noteTool>[1], {
         eraCutoffEpoch: eraCutoff(),
+        callerSessionId: options.resolveCallerSessionId?.() ?? null,
       }),
   };
 }

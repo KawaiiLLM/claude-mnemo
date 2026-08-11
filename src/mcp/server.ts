@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+import { getMnemoSessionIdForProcessSession } from "../db/process-session-map";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
@@ -27,6 +28,39 @@ const PACKAGE_VERSION =
 export interface CreateMcpServerOptions {
   database?: Database;
   handlers?: Partial<MnemoToolHandlers>;
+  /**
+   * Spec D2's identity source, threaded straight through to
+   * `createDatabaseBackedHandlers`. Only `isDirectExecution`'s own startup
+   * below ever supplies this — every test and every other embedding of this
+   * server leaves it undefined, which is what keeps identity out of every
+   * channel but the real MCP process.
+   */
+  resolveCallerSessionId?: () => number | null;
+}
+
+/**
+ * Spec D2's identity resolution: the process env var naming this OS
+ * process's session, joined through `process_session_map` (spec D1) to the
+ * mnemo session a UserPromptSubmit hook has actually recorded for it. Both
+ * halves can miss — the env var is absent on some Claude Code builds (the
+ * investigation found no guaranteed write site for it), and the mapping row
+ * may not exist yet if this runs before the session's first prompt — and a
+ * miss on either one reads as `null`, "identity unknown", never as a false
+ * match.
+ *
+ * Exported (rather than inlined in the startup IIFE below) purely so it has a
+ * unit-testable surface independent of spawning the real MCP process.
+ */
+export function resolveCallerSessionIdFromEnv(
+  db: Database,
+  env: NodeJS.ProcessEnv = process.env,
+): number | null {
+  const processSessionId = env.CLAUDE_CODE_SESSION_ID;
+  if (typeof processSessionId !== "string" || processSessionId.length === 0) {
+    return null;
+  }
+
+  return getMnemoSessionIdForProcessSession(db, processSessionId);
 }
 
 type MainMcpToolName = "recall" | "timeline" | "remember" | "note";
@@ -101,6 +135,7 @@ export function createMcpServer(
   const mergedHandlers = {
     ...createDatabaseBackedHandlers(options.database, {
       defaultProject: process.cwd(),
+      resolveCallerSessionId: options.resolveCallerSessionId,
     }),
     ...options.handlers,
   };
@@ -147,6 +182,13 @@ if (isDirectExecution()) {
     // one most likely to open it first: the MCP server is spawned with the
     // session, before any hook of this build has run (db/era.ts).
     ensureRecordedEraCutoff(db, Math.floor(Date.now() / 1000));
-    await startMcpServer({ database: db });
+    // spec D2: the only construction path in the whole codebase allowed to
+    // supply this. Resolved fresh per `note` call (see the option's doc on
+    // CreateDatabaseBackedHandlersOptions) rather than once here, since the
+    // mapping this reads may not exist yet at this exact moment.
+    await startMcpServer({
+      database: db,
+      resolveCallerSessionId: () => resolveCallerSessionIdFromEnv(db),
+    });
   })();
 }

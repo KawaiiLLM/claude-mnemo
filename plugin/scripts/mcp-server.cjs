@@ -8445,6 +8445,22 @@ var init_schema = __esm({
     UNIQUE(session_id, prompt_number)
   );
 
+  -- Process-session \u2192 mnemo-session identity map (spec D1, note guardrails
+  -- ticket). CLAUDE_CODE_SESSION_ID names the OS process's session, which is
+  -- NOT the same id mnemo keys sessions on (sessions.content_session_id, the
+  -- hook payload's session_id) \u2014 resume/compact mint a new process id for the
+  -- same ongoing mnemo session. UserPromptSubmit upserts this row every turn,
+  -- so the MCP entry point can turn "which process am I" into "which mnemo
+  -- session is this" without ever reading process.env itself. One process id
+  -- names exactly one mnemo session; a mnemo session accumulates one row per
+  -- process id it has ever run under, and old rows are left in place rather
+  -- than cleaned up \u2014 a stale row just never gets looked up again.
+  CREATE TABLE IF NOT EXISTS process_session_map (
+    process_session_id TEXT PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS turn_citations (
     citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
@@ -9050,6 +9066,7 @@ var server_exports = {};
 __export(server_exports, {
   createMcpServer: () => createMcpServer,
   registerMainMcpTools: () => registerMainMcpTools,
+  resolveCallerSessionIdFromEnv: () => resolveCallerSessionIdFromEnv,
   startMcpServer: () => startMcpServer
 });
 module.exports = __toCommonJS(server_exports);
@@ -32369,6 +32386,14 @@ var StdioServerTransport = class {
   }
 };
 
+// src/db/process-session-map.ts
+function getMnemoSessionIdForProcessSession(db, processSessionId) {
+  return db.query(
+    `SELECT session_id AS sessionId FROM process_session_map
+         WHERE process_session_id = ?`
+  ).get(processSessionId)?.sessionId ?? null;
+}
+
 // src/db/citations.ts
 var CITATION_RELATIONS = [
   "builds-on",
@@ -32610,7 +32635,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn replaces its note \u2014 send it again whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too. Never include <private> content."
+  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
@@ -32674,7 +32699,13 @@ var noteInputShape = {
   title: external_exports3.string().min(1).optional(),
   content: external_exports3.string().min(1).optional(),
   insight: external_exports3.string().optional(),
-  skip: external_exports3.boolean().optional()
+  skip: external_exports3.boolean().optional(),
+  // spec D3: declares intent to overwrite an address that already has a note.
+  replace: external_exports3.boolean().optional(),
+  // spec D4: declares intent to write a turn outside the caller's own
+  // session. No legitimate use exists today (every address a caller is ever
+  // handed is its own session's) — this is a pure guardrail.
+  crossSession: external_exports3.boolean().optional()
 };
 var timelineInputShape = {
   id: external_exports3.string().min(1),
@@ -33207,11 +33238,25 @@ function mayWriteNote(hasExistingNote, debt, isCurrentTurn) {
 function debtOwesNoNoteMessage(address, debt) {
   return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes for the current turn (the mnemo current-turn line's address), for turns listed in a backlog relief, or rewrite a note you already wrote.`;
 }
-function declineTurn(db, address, options) {
+function overwriteRequiredMessage(address) {
+  return `S${address.sessionId}/T${address.promptNumber} already has a note. Resend with replace: true to confirm you want to overwrite it.`;
+}
+function crossSessionRequiredMessage(address, callerSessionId) {
+  return `S${address.sessionId}/T${address.promptNumber} belongs to a different session than this call (S${callerSessionId}). Resend with crossSession: true to confirm the cross-session write.`;
+}
+function isCrossSessionWrite(callerSessionId, addressSessionId) {
+  return typeof callerSessionId === "number" && callerSessionId !== addressSessionId;
+}
+function declineTurn(db, address, options, crossSession) {
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
+    );
+  }
+  if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
+    return parameterError(
+      crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
@@ -33271,8 +33316,16 @@ function noteTool(db, rawInput, options = {}) {
   if (rawInput.skip !== void 0 && typeof rawInput.skip !== "boolean") {
     return parameterError("skip must be a boolean when present.");
   }
+  if (rawInput.replace !== void 0 && typeof rawInput.replace !== "boolean") {
+    return parameterError("replace must be a boolean when present.");
+  }
+  if (rawInput.crossSession !== void 0 && typeof rawInput.crossSession !== "boolean") {
+    return parameterError("crossSession must be a boolean when present.");
+  }
+  const replace = rawInput.replace === true;
+  const crossSession = rawInput.crossSession === true;
   if (rawInput.skip === true) {
-    return declineTurn(db, address, options);
+    return declineTurn(db, address, options, crossSession);
   }
   const titleInput = requireText(rawInput.title, "title");
   if (!titleInput.ok) {
@@ -33298,6 +33351,14 @@ function noteTool(db, rawInput, options = {}) {
   if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
     return parameterError(debtOwesNoNoteMessage(address, fastDebt));
   }
+  if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
+    return parameterError(
+      crossSessionRequiredMessage(address, options.callerSessionId)
+    );
+  }
+  if (fastExisting !== null && !replace) {
+    return parameterError(overwriteRequiredMessage(address));
+  }
   const rawTitle = titleInput.value;
   const rawContent = contentInput.value;
   const rawInsight = typeof rawInput.insight === "string" ? rawInput.insight : null;
@@ -33318,6 +33379,9 @@ function noteTool(db, rawInput, options = {}) {
     const debt = getNoteDebt(db, turn.id);
     if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
       return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
+    }
+    if (existing !== null && !replace) {
+      return { ok: false, message: overwriteRequiredMessage(address) };
     }
     upsertShadowNote(db, {
       turnId: turn.id,
@@ -33343,7 +33407,7 @@ function noteTool(db, rawInput, options = {}) {
     return parameterError(outcome.message);
   }
   const parts = [
-    `Noted S${turn.sessionId}/T${turn.promptNumber}${outcome.existing ? " (replaced the previous note)" : ""}.`
+    `${outcome.existing ? "Updated" : "Noted"} S${turn.sessionId}/T${turn.promptNumber}${outcome.existing ? " (replaced the previous note)" : ""}.`
   ];
   parts.push(
     rideTurnId === null ? "ride_turn: unknown." : `ride_turn: S${turn.sessionId}/T${getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber}.`
@@ -38427,13 +38491,21 @@ function createDatabaseBackedHandlers(database, options = {}) {
     // its confirmation is a short mechanical receipt with no memory text to
     // truncate or re-strip.
     note: (args) => noteTool(database, args, {
-      eraCutoffEpoch: eraCutoff()
+      eraCutoffEpoch: eraCutoff(),
+      callerSessionId: options.resolveCallerSessionId?.() ?? null
     })
   };
 }
 
 // src/mcp/server.ts
 var PACKAGE_VERSION = true ? "0.9.7" : "0.0.0-test";
+function resolveCallerSessionIdFromEnv(db, env = process.env) {
+  const processSessionId = env.CLAUDE_CODE_SESSION_ID;
+  if (typeof processSessionId !== "string" || processSessionId.length === 0) {
+    return null;
+  }
+  return getMnemoSessionIdForProcessSession(db, processSessionId);
+}
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {
     if (process.ppid === 1) {
@@ -38491,7 +38563,8 @@ function createMcpServer(options = {}) {
   );
   const mergedHandlers = {
     ...createDatabaseBackedHandlers(options.database, {
-      defaultProject: process.cwd()
+      defaultProject: process.cwd(),
+      resolveCallerSessionId: options.resolveCallerSessionId
     }),
     ...options.handlers
   };
@@ -38526,12 +38599,16 @@ if (isDirectExecution()) {
     const db = createDatabase2();
     initializeDatabase2(db);
     ensureRecordedEraCutoff2(db, Math.floor(Date.now() / 1e3));
-    await startMcpServer({ database: db });
+    await startMcpServer({
+      database: db,
+      resolveCallerSessionId: () => resolveCallerSessionIdFromEnv(db)
+    });
   })();
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   createMcpServer,
   registerMainMcpTools,
+  resolveCallerSessionIdFromEnv,
   startMcpServer
 });

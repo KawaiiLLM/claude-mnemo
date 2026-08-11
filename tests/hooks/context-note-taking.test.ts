@@ -49,7 +49,10 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("mnemo current turn: S…/T…");
     expect(flat).toContain("with the user's message");
     expect(flat).toContain("The note describes this turn only");
-    expect(flat).toContain("the newer note replaces");
+    // Note guardrails ticket (spec D3): a repeat write used to replace
+    // silently; it now demands an explicit declaration, and the instructions
+    // must say so or every agent's first rewrite attempt bounces.
+    expect(flat).toContain("resend with replace:true");
     // 裁决 26: sealing at the first batch was 0.9.4's rule and it survived the
     // protocol change — S18993/T93 filed its note two seconds after dispatching
     // a worker, so the report that arrived next never entered it. The note now

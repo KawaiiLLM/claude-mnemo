@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { upsertProcessSessionMap } from "../../db/process-session-map";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
@@ -30,7 +31,17 @@ export interface SessionInitDependencies {
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   captureRepairLog?: CaptureRepairLog;
   captureRepairMaxLines?: number;
+  /** Injected for tests; defaults to the real process environment. */
+  env?: NodeJS.ProcessEnv;
 }
+
+/**
+ * Names the OS process's session (spec D1's investigation) — distinct from
+ * `input.sessionId`, the hook payload's content session id this handler keys
+ * everything else on. Only a hook or MCP process can read it; it is not part
+ * of any hook payload.
+ */
+const PROCESS_SESSION_ID_ENV_KEY = "CLAUDE_CODE_SESSION_ID";
 
 function createPendingTurn(
   db: Database,
@@ -82,6 +93,7 @@ export function createSessionInitHandler(
 ) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1000));
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
+  const env = dependencies.env ?? process.env;
 
   return async function handleSessionInitHook(
     input: NormalizedHookInput,
@@ -145,6 +157,18 @@ export function createSessionInitHandler(
         updatedAtEpoch: epoch,
         completedAtEpoch: existingSession?.completedAtEpoch ?? null,
       });
+
+      // D1: refreshed every turn, not just at session start — resume/compact
+      // mint a new process id mid-session, and a mapping written once at
+      // SessionStart would point at whichever process id happened to be
+      // first. Missing entirely is a supported, silent case — the
+      // investigation found no guaranteed write site for this var on every
+      // Claude Code build — so this just skips the write, and identity
+      // resolves as "unknown" downstream.
+      const processSessionId = env[PROCESS_SESSION_ID_ENV_KEY];
+      if (processSessionId) {
+        upsertProcessSessionMap(dependencies.db, processSessionId, session.id, epoch);
+      }
 
       if (transcriptEntries && invalidationSets && parsedTurns) {
         applyInvalidationSets(

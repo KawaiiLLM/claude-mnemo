@@ -107,6 +107,22 @@ const SCHEMA_SQL = `
     UNIQUE(session_id, prompt_number)
   );
 
+  -- Process-session → mnemo-session identity map (spec D1, note guardrails
+  -- ticket). CLAUDE_CODE_SESSION_ID names the OS process's session, which is
+  -- NOT the same id mnemo keys sessions on (sessions.content_session_id, the
+  -- hook payload's session_id) — resume/compact mint a new process id for the
+  -- same ongoing mnemo session. UserPromptSubmit upserts this row every turn,
+  -- so the MCP entry point can turn "which process am I" into "which mnemo
+  -- session is this" without ever reading process.env itself. One process id
+  -- names exactly one mnemo session; a mnemo session accumulates one row per
+  -- process id it has ever run under, and old rows are left in place rather
+  -- than cleaned up — a stale row just never gets looked up again.
+  CREATE TABLE IF NOT EXISTS process_session_map (
+    process_session_id TEXT PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    updated_at_epoch INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS turn_citations (
     citing_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     cited_turn_id INTEGER NOT NULL REFERENCES turns(id) ON DELETE CASCADE,

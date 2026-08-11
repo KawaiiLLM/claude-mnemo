@@ -289,6 +289,7 @@ describe("era cutover write path", () => {
           turn: `S${sessionId}/T11`,
           title: "second title",
           content: "second content",
+          replace: true,
         },
         { ...options, now: () => 3_400 },
       );

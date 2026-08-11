@@ -1,6 +1,11 @@
-import { describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { Database } from "bun:sqlite";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { createDatabase } from "../../src/db/database";
+import { upsertProcessSessionMap } from "../../src/db/process-session-map";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
@@ -11,6 +16,7 @@ import {
 import {
   createMcpServer,
   registerMainMcpTools,
+  resolveCallerSessionIdFromEnv,
 } from "../../src/mcp/server";
 
 type ToolRegistration = {
@@ -154,5 +160,49 @@ describe("registerMainMcpTools", () => {
     } finally {
       registerToolSpy.mockRestore();
     }
+  });
+});
+
+describe("resolveCallerSessionIdFromEnv (spec D2)", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "server-identity-session",
+      project: "claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("resolves the mapped mnemo session when the env var and mapping both exist", () => {
+    upsertProcessSessionMap(db, "proc-xyz", sessionId, 100);
+
+    expect(
+      resolveCallerSessionIdFromEnv(db, { CLAUDE_CODE_SESSION_ID: "proc-xyz" }),
+    ).toBe(sessionId);
+  });
+
+  test("a missing env var reads as unknown, not as an error", () => {
+    expect(resolveCallerSessionIdFromEnv(db, {})).toBeNull();
+  });
+
+  test("an env var with no recorded mapping reads as unknown", () => {
+    // The MCP server can start before the session's first UserPromptSubmit
+    // hook has run — the mapping this reads may simply not exist yet.
+    expect(
+      resolveCallerSessionIdFromEnv(db, { CLAUDE_CODE_SESSION_ID: "proc-unmapped" }),
+    ).toBeNull();
   });
 });
