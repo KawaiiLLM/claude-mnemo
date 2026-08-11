@@ -38498,7 +38498,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
 }
 
 // src/mcp/server.ts
-var PACKAGE_VERSION = true ? "0.9.7" : "0.0.0-test";
+var PACKAGE_VERSION = true ? "0.9.8" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
   const processSessionId = env.CLAUDE_CODE_SESSION_ID;
   if (typeof processSessionId !== "string" || processSessionId.length === 0) {
