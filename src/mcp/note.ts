@@ -11,6 +11,7 @@ import {
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn, promoteTurnFromNote } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
+import { formatNoteBudget } from "../shared/note-budget";
 import { stripPrivateTags } from "../shared/tag-stripping";
 
 type ToolTextResult = {
@@ -630,6 +631,12 @@ export function noteTool(
       outcome.existing ? " (replaced the previous note)" : ""
     }.`,
   ];
+  // The budget is stated to the agent at session start, but a number nobody
+  // measures is a number nobody keeps: sixteen consecutive notes on S15069 ran
+  // 1.5×–2.5× over it. Reporting the write's own cost back, on the write, is
+  // the only feedback the writer gets in time to spend it differently next
+  // turn. Successful writes only — a decline has nothing to measure.
+  parts.push(`budget: ${formatNoteBudget({ title, content, insight })}`);
   parts.push(
     rideTurnId === null
       ? "ride_turn: unknown."

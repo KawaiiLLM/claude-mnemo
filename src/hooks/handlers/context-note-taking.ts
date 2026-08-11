@@ -25,18 +25,23 @@ nothing worth keeping, or whose details left your context with no open
 batch recovering them in passing — never invent a note from the listed
 line, never open a lookup just to rescue one.
 Fields:
-- title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
-  words (research/design/implement/fix/measure/review/write/ops) must state
-  the real stage, never a hoped-for one.
-- content (~100 tokens): conclusion first, then the key steps. Include
-  rejected alternatives with reasons, and who decided (user/data/literature/
+- title (~20 tokens): "<activity>+<topic>: <what this turn covered>" — the
+  addressing line, one glance says what the turn did. Activity words
+  (research/design/implement/fix/measure/review/write/ops) must state the
+  real stage, never a hoped-for one.
+- content (~100 tokens): the conclusion, then the evidence chain that
+  produced it — how it was reached, not just that it was. Include rejected
+  alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
-  Do not repeat the title.
-- insight: empty by default. Only knowledge from this turn
-  worth keeping long-term and hard to reacquire — pitfalls hit, durable
-  pointers, transferable lessons — and orthogonal to the conclusion. Known
-  facts and anything one search away do not qualify.
+  Never restate the title; never narrate looking — "I checked the transcript
+  and found no X" is "the transcript has no X".
+- insight (~60 tokens): empty by default. Only what is worth keeping
+  long-term, hard to reacquire, and orthogonal to the conclusion — pitfalls
+  hit, durable pointers, transferable lessons. Anything one search away does
+  not qualify.
 - skip: true with turn alone, for the refusal above.
+Each write's receipt reports its token count against these budgets — over
+budget, cut the next one.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
 other turns only as [S15069/T332] and only ids seen in injected context;

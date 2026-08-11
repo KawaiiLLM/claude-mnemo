@@ -554,3 +554,86 @@ describe("MCP format renderer", () => {
     ).toContain("[S17][T13:L42] Anchored turn");
   });
 });
+
+describe("truncation lands on a boundary a reader can see", () => {
+  const baseTurn: FormattedTurn = {
+    id: 21,
+    promptNumber: 21,
+    transcriptLineStart: null,
+    title: null,
+    content: null,
+  };
+
+  test("a cut inside a word retreats to the word boundary", () => {
+    // The production shape: a note's content is prose, and a raw slice ended
+    // mid-identifier ("identity sup...", "messaging-s..."), which reads as
+    // corruption rather than as truncation.
+    const content = `${"alpha beta gamma ".repeat(20)}supplementary`;
+    const rendered = renderNode(
+      { type: "turn", value: { ...baseTurn, title: "boundary", content } },
+      { depth: "expanded" },
+    );
+
+    const shown = rendered.split("- desc: ")[1]?.split("\n")[0] ?? "";
+    expect(shown).toEndWith("...");
+    expect(shown.slice(0, -3)).not.toEndWith(" ");
+    // Whatever survived is whole words: the visible text is a prefix of the
+    // source that ends where the source has a space.
+    expect(content.startsWith(shown.slice(0, -3))).toBe(true);
+    expect(content[shown.length - 3]).toBe(" ");
+  });
+
+  test("a window that already ends on whitespace keeps its last word", () => {
+    // "…too" where the source reads "…too long " is a word thrown away for
+    // nothing: the slice stopped before a space, so its last word was whole.
+    const content = `${"ab ".repeat(66)}tail`;
+    const rendered = renderNode(
+      { type: "turn", value: { ...baseTurn, title: "aligned", content } },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).toContain(`${"ab ".repeat(66).trimEnd()}...`);
+  });
+
+  test("a sentence end is never honoured — the window keeps its evidence", () => {
+    // A note written conclusion-first ends its first sentence well before the
+    // window does. Retreating there would show the claim and drop every piece
+    // of support the rest of the window exists to carry, so the cut is decided
+    // by word boundaries alone.
+    const content = `Short conclusion. ${"evidence ".repeat(40)}`;
+    const rendered = renderNode(
+      { type: "turn", value: { ...baseTurn, title: "early", content } },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).not.toContain("Short conclusion....");
+    expect(rendered).toContain("evidence evidence");
+  });
+
+  test("an unbroken run still hard-cuts", () => {
+    const rendered = renderNode(
+      {
+        type: "turn",
+        value: { ...baseTurn, title: "unbroken", content: "x".repeat(500) },
+      },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).toContain(`${"x".repeat(200)}...`);
+  });
+
+  test("a multi-line prompt standing in for a missing note is collapsed to one line", () => {
+    // A turn with no note falls back to its user prompt for the title slot,
+    // and a machine-generated prompt carries newlines. They reached the layout
+    // intact and spilled one turn's label across four lines.
+    const promptPreview =
+      "<task-notification>\n<task-id>a1758e6c</task-id>\n<output-file>/tmp/x.txt</output-file>\n</task-notification>";
+    const rendered = formatTurnCollapsed(
+      { ...baseTurn, promptPreview },
+      { sessionId: 15069 },
+    );
+
+    expect(rendered.split("\n")).toHaveLength(1);
+    expect(rendered).toContain("<task-notification> <task-id>a1758e6c</task-id>");
+  });
+});

@@ -282,6 +282,10 @@ export function splitBulletField(value: string | null | undefined): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
+function collapseToSingleLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 function truncateText(
   text: string,
   {
@@ -299,7 +303,28 @@ function truncateText(
   }
 
   markTruncated(signal);
-  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}`;
+  const window = text.slice(0, boundedLimit);
+  // End on a boundary the reader can see. A raw slice ends mid-word ("identity
+  // sup...", "messaging-s..."), which reads as corruption rather than as
+  // truncation.
+  //
+  // Word boundary only — an earlier revision also retreated to the last full
+  // sentence, and that was worse: a note written conclusion-first ends its
+  // first sentence around 45% in, so honouring it threw away the evidence the
+  // rest of the window exists to show. One rule, and it never sacrifices text
+  // it did not have to.
+  if (/\s/.test(text.charAt(boundedLimit))) {
+    // The window already stopped before whitespace, so its last word is whole.
+    return `${window}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  const wordEnd = window.lastIndexOf(" ");
+  // A late word boundary costs a partial word; an early one would cost most of
+  // the window (a long URL, a base64 blob, an unbroken CJK run), and a hard cut
+  // — the original behaviour — is the better trade there.
+  if (wordEnd >= boundedLimit * 0.8) {
+    return `${window.slice(0, wordEnd)}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
 
 function truncateFileTree(
@@ -513,7 +538,15 @@ function formatTurnLabel(
   const limit = resolveExplicitTruncate(truncate, truncateCap);
   const title =
     turn.title === null && turn.promptPreview
-      ? `"${truncateText(turn.promptPreview, { limit, signal })}"`
+      ? // The title slot is one line by construction. A prompt standing in for
+        // a missing note need not be: a task notification or a pasted payload
+        // carries newlines, and they reached the layout intact, spilling one
+        // turn's label across four lines. Collapse before measuring, so the
+        // truncation budget is spent on content rather than on line breaks.
+        `"${truncateText(collapseToSingleLine(turn.promptPreview), {
+          limit,
+          signal,
+        })}"`
       : truncateText(rawTitle, { limit, signal });
 
   // Worker-only DB-id surface: recall labels turns by prompt number, but a

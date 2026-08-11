@@ -32635,7 +32635,7 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title: `<activity>+<topic>: <what this turn covered>`. content: conclusion first, then the key steps, including rejected alternatives and who decided. insight: optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
+  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title (~20 tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the addressing line, one glance says what the turn did. content (~100 tokens): the conclusion, then the distilled evidence chain that produced it, including rejected alternatives and who decided; never restate the title, and never narrate the act of looking (\"I checked the transcript and found it has no X\" is \"the transcript has no X\"). insight (~60 tokens): optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Each successful write answers with its own token count against those budgets. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
@@ -33161,6 +33161,34 @@ function getShadowNote(db, turnId) {
 // src/mcp/note.ts
 init_segment_era();
 
+// src/utils/token-estimate.ts
+function estimateTokens(text) {
+  return Math.ceil(text.length / 4);
+}
+
+// src/shared/note-budget.ts
+var NOTE_TOKEN_BUDGET = {
+  title: 20,
+  content: 100,
+  insight: 60
+};
+function formatNoteBudget(fields) {
+  const title = estimateTokens(fields.title);
+  const content = estimateTokens(fields.content);
+  const insight = fields.insight ? estimateTokens(fields.insight) : 0;
+  const hasInsight = insight > 0;
+  const segments = [
+    `title ${title}/${NOTE_TOKEN_BUDGET.title}`,
+    `content ${content}/${NOTE_TOKEN_BUDGET.content}`
+  ];
+  if (hasInsight) {
+    segments.push(`insight ${insight}/${NOTE_TOKEN_BUDGET.insight}`);
+  }
+  const total = title + content + insight;
+  const budget = NOTE_TOKEN_BUDGET.title + NOTE_TOKEN_BUDGET.content + (hasInsight ? NOTE_TOKEN_BUDGET.insight : 0);
+  return `${segments.join(" \xB7 ")} \u2192 ${total}/${budget} (${(total / budget).toFixed(1)}\xD7).`;
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -33409,6 +33437,7 @@ function noteTool(db, rawInput, options = {}) {
   const parts = [
     `${outcome.existing ? "Updated" : "Noted"} S${turn.sessionId}/T${turn.promptNumber}${outcome.existing ? " (replaced the previous note)" : ""}.`
   ];
+  parts.push(`budget: ${formatNoteBudget({ title, content, insight })}`);
   parts.push(
     rideTurnId === null ? "ride_turn: unknown." : `ride_turn: S${turn.sessionId}/T${getRidePromptNumber(db, rideTurnId) ?? turn.promptNumber}.`
   );
@@ -34238,6 +34267,9 @@ function splitBulletField(value) {
   }
   return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
 }
+function collapseToSingleLine(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
 function truncateText(text, {
   limit,
   signal
@@ -34247,7 +34279,15 @@ function truncateText(text, {
     return text;
   }
   markTruncated(signal);
-  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}`;
+  const window = text.slice(0, boundedLimit);
+  if (/\s/.test(text.charAt(boundedLimit))) {
+    return `${window}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  const wordEnd = window.lastIndexOf(" ");
+  if (wordEnd >= boundedLimit * 0.8) {
+    return `${window.slice(0, wordEnd)}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
 function truncateFileTree(tree, {
   limit,
@@ -34389,7 +34429,17 @@ function formatTurnLabel(turn, {
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
   const limit = resolveExplicitTruncate(truncate2, truncateCap);
-  const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, { limit, signal })}"` : truncateText(rawTitle, { limit, signal });
+  const title = turn.title === null && turn.promptPreview ? (
+    // The title slot is one line by construction. A prompt standing in for
+    // a missing note need not be: a task notification or a pasted payload
+    // carries newlines, and they reached the layout intact, spilling one
+    // turn's label across four lines. Collapse before measuring, so the
+    // truncation budget is spent on content rather than on line breaks.
+    `"${truncateText(collapseToSingleLine(turn.promptPreview), {
+      limit,
+      signal
+    })}"`
+  ) : truncateText(rawTitle, { limit, signal });
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
 }

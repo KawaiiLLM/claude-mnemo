@@ -680,8 +680,10 @@ describe("handleContextHook", () => {
     expect(recentOutput).toContain(
       `- [S2] Secondary session | 💬2 | 1970-01-01 | /Users/zhaoqixuan/Projects/claude-mnemo`,
     );
+    // Cut back to the word boundary: the raw slice landed inside "budget",
+    // and a half-word reads as corruption rather than as truncation.
     expect(recentOutput).toContain(
-      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible bu...",
+      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible...",
     );
 
     expect(recentOutput).toContain(

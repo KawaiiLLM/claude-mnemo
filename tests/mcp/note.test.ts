@@ -165,6 +165,55 @@ describe("note tool", () => {
     expect(resultText(result)).not.toContain("replaced the previous note");
   });
 
+  test("a successful write reports its own size against the budget", () => {
+    // The budget is stated to the agent once, at session start. Stated and
+    // never measured, it was ignored: sixteen consecutive notes on S15069 ran
+    // 1.5x-2.5x over. The receipt is the only feedback that arrives in time to
+    // change the next note.
+    const overBudget = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "t",
+        content: "c".repeat(800),
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(overBudget)).toContain("budget: title 1/20");
+    expect(resultText(overBudget)).toContain("content 200/100");
+    expect(resultText(overBudget)).toContain("→ 201/120 (1.7×).");
+    // An absent insight is the documented default, not an underspend: it is
+    // left out of the line and out of the denominator.
+    expect(resultText(overBudget)).not.toContain("insight");
+  });
+
+  test("an insight is measured too, and only when one was written", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "t",
+        content: "c",
+        insight: "i".repeat(120),
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(result)).toContain("insight 30/60");
+    expect(resultText(result)).toContain("→ 32/180");
+  });
+
+  test("a decline has nothing to measure and says nothing about the budget", () => {
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T332`, skip: true },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(result)).not.toContain("budget:");
+  });
+
   test("a repeat write for the same turn overwrites, keeping only the latest", () => {
     noteTool(
       db,

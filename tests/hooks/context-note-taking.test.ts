@@ -71,6 +71,16 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("never invent a note from the listed line");
     expect(flat).toContain("no open batch recovering them in passing");
     expect(flat).toContain("never open a lookup just to rescue one");
+    // The writing rules (2026-08-11): sixteen consecutive notes ran 1.5x-2.5x
+    // over a budget the block stated but never explained the purpose of. Each
+    // field now says what it is FOR, which is what the terser version could
+    // not convey — and the receipt reports the cost back, so the budget is
+    // measured rather than merely declared.
+    expect(flat).toContain("the addressing line, one glance says what the turn did");
+    expect(flat).toContain("the evidence chain that produced it");
+    expect(flat).toContain("Never restate the title; never narrate looking");
+    expect(flat).toContain("insight (~60 tokens)");
+    expect(flat).toContain("reports its token count against these budgets");
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
     // The note-language rule (裁决 16): without it, agents follow the
     // conversation's language — the S15440 Chinese-notes regression.
@@ -79,13 +89,17 @@ describe("note-taking instructions injection", () => {
     );
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("never include <private> content");
     // Budgeted as a cached prefix block (~280 tokens in the spec, ~380 as
-    // shipped). Re-baselined to 500 for 裁决 22/24, which added the skip
-    // protocol and the once-per-turn rule: the block is injected at
+    // shipped, 500 after 裁决 22/24 added the skip protocol and the
+    // once-per-turn rule). Re-baselined to 580 for the writing rules: the
+    // field descriptions now carry what a title and a content are FOR, which
+    // is what sixteen consecutive 1.5×–2.5× over-budget notes on S15069 showed
+    // the terser version could not convey. The block is injected at
     // SessionStart and therefore paid once, into the same cached prefix whose
-    // repeated re-ingestion this release exists to stop. Estimated with the
+    // repeated re-ingestion this release exists to stop — 80 tokens once per
+    // session against every note the session writes. Estimated with the
     // 4-chars-per-token rule, not the diary's CJK-weighted one, which reads
     // ~3x high on English prose.
-    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(500);
+    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(580);
   });
 
   test("it stays out of other events", async () => {

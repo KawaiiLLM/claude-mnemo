@@ -3094,7 +3094,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.8-msog33bf" : "dev";
+var BUILD_ID = true ? "0.9.8-msoi7x6v" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3606,6 +3606,9 @@ function splitBulletField(value) {
   }
   return value.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-+\s*/, ""));
 }
+function collapseToSingleLine(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
 function truncateText(text, {
   limit,
   signal
@@ -3615,7 +3618,15 @@ function truncateText(text, {
     return text;
   }
   markTruncated(signal);
-  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}`;
+  const window = text.slice(0, boundedLimit);
+  if (/\s/.test(text.charAt(boundedLimit))) {
+    return `${window}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  const wordEnd = window.lastIndexOf(" ");
+  if (wordEnd >= boundedLimit * 0.8) {
+    return `${window.slice(0, wordEnd)}${FIELD_TRUNCATION_SUFFIX}`;
+  }
+  return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
 function truncateFileTree(tree, {
   limit,
@@ -3757,7 +3768,17 @@ function formatTurnLabel(turn, {
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
   const limit = resolveExplicitTruncate(truncate2, truncateCap);
-  const title = turn.title === null && turn.promptPreview ? `"${truncateText(turn.promptPreview, { limit, signal })}"` : truncateText(rawTitle, { limit, signal });
+  const title = turn.title === null && turn.promptPreview ? (
+    // The title slot is one line by construction. A prompt standing in for
+    // a missing note need not be: a task notification or a pasted payload
+    // carries newlines, and they reached the layout intact, spilling one
+    // turn's label across four lines. Collapse before measuring, so the
+    // truncation budget is spent on content rather than on line breaks.
+    `"${truncateText(collapseToSingleLine(turn.promptPreview), {
+      limit,
+      signal
+    })}"`
+  ) : truncateText(rawTitle, { limit, signal });
   const dbIdSegment = includeDbTurnIds ? ` dbid:T${turn.id}` : "";
   return `${prefix} ${title}${statsSegment}${formatStatus(turn.status)}${dbIdSegment}`;
 }
@@ -22986,18 +23007,23 @@ nothing worth keeping, or whose details left your context with no open
 batch recovering them in passing \u2014 never invent a note from the listed
 line, never open a lookup just to rescue one.
 Fields:
-- title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
-  words (research/design/implement/fix/measure/review/write/ops) must state
-  the real stage, never a hoped-for one.
-- content (~100 tokens): conclusion first, then the key steps. Include
-  rejected alternatives with reasons, and who decided (user/data/literature/
+- title (~20 tokens): "<activity>+<topic>: <what this turn covered>" \u2014 the
+  addressing line, one glance says what the turn did. Activity words
+  (research/design/implement/fix/measure/review/write/ops) must state the
+  real stage, never a hoped-for one.
+- content (~100 tokens): the conclusion, then the evidence chain that
+  produced it \u2014 how it was reached, not just that it was. Include rejected
+  alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
-  Do not repeat the title.
-- insight: empty by default. Only knowledge from this turn
-  worth keeping long-term and hard to reacquire \u2014 pitfalls hit, durable
-  pointers, transferable lessons \u2014 and orthogonal to the conclusion. Known
-  facts and anything one search away do not qualify.
+  Never restate the title; never narrate looking \u2014 "I checked the transcript
+  and found no X" is "the transcript has no X".
+- insight (~60 tokens): empty by default. Only what is worth keeping
+  long-term, hard to reacquire, and orthogonal to the conclusion \u2014 pitfalls
+  hit, durable pointers, transferable lessons. Anything one search away does
+  not qualify.
 - skip: true with turn alone, for the refusal above.
+Each write's receipt reports its token count against these budgets \u2014 over
+budget, cut the next one.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
 other turns only as [S15069/T332] and only ids seen in injected context;

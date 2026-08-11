@@ -96,24 +96,31 @@ appears, append a note call for the listed turns at the end of the current
 batch. No reminder — do nothing. Never start a tool call just to write a note.
 Skip when the main task is critical; the system will remind you again.
 Fields:
-- title (~20 tokens): "<activity>+<topic>: <what this turn covered>". Activity
-  words (research/design/implement/fix/measure/review/write/ops) must state
-  the real stage — never claim "finalized" for work still in design.
-- content (~100 tokens): conclusion first, then the key steps. Include
-  rejected alternatives with reasons, and who decided (user/data/literature/
+- title (~20 tokens): "<activity>+<topic>: <what this turn covered>" — the
+  addressing line, one glance says what the turn did. Activity words
+  (research/design/implement/fix/measure/review/write/ops) must state the
+  real stage — never claim "finalized" for work still in design.
+- content (~100 tokens): the conclusion, then the evidence chain that
+  produced it — how it was reached, not just that it was. Include rejected
+  alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
-  Do not repeat the title.
-- insight: study notes; empty by default. Only knowledge gained this turn
-  that is worth keeping long-term and hard to reacquire — pitfalls hit,
-  durable pointers, transferable lessons — and orthogonal to this turn's
+  Never restate the title; never narrate looking — "I checked the transcript
+  and found no X" is "the transcript has no X".
+- insight (~60 tokens): study notes; empty by default. Only knowledge gained
+  this turn that is worth keeping long-term and hard to reacquire — pitfalls
+  hit, durable pointers, transferable lessons — and orthogonal to this turn's
   conclusion. Already-known facts, perishable state, and anything one search
   away do not qualify.
 Rules: write title/content/insight in English; quoted user phrases keep
 their original language. The note call always goes last in a batch; cite
 other turns only as [S15069/T332] and only ids seen in reminders or injected
 context; omit numbers you are not sure of; never include <private> content.
+Each write's receipt reports its token count against these budgets — over
+budget, cut the next one.
 </mnemo-note-taking>
 ```
+
+**字段规则修订（2026-08-11，用户定案）**：上面三条字段说明已按实测改写，与出厂注入块一致。触发段落是原型期文字，已被裁决 25 取代（提醒协议撤除、注入当前 turn 地址），此处不再重写。修订依据：S15069 连续 16 条笔记全部 1.5×–2.5× 超预算，而预算只写在提示词里、无人度量。三处改动——标题定位为寻址行、正文改为「结论 + 证据链」且禁止复述标题与叙述查看动作（「我检查了 transcript，发现没有 X」写成「transcript 没有 X」）、insight 补上 60 token 预算——外加 `note` 成功回执附带本次 token 用量与预算比，让超支在下一条之前就被看见。注入块因此从 495 涨到 ~570 token（每会话一次，进缓存前缀）。
 
 动态提醒（PostToolUse，列表新增才出现；升级措辞只换末行为 "Write the pending notes in this batch; skipping is no longer authorized."）：
 
