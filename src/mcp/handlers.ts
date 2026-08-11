@@ -98,7 +98,12 @@ export function createDatabaseBackedHandlers(
   }
 
   const includeDbTurnIds = options.audience === "worker";
-  const eraCutoffEpoch =
+  // Resolved per tool call, not once here. These handlers are built when the
+  // MCP server connects, which can be before any process of this build has
+  // recorded the era: pinning `null` at that moment would make every `note` in
+  // the session decline to promote its turn while the hooks, resolving live,
+  // settle the same rows as new-era holes.
+  const eraCutoff = (): number | null =>
     options.eraCutoffEpoch !== undefined
       ? options.eraCutoffEpoch
       : resolveEraCutoff(database);
@@ -132,20 +137,20 @@ export function createDatabaseBackedHandlers(
           truncate: args.truncate as number | undefined,
           includeDbTurnIds,
           truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : undefined,
-          eraCutoffEpoch,
+          eraCutoffEpoch: eraCutoff(),
         }),
       ),
     remember: (args) =>
       rememberTool(
         database,
         args as unknown as Parameters<typeof rememberTool>[1],
-        { eraCutoffEpoch },
+        { eraCutoffEpoch: eraCutoff() },
       ),
     timeline: (args) =>
       workerTextResult(
         timelineQuery(database, {
           ...toTimelineQueryInput(args),
-          eraCutoffEpoch,
+          eraCutoffEpoch: eraCutoff(),
         }),
       ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
@@ -153,7 +158,7 @@ export function createDatabaseBackedHandlers(
     // truncate or re-strip.
     note: (args) =>
       noteTool(database, args as Parameters<typeof noteTool>[1], {
-        eraCutoffEpoch,
+        eraCutoffEpoch: eraCutoff(),
       }),
   };
 }

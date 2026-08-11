@@ -29,6 +29,31 @@ afterEach(() => {
   db.close();
 });
 
+test("an orphan still records the files it touched", () => {
+  // Same writer, same hole as the stranded floor: skipping extraction must not
+  // mean skipping the mechanical aggregation, or the turn drops out of `file:`
+  // recall permanently.
+  const turnId = seedTurn(1, "active", null);
+  db.query(
+    `INSERT INTO observations (turn_id, tool_name, tool_input, status, created_at_epoch)
+     VALUES (?, 'Read', ?, 'pending', 1000),
+            (?, 'Write', ?, 'pending', 1001)`,
+  ).run(
+    turnId,
+    JSON.stringify({ file_path: "/proj/read.ts" }),
+    turnId,
+    JSON.stringify({ file_path: "/proj/written.ts" }),
+  );
+
+  skipOrphanTurns(db, sessionId, 2000, [{ id: turnId, promptNumber: 1 }]);
+
+  const turn = getTurnById(db, turnId);
+  expect(turn?.status).toBe("skipped");
+  expect(turn?.filesRead).toEqual(["/proj/read.ts"]);
+  expect(turn?.filesModified).toEqual(["/proj/written.ts"]);
+  expect(turn?.toolCallCount).toBe(2);
+});
+
 function seedTurn(promptNumber: number, status: string, title: string | null): number {
   return db
     .query<{ id: number }, [number, number, string, string | null]>(

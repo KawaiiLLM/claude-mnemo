@@ -34,6 +34,31 @@ test("the first process to look records the boundary, and no later one moves it"
   expect(resolveEraCutoff(db)).toBe(1_700_000_000);
 });
 
+test("a process that asked before the boundary existed sees it once it does", () => {
+  // The failure this pins: a long-lived process (the MCP server) resolves the
+  // era at startup, gets `null` because no process of this build has recorded
+  // one YET, and keeps answering `null` for the rest of the session while the
+  // hooks — which recorded it a moment later — treat the same turns as new-era.
+  expect(resolveEraCutoff(db)).toBeNull();
+
+  ensureRecordedEraCutoff(db, 1_700_000_000);
+
+  expect(resolveEraCutoff(db)).toBe(1_700_000_000);
+});
+
+test("a boundary already answered is never re-read, so it cannot move mid-process", () => {
+  expect(resolveEraCutoff(db)).toBeNull();
+  ensureRecordedEraCutoff(db, 1_700_000_000);
+  expect(resolveEraCutoff(db)).toBe(1_700_000_000);
+
+  // Turns are already being written against this line. Rewriting the row
+  // underneath a running process must not move it.
+  db.query("UPDATE era_state SET cutoff_epoch = 1900000000 WHERE id = 1").run();
+
+  expect(resolveEraCutoff(db)).toBe(1_700_000_000);
+  expect(getRecordedEraCutoff(db)).toBe(1_900_000_000);
+});
+
 test("the recorded boundary is one row, and it carries when it was recorded", () => {
   ensureRecordedEraCutoff(db, 1_700_000_000);
 

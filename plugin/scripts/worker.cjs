@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msnnkk8g" : "dev";
+var BUILD_ID = true ? "0.9.5-mso7ejs0" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2253,16 +2253,30 @@ function getRecordedEraCutoff(db) {
 function ensureRecordedEraCutoff(db, nowEpoch) {
   const configured = loadConfigEraCutoff();
   if (configured !== null) {
+    settledBoundary.set(db, configured);
     return configured;
   }
   db.query(
     `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
      VALUES (1, ?, ?)`
   ).run(nowEpoch, nowEpoch);
-  return getRecordedEraCutoff(db);
+  const recorded = getRecordedEraCutoff(db);
+  if (recorded !== null) {
+    settledBoundary.set(db, recorded);
+  }
+  return recorded;
 }
+var settledBoundary = /* @__PURE__ */ new WeakMap();
 function resolveEraCutoff(db) {
-  return loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  const settled = settledBoundary.get(db);
+  if (settled !== void 0) {
+    return settled;
+  }
+  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  if (resolved !== null) {
+    settledBoundary.set(db, resolved);
+  }
+  return resolved;
 }
 function loadConfigEraCutoff() {
   try {
@@ -4364,7 +4378,7 @@ function createNoteSettlementScheduler(deps) {
     return created;
   }
   async function runTrigger(sessionDbId, trigger) {
-    const eraCutoffEpoch = config3.eraCutoffEpoch;
+    const eraCutoffEpoch = config3.eraCutoffEpoch ?? resolveEraCutoff(db);
     if (!config3.settlementEnabled || eraCutoffEpoch === null) {
       return inertPass();
     }
@@ -46296,7 +46310,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
-  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
+  const eraCutoff = () => options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -46325,25 +46339,25 @@ function createDatabaseBackedHandlers(database, options = {}) {
         truncate: args.truncate,
         includeDbTurnIds,
         truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0,
-        eraCutoffEpoch
+        eraCutoffEpoch: eraCutoff()
       })
     ),
     remember: (args) => rememberTool(
       database,
       args,
-      { eraCutoffEpoch }
+      { eraCutoffEpoch: eraCutoff() }
     ),
     timeline: (args) => workerTextResult(
       timelineQuery(database, {
         ...toTimelineQueryInput(args),
-        eraCutoffEpoch
+        eraCutoffEpoch: eraCutoff()
       })
     ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to
     // truncate or re-strip.
     note: (args) => noteTool(database, args, {
-      eraCutoffEpoch
+      eraCutoffEpoch: eraCutoff()
     })
   };
 }
@@ -50924,6 +50938,7 @@ function finalizeUnreachableStrandedTurns(db, unreachableTurns, options) {
       db.query(
         "UPDATE turns SET status = ? WHERE id = ?"
       ).run(status, turnId);
+      updateTurnById(db, turnId, aggregateTurnFiles(db, turnId));
       db.query(
         `UPDATE observations SET status = 'skipped'
          WHERE turn_id = ? AND status = 'pending'`
@@ -51087,7 +51102,7 @@ function createWorkerCore(deps) {
             sessionId: turn.sessionId,
             nowEpoch: now(),
             completedTurnId: turn.id,
-            eraCutoffEpoch: config3.eraCutoffEpoch
+            eraCutoffEpoch: config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db)
           });
         }
       } else if (item.kind === "obs") {
@@ -51241,7 +51256,7 @@ function createWorkerCore(deps) {
         repair.unreachable,
         {
           hasRegisteredSessionEnv: (sessionDbId) => getRegisteredSessionEnv(sessionDbId) !== void 0,
-          eraCutoffEpoch: config3.eraCutoffEpoch
+          eraCutoffEpoch: config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db)
         }
       );
       for (const item of floored) {
@@ -51790,7 +51805,11 @@ async function main(deps = {}) {
   const sessionEnvRegistry = /* @__PURE__ */ new Map();
   const logger = deps.logger ?? createLogger("MNEMOSYNE");
   initializeDatabase(db);
-  ensureRecordedEraCutoff(db, Math.floor(Date.now() / 1e3));
+  const recordedEraCutoff = ensureRecordedEraCutoff(
+    db,
+    Math.floor(Date.now() / 1e3)
+  );
+  const eraCutoffEpoch = config3.eraCutoffEpoch ?? recordedEraCutoff;
   try {
     migrateTurnCitationsToEdges(db);
   } catch (error49) {
@@ -51803,7 +51822,7 @@ async function main(deps = {}) {
     config: config3,
     workerEnv: env
   });
-  const noteSettlementDispatchImpl = deps.noteSettlementDispatchImpl ?? (config3.settlementEnabled && config3.eraCutoffEpoch !== null ? createNoteSettlementDispatch({
+  const noteSettlementDispatchImpl = deps.noteSettlementDispatchImpl ?? (config3.settlementEnabled && eraCutoffEpoch !== null ? createNoteSettlementDispatch({
     db,
     config: config3,
     now: deps.now,

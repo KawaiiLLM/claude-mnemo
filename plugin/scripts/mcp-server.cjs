@@ -7682,6 +7682,226 @@ var init_search = __esm({
   }
 });
 
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
+    "use strict";
+    import_node_fs2 = require("node:fs");
+    import_node_os2 = require("node:os");
+    import_node_path3 = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ];
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_CONFIG = {
+      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1
+    };
+  }
+});
+
+// src/db/era.ts
+var era_exports = {};
+__export(era_exports, {
+  ensureRecordedEraCutoff: () => ensureRecordedEraCutoff,
+  getRecordedEraCutoff: () => getRecordedEraCutoff,
+  resolveEraCutoff: () => resolveEraCutoff
+});
+function getRecordedEraCutoff(db) {
+  const row = db.query(
+    "SELECT cutoff_epoch AS cutoffEpoch FROM era_state WHERE id = 1"
+  ).get();
+  return row && Number.isFinite(row.cutoffEpoch) ? row.cutoffEpoch : null;
+}
+function ensureRecordedEraCutoff(db, nowEpoch) {
+  const configured = loadConfigEraCutoff();
+  if (configured !== null) {
+    settledBoundary.set(db, configured);
+    return configured;
+  }
+  db.query(
+    `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
+     VALUES (1, ?, ?)`
+  ).run(nowEpoch, nowEpoch);
+  const recorded = getRecordedEraCutoff(db);
+  if (recorded !== null) {
+    settledBoundary.set(db, recorded);
+  }
+  return recorded;
+}
+function resolveEraCutoff(db) {
+  const settled = settledBoundary.get(db);
+  if (settled !== void 0) {
+    return settled;
+  }
+  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  if (resolved !== null) {
+    settledBoundary.set(db, resolved);
+  }
+  return resolved;
+}
+function loadConfigEraCutoff() {
+  try {
+    return loadConfig().eraCutoffEpoch;
+  } catch {
+    return null;
+  }
+}
+var settledBoundary;
+var init_era = __esm({
+  "src/db/era.ts"() {
+    "use strict";
+    init_config();
+    settledBoundary = /* @__PURE__ */ new WeakMap();
+  }
+});
+
 // src/db/schema.ts
 var schema_exports = {};
 __export(schema_exports, {
@@ -32552,161 +32772,8 @@ function contentDateAt(epochSeconds, timeZone, boundaryHour) {
   return calendarDateAt(epochSeconds - boundaryHour * 3600, timeZone);
 }
 
-// src/shared/config.ts
-var import_node_fs2 = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path3 = require("node:path");
-
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
-}
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-
-// src/shared/config.ts
-var KNOWN_DREAM_AGENT_MODELS = [
-  "opus",
-  "sonnet",
-  "haiku",
-  "claude-opus-4-8",
-  "claude-opus-4-6",
-  "claude-opus-4-5",
-  "claude-sonnet-5",
-  "claude-sonnet-4-6",
-  "claude-sonnet-4-5",
-  "claude-haiku-4-5"
-];
-var DEFAULT_DREAM_AGENT_MODEL = "opus";
-var DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-var DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-var DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-var DEFAULT_DREAM_AGENT_HOUR = 4;
-var DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-var DEFAULT_CONFIG = {
-  hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-  // On by default because it is a kill switch, not the cutover switch: with no
-  // era cutoff configured this changes nothing at all.
-  settlementEnabled: true,
-  eraCutoffEpoch: null,
-  dreamAgentEnabled: false,
-  dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-  dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-  dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-  dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-  dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-  dreamAgentBacklogLimit: 1
-};
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function resolveDreamAgentModel(value, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
-  );
-  return DEFAULT_DREAM_AGENT_MODEL;
-}
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
-  return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
-  }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-
 // src/db/diary-state.ts
+init_config();
 init_database();
 function readDreamCalendarBoundary(db) {
   const timeZone = db.query(
@@ -32942,6 +33009,9 @@ function getFirstTurn(db, sessionId) {
   );
 }
 
+// src/db/turn-completion.ts
+init_segment_era();
+
 // src/db/note-debt.ts
 var NOTE_DEBT_COLUMNS = `
   turn_id AS turnId,
@@ -33043,6 +33113,9 @@ function getShadowNote(db, turnId) {
     `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
   ).get(turnId) ?? null;
 }
+
+// src/mcp/note.ts
+init_segment_era();
 
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
@@ -33537,6 +33610,7 @@ function getSegment(db, segmentId) {
 }
 
 // src/db/segment-rank.ts
+init_segment_era();
 var RANK_FACT_COLUMNS = `
   t.id AS turnId,
   t.session_id AS sessionId,
@@ -33850,6 +33924,7 @@ function getSession(db, id) {
 }
 
 // src/mcp/recall.ts
+init_segment_era();
 init_paths();
 
 // src/shared/file-tree.ts
@@ -35708,6 +35783,7 @@ function recallMemory(db, input) {
 
 // src/mcp/remember.ts
 init_database();
+init_segment_era();
 
 // src/diary/domain.ts
 var UTC_PLUS_EIGHT_SECONDS = 8 * 60 * 60;
@@ -36154,6 +36230,7 @@ function rememberTool(db, rawInput, options = {}) {
 }
 
 // src/mcp/timeline.ts
+init_segment_era();
 init_paths();
 
 // src/shared/transcript-parser.ts
@@ -38208,25 +38285,8 @@ function timelineQuery(db, input) {
   }
 }
 
-// src/db/era.ts
-function getRecordedEraCutoff(db) {
-  const row = db.query(
-    "SELECT cutoff_epoch AS cutoffEpoch FROM era_state WHERE id = 1"
-  ).get();
-  return row && Number.isFinite(row.cutoffEpoch) ? row.cutoffEpoch : null;
-}
-function resolveEraCutoff(db) {
-  return loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
-}
-function loadConfigEraCutoff() {
-  try {
-    return loadConfig().eraCutoffEpoch;
-  } catch {
-    return null;
-  }
-}
-
 // src/mcp/handlers.ts
+init_era();
 var WORKER_TOOL_RESULT_MAX_CHARS = 1e5;
 var WORKER_TOOL_RESULT_TRUNCATION_HINT = "\n\n[\u5DE5\u5177\u8FD4\u56DE\u5DF2\u8FBE\u4E0A\u9650\uFF1B\u8BF7\u7528\u5206\u9875\u6216\u6536\u7A84\u9009\u62E9\u5668\u7EE7\u7EED\u3002]";
 function textResult3(text) {
@@ -38262,7 +38322,7 @@ function createDatabaseBackedHandlers(database, options = {}) {
     return {};
   }
   const includeDbTurnIds = options.audience === "worker";
-  const eraCutoffEpoch = options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
+  const eraCutoff = () => options.eraCutoffEpoch !== void 0 ? options.eraCutoffEpoch : resolveEraCutoff(database);
   const workerTextResult = (text) => {
     if (!includeDbTurnIds) {
       return textResult3(text);
@@ -38291,25 +38351,25 @@ function createDatabaseBackedHandlers(database, options = {}) {
         truncate: args.truncate,
         includeDbTurnIds,
         truncateCap: includeDbTurnIds ? Number.MAX_SAFE_INTEGER : void 0,
-        eraCutoffEpoch
+        eraCutoffEpoch: eraCutoff()
       })
     ),
     remember: (args) => rememberTool(
       database,
       args,
-      { eraCutoffEpoch }
+      { eraCutoffEpoch: eraCutoff() }
     ),
     timeline: (args) => workerTextResult(
       timelineQuery(database, {
         ...toTimelineQueryInput(args),
-        eraCutoffEpoch
+        eraCutoffEpoch: eraCutoff()
       })
     ),
     // Not wrapped in workerTextResult: `note` is a main-agent-only write, and
     // its confirmation is a short mechanical receipt with no memory text to
     // truncate or re-strip.
     note: (args) => noteTool(database, args, {
-      eraCutoffEpoch
+      eraCutoffEpoch: eraCutoff()
     })
   };
 }
@@ -38404,8 +38464,10 @@ if (isDirectExecution()) {
   void (async () => {
     const { createDatabase: createDatabase2 } = await Promise.resolve().then(() => (init_database(), database_exports));
     const { initializeDatabase: initializeDatabase2 } = await Promise.resolve().then(() => (init_schema(), schema_exports));
+    const { ensureRecordedEraCutoff: ensureRecordedEraCutoff2 } = await Promise.resolve().then(() => (init_era(), era_exports));
     const db = createDatabase2();
     initializeDatabase2(db);
+    ensureRecordedEraCutoff2(db, Math.floor(Date.now() / 1e3));
     await startMcpServer({ database: db });
   })();
 }

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
+import { resolveEraCutoff } from "../db/era";
 import {
   advanceNoteSettlementCursor,
   claimNextNoteSettlementJob,
@@ -420,7 +421,11 @@ export function createNoteSettlementScheduler(
   ): Promise<NoteSettlementPassResult> {
     // The era is the switch: with no cutoff every turn is legacy, and a legacy
     // turn is settled by nothing. `settlementEnabled` only stops a live era.
-    const eraCutoffEpoch = config.eraCutoffEpoch;
+    // The configured pin first, then the recorded boundary. Reading the config
+    // ALONE left this permanently inert on every install that never pinned one
+    // by hand — which is all of them, since the boundary is normally recorded by
+    // the first process of a build rather than configured (db/era.ts).
+    const eraCutoffEpoch = config.eraCutoffEpoch ?? resolveEraCutoff(db);
     if (!config.settlementEnabled || eraCutoffEpoch === null) {
       return inertPass();
     }

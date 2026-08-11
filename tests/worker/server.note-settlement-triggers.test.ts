@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
@@ -225,6 +226,24 @@ describe("worker settlement trigger surface", () => {
       ...DEFAULT_CONFIG,
       eraCutoffEpoch: SETTLEMENT_ERA_CUTOFF_EPOCH,
     });
+
+    await core.handleTurnStop(sessionDbId);
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.windowEnd).toBe(NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+  });
+
+  test("a RECORDED cutoff brings settlement up too, with nothing configured", async () => {
+    // The shipped shape: nobody pins a cutoff by hand, the first process of the
+    // build records one (db/era.ts). Gating on the config alone left settlement
+    // permanently inert on exactly the installs ticket 14 was built for.
+    const sessionDbId = seedDecidedSession(
+      db,
+      "content-cutoff-recorded",
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+    );
+    ensureRecordedEraCutoff(db, SETTLEMENT_ERA_CUTOFF_EPOCH);
+    const { core, dispatched } = createHarness(db, DEFAULT_CONFIG);
 
     await core.handleTurnStop(sessionDbId);
 

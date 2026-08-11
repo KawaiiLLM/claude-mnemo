@@ -2,8 +2,11 @@ import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
 import { calendarDayBounds, contentDateAt } from "../diary/calendar";
-import { getTurnById } from "../db/turns";
-import { completionFloorStatus } from "../db/turn-completion";
+import { getTurnById, updateTurnById } from "../db/turns";
+import {
+  aggregateTurnFiles,
+  completionFloorStatus,
+} from "../db/turn-completion";
 
 export interface RestoreStrandedTurnStopsOptions {
   /** Content-days to scan — see `listStrandedRepairDates`, the only producer. */
@@ -330,6 +333,11 @@ export function finalizeUnreachableStrandedTurns(
       db.query<unknown, [string, number]>(
         "UPDATE turns SET status = ? WHERE id = ?",
       ).run(status, turnId);
+      // Flooring is still a completion: the turn did the work, only nobody was
+      // left to narrate it. `files_read` / `files_modified` / `tool_call_count`
+      // have one writer (db/turn-completion.ts), so skipping the aggregation
+      // here would drop this turn out of `file:` recall permanently.
+      updateTurnById(db, turnId, aggregateTurnFiles(db, turnId));
       db.query<unknown, [number]>(
         `UPDATE observations SET status = 'skipped'
          WHERE turn_id = ? AND status = 'pending'`,

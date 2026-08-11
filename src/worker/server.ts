@@ -30,7 +30,7 @@ import {
   resetClaimedQueueItems,
   type PendingQueueItem,
 } from "../db/pending-queue";
-import { ensureRecordedEraCutoff } from "../db/era";
+import { ensureRecordedEraCutoff, resolveEraCutoff } from "../db/era";
 import { initializeDatabase, migrateTurnCitationsToEdges } from "../db/schema";
 import { runTranscriptPathBackfill } from "../db/transcript-path-backfill";
 import {
@@ -437,7 +437,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             sessionId: turn.sessionId,
             nowEpoch: now(),
             completedTurnId: turn.id,
-            eraCutoffEpoch: config.eraCutoffEpoch,
+            eraCutoffEpoch: config.eraCutoffEpoch ?? resolveEraCutoff(deps.db),
           });
         }
       } else if (item.kind === "obs") {
@@ -648,7 +648,7 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
         {
           hasRegisteredSessionEnv: (sessionDbId) =>
             getRegisteredSessionEnv(sessionDbId) !== undefined,
-          eraCutoffEpoch: config.eraCutoffEpoch,
+          eraCutoffEpoch: config.eraCutoffEpoch ?? resolveEraCutoff(deps.db),
         },
       );
 
@@ -1395,7 +1395,11 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   initializeDatabase(db);
   // Same boundary the hook command records, in case the worker is the first
   // process of this build to open the database (db/era.ts).
-  ensureRecordedEraCutoff(db, Math.floor(Date.now() / 1000));
+  const recordedEraCutoff = ensureRecordedEraCutoff(
+    db,
+    Math.floor(Date.now() / 1000),
+  );
+  const eraCutoffEpoch = config.eraCutoffEpoch ?? recordedEraCutoff;
   // The cutover catch-up (spec D13, "收编重造"). `turn_citations` was folded into
   // `memory_edges` once, when the edge table was created, and the legacy
   // `remember` route kept appending to the source table afterwards — an
@@ -1426,7 +1430,7 @@ export async function main(deps: WorkerServerDeps = {}): Promise<void> {
   // default wiring rather than of a code path.
   const noteSettlementDispatchImpl =
     deps.noteSettlementDispatchImpl ??
-    (config.settlementEnabled && config.eraCutoffEpoch !== null
+    (config.settlementEnabled && eraCutoffEpoch !== null
       ? createNoteSettlementDispatch({
           db,
           config,

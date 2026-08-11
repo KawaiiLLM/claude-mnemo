@@ -39,22 +39,55 @@ export function ensureRecordedEraCutoff(
 ): number | null {
   const configured = loadConfigEraCutoff();
   if (configured !== null) {
+    settledBoundary.set(db, configured);
     return configured;
   }
   db.query<unknown, [number, number]>(
     `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
      VALUES (1, ?, ?)`,
   ).run(nowEpoch, nowEpoch);
-  return getRecordedEraCutoff(db);
+  const recorded = getRecordedEraCutoff(db);
+  if (recorded !== null) {
+    settledBoundary.set(db, recorded);
+  }
+  return recorded;
 }
+
+/**
+ * Once a database has answered with a boundary, that answer is kept.
+ *
+ * Not an optimization — a correctness rule that also happens to be free. The
+ * boundary is immutable by construction (INSERT OR IGNORE, and a config epoch an
+ * operator sets while a process runs must not move a line turns are already
+ * being written against), so re-reading it can only produce the same number or a
+ * wrong one. `null` is deliberately NEVER cached: it means "nobody has recorded
+ * one YET", and another process may record it a moment later — caching that is
+ * exactly how a long-lived process ends up disagreeing with the rest of the
+ * install. Keyed by database rather than by module so a test's database cannot
+ * pin a boundary onto the next one.
+ */
+const settledBoundary = new WeakMap<Database, number>();
 
 /**
  * The era boundary every reader and writer must agree on: the configured epoch
  * if there is one, otherwise the recorded one, otherwise none (which is the
  * legacy world, and what an unbootstrapped test database sees).
+ *
+ * Call this per operation. Resolving once and holding the result across a
+ * process's life is what made the worker and the MCP server judge the same turn
+ * differently; the cache above is what makes calling it per operation cost
+ * nothing after the first non-null answer.
  */
 export function resolveEraCutoff(db: Database): number | null {
-  return loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  const settled = settledBoundary.get(db);
+  if (settled !== undefined) {
+    return settled;
+  }
+  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  if (resolved !== null) {
+    settledBoundary.set(db, resolved);
+  }
+  return resolved;
 }
 
 function loadConfigEraCutoff(): number | null {

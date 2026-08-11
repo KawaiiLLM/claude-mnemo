@@ -356,16 +356,30 @@ function getRecordedEraCutoff(db) {
 function ensureRecordedEraCutoff(db, nowEpoch) {
   const configured = loadConfigEraCutoff();
   if (configured !== null) {
+    settledBoundary.set(db, configured);
     return configured;
   }
   db.query(
     `INSERT OR IGNORE INTO era_state (id, cutoff_epoch, recorded_at_epoch)
      VALUES (1, ?, ?)`
   ).run(nowEpoch, nowEpoch);
-  return getRecordedEraCutoff(db);
+  const recorded = getRecordedEraCutoff(db);
+  if (recorded !== null) {
+    settledBoundary.set(db, recorded);
+  }
+  return recorded;
 }
+var settledBoundary = /* @__PURE__ */ new WeakMap();
 function resolveEraCutoff(db) {
-  return loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  const settled = settledBoundary.get(db);
+  if (settled !== void 0) {
+    return settled;
+  }
+  const resolved = loadConfigEraCutoff() ?? getRecordedEraCutoff(db);
+  if (resolved !== null) {
+    settledBoundary.set(db, resolved);
+  }
+  return resolved;
 }
 function loadConfigEraCutoff() {
   try {
@@ -3064,7 +3078,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.5-msnnkk8g" : "dev";
+var BUILD_ID = true ? "0.9.5-mso7ejs0" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23491,6 +23505,7 @@ function skipOrphanTurns(db, sessionDbId, nowEpoch, orphans) {
     if (result.changes === 0) {
       continue;
     }
+    updateTurnById(db, orphan.id, aggregateTurnFiles(db, orphan.id));
     db.query(
       `UPDATE observations SET status = 'skipped'
        WHERE turn_id = ? AND status = 'pending'`

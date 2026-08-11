@@ -140,8 +140,13 @@ if (isDirectExecution()) {
   void (async () => {
     const { createDatabase } = await import("../db/database");
     const { initializeDatabase } = await import("../db/schema");
+    const { ensureRecordedEraCutoff } = await import("../db/era");
     const db = createDatabase();
     initializeDatabase(db);
+    // The third production entry point that owns a writable database, and the
+    // one most likely to open it first: the MCP server is spawned with the
+    // session, before any hook of this build has run (db/era.ts).
+    ensureRecordedEraCutoff(db, Math.floor(Date.now() / 1000));
     await startMcpServer({ database: db });
   })();
 }

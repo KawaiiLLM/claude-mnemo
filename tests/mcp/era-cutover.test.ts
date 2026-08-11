@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase, runWriteTransaction } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
@@ -634,6 +635,29 @@ describe("era cutover write path", () => {
       });
       expect(getTurnById(db, eraTurnId)!.title).toBe(
         "implement+era-cutover: wiring",
+      );
+    });
+
+    test("picks up a boundary recorded after the handlers were built", async () => {
+      // The MCP server is spawned with the session and builds its handlers at
+      // connect time, which can be before any process of this build has
+      // recorded the era. Resolving once at that moment pinned `null`, so every
+      // `note` for the rest of the session wrote a shadow note and left the
+      // turn row empty — while the hooks, resolving live, settled that same row
+      // as a new-era hole. The note was written and then lost.
+      const handlers = createDatabaseBackedHandlers(db);
+      expect(getTurnById(db, eraTurnId)!.title).toBeNull();
+
+      ensureRecordedEraCutoff(db, CUTOFF);
+
+      await handlers.note!({
+        turn: `S${sessionId}/T11`,
+        title: "implement+era-cutover: late boundary",
+        content: "Recorded after the handlers were built.",
+      });
+
+      expect(getTurnById(db, eraTurnId)!.title).toBe(
+        "implement+era-cutover: late boundary",
       );
     });
 

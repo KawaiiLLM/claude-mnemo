@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { ensureRecordedEraCutoff } from "../../src/db/era";
 import { createObservation, getObservation } from "../../src/db/observations";
 import { listPendingQueueItems } from "../../src/db/pending-queue";
 import { initializeSchema } from "../../src/db/schema";
@@ -180,6 +181,60 @@ describe("stranded-turn liveness repair", () => {
 
     expect(getTurnById(db, stranded)?.status).toBe("failed");
     expect(listPendingQueueItems(db)).toEqual([]);
+  });
+
+  test("the worker settles against the recorded boundary, not the config", () => {
+    // The worker used to read `config.eraCutoffEpoch`, which is null on every
+    // install that never pinned one by hand — so it judged a new-era turn by
+    // legacy rules and wrote `failed`, the one status that removes a turn from
+    // recall with nothing left to write it back, while the hooks and the MCP
+    // server called the same row a new-era hole.
+    ensureRecordedEraCutoff(db, DUE_EPOCH - 1);
+    const stranded = seedTurn({ promptNumber: 1, interrupted: true });
+    repair(new Set([sessionId]));
+    const core = createWorkerCore({
+      db,
+      now: () => DUE_EPOCH + 100,
+      sessionEnvRegistry: new Map([["stranded-session", {}]]),
+    });
+
+    return core.scanAndDrainQueue().then(() => {
+      expect(getTurnById(db, stranded)?.status).toBe("skipped");
+    });
+  });
+
+  test("a floored turn still records the files it touched", () => {
+    // Flooring skips extraction, not bookkeeping. `files_read` /
+    // `files_modified` / `tool_call_count` have exactly one writer since the
+    // extraction agent was retired, and a turn that reaches its terminal status
+    // down this path used to keep them empty forever — invisible to `file:`
+    // recall and underweighted by segment ranking, for work it demonstrably did.
+    const turnId = seedTurn({ promptNumber: 1, interrupted: true });
+    createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: JSON.stringify({ file_path: "/proj/src/read.ts" }),
+      status: "pending",
+      createdAtEpoch: DUE_EPOCH,
+    });
+    createObservation(db, {
+      turnId,
+      toolName: "Edit",
+      toolInput: JSON.stringify({ file_path: "/proj/src/edit.ts" }),
+      status: "pending",
+      createdAtEpoch: DUE_EPOCH + 1,
+    });
+
+    const prepared = repair();
+    finalizeUnreachableStrandedTurns(db, prepared.unreachable, {
+      hasRegisteredSessionEnv: () => false,
+    });
+
+    const turn = getTurnById(db, turnId);
+    expect(turn?.status).toBe("failed");
+    expect(turn?.filesRead).toEqual(["/proj/src/read.ts"]);
+    expect(turn?.filesModified).toEqual(["/proj/src/edit.ts"]);
+    expect(turn?.toolCallCount).toBe(2);
   });
 
   test("floors unreachable partial and empty turns atomically with zero queue residue", () => {

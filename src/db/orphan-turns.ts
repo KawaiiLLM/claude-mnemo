@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 
 import { enqueueQueueItem } from "./pending-queue";
+import { aggregateTurnFiles } from "./turn-completion";
+import { updateTurnById } from "./turns";
 
 export interface OrphanTurnRef {
   id: number;
@@ -113,6 +115,14 @@ export function skipOrphanTurns(
     if (result.changes === 0) {
       continue;
     }
+
+    // The same mechanical aggregation the completion settlement does. An orphan
+    // skips extraction, not bookkeeping: `files_read` / `files_modified` /
+    // `tool_call_count` have exactly one writer left (db/turn-completion.ts),
+    // and a turn that reaches its terminal status down this path would keep
+    // them empty forever — invisible to `file:` recall and underweighted by
+    // segment ranking, for work it demonstrably did.
+    updateTurnById(db, orphan.id, aggregateTurnFiles(db, orphan.id));
 
     db.query<unknown, [number]>(
       `UPDATE observations SET status = 'skipped'
