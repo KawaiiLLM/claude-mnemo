@@ -367,8 +367,10 @@ describe("observation rows render the call they were, on the era side", () => {
       truncate: 10,
     });
 
-    // The header is cut inside its parentheses, and the body by whole lines.
-    expect(output).toContain(`[O${observationId}] Bash(rg --…)`);
+    // The header spends its budget on the argument and keeps the tool name
+    // whole, so the whole call line fits the ten characters it was given; the
+    // body is cut by whole lines, and the one line it keeps by its own cap.
+    expect(output).toContain(`[O${observationId}] Bash(rg …)`);
     expect(output).toContain("    src/worker…");
     expect(output).toContain("    … +1 lines");
   });

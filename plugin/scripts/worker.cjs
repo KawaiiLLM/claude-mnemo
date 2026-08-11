@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.9-msos4n2q" : "dev";
+var BUILD_ID = true ? "0.9.9-msotbiim" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -6058,25 +6058,27 @@ function numberField(record3, key) {
 function toLines(text) {
   return text.split("\n").map((line) => line.replace(/\s+$/u, "")).filter((line) => line !== "");
 }
+var LINE_BREAK_MARK = "\u21B5";
 function singleLine(text) {
-  return text.replace(/\s+/gu, " ").trim();
+  return text.split("\n").map((line) => line.replace(/\s+/gu, " ").trim()).filter((line) => line !== "").join(LINE_BREAK_MARK);
 }
 function basename(filePath) {
   const segments = filePath.split("/").filter((segment) => segment !== "");
   return segments[segments.length - 1] ?? filePath;
 }
 function contentArrayText(value) {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length === 0) {
     return null;
   }
   const texts = [];
   for (const item of value) {
     const record3 = asRecord(item);
-    if (record3 && typeof record3.text === "string") {
-      texts.push(record3.text);
+    if (!record3 || typeof record3.text !== "string") {
+      return null;
     }
+    texts.push(record3.text);
   }
-  return texts.length > 0 ? texts.join("\n") : null;
+  return texts.join("\n");
 }
 function isEmptyValue(value) {
   if (value === null || value === void 0 || value === false || value === "") {
@@ -6121,7 +6123,9 @@ function genericLines(value) {
 }
 function genericDetail(input, result) {
   return {
-    argument: singleLine(genericLines(input).join(" ")),
+    // Joined by the line mark for the reason `singleLine` carries one: these
+    // were separate lines or separate fields, and a space claims they were one.
+    argument: genericLines(input).map(singleLine).join(LINE_BREAK_MARK),
     body: genericLines(result)
   };
 }
@@ -6137,13 +6141,12 @@ var PROJECTION_RULES = {
       return null;
     }
     const output = asRecord(result);
-    if (!output) {
+    const stdout = output && typeof output.stdout === "string" ? output.stdout : null;
+    const stderr = output && typeof output.stderr === "string" ? output.stderr : "";
+    if (stdout === null && stderr === "") {
       return { argument: singleLine(command), body: genericLines(result) };
     }
-    const body = toLines(
-      typeof output.stdout === "string" ? output.stdout : ""
-    );
-    const stderr = typeof output.stderr === "string" ? output.stderr : "";
+    const body = toLines(stdout ?? "");
     if (stderr.trim() !== "") {
       body.push(`stderr: ${singleLine(stderr)}`);
     }
@@ -6220,22 +6223,32 @@ var PROJECTION_RULES = {
     if (!description) {
       return null;
     }
-    const report = contentArrayText(asRecord(result)?.content);
-    return {
-      argument: description,
-      body: report === null ? [AGENT_REPORT_ELSEWHERE] : toLines(report)
-    };
+    const record3 = asRecord(result);
+    const report = contentArrayText(record3?.content);
+    if (report !== null) {
+      return { argument: description, body: toLines(report) };
+    }
+    return stringField(record3, "status") === "async_launched" ? { argument: description, body: [AGENT_REPORT_ELSEWHERE] } : { argument: description, body: genericLines(result) };
   },
   /**
-   * Keyed on the MCP base name (see `mcpBaseName`). The call's point is which
-   * turn it wrote about and what it claimed; the note body itself is a median
-   * 1,170 characters that the turn's own fields already carry.
+   * Keyed on the whole tool name, server prefix included, because that is what
+   * says whose payload this is. `note` is a common enough word that another
+   * server will have one, and a rule matched on the trailing segment handed
+   * `mcp__other_server__note` this projection — which reads its `turn` and its
+   * `title` and drops everything else, exactly the "keyed on a name rather than
+   * on the tool" error the survey's key-collision evidence forbids. The cost is
+   * that a marketplace rename stops matching; what happens then is the generic
+   * rule, verbose and true, which is the trade this projection makes everywhere
+   * else too.
+   *
+   * The call's point is which turn it wrote about and what it claimed; the note
+   * body itself is a median 1,170 characters that the turn's own fields carry.
    */
-  note: (input, result) => {
+  "mcp__plugin_claude-mnemo_mnemo__note": (input, result) => {
     const record3 = asRecord(input);
     const turn = stringField(record3, "turn");
     const title = stringField(record3, "title");
-    if (!turn && !title) {
+    if (!turn) {
       return null;
     }
     const receipt = contentArrayText(result);
@@ -6245,13 +6258,6 @@ var PROJECTION_RULES = {
     };
   }
 };
-function mcpBaseName(toolName) {
-  if (!toolName.startsWith("mcp__")) {
-    return "";
-  }
-  const index = toolName.lastIndexOf("__");
-  return index > 0 ? toolName.slice(index + 2) : "";
-}
 function composeHeader(toolName, argument) {
   if (!toolName) {
     return argument;
@@ -6261,7 +6267,7 @@ function composeHeader(toolName, argument) {
 function projectToolCall(toolName, toolInput, toolResult) {
   const input = parsePayload(toolInput);
   const result = parsePayload(toolResult);
-  const rule = PROJECTION_RULES[toolName] ?? PROJECTION_RULES[mcpBaseName(toolName)];
+  const rule = PROJECTION_RULES[toolName];
   const detail = (rule ? rule(input, result) : null) ?? genericDetail(input, result);
   return { header: composeHeader(toolName, detail.argument), body: detail.body };
 }
@@ -6399,7 +6405,7 @@ function truncateLines(lines, {
   let used = 0;
   for (const line of content) {
     const capped = lineLimit === void 0 ? line : truncateText(line, { limit: lineLimit, signal });
-    const nextUsed = used + capped.length + 1;
+    const nextUsed = used + capped.length + (kept.length > 0 ? 1 : 0);
     if (kept.length > 0 && nextUsed > boundedLimit) {
       break;
     }
@@ -6414,11 +6420,21 @@ function truncateLines(lines, {
   return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
 }
 function truncateCallHeader(header, { limit, signal }) {
-  const cut = truncateText(header, { limit, signal });
-  if (cut === header) {
-    return cut;
+  if (header.length <= limit) {
+    return header;
   }
-  return header.endsWith(")") && !cut.endsWith(")") ? `${cut})` : cut;
+  const open3 = header.indexOf("(");
+  if (open3 <= 0 || !header.endsWith(")")) {
+    return truncateText(header, { limit, signal });
+  }
+  const toolName = header.slice(0, open3);
+  const argument = header.slice(open3 + 1, -1);
+  const argumentBudget = limit - toolName.length - 3;
+  if (argumentBudget < 1) {
+    markTruncated(signal);
+    return toolName;
+  }
+  return `${toolName}(${truncateText(argument, { limit: argumentBudget, signal })})`;
 }
 function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
   return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);

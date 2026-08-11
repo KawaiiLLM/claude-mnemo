@@ -182,13 +182,16 @@ describe("a stored payload projects into the call it was", () => {
  * it is what makes that acceptable, and these are what keep it honest.
  */
 describe("a payload the projection does not recognise degrades", () => {
-  test("every tool name present in the era produces a non-empty header", () => {
+  test("every tool name present in the era renders as itself", () => {
     for (const payload of ERA_TOOL_PAYLOADS) {
-      const { header } = project(payload);
+      const { header, body } = project(payload);
       expect(header).not.toBe("");
       expect(header).toContain(payload.toolName);
+      // Every one of these rows returned something, so an empty body here
+      // would be the projection losing it rather than the call producing it.
+      expect(body.length).toBeGreaterThan(0);
     }
-    expect(ERA_TOOL_PAYLOADS).toHaveLength(10);
+    expect(ERA_TOOL_PAYLOADS).toHaveLength(12);
   });
 
   test("a tool whose whole input is empty still names itself", () => {
@@ -228,18 +231,24 @@ describe("a payload the projection does not recognise degrades", () => {
     expect(body).toEqual(["Structured output provided successfully"]);
   });
 
-  test("an array of mixed item shapes does not throw", () => {
+  test("an array is the MCP envelope only when every item is one", () => {
     // `WebSearch`'s `results` mixes objects with bare narration strings, so
     // anything mapping over it assuming one shape breaks here.
     expect(() => project(WEB_SEARCH_PAYLOAD)).not.toThrow();
     expect(project(WEB_SEARCH_PAYLOAD).header).toStartWith("WebSearch(");
 
-    const bareArray = projectToolCall(
+    // An array that is not uniformly the envelope is not the envelope. Keeping
+    // the items that happened to fit rendered this call as `ok` — two of its
+    // three items gone, and nothing in the output to say any were.
+    const mixed = projectToolCall(
       "Unknown",
       JSON.stringify({ query: "x" }),
-      JSON.stringify(["just a string", { text: "and a block" }, 7]),
+      JSON.stringify(["warning", { text: "ok" }, { error: "failed" }]),
     );
-    expect(bareArray.body).toEqual(["and a block"]);
+    const rendered = mixed.body.join("\n");
+    expect(rendered).toContain("warning");
+    expect(rendered).toContain("ok");
+    expect(rendered).toContain("failed");
   });
 
   test("a missing or empty payload never throws", () => {
@@ -256,6 +265,94 @@ describe("a payload the projection does not recognise degrades", () => {
       header: "Bash",
       body: [],
     });
+  });
+
+  test("a dispatched agent promises a later report only from a launch stub", () => {
+    // The stub — `status: async_launched` — is the payload that says a dispatch
+    // happened. Said about any other result, "it arrives later as a turn-level
+    // notification" promises a report that will never come.
+    const crashed = projectToolCall(
+      "Agent",
+      JSON.stringify({
+        description: "Tear down queue",
+        subagent_type: "offload-worker",
+      }),
+      JSON.stringify({ status: "completed", error: "crashed" }),
+    );
+
+    expect(crashed.body.join("\n")).not.toContain("not stored with this call");
+    expect(crashed.body.join("\n")).toContain("crashed");
+    // The stub itself still says where its report went.
+    expect(project(AGENT_ASYNC_PAYLOAD).body[0]).toContain(
+      "not stored with this call",
+    );
+  });
+
+  test("a Bash result of an unrecognised shape keeps what it carried", () => {
+    // Both of these rendered an empty body, discarding the only thing the call
+    // produced — and an empty body has to mean "this call produced nothing".
+    expect(
+      projectToolCall(
+        "Bash",
+        JSON.stringify({ command: "rm -rf /x" }),
+        JSON.stringify({ output: "permission denied" }),
+      ).body,
+    ).toEqual(["permission denied"]);
+
+    expect(
+      projectToolCall(
+        "Bash",
+        JSON.stringify({ command: "wc -l x" }),
+        JSON.stringify({ stdout: 42 }),
+      ).body,
+    ).toEqual(["42"]);
+
+    // And where the shape IS the known one, an empty body still means what it
+    // says: a command that printed nothing.
+    expect(
+      projectToolCall(
+        "Bash",
+        JSON.stringify({ command: "true" }),
+        JSON.stringify({ stdout: "", stderr: "", interrupted: false }),
+      ).body,
+    ).toEqual([]);
+  });
+
+  test("a multi-line command cannot read as a different valid command", () => {
+    const { header } = projectToolCall(
+      "Bash",
+      JSON.stringify({ command: "echo one\necho two" }),
+      JSON.stringify({ stdout: "" }),
+    );
+
+    // Two commands. Collapsing the break on whitespace made them one `echo`
+    // with four arguments — a call that could have been run and was not.
+    // Losing the boundary is acceptable; inventing a plausible different
+    // command is not, and `; ` would be the same mistake in a subtler form:
+    // the corpus has newlines inside quoted heredoc and SQL strings.
+    expect(header).toBe("Bash(echo one↵echo two)");
+    expect(header).not.toContain(";");
+  });
+
+  test("an MCP tool is projected only when its whole name says whose it is", () => {
+    // `note` is a common word and another server will have one. Matched on the
+    // trailing segment alone, a foreign tool received this server's projection
+    // and lost its `content` — the same "keyed on a name rather than on the
+    // tool" error the survey's key collisions forbid.
+    const foreign = projectToolCall(
+      "mcp__other_server__note",
+      JSON.stringify({
+        turn: "S1/T2",
+        title: "a title",
+        content: "the content this tool actually carries",
+      }),
+      JSON.stringify([{ type: "text", text: "ack" }]),
+    );
+
+    expect(foreign.header).toContain("the content this tool actually carries");
+    expect(project(NOTE_PAYLOAD).header).toStartWith(
+      "mcp__plugin_claude-mnemo_mnemo__note(S15069/T485 ",
+    );
   });
 
   test("an input the projection has never seen still identifies the call", () => {

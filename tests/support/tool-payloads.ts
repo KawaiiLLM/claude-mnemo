@@ -257,10 +257,54 @@ export const WEB_SEARCH_PAYLOAD = stored(
 );
 
 /**
- * Every tool name present in the era, measured 2026-08-11 over the 522 rows at
+ * O72482. A tool name the survey never saw: two arrived in the era between the
+ * survey and this file's second pass, which is the case the generic rule and
+ * this list exist for. `message`/`content` elided.
+ */
+export const SEND_MESSAGE_PAYLOAD = stored(
+  "SendMessage",
+  {
+    to: "a5000183d81f3f0b0",
+    summary: "追问无闪烁渲染的具体机制和效果",
+    message: "追问上一个问题：你提到 Claude Code 有个可选的「全屏无闪烁渲染」模式 …elided",
+    type: "message",
+    recipient: "a5000183d81f3f0b0",
+    content: "追问上一个问题：…elided",
+  },
+  {
+    success: true,
+    message:
+      'Agent "a5000183d81f3f0b0" had no active task; resumed from transcript in the background with your message.',
+    resumedAgentId: "a5000183d81f3f0b0",
+    pin: { id: "a5000183d81f3f0b0", name: "a5000183d81f3f0b0", ref: "f2bb4d" },
+  },
+);
+
+/** O72484. The era's other newcomer; `result` elided from 23,635 chars. */
+export const WEB_FETCH_PAYLOAD = stored(
+  "WebFetch",
+  {
+    url: "https://code.claude.com/docs/en/fullscreen.md",
+    prompt: "这篇文档讲的是 Claude Code 的全屏无闪烁渲染模式。请提取：…elided",
+  },
+  {
+    bytes: 23669,
+    code: 200,
+    codeText: "OK",
+    result:
+      "# Fullscreen rendering\n\n> Enable a smoother, flicker-free rendering mode …elided",
+    durationMs: 0,
+    url: "https://code.claude.com/docs/en/fullscreen.md",
+  },
+);
+
+/**
+ * Every tool name present in the era, measured 2026-08-11 over the 591 rows at
  * or after cutoff 1786427403, ordered by frequency. The coverage test walks
  * this list, which is what turns "we covered the common ones" into a checked
- * property rather than an impression.
+ * property rather than an impression. It is a moving list by construction —
+ * `SendMessage` and `WebFetch` entered the era after the survey was written,
+ * and both reach the reader through the generic rule alone.
  */
 export const ERA_TOOL_PAYLOADS: StoredToolPayload[] = [
   BASH_PAYLOAD,
@@ -273,4 +317,6 @@ export const ERA_TOOL_PAYLOADS: StoredToolPayload[] = [
   TOOL_SEARCH_PAYLOAD,
   ASK_USER_QUESTION_PAYLOAD,
   ENTER_PLAN_MODE_PAYLOAD,
+  SEND_MESSAGE_PAYLOAD,
+  WEB_FETCH_PAYLOAD,
 ];

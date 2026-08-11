@@ -55,11 +55,15 @@ interface CallDetail {
  * `Read`'s. A global key denylist was tried in the prototype and silently
  * removed `Agent`'s title.
  *
- * Returning `null` means "this payload is not the shape I know" and hands the
- * call to the generic rule. That is the whole safety story for a projection
- * that encodes an external contract: Claude Code's payload shapes will move,
- * and a rule that reached for a key that had been renamed would otherwise
- * render an empty body — silently claiming the call did nothing.
+ * A rule may claim a payload only if it fully recognises it. What it does not
+ * recognise falls through — by returning `null` for the whole call, or by
+ * handing the side it does not know to `genericLines` — and the generic rule
+ * never drops content it cannot classify. That is the whole safety story for a
+ * projection encoding an external contract: Claude Code's payload shapes will
+ * move, and a rule that matched on a partial signal and discarded the rest
+ * rendered an empty body, silently claiming the call did nothing. An empty body
+ * has to mean "this call produced nothing", never "the projection did not
+ * understand the result".
  */
 type ProjectionRule = (
   input: unknown,
@@ -123,8 +127,26 @@ function toLines(text: string): string[] {
     .filter((line) => line !== "");
 }
 
+/**
+ * The mark left where a value's line break was.
+ *
+ * It is not decoration. `echo one` newline `echo two` is two commands, and
+ * collapsing that on whitespace rendered `Bash(echo one echo two)` — one `echo`
+ * with four arguments, which is a different command that could plausibly have
+ * been run. Losing the boundary in a one-line slot is acceptable; inventing a
+ * valid-looking different call is not. Joining with `; ` is the same mistake in
+ * a subtler form: the corpus has newlines inside quoted heredoc and SQL
+ * strings, where a semicolon changes what the command means.
+ */
+const LINE_BREAK_MARK = "↵";
+
+/** A value flattened to one line, with its line breaks left visible. */
 function singleLine(text: string): string {
-  return text.replace(/\s+/gu, " ").trim();
+  return text
+    .split("\n")
+    .map((line) => line.replace(/\s+/gu, " ").trim())
+    .filter((line) => line !== "")
+    .join(LINE_BREAK_MARK);
 }
 
 /** The last path segment. The prefix repeats on every line of a render whose session header already names the project. */
@@ -134,28 +156,34 @@ function basename(filePath: string): string {
 }
 
 /**
- * The MCP content-block envelope, unwrapped to its text.
+ * The MCP content-block envelope, unwrapped to its text — and only when every
+ * item in the array is a block carrying text.
  *
  * Unconditional rather than per-tool: every `mcp__*` result in both the era and
  * the legacy sample is this array, which is the protocol's shape and not any
- * one tool's. The item guard is required, not defensive tidiness — `WebSearch`
- * stores an array whose items mix `{tool_use_id, content}` objects with bare
- * narration strings, and a naive `.map(item => item.text)` throws on it.
+ * one tool's. "Every item" is the load-bearing word. Skipping the items it did
+ * not recognise made `["warning", {"text":"ok"}, {"error":"failed"}]` render as
+ * `ok` — two thirds of what the call returned dropped, with nothing in the
+ * output to say so. `WebSearch` stores exactly such an array, its items mixing
+ * `{tool_use_id, content}` objects with bare narration strings, so this is a
+ * measured payload rather than a hypothetical. An array that is not uniformly
+ * the envelope is not the envelope, and goes to the generic rule whole.
  */
 function contentArrayText(value: unknown): string | null {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length === 0) {
     return null;
   }
 
   const texts: string[] = [];
   for (const item of value) {
     const record = asRecord(item);
-    if (record && typeof record.text === "string") {
-      texts.push(record.text);
+    if (!record || typeof record.text !== "string") {
+      return null;
     }
+    texts.push(record.text);
   }
 
-  return texts.length > 0 ? texts.join("\n") : null;
+  return texts.join("\n");
 }
 
 function isEmptyValue(value: unknown): boolean {
@@ -220,7 +248,9 @@ function genericLines(value: unknown): string[] {
 
 function genericDetail(input: unknown, result: unknown): CallDetail {
   return {
-    argument: singleLine(genericLines(input).join(" ")),
+    // Joined by the line mark for the reason `singleLine` carries one: these
+    // were separate lines or separate fields, and a space claims they were one.
+    argument: genericLines(input).map(singleLine).join(LINE_BREAK_MARK),
     body: genericLines(result),
   };
 }
@@ -238,14 +268,22 @@ const PROJECTION_RULES: Record<string, ProjectionRule> = {
     }
 
     const output = asRecord(result);
-    if (!output) {
+    const stdout = output && typeof output.stdout === "string"
+      ? output.stdout
+      : null;
+    const stderr = output && typeof output.stderr === "string"
+      ? output.stderr
+      : "";
+    if (stdout === null && stderr === "") {
+      // Neither stream is where this rule knows to look, so it does not know
+      // this payload and says nothing about it: the generic rule renders what
+      // is there. `{"output":"permission denied"}` and `{"stdout":42}` both
+      // used to reach the reader as an empty body, which claims a call produced
+      // nothing while discarding the only thing it produced.
       return { argument: singleLine(command), body: genericLines(result) };
     }
 
-    const body = toLines(
-      typeof output.stdout === "string" ? output.stdout : "",
-    );
-    const stderr = typeof output.stderr === "string" ? output.stderr : "";
+    const body = toLines(stdout ?? "");
     if (stderr.trim() !== "") {
       // Labelled and collapsed to one line: empty in 93% of rows, and when it
       // is set it is a diagnostic that must not read as part of the output.
@@ -346,23 +384,45 @@ const PROJECTION_RULES: Record<string, ProjectionRule> = {
       return null;
     }
 
-    const report = contentArrayText(asRecord(result)?.content);
-    return {
-      argument: description,
-      body: report === null ? [AGENT_REPORT_ELSEWHERE] : toLines(report),
-    };
+    const record = asRecord(result);
+    const report = contentArrayText(record?.content);
+    if (report !== null) {
+      return { argument: description, body: toLines(report) };
+    }
+
+    // The promise of a later report is made only against the payload that
+    // actually carries a dispatch — the launch stub, `status: async_launched`.
+    // Made against any other result it is a lie the reader cannot detect:
+    // `{"status":"completed","error":"crashed"}` used to render "it arrives
+    // later as a turn-level notification" about a report that will never come.
+    // Anything else is a shape this rule does not know, and the generic rule
+    // renders it rather than this one narrating it.
+    return stringField(record, "status") === "async_launched"
+      ? { argument: description, body: [AGENT_REPORT_ELSEWHERE] }
+      : { argument: description, body: genericLines(result) };
   },
 
   /**
-   * Keyed on the MCP base name (see `mcpBaseName`). The call's point is which
-   * turn it wrote about and what it claimed; the note body itself is a median
-   * 1,170 characters that the turn's own fields already carry.
+   * Keyed on the whole tool name, server prefix included, because that is what
+   * says whose payload this is. `note` is a common enough word that another
+   * server will have one, and a rule matched on the trailing segment handed
+   * `mcp__other_server__note` this projection — which reads its `turn` and its
+   * `title` and drops everything else, exactly the "keyed on a name rather than
+   * on the tool" error the survey's key-collision evidence forbids. The cost is
+   * that a marketplace rename stops matching; what happens then is the generic
+   * rule, verbose and true, which is the trade this projection makes everywhere
+   * else too.
+   *
+   * The call's point is which turn it wrote about and what it claimed; the note
+   * body itself is a median 1,170 characters that the turn's own fields carry.
    */
-  note: (input, result) => {
+  "mcp__plugin_claude-mnemo_mnemo__note": (input, result) => {
     const record = asRecord(input);
     const turn = stringField(record, "turn");
     const title = stringField(record, "title");
-    if (!turn && !title) {
+    // `turn` is the key this tool is about and is present in every stored row;
+    // without it this is not the payload the rule was written from.
+    if (!turn) {
       return null;
     }
 
@@ -373,25 +433,6 @@ const PROJECTION_RULES: Record<string, ProjectionRule> = {
     };
   },
 };
-
-/**
- * The trailing segment of an `mcp__*` name — `note` for
- * `mcp__plugin_claude-mnemo_mnemo__note`.
- *
- * The prefix encodes the marketplace and the server, which are deployment
- * facts: the same tool is called something else under another plugin id, and a
- * table keyed on the full name would quietly stop matching after a rename. A
- * same-named tool from a different server that happens to match here is safe by
- * construction — its payload will not have the keys the rule requires, and it
- * falls through to the generic rule.
- */
-function mcpBaseName(toolName: string): string {
-  if (!toolName.startsWith("mcp__")) {
-    return "";
-  }
-  const index = toolName.lastIndexOf("__");
-  return index > 0 ? toolName.slice(index + 2) : "";
-}
 
 function composeHeader(toolName: string, argument: string): string {
   if (!toolName) {
@@ -407,8 +448,7 @@ export function projectToolCall(
 ): ProjectedCall {
   const input = parsePayload(toolInput);
   const result = parsePayload(toolResult);
-  const rule =
-    PROJECTION_RULES[toolName] ?? PROJECTION_RULES[mcpBaseName(toolName)];
+  const rule = PROJECTION_RULES[toolName];
   const detail = (rule ? rule(input, result) : null) ?? genericDetail(input, result);
 
   return { header: composeHeader(toolName, detail.argument), body: detail.body };

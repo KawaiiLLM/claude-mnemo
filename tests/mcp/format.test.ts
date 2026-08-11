@@ -4,6 +4,7 @@ import {
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
+  type TruncationSignal,
   createTruncationSignal,
   formatObservationCollapsed,
   formatObservationExpanded,
@@ -695,7 +696,7 @@ describe("an observation renders as the call it was", () => {
 
   function render(
     value: FormattedObservation,
-    options: { truncate?: number } = {},
+    options: { truncate?: number; signal?: TruncationSignal } = {},
   ): string {
     return renderNode({ type: "observation", value }, {
       depth: "expanded",
@@ -770,6 +771,53 @@ describe("an observation renders as the call it was", () => {
       expect(line).toMatch(/^ {4}line \d+$/);
     }
     expect(bodyLines.length - 1 + Number(droppedMatch?.[1])).toBe(30);
+  });
+
+  test("the budget does not charge a separator after the final line", () => {
+    // A limit of 3 buys `a\nb`, which is three characters. Charging a separator
+    // after the last line as well made the budget one character short of what
+    // it was asked for, so a body that fitted was cut and reported `+1 lines`.
+    const rendered = render(
+      observation("Bash", { command: "ls" }, { stdout: "a\nb" }),
+      { truncate: 3 },
+    );
+
+    expect(rendered.split("\n").slice(1)).toEqual(["    a", "    b"]);
+    expect(rendered).not.toContain("lines");
+  });
+
+  test("the truncation signal is set only when something was dropped", () => {
+    // Three seven-character lines and the two separators between them are
+    // exactly twenty-three characters, and the header fits too — so nothing in
+    // this render was cut, and the response must not offer to show more.
+    const stdout = "aaaaaaa\nbbbbbbb\nccccccc";
+    const intact = createTruncationSignal();
+    render(observation("Bash", { command: "ls" }, { stdout }), {
+      truncate: 23,
+      signal: intact,
+    });
+    expect(intact.truncated).toBe(false);
+
+    const cut = createTruncationSignal();
+    const rendered = render(observation("Bash", { command: "ls" }, { stdout }), {
+      truncate: 22,
+      signal: cut,
+    });
+    expect(rendered).toContain("… +1 lines");
+    expect(cut.truncated).toBe(true);
+  });
+
+  test("a header cut down to the tool name still identifies the call", () => {
+    // At a budget this small the cut reached into the name and `Bash(ls)`
+    // became `B…)`, which identifies neither a tool nor an argument. The
+    // argument is what a header spends its budget on; the name is what is left
+    // when there is nothing to spend.
+    const rendered = render(
+      observation("Bash", { command: "ls" }, { stdout: "" }),
+      { truncate: 1 },
+    );
+
+    expect(rendered).toBe("- [O7] Bash");
   });
 
   test("a body's lines are indented under their header", () => {
@@ -988,10 +1036,13 @@ describe("a projected call keeps the row's own record", () => {
     );
   });
 
-  test("one enormous output line is capped, not printed whole", () => {
-    // The whole-lines rule alone would hand the reader the entire line: a body
-    // always keeps its first line, and one line of stdout reaches 20,000
-    // characters in this project's own database.
+  test("a line longer than the whole budget is cut inside itself, not dropped", () => {
+    // The rule, stated rather than implied: the budget is spent by whole lines,
+    // and a line that alone exceeds it is cut inside itself and ends in the
+    // truncation mark. Dropping it instead would render a call that produced
+    // thousands of characters as `… +1 lines` and nothing else — the same
+    // untruth an empty body tells, and not a rare one: 22 of the 304 era Bash
+    // rows carrying output have a line longer than the default budget.
     const rendered = renderNode(
       {
         type: "observation",
@@ -1009,5 +1060,31 @@ describe("a projected call keeps the row's own record", () => {
     expect(rendered).toBe(
       ["- [O7] Bash(cat blob)", `    ${"x".repeat(200)}…`].join("\n"),
     );
+    // Cut, not dropped: the line is shown, so it is not also counted as one the
+    // reader never saw.
+    expect(rendered).not.toContain("+1 lines");
+  });
+
+  test("a cut inside a line still lands on a word boundary", () => {
+    // The two cuts stay apart in the output — a line cut inside ends in the
+    // mark, dropped lines are counted by `… +N lines` — and neither ends the
+    // reader's last line in the middle of a word.
+    const rendered = renderNode(
+      {
+        type: "observation",
+        value: {
+          id: 7,
+          title: "Bash",
+          toolName: "Bash",
+          toolInput: JSON.stringify({ command: "cat prose" }),
+          toolResult: JSON.stringify({ stdout: "word ".repeat(100).trim() }),
+        },
+      },
+      { depth: "expanded", truncate: 200 },
+    );
+
+    const body = rendered.split("\n")[1] ?? "";
+    expect(body).toEndWith("word…");
+    expect(rendered).not.toContain("lines");
   });
 });

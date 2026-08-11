@@ -358,9 +358,21 @@ export function truncateText(
  * `lineLimit` caps each individual line and is opt-in. A file tree does not
  * want it: its lines are paths, a cut one is a path that does not exist, and
  * the two callers that pass a tree here rendered whole paths before this
- * existed. A tool's output does want it — one line of `stdout` can be twenty
- * thousand characters, and without a per-line cap the "whole lines" rule would
- * hand the reader all of it.
+ * existed. A tool's output does want it, and that is where the rule needs
+ * stating rather than implying:
+ *
+ * **The budget is spent by whole lines, and a line that alone exceeds
+ * `lineLimit` is cut inside itself.** The two cuts stay apart in the output: a
+ * line cut inside ends in the truncation mark, whole lines that were dropped
+ * are counted by the trailing `… +N lines`. The alternative — never cutting
+ * inside a line — has to either print an over-long line whole, blowing the
+ * budget by a hundredfold (this project's own database holds a 30,000-character
+ * stdout line), or drop it, which for a body whose first line is the long one
+ * renders as `… +N lines` and nothing else: a call reported as having produced
+ * output, with none of it shown. That is the same untruth an empty body tells,
+ * and it is not rare — 22 of the 304 era Bash rows carrying output have a line
+ * longer than the default 200-character budget. `truncateText` retreats to a
+ * word boundary where one is near, so the cut still does not end mid-word.
  */
 function truncateLines(
   lines: string[],
@@ -387,7 +399,10 @@ function truncateLines(
       lineLimit === undefined
         ? line
         : truncateText(line, { limit: lineLimit, signal });
-    const nextUsed = used + capped.length + 1;
+    // The separator is charged between lines and never after the last one, so
+    // a budget of 3 buys `["a", "b"]` — which is three characters — instead of
+    // paying for a newline that will not be rendered and reporting `+1 lines`.
+    const nextUsed = used + capped.length + (kept.length > 0 ? 1 : 0);
     if (kept.length > 0 && nextUsed > boundedLimit) {
       break;
     }
@@ -407,21 +422,45 @@ function truncateLines(
 }
 
 /**
- * Cut a projected header inside its parentheses rather than after them.
+ * Cut a projected header by its argument, never by its tool name.
  *
  * `Bash(git diff --stat &&…` reads as a renderer that lost its footing;
  * `Bash(git diff --stat &&…)` reads as an argument that was too long, which is
- * what happened. Two characters to keep the call's shape intact.
+ * what happened. Cutting the whole header as one string did the second only by
+ * luck: at a small budget the cut reached the name itself and `Bash(ls)` became
+ * `B…)`, which identifies no call at all. So the argument is what the budget is
+ * spent on, and when there is not enough left for even one character of it the
+ * header degrades to the bare tool name — the part a reader still needs to know
+ * what was run. That the name can then exceed the budget is deliberate: it is
+ * bounded (a tool name is a few dozen characters and repeats across rows) and a
+ * header that identifies nothing costs more than the characters it saves.
  */
 function truncateCallHeader(
   header: string,
   { limit, signal }: { limit: number; signal?: TruncationSignal },
 ): string {
-  const cut = truncateText(header, { limit, signal });
-  if (cut === header) {
-    return cut;
+  if (header.length <= limit) {
+    return header;
   }
-  return header.endsWith(")") && !cut.endsWith(")") ? `${cut})` : cut;
+
+  const open = header.indexOf("(");
+  if (open <= 0 || !header.endsWith(")")) {
+    // No argument to sacrifice — the header is a bare name, or a row that
+    // stored no tool name left the argument standing alone.
+    return truncateText(header, { limit, signal });
+  }
+
+  const toolName = header.slice(0, open);
+  const argument = header.slice(open + 1, -1);
+  // What a cut argument costs beyond its own characters: the two parentheses
+  // and the mark that says it was cut.
+  const argumentBudget = limit - toolName.length - 3;
+  if (argumentBudget < 1) {
+    markTruncated(signal);
+    return toolName;
+  }
+
+  return `${toolName}(${truncateText(argument, { limit: argumentBudget, signal })})`;
 }
 
 function resolveExplicitTruncate(
