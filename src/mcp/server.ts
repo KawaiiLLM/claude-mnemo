@@ -4,7 +4,10 @@ import type { Database } from "bun:sqlite";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { getMnemoSessionIdForProcessSession } from "../db/process-session-map";
+import {
+  deriveProcessIdentityKeys,
+  getMnemoSessionIdForProcessSession,
+} from "../db/process-session-map";
 import {
   MNEMO_TOOL_DESCRIPTIONS,
   noteInputSchema,
@@ -39,14 +42,19 @@ export interface CreateMcpServerOptions {
 }
 
 /**
- * Spec D2's identity resolution: the process env var naming this OS
- * process's session, joined through `process_session_map` (spec D1) to the
- * mnemo session a UserPromptSubmit hook has actually recorded for it. Both
- * halves can miss — the env var is absent on some Claude Code builds (the
- * investigation found no guaranteed write site for it), and the mapping row
- * may not exist yet if this runs before the session's first prompt — and a
- * miss on either one reads as `null`, "identity unknown", never as a false
- * match.
+ * Spec D2's identity resolution: the identity keys this process's environment
+ * yields, joined through `process_session_map` (spec D1) to the mnemo session a
+ * UserPromptSubmit hook has actually recorded for one of them. The candidate
+ * list and its order are owned by the map's own module, so this side cannot
+ * drift into a different key vocabulary from the writing side — which is the
+ * failure that made the guard inert for every resumed session.
+ *
+ * First HIT wins, not first key present: the reader may hold a variable the
+ * writer did not (the socket is feature-gated and can appear between them), and
+ * shadowing a recorded key with an unrecorded one would throw away an identity
+ * the map already has. Missing on all of them reads as `null` — "identity
+ * unknown" — exactly like holding no recognised variable at all, and never as a
+ * false match.
  *
  * Exported (rather than inlined in the startup IIFE below) purely so it has a
  * unit-testable surface independent of spawning the real MCP process.
@@ -55,12 +63,14 @@ export function resolveCallerSessionIdFromEnv(
   db: Database,
   env: NodeJS.ProcessEnv = process.env,
 ): number | null {
-  const processSessionId = env.CLAUDE_CODE_SESSION_ID;
-  if (typeof processSessionId !== "string" || processSessionId.length === 0) {
-    return null;
+  for (const identityKey of deriveProcessIdentityKeys(env)) {
+    const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
+    if (sessionId !== null) {
+      return sessionId;
+    }
   }
 
-  return getMnemoSessionIdForProcessSession(db, processSessionId);
+  return null;
 }
 
 type MainMcpToolName = "recall" | "timeline" | "remember" | "note";

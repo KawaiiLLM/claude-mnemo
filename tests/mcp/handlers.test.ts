@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { initializeDatabase } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
+import { createSessionInitHandler } from "../../src/hooks/handlers/session-init";
 import { recallInputSchema } from "../../src/mcp/definitions";
 import {
   createDatabaseBackedHandlers,
@@ -11,6 +12,7 @@ import {
   WORKER_TOOL_RESULT_TRUNCATION_HINT,
   toTimelineQueryInput,
 } from "../../src/mcp/handlers";
+import { resolveCallerSessionIdFromEnv } from "../../src/mcp/server";
 
 describe("database-backed MCP handlers", () => {
   let db: Database;
@@ -255,15 +257,48 @@ describe("database-backed MCP handlers", () => {
     // The factory default (no `resolveCallerSessionId`) must keep identity
     // unknown so a cross-session write is never wrongly blocked here.
     test("no resolveCallerSessionId option (the worker/default shape) leaves identity unknown", async () => {
-      const handlers = createDatabaseBackedHandlers(db, { audience: "worker" });
+      // The environment is made to resolve — a mapping is on record for exactly
+      // the keys this process holds — so the assertion below fails the moment
+      // anything on the note path reaches for process.env on its own, rather
+      // than passing vacuously because nothing could have resolved anyway.
+      const socket = "/tmp/cc-socks/worker-host.sock";
+      const previousSocket = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+      const previousSessionVar = process.env.CLAUDE_CODE_SESSION_ID;
+      process.env.CLAUDE_CODE_MESSAGING_SOCKET = socket;
+      process.env.CLAUDE_CODE_SESSION_ID = "worker-host-session";
 
-      const result = await handlers.note!({
-        turn: `S${otherSessionId}/T1`,
-        title: "t",
-        content: "c",
-      });
+      try {
+        await createSessionInitHandler({ db, env: { ...process.env } })({
+          eventName: "UserPromptSubmit",
+          sessionId: "handlers-identity-caller",
+          cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+          prompt: "the host hook's prompt",
+          stopHookActive: false,
+          raw: {},
+        });
+        expect(resolveCallerSessionIdFromEnv(db, process.env)).toBe(sessionId);
 
-      expect(result.content[0]?.text).toStartWith("Noted ");
+        const handlers = createDatabaseBackedHandlers(db, { audience: "worker" });
+
+        const result = await handlers.note!({
+          turn: `S${otherSessionId}/T1`,
+          title: "t",
+          content: "c",
+        });
+
+        expect(result.content[0]?.text).toStartWith("Noted ");
+      } finally {
+        if (previousSocket === undefined) {
+          delete process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+        } else {
+          process.env.CLAUDE_CODE_MESSAGING_SOCKET = previousSocket;
+        }
+        if (previousSessionVar === undefined) {
+          delete process.env.CLAUDE_CODE_SESSION_ID;
+        } else {
+          process.env.CLAUDE_CODE_SESSION_ID = previousSessionVar;
+        }
+      }
     });
 
     test("a foreign turn that owes nothing is refused for being foreign, and the flag gets past that", async () => {
@@ -296,6 +331,57 @@ describe("database-backed MCP handlers", () => {
         crossSession: true,
       });
       expect(declared.content[0]?.text).not.toContain("crossSession: true");
+    });
+
+    test("a resumed session's real environment refuses a foreign turn, and the flag gets past it", async () => {
+      // End to end through the production wiring: the UserPromptSubmit hook
+      // records the mapping from its own environment, the MCP entry point's
+      // resolver reads it from a DIFFERENT one — same messaging socket, a stale
+      // session id snapshotted when the server was spawned — and `note` gets
+      // the identity that comes out. This is the shape in which the guard was
+      // measured inert: the address was refused for owing no note, which is a
+      // true statement about the wrong problem.
+      await createSessionInitHandler({
+        db,
+        env: {
+          CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/cc-socks/52426.sock",
+          CLAUDE_CODE_SESSION_ID: "resumed-conversation-id",
+        },
+      })({
+        eventName: "UserPromptSubmit",
+        sessionId: "handlers-identity-caller",
+        cwd: "/Users/zhaoqixuan/Projects/claude-mnemo",
+        prompt: "the caller's own prompt",
+        stopHookActive: false,
+        raw: {},
+      });
+
+      const mcpEnv = {
+        CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/cc-socks/52426.sock",
+        CLAUDE_CODE_SESSION_ID: "boot-id-frozen-at-spawn",
+      };
+      expect(resolveCallerSessionIdFromEnv(db, mcpEnv)).toBe(sessionId);
+
+      const handlers = createDatabaseBackedHandlers(db, {
+        resolveCallerSessionId: () => resolveCallerSessionIdFromEnv(db, mcpEnv),
+      });
+
+      const refused = await handlers.note!({
+        turn: `S${otherSessionId}/T1`,
+        title: "t",
+        content: "c",
+      });
+      expect(refused.content[0]?.text).toStartWith("Parameter error:");
+      expect(refused.content[0]?.text).toContain("belongs to a different session");
+      expect(refused.content[0]?.text).toContain("crossSession: true");
+
+      const declared = await handlers.note!({
+        turn: `S${otherSessionId}/T1`,
+        title: "t",
+        content: "c",
+        crossSession: true,
+      });
+      expect(declared.content[0]?.text).toStartWith("Noted ");
     });
 
     test("a supplied resolveCallerSessionId is read fresh on every note call", async () => {

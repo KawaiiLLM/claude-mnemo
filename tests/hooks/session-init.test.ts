@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createDatabase } from "../../src/db/database";
-import { getMnemoSessionIdForProcessSession } from "../../src/db/process-session-map";
+import {
+  deriveProcessIdentityKeys,
+  getMnemoSessionIdForProcessSession,
+} from "../../src/db/process-session-map";
 import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
@@ -572,19 +575,36 @@ describe("process-session identity map (spec D1)", () => {
     db.close();
   });
 
-  test("upserts the process session id to the mnemo session on every prompt", async () => {
-    const handler = createSessionInitHandler({
-      db,
-      env: { CLAUDE_CODE_SESSION_ID: "proc-abc" },
-    });
+  function mappedSessions(env: NodeJS.ProcessEnv): Array<number | null> {
+    // Asserts through the same derivation the production reader uses, so the
+    // test never depends on how a key is spelled — only on the two halves
+    // agreeing about it.
+    return deriveProcessIdentityKeys(env).map((key) =>
+      getMnemoSessionIdForProcessSession(db, key),
+    );
+  }
+
+  test("records the session under every identity key its environment yields", async () => {
+    const env = {
+      CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/cc-socks/52426.sock",
+      CLAUDE_CODE_SESSION_ID: "conversation-id",
+    };
+    const handler = createSessionInitHandler({ db, env });
 
     await handler(createInput());
 
     const session = getSessionByContentId(db, "session-1");
-    expect(getMnemoSessionIdForProcessSession(db, "proc-abc")).toBe(session!.id);
+    expect(mappedSessions(env)).toEqual([session!.id, session!.id]);
+    // Two distinct rows, not one: the keys are namespaced by source, so they
+    // cannot collapse into each other in the map's single key column.
+    expect(
+      db.query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM process_session_map",
+      ).get()!.n,
+    ).toBe(2);
   });
 
-  test("a missing env var skips the mapping write without affecting the rest of the hook", async () => {
+  test("an environment with no recognised variable writes nothing and changes nothing else", async () => {
     const handler = createSessionInitHandler({ db, env: {} });
 
     const result = await handler(createInput());
@@ -595,30 +615,33 @@ describe("process-session identity map (spec D1)", () => {
     expect(session).not.toBeNull();
     expect(getTurn(db, session!.id, 1)).not.toBeNull();
     expect(result.hookSpecificOutput).toBe(`mnemo current turn: S${session!.id}/T1`);
-    // No row for anything: an absent env var is not the same as an empty one.
-    expect(getMnemoSessionIdForProcessSession(db, "")).toBeNull();
+    // No row at all — not an empty-string key, and not a key for a variable
+    // this environment does not hold.
+    expect(
+      db.query<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM process_session_map",
+      ).get()!.n,
+    ).toBe(0);
   });
 
-  test("a resume/compact process id change still resolves to the same mnemo session", async () => {
+  test("a session variable that moves mid-session leaves both values pointing at the session", async () => {
     // Same content session (`session-1`, spec D1's mnemo-session key) across
-    // two prompts, but the process env var — what CLAUDE_CODE_SESSION_ID
-    // names — changes between them, exactly what resume/compact do.
-    await createSessionInitHandler({
-      db,
-      env: { CLAUDE_CODE_SESSION_ID: "proc-before-resume" },
-    })(createInput({ prompt: "before resume" }));
+    // two prompts, with the session variable holding a different value on the
+    // second — a `/clear` reassigns it in place, and each hook is a fresh child
+    // that reads whatever is current. Neither row is retired: the reading
+    // process may still be holding either value in its own spawn-time snapshot.
+    const before = { CLAUDE_CODE_SESSION_ID: "id-before" };
+    const after = { CLAUDE_CODE_SESSION_ID: "id-after" };
 
-    await createSessionInitHandler({
-      db,
-      env: { CLAUDE_CODE_SESSION_ID: "proc-after-resume" },
-    })(createInput({ prompt: "after resume" }));
+    await createSessionInitHandler({ db, env: before })(
+      createInput({ prompt: "before" }),
+    );
+    await createSessionInitHandler({ db, env: after })(
+      createInput({ prompt: "after" }),
+    );
 
     const session = getSessionByContentId(db, "session-1");
-    expect(getMnemoSessionIdForProcessSession(db, "proc-before-resume")).toBe(
-      session!.id,
-    );
-    expect(getMnemoSessionIdForProcessSession(db, "proc-after-resume")).toBe(
-      session!.id,
-    );
+    expect(mappedSessions(before)).toEqual([session!.id]);
+    expect(mappedSessions(after)).toEqual([session!.id]);
   });
 });

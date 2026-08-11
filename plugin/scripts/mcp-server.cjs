@@ -8445,16 +8445,18 @@ var init_schema = __esm({
     UNIQUE(session_id, prompt_number)
   );
 
-  -- Process-session \u2192 mnemo-session identity map (spec D1, note guardrails
-  -- ticket). CLAUDE_CODE_SESSION_ID names the OS process's session, which is
-  -- NOT the same id mnemo keys sessions on (sessions.content_session_id, the
-  -- hook payload's session_id) \u2014 resume/compact mint a new process id for the
-  -- same ongoing mnemo session. UserPromptSubmit upserts this row every turn,
-  -- so the MCP entry point can turn "which process am I" into "which mnemo
-  -- session is this" without ever reading process.env itself. One process id
-  -- names exactly one mnemo session; a mnemo session accumulates one row per
-  -- process id it has ever run under, and old rows are left in place rather
-  -- than cleaned up \u2014 a stale row just never gets looked up again.
+  -- Process \u2192 mnemo-session identity map (spec D1, note guardrails ticket).
+  -- The key is an environment-derived identity key, namespaced by the variable
+  -- it came from (see deriveProcessIdentityKeys) \u2014 never the id mnemo keys
+  -- sessions on (sessions.content_session_id, the hook payload's session_id),
+  -- which no MCP process ever sees. UserPromptSubmit upserts one row per key it
+  -- can derive, every turn, so the MCP entry point can turn "which process am
+  -- I" into "which mnemo session is this". Several keys therefore name the same
+  -- mnemo session \u2014 that redundancy is the point, since the reading process
+  -- holds an environment snapshot taken at ITS spawn and shares only some of
+  -- them. Superseded rows are left in place rather than cleaned up; a stale row
+  -- is overwritten by the next session to claim that key, before any of that
+  -- session's tool calls can read it.
   CREATE TABLE IF NOT EXISTS process_session_map (
     process_session_id TEXT PRIMARY KEY,
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -32387,11 +32389,25 @@ var StdioServerTransport = class {
 };
 
 // src/db/process-session-map.ts
-function getMnemoSessionIdForProcessSession(db, processSessionId) {
+var IDENTITY_KEY_SOURCES = [
+  { namespace: "socket", envVar: "CLAUDE_CODE_MESSAGING_SOCKET" },
+  { namespace: "session", envVar: "CLAUDE_CODE_SESSION_ID" }
+];
+function deriveProcessIdentityKeys(env) {
+  const keys = [];
+  for (const source of IDENTITY_KEY_SOURCES) {
+    const value = env[source.envVar]?.trim();
+    if (value) {
+      keys.push(`${source.namespace}:${value}`);
+    }
+  }
+  return keys;
+}
+function getMnemoSessionIdForProcessSession(db, identityKey) {
   return db.query(
     `SELECT session_id AS sessionId FROM process_session_map
          WHERE process_session_id = ?`
-  ).get(processSessionId)?.sessionId ?? null;
+  ).get(identityKey)?.sessionId ?? null;
 }
 
 // src/db/citations.ts
@@ -38550,11 +38566,13 @@ function createDatabaseBackedHandlers(database, options = {}) {
 // src/mcp/server.ts
 var PACKAGE_VERSION = true ? "0.9.8" : "0.0.0-test";
 function resolveCallerSessionIdFromEnv(db, env = process.env) {
-  const processSessionId = env.CLAUDE_CODE_SESSION_ID;
-  if (typeof processSessionId !== "string" || processSessionId.length === 0) {
-    return null;
+  for (const identityKey of deriveProcessIdentityKeys(env)) {
+    const sessionId = getMnemoSessionIdForProcessSession(db, identityKey);
+    if (sessionId !== null) {
+      return sessionId;
+    }
   }
-  return getMnemoSessionIdForProcessSession(db, processSessionId);
+  return null;
 }
 function startParentHeartbeat(intervalMs = 3e4) {
   const timer = setInterval(() => {

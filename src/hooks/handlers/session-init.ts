@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
-import { upsertProcessSessionMap } from "../../db/process-session-map";
+import {
+  deriveProcessIdentityKeys,
+  upsertProcessSessionMap,
+} from "../../db/process-session-map";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
@@ -34,14 +37,6 @@ export interface SessionInitDependencies {
   /** Injected for tests; defaults to the real process environment. */
   env?: NodeJS.ProcessEnv;
 }
-
-/**
- * Names the OS process's session (spec D1's investigation) — distinct from
- * `input.sessionId`, the hook payload's content session id this handler keys
- * everything else on. Only a hook or MCP process can read it; it is not part
- * of any hook payload.
- */
-const PROCESS_SESSION_ID_ENV_KEY = "CLAUDE_CODE_SESSION_ID";
 
 function createPendingTurn(
   db: Database,
@@ -158,16 +153,22 @@ export function createSessionInitHandler(
         completedAtEpoch: existingSession?.completedAtEpoch ?? null,
       });
 
-      // D1: refreshed every turn, not just at session start — resume/compact
-      // mint a new process id mid-session, and a mapping written once at
-      // SessionStart would point at whichever process id happened to be
-      // first. Missing entirely is a supported, silent case — the
-      // investigation found no guaranteed write site for this var on every
-      // Claude Code build — so this just skips the write, and identity
-      // resolves as "unknown" downstream.
-      const processSessionId = env[PROCESS_SESSION_ID_ENV_KEY];
-      if (processSessionId) {
-        upsertProcessSessionMap(dependencies.db, processSessionId, session.id, epoch);
+      // D1: every key this environment yields is recorded, all pointing at the
+      // same session, because the process that reads them is running on a
+      // DIFFERENT environment — the snapshot the MCP server took when it was
+      // spawned, which on a resumed session disagrees about the session id and
+      // agrees only on the messaging socket. Writing one key would be betting on
+      // which variable the reader happens to share; writing all of them costs a
+      // row each and lets the reader find whichever one they both hold. The
+      // hook's own environment is authoritative here precisely because a hook is
+      // spawned per invocation, so its values are current.
+      //
+      // Refreshed every prompt rather than once at SessionStart, and deriving
+      // nothing writes nothing: no variable here is guaranteed on every Claude
+      // Code build, and identity then resolves as "unknown" downstream, which
+      // admits.
+      for (const identityKey of deriveProcessIdentityKeys(env)) {
+        upsertProcessSessionMap(dependencies.db, identityKey, session.id, epoch);
       }
 
       if (transcriptEntries && invalidationSets && parsedTurns) {

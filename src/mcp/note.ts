@@ -45,8 +45,8 @@ export interface NoteToolOptions {
   eraCutoffEpoch?: number | null;
   /**
    * The mnemo session the caller belongs to (spec D2), resolved ONLY by the
-   * MCP process's direct-execution entry point (server.ts) from the process
-   * env var through `process_session_map`. Every other construction path —
+   * MCP process's direct-execution entry point (server.ts) from its own
+   * environment through `process_session_map`. Every other construction path —
    * worker tool channels included, which inherit a hook's environment and
    * would otherwise "look like" whatever session that hook belonged to — must
    * leave this absent. Absent or null both mean "unknown", and unknown always
