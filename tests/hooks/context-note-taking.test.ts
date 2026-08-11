@@ -48,20 +48,39 @@ describe("note-taking instructions injection", () => {
     // one-turn lag manufactured pure-shift mis-attributions is gone.
     expect(flat).toContain("mnemo current turn: S…/T…");
     expect(flat).toContain("with the user's message");
-    expect(flat).toContain("The note describes this turn only");
+    // "its own turn", not "this turn": a note is now routinely written for an
+    // earlier turn from a later turn's batch, so the possessive has to point at
+    // the address rather than at the turn doing the writing. The rule 裁决 25
+    // pinned — one note describes exactly one turn — is unchanged.
+    expect(flat).toContain("The note describes its own turn only");
     // Note guardrails ticket (spec D3): a repeat write used to replace
     // silently; it now demands an explicit declaration, and the instructions
     // must say so or every agent's first rewrite attempt bounces.
     expect(flat).toContain("resend with replace:true");
-    // 裁决 26: sealing at the first batch was 0.9.4's rule and it survived the
-    // protocol change — S18993/T93 filed its note two seconds after dispatching
-    // a worker, so the report that arrived next never entered it. The note now
-    // waits for the batch that looks final, and any later result reopens it.
-    expect(flat).toContain("the batch you expect to be this turn's last");
-    expect(flat).toContain("let it wait rather than seal the turn early");
+    // 2026-08-12: 裁决 26's "wait for the batch that looks final" sent 95 of
+    // 272 measured notes into a batch of their own — 93 of them with a
+    // rideable batch earlier in the same turn — re-reading 22.6M context
+    // tokens for the extra requests. The batch you can be confident is last
+    // is precisely the one whose results you have not seen, so lastness is
+    // undecidable when the note is composed and result-independence is what
+    // the rule now tests. Deferral is the ordinary path, not a failure: a
+    // turn that ends still owing its note is written from any batch of a
+    // LATER turn, which is what 裁决 26's S18993/T93 case needed all along —
+    // the worker's report arrived after the note was filed.
+    expect(flat).toContain(
+      "a batch whose result cannot change what the note says",
+    );
+    expect(flat).toContain("ANY batch of a later turn");
     expect(flat).toContain("in this turn or a following one");
     expect(flat).toContain("Never start a tool call just to write a note");
+    // The authorisation list is exhaustive by construction — a third case was
+    // proposed and rejected, since a rule that already decides the case does
+    // not need a special case bolted on. A correction is on it because a
+    // written note closes its debt: no channel will ever list that turn again,
+    // so a deferred correction is a permanently lost one.
+    expect(flat).toContain("Exactly two things authorize");
     expect(flat).toContain('"backlog relief" list');
+    expect(flat).toContain("correcting a note already written");
     // 裁决 24: the refusal is explicit, and a note invented from a listed line
     // — the only thing left when the turn predates a compact — would poison
     // the corpus with confident fiction. Ticket 12: "left your context" is not
@@ -80,6 +99,13 @@ describe("note-taking instructions injection", () => {
     expect(flat).toContain("the evidence chain that produced it");
     expect(flat).toContain("Never restate the title; never narrate looking");
     expect(flat).toContain("insight (~60 tokens)");
+    // An insight is retrieved far from the turn that produced it — it is FTS
+    // indexed but renders only at expanded depth, so a search hit shows the
+    // title beside it and nothing else. Of 15 written under the era, 4 opened
+    // on a pointer into their own turn ("the brief", "this trap") or on a
+    // session-local literal, and those are the ones that do not survive the
+    // trip.
+    expect(flat).toContain("it must stand alone: claim first, evidence after");
     expect(flat).toContain("reports its token count against these budgets");
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
     // The note-language rule (裁决 16): without it, agents follow the
@@ -98,8 +124,15 @@ describe("note-taking instructions injection", () => {
     // repeated re-ingestion this release exists to stop — 80 tokens once per
     // session against every note the session writes. Estimated with the
     // 4-chars-per-token rule, not the diary's CJK-weighted one, which reads
-    // ~3x high on English prose.
-    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(580);
+    // ~3x high on English prose. Re-baselined again to 680 (measured 656) for
+    // the batching rule and the insight's standalone requirement: the block is
+    // injected once at SessionStart into the cached prefix, so the ~76 added
+    // tokens are paid once per session, against the 22.6M context tokens the
+    // old rule spent on extra requests in the measured corpus alone. A budget
+    // is the softer constraint when it collides with a rule that has to be
+    // stated — the alternative here is a shorter block that does not say when
+    // to write.
+    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(680);
   });
 
   test("it stays out of other events", async () => {

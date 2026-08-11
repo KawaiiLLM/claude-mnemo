@@ -3096,7 +3096,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.10-msotoebt" : "dev";
+var BUILD_ID = true ? "0.9.10-msozi0yy" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23280,15 +23280,17 @@ var NOTE_TOKEN_BUDGET = {
 var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns.
 Trigger: "mnemo current turn: S\u2026/T\u2026" with the user's message is this turn's
-own address. Write its note in the batch you expect to be this turn's last:
-while another tool call is still likely, let it wait rather than seal the
-turn early \u2014 its address stays writable later. The note describes this turn
-only; when a later result changes it, in this turn or a following one,
-resend with replace:true.
-Never start a tool call just to write a note: a turn that opens no batch
-writes none \u2014 missed turns accumulate for a "backlog relief" list, the only
-authorization for a batch of ONLY note calls.
-Answer note(turn:"S\u2026/T\u2026", skip:true) for a relief-listed turn holding
+own address. Write its note in a batch whose result cannot change what the
+note says \u2014 a commit, a push, a check you expect to pass. Which batch is
+last is not knowable before its results return, so do not wait for it: a
+turn that ends still owing its note is written from ANY batch of a later
+turn, results in hand, and that is the ordinary path. The note describes
+its own turn only; when a later result changes it, in this turn or a
+following one, resend with replace:true.
+Never start a tool call just to write a note. Exactly two things authorize
+a batch of only note calls: a "backlog relief" list, and correcting a note
+already written \u2014 a written note owes nothing, so no reminder returns to it.
+Answer note(turn:"S\u2026/T\u2026", skip:true) for a turn you owe that holds
 nothing worth keeping, or whose details left your context with no open
 batch recovering them in passing \u2014 never invent a note from the listed
 line, never open a lookup just to rescue one.
@@ -23306,7 +23308,9 @@ Fields:
 - insight (~${NOTE_TOKEN_BUDGET.insight} tokens): empty by default. Only what is worth keeping
   long-term, hard to reacquire, and orthogonal to the conclusion \u2014 pitfalls
   hit, durable pointers, transferable lessons. Anything one search away does
-  not qualify.
+  not qualify. It is read far from its turn, so it must stand alone: claim
+  first, evidence after, and no session-local literal (id, ticket number)
+  in the opening sentence.
 - skip: true with turn alone, for the refusal above.
 Each write's receipt reports its token count against these budgets \u2014 over
 budget, cut the next one.

@@ -231,7 +231,7 @@ function debtOwesNoNoteMessage(
   return (
     `S${address.sessionId}/T${address.promptNumber} owes no note` +
     `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
-    " Write notes for the current turn (the mnemo current-turn line's address), for turns listed in a backlog relief, or rewrite a note you already wrote."
+    " Write notes for the current turn (the mnemo current-turn line's address), for an earlier turn that still owes one — a backlog relief lists these, and any batch may drain them — or rewrite a note you already wrote."
   );
 }
 
