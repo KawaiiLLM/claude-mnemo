@@ -18,7 +18,11 @@ import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 
-import { appendNavigationLegend } from "./format";
+import {
+  appendNavigationLegend,
+  createTruncationSignal,
+  type TruncationSignal,
+} from "./format";
 import {
   legacyEraHeader,
   renderSegmentSpineBlock,
@@ -634,11 +638,24 @@ export function cleanPromptForLabel(raw: string | null): string {
   return firstLine.replace(/\s+/g, " ").trim();
 }
 
-export function truncateText(text: string, maxChars: number): string {
+export function truncateText(
+  text: string,
+  maxChars: number,
+  /**
+   * Render-scope truncation flag (spec D1, mirrors `format.ts`'s
+   * `TruncationSignal`). Optional so this stays a plain pure function for
+   * direct callers/tests that don't care; only set when this call actually
+   * cuts something.
+   */
+  signal?: TruncationSignal,
+): string {
   if (text.length <= maxChars) {
     return text;
   }
 
+  if (signal) {
+    signal.truncated = true;
+  }
   return `${text.slice(0, maxChars)}…`;
 }
 
@@ -1651,14 +1668,14 @@ export function selectMilestoneTurns(view: {
  * stands in; without it a revived antecedent would render as `(untitled)` and
  * carry no information at all.
  */
-function pulledAntecedentLabel(turn: TurnRecord): string {
+function pulledAntecedentLabel(turn: TurnRecord, signal?: TruncationSignal): string {
   if (turn.title !== null && turn.title.trim() !== "") {
     return turn.title;
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
   return prompt === ""
     ? "(untitled)"
-    : truncateText(prompt, MILESTONE_PULLED_LABEL_CAP);
+    : truncateText(prompt, MILESTONE_PULLED_LABEL_CAP, signal);
 }
 
 /**
@@ -2170,13 +2187,14 @@ function renderTurnTable(
   view: TimelineView,
   promptCap: number,
   titleCap: number,
+  signal?: TruncationSignal,
 ): string[] {
   const renderedTurns = view.pageTurns.map((turn) => ({
     turn,
     marker: null as string | null,
   }));
 
-  return renderTurnRows(view, renderedTurns, promptCap, titleCap);
+  return renderTurnRows(view, renderedTurns, promptCap, titleCap, signal);
 }
 
 const MILESTONE_MARKER_GLYPH: Record<Exclude<MilestoneMarker, null>, string> = {
@@ -2286,7 +2304,7 @@ function renderModifiedFilesTail(turn: TurnRecord): string {
  * the turns view uses, so both surfaces agree; only an envelope with no command
  * name left in it falls through to the marker.
  */
-function milestonePromptPrefix(turn: TurnRecord): string {
+function milestonePromptPrefix(turn: TurnRecord, signal?: TruncationSignal): string {
   const raw = turn.userPrompt;
   if (raw === null) {
     return "";
@@ -2295,7 +2313,7 @@ function milestonePromptPrefix(turn: TurnRecord): string {
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
+  return truncateText(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP, signal);
 }
 
 /** One spine row plus the `↳` antecedents homed under it — the budget unit (spec §D). */
@@ -2338,17 +2356,18 @@ function renderUnitLines(
   unit: MilestoneRenderUnit,
   trim: MilestoneUnitTrim,
   titleCap: number,
+  signal?: TruncationSignal,
 ): string[] {
   const { milestone } = unit;
   const glyph =
     milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
 
-  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn));
+  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn, signal));
   if (trim.promptTokens !== null) {
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText(milestone.turn.title ?? "(untitled)", titleCap),
+    truncateText(milestone.turn.title ?? "(untitled)", titleCap, signal),
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -2377,7 +2396,17 @@ function renderUnitLines(
   for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
     const superseded = antecedent.supersededBy.length > 0;
     const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
-    let label = sanitizeTimelineField(truncateText(antecedent.label, titleCap));
+    // Re-derive rather than re-truncate the stored `antecedent.label`: that
+    // field was already cut to `MILESTONE_PULLED_LABEL_CAP` at selection time
+    // (before this render's signal existed), and re-truncating the ALREADY-cut
+    // string to the larger default `titleCap` is a no-op that would hide the
+    // selection-time cut from this render's signal. `pulledAntecedentLabel` is
+    // pure in `turn`, so recomputing it here reproduces `antecedent.label`
+    // exactly (see the selection-time call site) while letting both of its
+    // truncation points report into the live signal.
+    let label = sanitizeTimelineField(
+      truncateText(pulledAntecedentLabel(antecedent.turn, signal), titleCap, signal),
+    );
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
     }
@@ -2401,8 +2430,9 @@ function unitTokens(
   unit: MilestoneRenderUnit,
   trim: MilestoneUnitTrim,
   titleCap: number,
+  signal?: TruncationSignal,
 ): number {
-  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap).join("\n"));
+  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap, signal).join("\n"));
 }
 
 /**
@@ -2416,6 +2446,7 @@ function largestFittingTokens(
   titleCap: number,
   cap: number,
   apply: (value: number) => void,
+  signal?: TruncationSignal,
 ): number {
   let low = 0;
   let high = cap;
@@ -2423,7 +2454,7 @@ function largestFittingTokens(
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     apply(mid);
-    if (unitTokens(unit, trim, titleCap) <= cap) {
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
       best = mid;
       low = mid + 1;
     } else {
@@ -2458,17 +2489,25 @@ function fitUnitTrim(
   titleCap: number,
   cap: number,
   base: MilestoneUnitTrim,
+  signal?: TruncationSignal,
 ): MilestoneUnitTrim {
   const trim = { ...base };
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
 
   // ① truncate the desc, then drop it outright if trimming it is not enough.
   if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
-    const best = largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-      trim.descTokens = value;
-    });
+    const best = largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.descTokens = value;
+      },
+      signal,
+    );
     if (best <= 0) {
       trim.showDesc = false;
       trim.descTokens = null;
@@ -2476,44 +2515,65 @@ function fitUnitTrim(
       return trim;
     }
   }
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
 
   // ② fold ↳ rows into `+N 前件` until it fits.
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap) > cap) {
+  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
     trim.pulledShown -= 1;
   }
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
 
   // ③ drop the `✏️` files tail: decoration goes before any load-bearing text is
   // cut, so a pathological basename can never cost the row its title.
   trim.showFiles = false;
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
 
   // ④ token-truncate the surviving ↳ titles, ⑤ then the spine's.
   if (trim.pulledShown > 0) {
-    largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-      trim.pulledTitleTokens = value;
-    });
-    if (unitTokens(unit, trim, titleCap) <= cap) {
+    largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.pulledTitleTokens = value;
+      },
+      signal,
+    );
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
       return trim;
     }
   }
-  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-    trim.titleTokens = value;
-  });
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.titleTokens = value;
+    },
+    signal,
+  );
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
   // ⑥ token-truncate the user-prompt prefix.
-  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-    trim.promptTokens = value;
-  });
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.promptTokens = value;
+    },
+    signal,
+  );
   return trim;
 }
 
@@ -2521,13 +2581,14 @@ function renderUnitFitted(
   unit: MilestoneRenderUnit,
   titleCap: number,
   descOff: boolean,
+  signal?: TruncationSignal,
 ): string[] {
   const base = initialUnitTrim(unit);
   if (descOff) {
     base.showDesc = false;
   }
-  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base);
-  const lines = renderUnitLines(unit, trim, titleCap);
+  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base, signal);
+  const lines = renderUnitLines(unit, trim, titleCap, signal);
   if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
     return lines;
   }
@@ -2679,6 +2740,7 @@ interface MilestoneBodyModel {
 function createMilestoneBodyModel(
   view: TimelineView,
   titleCap: number,
+  signal?: TruncationSignal,
 ): MilestoneBodyModel {
   const pagedPrompts = new Set(
     view.pagedMilestones.map((milestone) => milestone.turn.promptNumber),
@@ -2784,6 +2846,7 @@ function createMilestoneBodyModel(
       { milestone, pulled },
       titleCap,
       descOff.has(milestone),
+      signal,
     );
     const entry: MilestoneUnitEntry = {
       lines,
@@ -3095,11 +3158,15 @@ interface MilestoneBodyResult {
  * `createMilestoneBodyModel` is the single implementation — the budget path is
  * the same model with degradation steps applied.
  */
-function renderMilestoneBody(view: TimelineView, titleCap: number): MilestoneBodyResult {
+function renderMilestoneBody(
+  view: TimelineView,
+  titleCap: number,
+  signal?: TruncationSignal,
+): MilestoneBodyResult {
   if (view.milestoneDayGroups.length === 0) {
     return { lines: [], hiddenTurns: false };
   }
-  const body = createMilestoneBodyModel(view, titleCap);
+  const body = createMilestoneBodyModel(view, titleCap, signal);
   return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
 }
 
@@ -3148,8 +3215,9 @@ function fitMilestoneBodyToBudget(
   tokenBudget: number,
   fixedWeightTenths: number,
   measure: (bodyLines: string[], hiddenTurns: boolean) => number,
+  signal?: TruncationSignal,
 ): MilestoneBodyResult {
-  const body = createMilestoneBodyModel(view, titleCap);
+  const body = createMilestoneBodyModel(view, titleCap, signal);
   const fits = (): boolean =>
     tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget &&
     measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
@@ -3186,6 +3254,7 @@ function renderTurnRows(
   renderedTurns: Array<{ turn: TurnRecord; marker: string | null }>,
   promptCap: number,
   titleCap: number,
+  signal?: TruncationSignal,
 ): string[] {
   if (renderedTurns.length === 0) {
     return [];
@@ -3224,6 +3293,7 @@ function renderTurnRows(
         titleCap,
         view.turnEffGrades.get(turn.id),
         marker,
+        signal,
       ),
     );
     previousRenderedEpoch = turn.createdAtEpoch;
@@ -3256,6 +3326,7 @@ function renderTurnRow(
   titleCap: number,
   effGrade: number | undefined,
   marker: string | null = null,
+  signal?: TruncationSignal,
 ): string {
   const isUndone = turn.status === "undone";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
@@ -3269,11 +3340,13 @@ function renderTurnRow(
     turn.type === "compact"
       ? promptCore
       : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = sanitizeTimelineField(truncateText(promptWithBadges, promptCap));
+  const promptText = sanitizeTimelineField(
+    truncateText(promptWithBadges, promptCap, signal),
+  );
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "⨯ " : "";
   const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker),
+    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker, signal),
   );
 
   return [
@@ -3313,6 +3386,7 @@ function renderTitleCell(
   compactMetadata: { preTokens: number; trigger: string } | null,
   titleCap: number,
   marker: string | null = null,
+  signal?: TruncationSignal,
 ): string {
   const markerPrefix = marker ? `${marker} ` : "";
 
@@ -3324,14 +3398,14 @@ function renderTitleCell(
 
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap, signal)}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}⨯`.trim();
   }
 
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap, signal)}`;
   }
 
   return `${markerPrefix}⏳`.trim();
@@ -3348,6 +3422,7 @@ function isTimelineLiveTurn(turn: TurnRecord): boolean {
 function renderPhases(
   view: TimelineView,
   titleCap: number,
+  signal?: TruncationSignal,
 ): string[] {
   if (view.pagedPhases.length === 0) {
     return [];
@@ -3405,7 +3480,7 @@ function renderPhases(
       cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText =
       leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, titleCap));
+    const leadTitle = sanitizeTimelineField(truncateText(leadText, titleCap, signal));
 
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),
@@ -3549,6 +3624,11 @@ export function renderTimeline(
 ): string {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  // One flag for the whole response (spec D1): every `truncateText` call this
+  // render makes — turn table, phase list, or milestone body — reports into
+  // it, so the day-fold `hiddenTurns` signal is no longer the only thing that
+  // can trigger the navigation legend.
+  const signal = createTruncationSignal();
   // Spine lines are recomputed whenever the budget sheds a row; everything else
   // in `assemble` is fixed.
   let spineLines =
@@ -3570,10 +3650,15 @@ export function renderTimeline(
     ].join("\n");
 
   if (view.view === "phases") {
-    return assemble(renderPhases(view, titleCap));
+    return appendNavigationLegend(assemble(renderPhases(view, titleCap, signal)), {
+      truncated: signal.truncated,
+    });
   }
   if (view.view !== "milestones") {
-    return assemble(renderTurnTable(view, promptCap, titleCap));
+    return appendNavigationLegend(
+      assemble(renderTurnTable(view, promptCap, titleCap, signal)),
+      { truncated: signal.truncated },
+    );
   }
 
   // Milestones. A budget is measured against the WHOLE assembled output, so the
@@ -3582,14 +3667,14 @@ export function renderTimeline(
   //
   // The response-level legend (spec D4, `appendNavigationLegend`) is appended
   // to `assemble`'s result rather than folded inside it: whether it is needed
-  // is a fact about the body (did folding a day group hide a turn), so
-  // `assemble` stays a pure function of `bodyLines` and the legend is layered
-  // on top by every caller that also needs it counted — see the budgeted path
-  // below, where the fitter's `measure` does exactly that.
+  // is a fact about the body (did folding a day group hide a turn, OR did any
+  // field truncate), so `assemble` stays a pure function of `bodyLines` and the
+  // legend is layered on top by every caller that also needs it counted — see
+  // the budgeted path below, where the fitter's `measure` does exactly that.
   if (options.tokenBudget === undefined) {
-    const body = renderMilestoneBody(view, titleCap);
+    const body = renderMilestoneBody(view, titleCap, signal);
     return appendNavigationLegend(assemble(body.lines), {
-      truncated: body.hiddenTurns,
+      truncated: body.hiddenTurns || signal.truncated,
     });
   }
 
@@ -3625,11 +3710,14 @@ export function renderTimeline(
     textWeightTenths(assemble([])),
     (bodyLines, hiddenTurns) =>
       estimateDiaryTokens(
-        appendNavigationLegend(assemble(bodyLines), { truncated: hiddenTurns }),
+        appendNavigationLegend(assemble(bodyLines), {
+          truncated: hiddenTurns || signal.truncated,
+        }),
       ),
+    signal,
   );
   return appendNavigationLegend(assemble(body.lines), {
-    truncated: body.hiddenTurns,
+    truncated: body.hiddenTurns || signal.truncated,
   });
 }
 

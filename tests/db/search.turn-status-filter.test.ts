@@ -209,6 +209,38 @@ describe("recall observation hits read status per era", () => {
     expect(hits).not.toContain(legacy);
   });
 
+  test("a note call is never a hit, in either era", () => {
+    // A `note` is the agent's bookkeeping ABOUT a turn, withheld from every
+    // reader-facing surface. It used to be withheld from search by ACCIDENT:
+    // a note observation never reached `extracted`, so the status filter
+    // dropped it as a side effect. Dropping that filter in the era, while
+    // capture had begun indexing every observation, would have made the full
+    // text of every note searchable.
+    const turnId = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, 1, 'extracted', 'prompt', ?)
+         RETURNING id`,
+      )
+      .get(sessionId, CUTOFF)!.id;
+    createObservation(db, {
+      turnId,
+      toolName: "mcp__plugin_claude-mnemo_mnemo__note",
+      toolInput: JSON.stringify({ title: "pufferfish bookkeeping" }),
+      excludedFromExtraction: true,
+      createdAtEpoch: CUTOFF,
+    });
+
+    expect(
+      searchMemory(db, {
+        scope: "observations",
+        query: "pufferfish",
+        eraCutoffEpoch: CUTOFF,
+      }),
+    ).toEqual([]);
+  });
+
   test("with no era, the legacy rule stands and skipped stays out", () => {
     captureObservation(1, CUTOFF - 1, "src/pufferfish-legacy.ts");
     captureObservation(2, CUTOFF, "src/pufferfish-era.ts");

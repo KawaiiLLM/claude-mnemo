@@ -110,6 +110,20 @@ export interface SearchMemoryOptions {
  * whole layer. What makes an era observation findable is its own captured tool
  * input and output, indexed at capture (db/observations.ts).
  */
+/**
+ * A `note` call is the agent's bookkeeping ABOUT a turn, not work inside it, and
+ * it is withheld from every reader-facing surface — recall's turn views, the
+ * turn's tool-call count, the dream read tools. Search has to withhold it too.
+ *
+ * It used to be withheld by accident: a note observation never reached
+ * `extracted`, so a filter on that status excluded it as a side effect. Once the
+ * status filter stopped applying in the segment era, that accident stopped
+ * protecting anything — and by then capture had begun indexing every
+ * observation, note calls included, whose tool input is the note's full text.
+ * The rule is now stated where it is meant, and it holds in both eras.
+ */
+const READER_FACING_OBSERVATION_CLAUSE = "o.excluded_from_extraction = 0";
+
 function buildObservationStatusClause(eraCutoffEpoch: number | null | undefined): {
   clause: string;
   params: number[];
@@ -711,7 +725,11 @@ function queryRecentObservations(
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
-      ${combineClauses([statusClause.clause, projectClause.clause])}
+      ${combineClauses([
+        READER_FACING_OBSERVATION_CLAUSE,
+        statusClause.clause,
+        projectClause.clause,
+      ])}
       ORDER BY o.created_at_epoch DESC
     `, options.limit),
     withLimit([...statusClause.params, ...projectClause.params], options.limit),
@@ -1038,7 +1056,7 @@ function queryObservationsByScope(
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", READER_FACING_OBSERVATION_CLAUSE, statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
     const params: Array<string | number> = [query, ...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
     return queryRows(
@@ -1070,7 +1088,7 @@ function queryObservationsByScope(
     );
   }
 
-  const whereClauses = [statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+  const whereClauses = [READER_FACING_OBSERVATION_CLAUSE, statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
   const params: Array<string | number> = [...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
   return queryRows(

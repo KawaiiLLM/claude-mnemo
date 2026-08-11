@@ -3078,7 +3078,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.6-msobo1m7" : "dev";
+var BUILD_ID = true ? "0.9.6-msod6hj6" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3503,12 +3503,15 @@ var FIELD_TRUNCATION_SUFFIX = "...";
 var DEFAULT_TRUNCATE = 200;
 var MAX_TRUNCATE = 2e3;
 var DEFAULT_PREVIEW_COUNT = 5;
+function createTruncationSignal() {
+  return { truncated: false };
+}
 function markTruncated(signal) {
   if (signal) {
     signal.truncated = true;
   }
 }
-var NAVIGATION_LEGEND = 'Legend: "..." marks truncated text \u2014 read it in full via mnemo-replay skill using the [O<n>]/[S<n>/T<n>] id on that line; a hidden turn count can be explored with timeline(id="S<n>", view="turns").';
+var NAVIGATION_LEGEND = 'Legend: text ending in an ellipsis was truncated \u2014 read it in full with the mnemo-replay skill, addressing it by the bracketed ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
 function appendNavigationLegend(output, signal) {
   if (!signal.truncated) {
     return output;
@@ -21057,9 +21060,12 @@ function cleanPromptForLabel(raw) {
   const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
   return firstLine.replace(/\s+/g, " ").trim();
 }
-function truncateText2(text, maxChars) {
+function truncateText2(text, maxChars, signal) {
   if (text.length <= maxChars) {
     return text;
+  }
+  if (signal) {
+    signal.truncated = true;
   }
   return `${text.slice(0, maxChars)}\u2026`;
 }
@@ -21688,12 +21694,12 @@ function selectMilestoneTurns(view) {
   }
   return { kept: rows, ranked, pulled, overflowByDay, effGradeByTurnId };
 }
-function pulledAntecedentLabel(turn) {
+function pulledAntecedentLabel(turn, signal) {
   if (turn.title !== null && turn.title.trim() !== "") {
     return turn.title;
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP);
+  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP, signal);
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -21974,12 +21980,12 @@ function formatShowingLine(view) {
   }
   return `${view.view} \xB7 page ${view.page}/${view.pageCount} (${view.viewItemTotal})${anchor}`;
 }
-function renderTurnTable(view, promptCap, titleCap) {
+function renderTurnTable(view, promptCap, titleCap, signal) {
   const renderedTurns = view.pageTurns.map((turn) => ({
     turn,
     marker: null
   }));
-  return renderTurnRows(view, renderedTurns, promptCap, titleCap);
+  return renderTurnRows(view, renderedTurns, promptCap, titleCap, signal);
 }
 var MILESTONE_MARKER_GLYPH = {
   invalidated: "\u{1F6AB}",
@@ -22048,7 +22054,7 @@ function renderModifiedFilesTail(turn) {
   const hidden = turn.filesModified.length - shown.length;
   return `  \u270F\uFE0F${shown.join(",")}${hidden > 0 ? `+${hidden}` : ""}`;
 }
-function milestonePromptPrefix(turn) {
+function milestonePromptPrefix(turn, signal) {
   const raw = turn.userPrompt;
   if (raw === null) {
     return "";
@@ -22057,7 +22063,7 @@ function milestonePromptPrefix(turn) {
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP);
+  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP, signal);
 }
 function initialUnitTrim(unit) {
   return {
@@ -22073,15 +22079,15 @@ function initialUnitTrim(unit) {
 function milestoneDescText(turn) {
   return (turn.content ?? "").replace(/\s+/g, " ").trim();
 }
-function renderUnitLines(unit, trim, titleCap) {
+function renderUnitLines(unit, trim, titleCap, signal) {
   const { milestone } = unit;
   const glyph = milestone.marker === null ? "  " : MILESTONE_MARKER_GLYPH[milestone.marker];
-  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn));
+  let prompt = sanitizeTimelineField(milestonePromptPrefix(milestone.turn, signal));
   if (trim.promptTokens !== null) {
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText2(milestone.turn.title ?? "(untitled)", titleCap)
+    truncateText2(milestone.turn.title ?? "(untitled)", titleCap, signal)
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -22103,7 +22109,9 @@ function renderUnitLines(unit, trim, titleCap) {
   for (const antecedent of unit.pulled.slice(0, trim.pulledShown)) {
     const superseded = antecedent.supersededBy.length > 0;
     const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
-    let label = sanitizeTimelineField(truncateText2(antecedent.label, titleCap));
+    let label = sanitizeTimelineField(
+      truncateText2(pulledAntecedentLabel(antecedent.turn, signal), titleCap, signal)
+    );
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
     }
@@ -22118,17 +22126,17 @@ function renderUnitLines(unit, trim, titleCap) {
   }
   return lines;
 }
-function unitTokens(unit, trim, titleCap) {
-  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap).join("\n"));
+function unitTokens(unit, trim, titleCap, signal) {
+  return estimateDiaryTokens(renderUnitLines(unit, trim, titleCap, signal).join("\n"));
 }
-function largestFittingTokens(unit, trim, titleCap, cap, apply) {
+function largestFittingTokens(unit, trim, titleCap, cap, apply, signal) {
   let low = 0;
   let high = cap;
   let best = -1;
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     apply(mid);
-    if (unitTokens(unit, trim, titleCap) <= cap) {
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
       best = mid;
       low = mid + 1;
     } else {
@@ -22138,15 +22146,22 @@ function largestFittingTokens(unit, trim, titleCap, cap, apply) {
   apply(best < 0 ? 0 : best);
   return best;
 }
-function fitUnitTrim(unit, titleCap, cap, base) {
+function fitUnitTrim(unit, titleCap, cap, base, signal) {
   const trim = { ...base };
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
   if (trim.showDesc && milestoneDescText(unit.milestone.turn) !== "") {
-    const best = largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-      trim.descTokens = value;
-    });
+    const best = largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.descTokens = value;
+      },
+      signal
+    );
     if (best <= 0) {
       trim.showDesc = false;
       trim.descTokens = null;
@@ -22154,45 +22169,66 @@ function fitUnitTrim(unit, titleCap, cap, base) {
       return trim;
     }
   }
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
-  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap) > cap) {
+  while (trim.pulledShown > 0 && unitTokens(unit, trim, titleCap, signal) > cap) {
     trim.pulledShown -= 1;
   }
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
   trim.showFiles = false;
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
   if (trim.pulledShown > 0) {
-    largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-      trim.pulledTitleTokens = value;
-    });
-    if (unitTokens(unit, trim, titleCap) <= cap) {
+    largestFittingTokens(
+      unit,
+      trim,
+      titleCap,
+      cap,
+      (value) => {
+        trim.pulledTitleTokens = value;
+      },
+      signal
+    );
+    if (unitTokens(unit, trim, titleCap, signal) <= cap) {
       return trim;
     }
   }
-  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-    trim.titleTokens = value;
-  });
-  if (unitTokens(unit, trim, titleCap) <= cap) {
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.titleTokens = value;
+    },
+    signal
+  );
+  if (unitTokens(unit, trim, titleCap, signal) <= cap) {
     return trim;
   }
-  largestFittingTokens(unit, trim, titleCap, cap, (value) => {
-    trim.promptTokens = value;
-  });
+  largestFittingTokens(
+    unit,
+    trim,
+    titleCap,
+    cap,
+    (value) => {
+      trim.promptTokens = value;
+    },
+    signal
+  );
   return trim;
 }
-function renderUnitFitted(unit, titleCap, descOff) {
+function renderUnitFitted(unit, titleCap, descOff, signal) {
   const base = initialUnitTrim(unit);
   if (descOff) {
     base.showDesc = false;
   }
-  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base);
-  const lines = renderUnitLines(unit, trim, titleCap);
+  const trim = fitUnitTrim(unit, titleCap, MILESTONE_UNIT_TOKEN_CAP, base, signal);
+  const lines = renderUnitLines(unit, trim, titleCap, signal);
   if (estimateDiaryTokens(lines.join("\n")) <= MILESTONE_UNIT_TOKEN_CAP) {
     return lines;
   }
@@ -22211,7 +22247,7 @@ function textWeightTenths(text) {
 function tokensFromWeightTenths(tenths) {
   return Math.ceil(tenths * 12 / 100);
 }
-function createMilestoneBodyModel(view, titleCap) {
+function createMilestoneBodyModel(view, titleCap, signal) {
   const pagedPrompts = new Set(
     view.pagedMilestones.map((milestone) => milestone.turn.promptNumber)
   );
@@ -22299,7 +22335,8 @@ function createMilestoneBodyModel(view, titleCap) {
     const lines = renderUnitFitted(
       { milestone, pulled },
       titleCap,
-      descOff.has(milestone)
+      descOff.has(milestone),
+      signal
     );
     const entry = {
       lines,
@@ -22534,18 +22571,18 @@ function createMilestoneBodyModel(view, titleCap) {
     }
   };
 }
-function renderMilestoneBody(view, titleCap) {
+function renderMilestoneBody(view, titleCap, signal) {
   if (view.milestoneDayGroups.length === 0) {
     return { lines: [], hiddenTurns: false };
   }
-  const body = createMilestoneBodyModel(view, titleCap);
+  const body = createMilestoneBodyModel(view, titleCap, signal);
   return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
 }
 function milestoneDegradationOrder(view) {
   return [...view.pagedMilestones].sort(compareMilestoneRank).reverse();
 }
-function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure) {
-  const body = createMilestoneBodyModel(view, titleCap);
+function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths, measure, signal) {
+  const body = createMilestoneBodyModel(view, titleCap, signal);
   const fits = () => tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget && measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
   const result = () => ({
     lines: body.lines(),
@@ -22571,7 +22608,7 @@ function fitMilestoneBodyToBudget(view, titleCap, tokenBudget, fixedWeightTenths
   }
   return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
 }
-function renderTurnRows(view, renderedTurns, promptCap, titleCap) {
+function renderTurnRows(view, renderedTurns, promptCap, titleCap, signal) {
   if (renderedTurns.length === 0) {
     return [];
   }
@@ -22599,7 +22636,8 @@ function renderTurnRows(view, renderedTurns, promptCap, titleCap) {
         promptCap,
         titleCap,
         view.turnEffGrades.get(turn.id),
-        marker
+        marker,
+        signal
       )
     );
     previousRenderedEpoch = turn.createdAtEpoch;
@@ -22618,18 +22656,20 @@ function computePreviousEpochByPrompt(turns) {
 function renderDayDivider(currentEpoch, previousRenderedEpoch) {
   return `\u2500\u2500 ${formatLocalDateWithWeekday(currentEpoch)} \xB7 ${formatGap(currentEpoch, previousRenderedEpoch)} idle \u2500\u2500`;
 }
-function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titleCap, effGrade, marker = null) {
+function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titleCap, effGrade, marker = null, signal) {
   const isUndone = turn.status === "undone";
   const compactMetadata = turn.type === "compact" ? getCompactMetadata(turn.tags) : null;
   const gapSuffix = isBrokenPromptCandidate ? " \u203B" : "";
   const sourceBadges = extractSourceTags(turn.tags).map((source) => `[ext:${source}]`).join(" ");
   const promptCore = turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = turn.type === "compact" ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
-  const promptText = sanitizeTimelineField(truncateText2(promptWithBadges, promptCap));
+  const promptText = sanitizeTimelineField(
+    truncateText2(promptWithBadges, promptCap, signal)
+  );
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "\u2A2F " : "";
   const titleText = sanitizeTimelineField(
-    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker)
+    renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker, signal)
   );
   return [
     `${statusPrefix}T${turn.promptNumber}`,
@@ -22658,7 +22698,7 @@ function renderStats(turn) {
   }
   return stats.length > 0 ? stats.join(" ") : "\u2014";
 }
-function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null) {
+function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null, signal) {
   const markerPrefix = marker ? `${marker} ` : "";
   if (turn.type === "compact") {
     const preTokens = formatCompactTokenCount(compactMetadata?.preTokens ?? 0);
@@ -22667,13 +22707,13 @@ function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = nul
   }
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -22683,7 +22723,7 @@ function sanitizeTimelineField(value) {
 function isTimelineLiveTurn(turn) {
   return turn.status !== "undone" && turn.status !== "skipped";
 }
-function renderPhases(view, titleCap) {
+function renderPhases(view, titleCap, signal) {
   if (view.pagedPhases.length === 0) {
     return [];
   }
@@ -22719,7 +22759,7 @@ function renderPhases(view, titleCap) {
     const leadTurn = turnByPrompt.get(phase.startPromptNumber);
     const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap));
+    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap, signal));
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
     );
@@ -22813,6 +22853,7 @@ function withLegacyEraHeader(view, bodyLines, hasSpine) {
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
+  const signal = createTruncationSignal();
   let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
     spine: view.segmentSpine,
     orphans: view.orphanAnchors,
@@ -22827,15 +22868,20 @@ function renderTimeline(view, options = {}) {
     ...renderLineagePointer(view)
   ].join("\n");
   if (view.view === "phases") {
-    return assemble(renderPhases(view, titleCap));
+    return appendNavigationLegend(assemble(renderPhases(view, titleCap, signal)), {
+      truncated: signal.truncated
+    });
   }
   if (view.view !== "milestones") {
-    return assemble(renderTurnTable(view, promptCap, titleCap));
+    return appendNavigationLegend(
+      assemble(renderTurnTable(view, promptCap, titleCap, signal)),
+      { truncated: signal.truncated }
+    );
   }
   if (options.tokenBudget === void 0) {
-    const body2 = renderMilestoneBody(view, titleCap);
+    const body2 = renderMilestoneBody(view, titleCap, signal);
     return appendNavigationLegend(assemble(body2.lines), {
-      truncated: body2.hiddenTurns
+      truncated: body2.hiddenTurns || signal.truncated
     });
   }
   if (spineLines.length > 0) {
@@ -22855,11 +22901,14 @@ function renderTimeline(view, options = {}) {
     options.tokenBudget,
     textWeightTenths(assemble([])),
     (bodyLines, hiddenTurns) => estimateDiaryTokens(
-      appendNavigationLegend(assemble(bodyLines), { truncated: hiddenTurns })
-    )
+      appendNavigationLegend(assemble(bodyLines), {
+        truncated: hiddenTurns || signal.truncated
+      })
+    ),
+    signal
   );
   return appendNavigationLegend(assemble(body.lines), {
-    truncated: body.hiddenTurns
+    truncated: body.hiddenTurns || signal.truncated
   });
 }
 function shedSpineToBudget(options) {

@@ -3200,6 +3200,45 @@ describe("timelineQuery", () => {
     expect(milestoneOut).not.toContain(TURN_TABLE_HEADER);
     expect(milestoneOut).toMatch(/── \d{4}-\d{2}-\d{2} \w{3} · T\d+–T\d+ · \d+ kept/);
   });
+
+  it("shows the navigation legend on the turn table when a title truncates, even with no hidden turns", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "x".repeat(DEFAULT_TITLE_CAP + 20),
+        userPrompt: "short prompt",
+        createdAtEpoch: 1_700_000_000,
+      }),
+    ]);
+
+    // Default view is "turns": no day-folding, no budget — the turn table's own
+    // `truncateText` (title column, via renderTitleCell) is the only source of
+    // truncation here, and it used to carry no legend at all (spec D1 only
+    // wired the milestone body's hiddenTurns signal into this view kind).
+    const out = timelineQuery(db, { id: "S1" });
+
+    expect(out).toContain(`${"x".repeat(DEFAULT_TITLE_CAP)}…`);
+    expect(out).toContain(NAVIGATION_LEGEND);
+  });
+
+  it("omits the navigation legend on the turn table when nothing truncates", () => {
+    const db = createDatabase(":memory:");
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title: "short title",
+        userPrompt: "short prompt",
+        createdAtEpoch: 1_700_000_000,
+      }),
+    ]);
+
+    const out = timelineQuery(db, { id: "S1" });
+
+    expect(out).not.toContain(NAVIGATION_LEGEND);
+  });
 });
 
 describe("fork-lineage breadcrumb in timeline", () => {

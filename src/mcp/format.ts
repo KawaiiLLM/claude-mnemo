@@ -48,14 +48,20 @@ function markTruncated(signal?: TruncationSignal): void {
 /**
  * The one navigation notice for a whole rendered response (spec D1), said once
  * instead of once per field. It covers all three things a reader needs to keep
- * digging: truncated fields are readable in full, `[O<n>]` / `[S<n>/T<n>]` are
- * the addresses to hand to mnemo-replay, and hidden turn counts (timeline's
- * folded day groups) are reachable with `timeline(..., view="turns")`.
+ * digging: truncated fields are readable in full, the bracketed ids already on
+ * each line are what addresses them, and hidden turn counts (timeline's folded
+ * day groups) are reachable with `timeline(..., view="turns")`.
+ *
+ * It deliberately does NOT spell out an id format. An earlier wording promised
+ * `[S<n>/T<n>]`, a form this renderer never emits — turn lines carry
+ * `[S<n>][T<n>]`, optionally with a transcript-line suffix. A legend that names
+ * a shape has to be re-checked against the renderer every time a label changes;
+ * pointing at "the ids on that line" cannot go stale.
  * Appended only when `TruncationSignal.truncated` is set — a response with
  * nothing cut gets no legend.
  */
 export const NAVIGATION_LEGEND =
-  'Legend: "..." marks truncated text — read it in full via mnemo-replay skill using the [O<n>]/[S<n>/T<n>] id on that line; a hidden turn count can be explored with timeline(id="S<n>", view="turns").';
+  'Legend: text ending in an ellipsis was truncated — read it in full with the mnemo-replay skill, addressing it by the bracketed ids on that line; a "+N more" count is reachable with timeline(id="S<n>", view="turns").';
 
 export function appendNavigationLegend(
   output: string,
