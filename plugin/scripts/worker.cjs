@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.9-msotbiim" : "dev";
+var BUILD_ID = true ? "0.9.10-msotoebt" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -46958,7 +46958,7 @@ function createNoteSettlementSdkQuery(options) {
     }
     const server = createSdkMcpServerImpl({
       name: "mnemo",
-      version: "0.9.9",
+      version: "0.9.10",
       tools: [
         toolImpl(
           "recall",
@@ -49730,7 +49730,7 @@ function createDiarySdkQuery(options) {
       }
       const diaryServer = createSdkMcpServerImpl({
         name: "diary",
-        version: "0.9.9",
+        version: "0.9.10",
         tools: [
           toolImpl(
             "recall",
