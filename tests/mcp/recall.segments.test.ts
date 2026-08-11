@@ -238,7 +238,16 @@ describe("recall segment selector and cross-granularity filters", () => {
   });
 });
 
-describe("observation rows render mechanical fields on the era side", () => {
+const SWEEP_INPUT = JSON.stringify({
+  command: "rg --files-with-matches watchdog src/",
+});
+const SWEEP_RESULT = JSON.stringify({
+  stdout: "src/worker/server.ts\nsrc/worker/diary-runtime.ts",
+  stderr: "",
+  interrupted: false,
+});
+
+describe("observation rows render the call they were, on the era side", () => {
   let db: Database;
   let sessionId: number;
   let observationId: number;
@@ -273,8 +282,8 @@ describe("observation rows render mechanical fields on the era side", () => {
     observationId = createObservation(db, {
       turnId,
       toolName: "Bash",
-      toolInput: "rg --files-with-matches watchdog src/",
-      toolResult: "src/worker/server.ts\nsrc/worker/diary-runtime.ts",
+      toolInput: SWEEP_INPUT,
+      toolResult: SWEEP_RESULT,
       status: "extracted",
       createdAtEpoch: CUTOFF + 2,
     }).id;
@@ -288,23 +297,28 @@ describe("observation rows render mechanical fields on the era side", () => {
     const output = recallMemory(db, { id: `O${observationId}` });
 
     expect(output).toContain(`[O${observationId}]`);
-    expect(output).not.toContain("- in:");
-    expect(output).not.toContain("- out:");
+    expect(output).not.toContain("rg --files-with-matches");
+    expect(output).not.toContain("src/worker/server.ts");
   });
 
-  test("an era read shows the tool name via the label, input prefix and result prefix", () => {
+  test("an era read shows the command and its output, never the stored JSON", () => {
     const output = recallMemory(db, {
       id: `O${observationId}`,
       eraCutoffEpoch: CUTOFF,
     });
 
-    // No extractor title on an era observation, so the label falls back to the
-    // tool name (spec D11) — a separate `tool:` line would just repeat the word
-    // the label already shows, so it does not appear (spec D3).
-    expect(output).toContain(`[O${observationId}] Bash`);
+    // No extractor title on an era observation, so the label is the tool name
+    // (spec D11) and the projected header takes its place — a separate `tool:`
+    // line would just repeat the word the label already shows (spec D3).
+    expect(output).toContain(
+      `[O${observationId}] Bash(rg --files-with-matches watchdog src/)`,
+    );
     expect(output).not.toContain("- tool:");
-    expect(output).toContain("- in: rg --files-with-matches watchdog src/");
-    expect(output).toContain("- out: src/worker/server.ts");
+    expect(output).toContain("    src/worker/server.ts");
+    expect(output).toContain("    src/worker/diary-runtime.ts");
+    // The stored payload's structure never reaches the reader.
+    expect(output).not.toContain('"stdout"');
+    expect(output).not.toContain("interrupted");
   });
 
   test("a legacy read with an extractor title still shows the tool: line", () => {
@@ -338,22 +352,25 @@ describe("observation rows render mechanical fields on the era side", () => {
 
     expect(output).toContain(`[O${legacyObservationId}] Added mutex`);
     // A legacy row carries NO mechanical fields at all (spec D5) — not the
-    // name either. Its record is the extractor's summary, and the dedup rule
-    // never gets to weigh in because there is nothing to dedup against.
+    // name either. Its record is the extractor's summary, and neither the
+    // dedup rule nor the projection ever gets to weigh in, because there is
+    // nothing for either to work from.
     expect(output).not.toContain("- tool:");
-    expect(output).not.toContain("- in:");
-    expect(output).not.toContain("- out:");
+    expect(output).not.toContain("Bash(");
+    expect(output).not.toContain("rg --files-with-matches");
   });
 
-  test("the mechanical fields respect the truncate budget", () => {
+  test("the projected call respects the truncate budget", () => {
     const output = recallMemory(db, {
       id: `O${observationId}`,
       eraCutoffEpoch: CUTOFF,
       truncate: 10,
     });
 
-    expect(output).toContain("- in: rg --files…");
-    expect(output).toContain("- out: src/worker…");
+    // The header is cut inside its parentheses, and the body by whole lines.
+    expect(output).toContain(`[O${observationId}] Bash(rg --…)`);
+    expect(output).toContain("    src/worker…");
+    expect(output).toContain("    … +1 lines");
   });
 });
 
@@ -386,8 +403,8 @@ describe("an observation's era is its owning turn's era", () => {
     return createObservation(db, {
       turnId,
       toolName: "Bash",
-      toolInput: "rg --files-with-matches watchdog src/",
-      toolResult: "src/worker/server.ts",
+      toolInput: SWEEP_INPUT,
+      toolResult: SWEEP_RESULT,
       status: "extracted",
       createdAtEpoch,
     }).id;
@@ -419,14 +436,14 @@ describe("an observation's era is its owning turn's era", () => {
 
     expect(
       recallMemory(db, { id: `O${observationId}`, eraCutoffEpoch: CUTOFF }),
-    ).not.toContain("- in:");
+    ).not.toContain("Bash(");
     expect(
       recallMemory(db, {
         id: `S${sessionId}/T1`,
         depth: "expanded",
         eraCutoffEpoch: CUTOFF,
       }),
-    ).not.toContain("- in:");
+    ).not.toContain("Bash(");
   });
 
   test("an era turn whose tool call is stamped earlier still shows them", () => {
@@ -435,13 +452,13 @@ describe("an observation's era is its owning turn's era", () => {
 
     expect(
       recallMemory(db, { id: `O${observationId}`, eraCutoffEpoch: CUTOFF }),
-    ).toContain("- in: rg --files-with-matches watchdog src/");
+    ).toContain("Bash(rg --files-with-matches watchdog src/)");
     expect(
       recallMemory(db, {
         id: `S${sessionId}/T2`,
         depth: "expanded",
         eraCutoffEpoch: CUTOFF,
       }),
-    ).toContain("- in: rg --files-with-matches watchdog src/");
+    ).toContain("Bash(rg --files-with-matches watchdog src/)");
   });
 });

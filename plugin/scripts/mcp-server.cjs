@@ -34200,6 +34200,240 @@ function renderFileTree(paths, opts) {
   return rendered;
 }
 
+// src/mcp/tool-projection.ts
+var AGENT_REPORT_ELSEWHERE = "report not stored with this call \u2014 it arrives later as a turn-level notification";
+function parsePayload(raw) {
+  if (raw === null || raw === void 0 || raw.trim() === "") {
+    return void 0;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+function asRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function stringField(record2, key) {
+  const value = record2?.[key];
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+function numberField(record2, key) {
+  const value = record2?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function toLines(text) {
+  return text.split("\n").map((line) => line.replace(/\s+$/u, "")).filter((line) => line !== "");
+}
+function singleLine(text) {
+  return text.replace(/\s+/gu, " ").trim();
+}
+function basename(filePath) {
+  const segments = filePath.split("/").filter((segment) => segment !== "");
+  return segments[segments.length - 1] ?? filePath;
+}
+function contentArrayText(value) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const texts = [];
+  for (const item of value) {
+    const record2 = asRecord(item);
+    if (record2 && typeof record2.text === "string") {
+      texts.push(record2.text);
+    }
+  }
+  return texts.length > 0 ? texts.join("\n") : null;
+}
+function isEmptyValue(value) {
+  if (value === null || value === void 0 || value === false || value === "") {
+    return true;
+  }
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+  const record2 = asRecord(value);
+  return record2 !== null && Object.keys(record2).length === 0;
+}
+function valueText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value) ?? "";
+}
+function genericLines(value) {
+  if (value === void 0) {
+    return [];
+  }
+  const unwrapped = contentArrayText(value);
+  if (unwrapped !== null) {
+    return toLines(unwrapped);
+  }
+  if (typeof value === "string") {
+    return toLines(value);
+  }
+  const record2 = asRecord(value);
+  if (record2) {
+    const entries = Object.entries(record2).filter(
+      ([, entryValue]) => !isEmptyValue(entryValue)
+    );
+    if (entries.length === 0) {
+      return [];
+    }
+    if (entries.length === 1) {
+      return toLines(valueText(entries[0][1]));
+    }
+    return entries.map(
+      ([key, entryValue]) => `${key}: ${singleLine(valueText(entryValue))}`
+    );
+  }
+  return isEmptyValue(value) ? [] : toLines(valueText(value));
+}
+function genericDetail(input, result) {
+  return {
+    argument: singleLine(genericLines(input).join(" ")),
+    body: genericLines(result)
+  };
+}
+var PROJECTION_RULES = {
+  /**
+   * 61% of every observation recorded since the cutover. Header from the input,
+   * body from the result — the case the header/body interface exists for.
+   * `description` is left out: it restates the command that is already there.
+   */
+  Bash: (input, result) => {
+    const command = stringField(asRecord(input), "command");
+    if (!command) {
+      return null;
+    }
+    const output = asRecord(result);
+    if (!output) {
+      return { argument: singleLine(command), body: genericLines(result) };
+    }
+    const body = toLines(
+      typeof output.stdout === "string" ? output.stdout : ""
+    );
+    const stderr = typeof output.stderr === "string" ? output.stderr : "";
+    if (stderr.trim() !== "") {
+      body.push(`stderr: ${singleLine(stderr)}`);
+    }
+    return { argument: singleLine(command), body };
+  },
+  /**
+   * The single largest saving in the change. An `Edit` result is a verbatim
+   * duplicate of its input — `oldString`/`newString`/`filePath` matched in 62 of
+   * 62 sampled rows — plus `originalFile`, the entire pre-edit file, at a median
+   * of 23,494 characters against `old_string`'s median of 172. It therefore
+   * contributes nothing: everything worth reading is in the call.
+   */
+  Edit: (input) => {
+    const record2 = asRecord(input);
+    const filePath = stringField(record2, "file_path");
+    const oldString = record2 && typeof record2.old_string === "string" ? record2.old_string : null;
+    const newString = record2 && typeof record2.new_string === "string" ? record2.new_string : null;
+    if (!filePath || oldString === null || newString === null) {
+      return null;
+    }
+    return {
+      argument: basename(filePath),
+      body: [
+        ...toLines(oldString).map((line) => `- ${line}`),
+        ...toLines(newString).map((line) => `+ ${line}`)
+      ]
+    };
+  },
+  /**
+   * Body from the input, which is also what makes a create render correctly:
+   * `originalFile` is `null` on 24 of 30 sampled rows, so anything reaching for
+   * the pre-edit file renders empty on the majority case.
+   */
+  Write: (input) => {
+    const record2 = asRecord(input);
+    const filePath = stringField(record2, "file_path");
+    const content = record2 && typeof record2.content === "string" ? record2.content : null;
+    if (!filePath || content === null) {
+      return null;
+    }
+    return { argument: basename(filePath), body: toLines(content) };
+  },
+  /**
+   * The one tool whose result is pure bulk relative to its call: the input is a
+   * median 98 characters and the result a median 1,366, all of it the file slice
+   * the reader already has in context from the read itself. What they do not
+   * have is which part of the file it was.
+   */
+  Read: (input, result) => {
+    const filePath = stringField(asRecord(input), "file_path");
+    if (!filePath) {
+      return null;
+    }
+    const file2 = asRecord(asRecord(result)?.file);
+    const numLines = numberField(file2, "numLines");
+    if (numLines === null) {
+      return null;
+    }
+    const startLine = numberField(file2, "startLine");
+    const totalLines = numberField(file2, "totalLines");
+    const range = startLine === null ? null : `${startLine}\u2013${startLine + numLines - 1}${totalLines === null ? "" : ` of ${totalLines}`}`;
+    return {
+      argument: basename(filePath),
+      body: [range === null ? `${numLines} lines` : `${numLines} lines (${range})`]
+    };
+  },
+  /**
+   * The task's own description, never the prompt — the prompt is a median 2,923
+   * characters of instructions the reader wrote and does not need read back.
+   * The result is genuinely two shapes gated on how the agent was dispatched.
+   */
+  Agent: (input, result) => {
+    const description = stringField(asRecord(input), "description");
+    if (!description) {
+      return null;
+    }
+    const report = contentArrayText(asRecord(result)?.content);
+    return {
+      argument: description,
+      body: report === null ? [AGENT_REPORT_ELSEWHERE] : toLines(report)
+    };
+  },
+  /**
+   * Keyed on the MCP base name (see `mcpBaseName`). The call's point is which
+   * turn it wrote about and what it claimed; the note body itself is a median
+   * 1,170 characters that the turn's own fields already carry.
+   */
+  note: (input, result) => {
+    const record2 = asRecord(input);
+    const turn = stringField(record2, "turn");
+    const title = stringField(record2, "title");
+    if (!turn && !title) {
+      return null;
+    }
+    const receipt = contentArrayText(result);
+    return {
+      argument: [turn, title].filter(Boolean).join(" "),
+      body: receipt === null ? genericLines(result) : toLines(receipt)
+    };
+  }
+};
+function mcpBaseName(toolName) {
+  if (!toolName.startsWith("mcp__")) {
+    return "";
+  }
+  const index = toolName.lastIndexOf("__");
+  return index > 0 ? toolName.slice(index + 2) : "";
+}
+function composeHeader(toolName, argument) {
+  if (!toolName) {
+    return argument;
+  }
+  return argument ? `${toolName}(${argument})` : toolName;
+}
+function projectToolCall(toolName, toolInput, toolResult) {
+  const input = parsePayload(toolInput);
+  const result = parsePayload(toolResult);
+  const rule = PROJECTION_RULES[toolName] ?? PROJECTION_RULES[mcpBaseName(toolName)];
+  const detail = (rule ? rule(input, result) : null) ?? genericDetail(input, result);
+  return { header: composeHeader(toolName, detail.argument), body: detail.body };
+}
+
 // src/mcp/format.ts
 var TYPE_EMOJI = {
   bugfix: "\u{1F534}",
@@ -34322,28 +34556,37 @@ function truncateText(text, {
   }
   return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
-function truncateFileTree(tree, {
+function truncateLines(lines, {
   limit,
-  signal
+  signal,
+  lineLimit
 }) {
   const boundedLimit = Math.max(limit, 1);
-  const lines = tree.split("\n");
+  const content = lines.filter((line) => line.trim() !== "");
   const kept = [];
   let used = 0;
-  for (const line of lines) {
-    const nextUsed = used + line.length + 1;
+  for (const line of content) {
+    const capped = lineLimit === void 0 ? line : truncateText(line, { limit: lineLimit, signal });
+    const nextUsed = used + capped.length + 1;
     if (kept.length > 0 && nextUsed > boundedLimit) {
       break;
     }
-    kept.push(line);
+    kept.push(capped);
     used = nextUsed;
   }
-  const omitted = lines.length - kept.length;
+  const omitted = content.length - kept.length;
   if (omitted <= 0) {
     return kept;
   }
   markTruncated(signal);
-  return [...kept, `\u2026 +${omitted} lines`];
+  return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
+}
+function truncateCallHeader(header, { limit, signal }) {
+  const cut = truncateText(header, { limit, signal });
+  if (cut === header) {
+    return cut;
+  }
+  return header.endsWith(")") && !cut.endsWith(")") ? `${cut})` : cut;
 }
 function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
   return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
@@ -34612,7 +34855,7 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesRead), { limit, signal })
+      truncateLines(renderFileTree(turn.filesRead).split("\n"), { limit, signal })
     );
   }
   if (mode === "unified" && turn.filesModified && turn.filesModified.length > 0) {
@@ -34620,7 +34863,10 @@ function formatTurnExpandedWithMode(turn, options = {}) {
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesModified), { limit, signal })
+      truncateLines(renderFileTree(turn.filesModified).split("\n"), {
+        limit,
+        signal
+      })
     );
   }
   const childBlock = includeChildren ? renderTurnChildren(turn, depth, { ...options, mode }) : "";
@@ -34629,30 +34875,51 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatObservationLabel(observation, { indent = "" } = {}) {
-  return `${indent}- [O${observation.id}] ${observation.title}`;
+function formatObservationLabel(observation, { indent = "" } = {}, header) {
+  return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
+}
+var OBSERVATION_BODY_INDENT = "    ";
+function projectObservation(observation) {
+  if (!observation.toolInput && !observation.toolResult) {
+    return null;
+  }
+  return projectToolCall(
+    observation.toolName ?? "",
+    observation.toolInput,
+    observation.toolResult
+  );
 }
 function formatObservationCollapsedWithMode(observation, options = {}) {
   const { indent = "", signal } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatObservationLabel(observation, options)];
+  const projection = projectObservation(observation);
+  const headerIsLabel = projection !== null && observation.title === observation.toolName;
+  const lines = [
+    formatObservationLabel(
+      observation,
+      options,
+      headerIsLabel ? truncateCallHeader(projection.header, { limit, signal }) : void 0
+    )
+  ];
   if (observation.content) {
     lines.push(
       `${indent}  - desc: ${truncateText(observation.content, { limit, signal })}`
     );
   }
-  if (observation.toolName && observation.toolName !== observation.title) {
-    lines.push(`${indent}  - tool: \u{1F527} ${observation.toolName}`);
-  }
-  if (observation.toolInput) {
+  const toolLine = projection ? headerIsLabel ? null : projection.header : observation.toolName && observation.toolName !== observation.title ? observation.toolName : null;
+  if (toolLine) {
     lines.push(
-      `${indent}  - in: ${truncateText(observation.toolInput, { limit, signal })}`
+      `${indent}  - tool: \u{1F527} ${truncateCallHeader(toolLine, { limit, signal })}`
     );
   }
-  if (observation.toolResult) {
-    lines.push(
-      `${indent}  - out: ${truncateText(observation.toolResult, { limit, signal })}`
-    );
+  if (projection) {
+    for (const line of truncateLines(projection.body, {
+      limit,
+      signal,
+      lineLimit: limit
+    })) {
+      lines.push(`${indent}${OBSERVATION_BODY_INDENT}${line}`);
+    }
   }
   return lines.join("\n");
 }

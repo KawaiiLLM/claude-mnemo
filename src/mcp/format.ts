@@ -1,4 +1,5 @@
 import { renderFileTree } from "../shared/file-tree";
+import { projectToolCall, type ProjectedCall } from "./tool-projection";
 
 export const TYPE_EMOJI: Record<string, string> = {
   bugfix: "🔴",
@@ -345,31 +346,56 @@ export function truncateText(
   return `${window}${FIELD_TRUNCATION_SUFFIX}`;
 }
 
-function truncateFileTree(
-  tree: string,
+/**
+ * The one line-aware cut: fit a multi-line value to the same character budget a
+ * one-line field gets, dropping whole lines and saying how many went.
+ *
+ * It was written for the file tree and now also carries an observation's body,
+ * because those are the same problem and the alternative is two budgeting
+ * concepts that drift apart — this renderer has already had to delete a
+ * duplicate truncator that grew that way.
+ *
+ * `lineLimit` caps each individual line and is opt-in. A file tree does not
+ * want it: its lines are paths, a cut one is a path that does not exist, and
+ * the two callers that pass a tree here rendered whole paths before this
+ * existed. A tool's output does want it — one line of `stdout` can be twenty
+ * thousand characters, and without a per-line cap the "whole lines" rule would
+ * hand the reader all of it.
+ */
+function truncateLines(
+  lines: string[],
   {
     limit,
     signal,
+    lineLimit,
   }: {
     limit: number;
     signal?: TruncationSignal;
+    lineLimit?: number;
   },
 ): string[] {
   const boundedLimit = Math.max(limit, 1);
-  const lines = tree.split("\n");
+  // Blank lines are dropped before anything is counted, so the "+N lines" a
+  // reader judges by counts content rather than emptiness. A rendered file tree
+  // has none, so this is inert on that path.
+  const content = lines.filter((line) => line.trim() !== "");
   const kept: string[] = [];
   let used = 0;
 
-  for (const line of lines) {
-    const nextUsed = used + line.length + 1;
+  for (const line of content) {
+    const capped =
+      lineLimit === undefined
+        ? line
+        : truncateText(line, { limit: lineLimit, signal });
+    const nextUsed = used + capped.length + 1;
     if (kept.length > 0 && nextUsed > boundedLimit) {
       break;
     }
-    kept.push(line);
+    kept.push(capped);
     used = nextUsed;
   }
 
-  const omitted = lines.length - kept.length;
+  const omitted = content.length - kept.length;
   if (omitted <= 0) {
     return kept;
   }
@@ -377,7 +403,25 @@ function truncateFileTree(
   markTruncated(signal);
   // Same mark as a cut field and as the timeline's `… +N more`: a response that
   // hides things should say so one way, not two.
-  return [...kept, `… +${omitted} lines`];
+  return [...kept, `${FIELD_TRUNCATION_SUFFIX} +${omitted} lines`];
+}
+
+/**
+ * Cut a projected header inside its parentheses rather than after them.
+ *
+ * `Bash(git diff --stat &&…` reads as a renderer that lost its footing;
+ * `Bash(git diff --stat &&…)` reads as an argument that was too long, which is
+ * what happened. Two characters to keep the call's shape intact.
+ */
+function truncateCallHeader(
+  header: string,
+  { limit, signal }: { limit: number; signal?: TruncationSignal },
+): string {
+  const cut = truncateText(header, { limit, signal });
+  if (cut === header) {
+    return cut;
+  }
+  return header.endsWith(")") && !cut.endsWith(")") ? `${cut})` : cut;
 }
 
 function resolveExplicitTruncate(
@@ -770,7 +814,7 @@ function formatTurnExpandedWithMode(
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesRead), { limit, signal }),
+      truncateLines(renderFileTree(turn.filesRead).split("\n"), { limit, signal }),
     );
   }
 
@@ -779,7 +823,10 @@ function formatTurnExpandedWithMode(
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesModified), { limit, signal }),
+      truncateLines(renderFileTree(turn.filesModified).split("\n"), {
+        limit,
+        signal,
+      }),
     );
   }
 
@@ -796,8 +843,38 @@ function formatTurnExpandedWithMode(
 function formatObservationLabel(
   observation: FormattedObservation,
   { indent = "" }: ObservationFormatOptions = {},
+  header?: string,
 ): string {
-  return `${indent}- [O${observation.id}] ${observation.title}`;
+  return `${indent}- [O${observation.id}] ${header ?? observation.title}`;
+}
+
+/**
+ * The body sits under the label's text rather than at the bullet's own column,
+ * so a multi-line value can no longer reach column zero. A line at column zero
+ * does not merely look wrong: it produces a line neither a reader nor a
+ * downstream parser can attribute to the observation it came from.
+ */
+const OBSERVATION_BODY_INDENT = "    ";
+
+/**
+ * The projection applies only to a row that carries raw tool fields, which are
+ * era-gated upstream (spec D5): a legacy row's record is its extractor's
+ * summary and must keep rendering as it always did. The check is the observable
+ * fact — are the raw fields here — never a second era comparison, because two
+ * places deciding the same era is how they come to disagree.
+ */
+function projectObservation(
+  observation: FormattedObservation,
+): ProjectedCall | null {
+  if (!observation.toolInput && !observation.toolResult) {
+    return null;
+  }
+
+  return projectToolCall(
+    observation.toolName ?? "",
+    observation.toolInput,
+    observation.toolResult,
+  );
 }
 
 function formatObservationCollapsedWithMode(
@@ -806,7 +883,23 @@ function formatObservationCollapsedWithMode(
 ): string {
   const { indent = "", signal } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const lines = [formatObservationLabel(observation, options)];
+  const projection = projectObservation(observation);
+  // An era row has no extractor title — 0 of the 517 measured — so its label is
+  // already just the tool name, and the projected header replaces it in place.
+  // Where a title does exist it is the row's own record and keeps the label;
+  // the header then rides the `tool:` line, which is where the tool name was
+  // going anyway.
+  const headerIsLabel =
+    projection !== null && observation.title === observation.toolName;
+  const lines = [
+    formatObservationLabel(
+      observation,
+      options,
+      headerIsLabel
+        ? truncateCallHeader(projection.header, { limit, signal })
+        : undefined,
+    ),
+  ];
 
   if (observation.content) {
     lines.push(
@@ -820,18 +913,25 @@ function formatObservationCollapsedWithMode(
   // observable fact — does the label already say this — never the era. A
   // legacy row is not carved out here either: it never reaches this line,
   // because a legacy view carries no mechanical fields at all (spec D5).
-  if (observation.toolName && observation.toolName !== observation.title) {
-    lines.push(`${indent}  - tool: 🔧 ${observation.toolName}`);
-  }
-  if (observation.toolInput) {
+  const toolLine = projection
+    ? (headerIsLabel ? null : projection.header)
+    : observation.toolName && observation.toolName !== observation.title
+      ? observation.toolName
+      : null;
+  if (toolLine) {
     lines.push(
-      `${indent}  - in: ${truncateText(observation.toolInput, { limit, signal })}`,
+      `${indent}  - tool: 🔧 ${truncateCallHeader(toolLine, { limit, signal })}`,
     );
   }
-  if (observation.toolResult) {
-    lines.push(
-      `${indent}  - out: ${truncateText(observation.toolResult, { limit, signal })}`,
-    );
+
+  if (projection) {
+    for (const line of truncateLines(projection.body, {
+      limit,
+      signal,
+      lineLimit: limit,
+    })) {
+      lines.push(`${indent}${OBSERVATION_BODY_INDENT}${line}`);
+    }
   }
 
   return lines.join("\n");

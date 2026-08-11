@@ -666,3 +666,348 @@ describe("truncation lands on a boundary a reader can see", () => {
     }
   });
 });
+
+/**
+ * An observation renders as the call it was, not as the JSON it was stored in.
+ * The `- in:` / `- out:` labels named where a value was kept rather than what
+ * it is, and the two sides do not correspond to what a reader wants: an
+ * `Edit`'s meaning is entirely in its input, a `Read`'s entirely in its result,
+ * and a `Bash` draws its header from one side and its body from the other.
+ */
+describe("an observation renders as the call it was", () => {
+  function observation(
+    toolName: string,
+    toolInput: unknown,
+    toolResult: unknown,
+  ): FormattedObservation {
+    return {
+      id: 7,
+      // What an era row's label really holds: no pipeline summarizes an
+      // observation any more, so the title has already fallen back to the tool
+      // name by the time the renderer sees it.
+      title: toolName,
+      toolName,
+      toolInput: JSON.stringify(toolInput),
+      toolResult:
+        typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult),
+    };
+  }
+
+  function render(
+    value: FormattedObservation,
+    options: { truncate?: number } = {},
+  ): string {
+    return renderNode({ type: "observation", value }, {
+      depth: "expanded",
+      ...options,
+    });
+  }
+
+  test("a Bash call renders as its command with its output beneath", () => {
+    const rendered = render(
+      observation(
+        "Bash",
+        { command: "git diff --stat", description: "Show the diff" },
+        {
+          stdout: "src/mcp/format.ts | 42 ++++---\nsrc/mcp/recall.ts |  8 +--",
+          stderr: "",
+          interrupted: false,
+          isImage: false,
+        },
+      ),
+    );
+
+    expect(rendered).toBe(
+      [
+        "- [O7] Bash(git diff --stat)",
+        "    src/mcp/format.ts | 42 ++++---",
+        "    src/mcp/recall.ts |  8 +--",
+      ].join("\n"),
+    );
+  });
+
+  test("standard error is shown when it is non-empty", () => {
+    const rendered = render(
+      observation("Bash", { command: "bun test" }, {
+        stdout: "3 pass",
+        stderr: "error: 1 test failed",
+      }),
+    );
+
+    expect(rendered).toContain("    3 pass");
+    expect(rendered).toContain("    stderr: error: 1 test failed");
+  });
+
+  test("neither observation form carries the in/out labels any more", () => {
+    const value = observation("Bash", { command: "ls" }, { stdout: "a.ts" });
+
+    for (const depth of ["collapsed", "expanded"] as const) {
+      const rendered = renderNode({ type: "observation", value }, { depth });
+      expect(rendered).not.toContain("- in:");
+      expect(rendered).not.toContain("- out:");
+      expect(rendered).toContain("Bash(ls)");
+    }
+  });
+
+  test("a body is cut by whole lines and says how many it dropped", () => {
+    const stdout = Array.from({ length: 30 }, (_, index) => `line ${index}`)
+      // Blank lines cost vertical space and carry nothing, so they are dropped
+      // before anything is counted — otherwise the "+N lines" a reader is asked
+      // to judge by counts emptiness.
+      .join("\n\n");
+    const rendered = render(
+      observation("Bash", { command: "ls" }, { stdout }),
+      { truncate: 40 },
+    );
+
+    const bodyLines = rendered.split("\n").slice(1);
+    const marker = bodyLines[bodyLines.length - 1] ?? "";
+    const droppedMatch = /^ {4}… \+(\d+) lines$/.exec(marker);
+    expect(droppedMatch).not.toBeNull();
+    // Every surviving line is a whole line of the source — the cut lands
+    // between lines, never inside one.
+    for (const line of bodyLines.slice(0, -1)) {
+      expect(line).toMatch(/^ {4}line \d+$/);
+    }
+    expect(bodyLines.length - 1 + Number(droppedMatch?.[1])).toBe(30);
+  });
+
+  test("a body's lines are indented under their header", () => {
+    // A multi-line value that reaches column zero produces lines no reader and
+    // no downstream parser can attribute to the observation they came from.
+    const rendered = render(
+      observation("Bash", { command: "cat notes" }, {
+        stdout: "first\nsecond\nthird",
+      }),
+    );
+
+    for (const line of rendered.split("\n").slice(1)) {
+      expect(line).toStartWith("    ");
+    }
+  });
+
+  test("an Edit shows what changed and nothing from its result", () => {
+    const rendered = render(
+      observation(
+        "Edit",
+        {
+          file_path: "/Users/me/project/src/mcp/recall.ts",
+          old_string: "  const limit = 10;",
+          new_string: "  const limit = 20;",
+          replace_all: false,
+        },
+        {
+          filePath: "/Users/me/project/src/mcp/recall.ts",
+          oldString: "  const limit = 10;",
+          newString: "  const limit = 20;",
+          originalFile: `${"the whole pre-edit file ".repeat(40)}`,
+          structuredPatch: [{ oldStart: 1 }],
+        },
+      ),
+    );
+
+    expect(rendered).toBe(
+      [
+        "- [O7] Edit(recall.ts)",
+        "    -   const limit = 10;",
+        "    +   const limit = 20;",
+      ].join("\n"),
+    );
+    expect(rendered).not.toContain("pre-edit file");
+  });
+
+  test("a Write shows the beginning of what was written, on a create", () => {
+    const rendered = render(
+      observation(
+        "Write",
+        {
+          file_path: "/Users/me/project/docs/plan.md",
+          content: "# Plan\n\n- step one\n- step two\n",
+        },
+        {
+          type: "create",
+          filePath: "/Users/me/project/docs/plan.md",
+          content: "# Plan\n\n- step one\n- step two\n",
+          // The majority case: there is no pre-edit file to diff against, so a
+          // projection that reached for one would render empty here.
+          originalFile: null,
+          structuredPatch: [],
+        },
+      ),
+    );
+
+    expect(rendered).toBe(
+      [
+        "- [O7] Write(plan.md)",
+        "    # Plan",
+        "    - step one",
+        "    - step two",
+      ].join("\n"),
+    );
+  });
+
+  test("a Read says how much was read, not what was in the file", () => {
+    const rendered = render(
+      observation(
+        "Read",
+        { file_path: "/Users/me/project/src/mcp/format.ts", offset: 124, limit: 45 },
+        {
+          type: "text",
+          file: {
+            filePath: "/Users/me/project/src/mcp/format.ts",
+            content: "export function truncateText() {\n  return 1;\n}",
+            numLines: 45,
+            startLine: 124,
+            totalLines: 237,
+          },
+        },
+      ),
+    );
+
+    expect(rendered).toBe(
+      ["- [O7] Read(format.ts)", "    45 lines (124–168 of 237)"].join("\n"),
+    );
+  });
+
+  test("a note renders as the turn it addressed and its title, with the receipt", () => {
+    const rendered = render(
+      observation(
+        "mcp__plugin_claude-mnemo_mnemo__note",
+        {
+          turn: "S15069/T485",
+          title: "fix+render: the observation body is the call's output",
+          content: "A long note body that is the point of the call, not of the render.",
+        },
+        [{ type: "text", text: "Noted S15069/T485. ride_turn: S15069/T485." }],
+      ),
+    );
+
+    expect(rendered).toBe(
+      [
+        "- [O7] mcp__plugin_claude-mnemo_mnemo__note(S15069/T485 fix+render: the observation body is the call's output)",
+        "    Noted S15069/T485. ride_turn: S15069/T485.",
+      ].join("\n"),
+    );
+  });
+
+  test("a dispatched agent says its report is not stored with the call", () => {
+    // Rendering an empty body would assert that it returned nothing, which is
+    // false: the completion report arrives later as a turn-level notification
+    // and never becomes a second observation.
+    const rendered = render(
+      observation(
+        "Agent",
+        {
+          description: "Tear down observation queue",
+          prompt: "实现一张票 …",
+          subagent_type: "offload-worker",
+        },
+        {
+          isAsync: true,
+          status: "async_launched",
+          agentId: "a6d8456146913f590",
+          description: "Tear down observation queue",
+          prompt: "实现一张票 …",
+          outputFile: "/private/tmp/claude-501/a6d8456146913f590.output",
+        },
+      ),
+    );
+
+    expect(rendered).toStartWith("- [O7] Agent(Tear down observation queue)");
+    expect(rendered.split("\n")[1]).toContain("not stored with this call");
+    expect(rendered).not.toContain("outputFile");
+  });
+
+  test("an unknown tool renders through the generic rule", () => {
+    const rendered = render(
+      observation(
+        "ToolSearch",
+        { query: "select:Read,Edit", max_results: 3 },
+        { matches: ["Read", "Edit"], query: "select:Read,Edit", total_deferred_tools: 39 },
+      ),
+    );
+
+    expect(rendered).toStartWith("- [O7] ToolSearch(");
+    expect(rendered).toContain("select:Read,Edit");
+    expect(rendered).toContain("matches:");
+  });
+
+  test("a header cut inside its argument still closes its parenthesis", () => {
+    const rendered = render(
+      observation("Bash", { command: `echo ${"long ".repeat(80)}` }, { stdout: "" }),
+      { truncate: 60 },
+    );
+
+    expect(rendered).toMatch(/^- \[O7\] Bash\(echo (long ?)+…\)$/);
+  });
+
+  test("a legacy observation renders exactly as it did before", () => {
+    // A row recorded before the era cutoff carries no raw tool fields at all —
+    // its record is its extractor's summary — so this change is about what a
+    // NEW row looks like, not about what the archive says.
+    const legacy: FormattedObservation = {
+      id: 7,
+      title: "Added mutex",
+      content: "Guards refresh",
+    };
+
+    expect(formatObservationCollapsed(legacy)).toBe(
+      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
+    );
+    expect(formatObservationExpanded(legacy)).toBe(
+      ["- [O7] Added mutex", "  - desc: Guards refresh"].join("\n"),
+    );
+  });
+});
+
+describe("a projected call keeps the row's own record", () => {
+  test("a row that has both a title and a call shows both", () => {
+    // Not reachable from recall today — an era row has no extractor title — but
+    // the two are independent fields, and a title that exists is the row's own
+    // record, not something the header may overwrite.
+    const rendered = renderNode(
+      {
+        type: "observation",
+        value: {
+          id: 7,
+          title: "Added mutex",
+          toolName: "Bash",
+          toolInput: JSON.stringify({ command: "bun test" }),
+          toolResult: JSON.stringify({ stdout: "3 pass" }),
+        },
+      },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).toBe(
+      [
+        "- [O7] Added mutex",
+        "  - tool: 🔧 Bash(bun test)",
+        "    3 pass",
+      ].join("\n"),
+    );
+  });
+
+  test("one enormous output line is capped, not printed whole", () => {
+    // The whole-lines rule alone would hand the reader the entire line: a body
+    // always keeps its first line, and one line of stdout reaches 20,000
+    // characters in this project's own database.
+    const rendered = renderNode(
+      {
+        type: "observation",
+        value: {
+          id: 7,
+          title: "Bash",
+          toolName: "Bash",
+          toolInput: JSON.stringify({ command: "cat blob" }),
+          toolResult: JSON.stringify({ stdout: "x".repeat(20_000) }),
+        },
+      },
+      { depth: "expanded", truncate: 200 },
+    );
+
+    expect(rendered).toBe(
+      ["- [O7] Bash(cat blob)", `    ${"x".repeat(200)}…`].join("\n"),
+    );
+  });
+});
