@@ -292,15 +292,57 @@ describe("observation rows render mechanical fields on the era side", () => {
     expect(output).not.toContain("- out:");
   });
 
-  test("an era read shows tool name, input prefix and result prefix", () => {
+  test("an era read shows the tool name via the label, input prefix and result prefix", () => {
     const output = recallMemory(db, {
       id: `O${observationId}`,
       eraCutoffEpoch: CUTOFF,
     });
 
-    expect(output).toContain("- tool: 🔧 Bash");
+    // No extractor title on an era observation, so the label falls back to the
+    // tool name (spec D11) — a separate `tool:` line would just repeat the word
+    // the label already shows, so it does not appear (spec D3).
+    expect(output).toContain(`[O${observationId}] Bash`);
+    expect(output).not.toContain("- tool:");
     expect(output).toContain("- in: rg --files-with-matches watchdog src/");
     expect(output).toContain("- out: src/worker/server.ts");
+  });
+
+  test("a legacy read with an extractor title still shows the tool: line", () => {
+    // The judgment is "does the label already say this", not the era (spec
+    // D3): a legacy observation has a real extractor title, so the label and
+    // the tool name are two different words and `tool:` earns its line.
+    const legacyTurnId = db
+      .query<{ id: number }, [number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, title, content, created_at_epoch,
+           user_prompt, assistant_response, tags, files_read, files_modified
+         ) VALUES (?, 2, 'extracted', 'run the sweep again', 'swept again', ?, 'prompt',
+                   'response', '[]', '[]', '[]')
+         RETURNING id`,
+      )
+      .get(sessionId, CUTOFF - 100)!.id;
+    const legacyObservationId = createObservation(db, {
+      turnId: legacyTurnId,
+      toolName: "Bash",
+      title: "Added mutex",
+      toolInput: "rg --files-with-matches watchdog src/",
+      toolResult: "src/worker/server.ts",
+      status: "extracted",
+      createdAtEpoch: CUTOFF - 99,
+    }).id;
+
+    const output = recallMemory(db, {
+      id: `O${legacyObservationId}`,
+      eraCutoffEpoch: CUTOFF,
+    });
+
+    expect(output).toContain(`[O${legacyObservationId}] Added mutex`);
+    // A legacy row carries NO mechanical fields at all (spec D5) — not the
+    // name either. Its record is the extractor's summary, and the dedup rule
+    // never gets to weigh in because there is nothing to dedup against.
+    expect(output).not.toContain("- tool:");
+    expect(output).not.toContain("- in:");
+    expect(output).not.toContain("- out:");
   });
 
   test("the mechanical fields respect the truncate budget", () => {

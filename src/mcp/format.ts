@@ -18,15 +18,69 @@ export type RenderDepth = "collapsed" | "expanded";
 
 type RenderMode = "legacy" | "unified";
 
+/**
+ * Render-scoped "did anything get cut" flag (spec D1). Discoverability — "you
+ * can read the full text, and here is how" — is a property of the WHOLE
+ * response, not of each truncated field, so it is recorded once per response
+ * instead of re-derived per field. Created by the entry point (`recallMemory`,
+ * `timelineQuery`) and threaded down through render options; a caller that
+ * omits it simply gets no legend, which is what every direct `formatX` call
+ * outside those two entry points wants.
+ *
+ * Deliberately NOT inferred by scanning the rendered string for "...": user
+ * content (a prompt, a title) can itself contain an ellipsis, and a scan would
+ * misread that as a truncation this renderer performed.
+ */
+export interface TruncationSignal {
+  truncated: boolean;
+}
+
+export function createTruncationSignal(): TruncationSignal {
+  return { truncated: false };
+}
+
+function markTruncated(signal?: TruncationSignal): void {
+  if (signal) {
+    signal.truncated = true;
+  }
+}
+
+/**
+ * The one navigation notice for a whole rendered response (spec D1), said once
+ * instead of once per field. It covers all three things a reader needs to keep
+ * digging: truncated fields are readable in full, `[O<n>]` / `[S<n>/T<n>]` are
+ * the addresses to hand to mnemo-replay, and hidden turn counts (timeline's
+ * folded day groups) are reachable with `timeline(..., view="turns")`.
+ * Appended only when `TruncationSignal.truncated` is set — a response with
+ * nothing cut gets no legend.
+ */
+export const NAVIGATION_LEGEND =
+  'Legend: "..." marks truncated text — read it in full via mnemo-replay skill using the [O<n>]/[S<n>/T<n>] id on that line; a hidden turn count can be explored with timeline(id="S<n>", view="turns").';
+
+export function appendNavigationLegend(
+  output: string,
+  signal: TruncationSignal,
+): string {
+  if (!signal.truncated) {
+    return output;
+  }
+
+  return output ? `${output}\n\n${NAVIGATION_LEGEND}` : NAVIGATION_LEGEND;
+}
+
 export interface FormattedObservation {
   id: number;
   title: string;
   content?: string | null;
   /**
    * Mechanical fields (spec D11: the O layer renders tool name + input prefix +
-   * result prefix). In the segment era nothing summarizes an observation — the
-   * LLM obs pipeline is gone — so what a tool call DID has to come off the call
-   * itself. Left unset by the legacy path, whose output is unchanged.
+   * result prefix). In the segment era nothing summarizes an observation any
+   * more — the LLM obs pipeline is gone — so what a tool call DID has to come
+   * off the call itself. All three are era-gated together (spec D5): a legacy
+   * row's record is the extractor's summary, and giving it raw tool fields
+   * would change what an old rendering says. `toolName` is present here only
+   * for era rows, where the label has already fallen back to it — which is
+   * exactly the case the `tool:` dedup below has to catch.
    */
   toolName?: string | null;
   toolInput?: string | null;
@@ -46,6 +100,7 @@ interface ObservationFormatOptions {
   turnPromptNumber?: number;
   truncate?: number;
   truncateCap?: number;
+  signal?: TruncationSignal;
 }
 
 export interface FormattedTurn {
@@ -96,6 +151,7 @@ interface TurnFormatOptions {
   // worker can cite a turn it found via recall. Public/main rendering leaves
   // this unset and the output is byte-identical to before.
   includeDbTurnIds?: boolean;
+  signal?: TruncationSignal;
 }
 
 interface ToolCallFormatOptions {
@@ -104,6 +160,7 @@ interface ToolCallFormatOptions {
   turnPromptNumber?: number;
   truncate?: number;
   truncateCap?: number;
+  signal?: TruncationSignal;
 }
 
 interface RenderNodeOptions {
@@ -116,6 +173,7 @@ interface RenderNodeOptions {
   mode?: RenderMode;
   includeChildren?: boolean;
   includeDbTurnIds?: boolean;
+  signal?: TruncationSignal;
 }
 
 type RenderNode =
@@ -218,31 +276,14 @@ export function splitBulletField(value: string | null | undefined): string[] {
     .map((line) => line.replace(/^-+\s*/, ""));
 }
 
-function joinHint(sessionId: number | undefined, turnPromptNumber: number | undefined): string {
-  if (sessionId === undefined && turnPromptNumber === undefined) {
-    return "";
-  }
-
-  if (sessionId === undefined) {
-    return "";
-  }
-
-  if (turnPromptNumber === undefined) {
-    return `mnemo-replay skill → read S${sessionId}`;
-  }
-
-  return `mnemo-replay skill → read S${sessionId}/T${turnPromptNumber}`;
-}
 function truncateText(
   text: string,
   {
     limit,
-    mode = "legacy",
-    hintId,
+    signal,
   }: {
     limit: number;
-    mode?: RenderMode;
-    hintId?: string;
+    signal?: TruncationSignal;
   },
 ): string {
   const boundedLimit = Math.max(limit, 1);
@@ -251,23 +292,18 @@ function truncateText(
     return text;
   }
 
-  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}${
-    mode === "unified" && hintId
-      ? ` [use mnemo-replay skill → read ${hintId} for full content]`
-      : ""
-  }`;
+  markTruncated(signal);
+  return `${text.slice(0, boundedLimit)}${FIELD_TRUNCATION_SUFFIX}`;
 }
 
 function truncateFileTree(
   tree: string,
   {
     limit,
-    mode = "legacy",
-    hintId,
+    signal,
   }: {
     limit: number;
-    mode?: RenderMode;
-    hintId?: string;
+    signal?: TruncationSignal;
   },
 ): string[] {
   const boundedLimit = Math.max(limit, 1);
@@ -289,14 +325,8 @@ function truncateFileTree(
     return kept;
   }
 
-  return [
-    ...kept,
-    `... +${omitted} lines${
-      mode === "unified" && hintId
-        ? ` [use mnemo-replay skill → read ${hintId} for full content]`
-        : ""
-    }`,
-  ];
+  markTruncated(signal);
+  return [...kept, `... +${omitted} lines`];
 }
 
 function resolveExplicitTruncate(
@@ -304,29 +334,6 @@ function resolveExplicitTruncate(
   truncateCap = MAX_TRUNCATE,
 ): number {
   return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
-}
-
-function buildSessionHintId(sessionId: number): string {
-  return `S${sessionId}`;
-}
-
-function buildTurnHintId(
-  sessionId: number | undefined,
-  promptNumber: number,
-): string | undefined {
-  return sessionId === undefined ? undefined : `S${sessionId}/T${promptNumber}`;
-}
-
-function buildObservationHintId(
-  observationId: number,
-  sessionId?: number,
-  turnPromptNumber?: number,
-): string | undefined {
-  if (sessionId === undefined || turnPromptNumber === undefined) {
-    return undefined;
-  }
-
-  return `S${sessionId}/T${turnPromptNumber}/O${observationId}`;
 }
 
 function formatStatus(status?: string | null): string {
@@ -397,6 +404,7 @@ function formatSessionCollapsedWithMode(
   mode: RenderMode,
   truncate?: number,
   truncateCap?: number,
+  signal?: TruncationSignal,
 ): string {
   const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
@@ -407,11 +415,7 @@ function formatSessionCollapsedWithMode(
 
   if (session.content) {
     lines.push(
-      `  - desc: ${truncateText(session.content, {
-        limit,
-        mode,
-        hintId: buildSessionHintId(session.id),
-      })}`,
+      `  - desc: ${truncateText(session.content, { limit, signal })}`,
     );
   }
 
@@ -423,15 +427,17 @@ function formatSessionExpandedWithMode(
   mode: RenderMode,
   truncate?: number,
   truncateCap?: number,
+  signal?: TruncationSignal,
 ): string {
   const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const lines = [formatSessionCollapsedWithMode(session, mode, truncate, truncateCap)];
-  const hintId = buildSessionHintId(session.id);
+  const lines = [
+    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal),
+  ];
   const pushField = (label: string, value: string | null | undefined): void => {
     if (!value) {
       return;
     }
-    lines.push(`  - ${label}: ${truncateText(value, { limit, mode, hintId })}`);
+    lines.push(`  - ${label}: ${truncateText(value, { limit, signal })}`);
   };
   // decision/done/reference are markdown bullet lists: render a label line +
   // indented bullets (one per stored "- " line). Single-line values render as
@@ -441,9 +447,7 @@ function formatSessionExpandedWithMode(
     if (!value) {
       return;
     }
-    const items = splitBulletField(
-      truncateText(value, { limit, mode, hintId }),
-    );
+    const items = splitBulletField(truncateText(value, { limit, signal }));
     if (items.length === 0) {
       return;
     }
@@ -466,7 +470,7 @@ function formatSessionExpandedWithMode(
     pushBullets(
       lines,
       "    ",
-      session.insight.map((line) => truncateText(line, { limit, mode, hintId })),
+      session.insight.map((line) => truncateText(line, { limit, signal })),
     );
   }
 
@@ -483,11 +487,11 @@ function formatTurnLabel(
   {
     indent = "  ",
     sessionId,
-    mode = "legacy",
     depth = "collapsed",
     truncate,
     truncateCap,
     includeDbTurnIds = false,
+    signal,
   }: TurnFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
   const turnId = turn.transcriptLineStart === null
@@ -501,19 +505,10 @@ function formatTurnLabel(
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
   const limit = resolveExplicitTruncate(truncate, truncateCap);
-  const hintId = buildTurnHintId(sessionId, turn.promptNumber);
   const title =
     turn.title === null && turn.promptPreview
-      ? `"${truncateText(turn.promptPreview, {
-          limit,
-          mode,
-          hintId,
-        })}"`
-      : truncateText(rawTitle, {
-          limit,
-          mode,
-          hintId,
-        });
+      ? `"${truncateText(turn.promptPreview, { limit, signal })}"`
+      : truncateText(rawTitle, { limit, signal });
 
   // Worker-only DB-id surface: recall labels turns by prompt number, but a
   // citation needs the DB turn id (the same id remember() / `<turn id="T...">`
@@ -528,7 +523,7 @@ function formatTurnCollapsedWithMode(
   turn: FormattedTurn,
   options: TurnFormatOptions & { mode?: RenderMode } = {},
 ): string {
-  const { indent = "  ", mode = "legacy" } = options;
+  const { indent = "  ", mode = "legacy", signal } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [
     formatTurnLabel(turn, {
@@ -540,11 +535,7 @@ function formatTurnCollapsedWithMode(
 
   if (turn.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(turn.content, {
-        limit,
-        mode,
-        hintId: buildTurnHintId(options.sessionId, turn.promptNumber),
-      })}`,
+      `${indent}  - desc: ${truncateText(turn.content, { limit, signal })}`,
     );
   }
 
@@ -553,7 +544,7 @@ function formatTurnCollapsedWithMode(
 
 function formatToolCallLabel(
   toolCall: FormattedToolCall,
-  { indent = "    ", mode = "unified", depth = "collapsed", truncate, truncateCap }: ToolCallFormatOptions & {
+  { indent = "    ", truncate, truncateCap, signal }: ToolCallFormatOptions & {
     mode?: RenderMode;
     depth?: RenderDepth;
   } = {},
@@ -561,7 +552,7 @@ function formatToolCallLabel(
   const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam
-    ? ` ${truncateText(keyParam, { limit, mode })}`
+    ? ` ${truncateText(keyParam, { limit, signal })}`
     : "";
 
   return `${indent}- 🔧 ${toolCall.name}${suffix}`;
@@ -582,14 +573,12 @@ function formatToolCallExpandedWithMode(
   toolCall: FormattedToolCall,
   options: ToolCallFormatOptions & { mode?: RenderMode; depth?: RenderDepth } = {},
 ): string {
-  const { indent = "    ", mode = "unified", depth = "expanded", truncate } = options;
+  const { indent = "    ", truncate, signal } = options;
   const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
-  const hintId = buildTurnHintId(options.sessionId, options.turnPromptNumber ?? 0);
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
-      mode,
       depth: "expanded",
       truncate,
     }),
@@ -599,19 +588,14 @@ function formatToolCallExpandedWithMode(
     lines.push(
       `${detailIndent}- in: ${truncateText(JSON.stringify(toolCall.input), {
         limit,
-        mode,
-        hintId,
+        signal,
       })}`,
     );
   }
 
   if (toolCall.result) {
     lines.push(
-      `${detailIndent}- out: ${truncateText(toolCall.result, {
-        limit,
-        mode,
-        hintId,
-      })}`,
+      `${detailIndent}- out: ${truncateText(toolCall.result, { limit, signal })}`,
     );
   }
 
@@ -627,7 +611,7 @@ function renderTurnChildren(
     return "";
   }
 
-  const { indent = "  ", sessionId, mode = "legacy", truncate } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
   const childIndent = `${indent}  `;
   const childLines: string[] = [];
 
@@ -641,6 +625,7 @@ function renderTurnChildren(
           mode,
           depth: "expanded",
           truncate,
+          signal,
         }),
       );
     }
@@ -662,6 +647,7 @@ function renderTurnChildren(
           mode,
           depth: "expanded",
           truncate,
+          signal,
         }),
       );
     }
@@ -687,35 +673,21 @@ function formatTurnExpandedWithMode(
     mode = "legacy",
     depth = "expanded",
     includeChildren = mode === "unified",
+    signal,
   } = options;
   const detailIndent = `${indent}  `;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const hintId = buildTurnHintId(options.sessionId, turn.promptNumber);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
 
   if (turn.promptPreview) {
     lines.push(
-      `${detailIndent}- prompt: "${truncateText(
-        turn.promptPreview,
-        {
-          limit,
-          mode,
-          hintId,
-        },
-      )}"`,
+      `${detailIndent}- prompt: "${truncateText(turn.promptPreview, { limit, signal })}"`,
     );
   }
 
   if (turn.responsePreview) {
     lines.push(
-      `${detailIndent}- response: "${truncateText(
-        turn.responsePreview,
-        {
-          limit,
-          mode,
-          hintId,
-        },
-      )}"`,
+      `${detailIndent}- response: "${truncateText(turn.responsePreview, { limit, signal })}"`,
     );
   }
 
@@ -724,13 +696,7 @@ function formatTurnExpandedWithMode(
     pushBullets(
       lines,
       `${detailIndent}  `,
-      turn.insight.map((line) =>
-        truncateText(line, {
-          limit,
-          mode,
-          hintId,
-        }),
-      ),
+      turn.insight.map((line) => truncateText(line, { limit, signal })),
     );
   }
 
@@ -739,11 +705,7 @@ function formatTurnExpandedWithMode(
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesRead), {
-        limit,
-        mode,
-        hintId,
-      }),
+      truncateFileTree(renderFileTree(turn.filesRead), { limit, signal }),
     );
   }
 
@@ -752,11 +714,7 @@ function formatTurnExpandedWithMode(
     pushBullets(
       lines,
       `${detailIndent}  `,
-      truncateFileTree(renderFileTree(turn.filesModified), {
-        limit,
-        mode,
-        hintId,
-      }),
+      truncateFileTree(renderFileTree(turn.filesModified), { limit, signal }),
     );
   }
 
@@ -781,36 +739,33 @@ function formatObservationCollapsedWithMode(
   observation: FormattedObservation,
   options: ObservationFormatOptions & { mode?: RenderMode } = {},
 ): string {
-  const { indent = "", mode = "legacy" } = options;
+  const { indent = "", signal } = options;
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
-  const hintId = buildObservationHintId(
-    observation.id,
-    options.sessionId,
-    options.turnPromptNumber,
-  );
   const lines = [formatObservationLabel(observation, options)];
 
   if (observation.content) {
     lines.push(
-      `${indent}  - desc: ${truncateText(observation.content, {
-        limit,
-        mode,
-        hintId,
-      })}`,
+      `${indent}  - desc: ${truncateText(observation.content, { limit, signal })}`,
     );
   }
 
-  if (observation.toolName) {
+  // D3: the label above already fell back to the tool name when there was no
+  // extractor title (`title ?? toolName ?? ...`, spec D11). Printing `tool:`
+  // again in that case repeats the same word twice. What decides it is the
+  // observable fact — does the label already say this — never the era. A
+  // legacy row is not carved out here either: it never reaches this line,
+  // because a legacy view carries no mechanical fields at all (spec D5).
+  if (observation.toolName && observation.toolName !== observation.title) {
     lines.push(`${indent}  - tool: 🔧 ${observation.toolName}`);
   }
   if (observation.toolInput) {
     lines.push(
-      `${indent}  - in: ${truncateText(observation.toolInput, { limit, mode, hintId })}`,
+      `${indent}  - in: ${truncateText(observation.toolInput, { limit, signal })}`,
     );
   }
   if (observation.toolResult) {
     lines.push(
-      `${indent}  - out: ${truncateText(observation.toolResult, { limit, mode, hintId })}`,
+      `${indent}  - out: ${truncateText(observation.toolResult, { limit, signal })}`,
     );
   }
 
@@ -834,8 +789,20 @@ export function renderNode(node: RenderNode, options: RenderNodeOptions): string
   switch (node.type) {
     case "session":
       return effectiveOptions.depth === "collapsed"
-        ? formatSessionCollapsedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap)
-        : formatSessionExpandedWithMode(node.value, mode, effectiveOptions.truncate, effectiveOptions.truncateCap);
+        ? formatSessionCollapsedWithMode(
+            node.value,
+            mode,
+            effectiveOptions.truncate,
+            effectiveOptions.truncateCap,
+            effectiveOptions.signal,
+          )
+        : formatSessionExpandedWithMode(
+            node.value,
+            mode,
+            effectiveOptions.truncate,
+            effectiveOptions.truncateCap,
+            effectiveOptions.signal,
+          );
     case "turn":
       return effectiveOptions.depth === "collapsed"
         ? formatTurnCollapsedWithMode(node.value, { ...effectiveOptions, mode })

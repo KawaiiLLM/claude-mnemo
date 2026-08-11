@@ -25,6 +25,7 @@ import {
   MILESTONE_INJECTION_TOKEN_BUDGET,
   renderSessionMilestoneInjection,
 } from "../../src/hooks/milestone-injection";
+import { NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
 
 /**
@@ -396,6 +397,10 @@ describe("timeline dual-path rendering across the era boundary", () => {
  * mkdtemp on every run.
  */
 describe("a null era cutoff is byte-identical to the pre-segment renderer", () => {
+  // Updated for the recall-render-legend spec (ticket 02, D4): the day-group
+  // hint's repeated `→ timeline(...)` command is gone (said once now, in the
+  // response-level legend appended below) — this is an intentional legacy
+  // renderer change, per the comment above, so the pin moved with it.
   const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
   /tmp/project | 7 turns | 0 tool_calls
   types: 🟣1 ⚖️1 (session-wide)
@@ -407,12 +412,14 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
         body text
       T14 • G0 the user asked something → review the fix
         body text
-        … +5 more → timeline(id="S1", view="turns") @ within T2..T13
+        … +5 more @ within T2..T13
 
   shape signals (window T1-T14 = full session):
     - fastest gap:   after T10 (+1s)
     - longest gap:   after T2 (+1h 6m)
-    - broken-prompt: T10→T11, T11→T12, T12→T13, T13→T14`;
+    - broken-prompt: T10→T11, T11→T12, T12→T13, T13→T14
+
+${NAVIGATION_LEGEND}`;
 
   let db: Database;
   let sessionId: number;

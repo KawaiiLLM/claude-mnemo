@@ -312,7 +312,7 @@ describe("SessionStart milestone injection = the arc view", () => {
       expect(injected).toContain(arcTitle(promptNumber));
     }
     // Turns the budget could not fit are conserved into the day hints, not lost.
-    expect(injected).toContain('more → timeline(id="S1", view="turns")');
+    expect(injected).toMatch(/… \+\d+ more @ within T\d+\.\.T\d+/u);
     db.close();
   });
 
@@ -345,7 +345,19 @@ describe("SessionStart milestone injection = the arc view", () => {
       }
     }
 
-    expect(firstDrop).toEqual([lowest.turn.promptNumber]);
+    // The response-level legend (spec D4) is fixed overhead that appears the
+    // instant anything is hidden at all — so the very first size-decreasing
+    // budget step can force more than one removal at once (freeing one row is
+    // not enough to also cover the legend's first appearance). The ordering
+    // guarantee under test — worst-ranked goes first, an anchor never does —
+    // still holds: whatever the drop count, it must be exactly the worst-ranked
+    // PREFIX of `removable`, always led by `lowest`.
+    expect(firstDrop).not.toBeNull();
+    expect(firstDrop).toContain(lowest.turn.promptNumber);
+    const expectedPrefix = removable
+      .slice(removable.length - firstDrop!.length)
+      .map((milestone) => milestone.turn.promptNumber);
+    expect(new Set(firstDrop)).toEqual(new Set(expectedPrefix));
     db.close();
   });
 

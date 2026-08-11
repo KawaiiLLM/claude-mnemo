@@ -48,6 +48,7 @@ import {
 } from "../../src/mcp/timeline";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { timelineInputSchema } from "../../src/mcp/definitions";
+import { NAVIGATION_LEGEND } from "../../src/mcp/format";
 import {
   replaceTurnCitations,
   type CitationRelation,
@@ -4415,7 +4416,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     expect(pulledPromptNumbers(starved)).not.toContain(2);
     expect(dayHeaderLines(starved)).toHaveLength(3);
     expect(starved).toContain(
-      '… +1 more → timeline(id="S1", view="turns") @ within T2..T2',
+      '… +1 more @ within T2..T2',
     );
     // Conservation: kept + pulled + folded + hidden still equals the candidate
     // total, which is exactly what a lost orphan would have broken.
@@ -4465,7 +4466,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
     // that day with nowhere to render its `+1` — the turn vanished silently.
     expect(spinePromptNumbers(out)).toEqual([1, 3]);
     expect(out).toContain(
-      '… +1 more → timeline(id="S1", view="turns") @ within T2..T2',
+      '… +1 more @ within T2..T2',
     );
     expect(hiddenTurnTotal(out)).toBe(1);
     expect(spinePromptNumbers(out).length + hiddenTurnTotal(out)).toBe(3);
@@ -4474,9 +4475,12 @@ describe("unified row renderer — global token budget (spec §D)", () => {
   /**
    * Tight enough that only the two endpoint anchors survive, loose enough that
    * they fit once the days between them collapse — which is precisely the window
-   * that did not exist while frames were fixed cost.
+   * that did not exist while frames were fixed cost. Raised from 600 (still the
+   * same margin above the collapsed shape's actual cost) to cover the
+   * response-level legend (spec D4): it is fixed overhead the moment anything
+   * is hidden, so it counts here too, same as the header.
    */
-  const COLLAPSE_RUN_BUDGET = 600;
+  const COLLAPSE_RUN_BUDGET = 700;
 
   it("collapses a run of consecutive zero-row days into one combined line", () => {
     const db = createDatabase(":memory:");
@@ -4515,7 +4519,7 @@ describe("unified row renderer — global token budget (spec §D)", () => {
       .filter((line) => /· 0 kept · … \+\d+ more/u.test(line));
     expect(collapsed).toHaveLength(1);
     expect(collapsed[0]).toMatch(
-      /^── .+–.+ · 0 kept · … \+5 more → timeline\(id="S1", view="turns"\) @ within T2\.\.T6 ──$/u,
+      /^── .+–.+ · 0 kept · … \+5 more @ within T2\.\.T6 ──$/u,
     );
     expect(dayHeaderLines(starved)).toHaveLength(3);
     expect(spinePromptNumbers(starved).length + hiddenTurnTotal(starved)).toBe(7);
@@ -4723,7 +4727,7 @@ describe("unified row renderer — view preservation matrix (spec §D)", () => {
 
     // Hidden turns are T2, T3, T4, T6 — sparse, so the hint reports bounds.
     expect(out).toContain(
-      '… +4 more → timeline(id="S1", view="turns") @ within T2..T6',
+      '… +4 more @ within T2..T6',
     );
     expect(out).not.toContain("@ T2–T6");
   });
@@ -4760,7 +4764,7 @@ describe("unified row renderer — frozen shapes", () => {
       "      ↳ T2 🔵 G2 12-14% error",
       "      ↳ 🚫 T3 ⚖️ G1 Volume anchoring →被T5推翻",
       "   🏁 T6 🟣 G2 发布 → 0.9.0 released  ✏️package.json,plugin.json",
-      '        … +1 more → timeline(id="S1", view="turns") @ within T4..T4',
+      '        … +1 more @ within T4..T4',
     ]);
   });
 
@@ -4808,7 +4812,7 @@ describe("unified row renderer — frozen shapes", () => {
       "      T1 ⚖️ G4 调研一下三种切分方案 → Opened the slicing survey",
       "      T4 ⚖️ G3 ⟨notify⟩ → Picked cursor slicing on the survey evidence",
       "      ↳ T2 🔵 G2 Worker A: cursor slicing wins on recall",
-      '        … +1 more → timeline(id="S1", view="turns") @ within T3..T3',
+      '        … +1 more @ within T3..T3',
     ]);
   });
 
@@ -4855,5 +4859,93 @@ describe("unified row renderer — frozen shapes", () => {
     ]);
     // A legacy grade never reaches 4: it can never claim the anchor tier.
     expect(out).not.toContain("G4");
+  });
+});
+
+describe("navigation legend across folded day groups (spec D1/D4)", () => {
+  it("shows the legend exactly once even when several day groups fold", () => {
+    const db = createDatabase(":memory:");
+    const day = 86_400;
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "day0 anchor",
+        createdAtEpoch: ERA_BASE,
+      }),
+      turn({
+        promptNumber: 2,
+        type: "change",
+        significanceGrade: 1,
+        userPrompt: "噪音",
+        title: "day0 noise",
+        createdAtEpoch: ERA_BASE + 60,
+      }),
+      turn({
+        promptNumber: 3,
+        type: "decision",
+        significanceGrade: 3,
+        userPrompt: "第二天决定",
+        title: "day1 kept",
+        createdAtEpoch: ERA_BASE + day,
+      }),
+      turn({
+        promptNumber: 4,
+        type: "change",
+        significanceGrade: 1,
+        userPrompt: "噪音2",
+        title: "day1 noise",
+        createdAtEpoch: ERA_BASE + day + 60,
+      }),
+      turn({
+        promptNumber: 5,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "收尾",
+        title: "day2 anchor",
+        createdAtEpoch: ERA_BASE + 2 * day,
+      }),
+    ]);
+    const view = buildTimelineView(db, { id: "S1", view: "milestones" });
+    const out = renderTimeline(view);
+
+    // Two separate days each hide one low-grade turn (T2 under day0, T4 under
+    // day1) — two distinct hint lines, not one collapsed run.
+    const foldLines = out
+      .split("\n")
+      .filter((line) => /… \+\d+ more @ within/u.test(line));
+    expect(foldLines.length).toBe(2);
+    for (const line of foldLines) {
+      // The drill-down command and session id used to repeat on every one of
+      // these lines (spec D4); now only the count and range do.
+      expect(line).not.toContain("timeline(");
+      expect(line).not.toContain("S1");
+    }
+
+    // One legend for the whole response, said once regardless of how many
+    // day groups folded — and it is where the drill-down command now lives.
+    const legendOccurrences = out.split(NAVIGATION_LEGEND).length - 1;
+    expect(legendOccurrences).toBe(1);
+    expect(out).toContain('timeline(id="S<n>", view="turns")');
+  });
+
+  it("shows no legend when nothing is hidden", () => {
+    const db = createDatabase(":memory:");
+    seedArcSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        significanceGrade: 4,
+        userPrompt: "开题",
+        title: "only turn",
+        createdAtEpoch: ERA_BASE,
+      }),
+    ]);
+    const out = renderTimeline(buildTimelineView(db, { id: "S1", view: "milestones" }));
+
+    expect(out).not.toContain("Legend:");
+    expect(out).not.toContain(NAVIGATION_LEGEND);
   });
 });

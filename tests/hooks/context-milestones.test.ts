@@ -150,8 +150,7 @@ describe("createMilestoneContextHandler", () => {
     // The days the fitter emptied are consecutive, so they cost ONE line, and
     // that line carries the run's date range and the summed count.
     const collapsed = lines.filter((line) =>
-      /^── .+ · 0 kept · … \+\d+ more → timeline\(id="S1", view="turns"\) @ within T\d+\.\.T\d+ ──$/u
-        .test(line),
+      /^── .+ · 0 kept · … \+\d+ more @ within T\d+\.\.T\d+ ──$/u.test(line),
     );
     expect(collapsed).toHaveLength(1);
     expect(collapsed[0]).toMatch(

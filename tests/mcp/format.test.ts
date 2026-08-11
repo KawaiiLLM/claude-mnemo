@@ -4,6 +4,7 @@ import {
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
+  createTruncationSignal,
   formatObservationCollapsed,
   formatObservationExpanded,
   formatSessionCollapsed,
@@ -279,15 +280,20 @@ describe("MCP format renderer", () => {
       observationCount: 0,
     };
 
-    // unified mode surfaces the truncation hint; default truncate = 200.
+    // default truncate = 200; the signal records that this field got cut.
+    const signal = createTruncationSignal();
     const out = renderNode(
       { type: "session", value: session },
-      { depth: "expanded", mode: "unified" },
+      { depth: "expanded", mode: "unified", signal },
     );
 
     expect(out).toContain("X".repeat(50)); // first bullet survives
     expect(out).not.toContain("Z".repeat(50)); // third bullet dropped by the cap
-    expect(out).toContain("[use mnemo-replay skill");
+    // The per-field navigation sentence is gone (spec D1/D2): truncation only
+    // sets the render-scoped signal here; the response-level legend is
+    // assembled by the caller (recallMemory/timelineQuery), not this layer.
+    expect(out).not.toContain("mnemo-replay skill");
+    expect(signal.truncated).toBe(true);
   });
 
   test("a single-line bullet field renders as one bullet", () => {
@@ -459,7 +465,7 @@ describe("MCP format renderer", () => {
     );
   });
 
-  test("tree truncation includes replay hints only in unified mode when hintId exists", () => {
+  test("tree truncation sets the signal without a per-line hint, in either mode", () => {
     const turn: FormattedTurn = {
       id: 16,
       promptNumber: 16,
@@ -474,14 +480,19 @@ describe("MCP format renderer", () => {
       ],
     };
 
+    const signal = createTruncationSignal();
     const unified = renderNode(
       { type: "turn", value: turn },
-      { depth: "expanded", truncate: 40, sessionId: 142 },
+      { depth: "expanded", truncate: 40, sessionId: 142, signal },
     );
+    // Legacy mode never renders files_read at all (unified-only field), so it
+    // has nothing to truncate here — unrelated to the hint removal itself.
     const legacy = formatTurnExpanded(turn, { truncate: 40 });
 
-    expect(unified).toContain("[use mnemo-replay skill");
-    expect(legacy).not.toContain("[use mnemo-replay skill");
+    expect(unified).toContain("... +4 lines");
+    expect(unified).not.toContain("mnemo-replay skill");
+    expect(legacy).not.toContain("mnemo-replay skill");
+    expect(signal.truncated).toBe(true);
   });
 
   test("defaults truncate to 200 when unspecified", () => {
@@ -503,7 +514,7 @@ describe("MCP format renderer", () => {
     expect(rendered).not.toContain("x".repeat(201));
   });
 
-  test("shows mnemo-replay hint only for unified-mode truncation", () => {
+  test("sets the truncation signal only when a field actually got cut", () => {
     const turn: FormattedTurn = {
       id: 12,
       promptNumber: 12,
@@ -522,17 +533,22 @@ describe("MCP format renderer", () => {
       status: "extracted",
     };
 
+    const shortSignal = createTruncationSignal();
     const short = renderNode(
       { type: "turn", value: { ...turn, promptPreview: "short text" } },
-      { depth: "expanded", truncate: 200, sessionId: 142 },
+      { depth: "expanded", truncate: 200, sessionId: 142, signal: shortSignal },
     );
+    const longSignal = createTruncationSignal();
     const long = renderNode(
       { type: "turn", value: turn },
-      { depth: "expanded", truncate: 200, sessionId: 142 },
+      { depth: "expanded", truncate: 200, sessionId: 142, signal: longSignal },
     );
 
-    expect(short).not.toContain("[use ");
-    expect(long).toContain("[use mnemo-replay skill → read S142/T12 for full content]");
+    expect(short).not.toContain("...");
+    expect(shortSignal.truncated).toBe(false);
+    expect(long).toContain(`${"y".repeat(200)}...`);
+    expect(long).not.toContain("mnemo-replay skill");
+    expect(longSignal.truncated).toBe(true);
     expect(
       formatTurnCollapsed(anchoredTurn, { sessionId: 17 }),
     ).toContain("[S17][T13:L42] Anchored turn");

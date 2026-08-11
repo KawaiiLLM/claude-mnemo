@@ -666,9 +666,13 @@ describe("handleContextHook", () => {
     expect(recentOutput).toContain(
       "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long...",
     );
-    expect(recentOutput).toContain(
-      "[use mnemo-replay skill → read S1 for full content]",
-    );
+    // The per-field "[use mnemo-replay skill...]" hint is gone (spec D1/D2):
+    // the ellipsis above is still the truncation marker, but the navigation
+    // sentence is no longer repeated per field. This injection surface does
+    // not call recallMemory/timelineQuery, so it does not gain the
+    // response-level legend either — that stays scoped to those two entry
+    // points (spec's Testing Decisions).
+    expect(recentOutput).not.toContain("mnemo-replay skill");
     expect(recentOutput).not.toContain("Recent turn 1");
     expect(recentOutput).not.toContain("Recent turn 2");
     expect(recentOutput).not.toContain("Recent turn 6");

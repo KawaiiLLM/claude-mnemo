@@ -18,6 +18,7 @@ import { resolveSessionTranscriptPath } from "../shared/paths";
 import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 
+import { appendNavigationLegend } from "./format";
 import {
   legacyEraHeader,
   renderSegmentSpineBlock,
@@ -2665,6 +2666,14 @@ interface MilestoneBodyModel {
   /** Body weight in tenths, including the `\n` that joins each line. */
   weightTenths(): number;
   lines(): string[];
+  /**
+   * Whether any day section hides a turn count — a structural read of
+   * `hiddenCount` (spec D4), never a scan of the rendered `lines()` text, so a
+   * user-authored "…" in a title cannot be mistaken for one of these. Decides
+   * whether the response-level legend (`appendNavigationLegend`) is worth
+   * appending.
+   */
+  hasHiddenTurns(): boolean;
 }
 
 function createMilestoneBodyModel(
@@ -2804,10 +2813,14 @@ function createMilestoneBodyModel(
   /**
    * The pointer every hidden-turn count carries. `within` and not a dash range
    * on purpose: the hidden set is sparse, so these are its min and max, not the
-   * ends of a contiguous run.
+   * ends of a contiguous run. The drill-down command and session id used to
+   * repeat here on every occurrence (spec D4) — the session id is already in
+   * the header above, the command is now said once in the response-level
+   * legend (`appendNavigationLegend`), and only the count and range are a
+   * per-occurrence variable worth repeating.
    */
   function hiddenHint(hidden: number, promptLo: number, promptHi: number): string {
-    return `… +${hidden} more → timeline(id="S${view.session.id}", view="turns") @ within T${promptLo}..T${promptHi}`;
+    return `… +${hidden} more @ within T${promptLo}..T${promptHi}`;
   }
 
   /** The frame of a day that still shows rows: header, plus its hint if it hides anything. */
@@ -3061,7 +3074,20 @@ function createMilestoneBodyModel(
       }
       return out;
     },
+    hasHiddenTurns(): boolean {
+      // Every hidden turn is recorded on SOME state's `hiddenCount` at the
+      // moment it is hidden (initial overflow, a budget removal, or an
+      // orphaned antecedent) — folding a state into a run only moves that
+      // count onto the run, it never clears the state's own tally.
+      return orderedStates.some((state) => state.hiddenCount > 0);
+    },
   };
+}
+
+/** The arc body's lines plus whether any day section hides a turn count. */
+interface MilestoneBodyResult {
+  lines: string[];
+  hiddenTurns: boolean;
 }
 
 /**
@@ -3069,11 +3095,12 @@ function createMilestoneBodyModel(
  * `createMilestoneBodyModel` is the single implementation — the budget path is
  * the same model with degradation steps applied.
  */
-function renderMilestoneBody(view: TimelineView, titleCap: number): string[] {
+function renderMilestoneBody(view: TimelineView, titleCap: number): MilestoneBodyResult {
   if (view.milestoneDayGroups.length === 0) {
-    return [];
+    return { lines: [], hiddenTurns: false };
   }
-  return createMilestoneBodyModel(view, titleCap).lines();
+  const body = createMilestoneBodyModel(view, titleCap);
+  return { lines: body.lines(), hiddenTurns: body.hasHiddenTurns() };
 }
 
 /**
@@ -3106,27 +3133,39 @@ function milestoneDegradationOrder(view: TimelineView): KeptMilestone[] {
  * the token cost of the WHOLE assembled output — header and signal blocks
  * included. The stopping point is therefore identical to re-measuring the full
  * output on every step, at a fraction of the work.
+ *
+ * `measure` also takes the model's CURRENT `hasHiddenTurns()` so the
+ * expensive check prices the response-level legend the way it will actually
+ * be assembled (spec D4): the legend is appended outside this function's
+ * returned `lines`, so a check that ignored it could accept a candidate that
+ * overruns once the caller adds it. The cheap tenths pre-check stays
+ * legend-blind — it only ever gates the expensive one, never substitutes for
+ * it, so under-pricing there costs a few redundant steps, not correctness.
  */
 function fitMilestoneBodyToBudget(
   view: TimelineView,
   titleCap: number,
   tokenBudget: number,
   fixedWeightTenths: number,
-  measure: (bodyLines: string[]) => number,
-): string[] {
+  measure: (bodyLines: string[], hiddenTurns: boolean) => number,
+): MilestoneBodyResult {
   const body = createMilestoneBodyModel(view, titleCap);
   const fits = (): boolean =>
     tokensFromWeightTenths(fixedWeightTenths + body.weightTenths()) <= tokenBudget &&
-    measure(body.lines()) <= tokenBudget;
+    measure(body.lines(), body.hasHiddenTurns()) <= tokenBudget;
+  const result = (): MilestoneBodyResult => ({
+    lines: body.lines(),
+    hiddenTurns: body.hasHiddenTurns(),
+  });
 
   if (fits()) {
-    return body.lines();
+    return result();
   }
 
   for (const milestone of milestoneDegradationOrder(view)) {
     body.disableDesc(milestone);
     if (fits()) {
-      return body.lines();
+      return result();
     }
   }
 
@@ -3136,11 +3175,11 @@ function fitMilestoneBodyToBudget(
     }
     body.removeUnit(milestone);
     if (fits()) {
-      return body.lines();
+      return result();
     }
   }
 
-  return [...body.lines(), MILESTONE_OVER_BUDGET_NOTE];
+  return { lines: [...body.lines(), MILESTONE_OVER_BUDGET_NOTE], hiddenTurns: body.hasHiddenTurns() };
 }
 function renderTurnRows(
   view: TimelineView,
@@ -3540,15 +3579,28 @@ export function renderTimeline(
   // Milestones. A budget is measured against the WHOLE assembled output, so the
   // header and signal blocks count against it too; without one (every MCP view)
   // the body renders in full and pagination is the only sizing mechanism.
+  //
+  // The response-level legend (spec D4, `appendNavigationLegend`) is appended
+  // to `assemble`'s result rather than folded inside it: whether it is needed
+  // is a fact about the body (did folding a day group hide a turn), so
+  // `assemble` stays a pure function of `bodyLines` and the legend is layered
+  // on top by every caller that also needs it counted — see the budgeted path
+  // below, where the fitter's `measure` does exactly that.
   if (options.tokenBudget === undefined) {
-    return assemble(renderMilestoneBody(view, titleCap));
+    const body = renderMilestoneBody(view, titleCap);
+    return appendNavigationLegend(assemble(body.lines), {
+      truncated: body.hiddenTurns,
+    });
   }
 
   // The spine is the era's default view, so it is served first: it sheds its own
   // lowest-value rows only until it fits ALONE, and whatever is left of the
   // budget is what the legacy body's existing fitter degrades into. Both stages
   // measure with `estimateDiaryTokens` over the whole assembled output — one
-  // budget, one measure, no second budget system.
+  // budget, one measure, no second budget system. The legend's own cost is not
+  // yet knowable at this stage (it depends on the body the fitter has not run
+  // yet), so this measurement stays legend-blind; the body fitter below is the
+  // one that has to get it right, since ITS output is what the legend attaches to.
   if (spineLines.length > 0) {
     shedSpineToBudget({
       view,
@@ -3562,16 +3614,23 @@ export function renderTimeline(
   }
 
   // Everything outside the body is fixed, so its weight is measured once and the
-  // fitter only has to price what it changes.
-  return assemble(
-    fitMilestoneBodyToBudget(
-      view,
-      titleCap,
-      options.tokenBudget,
-      textWeightTenths(assemble([])),
-      (bodyLines) => estimateDiaryTokens(assemble(bodyLines)),
-    ),
+  // fitter only has to price what it changes. The fitter's `measure` folds the
+  // legend into the expensive check (not the cheap tenths pre-check) so the
+  // candidate it settles on is the one whose ASSEMBLED-PLUS-LEGEND size is what
+  // actually respects `tokenBudget`.
+  const body = fitMilestoneBodyToBudget(
+    view,
+    titleCap,
+    options.tokenBudget,
+    textWeightTenths(assemble([])),
+    (bodyLines, hiddenTurns) =>
+      estimateDiaryTokens(
+        appendNavigationLegend(assemble(bodyLines), { truncated: hiddenTurns }),
+      ),
   );
+  return appendNavigationLegend(assemble(body.lines), {
+    truncated: body.hiddenTurns,
+  });
 }
 
 interface ShedSpineOptions {

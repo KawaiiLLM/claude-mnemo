@@ -24,11 +24,14 @@ import { isSegmentEra } from "../segment-era";
 import { resolveSessionTranscriptPath } from "../shared/paths";
 
 import {
+  appendNavigationLegend,
+  createTruncationSignal,
   DEFAULT_TRUNCATE,
   renderNode,
   type FormattedObservation,
   type FormattedSession,
   type FormattedTurn,
+  type TruncationSignal,
 } from "./format";
 import { renderSegmentHeaderLines } from "./segment-spine";
 import { expandNumericSelector } from "./selectors";
@@ -594,6 +597,7 @@ function renderSession(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const view = depth === "expanded"
     ? buildSessionView(db, session, eraCutoffEpoch)
@@ -609,6 +613,7 @@ function renderSession(
         truncate,
         includeDbTurnIds,
         truncateCap,
+        signal,
       },
     ),
   ];
@@ -637,6 +642,7 @@ function renderSession(
         truncate,
         includeDbTurnIds,
         truncateCap,
+        signal,
       },
     );
     lines.push(turnLines);
@@ -657,6 +663,7 @@ function renderTurnScope(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, TurnRecord[]>();
@@ -681,7 +688,7 @@ function renderTurnScope(
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
       ),
     );
 
@@ -698,6 +705,7 @@ function renderTurnScope(
             truncate,
             includeDbTurnIds,
             truncateCap,
+            signal,
           },
         ),
       );
@@ -716,6 +724,7 @@ function renderObservationScope(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const lines: string[] = [];
   const grouped = new Map<number, Map<number, number[]>>();
@@ -750,6 +759,7 @@ function renderObservationScope(
             mode: "unified",
             truncate,
             truncateCap,
+            signal,
           },
         ),
       );
@@ -773,7 +783,7 @@ function renderObservationScope(
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
       ),
     );
     const turnMap = grouped.get(session.id) ?? new Map<number, number[]>();
@@ -793,6 +803,7 @@ function renderObservationScope(
             truncate,
             includeDbTurnIds,
             truncateCap,
+            signal,
           },
         ),
       );
@@ -822,6 +833,7 @@ function renderObservationScope(
               turnPromptNumber: turn.promptNumber,
               truncate,
               truncateCap,
+              signal,
             },
           ),
         );
@@ -837,6 +849,12 @@ function renderObservationScope(
  * (spec D11): no pipeline summarizes an observation any more, so the tool name
  * and the head of its input and result ARE the row's content. Pre-era rows are
  * untouched — their summary is what they have.
+ *
+ * `toolName` itself is forwarded on BOTH sides (spec D3): the label/tool-name
+ * dedup in format.ts needs to know the tool name regardless of era to decide
+ * whether a `tool:` line would just repeat the label above it. It is a name,
+ * not a raw call payload, so D5's "no raw tool fields on a legacy row" does not
+ * cover it — only `toolInput`/`toolResult` (the actual raw fields) stay gated.
  *
  * The era is decided by `ownerCreatedAtEpoch`, the TURN's timestamp, never the
  * observation's own. An observation has no semantics of its own: whether
@@ -890,6 +908,7 @@ function renderSessionDetail(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const session = getSession(db, sessionId);
   return session
@@ -902,6 +921,7 @@ function renderSessionDetail(
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       )
     : "Session not found.";
 }
@@ -913,6 +933,7 @@ function renderObservationDetail(
   truncate?: number,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const observation = getObservation(db, observationId);
   // Every listing route already drops excluded rows, so direct addressing must
@@ -930,6 +951,7 @@ function renderObservationDetail(
       mode: "unified",
       truncate,
       truncateCap,
+      signal,
     },
   );
 }
@@ -1021,6 +1043,7 @@ function renderSegmentDetail(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const segment = getSegment(db, segmentId);
   if (!segment) {
@@ -1058,6 +1081,7 @@ function renderSegmentDetail(
         truncate,
         includeDbTurnIds,
         truncateCap,
+        signal,
       },
     );
     // An anchor keeps the ordinary turn row and swaps its bullet for `⚓<n>`,
@@ -1158,6 +1182,7 @@ function renderGroupedSearchResults(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   // Segment hits lead: a `tag:` query returns the chapter AND its member turns
   // (spec user story 16), and the chapter is the index into the rest.
@@ -1227,6 +1252,7 @@ function renderGroupedSearchResults(
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       );
     }
 
@@ -1238,7 +1264,7 @@ function renderGroupedSearchResults(
             buildSessionSummary(db, session.id) ??
             buildSessionView(db, session, eraCutoffEpoch),
         },
-        { depth: "collapsed", mode: "unified", truncate, truncateCap },
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal },
       ),
     ];
     const turns = getTurnsForSession(db, session.id).filter(
@@ -1263,6 +1289,7 @@ function renderGroupedSearchResults(
             truncate,
             includeDbTurnIds,
             truncateCap,
+            signal,
           },
         ),
       );
@@ -1290,6 +1317,7 @@ function renderGroupedSearchResults(
               turnPromptNumber: turn.promptNumber,
               truncate,
               truncateCap,
+              signal,
             },
           ),
         );
@@ -1314,6 +1342,7 @@ function renderRoutedId(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
@@ -1334,6 +1363,7 @@ function renderRoutedId(
             includeDbTurnIds,
             truncateCap,
             eraCutoffEpoch,
+            signal,
           ),
         )
         .join("\n"),
@@ -1361,6 +1391,7 @@ function renderRoutedId(
             includeDbTurnIds,
             truncateCap,
             eraCutoffEpoch,
+            signal,
           ),
         )
         .join("\n"),
@@ -1389,6 +1420,7 @@ function renderRoutedId(
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       ),
       paged.pageCount,
     );
@@ -1405,6 +1437,7 @@ function renderRoutedId(
           includeDbTurnIds,
           truncateCap,
           eraCutoffEpoch,
+          signal,
         )
       : "Turn not found.";
   }
@@ -1443,6 +1476,7 @@ function renderRoutedId(
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       ),
       paged.pageCount,
     );
@@ -1480,6 +1514,7 @@ function renderRoutedId(
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       ),
       paged.pageCount,
     );
@@ -1493,6 +1528,7 @@ function renderRoutedId(
       truncate,
       truncateCap,
       eraCutoffEpoch,
+      signal,
     );
   }
 
@@ -1511,6 +1547,7 @@ function renderSessionList(
   includeDbTurnIds?: boolean,
   truncateCap?: number,
   eraCutoffEpoch: number | null = null,
+  signal?: TruncationSignal,
 ): string {
   const paged = paginateItems(
     listSessionIds(db, undefined, after, before),
@@ -1530,6 +1567,7 @@ function renderSessionList(
           includeDbTurnIds,
           truncateCap,
           eraCutoffEpoch,
+          signal,
         ),
       )
       .join("\n"),
@@ -1562,7 +1600,19 @@ function searchQueryResults(
   }).filter((r) => r.layer === "segment" || r.sessionId !== null);
 }
 
+// Response-scoped: one signal per call, threaded through every render helper
+// below it, so "was anything truncated" is a fact about the WHOLE response
+// (spec D1) rather than something each render site has to decide on its own.
 export function recallMemory(db: Database, input: RecallInput): string {
+  const signal = createTruncationSignal();
+  return appendNavigationLegend(recallMemoryBody(db, input, signal), signal);
+}
+
+function recallMemoryBody(
+  db: Database,
+  input: RecallInput,
+  signal: TruncationSignal,
+): string {
   const depth = input.depth ?? "collapsed";
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
@@ -1594,6 +1644,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       includeDbTurnIds,
       truncateCap,
       eraCutoffEpoch,
+      signal,
     );
   }
 
@@ -1640,6 +1691,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
+        signal,
       ),
       paged.pageCount,
     );
@@ -1656,5 +1708,6 @@ export function recallMemory(db: Database, input: RecallInput): string {
     includeDbTurnIds,
     truncateCap,
     eraCutoffEpoch,
+    signal,
   );
 }

@@ -7,6 +7,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { getSessionByContentId, upsertSession } from "../../src/db/sessions";
 import { getTurn } from "../../src/db/turns";
 import { recallInputSchema } from "../../src/mcp/definitions";
+import { NAVIGATION_LEGEND } from "../../src/mcp/format";
 import { recallMemory } from "../../src/mcp/recall";
 import { resolveTranscriptPath } from "../../src/shared/paths";
 import { saveTurnFixture as saveTurn } from "../support/turn-fixtures";
@@ -996,5 +997,111 @@ describe("fork-lineage breadcrumb in recall", () => {
     expect(output).not.toContain("Parent turn title");
     // Child's own turn must appear
     expect(output).toContain("Child turn title");
+  });
+});
+
+describe("recall navigation legend (spec D1)", () => {
+  let db: Database;
+  const ERA = 500_000;
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("many truncated fields in one expanded render show the legend exactly once", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "legend-many-fields",
+      project: "claude-mnemo",
+      title: "Legend coverage",
+      content: "s".repeat(500),
+      insight: null,
+      createdAtEpoch: ERA,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "p".repeat(500),
+      assistantResponse: "r".repeat(500),
+      title: "Long turn",
+      content: "c".repeat(500),
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: ERA + 10,
+      updatedAtEpoch: ERA + 10,
+      // Era-side observations (no title): each contributes two more
+      // truncatable fields (in/out). Only the first 5 render (DEFAULT_PREVIEW_
+      // COUNT), which is still enough to prove the legend does not scale with
+      // field count.
+      observations: Array.from({ length: 6 }, (_, index) => ({
+        toolName: "Bash",
+        toolInput: `i${index}-`.repeat(100),
+        toolResult: `o${index}-`.repeat(100),
+      })),
+    });
+
+    const output = recallMemory(db, {
+      id: `S${session.id}/T1`,
+      depth: "expanded",
+      eraCutoffEpoch: ERA,
+    });
+
+    // Several distinct fields actually got cut — session desc, turn prompt/
+    // response/content — each still carrying the plain ellipsis marker.
+    expect(output).toContain(`${"s".repeat(200)}...`);
+    expect(output).toContain(`${"p".repeat(200)}...`);
+    expect(output).toContain(`${"r".repeat(200)}...`);
+    expect(output).toContain(`${"c".repeat(200)}...`);
+
+    // One navigation sentence for the WHOLE response, not one per field — the
+    // old scheme repeated it once per truncated field (75 times on a real
+    // 49-observation turn, per the spec's measurement).
+    const legendOccurrences = output.split(NAVIGATION_LEGEND).length - 1;
+    expect(legendOccurrences).toBe(1);
+  });
+
+  test("no legend when nothing in the response was truncated", () => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    const session = upsertSession(db, {
+      contentSessionId: "legend-nothing-truncated",
+      project: "claude-mnemo",
+      title: "Short and sweet",
+      content: "short description",
+      insight: null,
+      createdAtEpoch: ERA,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    });
+
+    saveTurn(db, {
+      sessionId: session.id,
+      promptNumber: 1,
+      userPrompt: "short prompt",
+      assistantResponse: "short response",
+      title: "Short turn",
+      content: "short content",
+      insight: null,
+      filesRead: [],
+      filesModified: [],
+      createdAtEpoch: ERA + 10,
+      updatedAtEpoch: ERA + 10,
+      observations: [{ title: "Small observation", content: "small" }],
+    });
+
+    const output = recallMemory(db, {
+      id: `S${session.id}/T1`,
+      depth: "expanded",
+    });
+
+    expect(output).not.toContain("Legend:");
+    expect(output).not.toContain(NAVIGATION_LEGEND);
   });
 });
