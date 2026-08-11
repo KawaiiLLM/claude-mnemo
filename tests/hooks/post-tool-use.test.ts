@@ -158,6 +158,31 @@ describe("handlePostToolUseHook", () => {
     });
   });
 
+  test("indexes the observation for search at capture, with nothing to summarize it", async () => {
+    // The hook used to carry its own INSERT, so the row was written and never
+    // indexed; the search index was filled LATER, by the extraction agent's
+    // writeback. Retiring that agent left the observation layer unsearchable
+    // rather than merely stopping at the read filter, and nothing said so.
+    const handler = createPostToolUseHandler({
+      db,
+      now: () => 500,
+      workerClientDeps: { fetchImpl: mock(async () => new Response(null, { status: 200 })) },
+      workerEnv: {},
+    });
+
+    await handler(createInput());
+
+    const indexed = db
+      .query<{ sourceId: number; prompt: string }, []>(
+        `SELECT source_id AS sourceId, prompt
+         FROM memory_fts WHERE layer = 'observation'`,
+      )
+      .all();
+
+    expect(indexed).toHaveLength(1);
+    expect(indexed[0]!.prompt).toContain("src/auth.ts");
+  });
+
   test("runs foreground writes through the bounded hook transaction runner", async () => {
     const transactionRunner = mock((runnerDb: Database, fn: () => unknown) => {
       expect(runnerDb).toBe(db);

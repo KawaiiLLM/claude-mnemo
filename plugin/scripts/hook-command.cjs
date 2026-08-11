@@ -3078,7 +3078,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.6-mso8aqc4" : "dev";
+var BUILD_ID = true ? "0.9.6-mso90172" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -19359,6 +19359,40 @@ function mapObservationRow(row) {
   }
   return row;
 }
+function createObservation(db, input) {
+  const inserted = db.query(
+    `
+        INSERT INTO observations (
+          turn_id,
+          tool_name,
+          tool_input,
+          tool_result,
+          status,
+          title,
+          content,
+          excluded_from_extraction,
+          created_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING ${OBSERVATION_COLUMNS}
+      `
+  ).get(
+    input.turnId,
+    input.toolName ?? null,
+    input.toolInput ?? null,
+    input.toolResult ?? null,
+    input.status ?? "pending",
+    input.title ?? null,
+    input.content ?? null,
+    input.excludedFromExtraction ? 1 : 0,
+    input.createdAtEpoch
+  );
+  const observation = mapObservationRow(inserted);
+  if (!observation) {
+    throw new Error("Failed to create observation.");
+  }
+  indexObservationToFTS(db, observation);
+  return observation;
+}
 function getExtractableObservationsForTurn(db, turnId) {
   return db.query(
     `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
@@ -19805,29 +19839,14 @@ function createPostToolUseHandler(dependencies) {
       if (latestTurn.status !== "active" && latestTurn.status !== "provisional") {
         return { outcome: "terminal-root-turn", turnId: latestTurn.id };
       }
-      const inserted = dependencies.db.query(
-        `
-            INSERT INTO observations (
-              turn_id,
-              tool_name,
-              tool_input,
-              tool_result,
-              excluded_from_extraction,
-              created_at_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            RETURNING id
-          `
-      ).get(
-        latestTurn.id,
+      const inserted = createObservation(dependencies.db, {
+        turnId: latestTurn.id,
         toolName,
         toolInput,
         toolResult,
-        excludedFromExtraction ? 1 : 0,
+        excludedFromExtraction,
         createdAtEpoch
-      );
-      if (!inserted) {
-        throw new Error("Failed to enqueue observation for worker processing.");
-      }
+      });
       try {
         captureConsultedMemories(dependencies.db, latestTurn.id, {
           toolName,

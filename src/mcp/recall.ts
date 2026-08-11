@@ -1542,6 +1542,7 @@ function searchQueryResults(
   filters: QueryFilters,
   after?: number,
   before?: number,
+  eraCutoffEpoch: number | null = null,
 ): SearchMemoryResult[] {
   return searchMemory(db, {
     query: filters.text,
@@ -1552,6 +1553,9 @@ function searchQueryResults(
     sessionId: filters.session,
     after,
     before,
+    // Only the observation layer reads this, and only to decide whether a
+    // status still means anything (db/search.ts).
+    eraCutoffEpoch,
     // A segment is not bound to a session (spec D6), so it legitimately carries
     // a null `sessionId`; only session-layer rows that lost their session are
     // dropped here.
@@ -1622,6 +1626,7 @@ export function recallMemory(db: Database, input: RecallInput): string {
       filters,
       timeRange.after,
       timeRange.before,
+      input.eraCutoffEpoch ?? null,
     );
     const paged = paginateItems(results, page, pageSize);
 

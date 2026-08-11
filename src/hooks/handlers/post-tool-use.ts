@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { captureConsultedMemories } from "../../db/consulted-memories";
 import { runHookWriteTransaction } from "../../db/database";
 import { reconcileNoteDebt } from "../../db/note-debt";
+import { createObservation } from "../../db/observations";
 import { getSessionByContentId } from "../../db/sessions";
 import { resolveEraCutoff } from "../../db/era";
 import type { TurnStatus } from "../../db/turns";
@@ -128,42 +129,23 @@ export function createPostToolUseHandler(
         return { outcome: "terminal-root-turn" as const, turnId: latestTurn.id };
       }
 
-      const inserted = dependencies.db
-        .query<
-          { id: number },
-          [
-            number,
-            string,
-            string | null,
-            string | null,
-            number,
-            number,
-          ]
-        >(
-          `
-            INSERT INTO observations (
-              turn_id,
-              tool_name,
-              tool_input,
-              tool_result,
-              excluded_from_extraction,
-              created_at_epoch
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            RETURNING id
-          `,
-        )
-        .get(
-          latestTurn.id,
-          toolName,
-          toolInput,
-          toolResult,
-          excludedFromExtraction ? 1 : 0,
-          createdAtEpoch,
-        );
-
-      if (!inserted) {
-        throw new Error("Failed to enqueue observation for worker processing.");
-      }
+      // Through `createObservation` rather than a second INSERT of its own, so
+      // that capture goes through the writer that also indexes. This hook had
+      // its own copy of the statement, which meant the row was written and
+      // never indexed: the observation layer's search index was in fact being
+      // filled later, by the extraction agent's writeback marking each row
+      // `extracted`/`skipped`. Ticket 15 deleted that agent, and with it the
+      // only thing that had ever put an observation into `memory_fts` — so the
+      // layer stopped being searchable at all, rather than merely stopping at
+      // the read filter.
+      const inserted = createObservation(dependencies.db, {
+        turnId: latestTurn.id,
+        toolName,
+        toolInput,
+        toolResult,
+        excludedFromExtraction,
+        createdAtEpoch,
+      });
 
       // Mechanical retrieval provenance (spec D4/D7): which stored records this
       // turn's recall/replay calls actually reached. Wrapped like the note-debt

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
+import { createObservation } from "../../src/db/observations";
 import { initializeSchema } from "../../src/db/schema";
 import { reindexTurnFromDb, searchMemory } from "../../src/db/search";
 import { upsertSession } from "../../src/db/sessions";
@@ -135,5 +136,85 @@ describe("recall turn hits are filtered by render status", () => {
       )
       .get(turnId);
     expect(indexed?.prompt).toBe("zebrafish prompt");
+  });
+});
+
+/**
+ * The observation layer's half of the same rule, and why it needed an era.
+ *
+ * `skipped` changed meaning at the cutover. Before it, the extraction agent read
+ * each observation and skipping it was a JUDGEMENT — those rows are noise a
+ * reader should not be shown. After it nothing summarizes an observation at all,
+ * so every one of them ends `skipped` on completion and the status says nothing
+ * about worth; keeping the old filter would have hidden the entire layer.
+ */
+describe("recall observation hits read status per era", () => {
+  const CUTOFF = 1_000;
+  let db: Database;
+  let sessionId: number;
+
+  function captureObservation(
+    promptNumber: number,
+    createdAtEpoch: number,
+    filePath: string,
+  ): number {
+    const turnId = db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, ?, 'extracted', 'prompt', ?)
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, createdAtEpoch)!.id;
+    return createObservation(db, {
+      turnId,
+      toolName: "Read",
+      toolInput: JSON.stringify({ file_path: filePath }),
+      status: "skipped",
+      createdAtEpoch,
+    }).id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-observation-era",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      nextSteps: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("an era observation is a hit on its own captured text; a legacy one is not", () => {
+    const legacy = captureObservation(1, CUTOFF - 1, "src/pufferfish-legacy.ts");
+    const era = captureObservation(2, CUTOFF, "src/pufferfish-era.ts");
+
+    const hits = searchMemory(db, {
+      scope: "observations",
+      query: "pufferfish",
+      eraCutoffEpoch: CUTOFF,
+    }).map((hit) => hit.observationId);
+
+    expect(hits).toEqual([era]);
+    expect(hits).not.toContain(legacy);
+  });
+
+  test("with no era, the legacy rule stands and skipped stays out", () => {
+    captureObservation(1, CUTOFF - 1, "src/pufferfish-legacy.ts");
+    captureObservation(2, CUTOFF, "src/pufferfish-era.ts");
+
+    expect(
+      searchMemory(db, { scope: "observations", query: "pufferfish" }),
+    ).toEqual([]);
   });
 });

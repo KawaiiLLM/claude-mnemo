@@ -93,6 +93,33 @@ export interface SearchMemoryOptions {
   after?: number;
   before?: number;
   limit?: number;
+  /** See `buildObservationStatusClause`. */
+  eraCutoffEpoch?: number | null;
+}
+
+/**
+ * Which observations a search is allowed to return, per era.
+ *
+ * Legacy: `extracted` only. There, `skipped` was a JUDGEMENT — the extraction
+ * agent read the row and decided it was noise — so the ~70k skipped rows are
+ * exactly the ones a reader should not be shown.
+ *
+ * Era: any status. The same word means something else now. Nothing summarizes
+ * an observation any more, so every row ends `skipped` on completion and the
+ * status carries no opinion about worth at all; filtering on it would hide the
+ * whole layer. What makes an era observation findable is its own captured tool
+ * input and output, indexed at capture (db/observations.ts).
+ */
+function buildObservationStatusClause(eraCutoffEpoch: number | null | undefined): {
+  clause: string;
+  params: number[];
+} {
+  return eraCutoffEpoch === null || eraCutoffEpoch === undefined
+    ? { clause: "o.status = 'extracted'", params: [] }
+    : {
+        clause: "(o.status = 'extracted' OR t.created_at_epoch >= ?)",
+        params: [eraCutoffEpoch],
+      };
 }
 
 export interface SearchMemoryResult {
@@ -662,6 +689,7 @@ function queryRecentObservations(
   options: SearchMemoryOptions,
 ): SearchMemoryResult[] {
   const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
   return queryRows(
     db,
     applyLimit(`
@@ -683,10 +711,10 @@ function queryRecentObservations(
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
-      ${combineClauses(["o.status = 'extracted'", projectClause.clause])}
+      ${combineClauses([statusClause.clause, projectClause.clause])}
       ORDER BY o.created_at_epoch DESC
     `, options.limit),
-    withLimit([...projectClause.params], options.limit),
+    withLimit([...statusClause.params, ...projectClause.params], options.limit),
   );
 }
 
@@ -1005,12 +1033,13 @@ function queryObservationsByScope(
   }
 
   const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
   const dateClause = buildDateClause("o.created_at_epoch", options);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
 
   if (query) {
-    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
-    const params: Array<string | number> = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
+    const whereClauses = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params: Array<string | number> = [query, ...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
     return queryRows(
       db,
@@ -1041,8 +1070,8 @@ function queryObservationsByScope(
     );
   }
 
-  const whereClauses = ["o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
-  const params: Array<string | number> = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
+  const whereClauses = [statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params: Array<string | number> = [...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
 
   return queryRows(
     db,

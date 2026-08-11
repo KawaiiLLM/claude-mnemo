@@ -6979,6 +6979,12 @@ function truncateOriginal(value) {
 function normalizeTrigramText(value) {
   return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/gu, " ").trim();
 }
+function buildObservationStatusClause(eraCutoffEpoch) {
+  return eraCutoffEpoch === null || eraCutoffEpoch === void 0 ? { clause: "o.status = 'extracted'", params: [] } : {
+    clause: "(o.status = 'extracted' OR t.created_at_epoch >= ?)",
+    params: [eraCutoffEpoch]
+  };
+}
 function parseJsonArray(value) {
   if (!value) {
     return [];
@@ -7292,6 +7298,7 @@ function queryRecentTurns(db, options) {
 }
 function queryRecentObservations(db, options) {
   const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
   return queryRows(
     db,
     applyLimit(`
@@ -7313,10 +7320,10 @@ function queryRecentObservations(db, options) {
       FROM observations o
       JOIN turns t ON t.id = o.turn_id
       JOIN sessions s ON s.id = t.session_id
-      ${combineClauses(["o.status = 'extracted'", projectClause.clause])}
+      ${combineClauses([statusClause.clause, projectClause.clause])}
       ORDER BY o.created_at_epoch DESC
     `, options.limit),
-    withLimit([...projectClause.params], options.limit)
+    withLimit([...statusClause.params, ...projectClause.params], options.limit)
   );
 }
 function buildSessionTurnFacetClauses(options) {
@@ -7565,11 +7572,12 @@ function queryObservationsByScope(db, options, query) {
     return [];
   }
   const projectClause = buildProjectClause(options.project);
+  const statusClause = buildObservationStatusClause(options.eraCutoffEpoch);
   const dateClause = buildDateClause("o.created_at_epoch", options);
   const sessionClause = buildSessionClause("t.session_id", options.sessionId);
   if (query) {
-    const whereClauses2 = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", "o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
-    const params2 = [query, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
+    const whereClauses2 = ["memory_fts.layer = 'observation'", "memory_fts MATCH ?", statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+    const params2 = [query, ...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
     return queryRows(
       db,
       applyLimit(`
@@ -7598,8 +7606,8 @@ function queryObservationsByScope(db, options, query) {
       withLimit(params2, options.limit)
     );
   }
-  const whereClauses = ["o.status = 'extracted'", projectClause.clause, sessionClause.clause, dateClause.clause];
-  const params = [...projectClause.params, ...sessionClause.params, ...dateClause.params];
+  const whereClauses = [statusClause.clause, projectClause.clause, sessionClause.clause, dateClause.clause];
+  const params = [...statusClause.params, ...projectClause.params, ...sessionClause.params, ...dateClause.params];
   return queryRows(
     db,
     applyLimit(`
@@ -35692,7 +35700,7 @@ function renderSessionList(db, depth, page, pageSize, truncate2, after, before, 
     paged.pageCount
   );
 }
-function searchQueryResults(db, filters, after, before) {
+function searchQueryResults(db, filters, after, before, eraCutoffEpoch = null) {
   return searchMemory(db, {
     query: filters.text,
     type: filters.type,
@@ -35701,7 +35709,10 @@ function searchQueryResults(db, filters, after, before) {
     project: filters.project,
     sessionId: filters.session,
     after,
-    before
+    before,
+    // Only the observation layer reads this, and only to decide whether a
+    // status still means anything (db/search.ts).
+    eraCutoffEpoch
     // A segment is not bound to a session (spec D6), so it legitimately carries
     // a null `sessionId`; only session-layer rows that lost their session are
     // dropped here.
@@ -35750,7 +35761,8 @@ function recallMemory(db, input) {
       db,
       filters,
       timeRange.after,
-      timeRange.before
+      timeRange.before,
+      input.eraCutoffEpoch ?? null
     );
     const paged = paginateItems(results, page, pageSize);
     return joinPage(
