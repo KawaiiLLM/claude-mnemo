@@ -21,7 +21,6 @@ const COMPACT_TIMEOUT_MS = 5_000;
 
 export type WorkerTriggerAction =
   | "capture"
-  | "wake"
   | "turn-stop"
   | "compact"
   | "finish";

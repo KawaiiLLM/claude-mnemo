@@ -81,8 +81,6 @@ describe("async tool attribution production-blockade regression", () => {
       PostToolUse: createPostToolUseHandler({
         db,
         now: () => NOW_EPOCH,
-        workerClientDeps,
-        workerEnv,
         logger: { warn() {} },
       }),
       SessionEnd: createSessionEndHandler({
@@ -237,9 +235,14 @@ describe("async tool attribution production-blockade regression", () => {
     expect(getTurnById(db, provisionalTurnId)?.status).toBe("extracted");
     expect(getTurnById(db, blockedTurnId)?.status).toBe("failed");
     expect(getTurnById(db, currentTurnId)?.status).toBe("active");
+    // observation-queue-teardown: the queue drop no longer special-cases a
+    // terminal-owner obs row into `skipped` — that update lived only in the
+    // retired queue branch. The row still drains below (queue pollution does
+    // not linger), but the observation's own status is whatever it already
+    // was, untouched.
     expect(db.query<{ status: string }, [number]>(
       "SELECT status FROM observations WHERE id = ?",
-    ).get(pollutionObsId)?.status).toBe("skipped");
+    ).get(pollutionObsId)?.status).toBe("pending");
     expect(db.query<{ count: number }, [number, number]>(
       `SELECT COUNT(*) AS count FROM pending_queue
        WHERE (kind = 'turn-stop' AND target_id = ?)

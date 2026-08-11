@@ -107,7 +107,7 @@ export function createDefaultHookHandlers({
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
-    PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
+    PostToolUse: createPostToolUseHandler({ db }),
     PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({ db, workerClientDeps, workerEnv }),

@@ -58,9 +58,6 @@ describe("claude-mnemo smoke test", () => {
     });
     const postToolUseHandler = createPostToolUseHandler({
       db,
-      workerClientDeps: {
-        fetchImpl: async () => new Response(null, { status: 200 }),
-      },
       now: () => 250,
     });
     const stopHandler = createStopHandler({

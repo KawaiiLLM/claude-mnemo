@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.7-msodaysq" : "dev";
+var BUILD_ID = true ? "0.9.7-msoe66pr" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -51162,20 +51162,6 @@ function createWorkerCore(deps) {
             completedTurnId: turn.id,
             eraCutoffEpoch: config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db)
           });
-        }
-      } else if (item.kind === "obs") {
-        const owner = deps.db.query(
-          `SELECT o.id AS observationId, t.status AS turnStatus
-             FROM pending_queue q
-             LEFT JOIN observations o ON o.id = q.target_id
-             LEFT JOIN turns t ON t.id = o.turn_id
-             WHERE q.seq = ? AND q.kind = 'obs'`
-        ).get(item.seq);
-        const ownerIsLive = owner?.turnStatus === "active" || owner?.turnStatus === "provisional";
-        if (owner?.observationId !== null && owner !== null && !ownerIsLive) {
-          deps.db.query(
-            "UPDATE observations SET status = 'skipped' WHERE id = ?"
-          ).run(owner.observationId);
         }
       }
       deleteQueueItem(deps.db, item.seq);

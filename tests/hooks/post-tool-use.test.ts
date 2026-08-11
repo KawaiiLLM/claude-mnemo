@@ -91,13 +91,14 @@ describe("handlePostToolUseHook", () => {
     db.close();
   });
 
-  test("inserts an observation, enqueues it, and defers worker wake to asyncWork", async () => {
-    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+  test("inserts an observation without enqueueing it or waking the worker", async () => {
+    // observation-queue-teardown ticket: capture writes the raw row and stops.
+    // Nothing downstream reads a queue row any more, and nothing waits on a
+    // worker wake — a tool call's whole lifecycle is now "write a row, land in
+    // the search index".
     const handler = createPostToolUseHandler({
       db,
       now: () => 500,
-      workerClientDeps: { fetchImpl },
-      workerEnv: {},
     });
 
     const result = await handler(createInput());
@@ -128,34 +129,14 @@ describe("handlePostToolUseHook", () => {
       )
       .get()!;
 
-    expect(result.continue).toBe(true);
-    expect(typeof result.asyncWork).toBe("function");
+    expect(result).toEqual({ continue: true });
     expect(observation.turnId).toBe(turnId);
     expect(observation.toolName).toBe("Read");
     expect(observation.toolInput).toBe('{"file_path":"src/auth.ts"}');
     expect(observation.toolResult).toBe("line 1\n\nline 2");
     expect(observation.status).toBe("pending");
     expect(observation.title).toBeNull();
-    expect(getQueueRows(db)).toEqual([
-      {
-        kind: "obs",
-        targetId: observation.id,
-        sessionDbId: sessionId,
-      },
-    ]);
-    expect(fetchImpl).not.toHaveBeenCalled();
-
-    await result.asyncWork?.();
-
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe("http://127.0.0.1:37778/health");
-    expect(String(fetchImpl.mock.calls[1]?.[0])).toBe("http://127.0.0.1:37778/trigger");
-    expect(JSON.parse(String(fetchImpl.mock.calls[1]?.[1]?.body))).toEqual({
-      action: "wake",
-      content_session_id: "session-tool",
-      session_id: sessionId,
-      env: {},
-    });
+    expect(getQueueRows(db)).toEqual([]);
   });
 
   test("indexes the observation for search at capture, with nothing to summarize it", async () => {
@@ -166,8 +147,6 @@ describe("handlePostToolUseHook", () => {
     const handler = createPostToolUseHandler({
       db,
       now: () => 500,
-      workerClientDeps: { fetchImpl: mock(async () => new Response(null, { status: 200 })) },
-      workerEnv: {},
     });
 
     await handler(createInput());
@@ -219,11 +198,7 @@ describe("handlePostToolUseHook", () => {
   });
 
   test("continues without writing when session or turn context is missing", async () => {
-    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
-    const handler = createPostToolUseHandler({
-      db,
-      workerClientDeps: { fetchImpl },
-    });
+    const handler = createPostToolUseHandler({ db });
 
     const missingSession = await handler(
       createInput({
@@ -241,15 +216,12 @@ describe("handlePostToolUseHook", () => {
       db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM observations").get()
         ?.count,
     ).toBe(0);
-    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test("ignores child-agent events before database writes or worker wake", async () => {
-    const fetchImpl = mock(async () => new Response(null, { status: 200 }));
+  test("ignores child-agent events before any database write", async () => {
     const transactionRunner = mock((_db: Database, fn: () => unknown) => fn());
     const handler = createPostToolUseHandler({
       db,
-      workerClientDeps: { fetchImpl },
       runHookWriteTransaction: transactionRunner,
     });
 
@@ -259,7 +231,6 @@ describe("handlePostToolUseHook", () => {
     expect(transactionRunner).not.toHaveBeenCalled();
     expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM observations").get()?.count).toBe(0);
     expect(getQueueRows(db)).toEqual([]);
-    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   for (const status of ["extracted", "skipped", "failed", "undone"] as const) {
@@ -282,7 +253,7 @@ describe("handlePostToolUseHook", () => {
 
       const result = await handler(createInput({ toolName: "SendMessage" }));
 
-      expect(typeof result.asyncWork).toBe("function");
+      expect(result).toEqual({ continue: true });
       expect(db.query<{ turnId: number; toolName: string }, []>(
         "SELECT turn_id AS turnId, tool_name AS toolName FROM observations",
       ).get()).toEqual({ turnId, toolName: "SendMessage" });
@@ -375,7 +346,7 @@ describe("handlePostToolUseHook", () => {
     expect(getConsultedMemories(db, turnId)).toEqual([]);
   });
 
-  test("keeps capturing and enqueuing the other mnemo tools unchanged", async () => {
+  test("keeps capturing the other mnemo tools unchanged", async () => {
     const handler = createPostToolUseHandler({ db, now: () => 500 });
 
     await handler(createInput({ toolName: "mcp__mnemo__recall" }));
@@ -386,8 +357,6 @@ describe("handlePostToolUseHook", () => {
       )
       .get()!;
     expect(observation.excluded).toBe(0);
-    expect(getQueueRows(db)).toEqual([
-      { kind: "obs", targetId: observation.id, sessionDbId: sessionId },
-    ]);
+    expect(getQueueRows(db)).toEqual([]);
   });
 });

@@ -63,7 +63,12 @@ describe("pending queue helpers", () => {
   });
 });
 
-describe("terminal-owner queue hygiene", () => {
+// observation-queue-teardown: capture stopped writing `obs` rows, and
+// `retireQueueItem` stopped special-casing them. What is left to cover is that
+// a row from BEFORE that change — still sitting in a production `pending_queue`
+// table — drains exactly once through the same unconditional delete every other
+// kind uses, and is never re-enqueued.
+describe("legacy obs row draining", () => {
   let db: Database;
   let sessionId: number;
 
@@ -84,7 +89,7 @@ describe("terminal-owner queue hygiene", () => {
 
   afterEach(() => db.close());
 
-  function seedObservation(status: string, promptNumber: number): number {
+  function seedLegacyObsRow(status: string, promptNumber: number): number {
     const turnId = db.query<{ id: number }, [number, number, string]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch
@@ -108,45 +113,53 @@ describe("terminal-owner queue hygiene", () => {
     return createWorkerCore({ db, now: () => 100 });
   }
 
-  for (const status of ["extracted", "skipped", "failed", "undone"] as const) {
-    test(`retires an observation owned by a ${status} turn`, async () => {
-      const observationId = seedObservation(status, 1);
+  for (const status of ["active", "extracted", "skipped", "failed", "undone"] as const) {
+    test(`drains a legacy obs row owned by a ${status} turn, and does not re-enqueue it`, async () => {
+      const observationId = seedLegacyObsRow(status, 1);
 
-      await makeCore().scanAndDrainQueue();
+      const core = makeCore();
+      await core.scanAndDrainQueue();
+      await core.scanAndDrainQueue();
 
-      expect(getObservation(db, observationId)?.status).toBe("skipped");
+      // The queue row is gone — that is the whole of what "drained" means now.
+      // The observation's own `status` is untouched: nothing but a turn's own
+      // completion (db/turn-completion.ts) retires it any more, and this row's
+      // turn was set to its status directly, bypassing that path — exactly the
+      // pre-upgrade shape a legacy row can be found in.
       expect(listQueueItems(db)).toEqual([]);
+      expect(getObservation(db, observationId)?.status).toBe("pending");
     });
   }
 
-  test("retires an observation whose owning turn is missing", async () => {
-    const observationId = seedObservation("active", 1);
+  test("drains a legacy obs row whose owning turn is missing, without erroring", async () => {
+    const observationId = seedLegacyObsRow("active", 1);
     db.exec("PRAGMA foreign_keys = OFF");
     db.query("DELETE FROM turns").run();
 
     await makeCore().scanAndDrainQueue();
 
-    expect(getObservation(db, observationId)?.status).toBe("skipped");
     expect(listQueueItems(db)).toEqual([]);
+    expect(getObservation(db, observationId)?.status).toBe("pending");
   });
 
-  test("rolls back observation retirement if queue-row deletion fails", async () => {
-    const observationId = seedObservation("extracted", 1);
+  test("releases the claim and leaves the row queued when deletion fails", async () => {
+    const observationId = seedLegacyObsRow("extracted", 1);
     db.exec(`CREATE TRIGGER reject_queue_delete BEFORE DELETE ON pending_queue
       BEGIN SELECT RAISE(ABORT, 'delete rejected'); END`);
 
-    // Retirement and deletion share one transaction, so a rejected delete must
-    // leave the observation exactly as it was. The drain itself does not throw:
-    // it releases the claim and moves on, which is what keeps one poisoned row
-    // from wedging every other session's work.
+    // The drain itself does not throw: it releases the claim and moves on,
+    // which is what keeps one poisoned row from wedging every other session's
+    // work. Generic to every queue kind, not obs-specific — exercised here
+    // because a legacy obs row is exactly the kind of row that could still be
+    // sitting in a production table when this runs.
     await makeCore().scanAndDrainQueue();
 
-    expect(getObservation(db, observationId)?.status).toBe("pending");
     expect(listQueueItems(db)).toHaveLength(1);
+    expect(getObservation(db, observationId)?.status).toBe("pending");
   });
 
-  test("settles a valid turn-stop after retiring terminal-owner pollution", async () => {
-    seedObservation("extracted", 1);
+  test("drains a legacy obs row and still settles a valid turn-stop in the same pass", async () => {
+    seedLegacyObsRow("extracted", 1);
     const liveTurnId = db.query<{ id: number }, [number]>(
       `INSERT INTO turns (
          session_id, prompt_number, status, user_prompt, assistant_response, created_at_epoch

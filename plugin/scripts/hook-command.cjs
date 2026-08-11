@@ -3078,7 +3078,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.7-msodaysq" : "dev";
+var BUILD_ID = true ? "0.9.7-msoe66pr" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -19793,7 +19793,7 @@ function createPostToolUseHandler(dependencies) {
       if (latestTurn.status !== "active" && latestTurn.status !== "provisional") {
         return { outcome: "terminal-root-turn", turnId: latestTurn.id };
       }
-      const inserted = createObservation(dependencies.db, {
+      createObservation(dependencies.db, {
         turnId: latestTurn.id,
         toolName,
         toolInput,
@@ -19815,46 +19815,16 @@ function createPostToolUseHandler(dependencies) {
           error: error48 instanceof Error ? error48.message : String(error48)
         });
       }
-      if (excludedFromExtraction) {
-        return { outcome: "excluded", turnId: latestTurn.id };
-      }
-      dependencies.db.query(
-        `
-            INSERT INTO pending_queue (
-              kind,
-              target_id,
-              session_db_id,
-              enqueued_at_epoch
-            ) VALUES ('obs', ?, ?, ?)
-          `
-      ).run(inserted.id, session.id, createdAtEpoch);
-      return { outcome: "inserted", turnId: latestTurn.id };
+      return { outcome: "captured", turnId: latestTurn.id };
     });
-    if (writeResult.outcome === "excluded") {
-      return { continue: true };
-    }
-    if (writeResult.outcome !== "inserted") {
+    if (writeResult.outcome !== "captured") {
       logger.warn?.("post-tool-use ignored", {
         sessionId: input.sessionId,
         turnId: writeResult.turnId,
         reasonCode: writeResult.outcome
       });
-      return { continue: true };
     }
-    return {
-      continue: true,
-      asyncWork: async () => {
-        await notifyWorkerTrigger(
-          {
-            action: "wake",
-            contentSessionId: session.contentSessionId,
-            sessionDbId: session.id
-          },
-          dependencies.workerClientDeps,
-          dependencies.workerEnv
-        );
-      }
-    };
+    return { continue: true };
   };
 }
 
@@ -25085,7 +25055,7 @@ function createDefaultHookHandlers({
     "SessionStart:notes": createNoteTakingContextHandler(),
     SessionStart: createContextHandler(contextDependencies),
     SessionEnd: createSessionEndHandler({ db, workerClientDeps, workerEnv }),
-    PostToolUse: createPostToolUseHandler({ db, workerClientDeps, workerEnv }),
+    PostToolUse: createPostToolUseHandler({ db }),
     PreCompact: createCompactHandler({ db, workerClientDeps, workerEnv }),
     UserPromptSubmit: createSessionInitHandler({ db }),
     Stop: createStopHandler({ db, workerClientDeps, workerEnv })

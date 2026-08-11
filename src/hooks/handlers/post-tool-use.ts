@@ -9,14 +9,11 @@ import { resolveEraCutoff } from "../../db/era";
 import type { TurnStatus } from "../../db/turns";
 import { isExtractionExcludedToolName } from "../../shared/note-tool";
 import { stripPrivateTags } from "../../shared/tag-stripping";
-import { notifyWorkerTrigger, type WorkerClientDeps } from "../../worker/client";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 export interface PostToolUseHandlerDependencies {
   db: Database;
   now?: () => number;
-  workerClientDeps?: WorkerClientDeps;
-  workerEnv?: NodeJS.ProcessEnv;
   runHookWriteTransaction?: typeof runHookWriteTransaction;
   logger?: Pick<Console, "warn">;
   /**
@@ -138,7 +135,7 @@ export function createPostToolUseHandler(
       // only thing that had ever put an observation into `memory_fts` — so the
       // layer stopped being searchable at all, rather than merely stopping at
       // the read filter.
-      const inserted = createObservation(dependencies.db, {
+      createObservation(dependencies.db, {
         turnId: latestTurn.id,
         toolName,
         toolInput,
@@ -166,53 +163,23 @@ export function createPostToolUseHandler(
         });
       }
 
-      if (excludedFromExtraction) {
-        return { outcome: "excluded" as const, turnId: latestTurn.id };
-      }
-
-      dependencies.db
-        .query<unknown, [number, number, number]>(
-          `
-            INSERT INTO pending_queue (
-              kind,
-              target_id,
-              session_db_id,
-              enqueued_at_epoch
-            ) VALUES ('obs', ?, ?, ?)
-          `,
-        )
-        .run(inserted.id, session.id, createdAtEpoch);
-      return { outcome: "inserted" as const, turnId: latestTurn.id };
+      // There used to be a fork here: an extraction-excluded call (`note`)
+      // returned early to skip enqueueing it for the retired extraction
+      // agent's input stream, while everything else went on to enqueue and
+      // wake the worker (observation-queue-teardown ticket). Nothing past
+      // this point reads that distinction any more, so both captures now
+      // share the one outcome.
+      return { outcome: "captured" as const, turnId: latestTurn.id };
     });
 
-    // "excluded" is a successful capture, not a dropped one — it is only the
-    // enqueue that is skipped, so it must not be logged as ignored.
-    if (writeResult.outcome === "excluded") {
-      return { continue: true };
-    }
-
-    if (writeResult.outcome !== "inserted") {
+    if (writeResult.outcome !== "captured") {
       logger.warn?.("post-tool-use ignored", {
         sessionId: input.sessionId,
         turnId: writeResult.turnId,
         reasonCode: writeResult.outcome,
       });
-      return { continue: true };
     }
 
-    return {
-      continue: true,
-      asyncWork: async () => {
-        await notifyWorkerTrigger(
-          {
-            action: "wake",
-            contentSessionId: session.contentSessionId,
-            sessionDbId: session.id,
-          },
-          dependencies.workerClientDeps,
-          dependencies.workerEnv,
-        );
-      },
-    };
+    return { continue: true };
   };
 }

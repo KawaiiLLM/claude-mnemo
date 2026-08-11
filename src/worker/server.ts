@@ -410,16 +410,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   /**
    * Retire one claimed queue item.
    *
-   * This is the whole of what the queue does now. An `obs` row was only ever a
-   * wake signal plus a place in the extraction agent's input stream; with the
-   * agent gone the observation is already captured, already FTS-indexed and
-   * already readable, so the row is simply dropped — except when its owning turn
-   * is already terminal (or gone), which is queue pollution: the turn's own
-   * settlement has been and gone, so nothing else will ever retire that
-   * observation and it would stay `pending` forever. Retirement and deletion
-   * share one transaction, so a failed delete cannot leave a retired-but-queued
-   * row behind.
-   *
    * A `turn-stop` row is the turn's completion event, and completion is what
    * settles the row — through `reconcileNoteDebt`, the one place that knows both
    * "this turn is over" and "here is what it carries". Settling BEFORE the
@@ -427,6 +417,16 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
    * turn-stop as evidence, so a row deleted first would leave a turn with no
    * evidence and no terminal status, which the stranded repair would re-enqueue
    * on every end event forever.
+   *
+   * Every other kind is just dropped — deletion is unconditional below. The only
+   * other kind ever seen here was `obs` (observation-queue-teardown ticket): it
+   * used to be a wake signal plus a place in the retired extraction agent's input
+   * stream, and capture has stopped writing it. A row still sitting in the table
+   * from before that change drains through this same unconditional delete the
+   * first time it is claimed, and nothing re-enqueues it, so this is also the
+   * last time it is ever seen. Its observation's `status` is left exactly as
+   * capture wrote it — the turn's own completion (`settleCompletedTurn`) is what
+   * retires an observation's status now, not the queue.
    */
   function retireQueueItem(item: PendingQueueItem): void {
     runWriteTransaction(deps.db, () => {
@@ -439,25 +439,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
             completedTurnId: turn.id,
             eraCutoffEpoch: config.eraCutoffEpoch ?? resolveEraCutoff(deps.db),
           });
-        }
-      } else if (item.kind === "obs") {
-        const owner = deps.db
-          .query<{ observationId: number | null; turnStatus: string | null }, [number]>(
-            `SELECT o.id AS observationId, t.status AS turnStatus
-             FROM pending_queue q
-             LEFT JOIN observations o ON o.id = q.target_id
-             LEFT JOIN turns t ON t.id = o.turn_id
-             WHERE q.seq = ? AND q.kind = 'obs'`,
-          )
-          .get(item.seq);
-        const ownerIsLive =
-          owner?.turnStatus === "active" || owner?.turnStatus === "provisional";
-        if (owner?.observationId !== null && owner !== null && !ownerIsLive) {
-          deps.db
-            .query<unknown, [number]>(
-              "UPDATE observations SET status = 'skipped' WHERE id = ?",
-            )
-            .run(owner!.observationId!);
         }
       }
       deleteQueueItem(deps.db, item.seq);
@@ -1088,7 +1069,7 @@ export function createWorkerFetchHandler(
 
       if (req.method === "POST" && url.pathname === "/trigger") {
         const payload = (await req.json()) as {
-          action?: "capture" | "wake" | "turn-stop" | "compact" | "finish";
+          action?: "capture" | "turn-stop" | "compact" | "finish";
           content_session_id?: string;
           session_id?: number;
           transcript_path?: string | null;
