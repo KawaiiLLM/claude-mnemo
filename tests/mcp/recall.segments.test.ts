@@ -352,8 +352,8 @@ describe("observation rows render mechanical fields on the era side", () => {
       truncate: 10,
     });
 
-    expect(output).toContain("- in: rg --files...");
-    expect(output).toContain("- out: src/worker...");
+    expect(output).toContain("- in: rg --files…");
+    expect(output).toContain("- out: src/worker…");
   });
 });
 

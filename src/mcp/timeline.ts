@@ -21,6 +21,7 @@ import { isTaskCausalityEra } from "../task-causality-era";
 import {
   appendNavigationLegend,
   createTruncationSignal,
+  truncateText,
   type TruncationSignal,
 } from "./format";
 import {
@@ -636,27 +637,6 @@ export function cleanPromptForLabel(raw: string | null): string {
       .find((line) => line.length > 0) ?? "";
 
   return firstLine.replace(/\s+/g, " ").trim();
-}
-
-export function truncateText(
-  text: string,
-  maxChars: number,
-  /**
-   * Render-scope truncation flag (spec D1, mirrors `format.ts`'s
-   * `TruncationSignal`). Optional so this stays a plain pure function for
-   * direct callers/tests that don't care; only set when this call actually
-   * cuts something.
-   */
-  signal?: TruncationSignal,
-): string {
-  if (text.length <= maxChars) {
-    return text;
-  }
-
-  if (signal) {
-    signal.truncated = true;
-  }
-  return `${text.slice(0, maxChars)}…`;
 }
 
 export function formatDuration(ms: number): string {
@@ -1675,7 +1655,7 @@ function pulledAntecedentLabel(turn: TurnRecord, signal?: TruncationSignal): str
   const prompt = cleanPromptForLabel(turn.userPrompt);
   return prompt === ""
     ? "(untitled)"
-    : truncateText(prompt, MILESTONE_PULLED_LABEL_CAP, signal);
+    : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
 }
 
 /**
@@ -2313,7 +2293,10 @@ function milestonePromptPrefix(turn: TurnRecord, signal?: TruncationSignal): str
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP, signal);
+  return truncateText(cleanPromptForLabel(raw), {
+    limit: MILESTONE_PROMPT_PREFIX_CAP,
+    signal,
+  });
 }
 
 /** One spine row plus the `↳` antecedents homed under it — the budget unit (spec §D). */
@@ -2367,7 +2350,7 @@ function renderUnitLines(
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText(milestone.turn.title ?? "(untitled)", titleCap, signal),
+    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal }),
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -2405,7 +2388,10 @@ function renderUnitLines(
     // exactly (see the selection-time call site) while letting both of its
     // truncation points report into the live signal.
     let label = sanitizeTimelineField(
-      truncateText(pulledAntecedentLabel(antecedent.turn, signal), titleCap, signal),
+      truncateText(pulledAntecedentLabel(antecedent.turn, signal), {
+        limit: titleCap,
+        signal,
+      }),
     );
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
@@ -3341,7 +3327,7 @@ function renderTurnRow(
       ? promptCore
       : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = sanitizeTimelineField(
-    truncateText(promptWithBadges, promptCap, signal),
+    truncateText(promptWithBadges, { limit: promptCap, signal }),
   );
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "⨯ " : "";
@@ -3398,14 +3384,14 @@ function renderTitleCell(
 
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap, signal)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}⨯`.trim();
   }
 
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, titleCap, signal)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
   }
 
   return `${markerPrefix}⏳`.trim();
@@ -3480,7 +3466,7 @@ function renderPhases(
       cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText =
       leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText(leadText, titleCap, signal));
+    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
 
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd(),

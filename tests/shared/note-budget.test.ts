@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
   NOTE_TOKEN_BUDGET,
   formatNoteBudget,
 } from "../../src/shared/note-budget";
+import { NOTE_TAKING_INSTRUCTIONS } from "../../src/hooks/handlers/context-note-taking";
+import { MNEMO_TOOL_DESCRIPTIONS } from "../../src/mcp/definitions";
 
 describe("note budget line", () => {
   test("reports each field against its own budget, then the total", () => {
@@ -42,7 +45,53 @@ describe("note budget line", () => {
     ).toContain("→ 270/120 (2.3×).");
   });
 
+  test("a write well under budget does not read as nothing written", () => {
+    // A one-decimal ratio prints "(0.0×)" for anything under 5% of the budget,
+    // which reads as "your note is empty" rather than "you have room". The
+    // decimal exists for the over-budget case, so the under-budget floor is
+    // stated as an inequality instead of rounded away.
+    expect(formatNoteBudget({ title: "fix", content: "done" })).toContain(
+      "→ 2/120 (<0.1×).",
+    );
+  });
+
+  test("quoted CJK is not counted at a quarter of its size", () => {
+    // The instructions require English fields but explicitly allow quoted user
+    // phrases in their original language, and four-characters-per-token reports
+    // 80 Chinese characters as 20 tokens — a note that is 4x over budget reads
+    // as inside it, which is the one thing this line exists to prevent.
+    const han = "词".repeat(80);
+
+    expect(formatNoteBudget({ title: "t", content: han })).toContain(
+      "content 80/100",
+    );
+  });
+
   test("the budget the receipt measures is the one the instructions state", () => {
     expect(NOTE_TOKEN_BUDGET).toEqual({ title: 20, content: 100, insight: 60 });
+  });
+
+  test("every surface that states the budget reads it from the constant", () => {
+    // Three surfaces say these numbers: the receipt, the session-start
+    // instructions, and the `note` tool description. Two of them held them as
+    // literal prose, so changing NOTE_TOKEN_BUDGET would have left the agent
+    // told one budget and measured against another. Asserted on the source
+    // text because the rendered strings agree either way — the literals are
+    // exactly what a value check cannot see.
+    for (const path of [
+      "src/hooks/handlers/context-note-taking.ts",
+      "src/mcp/definitions.ts",
+    ]) {
+      const source = readFileSync(path, "utf8");
+      expect(source).toContain("NOTE_TOKEN_BUDGET.title");
+      expect(source).toContain("NOTE_TOKEN_BUDGET.content");
+      expect(source).toContain("NOTE_TOKEN_BUDGET.insight");
+    }
+
+    for (const prose of [NOTE_TAKING_INSTRUCTIONS, MNEMO_TOOL_DESCRIPTIONS.note]) {
+      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.title} tokens)`);
+      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.content} tokens)`);
+      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.insight} tokens)`);
+    }
   });
 });

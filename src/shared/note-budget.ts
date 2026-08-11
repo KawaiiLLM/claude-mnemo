@@ -26,9 +26,11 @@ export interface NoteBudgetFields {
  * when one was written — an absent insight is the documented default, not an
  * underspend to report.
  *
- * Reuses the plain four-characters-per-token estimate rather than the diary's
- * CJK-weighted one: note fields are English by rule, and the occasional quoted
- * user phrase is not worth a second estimator's worth of divergence.
+ * Measured with `estimateTokens`, the estimator for text an agent writes: four
+ * characters per token for English, a token per CJK character for the quoted
+ * user phrases the instructions allow. The diary's weighting is not reused here
+ * — it sizes an injection against a hard cap and reads ~3x high on English, so
+ * every note would report as over budget.
  */
 export function formatNoteBudget(fields: NoteBudgetFields): string {
   const title = estimateTokens(fields.title);
@@ -50,5 +52,18 @@ export function formatNoteBudget(fields: NoteBudgetFields): string {
     NOTE_TOKEN_BUDGET.content +
     (hasInsight ? NOTE_TOKEN_BUDGET.insight : 0);
 
-  return `${segments.join(" · ")} → ${total}/${budget} (${(total / budget).toFixed(1)}×).`;
+  return `${segments.join(" · ")} → ${total}/${budget} (${formatRatio(total, budget)}×).`;
+}
+
+/**
+ * One decimal is right for the case this line exists to expose — 2.3× is the
+ * whole message — but it rounds every write under 5% of the budget to "0.0",
+ * which reads as "nothing was written" rather than "you have room to spare".
+ * A well-under write says so as an inequality instead: no false precision, and
+ * no number that contradicts the counts printed next to it.
+ */
+function formatRatio(total: number, budget: number): string {
+  const ratio = total / budget;
+
+  return ratio < 0.05 ? "<0.1" : ratio.toFixed(1);
 }

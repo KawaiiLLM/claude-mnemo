@@ -2,7 +2,7 @@ import type { SegmentRecord } from "../db/segments";
 import type { OrphanAnchorRow, SegmentSpineRow } from "../db/segment-rank";
 import { TYPE_GLYPH, isMemoryType } from "../shared/type-vocabulary";
 
-import { TYPE_EMOJI } from "./format";
+import { TYPE_EMOJI, truncateText } from "./format";
 
 /**
  * The segment spine (spec D11): the new era's default reading surface.
@@ -48,10 +48,6 @@ function formatTags(tags: readonly string[]): string {
   return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
 }
 
-function truncate(text: string, maxChars: number): string {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
-}
-
 function sanitize(value: string): string {
   return value.replaceAll("|", "/").replaceAll("→", "->");
 }
@@ -76,7 +72,7 @@ export function renderSpineRow(row: SegmentSpineRow, titleCap: number): string {
     `[E${segment.id}]`,
     segmentTypeGlyph(row.dominantType),
     formatTags(segment.tags),
-    sanitize(truncate(segment.title, titleCap)),
+    sanitize(truncateText(segment.title, { limit: titleCap })),
     `[${segment.status}]`,
   ].filter((part) => part !== "");
 
@@ -94,7 +90,7 @@ export function renderOrphanRow(row: OrphanAnchorRow, titleCap: number): string 
   const { facts } = row;
   const label = facts.title === null || facts.title.trim() === ""
     ? "(untitled)"
-    : sanitize(truncate(facts.title, titleCap));
+    : sanitize(truncateText(facts.title, { limit: titleCap }));
   return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
     facts.type,
   )} ${label} (${row.signals.join(", ")})`;
@@ -220,7 +216,9 @@ export function renderSegmentHeaderLines(input: SegmentHeaderInput): string[] {
   ];
 
   if (segment.content) {
-    lines.push(`  - desc: ${truncate(segment.content, input.truncate)}`);
+    lines.push(
+      `  - desc: ${truncateText(segment.content, { limit: input.truncate })}`,
+    );
   }
   const trace = formatPhaseTrace(input.phaseTrace);
   if (trace !== "") {

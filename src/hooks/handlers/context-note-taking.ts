@@ -1,3 +1,4 @@
+import { NOTE_TOKEN_BUDGET } from "../../shared/note-budget";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
@@ -8,6 +9,11 @@ import type { HookResult, NormalizedHookInput } from "../types";
  * paid for — a project-overview injection measured +20% cost for no accuracy
  * (arXiv 2602.11988). English by 裁决 16, matching the library's existing
  * title/content corpus.
+ *
+ * The per-field budgets are interpolated from `NOTE_TOKEN_BUDGET`, the same
+ * constant the receipt measures a write against. Held as prose they were a
+ * second copy: raising the constant would have left the agent told one number
+ * and graded on another, with nothing failing to say so.
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns.
@@ -25,17 +31,17 @@ nothing worth keeping, or whose details left your context with no open
 batch recovering them in passing — never invent a note from the listed
 line, never open a lookup just to rescue one.
 Fields:
-- title (~20 tokens): "<activity>+<topic>: <what this turn covered>" — the
+- title (~${NOTE_TOKEN_BUDGET.title} tokens): "<activity>+<topic>: <what this turn covered>" — the
   addressing line, one glance says what the turn did. Activity words
   (research/design/implement/fix/measure/review/write/ops) must state the
   real stage, never a hoped-for one.
-- content (~100 tokens): the conclusion, then the evidence chain that
+- content (~${NOTE_TOKEN_BUDGET.content} tokens): the conclusion, then the evidence chain that
   produced it — how it was reached, not just that it was. Include rejected
   alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
   Never restate the title; never narrate looking — "I checked the transcript
   and found no X" is "the transcript has no X".
-- insight (~60 tokens): empty by default. Only what is worth keeping
+- insight (~${NOTE_TOKEN_BUDGET.insight} tokens): empty by default. Only what is worth keeping
   long-term, hard to reacquire, and orthogonal to the conclusion — pitfalls
   hit, durable pointers, transferable lessons. Anything one search away does
   not qualify.

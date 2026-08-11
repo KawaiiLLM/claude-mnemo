@@ -9,7 +9,20 @@ export const TYPE_EMOJI: Record<string, string> = {
   decision: "⚖️",
 };
 
-const FIELD_TRUNCATION_SUFFIX = "...";
+/**
+ * One mark for a cut field, on every read surface. This renderer ended a cut
+ * with "..." while the timeline ended it with "…", so the same session read
+ * differently depending on which view produced the line.
+ *
+ * The single character wins. It is already what every other renderer here
+ * emits — the timeline's segment spine and its token-level trimmer, the
+ * session-state pointer, the note reminder's prompt prefix, the replay CLI — so
+ * the three-dot form could only have won by changing all of them, or by leaving
+ * two marks inside one rendered response. It also costs two fewer characters of
+ * a budget that exists precisely because the text did not fit: the timeline
+ * measures hard per-unit token caps on the rendered line.
+ */
+const FIELD_TRUNCATION_SUFFIX = "…";
 export const DEFAULT_TRUNCATE = 200;
 export const MAX_TRUNCATE = 2000;
 export const DEFAULT_PREVIEW_COUNT = 5;
@@ -27,9 +40,9 @@ type RenderMode = "legacy" | "unified";
  * omits it simply gets no legend, which is what every direct `formatX` call
  * outside those two entry points wants.
  *
- * Deliberately NOT inferred by scanning the rendered string for "...": user
- * content (a prompt, a title) can itself contain an ellipsis, and a scan would
- * misread that as a truncation this renderer performed.
+ * Deliberately NOT inferred by scanning the rendered string for the truncation
+ * mark: user content (a prompt, a title) can itself contain an ellipsis, and a
+ * scan would misread that as a truncation this renderer performed.
  */
 export interface TruncationSignal {
   truncated: boolean;
@@ -286,7 +299,12 @@ function collapseToSingleLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function truncateText(
+/**
+ * The one truncator. Exported because the timeline renders the same fields and
+ * used to carry its own same-named copy, which hard-cut and marked the cut
+ * differently — a duplicate that only half-received every fix this one got.
+ */
+export function truncateText(
   text: string,
   {
     limit,
@@ -357,7 +375,9 @@ function truncateFileTree(
   }
 
   markTruncated(signal);
-  return [...kept, `... +${omitted} lines`];
+  // Same mark as a cut field and as the timeline's `… +N more`: a response that
+  // hides things should say so one way, not two.
+  return [...kept, `… +${omitted} lines`];
 }
 
 function resolveExplicitTruncate(
@@ -718,15 +738,21 @@ function formatTurnExpandedWithMode(
   const limit = resolveExplicitTruncate(options.truncate, options.truncateCap);
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
 
+  // Collapsed for the reason the title slot is (see `formatTurnLabel`): these
+  // are one-line field slots, and a task notification or a pasted payload
+  // arrives with its newlines, which reached the layout intact and split one
+  // field across four lines that no reader can attribute to it. Fixing only the
+  // title slot is what left the same prompt reading differently at the two
+  // depths. Collapse before measuring, so the budget buys content, not breaks.
   if (turn.promptPreview) {
     lines.push(
-      `${detailIndent}- prompt: "${truncateText(turn.promptPreview, { limit, signal })}"`,
+      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`,
     );
   }
 
   if (turn.responsePreview) {
     lines.push(
-      `${detailIndent}- response: "${truncateText(turn.responsePreview, { limit, signal })}"`,
+      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`,
     );
   }
 

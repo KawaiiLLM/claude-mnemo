@@ -39,7 +39,6 @@ import {
   segmentPhases,
   selectMilestoneTurns,
   timelineQuery,
-  truncateText,
   truncateToTokens,
   TURN_TABLE_HEADER,
   type KeptMilestone,
@@ -48,7 +47,9 @@ import {
 } from "../../src/mcp/timeline";
 import { estimateDiaryTokens } from "../../src/diary/domain";
 import { timelineInputSchema } from "../../src/mcp/definitions";
-import { NAVIGATION_LEGEND } from "../../src/mcp/format";
+// `truncateText` comes from the renderer it is shared with: timeline used to
+// export a second function of the same name, and the two cut differently.
+import { NAVIGATION_LEGEND, truncateText } from "../../src/mcp/format";
 import {
   replaceTurnCitations,
   type CitationRelation,
@@ -510,21 +511,34 @@ describe("cleanPromptForLabel", () => {
   });
 });
 
+// These cases were written against timeline's own `truncateText`, which hard-cut
+// at the limit. They now run against the one truncator every read surface uses,
+// so the cases survive and the expectations follow the shared rule: the cuts
+// below all land on whitespace or on an unbroken run, which is where the two
+// implementations already agreed.
 describe("truncateText", () => {
   it("returns shorter text unchanged", () => {
-    expect(truncateText("hello", 10)).toBe("hello");
+    expect(truncateText("hello", { limit: 10 })).toBe("hello");
   });
 
   it("truncates longer text and appends an ellipsis", () => {
-    expect(truncateText("hello world", 5)).toBe("hello…");
+    expect(truncateText("hello world", { limit: 5 })).toBe("hello…");
   });
 
   it("keeps exactly-max text unchanged", () => {
-    expect(truncateText("hello", 5)).toBe("hello");
+    expect(truncateText("hello", { limit: 5 })).toBe("hello");
   });
 
   it("handles an empty string", () => {
-    expect(truncateText("", 10)).toBe("");
+    expect(truncateText("", { limit: 10 })).toBe("");
+  });
+
+  it("retreats to a word boundary, as every other surface now does", () => {
+    // The defect this replaced: timeline cut mid-word ("…the wrapp…") while
+    // recall, rendering the same string, cut at the space before it.
+    expect(truncateText("hello wonderful world", { limit: 17 })).toBe(
+      "hello wonderful…",
+    );
   });
 });
 
@@ -1690,7 +1704,12 @@ describe("selectMilestoneTurns (grade-first arc)", () => {
     const antecedent = result.pulled[0]!;
     expect(antecedent.turn.promptNumber).toBe(2);
     expect(antecedent.effGrade).toBe(0);
-    expect(antecedent.label).toBe(`${longPrompt.slice(0, 60)}…`);
+    // Was `longPrompt.slice(0, 60)`, a hard cut landing inside "wrapper". The
+    // ↳ label now goes through the same truncator as every other field, so it
+    // retreats to the space before it — the visible text is whole words.
+    expect(antecedent.label).toBe(
+      "why does the extractor drop the boundary marker when the…",
+    );
   });
 
   it("prefers a stored title over the prompt prefix for a ↳ label", () => {
@@ -3221,6 +3240,32 @@ describe("timelineQuery", () => {
 
     expect(out).toContain(`${"x".repeat(DEFAULT_TITLE_CAP)}…`);
     expect(out).toContain(NAVIGATION_LEGEND);
+  });
+
+  it("cuts a turn-table title on a word boundary, as recall does", () => {
+    const db = createDatabase(":memory:");
+    const title = `${"alpha beta gamma ".repeat(20)}supplementary`;
+    seedTimelineSession(db, [
+      turn({
+        promptNumber: 1,
+        type: "decision",
+        title,
+        userPrompt: "short prompt",
+        createdAtEpoch: 1_700_000_000,
+      }),
+    ]);
+
+    const out = timelineQuery(db, { id: "S1" });
+    const row = out.split("\n").find((line) => line.includes("alpha"))!;
+    // The title closes the row, behind `<prompt> → <type emoji> `.
+    const shown = row.slice(row.lastIndexOf("⚖️ ") + 3);
+
+    expect(shown).toEndWith("…");
+    // Whatever survived is whole words: it is a prefix of the source that ends
+    // where the source has a space.
+    const kept = shown.slice(0, -1);
+    expect(title.startsWith(kept)).toBe(true);
+    expect(title.charAt(kept.length)).toBe(" ");
   });
 
   it("omits the navigation legend on the turn table when nothing truncates", () => {

@@ -3096,7 +3096,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.8-msoj7gik" : "dev";
+var BUILD_ID = true ? "0.9.8-msok6eyl" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -3517,7 +3517,7 @@ var TYPE_EMOJI = {
   discovery: "\u{1F535}",
   decision: "\u2696\uFE0F"
 };
-var FIELD_TRUNCATION_SUFFIX = "...";
+var FIELD_TRUNCATION_SUFFIX = "\u2026";
 var DEFAULT_TRUNCATE = 200;
 var MAX_TRUNCATE = 2e3;
 var DEFAULT_PREVIEW_COUNT = 5;
@@ -3651,10 +3651,10 @@ function truncateFileTree(tree, {
     return kept;
   }
   markTruncated(signal);
-  return [...kept, `... +${omitted} lines`];
+  return [...kept, `\u2026 +${omitted} lines`];
 }
-function resolveExplicitTruncate(truncate2, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate2 ?? DEFAULT_TRUNCATE, 1), truncateCap);
+function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function formatStatus(status) {
   return status ? ` [${status}]` : "";
@@ -3700,8 +3700,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -3714,10 +3714,10 @@ function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, s
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate2, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, signal) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const lines = [
-    formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, signal)
+    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal)
   ];
   const pushField = (label, value) => {
     if (!value) {
@@ -3759,7 +3759,7 @@ function formatTurnLabel(turn, {
   indent = "  ",
   sessionId,
   depth = "collapsed",
-  truncate: truncate2,
+  truncate,
   truncateCap,
   includeDbTurnIds = false,
   signal
@@ -3769,7 +3769,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const title = turn.title === null && turn.promptPreview ? (
     // The title slot is one line by construction. A prompt standing in for
     // a missing note need not be: a task notification or a pasted payload
@@ -3801,8 +3801,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", truncate: truncate2, truncateCap, signal } = {}) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatToolCallLabel(toolCall, { indent = "    ", truncate, truncateCap, signal } = {}) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, signal })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -3815,14 +3815,14 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
   });
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", truncate: truncate2, signal } = options;
-  const limit = resolveExplicitTruncate(truncate2, options.truncateCap);
+  const { indent = "    ", truncate, signal } = options;
+  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
       depth: "expanded",
-      truncate: truncate2
+      truncate
     })
   ];
   if (toolCall.input !== void 0) {
@@ -3844,7 +3844,7 @@ function renderTurnChildren(turn, depth, options = {}) {
   if (depth === "collapsed") {
     return "";
   }
-  const { indent = "  ", sessionId, mode = "legacy", truncate: truncate2, signal } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
   const childIndent = `${indent}  `;
   const childLines = [];
   if (turn.observations && turn.observations.length > 0) {
@@ -3856,7 +3856,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate: truncate2,
+          truncate,
           signal
         })
       );
@@ -3875,7 +3875,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate: truncate2,
+          truncate,
           signal
         })
       );
@@ -3899,12 +3899,12 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
     lines.push(
-      `${detailIndent}- prompt: "${truncateText(turn.promptPreview, { limit, signal })}"`
+      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`
     );
   }
   if (turn.responsePreview) {
     lines.push(
-      `${detailIndent}- response: "${truncateText(turn.responsePreview, { limit, signal })}"`
+      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`
     );
   }
   if (turn.insight && turn.insight.length > 0) {
@@ -20770,9 +20770,6 @@ function formatTags(tags) {
   const hidden = tags.length - shown.length;
   return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
 }
-function truncate(text, maxChars) {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026`;
-}
 function sanitize(value) {
   return value.replaceAll("|", "/").replaceAll("\u2192", "->");
 }
@@ -20791,7 +20788,7 @@ function renderSpineRow(row, titleCap) {
     `[E${segment.id}]`,
     segmentTypeGlyph(row.dominantType),
     formatTags(segment.tags),
-    sanitize(truncate(segment.title, titleCap)),
+    sanitize(truncateText(segment.title, { limit: titleCap })),
     `[${segment.status}]`
   ].filter((part) => part !== "");
   const facts = [
@@ -20803,7 +20800,7 @@ function renderSpineRow(row, titleCap) {
 }
 function renderOrphanRow(row, titleCap) {
   const { facts } = row;
-  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncate(facts.title, titleCap));
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncateText(facts.title, { limit: titleCap }));
   return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
     facts.type
   )} ${label} (${row.signals.join(", ")})`;
@@ -21068,15 +21065,6 @@ function cleanPromptForLabel(raw) {
   const stripped = raw.replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/g, "").replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g, "").replace(/<command-message>[\s\S]*?<\/command-message>/g, "").replace(/<command-args>[\s\S]*?<\/command-args>/g, "");
   const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
   return firstLine.replace(/\s+/g, " ").trim();
-}
-function truncateText2(text, maxChars, signal) {
-  if (text.length <= maxChars) {
-    return text;
-  }
-  if (signal) {
-    signal.truncated = true;
-  }
-  return `${text.slice(0, maxChars)}\u2026`;
 }
 function formatDuration(ms) {
   const totalSeconds = Math.floor(ms / 1e3);
@@ -21708,7 +21696,7 @@ function pulledAntecedentLabel(turn, signal) {
     return turn.title;
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP, signal);
+  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -22072,7 +22060,10 @@ function milestonePromptPrefix(turn, signal) {
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP, signal);
+  return truncateText(cleanPromptForLabel(raw), {
+    limit: MILESTONE_PROMPT_PREFIX_CAP,
+    signal
+  });
 }
 function initialUnitTrim(unit) {
   return {
@@ -22096,7 +22087,7 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText2(milestone.turn.title ?? "(untitled)", titleCap, signal)
+    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal })
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -22119,7 +22110,10 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     const superseded = antecedent.supersededBy.length > 0;
     const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
     let label = sanitizeTimelineField(
-      truncateText2(pulledAntecedentLabel(antecedent.turn, signal), titleCap, signal)
+      truncateText(pulledAntecedentLabel(antecedent.turn, signal), {
+        limit: titleCap,
+        signal
+      })
     );
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
@@ -22673,7 +22667,7 @@ function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titl
   const promptCore = turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = turn.type === "compact" ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = sanitizeTimelineField(
-    truncateText2(promptWithBadges, promptCap, signal)
+    truncateText(promptWithBadges, { limit: promptCap, signal })
   );
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "\u2A2F " : "";
@@ -22716,13 +22710,13 @@ function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = nul
   }
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -22768,7 +22762,7 @@ function renderPhases(view, titleCap, signal) {
     const leadTurn = turnByPrompt.get(phase.startPromptNumber);
     const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap, signal));
+    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
     );
@@ -22992,6 +22986,13 @@ function createMilestoneContextHandler(dependencies) {
   };
 }
 
+// src/shared/note-budget.ts
+var NOTE_TOKEN_BUDGET = {
+  title: 20,
+  content: 100,
+  insight: 60
+};
+
 // src/hooks/handlers/context-note-taking.ts
 var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns.
@@ -23009,17 +23010,17 @@ nothing worth keeping, or whose details left your context with no open
 batch recovering them in passing \u2014 never invent a note from the listed
 line, never open a lookup just to rescue one.
 Fields:
-- title (~20 tokens): "<activity>+<topic>: <what this turn covered>" \u2014 the
+- title (~${NOTE_TOKEN_BUDGET.title} tokens): "<activity>+<topic>: <what this turn covered>" \u2014 the
   addressing line, one glance says what the turn did. Activity words
   (research/design/implement/fix/measure/review/write/ops) must state the
   real stage, never a hoped-for one.
-- content (~100 tokens): the conclusion, then the evidence chain that
+- content (~${NOTE_TOKEN_BUDGET.content} tokens): the conclusion, then the evidence chain that
   produced it \u2014 how it was reached, not just that it was. Include rejected
   alternatives with reasons, and who decided (user/data/literature/
   inference). Prefer proper nouns (file names, error names) over narration.
   Never restate the title; never narrate looking \u2014 "I checked the transcript
   and found no X" is "the transcript has no X".
-- insight (~60 tokens): empty by default. Only what is worth keeping
+- insight (~${NOTE_TOKEN_BUDGET.insight} tokens): empty by default. Only what is worth keeping
   long-term, hard to reacquire, and orthogonal to the conclusion \u2014 pitfalls
   hit, durable pointers, transferable lessons. Anything one search away does
   not qualify.

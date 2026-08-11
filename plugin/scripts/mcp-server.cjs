@@ -32646,12 +32646,57 @@ function getSessionEffectiveCitations(db, sessionId) {
   return effective;
 }
 
+// src/utils/token-estimate.ts
+var CJK_CHARACTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function estimateTokens(text) {
+  let cjk = 0;
+  let rest = 0;
+  for (const character of text) {
+    if (CJK_CHARACTER.test(character)) {
+      cjk += 1;
+    } else {
+      rest += 1;
+    }
+  }
+  return Math.ceil(cjk + rest / 4);
+}
+
+// src/shared/note-budget.ts
+var NOTE_TOKEN_BUDGET = {
+  title: 20,
+  content: 100,
+  insight: 60
+};
+function formatNoteBudget(fields) {
+  const title = estimateTokens(fields.title);
+  const content = estimateTokens(fields.content);
+  const insight = fields.insight ? estimateTokens(fields.insight) : 0;
+  const hasInsight = insight > 0;
+  const segments = [
+    `title ${title}/${NOTE_TOKEN_BUDGET.title}`,
+    `content ${content}/${NOTE_TOKEN_BUDGET.content}`
+  ];
+  if (hasInsight) {
+    segments.push(`insight ${insight}/${NOTE_TOKEN_BUDGET.insight}`);
+  }
+  const total = title + content + insight;
+  const budget = NOTE_TOKEN_BUDGET.title + NOTE_TOKEN_BUDGET.content + (hasInsight ? NOTE_TOKEN_BUDGET.insight : 0);
+  return `${segments.join(" \xB7 ")} \u2192 ${total}/${budget} (${formatRatio(total, budget)}\xD7).`;
+}
+function formatRatio(total, budget) {
+  const ratio = total / budget;
+  return ratio < 0.05 ? "<0.1" : ratio.toFixed(1);
+}
+
 // src/mcp/definitions.ts
 var MNEMO_TOOL_DESCRIPTIONS = {
   recall: "Search past sessions for design rationale, rejected alternatives, decisions, and user corrections \u2014 the *why* behind the code, which source never records. For current behavior or mechanism, read the source first. Paginated index; hand off to the mnemo-replay skill for a turn's full untruncated text and tool I/O from the database (raw JSONL only for exact bytes).",
   remember: "Persist sessions, turns, or observations through one routed write tool.",
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
-  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title (~20 tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the addressing line, one glance says what the turn did. content (~100 tokens): the conclusion, then the distilled evidence chain that produced it, including rejected alternatives and who decided; never restate the title, and never narrate the act of looking (\"I checked the transcript and found it has no X\" is \"the transcript has no X\"). insight (~60 tokens): optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Each successful write answers with its own token count against those budgets. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
+  // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
+  // the receipt measures a write against, rather than restated as prose here.
+  // Three surfaces say these numbers; two of them used to say them from memory.
+  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in the batch you expect to be that turn's last \u2014 while another tool call is still likely, let it wait rather than seal the turn early, since an unwritten turn stays writable from a later turn; a backlog-relief list is the only other source of addresses. The note describes its addressed turn only. title (~" + NOTE_TOKEN_BUDGET.title + " tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the addressing line, one glance says what the turn did. content (~" + NOTE_TOKEN_BUDGET.content + ' tokens): the conclusion, then the distilled evidence chain that produced it, including rejected alternatives and who decided; never restate the title, and never narrate the act of looking ("I checked the transcript and found it has no X" is "the transcript has no X"). insight (~' + NOTE_TOKEN_BUDGET.insight + " tokens): optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. Each successful write answers with its own token count against those budgets. skip: set true, with `turn` alone, to decline a relief-listed turn that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),
@@ -33176,34 +33221,6 @@ function getShadowNote(db, turnId) {
 
 // src/mcp/note.ts
 init_segment_era();
-
-// src/utils/token-estimate.ts
-function estimateTokens(text) {
-  return Math.ceil(text.length / 4);
-}
-
-// src/shared/note-budget.ts
-var NOTE_TOKEN_BUDGET = {
-  title: 20,
-  content: 100,
-  insight: 60
-};
-function formatNoteBudget(fields) {
-  const title = estimateTokens(fields.title);
-  const content = estimateTokens(fields.content);
-  const insight = fields.insight ? estimateTokens(fields.insight) : 0;
-  const hasInsight = insight > 0;
-  const segments = [
-    `title ${title}/${NOTE_TOKEN_BUDGET.title}`,
-    `content ${content}/${NOTE_TOKEN_BUDGET.content}`
-  ];
-  if (hasInsight) {
-    segments.push(`insight ${insight}/${NOTE_TOKEN_BUDGET.insight}`);
-  }
-  const total = title + content + insight;
-  const budget = NOTE_TOKEN_BUDGET.title + NOTE_TOKEN_BUDGET.content + (hasInsight ? NOTE_TOKEN_BUDGET.insight : 0);
-  return `${segments.join(" \xB7 ")} \u2192 ${total}/${budget} (${(total / budget).toFixed(1)}\xD7).`;
-}
 
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
@@ -34192,7 +34209,7 @@ var TYPE_EMOJI = {
   discovery: "\u{1F535}",
   decision: "\u2696\uFE0F"
 };
-var FIELD_TRUNCATION_SUFFIX = "...";
+var FIELD_TRUNCATION_SUFFIX = "\u2026";
 var DEFAULT_TRUNCATE = 200;
 var MAX_TRUNCATE = 2e3;
 var DEFAULT_PREVIEW_COUNT = 5;
@@ -34326,10 +34343,10 @@ function truncateFileTree(tree, {
     return kept;
   }
   markTruncated(signal);
-  return [...kept, `... +${omitted} lines`];
+  return [...kept, `\u2026 +${omitted} lines`];
 }
-function resolveExplicitTruncate(truncate2, truncateCap = MAX_TRUNCATE) {
-  return Math.min(Math.max(truncate2 ?? DEFAULT_TRUNCATE, 1), truncateCap);
+function resolveExplicitTruncate(truncate, truncateCap = MAX_TRUNCATE) {
+  return Math.min(Math.max(truncate ?? DEFAULT_TRUNCATE, 1), truncateCap);
 }
 function formatStatus(status) {
   return status ? ` [${status}]` : "";
@@ -34375,8 +34392,8 @@ function extractKeyParam(name, input) {
       return null;
   }
 }
-function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const stats = formatSessionStats(session);
   const statsSegment = stats ? ` | ${stats}` : "";
   const lines = [
@@ -34389,10 +34406,10 @@ function formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, s
   }
   return lines.join("\n");
 }
-function formatSessionExpandedWithMode(session, mode, truncate2, truncateCap, signal) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatSessionExpandedWithMode(session, mode, truncate, truncateCap, signal) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const lines = [
-    formatSessionCollapsedWithMode(session, mode, truncate2, truncateCap, signal)
+    formatSessionCollapsedWithMode(session, mode, truncate, truncateCap, signal)
   ];
   const pushField = (label, value) => {
     if (!value) {
@@ -34434,7 +34451,7 @@ function formatTurnLabel(turn, {
   indent = "  ",
   sessionId,
   depth = "collapsed",
-  truncate: truncate2,
+  truncate,
   truncateCap,
   includeDbTurnIds = false,
   signal
@@ -34444,7 +34461,7 @@ function formatTurnLabel(turn, {
   const stats = formatTurnStats(turn);
   const statsSegment = stats ? ` | ${stats}` : "";
   const rawTitle = turn.title ?? turn.promptPreview ?? "Untitled";
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const title = turn.title === null && turn.promptPreview ? (
     // The title slot is one line by construction. A prompt standing in for
     // a missing note need not be: a task notification or a pasted payload
@@ -34476,8 +34493,8 @@ function formatTurnCollapsedWithMode(turn, options = {}) {
   }
   return lines.join("\n");
 }
-function formatToolCallLabel(toolCall, { indent = "    ", truncate: truncate2, truncateCap, signal } = {}) {
-  const limit = resolveExplicitTruncate(truncate2, truncateCap);
+function formatToolCallLabel(toolCall, { indent = "    ", truncate, truncateCap, signal } = {}) {
+  const limit = resolveExplicitTruncate(truncate, truncateCap);
   const keyParam = toolCall.keyParam ?? extractKeyParam(toolCall.name, toolCall.input);
   const suffix = keyParam ? ` ${truncateText(keyParam, { limit, signal })}` : "";
   return `${indent}- \u{1F527} ${toolCall.name}${suffix}`;
@@ -34490,14 +34507,14 @@ function formatToolCallCollapsedWithMode(toolCall, options = {}) {
   });
 }
 function formatToolCallExpandedWithMode(toolCall, options = {}) {
-  const { indent = "    ", truncate: truncate2, signal } = options;
-  const limit = resolveExplicitTruncate(truncate2, options.truncateCap);
+  const { indent = "    ", truncate, signal } = options;
+  const limit = resolveExplicitTruncate(truncate, options.truncateCap);
   const detailIndent = `${indent}  `;
   const lines = [
     formatToolCallLabel(toolCall, {
       ...options,
       depth: "expanded",
-      truncate: truncate2
+      truncate
     })
   ];
   if (toolCall.input !== void 0) {
@@ -34519,7 +34536,7 @@ function renderTurnChildren(turn, depth, options = {}) {
   if (depth === "collapsed") {
     return "";
   }
-  const { indent = "  ", sessionId, mode = "legacy", truncate: truncate2, signal } = options;
+  const { indent = "  ", sessionId, mode = "legacy", truncate, signal } = options;
   const childIndent = `${indent}  `;
   const childLines = [];
   if (turn.observations && turn.observations.length > 0) {
@@ -34531,7 +34548,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate: truncate2,
+          truncate,
           signal
         })
       );
@@ -34550,7 +34567,7 @@ function renderTurnChildren(turn, depth, options = {}) {
           turnPromptNumber: turn.promptNumber,
           mode,
           depth: "expanded",
-          truncate: truncate2,
+          truncate,
           signal
         })
       );
@@ -34574,12 +34591,12 @@ function formatTurnExpandedWithMode(turn, options = {}) {
   const lines = [formatTurnCollapsedWithMode(turn, { ...options, mode })];
   if (turn.promptPreview) {
     lines.push(
-      `${detailIndent}- prompt: "${truncateText(turn.promptPreview, { limit, signal })}"`
+      `${detailIndent}- prompt: "${truncateText(collapseToSingleLine(turn.promptPreview), { limit, signal })}"`
     );
   }
   if (turn.responsePreview) {
     lines.push(
-      `${detailIndent}- response: "${truncateText(turn.responsePreview, { limit, signal })}"`
+      `${detailIndent}- response: "${truncateText(collapseToSingleLine(turn.responsePreview), { limit, signal })}"`
     );
   }
   if (turn.insight && turn.insight.length > 0) {
@@ -34692,9 +34709,6 @@ function formatTags(tags) {
   const hidden = tags.length - shown.length;
   return `${shown.join(" ")}${hidden > 0 ? ` +${hidden}` : ""}`;
 }
-function truncate(text, maxChars) {
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}\u2026`;
-}
 function sanitize(value) {
   return value.replaceAll("|", "/").replaceAll("\u2192", "->");
 }
@@ -34713,7 +34727,7 @@ function renderSpineRow(row, titleCap) {
     `[E${segment.id}]`,
     segmentTypeGlyph(row.dominantType),
     formatTags(segment.tags),
-    sanitize(truncate(segment.title, titleCap)),
+    sanitize(truncateText(segment.title, { limit: titleCap })),
     `[${segment.status}]`
   ].filter((part) => part !== "");
   const facts = [
@@ -34725,7 +34739,7 @@ function renderSpineRow(row, titleCap) {
 }
 function renderOrphanRow(row, titleCap) {
   const { facts } = row;
-  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncate(facts.title, titleCap));
+  const label = facts.title === null || facts.title.trim() === "" ? "(untitled)" : sanitize(truncateText(facts.title, { limit: titleCap }));
   return `${SPINE_ROW_INDENT}${ORPHAN_GLYPH} T${facts.promptNumber} ${segmentTypeGlyph(
     facts.type
   )} ${label} (${row.signals.join(", ")})`;
@@ -34783,7 +34797,9 @@ function renderSegmentHeaderLines(input) {
     `${head} | ${input.memberCount} ${input.memberCount === 1 ? "turn" : "turns"} | [${segment.status}] | rev ${segment.revision}`
   ];
   if (segment.content) {
-    lines.push(`  - desc: ${truncate(segment.content, input.truncate)}`);
+    lines.push(
+      `  - desc: ${truncateText(segment.content, { limit: input.truncate })}`
+    );
   }
   const trace = formatPhaseTrace(input.phaseTrace);
   if (trace !== "") {
@@ -35133,7 +35149,7 @@ function deriveBreadcrumb(db, session) {
   }
   return `continues from ${parentRef}`;
 }
-function renderSession(db, session, depth, truncate2, turnSelector, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderSession(db, session, depth, truncate, turnSelector, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const view = depth === "expanded" ? buildSessionView(db, session, eraCutoffEpoch) : buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch);
   const breadcrumb = deriveBreadcrumb(db, session);
   const lines = [
@@ -35142,7 +35158,7 @@ function renderSession(db, session, depth, truncate2, turnSelector, includeDbTur
       {
         depth: depth === "collapsed" ? "collapsed" : "expanded",
         mode: "unified",
-        truncate: truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         signal
@@ -35167,7 +35183,7 @@ function renderSession(db, session, depth, truncate2, turnSelector, includeDbTur
         depth: "collapsed",
         mode: "unified",
         sessionId: session.id,
-        truncate: truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         signal
@@ -35180,7 +35196,7 @@ function renderSession(db, session, depth, truncate2, turnSelector, includeDbTur
   }
   return lines.join("\n");
 }
-function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderTurnScope(db, turns, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const turn of turns) {
@@ -35199,7 +35215,7 @@ function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncate
     lines.push(
       renderNode(
         { type: "session", value: view },
-        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap, signal }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
       )
     );
     const sessionTurns = grouped.get(session.id) ?? [];
@@ -35212,7 +35228,7 @@ function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncate
             depth,
             mode: "unified",
             sessionId: session.id,
-            truncate: truncate2,
+            truncate,
             includeDbTurnIds,
             truncateCap,
             signal
@@ -35223,7 +35239,7 @@ function renderTurnScope(db, turns, depth, truncate2, includeDbTurnIds, truncate
   }
   return lines.join("\n");
 }
-function renderObservationScope(db, observations, depth, includeParents, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderObservationScope(db, observations, depth, includeParents, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const lines = [];
   const grouped = /* @__PURE__ */ new Map();
   for (const row of observations) {
@@ -35251,7 +35267,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
           {
             depth: depth === "collapsed" ? "collapsed" : "expanded",
             mode: "unified",
-            truncate: truncate2,
+            truncate,
             truncateCap,
             signal
           }
@@ -35271,7 +35287,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
     lines.push(
       renderNode(
         { type: "session", value: sessionView },
-        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap, signal }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
       )
     );
     const turnMap = grouped.get(session.id) ?? /* @__PURE__ */ new Map();
@@ -35287,7 +35303,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
             depth: "collapsed",
             mode: "unified",
             sessionId: session.id,
-            truncate: truncate2,
+            truncate,
             includeDbTurnIds,
             truncateCap,
             signal
@@ -35315,7 +35331,7 @@ function renderObservationScope(db, observations, depth, includeParents, truncat
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate: truncate2,
+              truncate,
               truncateCap,
               signal
             }
@@ -35346,13 +35362,13 @@ function buildOwnedObservationView(db, observation, eraCutoffEpoch) {
     eraCutoffEpoch
   );
 }
-function renderSessionDetail(db, sessionId, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderSessionDetail(db, sessionId, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const session = getSession(db, sessionId);
   return session ? renderSession(
     db,
     session,
     depth,
-    truncate2,
+    truncate,
     void 0,
     includeDbTurnIds,
     truncateCap,
@@ -35360,7 +35376,7 @@ function renderSessionDetail(db, sessionId, depth, truncate2, includeDbTurnIds, 
     signal
   ) : "Session not found.";
 }
-function renderObservationDetail(db, observationId, depth, truncate2, truncateCap, eraCutoffEpoch = null, signal) {
+function renderObservationDetail(db, observationId, depth, truncate, truncateCap, eraCutoffEpoch = null, signal) {
   const observation = getObservation(db, observationId);
   if (!observation || observation.excludedFromExtraction !== 0) {
     return "Observation not found.";
@@ -35371,7 +35387,7 @@ function renderObservationDetail(db, observationId, depth, truncate2, truncateCa
     {
       depth: depth === "collapsed" ? "collapsed" : "expanded",
       mode: "unified",
-      truncate: truncate2,
+      truncate,
       truncateCap,
       signal
     }
@@ -35405,7 +35421,7 @@ function buildSegmentFacts(db, segment, eraCutoffEpoch = null) {
     members
   };
 }
-function renderSegmentSummary(db, segmentId, truncate2, eraCutoffEpoch = null) {
+function renderSegmentSummary(db, segmentId, truncate, eraCutoffEpoch = null) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return null;
@@ -35417,10 +35433,10 @@ function renderSegmentSummary(db, segmentId, truncate2, eraCutoffEpoch = null) {
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    truncate: truncate2 ?? DEFAULT_TRUNCATE
+    truncate: truncate ?? DEFAULT_TRUNCATE
   }).join("\n");
 }
-function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderSegmentDetail(db, segmentId, depth, pageSize, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const segment = getSegment(db, segmentId);
   if (!segment) {
     return "Segment not found.";
@@ -35432,7 +35448,7 @@ function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeD
     dominantType: facts.dominantType,
     phaseTrace: facts.phaseTrace,
     anchorRefs: facts.anchorRefs,
-    truncate: truncate2 ?? DEFAULT_TRUNCATE
+    truncate: truncate ?? DEFAULT_TRUNCATE
   });
   const shown = facts.members.slice(0, Math.max(0, pageSize));
   if (facts.members.length > 0) {
@@ -35451,7 +35467,7 @@ function renderSegmentDetail(db, segmentId, depth, pageSize, truncate2, includeD
         depth,
         mode: "unified",
         sessionId: member.sessionId,
-        truncate: truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         signal
@@ -35503,9 +35519,9 @@ function applyTurnSelector(db, sessionId, promptNumbers) {
   const selected = new Set(promptNumbers);
   return turns.filter((turn) => selected.has(turn.promptNumber));
 }
-function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderGroupedSearchResults(db, results, depth, truncate, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const segmentLines = results.filter((result) => result.layer === "segment").map(
-    (result) => renderSegmentSummary(db, result.sourceId, truncate2, eraCutoffEpoch)
+    (result) => renderSegmentSummary(db, result.sourceId, truncate, eraCutoffEpoch)
   ).filter((line) => line !== null);
   const sessionGroups = /* @__PURE__ */ new Map();
   const sessionOrder = [];
@@ -35548,7 +35564,7 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
         db,
         session,
         depth,
-        truncate2,
+        truncate,
         void 0,
         includeDbTurnIds,
         truncateCap,
@@ -35562,7 +35578,7 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
           type: "session",
           value: buildSessionSummary(db, session.id) ?? buildSessionView(db, session, eraCutoffEpoch)
         },
-        { depth: "collapsed", mode: "unified", truncate: truncate2, truncateCap, signal }
+        { depth: "collapsed", mode: "unified", truncate, truncateCap, signal }
       )
     ];
     const turns = getTurnsForSession(db, session.id).filter(
@@ -35578,7 +35594,7 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
             depth: turnDepth,
             mode: "unified",
             sessionId: session.id,
-            truncate: truncate2,
+            truncate,
             includeDbTurnIds,
             truncateCap,
             signal
@@ -35605,7 +35621,7 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
               indent: "    ",
               sessionId: session.id,
               turnPromptNumber: turn.promptNumber,
-              truncate: truncate2,
+              truncate,
               truncateCap,
               signal
             }
@@ -35617,7 +35633,7 @@ function renderGroupedSearchResults(db, results, depth, truncate2, includeDbTurn
   });
   return [...segmentLines, ...sessionLines].filter(Boolean).join("\n");
 }
-function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderRoutedId(db, routed, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   if (routed.kind === "sessions") {
     const paged = paginateItems(
       listSessionIds(db, routed.sessionIds, after, before),
@@ -35631,7 +35647,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
           db,
           sessionId,
           depth,
-          truncate2,
+          truncate,
           includeDbTurnIds,
           truncateCap,
           eraCutoffEpoch,
@@ -35655,7 +35671,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
           segmentId,
           depth,
           pageSize,
-          truncate2,
+          truncate,
           includeDbTurnIds,
           truncateCap,
           eraCutoffEpoch,
@@ -35682,7 +35698,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
         db,
         paged.items,
         depth,
-        truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
@@ -35697,7 +35713,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
       db,
       [turn],
       depth,
-      truncate2,
+      truncate,
       includeDbTurnIds,
       truncateCap,
       eraCutoffEpoch,
@@ -35730,7 +35746,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
         paged.items,
         depth,
         true,
-        truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
@@ -35763,7 +35779,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
         paged.items,
         depth,
         true,
-        truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
@@ -35777,7 +35793,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
       db,
       routed.observationId,
       depth,
-      truncate2,
+      truncate,
       truncateCap,
       eraCutoffEpoch,
       signal
@@ -35786,7 +35802,7 @@ function renderRoutedId(db, routed, depth, page, pageSize, truncate2, after, bef
   routed;
   return formatParameterError(`unrecognized id kind`);
 }
-function renderSessionList(db, depth, page, pageSize, truncate2, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
+function renderSessionList(db, depth, page, pageSize, truncate, after, before, includeDbTurnIds, truncateCap, eraCutoffEpoch = null, signal) {
   const paged = paginateItems(
     listSessionIds(db, void 0, after, before),
     page,
@@ -35799,7 +35815,7 @@ function renderSessionList(db, depth, page, pageSize, truncate2, after, before, 
         db,
         sessionId,
         depth,
-        truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
@@ -35836,7 +35852,7 @@ function recallMemoryBody(db, input, signal) {
   const page = Math.max(1, input.page ?? 1);
   const pageSize = input.pageSize ?? 10;
   const includeDbTurnIds = input.includeDbTurnIds ?? false;
-  const truncate2 = input.truncate ?? DEFAULT_TRUNCATE;
+  const truncate = input.truncate ?? DEFAULT_TRUNCATE;
   const truncateCap = input.truncateCap;
   const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const timeRange = resolveTimeRange(input.time);
@@ -35854,7 +35870,7 @@ function recallMemoryBody(db, input, signal) {
       depth,
       page,
       pageSize,
-      truncate2,
+      truncate,
       timeRange.after,
       timeRange.before,
       includeDbTurnIds,
@@ -35885,7 +35901,7 @@ function recallMemoryBody(db, input, signal) {
         db,
         paged.items,
         depth,
-        truncate2,
+        truncate,
         includeDbTurnIds,
         truncateCap,
         eraCutoffEpoch,
@@ -35899,7 +35915,7 @@ function recallMemoryBody(db, input, signal) {
     depth,
     page,
     pageSize,
-    truncate2,
+    truncate,
     timeRange.after,
     timeRange.before,
     includeDbTurnIds,
@@ -36592,15 +36608,6 @@ function cleanPromptForLabel(raw) {
   const firstLine = stripped.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
   return firstLine.replace(/\s+/g, " ").trim();
 }
-function truncateText2(text, maxChars, signal) {
-  if (text.length <= maxChars) {
-    return text;
-  }
-  if (signal) {
-    signal.truncated = true;
-  }
-  return `${text.slice(0, maxChars)}\u2026`;
-}
 function formatDuration(ms) {
   const totalSeconds = Math.floor(ms / 1e3);
   if (totalSeconds < 60) {
@@ -37231,7 +37238,7 @@ function pulledAntecedentLabel(turn, signal) {
     return turn.title;
   }
   const prompt = cleanPromptForLabel(turn.userPrompt);
-  return prompt === "" ? "(untitled)" : truncateText2(prompt, MILESTONE_PULLED_LABEL_CAP, signal);
+  return prompt === "" ? "(untitled)" : truncateText(prompt, { limit: MILESTONE_PULLED_LABEL_CAP, signal });
 }
 function sortTurnsForAnalysis(turns) {
   return [...turns].sort((left, right) => {
@@ -37595,7 +37602,10 @@ function milestonePromptPrefix(turn, signal) {
   if (commandName === null && isKnownSystemInjectedContent(raw.trimStart())) {
     return MILESTONE_NOTIFICATION_MARKER;
   }
-  return truncateText2(cleanPromptForLabel(raw), MILESTONE_PROMPT_PREFIX_CAP, signal);
+  return truncateText(cleanPromptForLabel(raw), {
+    limit: MILESTONE_PROMPT_PREFIX_CAP,
+    signal
+  });
 }
 function initialUnitTrim(unit) {
   return {
@@ -37619,7 +37629,7 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     prompt = truncateToTokens(prompt, trim.promptTokens);
   }
   let title = sanitizeTimelineField(
-    truncateText2(milestone.turn.title ?? "(untitled)", titleCap, signal)
+    truncateText(milestone.turn.title ?? "(untitled)", { limit: titleCap, signal })
   );
   if (trim.titleTokens !== null) {
     title = truncateToTokens(title, trim.titleTokens);
@@ -37642,7 +37652,10 @@ function renderUnitLines(unit, trim, titleCap, signal) {
     const superseded = antecedent.supersededBy.length > 0;
     const reversalGlyph = superseded ? `${MILESTONE_MARKER_GLYPH.invalidated} ` : "";
     let label = sanitizeTimelineField(
-      truncateText2(pulledAntecedentLabel(antecedent.turn, signal), titleCap, signal)
+      truncateText(pulledAntecedentLabel(antecedent.turn, signal), {
+        limit: titleCap,
+        signal
+      })
     );
     if (trim.pulledTitleTokens !== null) {
       label = truncateToTokens(label, trim.pulledTitleTokens);
@@ -38196,7 +38209,7 @@ function renderTurnRow(turn, prevEpoch, isBrokenPromptCandidate, promptCap, titl
   const promptCore = turn.type === "compact" ? "/compact" : cleanPromptForLabel(turn.userPrompt);
   const promptWithBadges = turn.type === "compact" ? promptCore : sourceBadges.length > 0 ? `${sourceBadges} ${promptCore}` : promptCore;
   const promptText = sanitizeTimelineField(
-    truncateText2(promptWithBadges, promptCap, signal)
+    truncateText(promptWithBadges, { limit: promptCap, signal })
   );
   const renderedPrompt = isUndone ? `~~${promptText}~~` : promptText;
   const statusPrefix = isUndone ? "\u2A2F " : "";
@@ -38239,13 +38252,13 @@ function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = nul
   }
   if (isUndone) {
     if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
+      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
   if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText2(turn.title, titleCap, signal)}`;
+    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -38291,7 +38304,7 @@ function renderPhases(view, titleCap, signal) {
     const leadTurn = turnByPrompt.get(phase.startPromptNumber);
     const leadTextCandidate = leadTurn?.title ?? cleanPromptForLabel(leadTurn?.userPrompt ?? null);
     const leadText = leadTextCandidate.length > 0 ? leadTextCandidate : "(untitled)";
-    const leadTitle = sanitizeTimelineField(truncateText2(leadText, titleCap, signal));
+    const leadTitle = sanitizeTimelineField(truncateText(leadText, { limit: titleCap, signal }));
     lines.push(
       `  ${String(startIndex + index + 1).padStart(2)} | ${dateLabel.padEnd(11)} | ${phase.emoji} ${(phase.kind === "pending" ? "pending" : phase.type ?? "").padEnd(10)} | ${range.padEnd(8)} | ${durationLabel.padEnd(7)} | ${`${countsLabel} ${stats.join(" ")}`.trim().padEnd(16)} | ${leadTitle}${extSuffix}`.trimEnd()
     );

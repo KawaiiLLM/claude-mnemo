@@ -12,7 +12,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import { writeMemoryEdges } from "../../src/db/memory-edges";
 import { initializeSchema } from "../../src/db/schema";
-import { deriveDominantType } from "../../src/db/segment-rank";
+import { deriveDominantType, type SegmentSpineRow } from "../../src/db/segment-rank";
 import {
   addSegmentMembers,
   applySegmentWrites,
@@ -26,6 +26,7 @@ import {
   renderSessionMilestoneInjection,
 } from "../../src/hooks/milestone-injection";
 import { NAVIGATION_LEGEND } from "../../src/mcp/format";
+import { renderSpineRow } from "../../src/mcp/segment-spine";
 import { buildTimelineView, renderTimeline } from "../../src/mcp/timeline";
 
 /**
@@ -486,5 +487,44 @@ describe("deriveDominantType (spec D9's member-type mode)", () => {
     expect(deriveDominantType(["research", "implement"], [])).toBeNull();
     expect(deriveDominantType(["implement", "research"], [])).toBeNull();
     expect(deriveDominantType(["fix", "fix", "ops", "ops"], [])).toBeNull();
+  });
+});
+
+describe("spine rows cut like every other field", () => {
+  const title = `${"alpha beta gamma ".repeat(20)}supplementary`;
+  const row: SegmentSpineRow = {
+    segment: {
+      id: 47,
+      topicId: null,
+      title,
+      content: null,
+      type: [],
+      tags: [],
+      status: "open",
+      revision: 1,
+      createdAtEpoch: CUTOFF,
+      updatedAtEpoch: CUTOFF,
+    },
+    dominantType: "implement",
+    memberCount: 3,
+    sessionMemberCount: 3,
+    firstPromptNumber: 12,
+    lastPromptNumber: 87,
+    firstEpoch: CUTOFF,
+    lastEpoch: CUTOFF,
+    phaseTrace: ["implement"],
+  };
+
+  test("a spine title retreats to a word boundary", () => {
+    // The spine held a third copy of the same three-line hard cut — the ticket
+    // named only the timeline's. A P2-era session reads through THIS renderer,
+    // so leaving it would have kept the defect on the surface that matters most.
+    const rendered = renderSpineRow(row, 60);
+    const shown = rendered.slice(rendered.indexOf(title.slice(0, 5)), rendered.indexOf(" [open]"));
+
+    expect(shown).toEndWith("…");
+    const kept = shown.slice(0, -1);
+    expect(title.startsWith(kept)).toBe(true);
+    expect(title.charAt(kept.length)).toBe(" ");
   });
 });

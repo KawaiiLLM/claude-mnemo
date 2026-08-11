@@ -664,7 +664,7 @@ describe("handleContextHook", () => {
       `raw: ${resolveTranscriptPath("/Users/zhaoqixuan/Projects/claude-mnemo", "session-newest")}`,
     );
     expect(recentOutput).toContain(
-      "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long...",
+      "  - desc: Most recent session description that should be truncated in the context hook output because it is intentionally too long…",
     );
     // The per-field "[use mnemo-replay skill...]" hint is gone (spec D1/D2):
     // the ellipsis above is still the truncation marker, but the navigation
@@ -683,7 +683,7 @@ describe("handleContextHook", () => {
     // Cut back to the word boundary: the raw slice landed inside "budget",
     // and a half-word reads as corruption rather than as truncation.
     expect(recentOutput).toContain(
-      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible...",
+      "  - desc: Secondary session description that should also be truncated in the context hook output because it exceeds the visible…",
     );
 
     expect(recentOutput).toContain(

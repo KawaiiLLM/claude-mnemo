@@ -381,9 +381,9 @@ describe("MCP format renderer", () => {
     );
 
     expect(shortLimit).toContain("x".repeat(50));
-    expect(shortLimit).toContain("...");
+    expect(shortLimit).toContain("…");
     expect(longLimit).toContain("x".repeat(500));
-    expect(longLimit).not.toContain("x".repeat(500) + "...");
+    expect(longLimit).not.toContain("x".repeat(500) + "…");
   });
 
   test("renders expanded turn files as a tree in unified mode", () => {
@@ -440,7 +440,7 @@ describe("MCP format renderer", () => {
 
     expect(rendered).toContain("    - files_read:");
     expect(rendered).toContain("      - /Users/zhaoqixuan/Projects/claude-mnemo/src");
-    expect(rendered).toContain("... +4 lines");
+    expect(rendered).toContain("… +4 lines");
   });
 
   test("renders expanded turn with relative-path filesRead as correct tree", () => {
@@ -489,7 +489,7 @@ describe("MCP format renderer", () => {
     // has nothing to truncate here — unrelated to the hint removal itself.
     const legacy = formatTurnExpanded(turn, { truncate: 40 });
 
-    expect(unified).toContain("... +4 lines");
+    expect(unified).toContain("… +4 lines");
     expect(unified).not.toContain("mnemo-replay skill");
     expect(legacy).not.toContain("mnemo-replay skill");
     expect(signal.truncated).toBe(true);
@@ -544,9 +544,9 @@ describe("MCP format renderer", () => {
       { depth: "expanded", truncate: 200, sessionId: 142, signal: longSignal },
     );
 
-    expect(short).not.toContain("...");
+    expect(short).not.toContain("…");
     expect(shortSignal.truncated).toBe(false);
-    expect(long).toContain(`${"y".repeat(200)}...`);
+    expect(long).toContain(`${"y".repeat(200)}…`);
     expect(long).not.toContain("mnemo-replay skill");
     expect(longSignal.truncated).toBe(true);
     expect(
@@ -566,7 +566,7 @@ describe("truncation lands on a boundary a reader can see", () => {
 
   test("a cut inside a word retreats to the word boundary", () => {
     // The production shape: a note's content is prose, and a raw slice ended
-    // mid-identifier ("identity sup...", "messaging-s..."), which reads as
+    // mid-identifier ("identity sup…", "messaging-s…"), which reads as
     // corruption rather than as truncation.
     const content = `${"alpha beta gamma ".repeat(20)}supplementary`;
     const rendered = renderNode(
@@ -575,12 +575,14 @@ describe("truncation lands on a boundary a reader can see", () => {
     );
 
     const shown = rendered.split("- desc: ")[1]?.split("\n")[0] ?? "";
-    expect(shown).toEndWith("...");
-    expect(shown.slice(0, -3)).not.toEndWith(" ");
+    // One character, not three: the mark a cut field ends with is the same on
+    // every read surface now, and it is the one the timeline already used.
+    expect(shown).toEndWith("…");
+    expect(shown.slice(0, -1)).not.toEndWith(" ");
     // Whatever survived is whole words: the visible text is a prefix of the
     // source that ends where the source has a space.
-    expect(content.startsWith(shown.slice(0, -3))).toBe(true);
-    expect(content[shown.length - 3]).toBe(" ");
+    expect(content.startsWith(shown.slice(0, -1))).toBe(true);
+    expect(content[shown.length - 1]).toBe(" ");
   });
 
   test("a window that already ends on whitespace keeps its last word", () => {
@@ -592,7 +594,7 @@ describe("truncation lands on a boundary a reader can see", () => {
       { depth: "expanded" },
     );
 
-    expect(rendered).toContain(`${"ab ".repeat(66).trimEnd()}...`);
+    expect(rendered).toContain(`${"ab ".repeat(66).trimEnd()}…`);
   });
 
   test("a sentence end is never honoured — the window keeps its evidence", () => {
@@ -606,7 +608,7 @@ describe("truncation lands on a boundary a reader can see", () => {
       { depth: "expanded" },
     );
 
-    expect(rendered).not.toContain("Short conclusion....");
+    expect(rendered).not.toContain("Short conclusion.…");
     expect(rendered).toContain("evidence evidence");
   });
 
@@ -619,7 +621,7 @@ describe("truncation lands on a boundary a reader can see", () => {
       { depth: "expanded" },
     );
 
-    expect(rendered).toContain(`${"x".repeat(200)}...`);
+    expect(rendered).toContain(`${"x".repeat(200)}…`);
   });
 
   test("a multi-line prompt standing in for a missing note is collapsed to one line", () => {
@@ -635,5 +637,32 @@ describe("truncation lands on a boundary a reader can see", () => {
 
     expect(rendered.split("\n")).toHaveLength(1);
     expect(rendered).toContain("<task-notification> <task-id>a1758e6c</task-id>");
+  });
+
+  test("the expanded prompt and response lines are one line each", () => {
+    // The collapsed title slot was collapsed and the expanded detail was not,
+    // so one multi-line prompt read as one line under depth="collapsed" and as
+    // four under depth="expanded" — the same turn, two shapes.
+    const promptPreview =
+      "<task-notification>\n<task-id>a1758e6c</task-id>\n</task-notification>";
+    const responsePreview = "the answer\n\nwith a blank line in it";
+    const rendered = renderNode(
+      {
+        type: "turn",
+        value: { ...baseTurn, title: "expanded", promptPreview, responsePreview },
+      },
+      { depth: "expanded" },
+    );
+
+    expect(rendered).toContain(
+      '- prompt: "<task-notification> <task-id>a1758e6c</task-id> </task-notification>"',
+    );
+    expect(rendered).toContain('- response: "the answer with a blank line in it"');
+    // Every line of this view is a `- label:` bullet or a bullet under one. A
+    // raw newline inside a value does not just look wrong, it produces a line
+    // no reader (and no downstream parser) can attribute to a field.
+    for (const line of rendered.split("\n")) {
+      expect(line.trimStart()).toStartWith("-");
+    }
   });
 });

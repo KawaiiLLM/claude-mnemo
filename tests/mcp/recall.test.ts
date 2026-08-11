@@ -1053,11 +1053,12 @@ describe("recall navigation legend (spec D1)", () => {
     });
 
     // Several distinct fields actually got cut — session desc, turn prompt/
-    // response/content — each still carrying the plain ellipsis marker.
-    expect(output).toContain(`${"s".repeat(200)}...`);
-    expect(output).toContain(`${"p".repeat(200)}...`);
-    expect(output).toContain(`${"r".repeat(200)}...`);
-    expect(output).toContain(`${"c".repeat(200)}...`);
+    // response/content — each carrying the one ellipsis every read surface
+    // now ends a cut with.
+    expect(output).toContain(`${"s".repeat(200)}…`);
+    expect(output).toContain(`${"p".repeat(200)}…`);
+    expect(output).toContain(`${"r".repeat(200)}…`);
+    expect(output).toContain(`${"c".repeat(200)}…`);
 
     // One navigation sentence for the WHOLE response, not one per field — the
     // old scheme repeated it once per truncated field (75 times on a real
