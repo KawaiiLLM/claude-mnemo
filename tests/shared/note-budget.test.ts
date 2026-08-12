@@ -72,26 +72,30 @@ describe("note budget line", () => {
   });
 
   test("every surface that states the budget reads it from the constant", () => {
-    // Three surfaces say these numbers: the receipt, the session-start
-    // instructions, and the `note` tool description. Two of them held them as
-    // literal prose, so changing NOTE_TOKEN_BUDGET would have left the agent
-    // told one budget and measured against another. Asserted on the source
-    // text because the rendered strings agree either way — the literals are
-    // exactly what a value check cannot see.
-    for (const path of [
-      "src/hooks/handlers/context-note-taking.ts",
-      "src/mcp/definitions.ts",
-    ]) {
-      const source = readFileSync(path, "utf8");
-      expect(source).toContain("NOTE_TOKEN_BUDGET.title");
-      expect(source).toContain("NOTE_TOKEN_BUDGET.content");
-      expect(source).toContain("NOTE_TOKEN_BUDGET.insight");
-    }
+    // Two surfaces say these numbers now: the receipt and the `note` tool
+    // description — the T586 single-home split removed them from the
+    // session-start block entirely, which must therefore NOT mention them (a
+    // budget stated there would be a second copy, the exact drift this test
+    // exists to prevent). The description once held them as literal prose, so
+    // changing NOTE_TOKEN_BUDGET would have left the agent told one budget
+    // and measured against another. Asserted on the source text because the
+    // rendered strings agree either way — the literals are exactly what a
+    // value check cannot see.
+    const source = readFileSync("src/mcp/definitions.ts", "utf8");
+    expect(source).toContain("NOTE_TOKEN_BUDGET.title");
+    expect(source).toContain("NOTE_TOKEN_BUDGET.content");
+    expect(source).toContain("NOTE_TOKEN_BUDGET.insight");
 
-    for (const prose of [NOTE_TAKING_INSTRUCTIONS, MNEMO_TOOL_DESCRIPTIONS.note]) {
-      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.title} tokens)`);
-      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.content} tokens)`);
-      expect(prose).toContain(`(~${NOTE_TOKEN_BUDGET.insight} tokens)`);
-    }
+    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
+      `(~${NOTE_TOKEN_BUDGET.title} tokens)`,
+    );
+    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
+      `(~${NOTE_TOKEN_BUDGET.content} tokens)`,
+    );
+    expect(MNEMO_TOOL_DESCRIPTIONS.note).toContain(
+      `(~${NOTE_TOKEN_BUDGET.insight} tokens)`,
+    );
+
+    expect(NOTE_TAKING_INSTRUCTIONS).not.toContain("tokens)");
   });
 });
