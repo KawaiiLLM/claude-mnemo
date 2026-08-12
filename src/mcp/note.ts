@@ -6,7 +6,6 @@ import {
   closeNoteDebtAsNoted,
   getNoteDebt,
   recordDeclinedNoteDebt,
-  type NoteDebtRecord,
 } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn, promoteTurnFromNote } from "../db/turns";
@@ -140,46 +139,25 @@ export function resolveWriterModel(
  *
  * `undone` rows are excluded: a sidechain prompt's row is born `undone` and
  * outranks the root turn in prompt order for the whole delegation window; it
- * is neither a valid ride nor a turn the session is "on". `status` is returned
- * so the current-turn admission below can additionally require a LIVE turn.
+ * is neither a valid ride nor a turn the session is "on".
+ *
+ * This is ride-turn attribution only — spec D5 retired the notion of a
+ * "current turn" eligibility carve-out, so nothing here gates writability any
+ * more (see `noteTool`'s eligibility comment).
  */
 function getSessionCurrentTurn(
   db: Database,
   sessionId: number,
-): { id: number; status: string } | null {
+): { id: number } | null {
   const row = db
-    .query<{ id: number; status: string }, [number]>(
-      `SELECT id, status FROM turns
+    .query<{ id: number }, [number]>(
+      `SELECT id FROM turns
        WHERE session_id = ? AND status != 'undone'
        ORDER BY prompt_number DESC LIMIT 1`,
     )
     .get(sessionId);
 
   return row ?? null;
-}
-
-/**
- * Is this turn the one its session is living right now (裁决 25)?
- *
- * Latest is not enough on its own: every idle session has a latest turn, its
- * address is one recall query away, and admitting it debtless would leave every
- * session's last turn permanently writable from anywhere. Requiring the row to
- * still be live (`active`/`provisional` — the same pair the completion-evidence
- * predicate treats as unfinished) shrinks the exposure to sessions that are
- * mid-turn at this instant, which is the only time the current-turn protocol
- * has any business writing. The anchor stays best-effort — the MCP process
- * cannot ask "is this my own session?" — and the instruction-side rule (only
- * ids seen in injected context) carries the rest.
- */
-function isSessionCurrentTurn(
-  current: { id: number; status: string } | null,
-  turnId: number,
-): boolean {
-  return (
-    current !== null &&
-    current.id === turnId &&
-    (current.status === "active" || current.status === "provisional")
-  );
 }
 
 function requireText(
@@ -198,42 +176,6 @@ function requireText(
 type NoteWriteOutcome =
   | { ok: true; existing: boolean }
   | { ok: false; message: string };
-
-/**
- * May a note be written against this turn?
- *
- * The session's current turn (裁决 25 — its debt does not exist yet, because
- * debts only open at classification after the turn ends), an open debt, a note
- * already on record (a rewrite), or a debt the agent itself declined (裁决 24).
- * The declined state is the only closed one a note may reopen: declining is the
- * agent's judgement about its own turn, so a later note is a revision rather
- * than an override — and since no channel lists a declined turn again, the only
- * way one arrives is the agent deliberately choosing to write it. `aged`,
- * `rolled-back` and `closed` stay terminal.
- */
-function mayWriteNote(
-  hasExistingNote: boolean,
-  debt: NoteDebtRecord | null,
-  isCurrentTurn: boolean,
-): boolean {
-  return (
-    isCurrentTurn ||
-    hasExistingNote ||
-    debt?.status === "pending" ||
-    (debt?.status === "skipped" && debt.reason === "declined")
-  );
-}
-
-function debtOwesNoNoteMessage(
-  address: TurnAddress,
-  debt: NoteDebtRecord | null,
-): string {
-  return (
-    `S${address.sessionId}/T${address.promptNumber} owes no note` +
-    `${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}.` +
-    " Write notes for the current turn (the mnemo current-turn line's address), for an earlier turn that still owes one — a backlog relief lists these, and any batch may drain them — or rewrite a note you already wrote."
-  );
-}
 
 /**
  * Overwrite must be declared (spec D3). A repeat write to an address that
@@ -285,8 +227,7 @@ function isCrossSessionWrite(
 type DeclineOutcome =
   | { kind: "declined" }
   | { kind: "already-noted" }
-  | { kind: "already-settled"; settledAs: string }
-  | { kind: "owes-nothing"; debt: NoteDebtRecord | null };
+  | { kind: "already-settled"; settledAs: string };
 
 /**
  * `note(turn, skip: true)` — the agent declining a listed turn (裁决 24).
@@ -298,12 +239,12 @@ type DeclineOutcome =
  * debts, which is the common case this exists for. Declining closes the debt now
  * and records WHY, so refusal is distinguishable from neglect.
  *
- * Same session anchor as a note: caller identity is best-effort and often
- * unknown (spec D2), so an open debt (or an existing note) stays the primary
- * evidence that this address belongs to the caller. When identity IS known,
- * the cross-session check below adds a second, independent guard on top of it
- * — it does not replace it. Skipping a foreign or trivial turn is therefore a
- * parameter error, exactly as writing one is.
+ * Eligibility is address resolution alone (spec D5): the `getTurn` lookup
+ * below is the whole check. The debt ledger is read afterwards only to decide
+ * WHAT KIND of answer this skip records — declined, already-noted, or
+ * already-settled — never whether the skip is allowed. When identity IS
+ * known, the cross-session check adds an independent guard on top of address
+ * resolution; a foreign turn is a parameter error exactly as writing one is.
  */
 function declineTurn(
   db: Database,
@@ -319,7 +260,7 @@ function declineTurn(
   }
 
   // spec D4: a foreign-session address is rejected before any debt-state
-  // reasoning runs — identity, when known, outranks the debt-based anchor.
+  // reasoning runs — identity, when known, outranks everything else.
   if (
     isCrossSessionWrite(options.callerSessionId, turn.sessionId) &&
     !crossSession
@@ -333,24 +274,12 @@ function declineTurn(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
 
-  // The current turn may be declined before its debt exists (裁决 25), exactly
-  // as it may be noted: classification has not run because the turn has not
-  // ended, and the refusal must not be rejected for being early.
-  const isCurrentTurn = isSessionCurrentTurn(
-    getSessionCurrentTurn(db, turn.sessionId),
-    turn.id,
-  );
-
-  // Fast path, same role as the note path's: it avoids opening a write
-  // transaction for a plainly invalid address. The decision is re-taken inside.
-  if (
-    !isCurrentTurn &&
-    !getShadowNote(db, turn.id) &&
-    getNoteDebt(db, turn.id) === null
-  ) {
-    return parameterError(debtOwesNoNoteMessage(address, null));
-  }
-
+  // No fast-path eligibility read gates entry to the transaction any more —
+  // the `getTurn` lookup above already resolved the address, and spec D5 says
+  // that resolution IS eligibility. What used to be a fast-path rejection for
+  // "no debt and not the current turn" is exactly the ordinary case a skip
+  // must now answer: a turn that finished with zero substantive tool calls
+  // never opened a debt row at all (T553/T562, spec Problem 2).
   const outcome = writeTransaction(db, (): DeclineOutcome => {
     // A note already on record wins: the agent has answered this turn, and a
     // stray skip must not undo that.
@@ -360,12 +289,14 @@ function declineTurn(
 
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
-      // Born-closed decline for the current turn; anything else with no debt
-      // row is a trivial turn or a borrowed address, and owes nothing.
-      if (isCurrentTurn && recordDeclinedNoteDebt(db, turn, nowEpoch)) {
-        return { kind: "declined" };
-      }
-      return { kind: "owes-nothing", debt: null };
+      // Born-closed decline: no debt row exists yet, whether because the turn
+      // is still live and classification has not reached it (裁决 25), or
+      // because it already finished trivially and classification never opened
+      // one at all. Both read the same way now that address existence is the
+      // only eligibility question — recordDeclinedNoteDebt is the same
+      // already-existing path either way.
+      recordDeclinedNoteDebt(db, turn, nowEpoch);
+      return { kind: "declined" };
     }
     if (debt.status !== "pending") {
       return { kind: "already-settled", settledAs: debt.reason ?? debt.status };
@@ -387,8 +318,6 @@ function declineTurn(
       return textResult(
         `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`,
       );
-    case "owes-nothing":
-      return parameterError(debtOwesNoNoteMessage(address, outcome.debt));
   }
 }
 
@@ -472,49 +401,23 @@ export function noteTool(
     );
   }
 
-  // Only the current turn, a turn that owes a note, or one already noted may be
-  // written to.
+  // spec D5: eligibility collapses to address resolution — the `getTurn` call
+  // above IS the eligibility check, full stop. The debt ledger is not read
+  // anywhere in this function any more: a turn that finished with zero
+  // substantive tool calls never opened a debt row, and the old debt-based
+  // reasoning read that absence as "ineligible" when the only real question
+  // was ever "does this turn exist" (T553/T562, spec Problem 2). This also
+  // retires the "current turn" carve-out (裁决 25) as a special case — it is
+  // now just the ordinary rule, since every existing turn is writable
+  // regardless of whether it is still live.
   //
-  // This is the guard against a mistyped or borrowed address, and — whenever
-  // caller identity is unknown, which spec D2 makes the common case — it is
-  // the only one available: "is this my own turn?" cannot be asked directly
-  // without it. An open debt — or being the addressed session's newest
-  // STILL-LIVE turn, the address the current-turn line hands out (裁决 25; see
-  // isSessionCurrentTurn for why "latest" alone would leave every idle
-  // session's last turn writable) — is the session anchor instead, and it
-  // makes ride_turn coherent as a side effect, since ride_turn is derived from
-  // the address's session. Without it, a note addressed at another session's
-  // turn silently attributes itself to THAT session's newest turn. When
-  // identity IS known, the explicit cross-session check below adds a second,
-  // independent guard on top of this one rather than replacing it.
-  //
-  // This read is a fast path only, not the authorising one: the hook-side
-  // reconcile (Stop handler, PostToolUse capture) runs in another process and
-  // can close this same debt — age it out, or close it as rolled-back —
-  // between this read and the write transaction below. The re-check that
-  // actually decides is the one taken inside that transaction; skipping the
-  // fast path here would only cost an avoidable BEGIN IMMEDIATE for a plainly
-  // invalid address.
-  //
-  // `isCurrentTurn` is deliberately NOT recomputed inside the transaction. The
-  // benign race — a new prompt lands between this read and the commit — would
-  // otherwise reject a note that was composed while its turn genuinely was the
-  // current one, and lose it; the stale answer admits it, which is the same
-  // grace every late-but-honest note gets. Nothing widens: the value was true
-  // of a live turn of the addressed session moments ago, and the debt-based
-  // admissions are re-read fresh inside the transaction as before.
-  const current = getSessionCurrentTurn(db, turn.sessionId);
-  const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
-  const fastExisting = getShadowNote(db, turn.id);
-  const fastDebt = getNoteDebt(db, turn.id);
-
-  // spec D4, and BEFORE any debt-state reasoning — the same order `declineTurn`
-  // uses, for the same reason: identity, when known, outranks the debt-based
-  // anchor. Behind the debt check this guard was unreachable for the commonest
-  // foreign address of all, another session's finished turn, which owes nothing
-  // and so was refused as "owes no note" — a true statement that names the
-  // wrong problem and, worse, one that `crossSession: true` could not get past,
-  // leaving the documented escape hatch inoperable for that whole class.
+  // spec D4, and BEFORE the replace guard — the same order `declineTurn`
+  // uses: identity, when known, outranks everything else. Under the old
+  // debt-based gate this guard was unreachable for the commonest foreign
+  // address of all, another session's finished turn, which "owed nothing" and
+  // so was refused with a message that named the wrong problem — and, worse,
+  // one that `crossSession: true` could not get past, leaving the documented
+  // escape hatch inoperable for that whole class.
   //
   // No race window exists to protect against (the caller's identity and the
   // address's session are both fixed for the duration of this call), so unlike
@@ -525,16 +428,19 @@ export function noteTool(
     );
   }
 
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
+  // `current` is ride-turn attribution only (which turn the SESSION is on
+  // right now), not an eligibility gate — see getSessionCurrentTurn. Without
+  // it, a note addressed at another session's turn would silently attribute
+  // itself to THAT session's newest turn, since ride_turn is derived from the
+  // address's session.
+  const current = getSessionCurrentTurn(db, turn.sessionId);
+  const fastExisting = getShadowNote(db, turn.id);
 
-  // spec D3: fast-path half of the overwrite guard — same role as the
-  // mayWriteNote check above, an early exit that avoids opening a write
-  // transaction for a call that is going to be rejected anyway. The
-  // authorising check is the one inside the transaction below, because a
-  // concurrent note to this same address can flip "no existing note" to
-  // "existing note" between this read and that one.
+  // spec D3: fast-path half of the overwrite guard — an early exit that
+  // avoids opening a write transaction for a call that is going to be
+  // rejected anyway. The authorising check is the one inside the transaction
+  // below, because a concurrent note to this same address can flip "no
+  // existing note" to "existing note" between this read and that one.
   if (fastExisting !== null && !replace) {
     return parameterError(overwriteRequiredMessage(address));
   }
@@ -564,29 +470,21 @@ export function noteTool(
     options.eraCutoffEpoch,
   );
 
-  // The debt validation, the note write and the debt's closure are one
-  // transaction, and the validation inside it is the one that counts: an
-  // IMMEDIATE transaction takes the write lock before either statement inside
-  // it runs, so whatever this read observes is the state the write commits
-  // against — there is no window left for a concurrent reconcile to close the
-  // debt between "we checked it was open" and "we wrote against it". Without
-  // this, that window let the note get written while its own closing UPDATE
-  // (WHERE status = 'pending') quietly matched zero rows, leaving a note on
-  // record for a debt whose ledger entry says anything but 'noted'.
+  // The note write and the debt's closure are one transaction. Eligibility no
+  // longer needs a re-check inside it — turn existence cannot change between
+  // the fast-path read and here, turns are never deleted — so the only
+  // authoritative re-read left is the overwrite guard below: an IMMEDIATE
+  // transaction takes the write lock before either statement inside it runs,
+  // so whatever this read observes is the state the write commits against.
   //
-  // Age is still not consulted inside the transaction — see
-  // closeNoteDebtAsNoted — only writability (open, already noted, or declined by
-  // the agent itself), re-read live.
+  // Age is still not consulted here — see closeNoteDebtAsNoted — closing a
+  // debt is best-effort bookkeeping downstream of the write, not a gate on it.
   const outcome = writeTransaction(db, (): NoteWriteOutcome => {
     const existing = getShadowNote(db, turn.id);
-    const debt = getNoteDebt(db, turn.id);
-    if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
-      return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
-    }
-    // spec D3, authoritative half: re-read fresh, exactly like the debt check
-    // just above it — a concurrent note between the fast-path read and this
-    // transaction's write lock must not be silently clobbered by a caller who
-    // never declared they meant to overwrite anything.
+    // spec D3, authoritative half: re-read fresh — a concurrent note between
+    // the fast-path read and this transaction's write lock must not be
+    // silently clobbered by a caller who never declared they meant to
+    // overwrite anything.
     if (existing !== null && !replace) {
       return { ok: false, message: overwriteRequiredMessage(address) };
     }

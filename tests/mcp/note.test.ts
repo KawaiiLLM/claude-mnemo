@@ -33,6 +33,7 @@ describe("note tool", () => {
   let db: Database;
   let sessionId: number;
   let targetTurnId: number;
+  let followUpTurnId: number;
   let rideTurnId: number;
 
   beforeEach(() => {
@@ -57,12 +58,13 @@ describe("note tool", () => {
        VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
     );
     targetTurnId = insertTurn.get(sessionId, 332, "Measure note routing", 120)!.id;
-    insertTurn.get(sessionId, 333, "Follow-up", 130);
+    followUpTurnId = insertTurn.get(sessionId, 333, "Follow-up", 130)!.id;
     rideTurnId = insertTurn.get(sessionId, 334, "Write it up", 140)!.id;
 
-    // A note is only writable against an open debt (ticket 03), so the fixture
-    // has to produce one the way the system does: a finished turn with a
-    // substantive tool call.
+    // T332's writability no longer depends on this (spec D5: existence alone
+    // suffices), but plenty of tests below exercise how a note or a skip
+    // CLOSES a debt, so the fixture still produces a real pending one the way
+    // the system does: a finished turn with a substantive tool call.
     db.query(
       `INSERT INTO observations (turn_id, tool_name, excluded_from_extraction, created_at_epoch)
        VALUES (?, 'Edit', 0, 120)`,
@@ -341,57 +343,81 @@ describe("note tool", () => {
     ).toBe(0);
   });
 
-  test("rejects a turn that owes no note, including another session's", () => {
-    const otherSessionId = upsertSession(db, {
-      contentSessionId: "other-session",
-      project: "claude-mnemo",
-      title: "Someone else's session",
-      content: null,
-      insight: null,
-      createdAtEpoch: 50,
-      updatedAtEpoch: 60,
-      completedAtEpoch: null,
-    }).id;
-    const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
-    );
-    const foreignTurnId = insertTurn.get(otherSessionId, 332, "Their work", 60)!.id;
-    const foreignRideTurnId = insertTurn.get(otherSessionId, 333, "Their next turn", 70)!.id;
-
-    // Same prompt number as this session's target: the exact shape of a
-    // mistyped or borrowed address.
-    const foreign = noteTool(
-      db,
-      { turn: `S${otherSessionId}/T332`, title: "t", content: "c" },
-      { now: () => 900, env: {} },
-    );
-    // And a turn of this session that was classified trivial.
-    const undebted = noteTool(
+  test("a zero-tool-call turn that never opened a debt is writable (T553/T562 class, spec D5/Problem 2)", () => {
+    // T333 ("Follow-up") got no observations in the fixture, so classification
+    // never opened a debt row for it. Under the old debt-based gate this read
+    // as "ineligible"; spec D5 collapses eligibility to address resolution
+    // alone, and this address resolves — the turn genuinely exists.
+    const result = noteTool(
       db,
       { turn: `S${sessionId}/T333`, title: "t", content: "c" },
       { now: () => 900, env: {} },
     );
 
-    expect(resultText(foreign)).toStartWith("Parameter error:");
-    expect(resultText(foreign)).toContain("owes no note");
-    expect(resultText(undebted)).toStartWith("Parameter error:");
-    expect(getShadowNote(db, foreignTurnId)).toBeNull();
-    expect(
-      db.query<{ count: number }, []>(
-        "SELECT COUNT(*) AS count FROM shadow_notes",
-      ).get()!.count,
-    ).toBe(0);
-    // The rejection is what keeps ride_turn honest: had the write gone through,
-    // the note would have been attributed to the OTHER session's newest turn.
-    expect(foreignRideTurnId).not.toBe(rideTurnId);
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(getShadowNote(db, followUpTurnId)?.title).toBe("t");
+  });
+
+  test("an idle session's finished latest turn is writable — no debt required", () => {
+    // The fixture's T334 is `extracted` with zero observations: exactly the
+    // shape of every idle session's last turn, whose address any recall
+    // result can hand out. The old code specifically carved this shape out as
+    // ineligible (裁决 25's "current turn" required LIVE status, Codex review
+    // P1-1); spec D5 retires that carve-out — every existing turn is writable
+    // regardless of whether it is still live.
+    const noted = noteTool(
+      db,
+      { turn: `S${sessionId}/T334`, title: "t", content: "c" },
+      { now: () => 900, env: {} },
+    );
+    expect(isNoteSuccess(noted)).toBe(true);
+    expect(getShadowNote(db, rideTurnId)?.title).toBe("t");
+  });
+
+  test("a zero-tool-call turn with no debt row is skippable too", () => {
+    // Same shape as the writable test above (T333, never observed, no debt
+    // ever opened) but exercising the decline path — the "owes-nothing"
+    // rejection the old debt-based gate produced here is gone; the born-closed
+    // decline is recorded on the spot regardless of whether the turn is
+    // current or trivial-and-finished.
+    const skipped = noteTool(
+      db,
+      { turn: `S${sessionId}/T333`, skip: true },
+      { now: () => 900, env: {} },
+    );
+    expect(resultText(skipped)).toContain("closed as declined");
+    expect(getNoteDebt(db, followUpTurnId)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+    });
+  });
+
+  test("an interrupted turn (status active, no Stop event, and not the session's latest turn) is writable", () => {
+    // T333 is left `active` — no Stop event ever closed it — but the session
+    // has already moved on to T334, so it is not even the session's current
+    // turn either. Old code's current-turn admission only ever looked at the
+    // LATEST turn by prompt_number, so an interrupted turn buried earlier in
+    // history fell through every debtless admission and was rejected even
+    // though it plainly exists.
+    db.query("UPDATE turns SET status = 'active' WHERE id = ?").run(
+      followUpTurnId,
+    );
+
+    const result = noteTool(
+      db,
+      { turn: `S${sessionId}/T333`, title: "t", content: "c" },
+      { now: () => 900, env: {} },
+    );
+
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(getShadowNote(db, followUpTurnId)?.title).toBe("t");
   });
 
   test("the session's current turn is writable before its debt exists", () => {
     // 裁决 25: the note is written during the turn it describes, and the debt
-    // only opens at classification after the turn ends. The latest turn is the
-    // address the current-turn line hands out — and it is admitted debtless
-    // only while it is still LIVE, which is when the protocol writes.
+    // only opens at classification after the turn ends. Spec D5 makes this the
+    // ordinary case rather than a special-cased carve-out — the turn simply
+    // exists, live or not — but it remains true and worth pinning.
     db.query("UPDATE turns SET status = 'active' WHERE id = ?").run(rideTurnId);
     const result = noteTool(
       db,
@@ -447,26 +473,6 @@ describe("note tool", () => {
     });
   });
 
-  test("a finished latest turn is not \"current\" — idle sessions stay closed to borrowing", () => {
-    // The fixture's T334 is `extracted`: exactly the shape of every idle
-    // session's last turn, whose address any recall result can hand out.
-    // Debtless admission must not apply to it (Codex review P1-1).
-    const finished = noteTool(
-      db,
-      { turn: `S${sessionId}/T334`, title: "t", content: "c" },
-      { now: () => 900, env: {} },
-    );
-    expect(resultText(finished)).toStartWith("Parameter error:");
-    expect(resultText(finished)).toContain("owes no note");
-
-    const finishedSkip = noteTool(
-      db,
-      { turn: `S${sessionId}/T334`, skip: true },
-      { now: () => 900, env: {} },
-    );
-    expect(resultText(finishedSkip)).toStartWith("Parameter error:");
-  });
-
   test("a sidechain row does not steal the current-turn position", () => {
     // A Task subagent's prompt inserts a row above the root turn for the whole
     // delegation window (born `undone` since 裁决 25). The root turn's own
@@ -494,7 +500,12 @@ describe("note tool", () => {
     expect(note?.rideTurnId).not.toBe(sidechainId);
   });
 
-  test("rejects a debt that has already been written off", () => {
+  test("a note succeeds even though its debt already closed as aged — the ledger's history does not gate eligibility (spec D5)", () => {
+    // Previously the sole path back from a written-off debt: the ledger's
+    // historical judgement no longer has any say over whether a NOTE may be
+    // written — only over what a SKIP records (see the skip 已结算 tests
+    // below, which keep the aged/rolled-back/closed reasons terminal for
+    // declines). The turn still exists, so it is still writable.
     db.query(
       `UPDATE note_debt SET status = 'skipped', reason = 'aged' WHERE turn_id = ?`,
     ).run(targetTurnId);
@@ -505,41 +516,8 @@ describe("note tool", () => {
       { now: () => 900, env: {} },
     );
 
-    expect(resultText(result)).toContain("its debt closed as aged");
-    expect(getShadowNote(db, targetTurnId)).toBeNull();
-  });
-
-  test("a debt closed by a concurrent reconcile between the fast-path read and the write transaction is honoured, not overwritten", () => {
-    // The fast-path read above the transaction sees the debt still pending —
-    // that is what lets this call proceed at all. The hook-side reconcile
-    // (another process) closes it for real only once the write transaction
-    // has begun, which this simulates by mutating the ledger row from inside
-    // the injected `runWriteTransaction`, exactly the window the fast path
-    // cannot see into. The authorising re-check lives inside the transaction,
-    // so it must pick up this new state rather than the stale pending read.
-    const result = noteTool(
-      db,
-      { turn: `S${sessionId}/T332`, title: "t", content: "c" },
-      {
-        now: () => 900,
-        env: {},
-        runWriteTransaction: (database, fn) => {
-          db.query(
-            `UPDATE note_debt SET status = 'skipped', reason = 'aged',
-               closed_at_epoch = 500, updated_at_epoch = 500 WHERE turn_id = ?`,
-          ).run(targetTurnId);
-          return fn();
-        },
-      },
-    );
-
-    expect(isNoteSuccess(result)).toBe(false);
-    expect(resultText(result)).toContain("its debt closed as aged");
-    // Not just rejected — nothing was written, and the ledger keeps the state
-    // the concurrent process actually committed, not the stale pending state
-    // the fast-path read observed.
-    expect(getShadowNote(db, targetTurnId)).toBeNull();
-    expect(getNoteDebt(db, targetTurnId)?.status).toBe("skipped");
+    expect(isNoteSuccess(result)).toBe(true);
+    expect(getShadowNote(db, targetTurnId)?.title).toBe("t");
   });
 
   test("a closed debt still permits rewriting the note it closed", () => {
@@ -753,12 +731,12 @@ describe("note tool", () => {
       expect(getNoteDebt(db, targetTurnId)?.reason).toBe("aged");
     });
 
-    test("skipping a foreign or trivial turn is still a parameter error", () => {
-      const undebted = noteTool(
-        db,
-        { turn: `S${sessionId}/T333`, skip: true },
-        { now: () => 900, env: {} },
-      );
+    test("skipping a nonexistent or malformed turn is still a parameter error", () => {
+      // Note the absence of a "trivial, no debt" case here (spec D5): a
+      // debtless turn is now the ordinary case a skip answers — see "a
+      // zero-tool-call turn with no debt row is skippable too" above — not a
+      // rejection. Only an address that fails to resolve at all stays an
+      // error.
       const unknown = noteTool(
         db,
         { turn: `S${sessionId}/T999`, skip: true },
@@ -766,9 +744,7 @@ describe("note tool", () => {
       );
       const malformed = noteTool(db, { turn: "T332", skip: true }, {});
 
-      // An open debt is the only evidence an MCP server has that the address
-      // belongs to the caller, so a skip needs it exactly as a note does.
-      for (const result of [undebted, unknown, malformed]) {
+      for (const result of [unknown, malformed]) {
         expect(resultText(result)).toStartWith("Parameter error:");
       }
     });

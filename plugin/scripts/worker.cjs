@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msozo521" : "dev";
+var BUILD_ID = true ? "0.9.11-msq6o0lw" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1588,6 +1588,232 @@ function updateCompactAnchor(db, sessionId) {
   ).run(sessionId, sessionId);
 }
 
+// src/shared/note-tool.ts
+var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
+function isMnemoOwnToolName(toolName) {
+  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_AGING_TURNS = 50;
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function countSubstantiveToolCalls(db, turnId) {
+  const rows = db.query(
+    `SELECT tool_name AS toolName FROM observations
+       WHERE turn_id = ? AND excluded_from_extraction = 0`
+  ).all(turnId);
+  return rows.filter(
+    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
+  ).length;
+}
+function getMaxPromptNumber(db, sessionId) {
+  return db.query(
+    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+  ).get(sessionId)?.maxPromptNumber ?? 0;
+}
+function getClassificationCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_classified_prompt_number AS cursor
+         FROM note_debt_cursor WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
+  db.query(
+    `INSERT INTO note_debt_cursor (
+       session_id, last_classified_prompt_number, updated_at_epoch
+     ) VALUES (?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       last_classified_prompt_number = MAX(
+         note_debt_cursor.last_classified_prompt_number,
+         excluded.last_classified_prompt_number
+       ),
+       updated_at_epoch = excluded.updated_at_epoch`
+  ).run(sessionId, promptNumber, nowEpoch);
+}
+var COMPLETION_EVIDENCE_SQL = `(
+  t.status NOT IN ('active', 'provisional')
+  OR EXISTS (
+    SELECT 1 FROM pending_queue q
+    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+  )
+)`;
+function classifyCompletedTurn(db, turn, nowEpoch) {
+  if (getNoteDebt(db, turn.id) !== null) {
+    return false;
+  }
+  const alreadyNoted = db.query(
+    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
+  ).get(turn.id);
+  if (alreadyNoted) {
+    return false;
+  }
+  if (countSubstantiveToolCalls(db, turn.id) === 0) {
+    return false;
+  }
+  db.query(
+    `INSERT OR IGNORE INTO note_debt (
+       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
+     ) VALUES (?, ?, ?, 'pending', ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
+  return true;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+function reconcileNoteDebt(db, input) {
+  const { sessionId, nowEpoch } = input;
+  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  const maxPromptNumber = getMaxPromptNumber(db, sessionId);
+  const cursor = getClassificationCursor(db, sessionId);
+  let classifyThrough = maxPromptNumber - 1;
+  if (input.completedTurnId !== void 0) {
+    const completed = db.query(
+      `SELECT prompt_number AS promptNumber, session_id AS sessionId
+         FROM turns WHERE id = ?`
+    ).get(input.completedTurnId);
+    if (completed && completed.sessionId === sessionId) {
+      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
+    }
+  }
+  const opened = [];
+  let classifiedThrough = cursor;
+  if (classifyThrough > cursor) {
+    const candidates = db.query(
+      `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
+                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
+         FROM turns t
+         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
+         ORDER BY t.prompt_number ASC`
+    ).all(sessionId, cursor, classifyThrough);
+    let blockedAtPromptNumber = null;
+    for (const candidate of candidates) {
+      if (candidate.hasCompletionEvidence !== 1 && candidate.id !== input.completedTurnId) {
+        blockedAtPromptNumber = candidate.promptNumber;
+        break;
+      }
+      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
+        opened.push(candidate.id);
+      }
+    }
+    classifiedThrough = blockedAtPromptNumber === null ? classifyThrough : blockedAtPromptNumber - 1;
+    if (classifiedThrough > cursor) {
+      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
+    }
+  }
+  const pending = db.query(
+    `SELECT
+         d.turn_id AS turnId,
+         d.prompt_number AS promptNumber,
+         t.was_rolled_back AS wasRolledBack,
+         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
+       FROM note_debt d
+       JOIN turns t ON t.id = d.turn_id
+       WHERE d.session_id = ? AND d.status = 'pending'
+       ORDER BY d.prompt_number ASC`
+  ).all(sessionId);
+  const noted = [];
+  const rolledBack = [];
+  const aged = [];
+  for (const row of pending) {
+    if (row.hasNote === 1) {
+      closeDebt(db, row.turnId, "noted", null, nowEpoch);
+      noted.push(row.turnId);
+      continue;
+    }
+    if (row.wasRolledBack === 1) {
+      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
+      rolledBack.push(row.turnId);
+      continue;
+    }
+    if (maxPromptNumber - row.promptNumber > agingTurns) {
+      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
+      aged.push(row.turnId);
+    }
+  }
+  return {
+    opened,
+    noted,
+    aged,
+    rolledBack,
+    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough)
+  };
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+function getExposedTurnIds(db, sessionId, source) {
+  const rows = source ? db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ? AND source = ?`
+  ).all(sessionId, source) : db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ?`
+  ).all(sessionId);
+  return new Set(rows.map((row) => row.exposedTurnId));
+}
+
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
   id,
@@ -1941,236 +2167,36 @@ function settleCompletedTurn(db, turnId, eraCutoffEpoch, nowEpoch) {
   return true;
 }
 
-// src/shared/note-tool.ts
-var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
-function isMnemoOwnToolName(toolName) {
-  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_AGING_TURNS = 50;
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
+// src/db/turn-settlement.ts
+var SETTLEMENT_CANDIDATE_SQL = `
+  SELECT t.id AS id
+  FROM turns t
+  WHERE t.session_id = ?
+    AND t.status IN ('active', 'provisional')
+    AND (
+      EXISTS (
+        SELECT 1 FROM turns later
+        WHERE later.session_id = t.session_id
+          AND later.prompt_number > t.prompt_number
+      )
+      OR EXISTS (
+        SELECT 1 FROM pending_queue q
+        WHERE q.kind = 'turn-stop' AND q.target_id = t.id
+      )
+    )
+  ORDER BY t.prompt_number ASC
 `;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
+function listSettlementCandidateTurnIds(db, sessionId) {
+  return db.query(SETTLEMENT_CANDIDATE_SQL).all(sessionId).map((row) => row.id);
 }
-function countSubstantiveToolCalls(db, turnId) {
-  const rows = db.query(
-    `SELECT tool_name AS toolName FROM observations
-       WHERE turn_id = ? AND excluded_from_extraction = 0`
-  ).all(turnId);
-  return rows.filter(
-    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
-  ).length;
-}
-function getMaxPromptNumber(db, sessionId) {
-  return db.query(
-    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
-  ).get(sessionId)?.maxPromptNumber ?? 0;
-}
-function getClassificationCursor(db, sessionId) {
-  return db.query(
-    `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
-}
-function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
-  db.query(
-    `INSERT INTO note_debt_cursor (
-       session_id, last_classified_prompt_number, updated_at_epoch
-     ) VALUES (?, ?, ?)
-     ON CONFLICT(session_id) DO UPDATE SET
-       last_classified_prompt_number = MAX(
-         note_debt_cursor.last_classified_prompt_number,
-         excluded.last_classified_prompt_number
-       ),
-       updated_at_epoch = excluded.updated_at_epoch`
-  ).run(sessionId, promptNumber, nowEpoch);
-}
-var COMPLETION_EVIDENCE_SQL = `(
-  t.status NOT IN ('active', 'provisional')
-  OR EXISTS (
-    SELECT 1 FROM pending_queue q
-    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-  )
-)`;
-function classifyCompletedTurn(db, turn, nowEpoch) {
-  if (getNoteDebt(db, turn.id) !== null) {
-    return false;
-  }
-  const alreadyNoted = db.query(
-    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
-  ).get(turn.id);
-  if (alreadyNoted) {
-    return false;
-  }
-  if (countSubstantiveToolCalls(db, turn.id) === 0) {
-    return false;
-  }
-  db.query(
-    `INSERT OR IGNORE INTO note_debt (
-       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
-     ) VALUES (?, ?, ?, 'pending', ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
-  return true;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-function reconcileNoteDebt(db, input) {
-  const { sessionId, nowEpoch } = input;
-  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
-  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const maxPromptNumber = getMaxPromptNumber(db, sessionId);
-  const cursor = getClassificationCursor(db, sessionId);
-  let classifyThrough = maxPromptNumber - 1;
-  if (input.completedTurnId !== void 0) {
-    const completed = db.query(
-      `SELECT prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns WHERE id = ?`
-    ).get(input.completedTurnId);
-    if (completed && completed.sessionId === sessionId) {
-      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
-    }
-  }
-  const opened = [];
+function settleOutstandingTurns(db, sessionId, eraCutoffEpoch, nowEpoch) {
   const settled = [];
-  let classifiedThrough = cursor;
-  if (classifyThrough > cursor) {
-    const candidates = db.query(
-      `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
-                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
-         FROM turns t
-         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
-         ORDER BY t.prompt_number ASC`
-    ).all(sessionId, cursor, classifyThrough);
-    let blockedAtPromptNumber = null;
-    for (const candidate of candidates) {
-      if (candidate.hasCompletionEvidence !== 1 && candidate.id !== input.completedTurnId) {
-        blockedAtPromptNumber = candidate.promptNumber;
-        break;
-      }
-      if (settleCompletedTurn(db, candidate.id, eraCutoffEpoch, nowEpoch)) {
-        settled.push(candidate.id);
-      }
-      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
-        opened.push(candidate.id);
-      }
-    }
-    classifiedThrough = blockedAtPromptNumber === null ? classifyThrough : blockedAtPromptNumber - 1;
-    if (classifiedThrough > cursor) {
-      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
+  for (const turnId of listSettlementCandidateTurnIds(db, sessionId)) {
+    if (settleCompletedTurn(db, turnId, eraCutoffEpoch, nowEpoch)) {
+      settled.push(turnId);
     }
   }
-  const pending = db.query(
-    `SELECT
-         d.turn_id AS turnId,
-         d.prompt_number AS promptNumber,
-         t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`
-  ).all(sessionId);
-  const noted = [];
-  const rolledBack = [];
-  const aged = [];
-  for (const row of pending) {
-    if (row.hasNote === 1) {
-      closeDebt(db, row.turnId, "noted", null, nowEpoch);
-      noted.push(row.turnId);
-      continue;
-    }
-    if (row.wasRolledBack === 1) {
-      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
-      rolledBack.push(row.turnId);
-      continue;
-    }
-    if (maxPromptNumber - row.promptNumber > agingTurns) {
-      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
-      aged.push(row.turnId);
-    }
-  }
-  return {
-    opened,
-    noted,
-    aged,
-    rolledBack,
-    settled,
-    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough)
-  };
-}
-function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-       SET status = 'skipped', reason = 'closed',
-           closed_at_epoch = ?, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'pending'`
-  ).run(nowEpoch, nowEpoch, sessionId).changes;
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
+  return settled;
 }
 
 // src/db/pending-queue.ts
@@ -46165,14 +46191,11 @@ function resolveWriterModel(env = process.env) {
 }
 function getSessionCurrentTurn(db, sessionId) {
   const row = db.query(
-    `SELECT id, status FROM turns
+    `SELECT id FROM turns
        WHERE session_id = ? AND status != 'undone'
        ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionId);
   return row ?? null;
-}
-function isSessionCurrentTurn(current, turnId) {
-  return current !== null && current.id === turnId && (current.status === "active" || current.status === "provisional");
 }
 function requireText(value, field) {
   if (typeof value !== "string") {
@@ -46182,12 +46205,6 @@ function requireText(value, field) {
     return { ok: false, message: `${field} must not be empty.` };
   }
   return { ok: true, value };
-}
-function mayWriteNote(hasExistingNote, debt, isCurrentTurn) {
-  return isCurrentTurn || hasExistingNote || debt?.status === "pending" || debt?.status === "skipped" && debt.reason === "declined";
-}
-function debtOwesNoNoteMessage(address, debt) {
-  return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes for the current turn (the mnemo current-turn line's address), for an earlier turn that still owes one \u2014 a backlog relief lists these, and any batch may drain them \u2014 or rewrite a note you already wrote.`;
 }
 function overwriteRequiredMessage(address) {
   return `S${address.sessionId}/T${address.promptNumber} already has a note. Resend with replace: true to confirm you want to overwrite it.`;
@@ -46213,23 +46230,14 @@ function declineTurn(db, address, options, crossSession) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
-  const isCurrentTurn = isSessionCurrentTurn(
-    getSessionCurrentTurn(db, turn.sessionId),
-    turn.id
-  );
-  if (!isCurrentTurn && !getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
-    return parameterError(debtOwesNoNoteMessage(address, null));
-  }
   const outcome = writeTransaction(db, () => {
     if (getShadowNote(db, turn.id) !== null) {
       return { kind: "already-noted" };
     }
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
-      if (isCurrentTurn && recordDeclinedNoteDebt(db, turn, nowEpoch)) {
-        return { kind: "declined" };
-      }
-      return { kind: "owes-nothing", debt: null };
+      recordDeclinedNoteDebt(db, turn, nowEpoch);
+      return { kind: "declined" };
     }
     if (debt.status !== "pending") {
       return { kind: "already-settled", settledAs: debt.reason ?? debt.status };
@@ -46248,8 +46256,6 @@ function declineTurn(db, address, options, crossSession) {
       return textResult(
         `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`
       );
-    case "owes-nothing":
-      return parameterError(debtOwesNoNoteMessage(address, outcome.debt));
   }
 }
 function noteTool(db, rawInput, options = {}) {
@@ -46295,18 +46301,13 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
-  const current = getSessionCurrentTurn(db, turn.sessionId);
-  const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
-  const fastExisting = getShadowNote(db, turn.id);
-  const fastDebt = getNoteDebt(db, turn.id);
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
+  const current = getSessionCurrentTurn(db, turn.sessionId);
+  const fastExisting = getShadowNote(db, turn.id);
   if (fastExisting !== null && !replace) {
     return parameterError(overwriteRequiredMessage(address));
   }
@@ -46327,10 +46328,6 @@ function noteTool(db, rawInput, options = {}) {
   );
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);
-    const debt = getNoteDebt(db, turn.id);
-    if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
-      return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
-    }
     if (existing !== null && !replace) {
       return { ok: false, message: overwriteRequiredMessage(address) };
     }
@@ -51560,11 +51557,13 @@ function createWorkerCore(deps) {
       if (item.kind === "turn-stop") {
         const turn = getTurnById(deps.db, item.targetId);
         if (turn) {
+          const eraCutoffEpoch = config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
+          settleOutstandingTurns(deps.db, turn.sessionId, eraCutoffEpoch, now());
           reconcileNoteDebt(deps.db, {
             sessionId: turn.sessionId,
             nowEpoch: now(),
             completedTurnId: turn.id,
-            eraCutoffEpoch: config3.eraCutoffEpoch ?? resolveEraCutoff(deps.db)
+            eraCutoffEpoch
           });
         }
       }

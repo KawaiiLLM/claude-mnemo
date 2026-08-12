@@ -6969,6 +6969,170 @@ var init_database = __esm({
   }
 });
 
+// src/segment-era.ts
+function isSegmentEra(createdAtEpoch, cutoffEpoch) {
+  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
+}
+function normalizeEraCutoffEpoch(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+var init_segment_era = __esm({
+  "src/segment-era.ts"() {
+    "use strict";
+  }
+});
+
+// src/shared/config.ts
+function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
+  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
+}
+function resolveDreamAgentModel(value, logger) {
+  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
+    return value;
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
+  );
+  return DEFAULT_DREAM_AGENT_MODEL;
+}
+function resolveDreamAgentTimeZone(value, logger) {
+  if (typeof value === "string") {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
+      return value;
+    } catch {
+    }
+  }
+  logger.warn(
+    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
+  );
+  return DEFAULT_DREAM_AGENT_TIME_ZONE;
+}
+function resolveBoolean(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+function clampInteger(value, min, max, fallback) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
+  return {
+    hardExitTimeoutMs: clampInteger(
+      config2.hardExitTimeoutMs,
+      1e3,
+      3e5,
+      DEFAULT_CONFIG.hardExitTimeoutMs
+    ),
+    settlementEnabled: resolveBoolean(
+      config2.settlementEnabled,
+      DEFAULT_CONFIG.settlementEnabled
+    ),
+    // Anything that is not a positive whole epoch reads as "no era yet" rather
+    // than as an epoch of 0, which would put every turn on the new path.
+    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
+    dreamAgentEnabled: resolveBoolean(
+      config2.dreamAgentEnabled,
+      DEFAULT_CONFIG.dreamAgentEnabled
+    ),
+    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
+    dreamAgentTimeoutMs: clampInteger(
+      config2.dreamAgentTimeoutMs,
+      6e4,
+      864e5,
+      DEFAULT_CONFIG.dreamAgentTimeoutMs
+    ),
+    dreamAgentIdleWatchdogMs: clampInteger(
+      config2.dreamAgentIdleWatchdogMs,
+      3e4,
+      36e5,
+      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
+    ),
+    dreamAgentHour: clampInteger(
+      config2.dreamAgentHour,
+      0,
+      23,
+      DEFAULT_CONFIG.dreamAgentHour
+    ),
+    dreamAgentTimeZone: resolveDreamAgentTimeZone(
+      rawDreamAgentTimeZone,
+      logger
+    ),
+    dreamAgentBacklogLimit: clampInteger(
+      config2.dreamAgentBacklogLimit,
+      1,
+      366,
+      DEFAULT_CONFIG.dreamAgentBacklogLimit
+    )
+  };
+}
+function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
+  const path2 = resolveConfigPath(homePath);
+  if (!(0, import_node_fs2.existsSync)(path2)) {
+    return DEFAULT_CONFIG;
+  }
+  try {
+    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
+    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentModel"
+    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
+    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
+      raw,
+      "dreamAgentTimeZone"
+    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
+    return clampConfig({
+      ...DEFAULT_CONFIG,
+      ...raw
+    }, configuredDreamModel, configuredDreamTimeZone, logger);
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
+var init_config = __esm({
+  "src/shared/config.ts"() {
+    "use strict";
+    import_node_fs2 = require("node:fs");
+    import_node_os2 = require("node:os");
+    import_node_path3 = require("node:path");
+    init_segment_era();
+    KNOWN_DREAM_AGENT_MODELS = [
+      "opus",
+      "sonnet",
+      "haiku",
+      "claude-opus-4-8",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ];
+    DEFAULT_DREAM_AGENT_MODEL = "opus";
+    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
+    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
+    DEFAULT_DREAM_AGENT_HOUR = 4;
+    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
+    DEFAULT_CONFIG = {
+      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
+      // On by default because it is a kill switch, not the cutover switch: with no
+      // era cutoff configured this changes nothing at all.
+      settlementEnabled: true,
+      eraCutoffEpoch: null,
+      dreamAgentEnabled: false,
+      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
+      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
+      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
+      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
+      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
+      dreamAgentBacklogLimit: 1
+    };
+  }
+});
+
 // src/db/search.ts
 function truncateOriginal(value) {
   if (!value) {
@@ -7692,170 +7856,6 @@ var init_search = __esm({
     OBSERVATION_ORIGINAL_INDEX_CHARS = 500;
     RENDERED_TURN_STATUS_CLAUSE = "t.status = 'extracted'";
     READER_FACING_OBSERVATION_CLAUSE = "o.excluded_from_extraction = 0";
-  }
-});
-
-// src/segment-era.ts
-function isSegmentEra(createdAtEpoch, cutoffEpoch) {
-  return cutoffEpoch !== null && cutoffEpoch !== void 0 && createdAtEpoch >= cutoffEpoch;
-}
-function normalizeEraCutoffEpoch(value) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
-}
-var init_segment_era = __esm({
-  "src/segment-era.ts"() {
-    "use strict";
-  }
-});
-
-// src/shared/config.ts
-function resolveConfigPath(homePath = (0, import_node_os2.homedir)()) {
-  return (0, import_node_path3.join)(homePath, ".claude-mnemo", "config.json");
-}
-function resolveDreamAgentModel(value, logger) {
-  if (typeof value === "string" && KNOWN_DREAM_AGENT_MODELS.includes(value)) {
-    return value;
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentModel ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_MODEL}.`
-  );
-  return DEFAULT_DREAM_AGENT_MODEL;
-}
-function resolveDreamAgentTimeZone(value, logger) {
-  if (typeof value === "string") {
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: value }).format(0);
-      return value;
-    } catch {
-    }
-  }
-  logger.warn(
-    `[claude-mnemo] Invalid dreamAgentTimeZone ${JSON.stringify(value)}; using ${DEFAULT_DREAM_AGENT_TIME_ZONE}.`
-  );
-  return DEFAULT_DREAM_AGENT_TIME_ZONE;
-}
-function resolveBoolean(value, fallback) {
-  return typeof value === "boolean" ? value : fallback;
-}
-function clampInteger(value, min, max, fallback) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
-    return fallback;
-  }
-  return Math.min(Math.max(value, min), max);
-}
-function clampConfig(config2, rawDreamAgentModel, rawDreamAgentTimeZone, logger) {
-  return {
-    hardExitTimeoutMs: clampInteger(
-      config2.hardExitTimeoutMs,
-      1e3,
-      3e5,
-      DEFAULT_CONFIG.hardExitTimeoutMs
-    ),
-    settlementEnabled: resolveBoolean(
-      config2.settlementEnabled,
-      DEFAULT_CONFIG.settlementEnabled
-    ),
-    // Anything that is not a positive whole epoch reads as "no era yet" rather
-    // than as an epoch of 0, which would put every turn on the new path.
-    eraCutoffEpoch: normalizeEraCutoffEpoch(config2.eraCutoffEpoch),
-    dreamAgentEnabled: resolveBoolean(
-      config2.dreamAgentEnabled,
-      DEFAULT_CONFIG.dreamAgentEnabled
-    ),
-    dreamAgentModel: resolveDreamAgentModel(rawDreamAgentModel, logger),
-    dreamAgentTimeoutMs: clampInteger(
-      config2.dreamAgentTimeoutMs,
-      6e4,
-      864e5,
-      DEFAULT_CONFIG.dreamAgentTimeoutMs
-    ),
-    dreamAgentIdleWatchdogMs: clampInteger(
-      config2.dreamAgentIdleWatchdogMs,
-      3e4,
-      36e5,
-      DEFAULT_CONFIG.dreamAgentIdleWatchdogMs
-    ),
-    dreamAgentHour: clampInteger(
-      config2.dreamAgentHour,
-      0,
-      23,
-      DEFAULT_CONFIG.dreamAgentHour
-    ),
-    dreamAgentTimeZone: resolveDreamAgentTimeZone(
-      rawDreamAgentTimeZone,
-      logger
-    ),
-    dreamAgentBacklogLimit: clampInteger(
-      config2.dreamAgentBacklogLimit,
-      1,
-      366,
-      DEFAULT_CONFIG.dreamAgentBacklogLimit
-    )
-  };
-}
-function loadConfig(homePath = (0, import_node_os2.homedir)(), logger = { warn: (message) => console.warn(message) }) {
-  const path2 = resolveConfigPath(homePath);
-  if (!(0, import_node_fs2.existsSync)(path2)) {
-    return DEFAULT_CONFIG;
-  }
-  try {
-    const raw = JSON.parse((0, import_node_fs2.readFileSync)(path2, "utf8"));
-    const configuredDreamModel = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentModel"
-    ) ? raw.dreamAgentModel : DEFAULT_DREAM_AGENT_MODEL;
-    const configuredDreamTimeZone = Object.prototype.hasOwnProperty.call(
-      raw,
-      "dreamAgentTimeZone"
-    ) ? raw.dreamAgentTimeZone : DEFAULT_DREAM_AGENT_TIME_ZONE;
-    return clampConfig({
-      ...DEFAULT_CONFIG,
-      ...raw
-    }, configuredDreamModel, configuredDreamTimeZone, logger);
-  } catch {
-    return DEFAULT_CONFIG;
-  }
-}
-var import_node_fs2, import_node_os2, import_node_path3, KNOWN_DREAM_AGENT_MODELS, DEFAULT_DREAM_AGENT_MODEL, DEFAULT_DREAM_AGENT_TIME_ZONE, DEFAULT_DREAM_AGENT_TIMEOUT_MS, DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS, DEFAULT_DREAM_AGENT_HOUR, DEFAULT_HARD_EXIT_TIMEOUT_MS, DEFAULT_CONFIG;
-var init_config = __esm({
-  "src/shared/config.ts"() {
-    "use strict";
-    import_node_fs2 = require("node:fs");
-    import_node_os2 = require("node:os");
-    import_node_path3 = require("node:path");
-    init_segment_era();
-    KNOWN_DREAM_AGENT_MODELS = [
-      "opus",
-      "sonnet",
-      "haiku",
-      "claude-opus-4-8",
-      "claude-opus-4-6",
-      "claude-opus-4-5",
-      "claude-sonnet-5",
-      "claude-sonnet-4-6",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5"
-    ];
-    DEFAULT_DREAM_AGENT_MODEL = "opus";
-    DEFAULT_DREAM_AGENT_TIME_ZONE = "Asia/Shanghai";
-    DEFAULT_DREAM_AGENT_TIMEOUT_MS = 30 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS = 10 * 60 * 1e3;
-    DEFAULT_DREAM_AGENT_HOUR = 4;
-    DEFAULT_HARD_EXIT_TIMEOUT_MS = 7e4;
-    DEFAULT_CONFIG = {
-      hardExitTimeoutMs: DEFAULT_HARD_EXIT_TIMEOUT_MS,
-      // On by default because it is a kill switch, not the cutover switch: with no
-      // era cutoff configured this changes nothing at all.
-      settlementEnabled: true,
-      eraCutoffEpoch: null,
-      dreamAgentEnabled: false,
-      dreamAgentModel: DEFAULT_DREAM_AGENT_MODEL,
-      dreamAgentTimeoutMs: DEFAULT_DREAM_AGENT_TIMEOUT_MS,
-      dreamAgentIdleWatchdogMs: DEFAULT_DREAM_AGENT_IDLE_WATCHDOG_MS,
-      dreamAgentHour: DEFAULT_DREAM_AGENT_HOUR,
-      dreamAgentTimeZone: DEFAULT_DREAM_AGENT_TIME_ZONE,
-      dreamAgentBacklogLimit: 1
-    };
   }
 });
 
@@ -32782,68 +32782,106 @@ var noteInputSchema = external_exports3.object(noteInputShape).strict();
 // src/mcp/note.ts
 init_database();
 
-// src/db/observations.ts
-init_search();
-var OBSERVATION_COLUMNS = `
-  id,
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
   turn_id AS turnId,
-  tool_name AS toolName,
-  tool_input AS toolInput,
-  tool_result AS toolResult,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
   status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+
+// src/db/shadow-notes.ts
+var SHADOW_NOTE_COLUMNS = `
+  turn_id AS turnId,
   title,
   content,
-  excluded_from_extraction AS excludedFromExtraction,
-  created_at_epoch AS createdAtEpoch
+  insight,
+  writer_model AS writerModel,
+  writer_origin AS writerOrigin,
+  ride_turn_id AS rideTurnId,
+  created_at_epoch AS createdAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
 `;
-var OBSERVATION_SELECT = `
-  SELECT ${OBSERVATION_COLUMNS}
-  FROM observations
-`;
-function mapObservationRow(row) {
-  if (!row) {
-    return null;
-  }
-  return row;
-}
-function updateObservation(db, observationId, input) {
-  const existing = getObservation(db, observationId);
-  if (!existing) {
-    return null;
-  }
-  const updated = mapObservationRow(
-    db.query(
+function upsertShadowNote(db, input) {
+  const written = db.query(
+    `
+        INSERT INTO shadow_notes (
+          turn_id,
+          title,
+          content,
+          insight,
+          writer_model,
+          writer_origin,
+          ride_turn_id,
+          created_at_epoch,
+          updated_at_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(turn_id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          insight = excluded.insight,
+          writer_model = excluded.writer_model,
+          writer_origin = excluded.writer_origin,
+          ride_turn_id = excluded.ride_turn_id,
+          updated_at_epoch = excluded.updated_at_epoch
+        RETURNING ${SHADOW_NOTE_COLUMNS}
       `
-          UPDATE observations
-          SET
-            title = ?,
-            content = ?,
-            status = ?
-          WHERE id = ?
-          RETURNING ${OBSERVATION_COLUMNS}
-        `
-    ).get(
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      input.status ?? existing.status,
-      observationId
-    ) ?? null
+  ).get(
+    input.turnId,
+    input.title,
+    input.content,
+    input.insight ?? null,
+    input.writerModel ?? null,
+    input.writerOrigin ?? "agent",
+    input.rideTurnId ?? null,
+    input.nowEpoch,
+    input.nowEpoch
   );
-  if (!updated) {
-    return null;
+  if (!written) {
+    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
   }
-  indexObservationToFTS(db, updated);
-  return updated;
+  return written;
 }
-function getExtractableObservationsForTurn(db, turnId) {
+function getShadowNote(db, turnId) {
   return db.query(
-    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
-  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
-}
-function getObservation(db, observationId) {
-  return mapObservationRow(
-    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
-  );
+    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
+  ).get(turnId) ?? null;
 }
 
 // src/diary/calendar.ts
@@ -33114,111 +33152,6 @@ function getFirstTurn(db, sessionId) {
   );
 }
 
-// src/db/turn-completion.ts
-init_segment_era();
-
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-
-// src/db/shadow-notes.ts
-var SHADOW_NOTE_COLUMNS = `
-  turn_id AS turnId,
-  title,
-  content,
-  insight,
-  writer_model AS writerModel,
-  writer_origin AS writerOrigin,
-  ride_turn_id AS rideTurnId,
-  created_at_epoch AS createdAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function upsertShadowNote(db, input) {
-  const written = db.query(
-    `
-        INSERT INTO shadow_notes (
-          turn_id,
-          title,
-          content,
-          insight,
-          writer_model,
-          writer_origin,
-          ride_turn_id,
-          created_at_epoch,
-          updated_at_epoch
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(turn_id) DO UPDATE SET
-          title = excluded.title,
-          content = excluded.content,
-          insight = excluded.insight,
-          writer_model = excluded.writer_model,
-          writer_origin = excluded.writer_origin,
-          ride_turn_id = excluded.ride_turn_id,
-          updated_at_epoch = excluded.updated_at_epoch
-        RETURNING ${SHADOW_NOTE_COLUMNS}
-      `
-  ).get(
-    input.turnId,
-    input.title,
-    input.content,
-    input.insight ?? null,
-    input.writerModel ?? null,
-    input.writerOrigin ?? "agent",
-    input.rideTurnId ?? null,
-    input.nowEpoch,
-    input.nowEpoch
-  );
-  if (!written) {
-    throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
-  }
-  return written;
-}
-function getShadowNote(db, turnId) {
-  return db.query(
-    `SELECT ${SHADOW_NOTE_COLUMNS} FROM shadow_notes WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-
 // src/mcp/note.ts
 init_segment_era();
 
@@ -33275,14 +33208,11 @@ function resolveWriterModel(env = process.env) {
 }
 function getSessionCurrentTurn(db, sessionId) {
   const row = db.query(
-    `SELECT id, status FROM turns
+    `SELECT id FROM turns
        WHERE session_id = ? AND status != 'undone'
        ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionId);
   return row ?? null;
-}
-function isSessionCurrentTurn(current, turnId) {
-  return current !== null && current.id === turnId && (current.status === "active" || current.status === "provisional");
 }
 function requireText(value, field) {
   if (typeof value !== "string") {
@@ -33292,12 +33222,6 @@ function requireText(value, field) {
     return { ok: false, message: `${field} must not be empty.` };
   }
   return { ok: true, value };
-}
-function mayWriteNote(hasExistingNote, debt, isCurrentTurn) {
-  return isCurrentTurn || hasExistingNote || debt?.status === "pending" || debt?.status === "skipped" && debt.reason === "declined";
-}
-function debtOwesNoNoteMessage(address, debt) {
-  return `S${address.sessionId}/T${address.promptNumber} owes no note${debt ? ` (its debt closed as ${debt.reason ?? debt.status})` : ""}. Write notes for the current turn (the mnemo current-turn line's address), for an earlier turn that still owes one \u2014 a backlog relief lists these, and any batch may drain them \u2014 or rewrite a note you already wrote.`;
 }
 function overwriteRequiredMessage(address) {
   return `S${address.sessionId}/T${address.promptNumber} already has a note. Resend with replace: true to confirm you want to overwrite it.`;
@@ -33323,23 +33247,14 @@ function declineTurn(db, address, options, crossSession) {
   const nowEpoch = options.now?.() ?? Math.floor(Date.now() / 1e3);
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const ref = `S${turn.sessionId}/T${turn.promptNumber}`;
-  const isCurrentTurn = isSessionCurrentTurn(
-    getSessionCurrentTurn(db, turn.sessionId),
-    turn.id
-  );
-  if (!isCurrentTurn && !getShadowNote(db, turn.id) && getNoteDebt(db, turn.id) === null) {
-    return parameterError(debtOwesNoNoteMessage(address, null));
-  }
   const outcome = writeTransaction(db, () => {
     if (getShadowNote(db, turn.id) !== null) {
       return { kind: "already-noted" };
     }
     const debt = getNoteDebt(db, turn.id);
     if (debt === null) {
-      if (isCurrentTurn && recordDeclinedNoteDebt(db, turn, nowEpoch)) {
-        return { kind: "declined" };
-      }
-      return { kind: "owes-nothing", debt: null };
+      recordDeclinedNoteDebt(db, turn, nowEpoch);
+      return { kind: "declined" };
     }
     if (debt.status !== "pending") {
       return { kind: "already-settled", settledAs: debt.reason ?? debt.status };
@@ -33358,8 +33273,6 @@ function declineTurn(db, address, options, crossSession) {
       return textResult(
         `Skipped ${ref} ignored: its debt already closed as ${outcome.settledAs}.`
       );
-    case "owes-nothing":
-      return parameterError(debtOwesNoNoteMessage(address, outcome.debt));
   }
 }
 function noteTool(db, rawInput, options = {}) {
@@ -33405,18 +33318,13 @@ function noteTool(db, rawInput, options = {}) {
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
   }
-  const current = getSessionCurrentTurn(db, turn.sessionId);
-  const isCurrentTurn = isSessionCurrentTurn(current, turn.id);
-  const fastExisting = getShadowNote(db, turn.id);
-  const fastDebt = getNoteDebt(db, turn.id);
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
       crossSessionRequiredMessage(address, options.callerSessionId)
     );
   }
-  if (!mayWriteNote(fastExisting !== null, fastDebt, isCurrentTurn)) {
-    return parameterError(debtOwesNoNoteMessage(address, fastDebt));
-  }
+  const current = getSessionCurrentTurn(db, turn.sessionId);
+  const fastExisting = getShadowNote(db, turn.id);
   if (fastExisting !== null && !replace) {
     return parameterError(overwriteRequiredMessage(address));
   }
@@ -33437,10 +33345,6 @@ function noteTool(db, rawInput, options = {}) {
   );
   const outcome = writeTransaction(db, () => {
     const existing = getShadowNote(db, turn.id);
-    const debt = getNoteDebt(db, turn.id);
-    if (!mayWriteNote(existing !== null, debt, isCurrentTurn)) {
-      return { ok: false, message: debtOwesNoNoteMessage(address, debt) };
-    }
     if (existing !== null && !replace) {
       return { ok: false, message: overwriteRequiredMessage(address) };
     }
@@ -33486,6 +33390,70 @@ function getRidePromptNumber(db, turnId) {
   return db.query(
     "SELECT prompt_number AS promptNumber FROM turns WHERE id = ?"
   ).get(turnId)?.promptNumber ?? null;
+}
+
+// src/db/observations.ts
+init_search();
+var OBSERVATION_COLUMNS = `
+  id,
+  turn_id AS turnId,
+  tool_name AS toolName,
+  tool_input AS toolInput,
+  tool_result AS toolResult,
+  status,
+  title,
+  content,
+  excluded_from_extraction AS excludedFromExtraction,
+  created_at_epoch AS createdAtEpoch
+`;
+var OBSERVATION_SELECT = `
+  SELECT ${OBSERVATION_COLUMNS}
+  FROM observations
+`;
+function mapObservationRow(row) {
+  if (!row) {
+    return null;
+  }
+  return row;
+}
+function updateObservation(db, observationId, input) {
+  const existing = getObservation(db, observationId);
+  if (!existing) {
+    return null;
+  }
+  const updated = mapObservationRow(
+    db.query(
+      `
+          UPDATE observations
+          SET
+            title = ?,
+            content = ?,
+            status = ?
+          WHERE id = ?
+          RETURNING ${OBSERVATION_COLUMNS}
+        `
+    ).get(
+      input.title ?? existing.title,
+      input.content ?? existing.content,
+      input.status ?? existing.status,
+      observationId
+    ) ?? null
+  );
+  if (!updated) {
+    return null;
+  }
+  indexObservationToFTS(db, updated);
+  return updated;
+}
+function getExtractableObservationsForTurn(db, turnId) {
+  return db.query(
+    `${OBSERVATION_SELECT} WHERE turn_id = ? AND excluded_from_extraction = 0 ORDER BY id ASC`
+  ).all(turnId).map((row) => mapObservationRow(row)).filter((observation) => observation !== null);
+}
+function getObservation(db, observationId) {
+  return mapObservationRow(
+    db.query(`${OBSERVATION_SELECT} WHERE id = ?`).get(observationId) ?? null
+  );
 }
 
 // src/mcp/recall.ts
