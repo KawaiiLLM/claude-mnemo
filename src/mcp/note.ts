@@ -191,6 +191,21 @@ function overwriteRequiredMessage(address: TurnAddress): string {
 }
 
 /**
+ * A compact marker is not a turn (spec D2/D5). It is the mechanical row
+ * PreCompact's transcript-repair path leaves at the boundary
+ * (hooks/capture-repair.ts's `type = 'compact'`) — no user prompt reached it
+ * and no work happened on it, so an address that resolves to one is rejected
+ * the same way an address that resolves to nothing is: this is the one fact
+ * left to state.
+ */
+function compactMarkerMessage(address: TurnAddress): string {
+  return (
+    `S${address.sessionId}/T${address.promptNumber} is a compact marker, not a turn` +
+    " — there is nothing to note or skip."
+  );
+}
+
+/**
  * Cross-session write must be declared (spec D4). No legitimate use exists
  * today — every address a caller ever has came from its own session's
  * current-turn line or backlog relief — so this fires only on a mistyped or
@@ -257,6 +272,14 @@ function declineTurn(
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`,
     );
+  }
+
+  // spec D2/D5: a compact marker is not a turn — it is the mechanical row
+  // PreCompact's transcript repair leaves behind (capture-repair.ts). It
+  // carries no user prompt and no work of its own, so there is nothing a
+  // skip could truthfully close.
+  if (turn.type === "compact") {
+    return parameterError(compactMarkerMessage(address));
   }
 
   // spec D4: a foreign-session address is rejected before any debt-state
@@ -399,6 +422,13 @@ export function noteTool(
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`,
     );
+  }
+
+  // spec D2/D5: a compact marker carries no note-worthy content — see
+  // `compactMarkerMessage`. Checked ahead of the cross-session guard, same as
+  // the "no turn" case above: existence-and-kind is resolved before identity.
+  if (turn.type === "compact") {
+    return parameterError(compactMarkerMessage(address));
   }
 
   // spec D5: eligibility collapses to address resolution — the `getTurn` call

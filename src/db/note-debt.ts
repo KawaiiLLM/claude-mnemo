@@ -1,24 +1,27 @@
 import type { Database } from "bun:sqlite";
 
-import { isMnemoOwnToolName } from "../shared/note-tool";
-
 /**
- * The P1 note-debt ledger (spec D2/D3).
+ * The note-debt ledger (spec note-prompt-clock, D1/D8).
  *
- * Ownership is split on purpose and the split is the point (R2#P2-6): every DEBT
- * TRANSITION in this module runs on the asynchronous ingest side (the Stop
- * handler's completion event and the PostToolUse capture entry), while the
- * synchronous UserPromptSubmit entry that returns the reminder only reads the
- * ledger and writes what the renderer alone can know — the reminded marker and
- * the rolled-back closure it announces. A hook result carrying
- * `additionalContext` cannot also carry `asyncWork` — the runner emits one or
- * the other — so a single handler that both maintained the ledger and rendered
- * the reminder would have to give up the worker wake, and two handlers that both
- * maintained it would race on the same rows every prompt.
+ * The owed set is no longer written anywhere — it is a DERIVED QUERY, computed
+ * fresh on every UserPromptSubmit from `turns`/`shadow_notes`/`note_debt`
+ * (`listOwedNoteTurns` below). The clock that used to decide "has this turn
+ * ended" (a Stop event, a classification sweep) is gone too: a turn ends the
+ * moment a later prompt exists, full stop, and that is a fact `turns` already
+ * carries — nothing needs to observe it happening.
+ *
+ * `note_debt` itself survives only as a table of RECORDED ANSWERS: a `skipped`
+ * row is the agent explicitly declining a turn (`declined`), or the system
+ * writing one off (`closed`, from residual settlement; `aged`/`rolled-back`
+ * are historical reasons a pre-cutover ledger produced and are read here but
+ * never written any more). A `noted` row exists only when a turn's decline was
+ * later reversed by a real note — `getShadowNote` already answers "is this
+ * turn noted" directly, so nothing reads `noted` rows as a signal, but closing
+ * one is what lets a reversed decline stop being reported as `declined`. There
+ * is no `pending` writer left: a debt this module never opens cannot need
+ * closing, and a `pending` row surviving from before this cutover is read as
+ * "unanswered", not as an obligation anything here tracks.
  */
-
-/** Turns a debt may wait before it is written off (spec D3's only hard bound). */
-export const NOTE_DEBT_AGING_TURNS = 50;
 
 export type NoteDebtStatus = "pending" | "noted" | "skipped";
 /**
@@ -31,10 +34,11 @@ export type NoteDebtStatus = "pending" | "noted" | "skipped";
  * reminder with `note(turn, skip: true)` because the turn held nothing worth
  * keeping, or because its details had left the context window (a compact
  * routinely strands the oldest debts that way) and the only alternative was
- * inventing a note from the reminder line. It is deliberately distinct from
- * `aged`: refusal and neglect look identical in a ledger that conflates them,
- * and the relief valve's "oldest five" window fills up with unwritable debts
- * unless declining removes them.
+ * inventing a note from the reminder line.
+ *
+ * `aged` and `rolled-back` are historical only (pre note-prompt-clock): a
+ * turn past the reminder's window, or a rolled-back turn, simply never enters
+ * `listOwedNoteTurns`'s result any more — there is nothing left to close.
  */
 export type NoteDebtReason = "aged" | "rolled-back" | "closed" | "declined";
 
@@ -47,54 +51,6 @@ export interface NoteDebtRecord {
   openedAtEpoch: number;
   closedAtEpoch: number | null;
   updatedAtEpoch: number;
-}
-
-/** An open debt joined with what the reminder has to render. */
-export interface OpenNoteDebt {
-  turnId: number;
-  sessionId: number;
-  promptNumber: number;
-  userPrompt: string | null;
-  wasRolledBack: boolean;
-  openedAtEpoch: number;
-  /**
-   * When the ordinary reminder listed this debt, or null if it never has
-   * (裁决 22 — one debt, one ask). The relief valve ignores it.
-   */
-  remindedAtEpoch: number | null;
-  /** How many turns the session has moved on since this turn ended. */
-  pendingTurns: number;
-}
-
-export interface ReconcileNoteDebtInput {
-  sessionId: number;
-  nowEpoch: number;
-  /**
-   * A turn known to have just ended (the Stop event's turn). Without it only
-   * turns strictly older than the session's open turn are classified, which is
-   * the right rule for the capture entry — it fires mid-turn.
-   */
-  completedTurnId?: number;
-  agingTurns?: number;
-  /**
-   * P2 era boundary (spec D11). Only decides what an un-noted turn is settled
-   * to — `skipped` in the new era, `failed` before it. Omitted = legacy.
-   *
-   * No longer used to settle anything here (ticket 02 moved that write to
-   * db/turn-settlement.ts, called by every caller of this function BEFORE it
-   * runs). Kept on the input type because `eraCutoffEpoch` is otherwise
-   * unused by classification/debt logic and every call site already threads
-   * it through from the same era resolution as the settlement call.
-   */
-  eraCutoffEpoch?: number | null;
-}
-
-export interface ReconcileNoteDebtResult {
-  opened: number[];
-  noted: number[];
-  aged: number[];
-  rolledBack: number[];
-  classifiedThroughPromptNumber: number;
 }
 
 const NOTE_DEBT_COLUMNS = `
@@ -135,151 +91,10 @@ export function listNoteDebt(
 }
 
 /**
- * A turn's substantive tool calls. Reads the captured observations rather than
- * `turns.tool_call_count`: the count column is derived from the transcript by a
- * later backfill and includes mnemo's own calls, while observations are what the
- * hook actually saw, are already present when the turn ends, and carry the
- * exclusion marker.
- */
-export function countSubstantiveToolCalls(db: Database, turnId: number): number {
-  const rows = db
-    .query<{ toolName: string | null }, [number]>(
-      `SELECT tool_name AS toolName FROM observations
-       WHERE turn_id = ? AND excluded_from_extraction = 0`,
-    )
-    .all(turnId);
-
-  return rows.filter(
-    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName),
-  ).length;
-}
-
-function getMaxPromptNumber(db: Database, sessionId: number): number {
-  return (
-    db
-      .query<{ maxPromptNumber: number | null }, [number]>(
-        "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?",
-      )
-      .get(sessionId)?.maxPromptNumber ?? 0
-  );
-}
-
-function getClassificationCursor(db: Database, sessionId: number): number {
-  return (
-    db
-      .query<{ cursor: number }, [number]>(
-        `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`,
-      )
-      .get(sessionId)?.cursor ?? 0
-  );
-}
-
-function setClassificationCursor(
-  db: Database,
-  sessionId: number,
-  promptNumber: number,
-  nowEpoch: number,
-): void {
-  db.query<unknown, [number, number, number]>(
-    `INSERT INTO note_debt_cursor (
-       session_id, last_classified_prompt_number, updated_at_epoch
-     ) VALUES (?, ?, ?)
-     ON CONFLICT(session_id) DO UPDATE SET
-       last_classified_prompt_number = MAX(
-         note_debt_cursor.last_classified_prompt_number,
-         excluded.last_classified_prompt_number
-       ),
-       updated_at_epoch = excluded.updated_at_epoch`,
-  ).run(sessionId, promptNumber, nowEpoch);
-}
-
-/**
- * Did mnemo actually capture this turn's completion?
- *
- * The sweep's whole premise is that a turn's tool batch is final, and a turn
- * that is still `active`/`provisional` with no captured Stop breaks it: those
- * are STRANDED turns (worker/turn-liveness.ts — a real production shape, not a
- * hypothetical), and classifying one reads whatever observations happened to
- * land before the capture path dropped out. Zero of them reads as "trivial",
- * which is indistinguishable from a turn that genuinely owed nothing, and the
- * watermark then walks over it so settlement freezes the misreading into a
- * window that can never be recut.
- *
- * Two independent kinds of evidence, and both are needed:
- *   - a terminal status, which is what the extraction pipeline leaves behind;
- *   - a queued `turn-stop` item, which is what the Stop hook and the stranded
- *     repair (ticket 10) leave behind BEFORE extraction runs. Without this
- *     clause the note ledger would inherit the extraction backlog's latency —
- *     debts would stop opening whenever extraction fell behind, which is
- *     exactly the coupling the ticket's ledger-not-`turns.status` rule exists
- *     to avoid, and it would also leave a repaired turn blocked until its
- *     re-extraction finished.
- *
- * Ticket 02 moved the turn's actual settlement — its terminal status,
- * `files_read`/`files_modified`/`tool_call_count`, and its observations'
- * retirement — out of this walk and into db/turn-settlement.ts, which every
- * caller of `reconcileNoteDebt` now calls first (spec D10). This predicate is
- * unchanged by that move: it is still the gate for whether an un-answered
- * turn owes a note, and it still reads the SAME evidence (a terminal status,
- * or a queued `turn-stop`) — the terminal status just now comes from the
- * settlement channel's own writer instead of from a call embedded in this
- * loop. The `turn-stop` clause is what makes that safe: it is evidence a
- * finished turn carries even before its (now external) settlement lands.
- */
-const COMPLETION_EVIDENCE_SQL = `(
-  t.status NOT IN ('active', 'provisional')
-  OR EXISTS (
-    SELECT 1 FROM pending_queue q
-    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-  )
-)`;
-
-/**
- * Classify one finished turn and open a debt if it owes a note.
- *
- * Returns the turn id when a debt was opened. Trivial turns (spec's 裁决 13)
- * leave no trace at all: absence from the ledger IS the "owes nothing" record,
- * and their value is carried by the raw text and FTS instead.
- */
-function classifyCompletedTurn(
-  db: Database,
-  turn: { id: number; promptNumber: number; sessionId: number },
-  nowEpoch: number,
-): boolean {
-  if (getNoteDebt(db, turn.id) !== null) {
-    return false;
-  }
-
-  // Already noted before the ledger ever saw it (the agent can note any turn it
-  // has an address for). Opening a debt now would demand a second note.
-  const alreadyNoted = db
-    .query<{ present: number }, [number]>(
-      "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?",
-    )
-    .get(turn.id);
-  if (alreadyNoted) {
-    return false;
-  }
-
-  if (countSubstantiveToolCalls(db, turn.id) === 0) {
-    return false;
-  }
-
-  db.query<unknown, [number, number, number, number, number]>(
-    `INSERT OR IGNORE INTO note_debt (
-       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
-     ) VALUES (?, ?, ?, 'pending', ?, ?)`,
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
-
-  return true;
-}
-
-/**
  * Every close goes through here, and every close is `WHERE status = 'pending'`.
  * That predicate is the whole concurrency story of the ledger: a debt has one
- * terminal state, whoever writes it first wins, and no later reconcile can
- * re-open a closed debt or overwrite one outcome with another.
+ * terminal state, whoever writes it first wins, and no later write can re-open
+ * a closed debt or overwrite one outcome with another.
  */
 function closeDebt(
   db: Database,
@@ -303,23 +118,18 @@ function closeDebt(
  * Close a debt because its note has just been written — called by the `note`
  * tool itself, synchronously with the write.
  *
- * Age is deliberately not consulted. The 50-turn bound governs how long a debt
- * keeps asking for attention, not whether a late answer counts: a note that
- * arrives at turn 60 is still a real note about a real turn, and recording it as
- * `aged` would call the trial's best-behaved case a default. The reminder path
- * stops rendering the debt at the bound; this path keeps accepting it.
- *
- * Doing it here rather than leaving it to the next reconcile is what makes the
- * ledger's durable state true at the moment it changes: a session whose last act
- * is a note would otherwise leave that debt `pending` forever, since reconcile
- * only ever runs from a later Stop or tool call that may never come.
- *
  * This is the ONE close that can overwrite another outcome, and only that one:
  * `skipped(declined)` → `noted`. A decline is the agent's own judgement about
- * its own turn (裁决 24), so the agent is entitled to revise it — and it can
- * only do so by deliberately calling `note` for an address the reminder will
- * never show again. `aged`, `rolled-back` and `closed` are the system's
- * judgements and stay terminal, as does every close reconcile performs.
+ * its own turn (裁決 24), so the agent is entitled to revise it — and it can
+ * only do so by deliberately calling `note` for an address `listOwedNoteTurns`
+ * will never show again (a decline already excludes the turn from the owed
+ * set). `aged`, `rolled-back` and `closed` are the system's judgements and
+ * stay terminal.
+ *
+ * A turn with no `note_debt` row at all (the ordinary case now that nothing
+ * opens one pre-emptively) simply has nothing to close here — `WHERE turn_id
+ * = ?` matches zero rows and this returns `false`, which the caller does not
+ * need to act on: the note itself is the durable record.
  */
 export function closeNoteDebtAsNoted(
   db: Database,
@@ -343,13 +153,13 @@ export function closeNoteDebtAsNoted(
  * Close a debt because the agent declined it — `note(turn, skip: true)`, the
  * explicit half of 裁决 24's skip rule.
  *
- * A skip is a real answer, not silence: it takes the debt out of the reminder
- * and relief selections (both read `status = 'pending'`) so a turn the agent
- * cannot write about stops occupying the relief window's oldest-five slots, and
- * it records WHICH kind of settlement happened, which `aged` cannot say.
+ * A skip is a real answer, not silence: it takes the turn out of
+ * `listOwedNoteTurns` (which excludes any turn with a `skipped` `note_debt`
+ * row, whatever the reason) so a turn the agent cannot honestly write about
+ * stops occupying one of the backlog relief's five oldest slots.
  *
- * Same `WHERE status = 'pending'` guard as every other close, so a debt a note
- * has already settled keeps its `noted` outcome and the skip is a no-op.
+ * Same `WHERE status = 'pending'` guard as `closeNoteDebtAsNoted`, so a debt a
+ * note has already settled keeps its `noted` outcome and the skip is a no-op.
  */
 export function closeNoteDebtAsDeclined(
   db: Database,
@@ -360,13 +170,10 @@ export function closeNoteDebtAsDeclined(
 }
 
 /**
- * Record a decline for a turn whose debt does not exist yet — the current turn
- * (裁决 25), which classification has not reached because it has not ended.
- *
- * The row is born closed: `skipped(declined)` from the start, so the later
- * classification pass finds a debt already present and opens nothing, and the
- * refusal survives exactly as if the debt had existed first. `INSERT OR IGNORE`
- * keeps a concurrent classification's `pending` row authoritative; the caller
+ * Record a decline for a turn whose debt does not exist yet — the ordinary
+ * shape now that nothing opens a debt ahead of time. The row is born closed:
+ * `skipped(declined)` from the start. `INSERT OR IGNORE` keeps a concurrent
+ * write (another decline, or a note landing first) authoritative; the caller
  * falls back to the ordinary close in that case.
  */
 export function recordDeclinedNoteDebt(
@@ -388,234 +195,15 @@ export function recordDeclinedNoteDebt(
 }
 
 /**
- * The `reminded_at_epoch` column survives as history: it was the per-debt
- * reminder's at-most-once claim (裁决 22), and the trial's reach metric reads
- * it. 裁决 25 abolished the reminder itself — no live path marks the column
- * any more, and rolled-back debts close in `reconcileNoteDebt` instead of at a
- * reminder's rendering.
- */
-
-/**
- * Bring the ledger up to date for one session: classify newly finished turns,
- * clear debts the agent has written notes for, close rolled-back debts the agent
- * has already been told about, and age out debts past the 50-turn bound.
- *
- * Idempotent and event-driven — there is no startup scan anywhere, and calling
- * it twice for the same event changes nothing the second time.
- */
-export function reconcileNoteDebt(
-  db: Database,
-  input: ReconcileNoteDebtInput,
-): ReconcileNoteDebtResult {
-  const { sessionId, nowEpoch } = input;
-  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const maxPromptNumber = getMaxPromptNumber(db, sessionId);
-  const cursor = getClassificationCursor(db, sessionId);
-
-  // The session's newest turn is still open, so it is not classified — unless
-  // the caller names it as the turn that just ended (the Stop event).
-  let classifyThrough = maxPromptNumber - 1;
-  if (input.completedTurnId !== undefined) {
-    const completed = db
-      .query<{ promptNumber: number; sessionId: number }, [number]>(
-        `SELECT prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns WHERE id = ?`,
-      )
-      .get(input.completedTurnId);
-    if (completed && completed.sessionId === sessionId) {
-      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
-    }
-  }
-
-  const opened: number[] = [];
-  let classifiedThrough = cursor;
-  if (classifyThrough > cursor) {
-    const candidates = db
-      .query<
-        {
-          id: number;
-          promptNumber: number;
-          sessionId: number;
-          hasCompletionEvidence: number;
-        },
-        [number, number, number]
-      >(
-        `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
-                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
-         FROM turns t
-         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
-         ORDER BY t.prompt_number ASC`,
-      )
-      .all(sessionId, cursor, classifyThrough);
-
-    // The watermark is a CONTIGUOUS prefix, so an unfinished turn stops the walk
-    // rather than being skipped over: settlement cuts its windows from this
-    // prefix, and a window is frozen at enqueue. Blocking costs a delay that the
-    // stranded repair ends; skipping costs a turn silently settled as trivial,
-    // permanently. The Stop event's own turn is evidence in itself — the caller
-    // naming it IS the capture.
-    let blockedAtPromptNumber: number | null = null;
-    for (const candidate of candidates) {
-      if (
-        candidate.hasCompletionEvidence !== 1 &&
-        candidate.id !== input.completedTurnId
-      ) {
-        blockedAtPromptNumber = candidate.promptNumber;
-        break;
-      }
-      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
-        opened.push(candidate.id);
-      }
-    }
-
-    // Nothing blocked → the whole computed range is classified, gaps in
-    // prompt_number included (a deleted subagent turn leaves one, and stopping
-    // at the last surviving row would wedge the watermark on it forever).
-    classifiedThrough =
-      blockedAtPromptNumber === null
-        ? classifyThrough
-        : blockedAtPromptNumber - 1;
-    if (classifiedThrough > cursor) {
-      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
-    }
-  }
-
-  const pending = db
-    .query<
-      {
-        turnId: number;
-        promptNumber: number;
-        wasRolledBack: number;
-        hasNote: number;
-      },
-      [number]
-    >(
-      `SELECT
-         d.turn_id AS turnId,
-         d.prompt_number AS promptNumber,
-         t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`,
-    )
-    .all(sessionId);
-
-  const noted: number[] = [];
-  const rolledBack: number[] = [];
-  const aged: number[] = [];
-
-  for (const row of pending) {
-    if (row.hasNote === 1) {
-      closeDebt(db, row.turnId, "noted", null, nowEpoch);
-      noted.push(row.turnId);
-      continue;
-    }
-
-    // A rolled-back turn needs no note. It used to close only after a reminder
-    // had shown its "rolled back" line once (user story 5); 裁决 25 retired
-    // that channel, so the close is silent here and the timeline's rollback
-    // fold is the notice.
-    if (row.wasRolledBack === 1) {
-      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
-      rolledBack.push(row.turnId);
-      continue;
-    }
-
-    if (maxPromptNumber - row.promptNumber > agingTurns) {
-      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
-      aged.push(row.turnId);
-    }
-  }
-
-  return {
-    opened,
-    noted,
-    aged,
-    rolledBack,
-    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough),
-  };
-}
-
-export interface ListOpenNoteDebtOptions {
-  /** The turn the session is on now; "pending N turns" is measured from it. */
-  latestPromptNumber: number;
-  agingTurns?: number;
-}
-
-/**
- * The open debts the backlog relief may list — READ ONLY, by contract.
- *
- * Aging is applied here as a filter rather than an update: a debt past the bound
- * is never rendered again from the moment it crosses it, which is the behaviour
- * "lazily aged at read time" is asking for, while the durable `skipped(aged)`
- * transition happens on the next reconcile from the async side.
- *
- * The reminded marker is returned rather than filtered on, because the two
- * callers need different halves of it: the ordinary reminder shows only unmarked
- * debts, the relief valve deliberately ignores the marker, and the escalation
- * ladder counts the whole open backlog either way.
- */
-export function listOpenNoteDebt(
-  db: Database,
-  sessionId: number,
-  options: ListOpenNoteDebtOptions,
-): OpenNoteDebt[] {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-
-  return db
-    .query<
-      {
-        turnId: number;
-        sessionId: number;
-        promptNumber: number;
-        userPrompt: string | null;
-        wasRolledBack: number;
-        openedAtEpoch: number;
-        remindedAtEpoch: number | null;
-      },
-      [number]
-    >(
-      `SELECT
-         d.turn_id AS turnId,
-         d.session_id AS sessionId,
-         d.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt,
-         t.was_rolled_back AS wasRolledBack,
-         d.opened_at_epoch AS openedAtEpoch,
-         d.reminded_at_epoch AS remindedAtEpoch
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`,
-    )
-    .all(sessionId)
-    .map((row) => ({
-      turnId: row.turnId,
-      sessionId: row.sessionId,
-      promptNumber: row.promptNumber,
-      userPrompt: row.userPrompt,
-      wasRolledBack: row.wasRolledBack === 1,
-      openedAtEpoch: row.openedAtEpoch,
-      remindedAtEpoch: row.remindedAtEpoch,
-      pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber),
-    }))
-    .filter((debt) => debt.pendingTurns <= agingTurns);
-}
-
-/**
  * Convert every open debt of a CLOSED session to `skipped(closed)` — the
  * claim-time step of residual settlement (spec D9, 裁决 11).
  *
  * Called from inside the residual job's claim transaction, never speculatively:
  * "closed" is a judgement computed at query time from live registrations and
- * idle age, and it is deliberately never stored. Writing these rows outside the
- * claim would durably record that judgement, and a session that reopens a minute
- * later would find its debts silently written off with no job to show for it.
- *
- * Uses the same `WHERE status = 'pending'` guard as every other close, so a debt
- * a late note just settled keeps its `noted` outcome.
+ * idle age, and it is deliberately never stored outside this write. Uses the
+ * same `WHERE status = 'pending'` guard as every other close, so a debt a late
+ * note just settled keeps its `noted` outcome. A session whose ledger holds no
+ * pre-cutover `pending` rows simply has nothing for this to touch.
  */
 export function closePendingNoteDebtsAsClosed(
   db: Database,
@@ -632,149 +220,100 @@ export function closePendingNoteDebtsAsClosed(
     .run(nowEpoch, nowEpoch, sessionId).changes;
 }
 
-export interface NoteReliefState {
-  /** Prompt number of the ride turn of this session's most recent note. */
-  lastNotePromptNumber: number;
-  /** Prompt number of the turn the last backlog relief rode (0 = never). */
-  lastReliefPromptNumber: number;
-  /** The newest turn the async side has classified as finished. */
-  classifiedThroughPromptNumber: number;
-  /** max(lastNotePromptNumber, lastReliefPromptNumber). */
-  anchorPromptNumber: number;
-  /** Finished turns since the anchor — the dry streak, in whole turns. */
-  dryTurns: number;
+/** Turns before which the reminder no longer counts a turn as owed (spec D1's only hard bound — it governs display, not writability; see mcp/note.ts). */
+export const NOTE_DEBT_AGING_TURNS = 50;
+
+export interface OwedNoteTurn {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+  userPrompt: string | null;
+  /** How many later prompts have gone by since this turn ended. */
+  pendingTurns: number;
+}
+
+export interface ListOwedNoteTurnsOptions {
+  agingTurns?: number;
 }
 
 /**
- * The two facts the backlog relief (裁决 21) needs beyond the debt list: how
- * long the session has gone without writing a note, and whether a relief has
- * already fired inside that streak. READ ONLY, like the reminder's list.
+ * The owed-note set for one session, computed fresh on every call (spec D1).
  *
- * The streak is counted against `last_classified_prompt_number` — the async
- * side's "this turn has finished" watermark — rather than against the newest
- * turn row. UserPromptSubmit hooks run in parallel (Claude Code awaits them with
- * Promise.all), so at the moment this runs, the row for the prompt being
- * submitted may or may not have been created yet by the `session-init` entry.
- * Counting finished turns is immune to that race; counting rows is not, and the
- * difference would be a trigger that fires a turn early or late depending on
- * process scheduling.
+ * A turn owes a note when every one of these holds, and none of them is a
+ * write this function performs:
  *
- * The dry streak needs no bookkeeping of its own: a note's `ride_turn_id` is
- * already the turn the session was on when it was written, so the newest one is
- * exactly "when a note was last written".
+ *   - it ENDED, which the prompt clock alone decides: `prompt_number <
+ *     currentPromptNumber` — a later prompt existing IS the turn ending, no
+ *     Stop capture or tool-call count required (spec's core move: "结束的
+ *     定义就是新 prompt 到达");
+ *   - nobody has ANSWERED for it — no `shadow_notes` row (a real note), and no
+ *     `note_debt` row whose status is `skipped` for ANY reason (a decline, an
+ *     aged-out or rolled-back closure from before this query replaced the
+ *     classification walk, or a residual write-off). A stray leftover
+ *     `pending` row from before the cutover is deliberately NOT an answer —
+ *     it is read exactly like no row at all;
+ *   - it is not a row this session's own bookkeeping produced: not `undone`
+ *     (a sidechain's pending row, born already marked), not rolled back, and
+ *     not a compact marker (`type = 'compact'` — spec D2's one mechanical row
+ *     in the whole session, created by the PreCompact transcript-repair path);
+ *   - it is inside the reminder's 50-turn window. The bound is on the
+ *     REMINDER, not on writability — `note`/`skip` accept any address that
+ *     resolves to a real, non-marker turn (spec D5) — so a turn that ages out
+ *     of this list is still writable, it is simply no longer asked about.
+ *
+ * Ordered oldest-first: the backlog relief wants the oldest N, the
+ * current-turn suffix wants the newest one, and both read off this one array
+ * (spec D3) — there is exactly one query, not a display copy and a trigger
+ * copy that could disagree.
+ *
+ * Bounded by `session_id, prompt_number` (the same index `turns` already
+ * carries) and by the aging window; the two `NOT EXISTS` clauses are primary-
+ * key lookups on `shadow_notes`/`note_debt`, one per candidate row, not a scan.
  */
-export function getNoteReliefState(
+export function listOwedNoteTurns(
   db: Database,
   sessionId: number,
-): NoteReliefState {
-  const lastNotePromptNumber =
-    db
-      .query<{ promptNumber: number | null }, [number]>(
-        `SELECT MAX(t.prompt_number) AS promptNumber
-         FROM shadow_notes n
-         JOIN turns t ON t.id = n.ride_turn_id
-         WHERE t.session_id = ?`,
-      )
-      .get(sessionId)?.promptNumber ?? 0;
+  currentPromptNumber: number,
+  options: ListOwedNoteTurnsOptions = {},
+): OwedNoteTurn[] {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
 
-  const cursor = db
+  return db
     .query<
-      { classifiedThrough: number; lastRelief: number },
-      [number]
+      {
+        turnId: number;
+        sessionId: number;
+        promptNumber: number;
+        userPrompt: string | null;
+      },
+      [number, number, number]
     >(
-      `SELECT last_classified_prompt_number AS classifiedThrough,
-              last_relief_prompt_number AS lastRelief
-       FROM note_debt_cursor WHERE session_id = ?`,
+      `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number < ?
+         AND t.prompt_number >= ?
+         AND t.status != 'undone'
+         AND t.was_rolled_back = 0
+         AND (t.type IS NULL OR t.type != 'compact')
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id AND d.status = 'skipped'
+         )
+       ORDER BY t.prompt_number ASC`,
     )
-    .get(sessionId);
-  const classifiedThroughPromptNumber = cursor?.classifiedThrough ?? 0;
-  const lastReliefPromptNumber = cursor?.lastRelief ?? 0;
-  const anchorPromptNumber = Math.max(
-    lastNotePromptNumber,
-    lastReliefPromptNumber,
-  );
-
-  const dryTurns =
-    db
-      .query<{ count: number }, [number, number, number]>(
-        `SELECT COUNT(*) AS count FROM turns
-         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?`,
-      )
-      .get(sessionId, anchorPromptNumber, classifiedThroughPromptNumber)
-      ?.count ?? 0;
-
-  return {
-    lastNotePromptNumber,
-    lastReliefPromptNumber,
-    classifiedThroughPromptNumber,
-    anchorPromptNumber,
-    dryTurns,
-  };
-}
-
-export interface ClaimNoteBacklogReliefInput {
-  sessionId: number;
-  /** The turn the injection rides; also the re-arm anchor. */
-  firePromptNumber: number;
-  /**
-   * The watermark the caller's eligibility check was computed from. The claim
-   * lands only while the row still holds it; 0 also covers "no cursor row yet",
-   * which is how `getNoteReliefState` reads an absent row.
-   */
-  previousReliefPromptNumber: number;
-  nowEpoch: number;
-}
-
-/**
- * Claim the one-shot backlog relief for this session, re-arming it at the turn
- * that fired. A compare-and-swap on the watermark, not a monotonic maximum: the
- * update lands only while the row still holds the value the caller's
- * eligibility check read, so a claim computed from a stale view of the session
- * loses instead of overwriting the winner.
- *
- * The maximum form let a real race through. UserPromptSubmit hooks run in
- * parallel (Claude Code awaits them with Promise.all), so two processes reach
- * this point looking at different ride turns — one at the turn the user just
- * submitted, one at the turn before it, depending on whether the `session-init`
- * entry had created the row yet. Both then see the same open backlog, and under
- * `existing < incoming` both claims succeed: the older ride turn writes first,
- * the newer one is larger and overwrites it. The agent gets the standing
- * authorisation twice. Under the swap the two contend for one value and exactly
- * one wins, whichever ride turn each happened to see.
- *
- * The `>` conjunct keeps the watermark monotonic: re-arming at an older turn
- * would shorten the silence the relief just bought.
- *
- * This is the ONLY write the relief path performs on the ledger besides its
- * exposure rows: no debt changes status here. Debt transitions stay on the
- * asynchronous side (R2#P2-6), and an injection that closed debts would be
- * claiming the agent had answered a request it has not answered yet.
- */
-export function claimNoteBacklogRelief(
-  db: Database,
-  input: ClaimNoteBacklogReliefInput,
-): boolean {
-  return (
-    db
-      .query<unknown, [number, number, number, number]>(
-        `INSERT INTO note_debt_cursor (
-           session_id, last_classified_prompt_number,
-           last_relief_prompt_number, updated_at_epoch
-         ) VALUES (?, 0, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           last_relief_prompt_number = excluded.last_relief_prompt_number,
-           updated_at_epoch = excluded.updated_at_epoch
-         WHERE note_debt_cursor.last_relief_prompt_number = ?
-           AND excluded.last_relief_prompt_number
-               > note_debt_cursor.last_relief_prompt_number`,
-      )
-      .run(
-        input.sessionId,
-        input.firePromptNumber,
-        input.nowEpoch,
-        input.previousReliefPromptNumber,
-      ).changes > 0
-  );
+    .all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns)
+    .map((row) => ({
+      ...row,
+      pendingTurns: currentPromptNumber - row.promptNumber,
+    }));
 }
 
 export type NoteIdExposureSource = "reminder" | "injection";
@@ -789,9 +328,11 @@ export interface RecordNoteIdExposureInput {
 
 /**
  * Record which turn ids were rendered into the model's context, and during which
- * turn. Written by whoever does the rendering — the reminder path for `reminder`
- * rows, an injection builder for `injection` rows — because only the renderer
- * knows an id actually reached the model.
+ * turn. Written by whoever does the rendering — `session-init` for the
+ * current-turn line's owed suffix and the backlog relief block, settlement's
+ * own context builder for its window — because only the renderer knows an id
+ * actually reached the model. Read by `db/references.ts`'s citation gate: an
+ * id a writer was never shown cannot be something it built on.
  */
 export function recordNoteIdExposure(
   db: Database,

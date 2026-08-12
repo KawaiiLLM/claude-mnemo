@@ -3,85 +3,55 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import {
-  claimNoteBacklogRelief,
+  closeNoteDebtAsDeclined,
+  closeNoteDebtAsNoted,
   getExposedTurnIds,
   getNoteDebt,
   listNoteDebt,
-  listOpenNoteDebt,
+  listOwedNoteTurns,
+  NOTE_DEBT_AGING_TURNS,
   recordDeclinedNoteDebt,
   recordNoteIdExposure,
-  reconcileNoteDebt,
 } from "../../src/db/note-debt";
-import { getDecidedPrefixEnd } from "../../src/db/note-settlement";
 import { initializeDatabase, initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 
-describe("note debt ledger", () => {
+/**
+ * The prompt-clock ledger (note-prompt-clock spec, D1/D8): the owed set is a
+ * derived query over `turns`/`shadow_notes`/`note_debt`, not a classification
+ * walk. `note_debt` itself survives only as a table of recorded answers
+ * (declined / closed) — nothing here opens a `pending` row any more.
+ */
+describe("listOwedNoteTurns (spec D1)", () => {
   let db: Database;
   let sessionId: number;
 
-  /**
-   * A turn whose Stop the hook captured — the ordinary case, and what every
-   * test here means by "a turn that ended". The turn row itself stays `active`
-   * because extraction is a later, separate pipeline; the queued `turn-stop` is
-   * mnemo's own record that the turn's tool batch is closed, and the sweep will
-   * not classify a turn without it (a turn with neither that nor a terminal
-   * status is STRANDED, not finished).
-   */
   function addTurn(
     promptNumber: number,
     options: {
       prompt?: string;
+      status?: string;
       rolledBack?: boolean;
-      /** Model a turn whose Stop was never captured. */
-      stranded?: boolean;
+      type?: string;
     } = {},
   ): number {
-    const turnId = db
-      .query<{ id: number }, [number, number, string, number]>(
+    return db
+      .query<{ id: number }, [number, number, string, string, number, string | null]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt,
-           was_rolled_back, created_at_epoch
-         ) VALUES (?, ?, 'active', ?, ?, 100)
+           was_rolled_back, created_at_epoch, type
+         ) VALUES (?, ?, ?, ?, ?, 100, ?)
          RETURNING id`,
       )
       .get(
         sessionId,
         promptNumber,
+        options.status ?? "active",
         options.prompt ?? `prompt ${promptNumber}`,
         options.rolledBack ? 1 : 0,
+        options.type ?? null,
       )!.id;
-    if (!options.stranded) {
-      db.query<unknown, [number, number]>(
-        `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
-         VALUES ('turn-stop', ?, ?, 100)`,
-      ).run(turnId, sessionId);
-    }
-    return turnId;
-  }
-
-  function getClassificationCursor(): number {
-    return (
-      db
-        .query<{ cursor: number }, [number]>(
-          `SELECT last_classified_prompt_number AS cursor
-           FROM note_debt_cursor WHERE session_id = ?`,
-        )
-        .get(sessionId)?.cursor ?? 0
-    );
-  }
-
-  function addObservation(
-    turnId: number,
-    toolName: string,
-    excluded = false,
-  ): void {
-    db.query(
-      `INSERT INTO observations (
-         turn_id, tool_name, excluded_from_extraction, created_at_epoch
-       ) VALUES (?, ?, ?, 100)`,
-    ).run(turnId, toolName, excluded ? 1 : 0);
   }
 
   beforeEach(() => {
@@ -103,397 +73,332 @@ describe("note debt ledger", () => {
     db.close();
   });
 
-  test("a turn with no tool call at all never enters the ledger", () => {
-    const chat = addTurn(1);
+  test("a turn ends the moment a later prompt exists — no Stop, no tool count required", () => {
+    // A zero-tool-call, never-Stopped turn (T553/T562 class, spec Problem 2):
+    // the prompt clock alone decides it is over.
+    const turn = addTurn(1);
     addTurn(2);
 
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-
-    expect(getNoteDebt(db, chat)).toBeNull();
-    expect(listNoteDebt(db, sessionId)).toEqual([]);
+    expect(listOwedNoteTurns(db, sessionId, 2).map((t) => t.turnId)).toEqual([
+      turn,
+    ]);
   });
 
-  // Both mount shapes, all four mnemo tools: memory housekeeping is not work,
-  // so a turn that only recalled or only took a note owes nothing. Otherwise
-  // writing a note would open the next debt (R2#P2-5).
-  for (const toolName of [
-    "mcp__mnemo__recall",
-    "mcp__mnemo__remember",
-    "mcp__mnemo__timeline",
-    "mcp__mnemo__note",
-    "mcp__plugin_claude-mnemo_mnemo__recall",
-    "mcp__plugin_claude-mnemo_mnemo__note",
-  ] as const) {
-    test(`a turn whose only tool call is ${toolName} owes nothing`, () => {
+  test("the current (still-open) turn never owes itself", () => {
+    addTurn(1);
+    const current = 2;
+
+    // Nothing after turn 1 exists yet, so only turn 1 can be owed and the
+    // query is asked as if turn `current` had just been created.
+    const owed = listOwedNoteTurns(db, sessionId, current);
+    expect(owed.map((t) => t.promptNumber)).toEqual([1]);
+    expect(owed[0]!.pendingTurns).toBe(1);
+  });
+
+  test("a real note removes the turn from the owed set", () => {
+    const noted = addTurn(1);
+    addTurn(2);
+    upsertShadowNote(db, {
+      turnId: noted,
+      title: "implement+ledger: notes answer the derived query",
+      content: "…",
+      nowEpoch: 200,
+    });
+
+    expect(listOwedNoteTurns(db, sessionId, 2)).toEqual([]);
+  });
+
+  test("a decline (any reason) removes the turn from the owed set", () => {
+    for (const reason of ["declined", "aged", "rolled-back", "closed"] as const) {
       const turn = addTurn(1);
-      addObservation(turn, toolName, toolName.endsWith("__note"));
+      db.query<unknown, [number, number, number, string, string, number, number]>(
+        `INSERT INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', ?, 100, 100)`,
+      ).run(turn, sessionId, 1, reason);
       addTurn(2);
 
-      reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
+      expect(
+        listOwedNoteTurns(db, sessionId, 2).map((t) => t.turnId),
+        `reason=${reason}`,
+      ).toEqual([]);
 
-      expect(getNoteDebt(db, turn)).toBeNull();
-    });
-  }
-
-  test("a turn with a substantive tool call owes a note once it ends", () => {
-    const working = addTurn(1);
-    addObservation(working, "Read");
-    addObservation(working, "mcp__mnemo__recall");
-
-    // Still the open turn: its batch is not final, so it is not classified yet.
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-    expect(getNoteDebt(db, working)).toBeNull();
-
-    // The Stop event names the turn that just ended.
-    reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 210,
-      completedTurnId: working,
-    });
-
-    expect(getNoteDebt(db, working)).toMatchObject({
-      turnId: working,
-      promptNumber: 1,
-      status: "pending",
-      reason: null,
-      openedAtEpoch: 210,
-    });
+      // Clean up for the next iteration in this loop.
+      db.query("DELETE FROM turns WHERE session_id = ?").run(sessionId);
+      db.query("DELETE FROM note_debt WHERE session_id = ?").run(sessionId);
+    }
   });
 
-  test("the next prompt also completes the previous turn", () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
+  test("a leftover pending note_debt row is not an answer — the turn still owes", () => {
+    // 06 migrates stale pre-cutover pending rows; this ticket only guarantees
+    // nothing new depends on them. Until that migration runs, a leftover
+    // `pending` row must not be read as a suppressed debt.
+    const turn = addTurn(1);
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status,
+         opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'pending', 100, 100)`,
+    ).run(turn, sessionId, 1);
     addTurn(2);
 
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-
-    expect(getNoteDebt(db, working)?.status).toBe("pending");
+    expect(listOwedNoteTurns(db, sessionId, 2).map((t) => t.turnId)).toEqual([
+      turn,
+    ]);
   });
 
-  test("a note clears the debt, and the closure is idempotent", () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
+  test("a sidechain (undone) turn never owes", () => {
+    addTurn(1, { status: "undone" });
     addTurn(2);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
 
-    upsertShadowNote(db, {
-      turnId: working,
-      title: "implement+ledger: debt closes on note",
-      content: "…",
-      nowEpoch: 220,
-    });
-    const first = reconcileNoteDebt(db, { sessionId, nowEpoch: 230 });
-    const second = reconcileNoteDebt(db, { sessionId, nowEpoch: 240 });
-
-    expect(first.noted).toEqual([working]);
-    expect(second.noted).toEqual([]);
-    expect(getNoteDebt(db, working)).toMatchObject({
-      status: "noted",
-      reason: null,
-      closedAtEpoch: 230,
-    });
+    expect(listOwedNoteTurns(db, sessionId, 2)).toEqual([]);
   });
 
-  test("a turn noted before the ledger saw it never opens a debt", () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
-    upsertShadowNote(db, {
-      turnId: working,
-      title: "write+notes: pre-emptive note",
-      content: "…",
-      nowEpoch: 190,
-    });
+  test("a rolled-back turn never owes", () => {
+    addTurn(1, { rolledBack: true });
     addTurn(2);
 
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-
-    expect(getNoteDebt(db, working)).toBeNull();
+    expect(listOwedNoteTurns(db, sessionId, 2)).toEqual([]);
   });
 
-  test("a rolled-back debt closes silently at reconcile", () => {
-    // It used to wait for a reminder to show its notice once (user story 5);
-    // 裁决 25 retired that channel, so the close needs no exposure and the
-    // timeline's rollback fold is the notice.
-    const working = addTurn(1, { rolledBack: true });
-    addObservation(working, "Edit");
+  test("a compact marker row never owes", () => {
+    // The mechanical row hooks/capture-repair.ts leaves at a PreCompact
+    // boundary (spec D2's one mechanical row in the session).
+    addTurn(1, { type: "compact", prompt: "/compact" });
     addTurn(2);
 
-    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-
-    expect(result.rolledBack).toEqual([working]);
-    expect(getNoteDebt(db, working)).toMatchObject({
-      status: "skipped",
-      reason: "rolled-back",
-    });
+    expect(listOwedNoteTurns(db, sessionId, 2)).toEqual([]);
   });
 
-  test("a debt past 50 turns ages out, and stops being readable first", () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
+  test("a skill-triggering slash-command turn is a real prompt and owes like any other", () => {
+    // spec D2: mechanical-command detection does not exist. The only
+    // mechanical row is the compact marker (type = 'compact') tested above;
+    // everything else that reaches UserPromptSubmit is a real turn.
+    const turn = addTurn(1, { prompt: "/markdown-writing polish this doc" });
     addTurn(2);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
 
-    for (let promptNumber = 3; promptNumber <= 52; promptNumber += 1) {
-      addTurn(promptNumber);
+    expect(listOwedNoteTurns(db, sessionId, 2).map((t) => t.turnId)).toEqual([
+      turn,
+    ]);
+  });
+
+  test("stays inside the 50-turn reminder window; outside it the turn is simply not listed", () => {
+    const working = addTurn(1);
+    // Every turn between the one under test and the boundary must be
+    // answered, or it would owe a note of its own and swamp the assertion —
+    // D1 has no tool-call gate any more, so an un-answered turn always owes.
+    for (let promptNumber = 2; promptNumber <= 52; promptNumber += 1) {
+      const turnId = addTurn(promptNumber);
+      upsertShadowNote(db, {
+        turnId,
+        title: `write+filler: turn ${promptNumber}`,
+        content: "…",
+        nowEpoch: 100,
+      });
     }
 
-    // 51 turns later it is exactly at the bound: still shown, still pending.
+    // Exactly at the bound (51 turns later): still shown.
     expect(
-      listOpenNoteDebt(db, sessionId, { latestPromptNumber: 51 }).map(
-        (debt) => debt.turnId,
-      ),
+      listOwedNoteTurns(db, sessionId, 51).map((t) => t.turnId),
     ).toEqual([working]);
-
-    // One turn past it the reader drops it — the durable transition follows on
-    // the next reconcile from the async side, with no scan in between.
-    expect(
-      listOpenNoteDebt(db, sessionId, { latestPromptNumber: 52 }),
-    ).toEqual([]);
-    expect(getNoteDebt(db, working)?.status).toBe("pending");
-
-    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 300 });
-
-    expect(result.aged).toEqual([working]);
-    expect(getNoteDebt(db, working)).toMatchObject({
-      status: "skipped",
-      reason: "aged",
-    });
+    // One turn past it: no longer listed.
+    expect(listOwedNoteTurns(db, sessionId, 52)).toEqual([]);
   });
 
-  /**
-   * The sweep's premise is that a classified turn's tool batch is FINAL, and a
-   * turn whose Stop mnemo never captured is still nominally open — more
-   * observations can land against it at any time. Classifying it on what has
-   * arrived so far reads zero tool calls as "owed nothing", which is
-   * indistinguishable from a genuinely trivial turn, and the watermark then
-   * walks over it. That is not a delay a later pass corrects: settlement cuts
-   * frozen windows from this watermark, so the misreading becomes a window that
-   * can never be recut.
-   */
-  test("a stranded turn blocks the watermark instead of being read as trivial", () => {
-    // Trivial by design: no observations, so they are decided by absence.
-    for (let promptNumber = 1; promptNumber <= 9; promptNumber += 1) {
-      addTurn(promptNumber);
-    }
-    // Turn 10's Stop never reached mnemo, so nothing has closed its batch.
-    const stranded = addTurn(10, { stranded: true });
-    const later = addTurn(11);
-
-    const blocked = reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 300,
-      completedTurnId: later,
-    });
-
-    expect(getNoteDebt(db, stranded)).toBeNull();
-    // Turn 11 is finished, but the prefix is contiguous: it waits behind 10.
-    expect(getNoteDebt(db, later)).toBeNull();
-    expect(blocked.classifiedThroughPromptNumber).toBe(9);
-    expect(getClassificationCursor()).toBe(9);
-    // The settlement consequence, which is why this matters at all: no window
-    // can be cut over turn 10 while its outcome is unknown.
-    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(9);
-
-    // Proof the batch was not final: a tool call for turn 10 lands late. Had
-    // the sweep classified it above, this work would already have been written
-    // off as a turn that owed nothing.
-    addObservation(stranded, "Edit");
-    // The liveness repair (ticket 10) re-enqueues the missing turn-stop.
-    db.query<unknown, [number, number]>(
-      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
-       VALUES ('turn-stop', ?, ?, 310)`,
-    ).run(stranded, sessionId);
-
-    const resumed = reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 320,
-      completedTurnId: later,
-    });
-
-    expect(resumed.opened).toEqual([stranded]);
-    expect(getNoteDebt(db, stranded)?.status).toBe("pending");
-    expect(resumed.classifiedThroughPromptNumber).toBe(11);
-    // Now the debt itself — a real, writable one — is what holds the window.
-    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(9);
-
-    upsertShadowNote(db, {
-      turnId: stranded,
-      title: "repair+ledger: the late note lands",
-      content: "…",
-      nowEpoch: 330,
-    });
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 340 });
-    expect(getDecidedPrefixEnd(db, sessionId, 1)).toBe(11);
-  });
-
-  test("a gap in prompt numbers does not wedge the watermark", () => {
-    addObservation(addTurn(1), "Edit");
-    // Prompt 2 never existed — a cleaned subagent turn leaves exactly this.
-    addObservation(addTurn(3), "Edit");
-    const latest = addTurn(4);
-
-    const result = reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 300,
-      completedTurnId: latest,
-    });
-
-    expect(result.classifiedThroughPromptNumber).toBe(4);
-    expect(getClassificationCursor()).toBe(4);
-  });
-
-  test("opening the database runs no ledger scan", () => {
+  test("the aging window is configurable and defaults to NOTE_DEBT_AGING_TURNS", () => {
+    expect(NOTE_DEBT_AGING_TURNS).toBe(50);
     const working = addTurn(1);
-    addObservation(working, "Edit");
     addTurn(2);
-
-    initializeDatabase(db);
-
-    expect(listNoteDebt(db, sessionId)).toEqual([]);
-  });
-
-  test("classification never revisits a turn it already ruled on", () => {
-    const chat = addTurn(1);
-    addTurn(2);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-
-    // A late observation on an already-classified turn does not reopen it: the
-    // cursor is what keeps the sweep O(new turns) instead of O(session).
-    addObservation(chat, "Edit");
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 210 });
-
-    expect(getNoteDebt(db, chat)).toBeNull();
-  });
-
-  test("pending turns are counted from the session's current turn", () => {
-    const first = addTurn(1);
-    addObservation(first, "Edit");
-    const second = addTurn(2);
-    addObservation(second, "Bash");
-    addTurn(3);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
 
     expect(
-      listOpenNoteDebt(db, sessionId, { latestPromptNumber: 3 }).map((debt) => [
-        debt.promptNumber,
-        debt.pendingTurns,
-      ]),
+      listOwedNoteTurns(db, sessionId, 2, { agingTurns: 0 }).map((t) => t.turnId),
+    ).toEqual([]);
+    expect(
+      listOwedNoteTurns(db, sessionId, 2, { agingTurns: 1 }).map((t) => t.turnId),
+    ).toEqual([working]);
+  });
+
+  test("ordered oldest-first, with pendingTurns measured from the current prompt", () => {
+    addTurn(1);
+    addTurn(2);
+    addTurn(3);
+
+    expect(
+      listOwedNoteTurns(db, sessionId, 3).map((t) => [t.promptNumber, t.pendingTurns]),
     ).toEqual([
       [1, 2],
       [2, 1],
     ]);
   });
 
-  test("the exposure ledger records reminder and injection ids alike", () => {
-    const first = addTurn(1);
-    const second = addTurn(2);
-    const rideTurn = addTurn(3);
+  test("a turn from a different session never appears", () => {
+    const otherSessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-other",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    db.query<unknown, [number, number, string]>(
+      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+       VALUES (?, 1, 'active', 'their own turn', 100)`,
+    ).run(otherSessionId);
+    addTurn(1);
+    addTurn(2);
+
+    expect(
+      listOwedNoteTurns(db, sessionId, 2).every((t) => t.sessionId === sessionId),
+    ).toBe(true);
+  });
+
+  test("switching to the derived query does not revive turns already outside the historical window (spec D9)", () => {
+    // A session with 200 turns of history, none ever written, cutting over to
+    // the new query mid-session: only the newest 50 are ever asked about.
+    for (let promptNumber = 1; promptNumber <= 199; promptNumber += 1) {
+      addTurn(promptNumber);
+    }
+    addTurn(200);
+
+    const owed = listOwedNoteTurns(db, sessionId, 200);
+    expect(owed).toHaveLength(50);
+    expect(owed[0]!.promptNumber).toBe(150);
+    expect(owed[owed.length - 1]!.promptNumber).toBe(199);
+  });
+});
+
+describe("note-debt recorded-answer writers", () => {
+  let db: Database;
+  let sessionId: number;
+  let turnId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-writers",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+    turnId = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
+         VALUES (?, 1, 'active', 'prompt', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("recordDeclinedNoteDebt records a born-closed decline and getNoteDebt reads it", () => {
+    expect(
+      recordDeclinedNoteDebt(db, { id: turnId, sessionId, promptNumber: 1 }, 150),
+    ).toBe(true);
+
+    expect(getNoteDebt(db, turnId)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+    });
+    expect(listNoteDebt(db, sessionId)).toHaveLength(1);
+  });
+
+  test("recordDeclinedNoteDebt is a no-op once a row already exists", () => {
+    recordDeclinedNoteDebt(db, { id: turnId, sessionId, promptNumber: 1 }, 150);
+
+    expect(
+      recordDeclinedNoteDebt(db, { id: turnId, sessionId, promptNumber: 1 }, 250),
+    ).toBe(false);
+  });
+
+  test("closeNoteDebtAsDeclined closes an existing pending row", () => {
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO note_debt (turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch)
+       VALUES (?, ?, 1, 'pending', 100, 100)`,
+    ).run(turnId, sessionId);
+
+    expect(closeNoteDebtAsDeclined(db, turnId, 200)).toBe(true);
+    expect(getNoteDebt(db, turnId)).toMatchObject({
+      status: "skipped",
+      reason: "declined",
+      closedAtEpoch: 200,
+    });
+  });
+
+  test("closeNoteDebtAsNoted reverses a decline, and only a decline", () => {
+    recordDeclinedNoteDebt(db, { id: turnId, sessionId, promptNumber: 1 }, 150);
+
+    expect(closeNoteDebtAsNoted(db, turnId, 300)).toBe(true);
+    expect(getNoteDebt(db, turnId)).toMatchObject({ status: "noted", reason: null });
+
+    // Terminal now: a second decline attempt does not reopen it.
+    expect(closeNoteDebtAsDeclined(db, turnId, 400)).toBe(false);
+    expect(getNoteDebt(db, turnId)?.status).toBe("noted");
+  });
+
+  test("closeNoteDebtAsNoted on a turn with no debt row at all is a harmless no-op", () => {
+    // The ordinary shape now: nothing opens a debt ahead of time.
+    expect(closeNoteDebtAsNoted(db, turnId, 300)).toBe(false);
+    expect(getNoteDebt(db, turnId)).toBeNull();
+  });
+
+  test("opening the database runs no ledger scan", () => {
+    initializeDatabase(db);
+
+    expect(listNoteDebt(db, sessionId)).toEqual([]);
+  });
+});
+
+describe("note id exposure ledger", () => {
+  let db: Database;
+  let sessionId: number;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-exposure",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("records which turn ids reached the model, by source", () => {
+    const rideTurn = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, created_at_epoch)
+         VALUES (?, 1, 'active', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
 
     recordNoteIdExposure(db, {
       sessionId,
       rideTurnId: rideTurn,
-      exposedTurnIds: [first],
-      source: "reminder",
-      nowEpoch: 300,
-    });
-    recordNoteIdExposure(db, {
-      sessionId,
-      rideTurnId: rideTurn,
-      exposedTurnIds: [second],
+      exposedTurnIds: [rideTurn],
       source: "injection",
       nowEpoch: 300,
     });
 
-    expect([...getExposedTurnIds(db, sessionId)].sort()).toEqual(
-      [first, second].sort(),
-    );
-    expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([first]);
-  });
-
-  test("a current turn may be declined before its debt exists", () => {
-    // 裁决 25: the current turn's debt only opens at classification, after the
-    // turn ends, so the decline is recorded as a born-closed row — and the
-    // later classification finds it and opens nothing.
-    const current = addTurn(1);
-    addObservation(current, "Edit");
-
-    expect(
-      recordDeclinedNoteDebt(
-        db,
-        { id: current, sessionId, promptNumber: 1 },
-        150,
-      ),
-    ).toBe(true);
-    expect(getNoteDebt(db, current)).toMatchObject({
-      status: "skipped",
-      reason: "declined",
-    });
-
-    addTurn(2);
-    const result = reconcileNoteDebt(db, { sessionId, nowEpoch: 200 });
-    expect(result.opened).toEqual([]);
-    expect(getNoteDebt(db, current)).toMatchObject({
-      status: "skipped",
-      reason: "declined",
-    });
-
-    // A pending row already claimed by classification is left authoritative.
-    expect(
-      recordDeclinedNoteDebt(
-        db,
-        { id: current, sessionId, promptNumber: 1 },
-        250,
-      ),
-    ).toBe(false);
-  });
-
-  test("the relief claim refuses a second claim built on the same watermark", () => {
-    // Two parallel UserPromptSubmit processes, each holding a different ride
-    // turn because only one of them had its `session-init` sibling create the
-    // newest turn row — but both computed eligibility from watermark 0. A claim
-    // that merely took the maximum would let both through, the later ride turn
-    // simply overwriting the earlier one, and the agent would be handed the
-    // standing authorisation twice.
-    const earlier = claimNoteBacklogRelief(db, {
-      sessionId,
-      firePromptNumber: 6,
-      previousReliefPromptNumber: 0,
-      nowEpoch: 500,
-    });
-    const later = claimNoteBacklogRelief(db, {
-      sessionId,
-      firePromptNumber: 7,
-      previousReliefPromptNumber: 0,
-      nowEpoch: 500,
-    });
-
-    expect([earlier, later]).toEqual([true, false]);
-    expect(
-      db
-        .query<{ lastRelief: number }, [number]>(
-          `SELECT last_relief_prompt_number AS lastRelief
-           FROM note_debt_cursor WHERE session_id = ?`,
-        )
-        .get(sessionId)?.lastRelief,
-    ).toBe(6);
-
-    // A caller that did read the current watermark still claims, and the
-    // watermark never moves backwards.
-    expect(
-      claimNoteBacklogRelief(db, {
-        sessionId,
-        firePromptNumber: 12,
-        previousReliefPromptNumber: 6,
-        nowEpoch: 600,
-      }),
-    ).toBe(true);
-    expect(
-      claimNoteBacklogRelief(db, {
-        sessionId,
-        firePromptNumber: 8,
-        previousReliefPromptNumber: 12,
-        nowEpoch: 600,
-      }),
-    ).toBe(false);
+    expect([...getExposedTurnIds(db, sessionId)]).toEqual([rideTurn]);
+    expect([...getExposedTurnIds(db, sessionId, "injection")]).toEqual([rideTurn]);
+    expect([...getExposedTurnIds(db, sessionId, "reminder")]).toEqual([]);
   });
 });

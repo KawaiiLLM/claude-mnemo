@@ -5,33 +5,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createDatabase } from "../../src/db/database";
-import { getNoteDebt, listNoteDebt } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
-import { createPostToolUseHandler } from "../../src/hooks/handlers/post-tool-use";
 import { createStopHandler } from "../../src/hooks/handlers/stop";
 import { parseReplayTranscript } from "../../src/shared/transcript-parser";
-import type { NormalizedHookInput } from "../../src/hooks/types";
 
 /**
- * The asynchronous half of the pair: the entries that maintain the ledger.
- * Their contract is the mirror image of the reminder entry's — they write, and
- * they never answer with `additionalContext`.
+ * Writer-model backfill via Stop (spec D4's mechanical provenance).
+ *
+ * Before note-prompt-clock this file also exercised the note-debt
+ * classification walk that used to run inside Stop/PostToolUse. That walk is
+ * gone (spec D1): the owed set is a derived query `session-init` computes at
+ * prompt time (tests/db/note-debt.test.ts), and Stop/PostToolUse now only run
+ * turn settlement (tests/db/turn-settlement.test.ts, ticket 02) before their
+ * own capture work. What is left here — recovering which model actually
+ * wrote a note from the transcript, since the MCP process that ran the write
+ * has no way to know its own model identity — is unrelated to either and
+ * still needs Stop's transcript read.
  */
-describe("note debt on the asynchronous capture entries", () => {
+describe("writer_model backfill on Stop", () => {
   let db: Database;
   let sessionId: number;
   let directory: string;
 
-  /**
-   * A turn whose Stop the hook captured — the queued `turn-stop` is that record
-   * — while extraction has not yet run, so the row is still `active`. The sweep
-   * classifies from that queued item, not from the turn's status, which is what
-   * keeps the ledger off the extraction pipeline's latency.
-   */
   function addTurn(promptNumber: number, prompt = `prompt ${promptNumber}`): number {
-    const turnId = db
+    return db
       .query<{ id: number }, [number, number, string]>(
         `INSERT INTO turns (
            session_id, prompt_number, status, user_prompt, created_at_epoch
@@ -39,19 +38,6 @@ describe("note debt on the asynchronous capture entries", () => {
          RETURNING id`,
       )
       .get(sessionId, promptNumber, prompt)!.id;
-    db.query<unknown, [number, number]>(
-      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
-       VALUES ('turn-stop', ?, ?, 100)`,
-    ).run(turnId, sessionId);
-    return turnId;
-  }
-
-  function addObservation(turnId: number, toolName: string): void {
-    db.query(
-      `INSERT INTO observations (
-         turn_id, tool_name, excluded_from_extraction, created_at_epoch
-       ) VALUES (?, ?, 0, 100)`,
-    ).run(turnId, toolName);
   }
 
   function writeTranscript(lines: unknown[]): string {
@@ -83,143 +69,6 @@ describe("note debt on the asynchronous capture entries", () => {
   afterEach(() => {
     db.close();
     rmSync(directory, { recursive: true, force: true });
-  });
-
-  test("Stop classifies the turn that just ended and answers with no context", async () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
-
-    const result = await createStopHandler({
-      db,
-      now: () => 500,
-      workerClientDeps: { fetchImpl: (async () => new Response(null)) as typeof fetch },
-      workerEnv: {},
-    })({
-      eventName: "Stop",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      stopHookActive: false,
-      raw: {},
-    });
-
-    expect(getNoteDebt(db, working)).toMatchObject({
-      status: "pending",
-      promptNumber: 1,
-    });
-    // The capture entries wake the worker; carrying context here would silently
-    // cost the wake, since the runner emits one or the other.
-    expect(result.hookSpecificOutput).toBeUndefined();
-    expect(typeof result.asyncWork).toBe("function");
-  });
-
-  test("Stop leaves a pure question-and-answer turn out of the ledger", async () => {
-    const chat = addTurn(1);
-
-    await createStopHandler({ db, now: () => 500, workerEnv: {} })({
-      eventName: "Stop",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      stopHookActive: false,
-      raw: {},
-    });
-
-    expect(getNoteDebt(db, chat)).toBeNull();
-    expect(listNoteDebt(db, sessionId)).toEqual([]);
-  });
-
-  // The Stop handler is not the only way into the ledger: whenever its own
-  // reconcile did not classify a turn — an interrupt, a crash between the queue
-  // write and the reconcile, a restart — the next tool result sweeps it up.
-  // What the sweep will NOT do is classify a turn whose Stop was never captured
-  // at all: that turn is stranded, its batch is not closed, and the liveness
-  // repair owns it (see note-debt.test.ts).
-  test("a tool result sweeps turns the Stop event did not classify", async () => {
-    const interrupted = addTurn(1);
-    addObservation(interrupted, "Bash");
-    addTurn(2);
-
-    const input: NormalizedHookInput = {
-      eventName: "PostToolUse",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      toolName: "Read",
-      toolInput: { file_path: "src/auth.ts" },
-      toolResponse: "line 1",
-      stopHookActive: false,
-      raw: {},
-    };
-    const result = await createPostToolUseHandler({ db, now: () => 500 })(input);
-
-    expect(getNoteDebt(db, interrupted)?.status).toBe("pending");
-    expect(result.hookSpecificOutput).toBeUndefined();
-  });
-
-  test("the sweep reaches every unclassified turn, not just the previous one", async () => {
-    // A turn the Stop event left unclassified is followed here by three pure
-    // question-and-answer turns, which produce no tool result of their own and
-    // so cannot trigger a sweep. The classification cursor is what
-    // makes the eventual sweep whole: it walks every prompt number above the
-    // cursor, so the working turn is still classified four turns later.
-    const working = addTurn(1);
-    addObservation(working, "Bash");
-    const chatA = addTurn(2);
-    const chatB = addTurn(3);
-    const chatC = addTurn(4);
-    addTurn(5);
-
-    await createPostToolUseHandler({ db, now: () => 500 })({
-      eventName: "PostToolUse",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      toolName: "Read",
-      toolResponse: "line 1",
-      stopHookActive: false,
-      raw: {},
-    });
-
-    expect(getNoteDebt(db, working)?.status).toBe("pending");
-    // The intervening chat turns did no tool work, so they owe nothing and the
-    // ledger stays proportional to real debt.
-    for (const chat of [chatA, chatB, chatC]) {
-      expect(getNoteDebt(db, chat)).toBeNull();
-    }
-  });
-
-  test("a note call closes its debt on the same tool result", async () => {
-    const working = addTurn(1);
-    addObservation(working, "Edit");
-    addTurn(2);
-    await createPostToolUseHandler({ db, now: () => 500 })({
-      eventName: "PostToolUse",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      toolName: "Read",
-      toolResponse: "line 1",
-      stopHookActive: false,
-      raw: {},
-    });
-    upsertShadowNote(db, {
-      turnId: working,
-      title: "implement+ledger: closes on note",
-      content: "…",
-      nowEpoch: 500,
-    });
-
-    await createPostToolUseHandler({ db, now: () => 600 })({
-      eventName: "PostToolUse",
-      sessionId: "session-capture",
-      cwd: "/tmp/project",
-      toolName: "mcp__mnemo__note",
-      toolInput: { turn: `S${sessionId}/T1` },
-      toolResponse: `Noted S${sessionId}/T1.`,
-      stopHookActive: false,
-      raw: {},
-    });
-
-    expect(getNoteDebt(db, working)).toMatchObject({
-      status: "noted",
-      closedAtEpoch: 600,
-    });
   });
 
   test("writer_model is recovered from message.model at capture time", async () => {

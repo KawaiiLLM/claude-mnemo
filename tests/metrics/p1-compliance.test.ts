@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
-import { countSubstantiveToolCalls } from "../../src/db/note-debt";
 import {
   collectDebtFacts,
   computeCompliance,
+  countSubstantiveToolCalls,
   countSubstantiveToolCallsForDebts,
   type BucketRow,
 } from "../../src/metrics/p1/compliance";

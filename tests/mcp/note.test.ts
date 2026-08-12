@@ -2,11 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
-import {
-  getNoteDebt,
-  listOpenNoteDebt,
-  reconcileNoteDebt,
-} from "../../src/db/note-debt";
+import { getNoteDebt, listOwedNoteTurns } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { upsertSession } from "../../src/db/sessions";
@@ -36,6 +32,21 @@ describe("note tool", () => {
   let followUpTurnId: number;
   let rideTurnId: number;
 
+  /**
+   * A `note_debt` row seeded directly, the way it was left by the retired
+   * classification walk (note-prompt-clock ticket 03 deleted the walk itself,
+   * not the table it wrote to). Several tests below exercise how a note or a
+   * skip CLOSES an existing debt — that mechanism is unchanged, so its fixture
+   * just has to produce the row the classifier used to produce.
+   */
+  function seedPendingDebt(turnId: number, promptNumber: number): void {
+    db.query<unknown, [number, number, number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'pending', ?, ?)`,
+    ).run(turnId, sessionId, promptNumber, 150, 150);
+  }
+
   beforeEach(() => {
     db = createDatabase(":memory:");
     initializeSchema(db);
@@ -63,13 +74,9 @@ describe("note tool", () => {
 
     // T332's writability no longer depends on this (spec D5: existence alone
     // suffices), but plenty of tests below exercise how a note or a skip
-    // CLOSES a debt, so the fixture still produces a real pending one the way
-    // the system does: a finished turn with a substantive tool call.
-    db.query(
-      `INSERT INTO observations (turn_id, tool_name, excluded_from_extraction, created_at_epoch)
-       VALUES (?, 'Edit', 0, 120)`,
-    ).run(targetTurnId);
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 150 });
+    // CLOSES a debt, so the fixture still seeds one — the way a real one would
+    // exist on a database carrying pre-cutover history.
+    seedPendingDebt(targetTurnId, 332);
     expect(getNoteDebt(db, targetTurnId)?.status).toBe("pending");
   });
 
@@ -306,7 +313,7 @@ describe("note tool", () => {
     );
 
     const note = getShadowNote(db, targetTurnId)!;
-    const stored = `${note.title} ${note.content} ${note.insight}`;
+    const stored = [note.title, note.content, note.insight].join(" ");
     expect(stored).not.toContain("token abc");
     expect(stored).not.toContain("sk-live-123");
     expect(stored).not.toContain("personal note");
@@ -344,10 +351,12 @@ describe("note tool", () => {
   });
 
   test("a zero-tool-call turn that never opened a debt is writable (T553/T562 class, spec D5/Problem 2)", () => {
-    // T333 ("Follow-up") got no observations in the fixture, so classification
-    // never opened a debt row for it. Under the old debt-based gate this read
-    // as "ineligible"; spec D5 collapses eligibility to address resolution
-    // alone, and this address resolves — the turn genuinely exists.
+    // T333 ("Follow-up") got no debt row seeded in the fixture, so it starts
+    // with no `note_debt` row at all — exactly what D1's derived query
+    // produces for a turn nobody has answered yet. Under the old debt-based
+    // gate this read as "ineligible"; spec D5 collapses eligibility to
+    // address resolution alone, and this address resolves — the turn
+    // genuinely exists.
     const result = noteTool(
       db,
       { turn: `S${sessionId}/T333`, title: "t", content: "c" },
@@ -359,9 +368,9 @@ describe("note tool", () => {
   });
 
   test("an idle session's finished latest turn is writable — no debt required", () => {
-    // The fixture's T334 is `extracted` with zero observations: exactly the
-    // shape of every idle session's last turn, whose address any recall
-    // result can hand out. The old code specifically carved this shape out as
+    // The fixture's T334 is `extracted` with no debt row: exactly the shape
+    // of every idle session's last turn, whose address any recall result can
+    // hand out. The old code specifically carved this shape out as
     // ineligible (裁决 25's "current turn" required LIVE status, Codex review
     // P1-1); spec D5 retires that carve-out — every existing turn is writable
     // regardless of whether it is still live.
@@ -375,11 +384,11 @@ describe("note tool", () => {
   });
 
   test("a zero-tool-call turn with no debt row is skippable too", () => {
-    // Same shape as the writable test above (T333, never observed, no debt
-    // ever opened) but exercising the decline path — the "owes-nothing"
-    // rejection the old debt-based gate produced here is gone; the born-closed
-    // decline is recorded on the spot regardless of whether the turn is
-    // current or trivial-and-finished.
+    // Same shape as the writable test above (T333, no debt row) but
+    // exercising the decline path — the "owes-nothing" rejection the old
+    // debt-based gate produced here is gone; the born-closed decline is
+    // recorded on the spot regardless of whether the turn is current or
+    // trivial-and-finished.
     const skipped = noteTool(
       db,
       { turn: `S${sessionId}/T333`, skip: true },
@@ -414,10 +423,10 @@ describe("note tool", () => {
   });
 
   test("the session's current turn is writable before its debt exists", () => {
-    // 裁决 25: the note is written during the turn it describes, and the debt
-    // only opens at classification after the turn ends. Spec D5 makes this the
-    // ordinary case rather than a special-cased carve-out — the turn simply
-    // exists, live or not — but it remains true and worth pinning.
+    // 裁决 25: the note is written during the turn it describes, and nothing
+    // opens a debt ahead of time any more. Spec D5 makes this the ordinary
+    // case rather than a special-cased carve-out — the turn simply exists,
+    // live or not — but it remains true and worth pinning.
     db.query("UPDATE turns SET status = 'active' WHERE id = ?").run(rideTurnId);
     const result = noteTool(
       db,
@@ -427,18 +436,8 @@ describe("note tool", () => {
 
     expect(isNoteSuccess(result)).toBe(true);
     expect(getShadowNote(db, rideTurnId)?.rideTurnId).toBe(rideTurnId);
-
-    // Classification later finds the note and opens nothing.
-    db.query(
-      `INSERT INTO observations (turn_id, tool_name, excluded_from_extraction, created_at_epoch)
-       VALUES (?, 'Edit', 0, 910)`,
-    ).run(rideTurnId);
-    db.query<{ id: number }, [number, number, string, number]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
-    ).get(sessionId, 335, "Next", 920);
-    const reconciled = reconcileNoteDebt(db, { sessionId, nowEpoch: 930 });
-    expect(reconciled.opened).toEqual([]);
+    // No debt row was ever opened for it (nothing pre-empts one any more), so
+    // `closeNoteDebtAsNoted` inside the write above had nothing to close.
     expect(getNoteDebt(db, rideTurnId)).toBeNull();
   });
 
@@ -451,22 +450,6 @@ describe("note tool", () => {
     );
 
     expect(resultText(result)).toContain("closed as declined");
-    expect(getNoteDebt(db, rideTurnId)).toMatchObject({
-      status: "skipped",
-      reason: "declined",
-    });
-
-    // And classification later respects the refusal instead of re-opening.
-    db.query(
-      `INSERT INTO observations (turn_id, tool_name, excluded_from_extraction, created_at_epoch)
-       VALUES (?, 'Edit', 0, 910)`,
-    ).run(rideTurnId);
-    db.query<{ id: number }, [number, number, string, number]>(
-      `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
-       VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
-    ).get(sessionId, 335, "Next", 920);
-    const reconciled = reconcileNoteDebt(db, { sessionId, nowEpoch: 930 });
-    expect(reconciled.opened).toEqual([]);
     expect(getNoteDebt(db, rideTurnId)).toMatchObject({
       status: "skipped",
       reason: "declined",
@@ -526,8 +509,9 @@ describe("note tool", () => {
       { turn: `S${sessionId}/T332`, title: "first", content: "c" },
       { now: () => 900, env: {} },
     );
-    // The asynchronous side closes the debt once the note exists.
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 950 });
+    // The write itself closes the debt on the spot (closeNoteDebtAsNoted runs
+    // inside noteTool's own transaction) — there is no separate reconcile
+    // step left to run.
     expect(getNoteDebt(db, targetTurnId)?.status).toBe("noted");
 
     const rewrite = noteTool(
@@ -570,9 +554,9 @@ describe("note tool", () => {
       { now: () => 900, env: {} },
     );
 
-    // Not left to the next reconcile: a session whose last act is the note would
-    // otherwise report that debt as open forever, because nothing is left to run
-    // that could close it.
+    // Closed synchronously with the write, not left to any later pass — a
+    // session whose last act is the note would otherwise report that debt as
+    // open forever, since nothing is left to run that could close it.
     expect(getNoteDebt(db, targetTurnId)).toMatchObject({
       status: "noted",
       reason: null,
@@ -581,10 +565,9 @@ describe("note tool", () => {
   });
 
   test("a note written past the aging bound still closes the debt as noted", () => {
-    // The session runs on well past the 50-turn bound. The reminder stopped
-    // rendering this debt long ago — that bound governs how long a debt keeps
-    // asking, not whether a late answer counts — and the durable row is still
-    // `pending` because lazy aging only filters on read.
+    // The session runs on well past the 50-turn bound. The owed suffix
+    // stopped naming this debt long ago — that bound governs how long a debt
+    // keeps getting asked about, not whether a late answer counts.
     const insertTurn = db.query<{ id: number }, [number, number, string, number]>(
       `INSERT INTO turns (session_id, prompt_number, status, user_prompt, created_at_epoch)
        VALUES (?, ?, 'extracted', ?, ?) RETURNING id`,
@@ -592,7 +575,6 @@ describe("note tool", () => {
     for (let promptNumber = 335; promptNumber <= 400; promptNumber += 1) {
       insertTurn.get(sessionId, promptNumber, "later work", 200);
     }
-    expect(getNoteDebt(db, targetTurnId)?.status).toBe("pending");
 
     const result = noteTool(
       db,
@@ -608,15 +590,47 @@ describe("note tool", () => {
     expect(getNoteDebt(db, targetTurnId)).toMatchObject({
       status: "noted",
       reason: null,
+      closedAtEpoch: 900,
+    });
+  });
+
+  describe("compact markers (spec D2/D5)", () => {
+    let markerTurnId: number;
+
+    beforeEach(() => {
+      markerTurnId = db
+        .query<{ id: number }, [number]>(
+          `INSERT INTO turns (
+             session_id, prompt_number, status, title, type, created_at_epoch
+           ) VALUES (?, 336, 'extracted', '/compact', 'compact', 200)
+           RETURNING id`,
+        )
+        .get(sessionId)!.id;
     });
 
-    // And a later reconcile — which is where `aged` is written — must not
-    // reclassify a debt that was answered.
-    reconcileNoteDebt(db, { sessionId, nowEpoch: 1_000 });
-    expect(getNoteDebt(db, targetTurnId)).toMatchObject({
-      status: "noted",
-      reason: null,
-      closedAtEpoch: 900,
+    test("a note against a compact marker is rejected, and states the fact", () => {
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T336`, title: "t", content: "c" },
+        { now: () => 900, env: {} },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("compact marker");
+      expect(isNoteSuccess(result)).toBe(false);
+      expect(getShadowNote(db, markerTurnId)).toBeNull();
+    });
+
+    test("a skip against a compact marker is rejected the same way", () => {
+      const result = noteTool(
+        db,
+        { turn: `S${sessionId}/T336`, skip: true },
+        { now: () => 900, env: {} },
+      );
+
+      expect(resultText(result)).toStartWith("Parameter error:");
+      expect(resultText(result)).toContain("compact marker");
+      expect(getNoteDebt(db, markerTurnId)).toBeNull();
     });
   });
 
@@ -640,15 +654,15 @@ describe("note tool", () => {
       });
     });
 
-    test("a declined debt leaves the reminder and relief selections", () => {
+    test("a declined turn leaves the owed set, an undeclined one stays on it", () => {
       // The point of the explicit skip: an unwritable turn — its material gone
       // with a compact — stops occupying one of the relief window's five
       // oldest-debt slots instead of sitting open until the 50-turn bound.
+      // T333 has no debt row of its own but is still a real, un-answered
+      // turn, so D1's derived query owes it too.
       expect(
-        listOpenNoteDebt(db, sessionId, { latestPromptNumber: 334 }).map(
-          (debt) => debt.promptNumber,
-        ),
-      ).toEqual([332]);
+        listOwedNoteTurns(db, sessionId, 334).map((turn) => turn.promptNumber),
+      ).toEqual([332, 333]);
 
       noteTool(
         db,
@@ -657,8 +671,8 @@ describe("note tool", () => {
       );
 
       expect(
-        listOpenNoteDebt(db, sessionId, { latestPromptNumber: 334 }),
-      ).toEqual([]);
+        listOwedNoteTurns(db, sessionId, 334).map((turn) => turn.promptNumber),
+      ).toEqual([333]);
     });
 
     test("a real note after a skip is accepted and replaces the refusal", () => {

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { listOwedNoteTurns, recordNoteIdExposure } from "../../db/note-debt";
 import {
   deriveProcessIdentityKeys,
   upsertProcessSessionMap,
@@ -8,6 +9,12 @@ import {
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { reindexTurnFromDb } from "../../db/search";
 import { getMaxPromptNumber } from "../../db/turns";
+import {
+  formatOwedSuffix,
+  NOTE_REMINDER_DISPLAY_LIMIT,
+  NOTE_RELIEF_PENDING_THRESHOLD,
+  renderNoteBacklogRelief,
+} from "../note-reminder";
 import {
   countUserPromptsInEntries,
   parseReplayTranscript,
@@ -45,7 +52,7 @@ function createPendingTurn(
   prompt: string,
   createdAtEpoch: number,
   isSidechain: boolean,
-): void {
+): number | null {
   // A sidechain prompt's row is born already marked — status `undone` with the
   // pending tag — instead of waiting for the next root prompt's transcript scan
   // to find it. The scan stays as the retroactive path for rows created before
@@ -81,6 +88,8 @@ function createPendingTurn(
   if (inserted) {
     reindexTurnFromDb(db, inserted.id);
   }
+
+  return inserted?.id ?? null;
 }
 
 export function createSessionInitHandler(
@@ -208,7 +217,7 @@ export function createSessionInitHandler(
           ? transcriptPromptCount + 1
           : 1;
 
-      createPendingTurn(
+      const turnId = createPendingTurn(
         dependencies.db,
         session.id,
         promptNumber,
@@ -217,7 +226,39 @@ export function createSessionInitHandler(
         isSubagent,
       );
 
-      return { sessionDbId: session.id, promptNumber };
+      // The owed set and its rendering (spec D1/D3/D9) — computed and injected
+      // in this SAME transaction, against the promptNumber this call just
+      // took. A subagent gets neither: it has no authority over the root
+      // session's notes (see the suppressOutput branch below), so showing it
+      // an owed address would be an instruction it cannot act on.
+      let owedSuffix = "";
+      let reliefText: string | null = null;
+      if (!isSubagent && turnId !== null) {
+        const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
+        owedSuffix = formatOwedSuffix(owed);
+
+        const exposedTurnIds = new Set<number>();
+        if (owed.length > 0) {
+          exposedTurnIds.add(owed[owed.length - 1]!.turnId);
+        }
+        if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
+          reliefText = renderNoteBacklogRelief(owed);
+          for (const turn of owed.slice(0, NOTE_REMINDER_DISPLAY_LIMIT)) {
+            exposedTurnIds.add(turn.turnId);
+          }
+        }
+        if (exposedTurnIds.size > 0) {
+          recordNoteIdExposure(dependencies.db, {
+            sessionId: session.id,
+            rideTurnId: turnId,
+            exposedTurnIds: [...exposedTurnIds],
+            source: "injection",
+            nowEpoch: epoch,
+          });
+        }
+      }
+
+      return { sessionDbId: session.id, promptNumber, owedSuffix, reliefText };
     });
 
     if (isSubagent) {
@@ -232,9 +273,21 @@ export function createSessionInitHandler(
     // inside its own transaction, so the number is exact where any other
     // UserPromptSubmit process would be racing it. Data only; the protocol for
     // what to do with the address lives in the session-start framework text.
+    //
+    // The owed suffix and the backlog-relief block (spec D3/D9) ride the same
+    // line and the same process: `prompt-dispatch`, the sibling
+    // UserPromptSubmit entry, renders neither any more, so there is exactly
+    // one writer and no N/N-1 race between them to resolve.
+    const sections = [
+      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}${created.owedSuffix}`,
+    ];
+    if (created.reliefText) {
+      sections.push(created.reliefText);
+    }
+
     return {
       continue: true,
-      hookSpecificOutput: `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`,
+      hookSpecificOutput: sections.join("\n\n"),
     };
   };
 }

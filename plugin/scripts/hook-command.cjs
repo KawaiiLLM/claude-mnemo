@@ -3096,7 +3096,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msq6o0lw" : "dev";
+var BUILD_ID = true ? "0.9.11-msq8mygc" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -4551,13 +4551,6 @@ function getMaxPromptNumber(db, sessionId) {
     "SELECT MAX(prompt_number) AS max FROM turns WHERE session_id = ?"
   ).get(sessionId);
   return row?.max ?? null;
-}
-function getLatestTurn(db, sessionId) {
-  return db.query(
-    `SELECT id, prompt_number AS promptNumber FROM turns
-         WHERE session_id = ? AND status != 'undone'
-         ORDER BY prompt_number DESC LIMIT 1`
-  ).get(sessionId) ?? null;
 }
 function getMaxTurnId(db, sessionId) {
   const row = db.query(
@@ -19612,276 +19605,6 @@ function captureConsultedMemories(db, turnId, call) {
   return recordConsultedMemories(db, turnId, addresses).length;
 }
 
-// src/shared/note-tool.ts
-var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
-var MNEMO_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__(?:note|recall|remember|timeline)$/;
-function isNoteToolName(toolName) {
-  return NOTE_TOOL_NAME_PATTERN.test(toolName);
-}
-function isMnemoOwnToolName(toolName) {
-  return MNEMO_TOOL_NAME_PATTERN.test(toolName);
-}
-function isExtractionExcludedToolName(toolName) {
-  return isNoteToolName(toolName);
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_AGING_TURNS = 50;
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function countSubstantiveToolCalls(db, turnId) {
-  const rows = db.query(
-    `SELECT tool_name AS toolName FROM observations
-       WHERE turn_id = ? AND excluded_from_extraction = 0`
-  ).all(turnId);
-  return rows.filter(
-    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName)
-  ).length;
-}
-function getMaxPromptNumber2(db, sessionId) {
-  return db.query(
-    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
-  ).get(sessionId)?.maxPromptNumber ?? 0;
-}
-function getClassificationCursor(db, sessionId) {
-  return db.query(
-    `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
-}
-function setClassificationCursor(db, sessionId, promptNumber, nowEpoch) {
-  db.query(
-    `INSERT INTO note_debt_cursor (
-       session_id, last_classified_prompt_number, updated_at_epoch
-     ) VALUES (?, ?, ?)
-     ON CONFLICT(session_id) DO UPDATE SET
-       last_classified_prompt_number = MAX(
-         note_debt_cursor.last_classified_prompt_number,
-         excluded.last_classified_prompt_number
-       ),
-       updated_at_epoch = excluded.updated_at_epoch`
-  ).run(sessionId, promptNumber, nowEpoch);
-}
-var COMPLETION_EVIDENCE_SQL = `(
-  t.status NOT IN ('active', 'provisional')
-  OR EXISTS (
-    SELECT 1 FROM pending_queue q
-    WHERE q.kind = 'turn-stop' AND q.target_id = t.id
-  )
-)`;
-function classifyCompletedTurn(db, turn, nowEpoch) {
-  if (getNoteDebt(db, turn.id) !== null) {
-    return false;
-  }
-  const alreadyNoted = db.query(
-    "SELECT 1 AS present FROM shadow_notes WHERE turn_id = ?"
-  ).get(turn.id);
-  if (alreadyNoted) {
-    return false;
-  }
-  if (countSubstantiveToolCalls(db, turn.id) === 0) {
-    return false;
-  }
-  db.query(
-    `INSERT OR IGNORE INTO note_debt (
-       turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch
-     ) VALUES (?, ?, ?, 'pending', ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch);
-  return true;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function reconcileNoteDebt(db, input) {
-  const { sessionId, nowEpoch } = input;
-  const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const maxPromptNumber = getMaxPromptNumber2(db, sessionId);
-  const cursor = getClassificationCursor(db, sessionId);
-  let classifyThrough = maxPromptNumber - 1;
-  if (input.completedTurnId !== void 0) {
-    const completed = db.query(
-      `SELECT prompt_number AS promptNumber, session_id AS sessionId
-         FROM turns WHERE id = ?`
-    ).get(input.completedTurnId);
-    if (completed && completed.sessionId === sessionId) {
-      classifyThrough = Math.max(classifyThrough, completed.promptNumber);
-    }
-  }
-  const opened = [];
-  let classifiedThrough = cursor;
-  if (classifyThrough > cursor) {
-    const candidates = db.query(
-      `SELECT t.id, t.prompt_number AS promptNumber, t.session_id AS sessionId,
-                ${COMPLETION_EVIDENCE_SQL} AS hasCompletionEvidence
-         FROM turns t
-         WHERE t.session_id = ? AND t.prompt_number > ? AND t.prompt_number <= ?
-         ORDER BY t.prompt_number ASC`
-    ).all(sessionId, cursor, classifyThrough);
-    let blockedAtPromptNumber = null;
-    for (const candidate of candidates) {
-      if (candidate.hasCompletionEvidence !== 1 && candidate.id !== input.completedTurnId) {
-        blockedAtPromptNumber = candidate.promptNumber;
-        break;
-      }
-      if (classifyCompletedTurn(db, candidate, nowEpoch)) {
-        opened.push(candidate.id);
-      }
-    }
-    classifiedThrough = blockedAtPromptNumber === null ? classifyThrough : blockedAtPromptNumber - 1;
-    if (classifiedThrough > cursor) {
-      setClassificationCursor(db, sessionId, classifiedThrough, nowEpoch);
-    }
-  }
-  const pending = db.query(
-    `SELECT
-         d.turn_id AS turnId,
-         d.prompt_number AS promptNumber,
-         t.was_rolled_back AS wasRolledBack,
-         EXISTS(SELECT 1 FROM shadow_notes n WHERE n.turn_id = d.turn_id) AS hasNote
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`
-  ).all(sessionId);
-  const noted = [];
-  const rolledBack = [];
-  const aged = [];
-  for (const row of pending) {
-    if (row.hasNote === 1) {
-      closeDebt(db, row.turnId, "noted", null, nowEpoch);
-      noted.push(row.turnId);
-      continue;
-    }
-    if (row.wasRolledBack === 1) {
-      closeDebt(db, row.turnId, "skipped", "rolled-back", nowEpoch);
-      rolledBack.push(row.turnId);
-      continue;
-    }
-    if (maxPromptNumber - row.promptNumber > agingTurns) {
-      closeDebt(db, row.turnId, "skipped", "aged", nowEpoch);
-      aged.push(row.turnId);
-    }
-  }
-  return {
-    opened,
-    noted,
-    aged,
-    rolledBack,
-    classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough)
-  };
-}
-function listOpenNoteDebt(db, sessionId, options) {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  return db.query(
-    `SELECT
-         d.turn_id AS turnId,
-         d.session_id AS sessionId,
-         d.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt,
-         t.was_rolled_back AS wasRolledBack,
-         d.opened_at_epoch AS openedAtEpoch,
-         d.reminded_at_epoch AS remindedAtEpoch
-       FROM note_debt d
-       JOIN turns t ON t.id = d.turn_id
-       WHERE d.session_id = ? AND d.status = 'pending'
-       ORDER BY d.prompt_number ASC`
-  ).all(sessionId).map((row) => ({
-    turnId: row.turnId,
-    sessionId: row.sessionId,
-    promptNumber: row.promptNumber,
-    userPrompt: row.userPrompt,
-    wasRolledBack: row.wasRolledBack === 1,
-    openedAtEpoch: row.openedAtEpoch,
-    remindedAtEpoch: row.remindedAtEpoch,
-    pendingTurns: Math.max(0, options.latestPromptNumber - row.promptNumber)
-  })).filter((debt) => debt.pendingTurns <= agingTurns);
-}
-function getNoteReliefState(db, sessionId) {
-  const lastNotePromptNumber = db.query(
-    `SELECT MAX(t.prompt_number) AS promptNumber
-         FROM shadow_notes n
-         JOIN turns t ON t.id = n.ride_turn_id
-         WHERE t.session_id = ?`
-  ).get(sessionId)?.promptNumber ?? 0;
-  const cursor = db.query(
-    `SELECT last_classified_prompt_number AS classifiedThrough,
-              last_relief_prompt_number AS lastRelief
-       FROM note_debt_cursor WHERE session_id = ?`
-  ).get(sessionId);
-  const classifiedThroughPromptNumber = cursor?.classifiedThrough ?? 0;
-  const lastReliefPromptNumber = cursor?.lastRelief ?? 0;
-  const anchorPromptNumber = Math.max(
-    lastNotePromptNumber,
-    lastReliefPromptNumber
-  );
-  const dryTurns = db.query(
-    `SELECT COUNT(*) AS count FROM turns
-         WHERE session_id = ? AND prompt_number > ? AND prompt_number <= ?`
-  ).get(sessionId, anchorPromptNumber, classifiedThroughPromptNumber)?.count ?? 0;
-  return {
-    lastNotePromptNumber,
-    lastReliefPromptNumber,
-    classifiedThroughPromptNumber,
-    anchorPromptNumber,
-    dryTurns
-  };
-}
-function claimNoteBacklogRelief(db, input) {
-  return db.query(
-    `INSERT INTO note_debt_cursor (
-           session_id, last_classified_prompt_number,
-           last_relief_prompt_number, updated_at_epoch
-         ) VALUES (?, 0, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-           last_relief_prompt_number = excluded.last_relief_prompt_number,
-           updated_at_epoch = excluded.updated_at_epoch
-         WHERE note_debt_cursor.last_relief_prompt_number = ?
-           AND excluded.last_relief_prompt_number
-               > note_debt_cursor.last_relief_prompt_number`
-  ).run(
-    input.sessionId,
-    input.firePromptNumber,
-    input.nowEpoch,
-    input.previousReliefPromptNumber
-  ).changes > 0;
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
   id,
@@ -20064,6 +19787,15 @@ function settleOutstandingTurns(db, sessionId, eraCutoffEpoch, nowEpoch) {
   return settled;
 }
 
+// src/shared/note-tool.ts
+var NOTE_TOOL_NAME_PATTERN = /^mcp__(?:[A-Za-z0-9_-]*_)?mnemo__note$/;
+function isNoteToolName(toolName) {
+  return NOTE_TOOL_NAME_PATTERN.test(toolName);
+}
+function isExtractionExcludedToolName(toolName) {
+  return isNoteToolName(toolName);
+}
+
 // src/shared/tag-stripping.ts
 var MAX_TAG_OCCURRENCES = 100;
 function stripTag(text, tagName) {
@@ -20089,7 +19821,7 @@ function stringifyToolPayload(value) {
   const normalized = typeof value === "string" ? value : JSON.stringify(value);
   return stripPrivateTags(normalized);
 }
-function getLatestTurn2(db, sessionDbId) {
+function getLatestTurn(db, sessionDbId) {
   const row = db.query(
     `SELECT id, status FROM turns WHERE session_id = ? ORDER BY prompt_number DESC LIMIT 1`
   ).get(sessionDbId);
@@ -20128,19 +19860,14 @@ function createPostToolUseHandler(dependencies) {
           eraCutoffEpoch,
           createdAtEpoch
         );
-        reconcileNoteDebt(dependencies.db, {
-          sessionId: session.id,
-          nowEpoch: createdAtEpoch,
-          eraCutoffEpoch
-        });
       } catch (error48) {
-        logger.warn?.("note debt reconcile failed", {
+        logger.warn?.("turn settlement failed", {
           sessionId: input.sessionId,
           reasonCode: "post-tool-use-sweep",
           error: error48 instanceof Error ? error48.message : String(error48)
         });
       }
-      const latestTurn = getLatestTurn2(dependencies.db, session.id);
+      const latestTurn = getLatestTurn(dependencies.db, session.id);
       if (!latestTurn) {
         return { outcome: "no-root-turn", turnId: null };
       }
@@ -20347,6 +20074,56 @@ function getSessionEffectiveCitations(db, sessionId) {
     });
   }
   return effective;
+}
+
+// src/db/note-debt.ts
+var NOTE_DEBT_AGING_TURNS = 50;
+function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number < ?
+         AND t.prompt_number >= ?
+         AND t.status != 'undone'
+         AND t.was_rolled_back = 0
+         AND (t.type IS NULL OR t.type != 'compact')
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id AND d.status = 'skipped'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
+    ...row,
+    pendingTurns: currentPromptNumber - row.promptNumber
+  }));
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
 }
 
 // src/shared/type-vocabulary.ts
@@ -23631,185 +23408,24 @@ function createUserPromptSubmitDispatcher(dependencies = {}) {
   return createDispatcher("UserPromptSubmit", dependencies);
 }
 
-// src/hooks/note-reminder.ts
-var NOTE_REMINDER_DISPLAY_LIMIT = 5;
-var NOTE_RELIEF_PENDING_THRESHOLD = 5;
-var NOTE_RELIEF_DRY_TURNS = 5;
-var PROMPT_PREFIX_CHARACTERS = 40;
-function selectNoteReminderItems(open2, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
-  const writable = open2.filter((debt) => !debt.wasRolledBack).sort((left, right) => left.promptNumber - right.promptNumber);
-  return {
-    writable: writable.slice(0, Math.max(0, displayLimit)),
-    writableTotal: writable.length
-  };
-}
-function formatTurnAddress(debt) {
-  return `S${debt.sessionId}/T${debt.promptNumber}`;
-}
-var CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/gu;
-function formatPromptPrefix(userPrompt) {
-  const collapsed = (userPrompt ?? "").replace(/\s+/gu, " ").replace(CONTROL_CHARACTERS, "").replace(/"/gu, "'").replace(/</gu, "\u2039").replace(/>/gu, "\u203A").trim();
-  if (collapsed === "") {
-    return '""';
-  }
-  const characters = Array.from(collapsed);
-  return characters.length > PROMPT_PREFIX_CHARACTERS ? `"${characters.slice(0, PROMPT_PREFIX_CHARACTERS).join("")}\u2026"` : `"${collapsed}"`;
-}
-function pendingSuffix(pendingTurns) {
-  return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
-}
-function formatDebtLine(debt) {
-  return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
-}
-function renderNoteBacklogRelief(view) {
-  const lines = ["mnemo pending notes (backlog relief):"];
-  for (const debt of view.writable) {
-    lines.push(formatDebtLine(debt));
-  }
-  lines.push(
-    `${view.writableTotal} turns are waiting for notes. This once, after you answer, append a dedicated batch containing ONLY note calls for the turns above \u2014 the standing rule against starting a tool call just to write notes is waived for this batch only, and for nothing else in it.`
-  );
-  return lines.join("\n");
-}
-
-// src/hooks/handlers/note-relief.ts
-function createNoteBacklogReliefHandler(dependencies) {
-  const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
-  const agingTurns = dependencies.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  const displayLimit = dependencies.displayLimit ?? NOTE_REMINDER_DISPLAY_LIMIT;
-  const pendingThreshold = dependencies.pendingThreshold ?? NOTE_RELIEF_PENDING_THRESHOLD;
-  const dryTurnsThreshold = dependencies.dryTurns ?? NOTE_RELIEF_DRY_TURNS;
-  const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
-  const logger = dependencies.logger ?? createLogger("HOOK");
-  return async function handleNoteBacklogRelief(input) {
-    if (input.eventName !== "UserPromptSubmit") {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    if (input.agentId !== void 0) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    if (!input.sessionId) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    const session = getSessionByContentId(dependencies.db, input.sessionId);
-    if (!session) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    const rideTurn = getLatestTurn(dependencies.db, session.id);
-    if (!rideTurn) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    const relief = getNoteReliefState(dependencies.db, session.id);
-    if (relief.dryTurns < dryTurnsThreshold) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    const writable = listOpenNoteDebt(dependencies.db, session.id, {
-      latestPromptNumber: rideTurn.promptNumber,
-      agingTurns
-    }).filter((debt) => !debt.wasRolledBack);
-    if (writable.length < pendingThreshold) {
-      return { continue: true, reliefOutcome: "not-eligible" };
-    }
-    let claimed;
-    try {
-      claimed = writeTransaction(dependencies.db, () => {
-        const settled = getNoteReliefState(dependencies.db, session.id);
-        if (settled.lastReliefPromptNumber > relief.lastReliefPromptNumber) {
-          return { outcome: "eligible-not-claimed", view: null };
-        }
-        if (settled.dryTurns < dryTurnsThreshold) {
-          return { outcome: "not-eligible", view: null };
-        }
-        const stillOpen = listOpenNoteDebt(dependencies.db, session.id, {
-          latestPromptNumber: rideTurn.promptNumber,
-          agingTurns
-        }).filter((debt) => !debt.wasRolledBack);
-        if (stillOpen.length < pendingThreshold) {
-          return { outcome: "not-eligible", view: null };
-        }
-        if (!claimNoteBacklogRelief(dependencies.db, {
-          sessionId: session.id,
-          firePromptNumber: rideTurn.promptNumber,
-          previousReliefPromptNumber: relief.lastReliefPromptNumber,
-          nowEpoch: now()
-        })) {
-          return { outcome: "eligible-not-claimed", view: null };
-        }
-        const view = selectNoteReminderItems(stillOpen, displayLimit);
-        recordNoteIdExposure(dependencies.db, {
-          sessionId: session.id,
-          rideTurnId: rideTurn.id,
-          exposedTurnIds: view.writable.map((debt) => debt.turnId),
-          // `injection`, not `reminder`: this is prompt-time context, and the
-          // reminder path's own gates read the `reminder` rows to decide what
-          // it has already shown. Filing these as `reminder` would silence the
-          // ordinary reminder for the rest of the turn — or not, depending on
-          // which UserPromptSubmit process won the race for the ride turn.
-          source: "injection",
-          nowEpoch: now()
-        });
-        return { outcome: "fired", view };
-      });
-    } catch (error48) {
-      logger.warn?.("note backlog relief not claimed", {
-        sessionId: input.sessionId,
-        reasonCode: "relief-claim-failed",
-        error: error48 instanceof Error ? error48.message : String(error48)
-      });
-      return { continue: true, reliefOutcome: "eligible-not-claimed" };
-    }
-    if (!claimed.view) {
-      return { continue: true, reliefOutcome: claimed.outcome };
-    }
-    return {
-      continue: true,
-      reliefOutcome: "fired",
-      hookSpecificOutput: renderNoteBacklogRelief(claimed.view)
-    };
-  };
-}
-
 // src/hooks/handlers/prompt-dispatch.ts
 function createPromptDispatchHandler(dependencies = {}) {
-  const { db, now, logger: injectedLogger, ...dispatcherDependencies } = dependencies;
+  const { logger: injectedLogger, ...dispatcherDependencies } = dependencies;
   const ruleDispatcher = createUserPromptSubmitDispatcher(dispatcherDependencies);
   const logger = injectedLogger ?? createLogger("HOOK");
-  const backlogRelief = db ? createNoteBacklogReliefHandler({ db, now, logger }) : void 0;
-  async function section(name, run, input) {
+  return async function handlePromptDispatch(input) {
+    let rules;
     try {
-      return await run();
+      rules = await ruleDispatcher(input);
     } catch (error48) {
       logger.warn?.("prompt-dispatch section failed", {
         sessionId: input.sessionId ?? null,
-        reasonCode: name,
+        reasonCode: "rule-dispatch",
         error: error48 instanceof Error ? error48.message : String(error48)
       });
-      return null;
+      rules = null;
     }
-  }
-  return async function handlePromptDispatch(input) {
-    const sections = [];
-    const rules = await section(
-      "rule-dispatch",
-      () => ruleDispatcher(input),
-      input
-    );
-    if (rules?.hookSpecificOutput) {
-      sections.push(rules.hookSpecificOutput);
-    }
-    let notes = null;
-    if (backlogRelief) {
-      const relief = await section(
-        "note-relief",
-        () => backlogRelief(input),
-        input
-      );
-      notes = relief?.hookSpecificOutput ?? null;
-    }
-    if (notes) {
-      sections.push(notes);
-    }
-    return sections.length > 0 ? { continue: true, hookSpecificOutput: sections.join("\n\n") } : { continue: true };
+    return rules?.hookSpecificOutput ? { continue: true, hookSpecificOutput: rules.hookSpecificOutput } : { continue: true };
   };
 }
 
@@ -24559,6 +24175,47 @@ function upsertProcessSessionMap(db, identityKey, sessionId, nowEpoch) {
   ).run(identityKey, sessionId, nowEpoch);
 }
 
+// src/hooks/note-reminder.ts
+var NOTE_REMINDER_DISPLAY_LIMIT = 5;
+var NOTE_RELIEF_PENDING_THRESHOLD = 5;
+var PROMPT_PREFIX_CHARACTERS = 40;
+function formatTurnAddress(debt) {
+  return `S${debt.sessionId}/T${debt.promptNumber}`;
+}
+var CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/gu;
+function formatPromptPrefix(userPrompt) {
+  const collapsed = (userPrompt ?? "").replace(/\s+/gu, " ").replace(CONTROL_CHARACTERS, "").replace(/"/gu, "'").replace(/</gu, "\u2039").replace(/>/gu, "\u203A").trim();
+  if (collapsed === "") {
+    return '""';
+  }
+  const characters = Array.from(collapsed);
+  return characters.length > PROMPT_PREFIX_CHARACTERS ? `"${characters.slice(0, PROMPT_PREFIX_CHARACTERS).join("")}\u2026"` : `"${collapsed}"`;
+}
+function pendingSuffix(pendingTurns) {
+  return pendingTurns === 1 ? "(pending 1 turn)" : `(pending ${pendingTurns} turns)`;
+}
+function formatDebtLine(turn) {
+  return `  [${formatTurnAddress(turn)}] ${formatPromptPrefix(turn.userPrompt)} ${pendingSuffix(turn.pendingTurns)}`;
+}
+function formatOwedSuffix(owed) {
+  if (owed.length === 0) {
+    return "";
+  }
+  const newest = owed[owed.length - 1];
+  const address = formatTurnAddress(newest);
+  return owed.length === 1 ? ` \xB7 owed: ${address}` : ` \xB7 owed: ${address} +${owed.length - 1} older`;
+}
+function renderNoteBacklogRelief(owed, displayLimit = NOTE_REMINDER_DISPLAY_LIMIT) {
+  const lines = ["mnemo pending notes (backlog relief):"];
+  for (const turn of owed.slice(0, displayLimit)) {
+    lines.push(formatDebtLine(turn));
+  }
+  lines.push(
+    `${owed.length} turns are waiting for notes. Open a batch containing ONLY note or skip calls for the turns above \u2014 the standing rule against starting a tool call just to write notes is waived for that batch, and for nothing else in it.`
+  );
+  return lines.join("\n");
+}
+
 // src/worker/invalidation.ts
 var INTERRUPT_PENDING_TAG = "invalidated:notify-pending:interrupt";
 var INTERRUPT_NOTIFIED_TAG = "invalidated:notified:interrupt";
@@ -24853,6 +24510,7 @@ function createPendingTurn(db, sessionId, promptNumber, prompt, createdAtEpoch, 
   if (inserted) {
     reindexTurnFromDb(db, inserted.id);
   }
+  return inserted?.id ?? null;
 }
 function createSessionInitHandler(dependencies) {
   const now = dependencies.now ?? (() => Math.floor(Date.now() / 1e3));
@@ -24922,7 +24580,7 @@ function createSessionInitHandler(dependencies) {
       }
       const dbMaxPromptNumber = getMaxPromptNumber(dependencies.db, session.id);
       const promptNumber = dbMaxPromptNumber !== null ? dbMaxPromptNumber + 1 : transcriptPromptCount !== null ? transcriptPromptCount + 1 : 1;
-      createPendingTurn(
+      const turnId = createPendingTurn(
         dependencies.db,
         session.id,
         promptNumber,
@@ -24930,7 +24588,32 @@ function createSessionInitHandler(dependencies) {
         epoch,
         isSubagent
       );
-      return { sessionDbId: session.id, promptNumber };
+      let owedSuffix = "";
+      let reliefText = null;
+      if (!isSubagent && turnId !== null) {
+        const owed = listOwedNoteTurns(dependencies.db, session.id, promptNumber);
+        owedSuffix = formatOwedSuffix(owed);
+        const exposedTurnIds = /* @__PURE__ */ new Set();
+        if (owed.length > 0) {
+          exposedTurnIds.add(owed[owed.length - 1].turnId);
+        }
+        if (owed.length >= NOTE_RELIEF_PENDING_THRESHOLD) {
+          reliefText = renderNoteBacklogRelief(owed);
+          for (const turn of owed.slice(0, NOTE_REMINDER_DISPLAY_LIMIT)) {
+            exposedTurnIds.add(turn.turnId);
+          }
+        }
+        if (exposedTurnIds.size > 0) {
+          recordNoteIdExposure(dependencies.db, {
+            sessionId: session.id,
+            rideTurnId: turnId,
+            exposedTurnIds: [...exposedTurnIds],
+            source: "injection",
+            nowEpoch: epoch
+          });
+        }
+      }
+      return { sessionDbId: session.id, promptNumber, owedSuffix, reliefText };
     });
     if (isSubagent) {
       return {
@@ -24938,9 +24621,15 @@ function createSessionInitHandler(dependencies) {
         suppressOutput: true
       };
     }
+    const sections = [
+      `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}${created.owedSuffix}`
+    ];
+    if (created.reliefText) {
+      sections.push(created.reliefText);
+    }
     return {
       continue: true,
-      hookSpecificOutput: `mnemo current turn: S${created.sessionDbId}/T${created.promptNumber}`
+      hookSpecificOutput: sections.join("\n\n")
     };
   };
 }
@@ -25229,7 +24918,7 @@ function backfillFromTranscript(db, pendingTurns, transcriptPath, lastAssistantM
 }
 
 // src/hooks/handlers/stop.ts
-function getLatestTurn3(db, sessionDbId) {
+function getLatestTurn2(db, sessionDbId) {
   const row = db.query(
     `
         SELECT
@@ -25275,7 +24964,7 @@ function createStopHandler(dependencies) {
         exitCode: HOOK_SUCCESS_EXIT_CODE
       };
     }
-    const turn = getLatestTurn3(dependencies.db, session.id);
+    const turn = getLatestTurn2(dependencies.db, session.id);
     if (!turn) {
       return {
         continue: true,
@@ -25362,12 +25051,6 @@ function createStopHandler(dependencies) {
       }
       try {
         settleOutstandingTurns(dependencies.db, session.id, eraCutoffEpoch, epoch);
-        reconcileNoteDebt(dependencies.db, {
-          sessionId: session.id,
-          nowEpoch: epoch,
-          completedTurnId: turn.id,
-          eraCutoffEpoch
-        });
         if (parsedTurns) {
           backfillShadowNoteWriterModels(
             dependencies.db,
@@ -25376,7 +25059,7 @@ function createStopHandler(dependencies) {
           );
         }
       } catch (error48) {
-        logger.warn?.("note debt reconcile failed", {
+        logger.warn?.("turn settlement failed", {
           sessionId: input.sessionId,
           reasonCode: "stop-completion",
           error: error48 instanceof Error ? error48.message : String(error48)
@@ -25536,16 +25219,7 @@ function getDefaultDigestContextHandler() {
 }
 function getDefaultUserPromptSubmitDispatcher() {
   if (!defaultUserPromptSubmitDispatcher) {
-    let db;
-    try {
-      db = getDefaultHookDatabase();
-    } catch (error48) {
-      process.stderr.write(
-        `[HOOK] pending-notes sections disabled for this call: ${error48 instanceof Error ? error48.message : String(error48)}
-`
-      );
-    }
-    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
+    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler();
   }
   return defaultUserPromptSubmitDispatcher;
 }

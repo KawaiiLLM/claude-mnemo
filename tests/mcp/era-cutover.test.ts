@@ -3,7 +3,7 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase, runWriteTransaction } from "../../src/db/database";
 import { ensureRecordedEraCutoff } from "../../src/db/era";
-import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
+import { getNoteDebt } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { upsertSession } from "../../src/db/sessions";
@@ -123,19 +123,23 @@ describe("era cutover write path", () => {
     insertObservation.run(eraTurnId, 3_000);
     insertTurnStop.run(legacyTurnId, sessionId, 1_000);
     insertTurnStop.run(eraTurnId, sessionId, 3_000);
-    // Ticket 15 gave the turns their terminal statuses in the same pass that
-    // opened their debts; note-prompt-clock ticket 02 split that pass in two.
-    // Settlement now runs first through its own channel, then the ledger
-    // classifies — the same order every production call site uses, and the
-    // same end state this fixture always asserted. The era turn becomes the
-    // hole `skipped` names; the pre-era one becomes `failed`, which is what a
-    // turn whose only writer is gone has always been called.
+    // Ticket 15 gave the turns their terminal statuses AND opened their debts
+    // in one pass; note-prompt-clock ticket 03 retired that whole
+    // classification walk (owed turns are a derived query now — spec D1) and
+    // ticket 02 split settlement out into its own channel first. This fixture
+    // reproduces exactly the end state the walk used to leave: settlement
+    // gives each turn its terminal status, and a `pending` `note_debt` row is
+    // seeded directly the way a pre-cutover database still carries one — the
+    // era turn becomes the hole `skipped` names; the pre-era one becomes
+    // `failed`, which is what a turn whose only writer is gone has always
+    // been called.
     settleOutstandingTurns(db, sessionId, CUTOFF, 3_200);
-    reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 3_200,
-      eraCutoffEpoch: CUTOFF,
-    });
+    const insertPendingDebt = db.query<unknown, [number, number, number]>(
+      `INSERT INTO note_debt (turn_id, session_id, prompt_number, status, opened_at_epoch, updated_at_epoch)
+       VALUES (?, ?, ?, 'pending', 3200, 3200)`,
+    );
+    insertPendingDebt.run(legacyTurnId, sessionId, 10);
+    insertPendingDebt.run(eraTurnId, sessionId, 11);
     expect(getNoteDebt(db, legacyTurnId)?.status).toBe("pending");
     expect(getNoteDebt(db, eraTurnId)?.status).toBe("pending");
     expect(getTurnById(db, eraTurnId)?.status).toBe("skipped");

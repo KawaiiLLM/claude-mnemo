@@ -1,58 +1,27 @@
-import type { OpenNoteDebt } from "../db/note-debt";
+import type { OwedNoteTurn } from "../db/note-debt";
 
 /**
- * The backlog-relief injection's rendering (spec D2 附). English by 裁决 16,
- * except the quoted user prompt, which keeps its original language because it
- * is a quotation.
+ * Rendering for the prompt-clock ledger's owed set (spec D3/D4).
  *
- * This module used to render the per-debt reminder too. 裁决 25 abolished it:
- * the current turn's note is written against the address line `session-init`
- * injects, during the turn itself, so the only list-bearing text left is the
- * relief below.
+ * Everything here is a pure function over `listOwedNoteTurns`'s result — no
+ * database access, no state of its own. `session-init` calls these inside the
+ * same write transaction that creates the current turn (spec D9: it is the
+ * one process that knows the new turn's number without racing) and is the
+ * ONLY caller; `prompt-dispatch` renders none of this any more.
  */
 
-/**
- * Display cap, not a queue cap: the ledger may hold more than it shows.
- */
+/** Display cap for the backlog relief — a queue may hold more than this shows. */
 export const NOTE_REMINDER_DISPLAY_LIMIT = 5;
 
 /**
- * Backlog relief (裁决 21). Both gates are five, and both are deliberately
- * coarse: the injection is the single sanctioned exception to "never start a
- * tool call just to write a note", so it is safe only while it stays rare.
- * `NOTE_RELIEF_PENDING_THRESHOLD` is a count of open writable debts;
- * `NOTE_RELIEF_DRY_TURNS` is how many finished turns must pass with no note
- * written and no relief fired before the next one may fire.
+ * Backlog relief's only gate (spec D4): a count of writable owed turns. There
+ * is no second gate any more — no dry-turn streak, no claim, no re-arm. The
+ * condition is its own limit: writing even one note or skip drops the count,
+ * and the block stops appearing the next prompt it does.
  */
 export const NOTE_RELIEF_PENDING_THRESHOLD = 5;
-export const NOTE_RELIEF_DRY_TURNS = 5;
 
 const PROMPT_PREFIX_CHARACTERS = 40;
-
-export interface NoteReminderView {
-  writable: OpenNoteDebt[];
-  /** Every open writable debt, not just the displayed ones. */
-  writableTotal: number;
-}
-
-/**
- * Pick what a single relief shows: the oldest writable debts first, never more
- * than `displayLimit` item lines. Rolled-back debts never take a slot — they
- * close silently at reconcile (裁决 25), and this injection is a work list.
- */
-export function selectNoteReminderItems(
-  open: OpenNoteDebt[],
-  displayLimit = NOTE_REMINDER_DISPLAY_LIMIT,
-): NoteReminderView {
-  const writable = open
-    .filter((debt) => !debt.wasRolledBack)
-    .sort((left, right) => left.promptNumber - right.promptNumber);
-
-  return {
-    writable: writable.slice(0, Math.max(0, displayLimit)),
-    writableTotal: writable.length,
-  };
-}
 
 export function formatTurnAddress(debt: {
   sessionId: number;
@@ -74,9 +43,9 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/gu;
  * back through the conversation. Collapsed to one line and cut short: it is a
  * label, not the content.
  *
- * It is also the only part of a reminder that somebody else wrote, quoted into
- * text the model reads as system context — Claude Code wraps this file's output
- * in a `<system-reminder>` element on both paths. So the quotation is made inert
+ * It is also the only part of the rendering that somebody else wrote, quoted
+ * into text the model reads as system context — Claude Code wraps this file's
+ * output in a `<system-reminder>` element. So the quotation is made inert
  * before it is framed: angle brackets become their single-guillemet lookalikes,
  * because a prompt containing `</system-reminder>` would otherwise close the
  * wrapper early and leave everything after it reading as instruction rather than
@@ -110,40 +79,58 @@ function pendingSuffix(pendingTurns: number): string {
 }
 
 /**
- * One item line. The address format is what the agent is told to cite with, so
- * a second copy of this string would be a second citation dialect the moment
- * either drifts.
+ * One item line for the backlog relief. The address format is what the agent
+ * is told to cite with, so a second copy of this string would be a second
+ * citation dialect the moment either drifts.
  */
-function formatDebtLine(debt: OpenNoteDebt): string {
-  return `  [${formatTurnAddress(debt)}] ${formatPromptPrefix(debt.userPrompt)} ${pendingSuffix(debt.pendingTurns)}`;
+function formatDebtLine(turn: OwedNoteTurn): string {
+  return `  [${formatTurnAddress(turn)}] ${formatPromptPrefix(turn.userPrompt)} ${pendingSuffix(turn.pendingTurns)}`;
 }
 
 /**
- * The backlog-relief injection (裁决 21) — the only pending-notes list left
- * (裁决 25), and the only text allowed to authorise a dedicated note batch.
+ * The current-turn line's owed suffix (spec D3, byte-level):
  *
- * It is made safe by two things at once: it fires only from a rare state (a
- * deep backlog that several finished turns have failed to drain, so the
- * current-turn protocol is demonstrably not keeping up), and its wording spends
- * that exception on note calls explicitly and on nothing else. Without the
- * second half the injection would simply reproduce the failure it was carved
- * out of.
+ *   0 owed   ""                              (the line is unchanged)
+ *   1 owed   " · owed: S<session>/T<n>"
+ *   ≥2 owed  " · owed: S<session>/T<n> +<count-1> older"
  *
- * Rolled-back debts never appear here: they close silently at reconcile, and
- * this path may not write debt transitions (R2#P2-6). Callers pass writable
- * debts only.
+ * `owed` is `listOwedNoteTurns`'s own oldest-first order, so the NEWEST debt —
+ * the one worth naming — is the last element.
  */
-export function renderNoteBacklogRelief(view: NoteReminderView): string {
-  // No <system-reminder> wrapper, same as the reminder: Claude Code wraps
-  // UserPromptSubmit additionalContext in one before it reaches the model.
+export function formatOwedSuffix(owed: readonly OwedNoteTurn[]): string {
+  if (owed.length === 0) {
+    return "";
+  }
+
+  const newest = owed[owed.length - 1]!;
+  const address = formatTurnAddress(newest);
+  return owed.length === 1
+    ? ` · owed: ${address}`
+    : ` · owed: ${address} +${owed.length - 1} older`;
+}
+
+/**
+ * The backlog-relief block (spec D4) — appended once `owed.length >=
+ * NOTE_RELIEF_PENDING_THRESHOLD`, showing the oldest `displayLimit` turns.
+ * There is no one-shot claim: this re-renders on every prompt for as long as
+ * the count stays at or above the threshold (spec D3's "逐 prompt 重渲染直至
+ * <5"), and it authorises a batch for exactly as long as that holds.
+ */
+export function renderNoteBacklogRelief(
+  owed: readonly OwedNoteTurn[],
+  displayLimit: number = NOTE_REMINDER_DISPLAY_LIMIT,
+): string {
   const lines = ["mnemo pending notes (backlog relief):"];
 
-  for (const debt of view.writable) {
-    lines.push(formatDebtLine(debt));
+  for (const turn of owed.slice(0, displayLimit)) {
+    lines.push(formatDebtLine(turn));
   }
 
   lines.push(
-    `${view.writableTotal} turns are waiting for notes. This once, after you answer, append a dedicated batch containing ONLY note calls for the turns above — the standing rule against starting a tool call just to write notes is waived for this batch only, and for nothing else in it.`,
+    `${owed.length} turns are waiting for notes. Open a batch containing ONLY` +
+      " note or skip calls for the turns above — the standing rule against" +
+      " starting a tool call just to write notes is waived for that batch," +
+      " and for nothing else in it.",
   );
 
   return lines.join("\n");

@@ -214,29 +214,15 @@ function getDefaultDigestContextHandler(): HookHandler {
   return defaultDigestContextHandler;
 }
 
-// The one synchronous entry mnemo has left, and the only one that returns
-// `additionalContext` at all: the tool-adjacent entries were retired because
-// Claude Code re-renders their context at request assembly, which rewrites the
-// previous turn's tail and destroys the message-side cache breakpoint.
-//
-// It needs a writable handle — both pending-notes paths record the ids they just
-// showed and take their claim in the same transaction — and it must survive
-// failing to get one: `session-init` runs in a parallel process on the very same
-// event and can hold the write lock past the busy timeout. A database that
-// cannot be opened costs the notes sections alone, never the rule digest.
+// The `prompt-dispatch` UserPromptSubmit entry — the rule digest only (spec
+// note-prompt-clock D9). It opens no database: `session-init`, the sibling
+// UserPromptSubmit registration, is the sole writer and sole reader of the
+// owed-notes state (turn creation, the owed suffix, the backlog relief), all
+// inside its own transaction, so there is nothing left here that a write lock
+// could contend with.
 function getDefaultUserPromptSubmitDispatcher(): HookHandler {
   if (!defaultUserPromptSubmitDispatcher) {
-    let db: ReturnType<typeof createDatabase> | undefined;
-    try {
-      db = getDefaultHookDatabase();
-    } catch (error) {
-      process.stderr.write(
-        `[HOOK] pending-notes sections disabled for this call: ${
-          error instanceof Error ? error.message : String(error)
-        }\n`,
-      );
-    }
-    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler({ db });
+    defaultUserPromptSubmitDispatcher = createPromptDispatchHandler();
   }
   return defaultUserPromptSubmitDispatcher;
 }

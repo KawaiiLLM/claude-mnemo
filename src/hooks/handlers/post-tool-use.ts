@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 
 import { captureConsultedMemories } from "../../db/consulted-memories";
 import { runHookWriteTransaction } from "../../db/database";
-import { reconcileNoteDebt } from "../../db/note-debt";
 import { settleOutstandingTurns } from "../../db/turn-settlement";
 import { createObservation } from "../../db/observations";
 import { getSessionByContentId } from "../../db/sessions";
@@ -92,26 +91,19 @@ export function createPostToolUseHandler(
     const excludedFromExtraction = isExtractionExcludedToolName(toolName);
 
     const writeResult = writeTransaction(dependencies.db, () => {
-      // Settlement runs first (ticket 02, spec D10): db/turn-settlement.ts is
-      // now the only caller of `settleCompletedTurn`, so a turn's terminal
-      // status, file sets and tool count land here before the note-debt sweep
-      // below reads its completion evidence — the same order the write used
-      // to happen in when it ran embedded inside the ledger's own reconcile.
+      // Settlement (ticket 02, spec D10): db/turn-settlement.ts is the only
+      // caller of `settleCompletedTurn`, so a turn's terminal status, file
+      // sets and tool count land here as a catch-up sweep — only turns still
+      // `active`/`provisional` with completion evidence are touched, so this
+      // costs one bounded indexed query when nothing is new.
       //
-      // Note-debt ownership (spec D2/D3): the asynchronous capture entry
-      // maintains the ledger, the synchronous reminder entry only reads it.
-      // Here it is a catch-up sweep — only turns older than the open one are
-      // classified — and it costs one indexed query when nothing is new.
+      // The note-debt ledger itself needs no sweep any more (spec D1): owed
+      // turns are a derived query `session-init` runs at prompt time, not a
+      // classification this hook maintains.
       //
-      // It catches up on turns whose Stop was CAPTURED but whose reconcile did
-      // not land. A turn whose Stop was never captured at all is stranded, not
-      // finished, and the sweep stops at it rather than reading its half-landed
-      // observations as a verdict; the liveness repair restores its turn-stop
-      // and the next sweep walks on.
-      //
-      // Wrapped: the shadow ledger is a P1 trial artefact and must never be
-      // able to abort the capture write it shares a transaction with; settlement
-      // inherits the same tolerance it had when it ran embedded in the ledger.
+      // Wrapped: settlement must never be able to abort the capture write it
+      // shares a transaction with — a lost sweep costs a delayed terminal
+      // status, not the observation this hook exists to record.
       try {
         settleOutstandingTurns(
           dependencies.db,
@@ -119,14 +111,8 @@ export function createPostToolUseHandler(
           eraCutoffEpoch,
           createdAtEpoch,
         );
-
-        reconcileNoteDebt(dependencies.db, {
-          sessionId: session.id,
-          nowEpoch: createdAtEpoch,
-          eraCutoffEpoch,
-        });
       } catch (error) {
-        logger.warn?.("note debt reconcile failed", {
+        logger.warn?.("turn settlement failed", {
           sessionId: input.sessionId,
           reasonCode: "post-tool-use-sweep",
           error: error instanceof Error ? error.message : String(error),

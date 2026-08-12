@@ -133,11 +133,20 @@ describe("release artifacts", () => {
     // fails here instead of shipping a stale bundle.
     const hookCommand = readFileSync("plugin/scripts/hook-command.cjs", "utf8");
     expect(hookCommand).toContain("renderPersonaDocumentInjection");
-    // The pending-notes reminder's once-per-debt marker (裁决 22). The retired
-    // tool-adjacent subcommands are asserted absent instead: a stale bundle
-    // would still register `pre-tool-dispatch` and `result-dispatch`, whose
-    // additionalContext is what breaks the message-side cache breakpoint.
-    expect(hookCommand).toContain("reminded_at_epoch");
+    // note-prompt-clock (ticket 03): the owed suffix and the backlog relief
+    // are rendered by session-init alone, from a derived query — a stale
+    // bundle would still carry the retired classification walk and the
+    // per-debt reminder's once marker instead.
+    expect(hookCommand).toContain("formatOwedSuffix");
+    expect(hookCommand).toContain("listOwedNoteTurns");
+    expect(hookCommand).not.toContain("reconcileNoteDebt");
+    expect(hookCommand).not.toContain("NOTE_RELIEF_DRY_TURNS");
+    // `reminded_at_epoch` itself stays (spec D8: the column is a trial-history
+    // leftover, not retired) — only the classification walk that wrote it is
+    // gone, which the two assertions above already pin.
+    // The retired tool-adjacent subcommands are asserted absent too: a stale
+    // bundle would still register `pre-tool-dispatch` and `result-dispatch`,
+    // whose additionalContext is what breaks the message-side cache breakpoint.
     expect(hookCommand).not.toContain("pre-tool-dispatch");
     expect(hookCommand).not.toContain("result-dispatch");
     // The SessionStart milestones section is the unified renderer's budget
@@ -162,7 +171,6 @@ describe("release artifacts", () => {
       "claim_generation", // lease ownership fence — a stale worker commits nothing
       "settleCompletedTurn", // ticket 15: completion settles the row, no agent
       "completionFloorStatus", // the ONE definition of an un-noted turn's status
-      "reconcileNoteDebt", // the note-debt classification path the worker drains through
     ]) {
       expect(worker).toContain(marker);
     }
@@ -180,6 +188,11 @@ describe("release artifacts", () => {
       "parseSettlementBatch", // 0.8.4 two-phase grading
       "This message is a SETTLEMENT", // the settle message class
       "buildCorrectiveResend", // the derailment ladder
+      // note-prompt-clock (ticket 03): the classification walk that used to
+      // run inside Stop/PostToolUse/the worker's turn-stop retirement is
+      // retired outright — owed turns are a derived query, not a maintained
+      // ledger — so a stale worker bundle would still carry its call sites.
+      "reconcileNoteDebt",
     ]) {
       expect(worker).not.toContain(removed);
     }

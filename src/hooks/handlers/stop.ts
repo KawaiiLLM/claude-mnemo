@@ -2,7 +2,6 @@ import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
 import { markSettledDiaryDayStaleForTurn } from "../../db/diary-state";
-import { reconcileNoteDebt } from "../../db/note-debt";
 import { settleOutstandingTurns } from "../../db/turn-settlement";
 import { getSessionByContentId, upsertSession } from "../../db/sessions";
 import { enqueueQueueItem } from "../../db/pending-queue";
@@ -248,30 +247,18 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
         );
       }
 
-      // Stop is the turn-completion event (spec D3, R2#1): only now is the
-      // turn's tool batch final, so only now can it be classified as trivial or
-      // as owing a note. Classifying at creation would have to predict tool use.
+      // Settlement (ticket 02, spec D10): db/turn-settlement.ts is the only
+      // caller of `settleCompletedTurn`, so this turn's terminal status, file
+      // sets and tool count land here. The note-debt ledger needs no event of
+      // its own any more (spec D1) — a turn owes a note the moment a later
+      // prompt exists, which `session-init` reads as a derived query at
+      // prompt time, not as something Stop classifies.
       //
-      // Settlement runs FIRST (ticket 02, spec D10): db/turn-settlement.ts is
-      // now the only caller of `settleCompletedTurn`, so this turn's terminal
-      // status, file sets and tool count land here rather than inside
-      // `reconcileNoteDebt`'s own classification walk — and running it before
-      // that walk is what keeps the walk's completion-evidence read seeing
-      // exactly the turn state it always did.
-      //
-      // Everything in this block is wrapped: a P1 trial artefact (the debt
-      // ledger, the writer-model backfill) must never abort the capture
-      // transaction it shares, and settlement inherits the same tolerance it
-      // had when it ran embedded inside the ledger's own reconcile call.
+      // Wrapped: a P1 trial artefact (the writer-model backfill) must never
+      // abort the capture transaction it shares, and settlement inherits the
+      // same tolerance.
       try {
         settleOutstandingTurns(dependencies.db, session.id, eraCutoffEpoch, epoch);
-
-        reconcileNoteDebt(dependencies.db, {
-          sessionId: session.id,
-          nowEpoch: epoch,
-          completedTurnId: turn.id,
-          eraCutoffEpoch,
-        });
 
         if (parsedTurns) {
           backfillShadowNoteWriterModels(
@@ -281,7 +268,7 @@ export function createStopHandler(dependencies: StopHandlerDependencies) {
           );
         }
       } catch (error) {
-        logger.warn?.("note debt reconcile failed", {
+        logger.warn?.("turn settlement failed", {
           sessionId: input.sessionId,
           reasonCode: "stop-completion",
           error: error instanceof Error ? error.message : String(error),

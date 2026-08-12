@@ -20,7 +20,6 @@ import {
   getSessionByContentId,
   updateCompactAnchor,
 } from "../db/sessions";
-import { reconcileNoteDebt } from "../db/note-debt";
 import { settleOutstandingTurns } from "../db/turn-settlement";
 import { getTurnById } from "../db/turns";
 import {
@@ -413,13 +412,13 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
    *
    * A `turn-stop` row is the turn's completion event. Completion is what
    * settles the row — `settleOutstandingTurns` (db/turn-settlement.ts, ticket
-   * 02) is now the one place that knows both "this turn is over" and "here is
-   * what it carries" — and `reconcileNoteDebt` still runs right after it, for
-   * the note-debt ledger's own reasons (spec D2/D3), unrelated to settlement.
-   * Settling BEFORE the delete matters: the settlement candidate predicate
-   * counts a queued turn-stop as evidence, so a row deleted first would leave
-   * a turn with no evidence and no terminal status, which the stranded repair
-   * would re-enqueue on every end event forever.
+   * 02) is the one place that knows both "this turn is over" and "here is
+   * what it carries". The note-debt ledger reads no event of its own any more
+   * (spec D1): owed turns are a derived query `session-init` runs at prompt
+   * time. Settling BEFORE the delete matters: the settlement candidate
+   * predicate counts a queued turn-stop as evidence, so a row deleted first
+   * would leave a turn with no evidence and no terminal status, which the
+   * stranded repair would re-enqueue on every end event forever.
    *
    * Every other kind is just dropped — deletion is unconditional below. The only
    * other kind ever seen here was `obs` (observation-queue-teardown ticket): it
@@ -439,12 +438,6 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
           const eraCutoffEpoch =
             config.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
           settleOutstandingTurns(deps.db, turn.sessionId, eraCutoffEpoch, now());
-          reconcileNoteDebt(deps.db, {
-            sessionId: turn.sessionId,
-            nowEpoch: now(),
-            completedTurnId: turn.id,
-            eraCutoffEpoch,
-          });
         }
       }
       deleteQueueItem(deps.db, item.seq);

@@ -33226,6 +33226,9 @@ function requireText(value, field) {
 function overwriteRequiredMessage(address) {
   return `S${address.sessionId}/T${address.promptNumber} already has a note. Resend with replace: true to confirm you want to overwrite it.`;
 }
+function compactMarkerMessage(address) {
+  return `S${address.sessionId}/T${address.promptNumber} is a compact marker, not a turn \u2014 there is nothing to note or skip.`;
+}
 function crossSessionRequiredMessage(address, callerSessionId) {
   return `S${address.sessionId}/T${address.promptNumber} belongs to a different session than this call (S${callerSessionId}). Resend with crossSession: true to confirm the cross-session write.`;
 }
@@ -33238,6 +33241,9 @@ function declineTurn(db, address, options, crossSession) {
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
+  }
+  if (turn.type === "compact") {
+    return parameterError(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(
@@ -33317,6 +33323,9 @@ function noteTool(db, rawInput, options = {}) {
     return parameterError(
       `no turn at S${address.sessionId}/T${address.promptNumber}. Use an address copied from a reminder or from injected context.`
     );
+  }
+  if (turn.type === "compact") {
+    return parameterError(compactMarkerMessage(address));
   }
   if (isCrossSessionWrite(options.callerSessionId, turn.sessionId) && !crossSession) {
     return parameterError(

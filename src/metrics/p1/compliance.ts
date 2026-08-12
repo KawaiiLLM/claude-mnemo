@@ -161,6 +161,32 @@ const TURN_WEIGHT_ORDER = [
 ];
 
 /**
+ * A turn's substantive tool calls. Reads the captured observations rather than
+ * `turns.tool_call_count`: the count column is derived from the transcript by a
+ * later backfill and includes mnemo's own calls, while observations are what the
+ * hook actually saw and carry the exclusion marker.
+ *
+ * Relocated from db/note-debt.ts by note-prompt-clock (ticket 03): the live
+ * note path no longer counts tool calls for anything — a turn's eligibility to
+ * be noted or skipped is address resolution alone (spec D5), not a weight —
+ * but the P1 trial's turn-weight bucketing (below) still needs this exact
+ * predicate to reconcile against the ledger it is measuring, so it moved here
+ * with its one remaining caller instead of being deleted.
+ */
+export function countSubstantiveToolCalls(db: Database, turnId: number): number {
+  const rows = db
+    .query<{ toolName: string | null }, [number]>(
+      `SELECT tool_name AS toolName FROM observations
+       WHERE turn_id = ? AND excluded_from_extraction = 0`,
+    )
+    .all(turnId);
+
+  return rows.filter(
+    (row) => row.toolName !== null && !isMnemoOwnToolName(row.toolName),
+  ).length;
+}
+
+/**
  * Substantive tool calls for every turn in the ledger, in one query.
  *
  * Same predicate as `countSubstantiveToolCalls`, batched: calling that function
