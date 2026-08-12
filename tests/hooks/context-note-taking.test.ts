@@ -34,7 +34,7 @@ describe("note-taking instructions injection", () => {
     }
   });
 
-  test("the block states the protocol the reminder relies on", () => {
+  test("the block states the prompt-clock protocol (ticket 04)", () => {
     // Instructions, not background: the reminder's trigger, the field contract,
     // the citation form the ledger's addresses use, and the privacy rule.
     expect(NOTE_TAKING_INSTRUCTIONS).toStartWith("<mnemo-note-taking>");
@@ -43,68 +43,102 @@ describe("note-taking instructions injection", () => {
     // to keep the injected paragraph narrow, so a sentence that reads as one
     // phrase can be split by a newline at any time.
     const flat = NOTE_TAKING_INSTRUCTIONS.replace(/\s+/gu, " ");
-    // 裁决 25: the injection is the current turn's own address, and the note is
-    // written during the turn it describes — the reminder protocol whose
-    // one-turn lag manufactured pure-shift mis-attributions is gone.
-    expect(flat).toContain("mnemo current turn: S…/T…");
-    expect(flat).toContain("with the user's message");
-    // "its own turn", not "this turn": a note is now routinely written for an
-    // earlier turn from a later turn's batch, so the possessive has to point at
-    // the address rather than at the turn doing the writing. The rule 裁决 25
-    // pinned — one note describes exactly one turn — is unchanged.
-    expect(flat).toContain("The note describes its own turn only");
-    // Note guardrails ticket (spec D3): a repeat write used to replace
-    // silently; it now demands an explicit declaration, and the instructions
-    // must say so or every agent's first rewrite attempt bounces.
-    expect(flat).toContain("resend with replace:true");
-    // 2026-08-12: 裁决 26's "wait for the batch that looks final" sent 95 of
-    // 272 measured notes into a batch of their own — 93 of them with a
-    // rideable batch earlier in the same turn — re-reading 22.6M context
-    // tokens for the extra requests. The batch you can be confident is last
-    // is precisely the one whose results you have not seen, so lastness is
-    // undecidable when the note is composed and result-independence is what
-    // the rule now tests. Deferral is the ordinary path, not a failure: a
-    // turn that ends still owing its note is written from any batch of a
-    // LATER turn, which is what 裁决 26's S18993/T93 case needed all along —
-    // the worker's report arrived after the note was filed.
-    expect(flat).toContain(
+
+    // --- Trigger line and the new injection shape (spec D3) ---
+    // 裁決 25's own-address line is unchanged, but it now grows an owed
+    // suffix and, at 5+ owed, a backlog-relief block — both rendered by
+    // session-init every prompt (ticket 03). The block must say these ARE
+    // the owed-address channel, or the agent goes hunting from memory.
+    expect(flat).toContain('mnemo current turn: S…/T…" is this turn\'s address');
+    expect(flat).toContain('· owed: S…/T…" suffix');
+    expect(flat).toContain('"+N older" if more');
+    expect(flat).toContain('"mnemo pending notes (backlog relief):" block');
+    expect(flat).toContain("the ONLY source of an owed address");
+    expect(flat).toContain("even after a compact");
+    expect(flat).toContain("never recall or invent one");
+
+    // --- 0.9.11 heuristic must be fully gone (ticket 04 AC) ---
+    // The batch-result-independence rule this ticket supersedes: no batch is
+    // "the right one" to wait for any more, since the note is unconditionally
+    // deferred (rule 2) and a wrong write is fixed with replace:true instead.
+    expect(flat).not.toContain(
       "a batch whose result cannot change what the note says",
     );
-    expect(flat).toContain("ANY batch of a later turn");
-    expect(flat).toContain("in this turn or a following one");
+    expect(flat).not.toContain("Exactly two things authorize");
+
+    // --- Three rules + 3′ (spec D6), each independently locatable ---
     expect(flat).toContain("Never start a tool call just to write a note");
-    // The authorisation list is exhaustive by construction — a third case was
-    // proposed and rejected, since a rule that already decides the case does
-    // not need a special case bolted on. A correction is on it because a
-    // written note closes its debt: no channel will ever list that turn again,
-    // so a deferred correction is a permanently lost one.
-    expect(flat).toContain("Exactly two things authorize");
-    expect(flat).toContain('"backlog relief" list');
-    expect(flat).toContain("correcting a note already written");
-    // 裁决 24: the refusal is explicit, and a note invented from a listed line
-    // — the only thing left when the turn predates a compact — would poison
-    // the corpus with confident fiction. Ticket 12: "left your context" is not
-    // "unrecoverable"; a skip is correct only when recovery would need a tool
-    // batch of its own.
+    expect(flat).toContain(
+      "Every turn's first tool batch also settles what a previous turn still",
+    );
+    expect(flat).toContain("owes — note or skip, same eligibility and batch as any note");
+    // Operational discipline folded into rule 1 rather than stated
+    // separately (issue 04 revision): timely skipping is what keeps backlog
+    // relief's threshold from being the only thing that empties the queue.
+    expect(flat).toContain("owed count is backlog relief's only fuel");
+    // Rule 2: the note describes a turn that has already ended by the time
+    // it is written — never composed inside the turn it is about.
+    expect(flat).toContain(
+      "This turn's OWN note waits for a later turn to write",
+    );
+    expect(flat).toContain("never send it in the turn it describes");
+    // Rule 3 + 3′: the two things that still authorize a note-only batch —
+    // unchanged in substance from 0.9.11's "exactly two things", restated as
+    // the exception to the opening prohibition instead of a standalone list.
+    expect(flat).toContain(
+      "A note/skip-only batch may open alone when the backlog-relief block is",
+    );
+    expect(flat).toContain("to correct a note already written — the only exceptions");
+
+    // --- replace:true absorbs the old result-independence heuristic ---
+    expect(flat).toContain("A later result that overturns");
+    expect(flat).toContain("is fixed by resending with replace:true");
+    expect(flat).toContain(
+      "a decline needs no replace before the real note that follows it",
+    );
+
+    // --- Skip criterion (issue 04, revised S15069 T577/T579/T580/T581) ---
+    // A single dimension — does the turn hold anything unique — not a
+    // taxonomy. The user explicitly rejected enumerating interrupted/resent/
+    // bookkeeping as separate tests ("打不打断也不重要"): they are examples
+    // of the one question's answer, never a checklist to sort a turn into.
+    expect(flat).toContain(
+      "would a future retriever find anything unique in this turn",
+    );
+    // The operational form of the same question (T581): would deleting the
+    // turn cost the project anything real.
+    expect(flat).toContain(
+      "if deleting this turn from history would cost the project no decision, no progress, and no coherence",
+    );
     expect(flat).toContain('note(turn:"S…/T…", skip:true)');
-    expect(flat).toContain("never invent a note from the listed line");
-    expect(flat).toContain("no open batch recovering them in passing");
-    expect(flat).toContain("never open a lookup just to rescue one");
-    // The writing rules (2026-08-11): sixteen consecutive notes ran 1.5x-2.5x
-    // over a budget the block stated but never explained the purpose of. Each
-    // field now says what it is FOR, which is what the terser version could
-    // not convey — and the receipt reports the cost back, so the budget is
-    // measured rather than merely declared.
+    expect(flat).toContain(
+      'those are common shapes of "nothing unique," not separate tests',
+    );
+    expect(flat).toContain("For illustration only, not a category list");
+    // The red line (unchanged in substance across every prior revision):
+    // never invent from a reminder line, and incidental recovery undoes the
+    // skip.
+    expect(flat).toContain(
+      "Content that has left your context with no batch recovering it in passing is skipped, never invented from the listed line",
+    );
+    expect(flat).toContain("recovering it in passing makes it writable again");
+    // The hard line: a user decision/correction/veto or any turn with a
+    // conclusion, rejected option, or lesson is never skippable, whatever the
+    // tool count — this is the one place tool-call count is explicitly
+    // disclaimed as irrelevant to the skip decision.
+    expect(flat).toContain(
+      "Never skip a user decision, correction, or veto, or any turn with a",
+    );
+    expect(flat).toContain("however short — whatever the tool count");
+
+    // --- Retained checklist (issue 04's "保留清单") ---
     expect(flat).toContain("the addressing line, one glance says what the turn did");
     expect(flat).toContain("the evidence chain that produced it");
     expect(flat).toContain("Never restate the title; never narrate looking");
     expect(flat).toContain("insight (~60 tokens)");
     // An insight is retrieved far from the turn that produced it — it is FTS
     // indexed but renders only at expanded depth, so a search hit shows the
-    // title beside it and nothing else. Of 15 written under the era, 4 opened
-    // on a pointer into their own turn ("the brief", "this trap") or on a
-    // session-local literal, and those are the ones that do not survive the
-    // trip.
+    // title beside it and nothing else.
     expect(flat).toContain("it must stand alone: claim first, evidence after");
     expect(flat).toContain("reports its token count against these budgets");
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("[S15069/T332]");
@@ -114,25 +148,20 @@ describe("note-taking instructions injection", () => {
       "write title/content/insight in English",
     );
     expect(NOTE_TAKING_INSTRUCTIONS).toContain("never include <private> content");
-    // Budgeted as a cached prefix block (~280 tokens in the spec, ~380 as
-    // shipped, 500 after 裁决 22/24 added the skip protocol and the
-    // once-per-turn rule). Re-baselined to 580 for the writing rules: the
-    // field descriptions now carry what a title and a content are FOR, which
-    // is what sixteen consecutive 1.5×–2.5× over-budget notes on S15069 showed
-    // the terser version could not convey. The block is injected at
-    // SessionStart and therefore paid once, into the same cached prefix whose
-    // repeated re-ingestion this release exists to stop — 80 tokens once per
-    // session against every note the session writes. Estimated with the
-    // 4-chars-per-token rule, not the diary's CJK-weighted one, which reads
-    // ~3x high on English prose. Re-baselined again to 680 (measured 656) for
-    // the batching rule and the insight's standalone requirement: the block is
-    // injected once at SessionStart into the cached prefix, so the ~76 added
-    // tokens are paid once per session, against the 22.6M context tokens the
-    // old rule spent on extra requests in the measured corpus alone. A budget
-    // is the softer constraint when it collides with a rule that has to be
-    // stated — the alternative here is a shorter block that does not say when
-    // to write.
-    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(680);
+    expect(flat).toContain("The note call always goes last in a batch");
+
+    // Re-baselined for ticket 04 (note-prompt-clock): the previous 680-token
+    // cap covered the 0.9.11 batch-result-independence protocol, which this
+    // release deletes outright. In its place the block now has to teach the
+    // owed-suffix/backlog-relief injection shape (new in ticket 03, previously
+    // undocumented here) AND the full skip criterion the old block only
+    // gestured at in one sentence — a single test, its operational
+    // (deletion-cost) form, the red line, and the hard line. Measured 908
+    // tokens as shipped; capped at 950 for headroom. A budget is the softer
+    // constraint when it collides with a rule that has to be stated — the
+    // alternative here is a shorter block that does not say when to write or
+    // where an owed address comes from.
+    expect(estimateTokens(NOTE_TAKING_INSTRUCTIONS)).toBeLessThanOrEqual(950);
   });
 
   test("it stays out of other events", async () => {

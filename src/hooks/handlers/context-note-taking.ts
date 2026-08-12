@@ -2,8 +2,8 @@ import { NOTE_TOKEN_BUDGET } from "../../shared/note-budget";
 import type { HookResult, NormalizedHookInput } from "../types";
 
 /**
- * The static note-taking instructions (spec D2 附), injected once per session
- * start so they sit in the cached prefix.
+ * The static note-taking instructions (spec note-prompt-clock D6), injected
+ * once per session start so they sit in the cached prefix.
  *
  * Instructions only, no background: instructions get followed, overviews get
  * paid for — a project-overview injection measured +20% cost for no accuracy
@@ -14,24 +14,50 @@ import type { HookResult, NormalizedHookInput } from "../types";
  * constant the receipt measures a write against. Held as prose they were a
  * second copy: raising the constant would have left the agent told one number
  * and graded on another, with nothing failing to say so.
+ *
+ * Rewritten for the prompt-clock ledger (ticket 04): 0.9.11's "wait for a
+ * batch whose result cannot change the note" heuristic is gone — a turn's
+ * note is now simply deferred one turn, unconditionally (rule 2 below), and a
+ * result that overturns an already-written note is handled by resending with
+ * replace:true rather than by guessing which batch was "last" up front. The
+ * owed address itself is no longer something to remember: session-init
+ * (spec D3) renders it fresh into every prompt's current-turn line and, at 5
+ * or more owed, into the backlog-relief block, so this block only has to
+ * teach the agent to read those, never to track them itself.
  */
 export const NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
 You keep notes on your own turns.
-Trigger: "mnemo current turn: S…/T…" with the user's message is this turn's
-own address. Write its note in a batch whose result cannot change what the
-note says — a commit, a push, a check you expect to pass. Which batch is
-last is not knowable before its results return, so do not wait for it: a
-turn that ends still owing its note is written from ANY batch of a later
-turn, results in hand, and that is the ordinary path. The note describes
-its own turn only; when a later result changes it, in this turn or a
-following one, resend with replace:true.
-Never start a tool call just to write a note. Exactly two things authorize
-a batch of only note calls: a "backlog relief" list, and correcting a note
-already written — a written note owes nothing, so no reminder returns to it.
-Answer note(turn:"S…/T…", skip:true) for a turn you owe that holds
-nothing worth keeping, or whose details left your context with no open
-batch recovering them in passing — never invent a note from the listed
-line, never open a lookup just to rescue one.
+Trigger: "mnemo current turn: S…/T…" is this turn's address. A previous
+turn still owed grows the line a " · owed: S…/T…" suffix (the newest one,
+plus "+N older" if more); at 5 or more owed, a "mnemo pending notes
+(backlog relief):" block also lists the oldest. These are the ONLY source
+of an owed address, refreshed every prompt — even after a compact — so
+never recall or invent one.
+Never start a tool call just to write a note. Three rules:
+1. Every turn's first tool batch also settles what a previous turn still
+   owes — note or skip, same eligibility and batch as any note. Skip
+   trivial debt right there; owed count is backlog relief's only fuel.
+2. This turn's OWN note waits for a later turn to write; never send it in
+   the turn it describes.
+3. A note/skip-only batch may open alone when the backlog-relief block is
+   present, or to correct a note already written — the only exceptions.
+A note describes its addressed turn only. A later result that overturns
+one, in this turn or a following one, is fixed by resending with
+replace:true; a decline needs no replace before the real note that
+follows it.
+Skip test, one question: would a future retriever find anything unique in
+this turn? The check: if deleting this turn from history would cost the
+project no decision, no progress, and no coherence, answer
+note(turn:"S…/T…", skip:true); otherwise write. Not whether the turn was
+interrupted, resent, or was itself a note-bookkeeping round; those are
+common shapes of "nothing unique," not separate tests. For illustration
+only, not a category list: pure confirmation, a swallowed duplicate send,
+a bookkeeping round auditing or backfilling old notes (its output belongs
+to the turn it processed). Content that has left your context with no
+batch recovering it in passing is skipped, never invented from the listed
+line; recovering it in passing makes it writable again. Never skip a user
+decision, correction, or veto, or any turn with a conclusion, a rejected
+option, or a lesson, however short — whatever the tool count.
 Fields:
 - title (~${NOTE_TOKEN_BUDGET.title} tokens): "<activity>+<topic>: <what this turn covered>" — the
   addressing line, one glance says what the turn did. Activity words
