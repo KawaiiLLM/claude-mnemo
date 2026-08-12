@@ -126,6 +126,17 @@ interface DebtRow {
   writerModel: string | null;
   ridePromptNumber: number | null;
   reminderExposures: number;
+  /**
+   * A real agent-authored note exists for this turn RIGHT NOW, independent of
+   * `status`. `closeNoteDebtAsNoted` (note-debt.ts) only flips `pending` or
+   * `skipped(declined)` rows to `noted` — a debt the SYSTEM closed as
+   * `aged`/`rolled-back`/`closed` stays terminal forever even when the agent
+   * (or settlement backfill, per spec D7) later writes a real note for that
+   * same turn (ticket 06's known 01-carryover). `status` alone is therefore
+   * not the ledger's current truth for those three reasons; `shadow_notes`
+   * existence is.
+   */
+  hasNote: number;
 }
 
 const UNKNOWN_MODEL = "unknown";
@@ -283,7 +294,8 @@ export function collectDebtFacts(
       (SELECT COUNT(*) FROM note_id_exposures e
         WHERE e.session_id = d.session_id
           AND e.exposed_turn_id = d.turn_id
-          AND e.source IN ('reminder', 'injection')) AS reminderExposures
+          AND e.source IN ('reminder', 'injection')) AS reminderExposures,
+      (CASE WHEN n.turn_id IS NOT NULL THEN 1 ELSE 0 END) AS hasNote
     FROM note_debt d
     JOIN turns t ON t.id = d.turn_id
     JOIN session_size z ON z.sessionId = d.session_id
@@ -308,7 +320,11 @@ export function collectDebtFacts(
     const lazyAged = row.status === "pending" && pastBound;
 
     let outcome: DebtOutcome;
-    if (row.status === "noted") {
+    if (row.status === "noted" || row.hasNote === 1) {
+      // `hasNote` wins over a terminal `status` (ticket 06's 01-carryover):
+      // `shadow_notes` is the current truth about whether the turn was ever
+      // written up, and a debt row the system closed (aged/rolled-back/closed)
+      // never un-terminalises even after a real note lands.
       outcome = "noted";
     } else if (row.status === "skipped" && row.reason === "rolled-back") {
       outcome = "waived";

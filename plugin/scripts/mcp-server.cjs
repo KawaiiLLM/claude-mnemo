@@ -7921,7 +7921,8 @@ __export(schema_exports, {
   backfillAllIntraChains: () => backfillAllIntraChains,
   initializeDatabase: () => initializeDatabase,
   initializeSchema: () => initializeSchema,
-  migrateTurnCitationsToEdges: () => migrateTurnCitationsToEdges
+  migrateTurnCitationsToEdges: () => migrateTurnCitationsToEdges,
+  retireLegacyPendingNoteDebts: () => retireLegacyPendingNoteDebts
 });
 function hasTable(db, table) {
   return db.query(
@@ -7984,6 +7985,7 @@ function initializeSchema(db) {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
@@ -8031,6 +8033,15 @@ function ensureNoteDebtCursorReliefColumn(db) {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function retireLegacyPendingNoteDebts(db) {
+  const nowEpoch = Math.floor(Date.now() / 1e3);
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE status = 'pending'`
+  ).run(nowEpoch, nowEpoch).changes;
 }
 function noteSettlementTriggerVocabularyIsStale(db) {
   const storedDdl = db.query(

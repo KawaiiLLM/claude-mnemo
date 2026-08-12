@@ -1340,6 +1340,7 @@ function initializeSchema(db) {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
@@ -1387,6 +1388,15 @@ function ensureNoteDebtCursorReliefColumn(db) {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function retireLegacyPendingNoteDebts(db) {
+  const nowEpoch = Math.floor(Date.now() / 1e3);
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE status = 'pending'`
+  ).run(nowEpoch, nowEpoch).changes;
 }
 function noteSettlementTriggerVocabularyIsStale(db) {
   const storedDdl = db.query(
@@ -3137,7 +3147,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msqanh7g" : "dev";
+var BUILD_ID = true ? "0.9.11-msqba1yc" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

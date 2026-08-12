@@ -105,6 +105,10 @@ describe("note_debt reason vocabulary migration", () => {
 
     initializeSchema(db);
 
+    // The reason-vocabulary rebuild leaves prompt 2's `pending` row alone —
+    // that is the WHOLE point of this test — but `initializeSchema` also runs
+    // ticket 06's D8 retirement in the same call, which is what closes it to
+    // `skipped(closed)` immediately afterward. Nothing here re-opens it.
     expect(
       db
         .query<{ promptNumber: number; status: string; reason: string | null }, []>(
@@ -114,7 +118,7 @@ describe("note_debt reason vocabulary migration", () => {
         .all(),
     ).toEqual([
       { promptNumber: 1, status: "skipped", reason: "aged" },
-      { promptNumber: 2, status: "pending", reason: null },
+      { promptNumber: 2, status: "skipped", reason: "closed" },
     ]);
 
     db.exec(
@@ -222,6 +226,9 @@ describe("note_debt reason vocabulary migration", () => {
             .get()!.sql,
         ).toContain("'declined'");
         // Every debt survives exactly once, and no rebuild scaffolding is left.
+        // Prompt 2's `pending` row is closed by the SAME `initializeSchema`
+        // call, via ticket 06's D8 retirement — visible on both connections
+        // once either one commits it.
         expect(
           database
             .query<{ promptNumber: number; status: string }, []>(
@@ -231,7 +238,7 @@ describe("note_debt reason vocabulary migration", () => {
             .all(),
         ).toEqual([
           { promptNumber: 1, status: "skipped" },
-          { promptNumber: 2, status: "pending" },
+          { promptNumber: 2, status: "skipped" },
         ]);
         expect(
           database

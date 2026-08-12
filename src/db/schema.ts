@@ -829,6 +829,7 @@ export function initializeSchema(db: Database): void {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  retireLegacyPendingNoteDebts(db);
   ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
@@ -941,6 +942,46 @@ function ensureNoteDebtCursorReliefColumn(db: Database): void {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0",
   );
+}
+
+/**
+ * One-time write-off of every `note_debt` row still `pending` (spec D8, ticket
+ * 06). The owed set has been a derived query since the prompt-clock ledger (03)
+ * — nothing opens a debt pre-emptively any more, and the only surviving INSERT
+ * (`recordDeclinedNoteDebt`) is born `skipped`. A `pending` row this finds is
+ * therefore not an open obligation any reader still tracks; it is bookkeeping
+ * stranded by the cutover, and this closes it the same way residual settlement
+ * closes an abandoned session's tail (spec D9) — `status = 'skipped', reason =
+ * 'closed'` — rather than deleting it, so the row stays available for audit.
+ *
+ * `closed` over some other write-off reason is a no-op choice for settlement:
+ * `listOwedNoteTurnsInRange` (note-debt.ts) excludes a turn from its backfill
+ * candidates only on `reason = 'declined'`, so a row this migration touches was
+ * already not excluded while `pending` and stays not excluded as `closed` —
+ * nothing about which turns settlement will still reconstruct changes.
+ *
+ * A plain `UPDATE … WHERE status = 'pending'` rather than a rename/rebuild:
+ * this is a data write-off, not a shape change (D8 does not touch the CHECK
+ * vocabulary — `closed` already exists there from
+ * `ensureNoteDebtReasonVocabulary`, which must therefore run first), and the
+ * predicate is naturally idempotent — after the first run nothing is left for
+ * a second to match, so running this on every process start costs one indexed
+ * no-op scan.
+ *
+ * Runs AFTER `ensureNoteDebtReasonVocabulary`: on a database that has not yet
+ * widened the CHECK to admit `closed`, writing it here would fail the same
+ * constraint that function exists to lift.
+ */
+export function retireLegacyPendingNoteDebts(db: Database): number {
+  const nowEpoch = Math.floor(Date.now() / 1000);
+  return db
+    .query<unknown, [number, number]>(
+      `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE status = 'pending'`,
+    )
+    .run(nowEpoch, nowEpoch).changes;
 }
 
 // `note_settlement_jobs` shipped (arc-spine-redesign, 0.8.4) with a three-value

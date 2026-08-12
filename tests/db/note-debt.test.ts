@@ -9,11 +9,16 @@ import {
   getNoteDebt,
   listNoteDebt,
   listOwedNoteTurns,
+  listOwedNoteTurnsInRange,
   NOTE_DEBT_AGING_TURNS,
   recordDeclinedNoteDebt,
   recordNoteIdExposure,
 } from "../../src/db/note-debt";
-import { initializeDatabase, initializeSchema } from "../../src/db/schema";
+import {
+  initializeDatabase,
+  initializeSchema,
+  retireLegacyPendingNoteDebts,
+} from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { upsertShadowNote } from "../../src/db/shadow-notes";
 
@@ -267,6 +272,102 @@ describe("listOwedNoteTurns (spec D1)", () => {
     expect(owed).toHaveLength(50);
     expect(owed[0]!.promptNumber).toBe(150);
     expect(owed[owed.length - 1]!.promptNumber).toBe(199);
+  });
+});
+
+/**
+ * Ticket 06's D8 investigation: does writing off a leftover `pending` row as
+ * `skipped(closed)` make settlement's backfill (`listOwedNoteTurnsInRange`,
+ * ticket 05) suddenly treat a dead session's history as due for
+ * reconstruction? The predicate excludes a turn only on
+ * `reason = 'declined'` (note-debt.ts) — `pending` was never excluded either,
+ * so retiring a row to `closed` changes nothing about which turns settlement
+ * still considers unanswered. This pins that finding directly rather than
+ * only in the ticket's report.
+ */
+describe("listOwedNoteTurnsInRange is unaffected by D8's pending retirement", () => {
+  let db: Database;
+  let sessionId: number;
+
+  function addTurn(promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number, string]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, ?, 'active', ?, 100)
+         RETURNING id`,
+      )
+      .get(sessionId, promptNumber, `prompt ${promptNumber}`)!.id;
+  }
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-note-debt-range-retirement",
+      project: "/tmp/project",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  test("a leftover pending row is owed, and stays owed once retired to closed", () => {
+    const turn = addTurn(1);
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status,
+         opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'pending', 100, 100)`,
+    ).run(turn, sessionId, 1);
+
+    expect(
+      listOwedNoteTurnsInRange(db, sessionId, 1, 1).map((t) => t.turnId),
+    ).toEqual([turn]);
+
+    // The migration's own write, exactly as `initializeSchema` applies it.
+    expect(retireLegacyPendingNoteDebts(db)).toBe(1);
+
+    expect(
+      listOwedNoteTurnsInRange(db, sessionId, 1, 1).map((t) => t.turnId),
+    ).toEqual([turn]);
+  });
+
+  test("only a declined reason excludes — aged/rolled-back/closed all stay owed", () => {
+    for (const reason of ["aged", "rolled-back", "closed"] as const) {
+      const turn = addTurn(1);
+      db.query<unknown, [number, number, number, string]>(
+        `INSERT INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', ?, 100, 100)`,
+      ).run(turn, sessionId, 1, reason);
+
+      expect(
+        listOwedNoteTurnsInRange(db, sessionId, 1, 1).map((t) => t.turnId),
+        `reason=${reason}`,
+      ).toEqual([turn]);
+
+      db.query("DELETE FROM turns WHERE session_id = ?").run(sessionId);
+      db.query("DELETE FROM note_debt WHERE session_id = ?").run(sessionId);
+    }
+
+    const declinedTurn = addTurn(1);
+    db.query<unknown, [number, number, number]>(
+      `INSERT INTO note_debt (
+         turn_id, session_id, prompt_number, status, reason,
+         opened_at_epoch, updated_at_epoch
+       ) VALUES (?, ?, ?, 'skipped', 'declined', 100, 100)`,
+    ).run(declinedTurn, sessionId, 1);
+
+    expect(listOwedNoteTurnsInRange(db, sessionId, 1, 1)).toEqual([]);
   });
 });
 
