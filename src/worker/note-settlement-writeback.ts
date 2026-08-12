@@ -30,7 +30,7 @@ import {
   type SegmentWrite,
 } from "../db/segments";
 import { updateSessionSummaryRewrite } from "../db/sessions";
-import { upsertShadowNote } from "../db/shadow-notes";
+import { upsertReconstructedShadowNote } from "../db/shadow-notes";
 import type {
   NoteSettlementResponse,
   SettlementSegmentDirective,
@@ -41,7 +41,7 @@ import type {
  *
  * ONE transaction holds every per-session effect of a window — segments and
  * their members, the anchor and judged edges, the type/tag revision, the session
- * summary, the interior-hole reconstructions — together with the job completion
+ * summary, the mechanical hole backfill — together with the job completion
  * and the cursor advance. That grouping is the whole point: the cursor is what
  * says "this window is settled", so a cursor that moved without the writes, or
  * writes that landed without the cursor, both produce a window nobody will ever
@@ -101,6 +101,16 @@ export interface NoteSettlementWriteBackCounts {
   rejectedReferences: number;
   notesReconstructed: number;
   notesRejected: number;
+  /**
+   * A reconstruction the model wrote for a turn that already carries an
+   * `agent` note by the time the write-back runs — the race spec D7 (ticket
+   * 05) requires a winner for: the main agent's own note landed while this
+   * job was queued or in flight, and it wins. Distinct from `notesRejected`
+   * (an address the model was never shown, or a turn outside this window's
+   * backfill scope): this one names turns the model was correctly asked to
+   * reconstruct, whose write simply arrived second.
+   */
+  notesYielded: number;
   summaryUpdated: boolean;
 }
 
@@ -122,6 +132,7 @@ const EMPTY_COUNTS: NoteSettlementWriteBackCounts = {
   rejectedReferences: 0,
   notesReconstructed: 0,
   notesRejected: 0,
+  notesYielded: 0,
   summaryUpdated: false,
 };
 
@@ -371,7 +382,7 @@ export function applyNoteSettlementWriteBack(
       ).written.length;
     }
 
-    // --- interior-hole reconstructions ------------------------------------
+    // --- mechanical hole backfill (spec D7, ticket 05) ---------------------
     for (const note of response.reconstructedNotes) {
       const parsed = parseAddressToken(note.turn);
       const turnId =
@@ -382,18 +393,23 @@ export function applyNoteSettlementWriteBack(
               )
               .get(parsed.sessionId, parsed.promptNumber)?.id ?? null)
           : null;
-      // Only an interior hole may be reconstructed. A trailing hole has nothing
-      // after it that depends on it, and a turn the agent skipped or aged out is
-      // the reminder protocol's business — writing either here would manufacture
-      // compliance the trial is measuring.
+      // Only a turn this window's context actually classified as a hole may be
+      // reconstructed — a turn the agent skipped, a compact marker, or one
+      // outside this window is the live discipline's business, not a hindsight
+      // backfill's (D7's "机械回填,不覆盖" — the payload holds no discretion
+      // beyond this membership test).
       if (turnId === null || !options.reconstructableTurnIds.has(turnId)) {
         counts.notesRejected += 1;
         options.logger?.warn?.(
-          `[claude-mnemo] settlement job ${job.id}: refused reconstruction for ${note.turn} (not an interior hole of this window)`,
+          `[claude-mnemo] settlement job ${job.id}: refused reconstruction for ${note.turn} (not an owed hole of this window)`,
         );
         continue;
       }
-      upsertShadowNote(db, {
+      // WHERE-gated upsert: the main agent's own note can land between this
+      // window being claimed and this write landing, and that note must win
+      // (spec D7's race guard) — never overwritten by a hindsight
+      // reconstruction of the same turn.
+      const written = upsertReconstructedShadowNote(db, {
         turnId,
         title: note.title,
         content: note.content,
@@ -403,7 +419,11 @@ export function applyNoteSettlementWriteBack(
         rideTurnId: options.rideTurnId,
         nowEpoch: options.nowEpoch,
       });
-      counts.notesReconstructed += 1;
+      if (written) {
+        counts.notesReconstructed += 1;
+      } else {
+        counts.notesYielded += 1;
+      }
     }
 
     // --- session summary ---------------------------------------------------

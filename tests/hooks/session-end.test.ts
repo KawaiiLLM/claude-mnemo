@@ -3,6 +3,11 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { createObservation } from "../../src/db/observations";
+import {
+  getNoteSettlementCursor,
+  listNoteSettlementJobs,
+  NOTE_SETTLEMENT_MIN_WINDOW_TURNS,
+} from "../../src/db/note-settlement";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { createContextHandler } from "../../src/hooks/handlers/context";
@@ -468,5 +473,141 @@ describe("handleSessionEndHook", () => {
     expect(result.continue).toBe(true);
     expect(typeof result.asyncWork).toBe("function");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The sessionend settlement boundary (spec note-prompt-clock D7, ticket 05):
+ * the hook freezes and enqueues its own window SYNCHRONOUSLY, before the
+ * async worker flush is ever notified — the async half only ever leaks
+ * whatever is already due, never plans anything of its own. These tests
+ * assert directly on `note_settlement_jobs`, deliberately bypassing the async
+ * flush entirely, so a passing assertion can only be explained by the hook's
+ * own write transaction.
+ */
+describe("handleSessionEndHook — note settlement boundary", () => {
+  let db: Database;
+  let sessionId: number;
+  const ERA_CUTOFF_EPOCH = 1;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+
+    sessionId = upsertSession(db, {
+      contentSessionId: "session-boundary-1",
+      project: "/Users/zhaoqixuan/Projects/claude-mnemo",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: 100,
+      completedAtEpoch: null,
+    }).id;
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedTurns(from: number, count: number, createdAtEpoch = 200): void {
+    for (let promptNumber = from; promptNumber < from + count; promptNumber += 1) {
+      db.query(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt,
+           assistant_response, created_at_epoch
+         ) VALUES (?, ?, 'active', 'p', 'r', ?)`,
+      ).run(sessionId, promptNumber, createdAtEpoch);
+    }
+  }
+
+  test("a tail of 1-19 turns still opens a window — the 20-turn floor is exempt", async () => {
+    seedTurns(1, 7);
+    const handler = createSessionEndHandler({
+      db,
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+      settlementEnabled: true,
+    });
+
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+
+    const jobs = listNoteSettlementJobs(db, sessionId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.triggerType).toBe("sessionend");
+    expect(jobs[0]!.windowStart).toBe(1);
+    expect(jobs[0]!.windowEnd).toBe(7);
+    expect(jobs[0]!.status).toBe("pending");
+    // Well under NOTE_SETTLEMENT_MIN_WINDOW_TURNS — a compact or a below-floor
+    // consecutive trigger would have written nothing at all.
+    expect(7).toBeLessThan(NOTE_SETTLEMENT_MIN_WINDOW_TURNS);
+  });
+
+  test("a repeat SessionEnd with no new activity is idempotent", async () => {
+    seedTurns(1, 5);
+    const handler = createSessionEndHandler({
+      db,
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+      settlementEnabled: true,
+    });
+
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+
+    const jobs = listNoteSettlementJobs(db, sessionId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.windowStart).toBe(1);
+    expect(jobs[0]!.windowEnd).toBe(5);
+  });
+
+  test("end then resume with new turns opens a SECOND window; the first job is untouched", async () => {
+    seedTurns(1, 5);
+    const handler = createSessionEndHandler({
+      db,
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+      settlementEnabled: true,
+    });
+
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+    const firstJob = listNoteSettlementJobs(db, sessionId)[0]!;
+
+    // Resume is a normal shape (spec D7): new turns belong to the NEXT window.
+    seedTurns(6, 4);
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+
+    const jobs = listNoteSettlementJobs(db, sessionId);
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]!.id).toBe(firstJob.id);
+    expect(jobs[0]!.windowStart).toBe(1);
+    expect(jobs[0]!.windowEnd).toBe(5);
+    expect(jobs[0]!.status).toBe("pending"); // untouched by the second end event
+    expect(jobs[1]!.windowStart).toBe(6);
+    expect(jobs[1]!.windowEnd).toBe(9);
+    expect(jobs[1]!.triggerType).toBe("sessionend");
+  });
+
+  test("an inert install (no era) writes no boundary and no job", async () => {
+    seedTurns(1, 5);
+    // No eraCutoffEpoch override: resolves via resolveEraCutoff(db), which is
+    // null on a fresh database — the product default (spec D9).
+    const handler = createSessionEndHandler({ db });
+
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+
+    expect(listNoteSettlementJobs(db, sessionId)).toHaveLength(0);
+    expect(getNoteSettlementCursor(db, sessionId)).toBe(0);
+  });
+
+  test("the kill switch stops the boundary write while the era stays up", async () => {
+    seedTurns(1, 5);
+    const handler = createSessionEndHandler({
+      db,
+      eraCutoffEpoch: ERA_CUTOFF_EPOCH,
+      settlementEnabled: false,
+    });
+
+    await handler(createInput({ sessionId: "session-boundary-1" }));
+
+    expect(listNoteSettlementJobs(db, sessionId)).toHaveLength(0);
   });
 });

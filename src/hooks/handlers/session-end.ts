@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
 
 import { runHookWriteTransaction } from "../../db/database";
+import { resolveEraCutoff } from "../../db/era";
+import { enqueueSessionEndNoteSettlementWindow } from "../../db/note-settlement";
 import { getSessionByContentId } from "../../db/sessions";
 import { hasNewTurnSinceSessionRunStart } from "../../db/session-run";
 import {
@@ -13,9 +15,24 @@ import {
   type WorkerClientDeps,
 } from "../../worker/client";
 import { getMaxTurnId } from "../../db/turns";
+import { DEFAULT_CONFIG, loadConfig } from "../../shared/config";
 import { resolveSessionTranscriptPath } from "../../shared/paths";
 import { runCaptureRepair, type CaptureRepairLog } from "../capture-repair";
 import type { HookResult, NormalizedHookInput } from "../types";
+
+/**
+ * A config read must never cost a hook (era.ts's own rule, mirrored here): the
+ * default is the safe answer on any failure, and the PRODUCT default
+ * (`eraCutoffEpoch: null`) is what keeps this whole path inert regardless —
+ * see the gate at the call site below.
+ */
+function loadSettlementEnabled(): boolean {
+  try {
+    return loadConfig().settlementEnabled;
+  } catch {
+    return DEFAULT_CONFIG.settlementEnabled;
+  }
+}
 
 /** SessionEnd runs under a 2s hook budget; the backstop scan stays well inside it. */
 export const SESSION_END_SCAN_MAX_LINES = 500;
@@ -51,6 +68,15 @@ export interface SessionEndHandlerDependencies {
   captureRepairBatchLines?: number;
   /** Seam for the repair itself (default `runCaptureRepair`). */
   captureRepairRunner?: typeof runCaptureRepair;
+  /**
+   * P2 era boundary (spec D11), read once at handler construction — same idiom
+   * as `stop.ts`. Omitted, it comes from `resolveEraCutoff`, whose default
+   * (`null`) leaves the sessionend window-freeze inert, same as every other
+   * settlement path.
+   */
+  eraCutoffEpoch?: number | null;
+  /** The kill switch on top of a live era (spec D9); defaults to config. */
+  settlementEnabled?: boolean;
 }
 
 export function createSessionEndHandler(
@@ -62,6 +88,12 @@ export function createSessionEndHandler(
     dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const captureRepairRunner =
     dependencies.captureRepairRunner ?? runCaptureRepair;
+  const eraCutoffEpoch =
+    dependencies.eraCutoffEpoch !== undefined
+      ? dependencies.eraCutoffEpoch
+      : resolveEraCutoff(dependencies.db);
+  const settlementEnabled =
+    dependencies.settlementEnabled ?? loadSettlementEnabled();
 
   return async function handleSessionEndHook(
     input: NormalizedHookInput,
@@ -198,6 +230,32 @@ export function createSessionEndHandler(
         writeTransaction(dependencies.db, () => {
           skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
+      }
+    }
+
+    // The sessionend settlement boundary (spec D7, ticket 05): the hook
+    // freezes and enqueues this session's window synchronously, right here —
+    // never through the async worker notification below, which only ever
+    // asks the worker to LEAK whatever is already due. Gated on the same
+    // era/kill-switch pair every other settlement path checks, so an inert
+    // install (the product default) takes this branch and writes nothing.
+    // Naturally idempotent: a repeat SessionEnd with no new activity re-derives
+    // the identical, already-consumed window and enqueues nothing (see
+    // `enqueueSessionEndNoteSettlementWindow`'s own doc).
+    if (settlementEnabled && eraCutoffEpoch !== null) {
+      try {
+        enqueueSessionEndNoteSettlementWindow(
+          dependencies.db,
+          session.id,
+          now(),
+          eraCutoffEpoch,
+        );
+      } catch (error) {
+        repairLog(
+          `session-end note settlement enqueue failed for session ${session.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     }
 

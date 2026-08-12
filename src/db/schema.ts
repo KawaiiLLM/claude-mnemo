@@ -49,6 +49,48 @@ const NOTE_DEBT_INDEX_DDL = `
     ON note_debt(session_id, status, prompt_number);
 `;
 
+// Hoisted for the same reason as NOTE_DEBT_TABLE_DDL: `trigger_type`'s CHECK
+// constraint cannot be ALTERed, so widening it (spec note-prompt-clock D7,
+// ticket 05: `sessionend` joins `compact`/`consecutive`/`residual`) requires
+// rebuilding the table from this one definition rather than editing SCHEMA_SQL
+// and a migration out of step with each other.
+const NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+`;
+
+const NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
+`;
+
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,38 +331,8 @@ const SCHEMA_SQL = `
   -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
   -- under replay, and the two triggers can each own a window that starts at the
   -- same place without one silently swallowing the other.
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
-    -- after the window was cut joins the next window, never this one, so a retry
-    -- settles the same set the first attempt saw.
-    window_start INTEGER NOT NULL,
-    window_end INTEGER NOT NULL,
-    trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual')
-    ),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
-    ),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
-    -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
-    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
-    claimed_at_epoch INTEGER,
-    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
-    -- A dispatch whose lease expired CASes on the generation it was claimed
-    -- under and so writes nothing over the attempt that displaced it.
-    claim_generation INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL,
-    UNIQUE(session_id, window_start, trigger_type)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
-    ON note_settlement_jobs(session_id, status, window_start);
+  ${NOTE_SETTLEMENT_JOBS_TABLE_DDL}
+  ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
     session_id INTEGER PRIMARY KEY
@@ -817,6 +829,7 @@ export function initializeSchema(db: Database): void {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
 
@@ -928,6 +941,64 @@ function ensureNoteDebtCursorReliefColumn(db: Database): void {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0",
   );
+}
+
+// `note_settlement_jobs` shipped (arc-spine-redesign, 0.8.4) with a three-value
+// trigger vocabulary. Spec note-prompt-clock D7 (ticket 05) adds a fourth: the
+// SessionEnd hook now freezes and enqueues its own window synchronously, tagged
+// `sessionend`. `trigger_type`'s CHECK constraint cannot be ALTERed, and
+// `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
+// table, so without this rebuild the hook's first insert throws a constraint
+// failure on every install that shipped before this ticket.
+//
+// Same detection idiom as `ensureNoteDebtReasonVocabulary`: read the stored DDL
+// for the newest value rather than a version counter, so a fresh database (whose
+// CREATE TABLE already carries `sessionend`) skips the rebuild entirely.
+function noteSettlementTriggerVocabularyIsStale(db: Database): boolean {
+  const storedDdl =
+    db
+      .query<{ sql: string | null }, []>(
+        `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`,
+      )
+      .get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+}
+
+function ensureNoteSettlementSessionEndTrigger(db: Database): void {
+  if (!noteSettlementTriggerVocabularyIsStale(db)) {
+    return;
+  }
+
+  // One IMMEDIATE transaction, same shape as the note_debt rebuild: deciding to
+  // rebuild outside the write lock is what lets two racing hook processes both
+  // start the rename, and a crash mid-rebuild must not leave the jobs table
+  // parked under a name nothing reads.
+  runWriteTransaction(db, () => {
+    if (!noteSettlementTriggerVocabularyIsStale(db)) {
+      return;
+    }
+
+    db.exec(
+      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend",
+    );
+    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_settlement_jobs (
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       )
+       SELECT
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       FROM note_settlement_jobs_pre_sessionend`,
+    );
+    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
+    // The index followed the renamed table and died with it.
+    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+  });
 }
 
 // `shadow_notes` arrives whole from SCHEMA_SQL (CREATE TABLE IF NOT EXISTS), but

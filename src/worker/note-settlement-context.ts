@@ -1,8 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "../db/database";
-import { getNoteDebt, recordNoteIdExposure } from "../db/note-debt";
-import type { NoteDebtReason, NoteDebtStatus } from "../db/note-debt";
+import { listOwedNoteTurnsInRange, recordNoteIdExposure } from "../db/note-debt";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import {
   listOpenSegments,
@@ -35,47 +34,41 @@ import { stripPrivateTags } from "../shared/tag-stripping";
  *
  * The one thing assembled here rather than borrowed is the WINDOW itself, which
  * has no existing reader: a window turn is presented as its note when it has
- * one, and as truncated raw material when it does not (trivial turns, and the
- * interior holes 裁决 20 requires be reconstructed).
+ * one, and as truncated raw material when it is a HOLE the payload must
+ * mechanically backfill (spec note-prompt-clock D7, ticket 05).
  */
 
 /** Turns of context BEFORE the window, rendered as recall renders them. */
 export const NOTE_SETTLEMENT_PRIOR_TURNS = 50;
 
 /**
- * Raw-material budget for an interior hole (裁决 20's ~1000 token/turn). The
- * model has to reconstruct a note from this and nothing else, so it is the
- * largest per-turn allowance in the payload.
+ * Raw-material budget for a hole (裁决 20's ~1000 token/turn). The model has to
+ * reconstruct a note from this and nothing else, so it is the largest per-turn
+ * allowance in the payload.
  */
 export const NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET = 1_000;
 
 /**
- * Raw-material budget for a trivial turn (spec D11's "琐碎 turn 以截断原文注入").
- * A trivial turn owes no note and gets no reconstruction — its text is here only
- * so the segment body can account for a conversational stretch, which needs far
- * less than a reconstruction does.
- */
-export const NOTE_SETTLEMENT_TRIVIAL_TOKEN_BUDGET = 300;
-
-/**
- * How a window turn reaches the model.
+ * How a window turn reaches the model (spec D7, ticket 05 — the payload is a
+ * MECHANICAL backfill, not a value judgement, so this classification is a plain
+ * membership test and nothing else):
  *
- *   - `noted`          its note is the material;
- *   - `interior-hole`  debt written off at residual claim time, but a LATER turn
- *                      in the same window was noted, so the arc reads as broken
- *                      without it. Gets raw material and owes a reconstruction;
- *   - `trailing-hole`  same write-off with nothing noted after it. Gets neither:
- *                      no member depends on it, the arc simply ends early;
- *   - `skipped`        aged or rolled back. Deliberately left alone — filling
- *                      aged holes would dissolve the reminder's authority;
- *   - `trivial`        no ledger row at all (no substantive tool call).
+ *   - `noted`    it already has a note — its note is the material;
+ *   - `hole`     it is still OWED one right now, by the same derived predicate
+ *                `listOwedNoteTurns` reads at prompt time
+ *                (`listOwedNoteTurnsInRange`), checked at DISPATCH time rather
+ *                than at window-freeze time. Gets raw material and owes a
+ *                reconstruction. The old "interior" / "trailing" / "trivial"
+ *                split is gone — ticket 05 deletes both of the payload's
+ *                former discretionary calls ("no debt row is trivial",
+ *                "a trailing gap is refused"), so every gap the window still
+ *                has when the payload runs gets backfilled, full stop;
+ *   - `skipped`  not owed and not noted — a compact marker, `undone`, rolled
+ *                back, or a turn the agent explicitly declined. Deliberately
+ *                left alone: value triage is the main agent's live `skip`,
+ *                never the payload's to re-litigate in hindsight.
  */
-export type NoteSettlementTurnKind =
-  | "noted"
-  | "interior-hole"
-  | "trailing-hole"
-  | "skipped"
-  | "trivial";
+export type NoteSettlementTurnKind = "noted" | "hole" | "skipped";
 
 export interface NoteSettlementWindowTurn {
   turnId: number;
@@ -84,10 +77,8 @@ export interface NoteSettlementWindowTurn {
   /** `S<session>/T<prompt>` — the only address the model ever sees (D7). */
   ref: string;
   kind: NoteSettlementTurnKind;
-  debtStatus: NoteDebtStatus | null;
-  debtReason: NoteDebtReason | null;
   note: ShadowNoteRecord | null;
-  /** Truncated prompt + response; only for `trivial` and `interior-hole`. */
+  /** Truncated prompt + response; only for a `hole`. */
   rawMaterial: string | null;
   createdAtEpoch: number;
   toolCallCount: number | null;
@@ -174,32 +165,23 @@ function buildRawMaterial(turn: TurnRecord, tokenBudget: number): string {
 }
 
 function classifyTurn(
-  debt: { status: NoteDebtStatus; reason: NoteDebtReason | null } | null,
   hasNote: boolean,
-  hasLaterNotedTurn: boolean,
+  isOwed: boolean,
 ): NoteSettlementTurnKind {
   if (hasNote) {
     return "noted";
   }
-  if (debt === null) {
-    return "trivial";
-  }
-  if (debt.status === "skipped" && debt.reason === "closed") {
-    return hasLaterNotedTurn ? "interior-hole" : "trailing-hole";
-  }
-  // A still-pending debt cannot occur in a frozen decided window; if one ever
-  // does (a hand-edited ledger), it reads as skipped rather than as a hole —
-  // reconstructing a turn the agent may still write up would duplicate the note.
-  return "skipped";
+  return isOwed ? "hole" : "skipped";
 }
 
 /**
  * Assemble one window's settlement context.
  *
- * Interior holes are DERIVED here and stored nowhere (ticket 05's decision 5):
- * "was written off but something after it was noted" is a fact about the window,
- * and a window is frozen, so the derivation is stable across retries without a
- * column to keep in sync.
+ * Holes are a DERIVED membership test, re-run here rather than read off a
+ * stored classification (ticket 05's decision 4/5): `listOwedNoteTurnsInRange`
+ * is read at the moment this context is built, which for the payload is
+ * DISPATCH time — so a note the main agent lands while the job sits queued
+ * already reads as `noted` here, before the model ever sees the turn as a gap.
  */
 export function buildNoteSettlementContext(
   db: Database,
@@ -220,23 +202,21 @@ export function buildNoteSettlementContext(
   for (const turn of windowRecords) {
     notes.set(turn.id, getShadowNote(db, turn.id));
   }
+  const owedTurnIds = new Set(
+    listOwedNoteTurnsInRange(
+      db,
+      job.sessionId,
+      job.windowStart,
+      job.windowEnd,
+    ).map((turn) => turn.turnId),
+  );
 
   const windowTurns: NoteSettlementWindowTurn[] = [];
   let previousCreatedAt: number | null = null;
-  for (let index = 0; index < windowRecords.length; index += 1) {
-    const turn = windowRecords[index]!;
+  for (const turn of windowRecords) {
     const note = notes.get(turn.id) ?? null;
-    const debt = getNoteDebt(db, turn.id);
-    const hasLaterNotedTurn = windowRecords
-      .slice(index + 1)
-      .some((later) => notes.get(later.id) != null);
-    const kind = classifyTurn(debt, note !== null, hasLaterNotedTurn);
-    const tokenBudget =
-      kind === "interior-hole"
-        ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET
-        : kind === "trivial"
-          ? NOTE_SETTLEMENT_TRIVIAL_TOKEN_BUDGET
-          : 0;
+    const kind = classifyTurn(note !== null, owedTurnIds.has(turn.id));
+    const tokenBudget = kind === "hole" ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET : 0;
     const draft = draftTypeFromTitle(note?.title ?? turn.title ?? "");
 
     windowTurns.push({
@@ -245,8 +225,6 @@ export function buildNoteSettlementContext(
       promptNumber: turn.promptNumber,
       ref: formatTurnAddress(turn),
       kind,
-      debtStatus: debt?.status ?? null,
-      debtReason: debt?.reason ?? null,
       note,
       rawMaterial: tokenBudget > 0 ? buildRawMaterial(turn, tokenBudget) : null,
       createdAtEpoch: turn.createdAtEpoch,
@@ -283,7 +261,7 @@ export function buildNoteSettlementContext(
     job,
     session,
     windowTurns,
-    interiorHoles: windowTurns.filter((turn) => turn.kind === "interior-hole"),
+    interiorHoles: windowTurns.filter((turn) => turn.kind === "hole"),
     priorTurnsRendering,
     openSegments,
     activeTopics: listTopics(db, "active"),

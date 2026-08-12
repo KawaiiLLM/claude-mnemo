@@ -335,6 +335,7 @@ export function createNoteSettlementDispatch(
       rejectedReferences: result.rejectedReferences,
       notesReconstructed: result.notesReconstructed,
       notesRejected: result.notesRejected,
+      notesYielded: result.notesYielded,
       summaryUpdated: result.summaryUpdated,
     });
 

@@ -172,12 +172,11 @@ export function renderNoteSettlementPrompt(
     "   Keep it inside its existing budget — roughly the length shown.",
     "",
     holes.length > 0
-      ? `6. RECONSTRUCTION. These turns were never written up but later turns in ` +
-        `the window depend on them: ${holes.join(", ")}. Their raw material is ` +
-        `in the window below (marked raw>). Write one reconstruction note each ` +
-        `into reconstructed_notes, same discipline as a turn note: title names ` +
-        `the activity and topic, content leads with the conclusion. Do not write ` +
-        `notes for any other turn.`
+      ? `6. RECONSTRUCTION. These turns still owe a note: ${holes.join(", ")}. ` +
+        `Their raw material is in the window below (marked raw>). Write one ` +
+        `reconstruction note each into reconstructed_notes, same discipline as ` +
+        `a turn note: title names the activity and topic, content leads with ` +
+        `the conclusion. Do not write notes for any other turn.`
       : "6. RECONSTRUCTION. No turn in this window needs one; leave " +
         "reconstructed_notes empty.",
     "",

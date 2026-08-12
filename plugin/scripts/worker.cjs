@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msq8mygc" : "dev";
+var BUILD_ID = true ? "0.9.11-msqanh7g" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -2138,6 +2138,41 @@ var NOTE_DEBT_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
 `;
+var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+`;
+var NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
+`;
 var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2378,38 +2413,8 @@ var SCHEMA_SQL = `
   -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
   -- under replay, and the two triggers can each own a window that starts at the
   -- same place without one silently swallowing the other.
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
-    -- after the window was cut joins the next window, never this one, so a retry
-    -- settles the same set the first attempt saw.
-    window_start INTEGER NOT NULL,
-    window_end INTEGER NOT NULL,
-    trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual')
-    ),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
-    ),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
-    -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
-    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
-    claimed_at_epoch INTEGER,
-    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
-    -- A dispatch whose lease expired CASes on the generation it was claimed
-    -- under and so writes nothing over the attempt that displaced it.
-    claim_generation INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL,
-    UNIQUE(session_id, window_start, trigger_type)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
-    ON note_settlement_jobs(session_id, status, window_start);
+  ${NOTE_SETTLEMENT_JOBS_TABLE_DDL}
+  ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
     session_id INTEGER PRIMARY KEY
@@ -2863,6 +2868,7 @@ function initializeSchema(db) {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
 function noteDebtReasonVocabularyIsStale(db) {
@@ -2909,6 +2915,41 @@ function ensureNoteDebtCursorReliefColumn(db) {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function noteSettlementTriggerVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+}
+function ensureNoteSettlementSessionEndTrigger(db) {
+  if (!noteSettlementTriggerVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!noteSettlementTriggerVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
+    );
+    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_settlement_jobs (
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       )
+       SELECT
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       FROM note_settlement_jobs_pre_sessionend`
+    );
+    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
+    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+  });
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -3643,6 +3684,30 @@ function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
        WHERE session_id = ? AND status = 'pending'`
   ).run(nowEpoch, nowEpoch, sessionId).changes;
 }
+function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number BETWEEN ? AND ?
+         AND t.status != 'undone'
+         AND t.was_rolled_back = 0
+         AND (t.type IS NULL OR t.type != 'compact')
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id
+             AND d.status = 'skipped'
+             AND d.reason = 'declined'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, rangeStart, rangeEnd);
+}
 function recordNoteIdExposure(db, input) {
   const statement = db.query(
     `INSERT OR IGNORE INTO note_id_exposures (
@@ -3733,25 +3798,14 @@ function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
      ), ?`
   ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
 }
-function getClassifiedThrough(db, sessionId) {
+function getMaxPromptNumber(db, sessionId) {
   return db.query(
-    `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`
-  ).get(sessionId)?.cursor ?? 0;
+    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+  ).get(sessionId)?.maxPromptNumber ?? 0;
 }
 function getDecidedPrefixEnd(db, sessionId, windowStart) {
-  const classifiedThrough = getClassifiedThrough(db, sessionId);
-  if (classifiedThrough < windowStart) {
-    return windowStart - 1;
-  }
-  const firstPending = db.query(
-    `SELECT MIN(prompt_number) AS promptNumber FROM note_debt
-         WHERE session_id = ? AND status = 'pending' AND prompt_number >= ?`
-  ).get(sessionId, windowStart)?.promptNumber ?? null;
-  if (firstPending === null) {
-    return classifiedThrough;
-  }
-  return Math.min(classifiedThrough, firstPending - 1);
+  const ended = getMaxPromptNumber(db, sessionId) - 1;
+  return Math.max(windowStart - 1, ended);
 }
 function getCompactBoundaryPromptNumber(db, sessionId) {
   return db.query(
@@ -3770,8 +3824,10 @@ function planNoteSettlementWindows(db, sessionId, trigger, options) {
   if (trigger === "compact") {
     const boundary = getCompactBoundaryPromptNumber(db, sessionId);
     if (boundary !== null) {
-      prefixEnd = Math.min(prefixEnd, boundary);
+      prefixEnd = boundary;
     }
+  } else if (trigger === "sessionend") {
+    prefixEnd = getMaxPromptNumber(db, sessionId);
   }
   const plans = [];
   while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
@@ -3784,12 +3840,13 @@ function planNoteSettlementWindows(db, sessionId, trigger, options) {
     });
     windowStart = windowEnd + 1;
   }
-  if (trigger === "compact" && prefixEnd - windowStart + 1 >= minWindowTurns) {
+  const remainderFloor = trigger === "sessionend" ? 1 : minWindowTurns;
+  if ((trigger === "compact" || trigger === "sessionend") && prefixEnd - windowStart + 1 >= remainderFloor) {
     plans.push({
       sessionId,
       windowStart,
       windowEnd: prefixEnd,
-      triggerType: "compact"
+      triggerType: trigger
     });
   }
   return plans;
@@ -4346,9 +4403,42 @@ function createNoteSettlementScheduler(deps) {
     }
     return { triggered, created, dispatched, residualSessionIds };
   }
+  async function leakDueSessions(excludeSessionDbId) {
+    const eraCutoffEpoch = config3.eraCutoffEpoch ?? resolveEraCutoff(db);
+    if (!config3.settlementEnabled || eraCutoffEpoch === null) {
+      return [];
+    }
+    if (isGracefulExit()) {
+      return [];
+    }
+    const excluded = /* @__PURE__ */ new Set();
+    if (excludeSessionDbId !== void 0) {
+      excluded.add(excludeSessionDbId);
+    }
+    let dueSessionIds;
+    try {
+      dueSessionIds = listDispatchableNoteSettlementSessions(db, {
+        excludeSessionIds: excluded,
+        nowEpoch: now(),
+        nowMs: nowMs(),
+        leaseMs: claimOptions.leaseMs,
+        maxAttempts: claimOptions.maxAttempts,
+        limit: deps.residualLimit ?? NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER
+      });
+    } catch (error49) {
+      logger.error?.("note settlement leak scan failed", { error: error49 });
+      return [];
+    }
+    const dispatched = [];
+    for (const sessionDbId of dueSessionIds) {
+      dispatched.push(...await drainSession(sessionDbId, 1));
+    }
+    return dispatched;
+  }
   return {
     onTurnStop: (sessionDbId) => runTrigger(sessionDbId, "consecutive"),
-    onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact")
+    onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact"),
+    leakDueSessions
   };
 }
 
@@ -4882,6 +4972,42 @@ function upsertShadowNote(db, input) {
     throw new Error(`Failed to write shadow note for turn ${input.turnId}.`);
   }
   return written;
+}
+function upsertReconstructedShadowNote(db, input) {
+  return db.query(
+    `
+          INSERT INTO shadow_notes (
+            turn_id,
+            title,
+            content,
+            insight,
+            writer_model,
+            writer_origin,
+            ride_turn_id,
+            created_at_epoch,
+            updated_at_epoch
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(turn_id) DO UPDATE SET
+            title = excluded.title,
+            content = excluded.content,
+            insight = excluded.insight,
+            writer_model = excluded.writer_model,
+            writer_origin = excluded.writer_origin,
+            ride_turn_id = excluded.ride_turn_id,
+            updated_at_epoch = excluded.updated_at_epoch
+          WHERE shadow_notes.writer_origin != 'agent'
+        `
+  ).run(
+    input.turnId,
+    input.title,
+    input.content,
+    input.insight ?? null,
+    input.writerModel ?? null,
+    input.writerOrigin ?? "settlement",
+    input.rideTurnId ?? null,
+    input.nowEpoch,
+    input.nowEpoch
+  ).changes > 0;
 }
 function getShadowNote(db, turnId) {
   return db.query(
@@ -10206,7 +10332,6 @@ function stripPrivateTags(text) {
 // src/worker/note-settlement-context.ts
 var NOTE_SETTLEMENT_PRIOR_TURNS = 50;
 var NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET = 1e3;
-var NOTE_SETTLEMENT_TRIVIAL_TOKEN_BUDGET = 300;
 function truncateToTokens2(text, tokenBudget) {
   if (estimateDiaryTokens(text) <= tokenBudget) {
     return text;
@@ -10243,17 +10368,11 @@ function buildRawMaterial(turn, tokenBudget) {
   }
   return parts.join("\n");
 }
-function classifyTurn(debt, hasNote, hasLaterNotedTurn) {
+function classifyTurn(hasNote, isOwed) {
   if (hasNote) {
     return "noted";
   }
-  if (debt === null) {
-    return "trivial";
-  }
-  if (debt.status === "skipped" && debt.reason === "closed") {
-    return hasLaterNotedTurn ? "interior-hole" : "trailing-hole";
-  }
-  return "skipped";
+  return isOwed ? "hole" : "skipped";
 }
 function buildNoteSettlementContext(db, job, options) {
   const session = getSession(db, job.sessionId);
@@ -10268,15 +10387,20 @@ function buildNoteSettlementContext(db, job, options) {
   for (const turn of windowRecords) {
     notes.set(turn.id, getShadowNote(db, turn.id));
   }
+  const owedTurnIds = new Set(
+    listOwedNoteTurnsInRange(
+      db,
+      job.sessionId,
+      job.windowStart,
+      job.windowEnd
+    ).map((turn) => turn.turnId)
+  );
   const windowTurns = [];
   let previousCreatedAt = null;
-  for (let index = 0; index < windowRecords.length; index += 1) {
-    const turn = windowRecords[index];
+  for (const turn of windowRecords) {
     const note = notes.get(turn.id) ?? null;
-    const debt = getNoteDebt(db, turn.id);
-    const hasLaterNotedTurn = windowRecords.slice(index + 1).some((later) => notes.get(later.id) != null);
-    const kind = classifyTurn(debt, note !== null, hasLaterNotedTurn);
-    const tokenBudget = kind === "interior-hole" ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET : kind === "trivial" ? NOTE_SETTLEMENT_TRIVIAL_TOKEN_BUDGET : 0;
+    const kind = classifyTurn(note !== null, owedTurnIds.has(turn.id));
+    const tokenBudget = kind === "hole" ? NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET : 0;
     const draft = draftTypeFromTitle(note?.title ?? turn.title ?? "");
     windowTurns.push({
       turnId: turn.id,
@@ -10284,8 +10408,6 @@ function buildNoteSettlementContext(db, job, options) {
       promptNumber: turn.promptNumber,
       ref: formatTurnAddress(turn),
       kind,
-      debtStatus: debt?.status ?? null,
-      debtReason: debt?.reason ?? null,
       note,
       rawMaterial: tokenBudget > 0 ? buildRawMaterial(turn, tokenBudget) : null,
       createdAtEpoch: turn.createdAtEpoch,
@@ -10310,7 +10432,7 @@ function buildNoteSettlementContext(db, job, options) {
     job,
     session,
     windowTurns,
-    interiorHoles: windowTurns.filter((turn) => turn.kind === "interior-hole"),
+    interiorHoles: windowTurns.filter((turn) => turn.kind === "hole"),
     priorTurnsRendering,
     openSegments,
     activeTopics: listTopics(db, "active"),
@@ -10477,7 +10599,7 @@ function renderNoteSettlementPrompt(context) {
     "   settled outcomes, `next_steps` is what a resumed session would do first.",
     "   Keep it inside its existing budget \u2014 roughly the length shown.",
     "",
-    holes.length > 0 ? `6. RECONSTRUCTION. These turns were never written up but later turns in the window depend on them: ${holes.join(", ")}. Their raw material is in the window below (marked raw>). Write one reconstruction note each into reconstructed_notes, same discipline as a turn note: title names the activity and topic, content leads with the conclusion. Do not write notes for any other turn.` : "6. RECONSTRUCTION. No turn in this window needs one; leave reconstructed_notes empty.",
+    holes.length > 0 ? `6. RECONSTRUCTION. These turns still owe a note: ${holes.join(", ")}. Their raw material is in the window below (marked raw>). Write one reconstruction note each into reconstructed_notes, same discipline as a turn note: title names the activity and topic, content leads with the conclusion. Do not write notes for any other turn.` : "6. RECONSTRUCTION. No turn in this window needs one; leave reconstructed_notes empty.",
     "",
     "## Session state (rewrite target)",
     "",
@@ -10815,6 +10937,7 @@ var EMPTY_COUNTS = {
   rejectedReferences: 0,
   notesReconstructed: 0,
   notesRejected: 0,
+  notesYielded: 0,
   summaryUpdated: false
 };
 function parseAddressToken(token) {
@@ -11006,11 +11129,11 @@ function applyNoteSettlementWriteBack(db, options) {
       if (turnId === null || !options.reconstructableTurnIds.has(turnId)) {
         counts.notesRejected += 1;
         options.logger?.warn?.(
-          `[claude-mnemo] settlement job ${job.id}: refused reconstruction for ${note.turn} (not an interior hole of this window)`
+          `[claude-mnemo] settlement job ${job.id}: refused reconstruction for ${note.turn} (not an owed hole of this window)`
         );
         continue;
       }
-      upsertShadowNote(db, {
+      const written = upsertReconstructedShadowNote(db, {
         turnId,
         title: note.title,
         content: note.content,
@@ -11020,7 +11143,11 @@ function applyNoteSettlementWriteBack(db, options) {
         rideTurnId: options.rideTurnId,
         nowEpoch: options.nowEpoch
       });
-      counts.notesReconstructed += 1;
+      if (written) {
+        counts.notesReconstructed += 1;
+      } else {
+        counts.notesYielded += 1;
+      }
     }
     if (response.sessionSummary) {
       const updated = updateSessionSummaryRewrite(
@@ -11301,6 +11428,7 @@ function createNoteSettlementDispatch(options) {
       rejectedReferences: result.rejectedReferences,
       notesReconstructed: result.notesReconstructed,
       notesRejected: result.notesRejected,
+      notesYielded: result.notesYielded,
       summaryUpdated: result.summaryUpdated
     });
     return { ok: true };
@@ -45926,8 +46054,13 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
   // the receipt measures a write against, rather than restated as prose here.
-  // Three surfaces say these numbers; two of them used to say them from memory.
-  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in a batch whose result cannot change what the note says (a commit, a check you expect to pass). Which batch is last is not knowable before its results return, so do not wait for it: a turn that ends still owing its note is written from any batch of a later turn, results in hand, and that is the ordinary path. Never open a batch of only note calls except for a backlog-relief list or to correct a note already written. The note describes its addressed turn only. title (~" + NOTE_TOKEN_BUDGET.title + " tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the addressing line, one glance says what the turn did. content (~" + NOTE_TOKEN_BUDGET.content + ' tokens): the conclusion, then the distilled evidence chain that produced it, including rejected alternatives and who decided; never restate the title, and never narrate the act of looking ("I checked the transcript and found it has no X" is "the transcript has no X"). insight (~' + NOTE_TOKEN_BUDGET.insight + " tokens): optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. It is read far from its turn, so it must stand alone: claim first, evidence after, and no session-local literal (id, ticket number) in the opening sentence. Each successful write answers with its own token count against those budgets. skip: set true, with `turn` alone, to decline a turn you owe that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
+  //
+  // Single home of the note contract (user ruling, S15069 T586): fields,
+  // budgets, the skip test and replace live HERE and nowhere else; the
+  // SessionStart block (src/hooks/handlers/context-note-taking.ts) carries
+  // only the batch-timing digest and points at this text. Capped at 500
+  // tokens by tests/mcp/definitions.test.ts.
+  note: "Write a note about one of this session's turns. `turn` is the `S<session>/T<prompt>` address from the injected `mnemo current turn` line, its `owed:` suffix, or the backlog-relief block \u2014 the only sources of an address; never recall or invent one. Timing: the SessionStart block's three rules. A note describes its addressed turn only, in English; quoted user phrases keep their original language. title (~" + NOTE_TOKEN_BUDGET.title + " tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the activity word states the real stage, never a hoped-for one. content (~" + NOTE_TOKEN_BUDGET.content + ' tokens): the conclusion, then the evidence chain that produced it \u2014 rejected alternatives with reasons, who decided (user/data/literature/inference); proper nouns over narration; never restate the title, never narrate looking ("I checked X and found no Y" is "X has no Y"). insight (~' + NOTE_TOKEN_BUDGET.insight + " tokens): empty by default \u2014 only long-term, hard-to-reacquire knowledge orthogonal to the conclusion; it is read far from its turn, so claim first, evidence after, and no session-local literal in the opening sentence. The receipt reports token counts against these budgets \u2014 over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique in the turn; the check: deleting it from history would cost the project no decision, progress, or coherence. Content that left your context and is not recovered in passing is skipped, never invented; recovered in passing, it is writable again. Never skip a user decision, correction, or veto, or any turn with a conclusion, a rejected option, or a lesson \u2014 whatever the tool count. Re-sending a turn's note requires `replace: true` (receipt `Updated`) \u2014 send it whenever a later result changes what it should say; a real note after a skip needs no replace. `crossSession: true` only for another session's turn; you should never need it. The note call goes last in its batch; cite other turns only as [S15069/T332], only ids seen in injected context; never include <private> content."
 };
 var recallInputShape = {
   id: external_exports.string().optional(),
@@ -51396,6 +51529,13 @@ function createWorkerCore(deps) {
       });
     }
   }
+  async function runNoteSettlementLeak(sessionDbId) {
+    try {
+      await noteSettlement.leakDueSessions(sessionDbId);
+    } catch (error49) {
+      logger.error?.("note settlement leak failed", { sessionDbId, error: error49 });
+    }
+  }
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer = null;
   let pendingDiaryTriggerSessionDbId;
@@ -51621,6 +51761,7 @@ function createWorkerCore(deps) {
   async function handleTurnStop(sessionDbId) {
     await scanAndDrainGlobalQueue(sessionDbId);
     await runNoteSettlementTrigger(sessionDbId, "turn-stop");
+    await runNoteSettlementLeak(sessionDbId);
   }
   async function drainSessionCompletely(sessionDbId) {
     let previousCount = Number.POSITIVE_INFINITY;
@@ -51642,6 +51783,7 @@ function createWorkerCore(deps) {
   async function finishSession(sessionDbId) {
     await drainSessionCompletely(sessionDbId);
     await scanAndDrainGlobalQueue(sessionDbId);
+    await runNoteSettlementLeak(sessionDbId);
   }
   async function handleCompact(sessionDbId, transcriptPath) {
     if (transcriptPath) {
@@ -51665,6 +51807,7 @@ function createWorkerCore(deps) {
     }
     await scanAndDrainGlobalQueue(sessionDbId);
     await runNoteSettlementTrigger(sessionDbId, "compact");
+    await runNoteSettlementLeak(sessionDbId);
   }
   return {
     recoverFromCrash() {

@@ -610,6 +610,41 @@ var NOTE_DEBT_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
 `;
+var NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+`;
+var NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
+`;
 var SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -850,38 +885,8 @@ var SCHEMA_SQL = `
   -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
   -- under replay, and the two triggers can each own a window that starts at the
   -- same place without one silently swallowing the other.
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
-    -- after the window was cut joins the next window, never this one, so a retry
-    -- settles the same set the first attempt saw.
-    window_start INTEGER NOT NULL,
-    window_end INTEGER NOT NULL,
-    trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual')
-    ),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
-    ),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
-    -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
-    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
-    claimed_at_epoch INTEGER,
-    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
-    -- A dispatch whose lease expired CASes on the generation it was claimed
-    -- under and so writes nothing over the attempt that displaced it.
-    claim_generation INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL,
-    UNIQUE(session_id, window_start, trigger_type)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
-    ON note_settlement_jobs(session_id, status, window_start);
+  ${NOTE_SETTLEMENT_JOBS_TABLE_DDL}
+  ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
     session_id INTEGER PRIMARY KEY
@@ -1335,6 +1340,7 @@ function initializeSchema(db) {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
 function noteDebtReasonVocabularyIsStale(db) {
@@ -1381,6 +1387,41 @@ function ensureNoteDebtCursorReliefColumn(db) {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function noteSettlementTriggerVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+}
+function ensureNoteSettlementSessionEndTrigger(db) {
+  if (!noteSettlementTriggerVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!noteSettlementTriggerVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
+    );
+    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_settlement_jobs (
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       )
+       SELECT
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       FROM note_settlement_jobs_pre_sessionend`
+    );
+    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
+    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+  });
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -3096,7 +3137,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msq8mygc" : "dev";
+var BUILD_ID = true ? "0.9.11-msqanh7g" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -23078,55 +23119,18 @@ function createMilestoneContextHandler(dependencies) {
   };
 }
 
-// src/shared/note-budget.ts
-var NOTE_TOKEN_BUDGET = {
-  title: 20,
-  content: 100,
-  insight: 60
-};
-
 // src/hooks/handlers/context-note-taking.ts
 var NOTE_TAKING_INSTRUCTIONS = `<mnemo-note-taking>
-You keep notes on your own turns.
-Trigger: "mnemo current turn: S\u2026/T\u2026" with the user's message is this turn's
-own address. Write its note in a batch whose result cannot change what the
-note says \u2014 a commit, a push, a check you expect to pass. Which batch is
-last is not knowable before its results return, so do not wait for it: a
-turn that ends still owing its note is written from ANY batch of a later
-turn, results in hand, and that is the ordinary path. The note describes
-its own turn only; when a later result changes it, in this turn or a
-following one, resend with replace:true.
-Never start a tool call just to write a note. Exactly two things authorize
-a batch of only note calls: a "backlog relief" list, and correcting a note
-already written \u2014 a written note owes nothing, so no reminder returns to it.
-Answer note(turn:"S\u2026/T\u2026", skip:true) for a turn you owe that holds
-nothing worth keeping, or whose details left your context with no open
-batch recovering them in passing \u2014 never invent a note from the listed
-line, never open a lookup just to rescue one.
-Fields:
-- title (~${NOTE_TOKEN_BUDGET.title} tokens): "<activity>+<topic>: <what this turn covered>" \u2014 the
-  addressing line, one glance says what the turn did. Activity words
-  (research/design/implement/fix/measure/review/write/ops) must state the
-  real stage, never a hoped-for one.
-- content (~${NOTE_TOKEN_BUDGET.content} tokens): the conclusion, then the evidence chain that
-  produced it \u2014 how it was reached, not just that it was. Include rejected
-  alternatives with reasons, and who decided (user/data/literature/
-  inference). Prefer proper nouns (file names, error names) over narration.
-  Never restate the title; never narrate looking \u2014 "I checked the transcript
-  and found no X" is "the transcript has no X".
-- insight (~${NOTE_TOKEN_BUDGET.insight} tokens): empty by default. Only what is worth keeping
-  long-term, hard to reacquire, and orthogonal to the conclusion \u2014 pitfalls
-  hit, durable pointers, transferable lessons. Anything one search away does
-  not qualify. It is read far from its turn, so it must stand alone: claim
-  first, evidence after, and no session-local literal (id, ticket number)
-  in the opening sentence.
-- skip: true with turn alone, for the refusal above.
-Each write's receipt reports its token count against these budgets \u2014 over
-budget, cut the next one.
-Rules: write title/content/insight in English; quoted user phrases keep
-their original language. The note call always goes last in a batch; cite
-other turns only as [S15069/T332] and only ids seen in injected context;
-omit numbers you are not sure of; never include <private> content.
+You keep notes on your own turns. The injected "mnemo current turn" line,
+its owed suffix, and the backlog-relief block are the ONLY sources of a
+note address \u2014 never recall one from memory, never invent one.
+1. Each turn's first tool batch also settles owed turns \u2014 a note or a
+   skip per address.
+2. A turn's own note is written by a later turn, never by itself.
+3. Never open a batch just for notes, except while the relief block is
+   present or to correct a note already written.
+Fields, budgets, the skip test, and replace live in the note tool's
+description.
 </mnemo-note-taking>`;
 function createNoteTakingContextHandler() {
   return async function handleNoteTakingContextHook(input) {
@@ -23427,6 +23431,163 @@ function createPromptDispatchHandler(dependencies = {}) {
     }
     return rules?.hookSpecificOutput ? { continue: true, hookSpecificOutput: rules.hookSpecificOutput } : { continue: true };
   };
+}
+
+// src/db/note-settlement.ts
+var NOTE_SETTLEMENT_CONSECUTIVE_TURNS = 50;
+var NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
+var NOTE_SETTLEMENT_LEASE_MS = 10 * 60 * 1e3;
+var NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1e3;
+var JOB_COLUMNS = `
+    id,
+    session_id AS sessionId,
+    window_start AS windowStart,
+    window_end AS windowEnd,
+    trigger_type AS triggerType,
+    status,
+    attempts,
+    retry_at_epoch AS retryAtEpoch,
+    claimed_at_epoch AS claimedAtEpoch,
+    claim_generation AS claimGeneration,
+    last_error AS lastError,
+    created_at_epoch AS createdAtEpoch,
+    updated_at_epoch AS updatedAtEpoch`;
+var JOB_SELECT = `SELECT${JOB_COLUMNS} FROM note_settlement_jobs`;
+function getNoteSettlementCursor(db, sessionId) {
+  return db.query(
+    `SELECT last_settled_prompt_number AS cursor
+         FROM note_settlement_cursors WHERE session_id = ?`
+  ).get(sessionId)?.cursor ?? 0;
+}
+function getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch) {
+  return db.query(
+    `SELECT MAX(prompt_number) AS floor FROM turns
+         WHERE session_id = ? AND created_at_epoch < ?`
+  ).get(sessionId, eraCutoffEpoch)?.floor ?? 0;
+}
+function getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch) {
+  const highestEnqueued = db.query(
+    `SELECT MAX(window_end) AS windowEnd FROM note_settlement_jobs
+         WHERE session_id = ?`
+  ).get(sessionId)?.windowEnd ?? 0;
+  return Math.max(
+    getNoteSettlementCursor(db, sessionId),
+    highestEnqueued ?? 0,
+    getEraFloorPromptNumber(db, sessionId, eraCutoffEpoch)
+  ) + 1;
+}
+function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
+  db.query(
+    `INSERT OR IGNORE INTO note_settlement_cursors (
+       session_id, last_settled_prompt_number, updated_at_epoch
+     )
+     SELECT ?, COALESCE(
+       (SELECT MAX(prompt_number) FROM turns
+        WHERE session_id = ? AND created_at_epoch < ?), 0
+     ), ?`
+  ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
+}
+function getMaxPromptNumber2(db, sessionId) {
+  return db.query(
+    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+  ).get(sessionId)?.maxPromptNumber ?? 0;
+}
+function getDecidedPrefixEnd(db, sessionId, windowStart) {
+  const ended = getMaxPromptNumber2(db, sessionId) - 1;
+  return Math.max(windowStart - 1, ended);
+}
+function getCompactBoundaryPromptNumber(db, sessionId) {
+  return db.query(
+    "SELECT last_compact_turn AS boundary FROM sessions WHERE id = ?"
+  ).get(sessionId)?.boundary ?? null;
+}
+function planNoteSettlementWindows(db, sessionId, trigger, options) {
+  const consecutiveTurns = options.consecutiveTurns ?? NOTE_SETTLEMENT_CONSECUTIVE_TURNS;
+  const minWindowTurns = options.minWindowTurns ?? NOTE_SETTLEMENT_MIN_WINDOW_TURNS;
+  let windowStart = getNoteSettlementWindowStart(
+    db,
+    sessionId,
+    options.eraCutoffEpoch
+  );
+  let prefixEnd = getDecidedPrefixEnd(db, sessionId, windowStart);
+  if (trigger === "compact") {
+    const boundary = getCompactBoundaryPromptNumber(db, sessionId);
+    if (boundary !== null) {
+      prefixEnd = boundary;
+    }
+  } else if (trigger === "sessionend") {
+    prefixEnd = getMaxPromptNumber2(db, sessionId);
+  }
+  const plans = [];
+  while (prefixEnd - windowStart + 1 >= consecutiveTurns) {
+    const windowEnd = windowStart + consecutiveTurns - 1;
+    plans.push({
+      sessionId,
+      windowStart,
+      windowEnd,
+      triggerType: "consecutive"
+    });
+    windowStart = windowEnd + 1;
+  }
+  const remainderFloor = trigger === "sessionend" ? 1 : minWindowTurns;
+  if ((trigger === "compact" || trigger === "sessionend") && prefixEnd - windowStart + 1 >= remainderFloor) {
+    plans.push({
+      sessionId,
+      windowStart,
+      windowEnd: prefixEnd,
+      triggerType: trigger
+    });
+  }
+  return plans;
+}
+function enqueueSessionEndNoteSettlementWindow(db, sessionId, nowEpoch, eraCutoffEpoch) {
+  const plans = planNoteSettlementWindows(db, sessionId, "sessionend", {
+    eraCutoffEpoch
+  });
+  return enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch);
+}
+function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
+  if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
+    return null;
+  }
+  if (windowEnd < windowStart) {
+    return null;
+  }
+  const job = db.query(
+    `INSERT OR IGNORE INTO note_settlement_jobs (
+           session_id, window_start, window_end, trigger_type,
+           status, attempts, retry_at_epoch,
+           created_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+         RETURNING${JOB_COLUMNS}`
+  ).get(sessionId, windowStart, windowEnd, triggerType, nowEpoch, nowEpoch) ?? null;
+  if (job) {
+    ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch);
+  }
+  return job;
+}
+function enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch) {
+  if (plans.length === 0) {
+    return [];
+  }
+  return runWriteTransaction(db, () => {
+    const created = [];
+    for (const plan of plans) {
+      const job = insertJob(
+        db,
+        plan.sessionId,
+        plan.windowStart,
+        plan.windowEnd,
+        plan.triggerType,
+        nowEpoch,
+        eraCutoffEpoch
+      );
+      if (job) {
+        created.push(job);
+      }
+    }
+    return created;
+  });
 }
 
 // src/db/orphan-turns.ts
@@ -24040,6 +24201,13 @@ function runCaptureRepair(db, session, transcriptPath, options) {
 }
 
 // src/hooks/handlers/session-end.ts
+function loadSettlementEnabled() {
+  try {
+    return loadConfig().settlementEnabled;
+  } catch {
+    return DEFAULT_CONFIG.settlementEnabled;
+  }
+}
 var SESSION_END_SCAN_MAX_LINES = 500;
 var SESSION_END_REPAIR_BUDGET_MS = 400;
 var SESSION_END_SCAN_BATCH_LINES = 50;
@@ -24049,6 +24217,8 @@ function createSessionEndHandler(dependencies) {
   const nowMs = dependencies.nowMs ?? Date.now;
   const writeTransaction = dependencies.runHookWriteTransaction ?? runHookWriteTransaction;
   const captureRepairRunner = dependencies.captureRepairRunner ?? runCaptureRepair;
+  const eraCutoffEpoch = dependencies.eraCutoffEpoch !== void 0 ? dependencies.eraCutoffEpoch : resolveEraCutoff(dependencies.db);
+  const settlementEnabled = dependencies.settlementEnabled ?? loadSettlementEnabled();
   return async function handleSessionEndHook(input) {
     if (!input.sessionId) {
       return { continue: true };
@@ -24133,6 +24303,20 @@ function createSessionEndHandler(dependencies) {
         writeTransaction(dependencies.db, () => {
           skipOrphanTurns(dependencies.db, session.id, now(), orphanTurns);
         });
+      }
+    }
+    if (settlementEnabled && eraCutoffEpoch !== null) {
+      try {
+        enqueueSessionEndNoteSettlementWindow(
+          dependencies.db,
+          session.id,
+          now(),
+          eraCutoffEpoch
+        );
+      } catch (error48) {
+        repairLog(
+          `session-end note settlement enqueue failed for session ${session.id}: ${error48 instanceof Error ? error48.message : String(error48)}`
+        );
       }
     }
     return {

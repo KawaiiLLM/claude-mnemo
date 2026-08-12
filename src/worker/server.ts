@@ -379,6 +379,21 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     }
   }
 
+  /**
+   * The leak point (spec D7, ticket 05), run after EVERY settlement entry
+   * point's own logic — including the below-threshold turn-stop path that used
+   * to return before any cross-session scan ran at all. A settlement fault
+   * here must never fail the content event that carried it, same tolerance as
+   * `runNoteSettlementTrigger`.
+   */
+  async function runNoteSettlementLeak(sessionDbId: number): Promise<void> {
+    try {
+      await noteSettlement.leakDueSessions(sessionDbId);
+    } catch (error) {
+      logger.error?.("note settlement leak failed", { sessionDbId, error });
+    }
+  }
+
   const diaryStateStore = createDiaryStateStore(deps.db);
   let diaryContinuationTimer: unknown | null = null;
   let pendingDiaryTriggerSessionDbId: number | null | undefined;
@@ -711,6 +726,10 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // from ordinary work. It settles nothing until 50 consecutive decided turns
     // have accumulated, so every other turn-stop costs one indexed read.
     await runNoteSettlementTrigger(sessionDbId, "turn-stop");
+    // The leak (spec D7, ticket 05): unconditional, including the below-
+    // threshold case above that just returned without triggering anything of
+    // its own.
+    await runNoteSettlementLeak(sessionDbId);
   }
 
   async function drainSessionCompletely(sessionDbId: number): Promise<void> {
@@ -735,11 +754,17 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   }
 
   async function finishSession(sessionDbId: number): Promise<void> {
-    // SessionEnd is deliberately NOT a settlement trigger (spec D9, 裁决 7):
-    // it drains what capture left behind and nothing else. A closed session's
-    // unsettled window is picked up by another session's residual dispatch.
+    // SessionEnd still opens no window of its OWN session here (spec D9, 裁決
+    // 7): closing this session triggers nothing about its own turns — the
+    // SessionEnd HOOK already froze and enqueued that window synchronously
+    // (spec D7, ticket 05), before this flush was ever notified. What flush
+    // adds is the leak: one attempt at whatever OTHER session's job — most
+    // often a sessionend job, which has no trigger of its own — is due right
+    // now. Without it, a session that enqueues its tail and then goes quiet
+    // strands that job until an unrelated session's trigger happens by.
     await drainSessionCompletely(sessionDbId);
     await scanAndDrainGlobalQueue(sessionDbId);
+    await runNoteSettlementLeak(sessionDbId);
   }
 
   async function handleCompact(
@@ -775,6 +800,9 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
     // and the queue is drained, so the note-debt ledger is as decided as it
     // will get for the turns this compact closes over.
     await runNoteSettlementTrigger(sessionDbId, "compact");
+    // The leak (spec D7, ticket 05) — see handleTurnStop's call for why this
+    // runs unconditionally after every settlement entry point.
+    await runNoteSettlementLeak(sessionDbId);
   }
 
   return {

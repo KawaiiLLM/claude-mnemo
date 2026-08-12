@@ -112,6 +112,19 @@ export interface NoteSettlementPassResult {
 export interface NoteSettlementScheduler {
   onTurnStop(sessionDbId: number): Promise<NoteSettlementPassResult>;
   onCompact(sessionDbId: number): Promise<NoteSettlementPassResult>;
+  /**
+   * The leak point spec D7 (ticket 05) requires explicit rather than assumed:
+   * one attempt at whatever OTHER session's job is due right now, independent
+   * of whether the CALLING event triggered a window of its own. A sessionend
+   * job — frozen and enqueued synchronously by the SessionEnd hook, never by a
+   * trigger this scheduler runs — has no trigger of its own to come back for
+   * it; without this, a session that ends and then goes quiet strands its own
+   * tail window forever. Called after every settlement entry point (turn-stop,
+   * compact, and flush/finishSession), including the overwhelmingly common
+   * below-threshold turn-stop that used to return before reaching any
+   * cross-session scan at all.
+   */
+  leakDueSessions(excludeSessionDbId?: number): Promise<NoteSettlementJob[]>;
 }
 
 /**
@@ -505,8 +518,61 @@ export function createNoteSettlementScheduler(
     return { triggered, created, dispatched, residualSessionIds };
   }
 
+  /**
+   * The leak point (spec D7, ticket 05). Unlike `runTrigger`, this never plans
+   * or enqueues anything — it only asks "what is due right now, for anyone
+   * other than the caller" and drains one job each, using the SAME
+   * `listDispatchableNoteSettlementSessions` primitive `runTrigger` already
+   * uses for other sessions' backlog. That reuse is deliberate: it does not
+   * discriminate by trigger type, so a `sessionend` job — which has no trigger
+   * of its own — is drained by the same call that opportunistically clears a
+   * stray `consecutive`/`compact`/`residual` job left un-dispatched by an
+   * earlier graceful-exit window.
+   *
+   * Gated on the same era/kill-switch pair every other path checks: a leak
+   * attempt on an inert install must cost nothing beyond the gate read itself.
+   */
+  async function leakDueSessions(
+    excludeSessionDbId?: number,
+  ): Promise<NoteSettlementJob[]> {
+    const eraCutoffEpoch = config.eraCutoffEpoch ?? resolveEraCutoff(db);
+    if (!config.settlementEnabled || eraCutoffEpoch === null) {
+      return [];
+    }
+    if (isGracefulExit()) {
+      return [];
+    }
+
+    const excluded = new Set<number>();
+    if (excludeSessionDbId !== undefined) {
+      excluded.add(excludeSessionDbId);
+    }
+
+    let dueSessionIds: number[];
+    try {
+      dueSessionIds = listDispatchableNoteSettlementSessions(db, {
+        excludeSessionIds: excluded,
+        nowEpoch: now(),
+        nowMs: nowMs(),
+        leaseMs: claimOptions.leaseMs,
+        maxAttempts: claimOptions.maxAttempts,
+        limit: deps.residualLimit ?? NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER,
+      });
+    } catch (error) {
+      logger.error?.("note settlement leak scan failed", { error });
+      return [];
+    }
+
+    const dispatched: NoteSettlementJob[] = [];
+    for (const sessionDbId of dueSessionIds) {
+      dispatched.push(...(await drainSession(sessionDbId, 1)));
+    }
+    return dispatched;
+  }
+
   return {
     onTurnStop: (sessionDbId) => runTrigger(sessionDbId, "consecutive"),
     onCompact: (sessionDbId) => runTrigger(sessionDbId, "compact"),
+    leakDueSessions,
   };
 }

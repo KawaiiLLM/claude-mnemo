@@ -133,6 +133,83 @@ export function upsertShadowNote(
   return written;
 }
 
+/**
+ * Write a settlement reconstruction, but never over an `agent` note (spec D7,
+ * ticket 05). The window between a settlement job being claimed and its
+ * payload actually landing a result is long enough for the main agent to
+ * write the turn's real note — a note the agent's own eligibility gate has
+ * already accepted — and that write must win: a hindsight reconstruction of
+ * the same material never outranks the agent's own account of its turn.
+ *
+ * The `WHERE` on the conflict branch, not a read-then-write, is what makes the
+ * check atomic with the write inside one statement: a plain `getShadowNote`
+ * before this call could still lose to a note landing in the gap between the
+ * read and the write it guards.
+ *
+ * A retried or later settlement pass overwriting its OWN earlier
+ * `writer_origin = 'settlement'` reconstruction is fine — same authority
+ * level, just an updated judgement — so only `agent` blocks the write.
+ *
+ * Returns `false` when a conflicting `agent` note is why nothing was written;
+ * the caller counts that as a yield, not a failure.
+ */
+export function upsertReconstructedShadowNote(
+  db: Database,
+  input: UpsertShadowNoteInput,
+): boolean {
+  return (
+    db
+      .query<
+        unknown,
+        [
+          number,
+          string,
+          string,
+          string | null,
+          string | null,
+          string,
+          number | null,
+          number,
+          number,
+        ]
+      >(
+        `
+          INSERT INTO shadow_notes (
+            turn_id,
+            title,
+            content,
+            insight,
+            writer_model,
+            writer_origin,
+            ride_turn_id,
+            created_at_epoch,
+            updated_at_epoch
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(turn_id) DO UPDATE SET
+            title = excluded.title,
+            content = excluded.content,
+            insight = excluded.insight,
+            writer_model = excluded.writer_model,
+            writer_origin = excluded.writer_origin,
+            ride_turn_id = excluded.ride_turn_id,
+            updated_at_epoch = excluded.updated_at_epoch
+          WHERE shadow_notes.writer_origin != 'agent'
+        `,
+      )
+      .run(
+        input.turnId,
+        input.title,
+        input.content,
+        input.insight ?? null,
+        input.writerModel ?? null,
+        input.writerOrigin ?? "settlement",
+        input.rideTurnId ?? null,
+        input.nowEpoch,
+        input.nowEpoch,
+      ).changes > 0
+  );
+}
+
 export function getShadowNote(
   db: Database,
   turnId: number,

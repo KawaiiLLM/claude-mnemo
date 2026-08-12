@@ -188,7 +188,18 @@ describe("note settlement triggers", () => {
     expect(countNoteSettlementJobs(db)).toBe(0);
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(0);
 
+    // Turn 50 itself is NOT yet decided (spec D10): the prompt clock only
+    // counts a turn as ended once a LATER one exists, so landing exactly turn
+    // 50 still reads as 49 decided turns.
     seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, 1);
+    const stillShort = await scheduler.onTurnStop(sessionDbId);
+
+    expect(stillShort.triggered).toBe(false);
+    expect(calls).toHaveLength(0);
+
+    // Turn 51 is what makes turn 50 decided — the window closes one turn later
+    // than "landing turn 50" would suggest, and stays anchored at windowEnd 50.
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, 1);
     const full = await scheduler.onTurnStop(sessionDbId);
 
     expect(full.triggered).toBe(true);
@@ -202,8 +213,12 @@ describe("note settlement triggers", () => {
     );
   });
 
-  test("a still-pending debt inside the prefix holds the whole window back", async () => {
-    const sessionDbId = seedSession(db, "content-pending-hole");
+  test("a stale pending debt left by the migration cleanup does not hold the window back", async () => {
+    // Spec D10 (ticket 05): getDecidedPrefixEnd no longer reads note_debt at
+    // all, so a leftover pre-cutover `pending` row — the one-time migration
+    // cleanup (ticket 06) is what retires these, not this code path — must
+    // not wedge a window that has otherwise moved on.
+    const sessionDbId = seedSession(db, "content-stale-pending");
     const clock = createClock();
     const { dispatch, calls } = recordingDispatch();
     const scheduler = createNoteSettlementScheduler({
@@ -215,38 +230,21 @@ describe("note settlement triggers", () => {
     });
 
     seedTurns(db, sessionDbId, 1, 9);
-    seedTurns(db, sessionDbId, 10, 1, "pending");
-    seedTurns(db, sessionDbId, 11, 60);
-
-    expect((await scheduler.onTurnStop(sessionDbId)).triggered).toBe(false);
-    expect(countNoteSettlementJobs(db)).toBe(0);
-
-    closeDebt(db, sessionDbId, 10);
-    const after = await scheduler.onTurnStop(sessionDbId);
-
-    expect(after.created).toHaveLength(1);
-    expect(after.created[0]!.windowEnd).toBe(NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
-    expect(calls).toHaveLength(1);
-  });
-
-  test("trivial turns count as decided — they never owed a note", async () => {
-    const sessionDbId = seedSession(db, "content-trivial");
-    const clock = createClock();
-    const { dispatch } = recordingDispatch();
-    const scheduler = createNoteSettlementScheduler({
-      db,
-      config: SETTLEMENT_ENABLED_CONFIG,
-      now: clock.now,
-      nowMs: clock.nowMs,
-      dispatch,
-    });
-
-    seedTurns(db, sessionDbId, 1, 25);
-    seedTurns(db, sessionDbId, 26, 25, "trivial");
+    seedTurns(db, sessionDbId, 10, 1, "pending"); // never closed — left exactly as-is
+    seedTurns(db, sessionDbId, 11, 40); // turns 11..50
+    seedTurns(db, sessionDbId, 51, 1); // closes the window ending at turn 50
 
     const pass = await scheduler.onTurnStop(sessionDbId);
+
     expect(pass.created).toHaveLength(1);
-    expect(pass.created[0]!.windowEnd).toBe(50);
+    expect(pass.created[0]!.windowStart).toBe(1);
+    expect(pass.created[0]!.windowEnd).toBe(NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    expect(calls).toHaveLength(1);
+    // The stale row is untouched — this path never writes to note_debt.
+    expect(
+      listNoteDebt(db, sessionDbId).find((debt) => debt.promptNumber === 10)
+        ?.status,
+    ).toBe("pending");
   });
 
   test("compact under the minimum window writes nothing and keeps accumulating", async () => {
@@ -279,8 +277,10 @@ describe("note settlement triggers", () => {
 
     // The turns were not lost: the next compact settles the ACCUMULATED window
     // from turn 1, not just the turns that arrived since the last compact.
+    // +2, not +1: turn 20 alone is not yet decided (spec D10) — turn 21 is
+    // what makes it so, and the window still ends at exactly turn 20.
     clock.advance(60 * 60 * 1000);
-    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_MIN_WINDOW_TURNS, 1);
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_MIN_WINDOW_TURNS, 2);
     const third = await scheduler.onCompact(sessionDbId);
 
     expect(third.created).toHaveLength(1);
@@ -304,7 +304,8 @@ describe("note settlement triggers", () => {
       isGracefulExit: () => exiting,
     });
 
-    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    // +1: turn 50 alone is not yet decided (spec D10) — turn 51 makes it so.
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     const during = await scheduler.onTurnStop(sessionDbId);
 
     expect(during.created).toHaveLength(1);
@@ -312,9 +313,10 @@ describe("note settlement triggers", () => {
     expect(calls).toHaveLength(0);
     expect(listNoteSettlementJobs(db, sessionDbId)[0]!.status).toBe("pending");
 
-    // The recorded job is picked up by the next ordinary trigger.
+    // The recorded job is picked up by the next ordinary trigger. Turn 51
+    // already exists (seeded above); +50 more (52..101) closes window 51-100.
     exiting = false;
-    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, 50);
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 2, 50);
     const after = await scheduler.onTurnStop(sessionDbId);
 
     expect(calls).toHaveLength(2);
@@ -428,13 +430,14 @@ describe("note settlement and the era boundary", () => {
     });
 
     // A session that straddles the cutover: 40 turns under the old rules, then a
-    // full window under the new ones.
+    // full window under the new ones. +1: turn 90 alone is not yet decided
+    // (spec D10) — turn 91 makes it so, and the window still ends at 90.
     seedTurns(db, sessionDbId, 1, 40, "noted", LEGACY_EPOCH);
     seedTurns(
       db,
       sessionDbId,
       41,
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
       "noted",
       ERA_EPOCH,
     );
@@ -484,8 +487,18 @@ describe("note settlement and the era boundary", () => {
       eraCutoffEpoch: cutoffEpoch,
     };
 
+    // +1: live's own window needs turn 51 to make turn 50 decided (spec D10) —
+    // without it `live`'s own trigger never fires and the residual scan this
+    // test is about never runs at all.
     const live = seedSession(db, "content-era-live", nowEpoch);
-    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    seedTurns(
+      db,
+      live,
+      1,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
+      "noted",
+      nowEpoch,
+    );
 
     // Oldest and largest, so it would be picked first on age — but every turn of
     // it predates the era, so it has no residual at all.
@@ -575,8 +588,8 @@ describe("note settlement and the graceful-exit window", () => {
     });
 
     // Three full windows are due at once, so the loop would otherwise claim and
-    // dispatch all three in this single pass.
-    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    // dispatch all three in this single pass. +1: spec D10.
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     const pass = await scheduler.onTurnStop(sessionDbId);
 
     expect(pass.created).toHaveLength(3);
@@ -615,7 +628,8 @@ describe("note settlement and the graceful-exit window", () => {
       },
     });
 
-    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    // +1: spec D10.
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     const pass = await scheduler.onTurnStop(sessionDbId);
 
     expect(pass.created).toHaveLength(1);
@@ -704,7 +718,10 @@ describe("note settlement compact boundary", () => {
     const pass = await scheduler.onCompact(sessionDbId);
 
     expect(pass.created).toHaveLength(1);
-    expect(pass.created[0]!.windowEnd).toBe(25);
+    // Not 25: absent a boundary, `compact` falls back to the shared decided-
+    // prefix default (spec D10), which never counts the current max turn as
+    // ended (turn 25 has no turn 26 after it).
+    expect(pass.created[0]!.windowEnd).toBe(24);
   });
 });
 
@@ -736,7 +753,8 @@ describe("note settlement job state machine", () => {
       dispatch,
     });
 
-    seedTurns(db, sessionDbId, 1, 50);
+    // +1 (turn 51): turn 50 alone is not yet decided (spec D10).
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     await scheduler.onTurnStop(sessionDbId);
 
     const afterFirst = listNoteSettlementJobs(db, sessionDbId)[0]!;
@@ -748,15 +766,18 @@ describe("note settlement job state machine", () => {
     );
 
     // A trigger arriving before the backoff elapses does not re-dispatch.
-    seedTurns(db, sessionDbId, 51, 50);
+    // Turn 51 already exists; +50 more (52..101) closes window 51-100.
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 2, 50);
     await scheduler.onTurnStop(sessionDbId);
     expect(calls).toHaveLength(2);
     expect(calls[1]!.windowStart).toBe(51);
     expect(listNoteSettlementJobs(db, sessionDbId)[0]!.attempts).toBe(1);
 
     // Past the backoff the same trigger picks it up in passing — no timer ran.
+    // Turn 101 already exists; +50 more (102..151) closes window 101-150,
+    // which is what makes this trigger non-empty and reaches the reclaim.
     clock.advance(NOTE_SETTLEMENT_RETRY_BASE_MS + 1_000);
-    seedTurns(db, sessionDbId, 101, 50);
+    seedTurns(db, sessionDbId, 2 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 2, 50);
     await scheduler.onTurnStop(sessionDbId);
 
     const afterSecond = listNoteSettlementJobs(db, sessionDbId)[0]!;
@@ -780,7 +801,9 @@ describe("note settlement job state machine", () => {
       isGracefulExit: () => true,
     });
 
-    seedTurns(db, sessionDbId, 1, 50);
+    // +1 (turn 51): turn 50 alone is not yet decided (spec D10) — without it
+    // this graceful-exit pass records no job at all.
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     await scheduler.onTurnStop(sessionDbId);
 
     let previousGeneration = 0;
@@ -815,7 +838,8 @@ describe("note settlement job state machine", () => {
 
     // terminal-state-must-abandon-and-continue: the next trigger advances the
     // cursor past the dead window instead of parking the session on it forever.
-    seedTurns(db, sessionDbId, 51, 50);
+    // Turn 51 already exists; +50 more (52..101) closes window 51-100.
+    seedTurns(db, sessionDbId, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 2, 50);
     await scheduler.onTurnStop(sessionDbId);
     const withDispatch = createNoteSettlementScheduler({
       db,
@@ -823,7 +847,7 @@ describe("note settlement job state machine", () => {
       now: clock.now,
       nowMs: clock.nowMs,
     });
-    seedTurns(db, sessionDbId, 101, 50);
+    seedTurns(db, sessionDbId, 2 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 2, 50);
     await withDispatch.onTurnStop(sessionDbId);
 
     expect(getNoteSettlementCursor(db, sessionDbId)).toBeGreaterThanOrEqual(50);
@@ -853,7 +877,8 @@ describe("note settlement job state machine", () => {
       },
     });
 
-    seedTurns(db, sessionDbId, 1, 50);
+    // +1 (turn 51): turn 50 alone is not yet decided (spec D10).
+    seedTurns(db, sessionDbId, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     await scheduler.onTurnStop(sessionDbId);
 
     // Claim (1) → reclaim of the expired lease (2) → the reclaimer's claim (3).
@@ -1031,8 +1056,10 @@ describe("note settlement drain past a self-settling payload", () => {
     });
 
     // Three full windows come due in one trigger — a backfill, or a session that
-    // ran 150 turns between compacts.
-    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    // ran 150 turns between compacts. +1: turn 150 alone is not yet decided
+    // (spec D10) — turn 151 makes it so, and the third window still ends at
+    // exactly 150.
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     const pass = await scheduler.onTurnStop(sessionDbId);
 
     expect(pass.created).toHaveLength(3);
@@ -1069,7 +1096,8 @@ describe("note settlement drain past a self-settling payload", () => {
       },
     });
 
-    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS);
+    // +1: see the previous test for why.
+    seedTurns(db, sessionDbId, 1, 3 * NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1);
     await scheduler.onTurnStop(sessionDbId);
 
     expect(calls).toHaveLength(3);
@@ -1220,8 +1248,11 @@ describe("residual settlement of closed sessions", () => {
     const clock = createClock();
     const nowEpoch = clock.now();
 
+    // +1: live's own window needs one turn past 50 to be decided (spec D10) —
+    // without it live's own trigger never fires and the residual scan below
+    // never runs.
     const live = seedSession(db, "content-live", nowEpoch);
-    seedTurns(db, live, 1, 50, "noted", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, "noted", nowEpoch);
 
     // Idle for two days, one day and one day plus an hour respectively.
     const oldest = seedClosedSession("content-old", 40, nowEpoch - 3 * DAY_SECONDS, 12);
@@ -1341,7 +1372,7 @@ describe("residual settlement of closed sessions", () => {
     const nowEpoch = clock.now();
 
     const live = seedSession(db, "content-live-exit", nowEpoch);
-    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, "noted", nowEpoch); // +1: spec D10
     const closed = seedClosedSession(
       "content-closed-exit",
       40,
@@ -1381,7 +1412,7 @@ describe("residual settlement of closed sessions", () => {
     const nowEpoch = clock.now();
 
     const live = seedSession(db, "content-live-retry", nowEpoch);
-    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, "noted", nowEpoch); // +1: spec D10
     const closed = seedClosedSession(
       "content-closed-retry",
       40,
@@ -1428,7 +1459,7 @@ describe("residual settlement of closed sessions", () => {
     const nowEpoch = clock.now();
 
     const live = seedSession(db, "content-live-budget", nowEpoch);
-    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS, "noted", nowEpoch);
+    seedTurns(db, live, 1, NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1, "noted", nowEpoch); // +1: spec D10
     const oldest = seedClosedSession(
       "content-budget-old",
       40,

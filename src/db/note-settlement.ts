@@ -69,7 +69,11 @@ export const NOTE_SETTLEMENT_RESIDUAL_IDLE_MS = 24 * 60 * 60 * 1000;
 /** Closed sessions one trigger may pick up, oldest first (裁决 11). */
 export const NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER = 2;
 
-export type NoteSettlementTrigger = "consecutive" | "compact" | "residual";
+export type NoteSettlementTrigger =
+  | "consecutive"
+  | "compact"
+  | "residual"
+  | "sessionend";
 export type NoteSettlementJobStatus =
   | "pending"
   | "claimed"
@@ -250,17 +254,6 @@ export function ensureNoteSettlementCursor(
   ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
 }
 
-function getClassifiedThrough(db: Database, sessionId: number): number {
-  return (
-    db
-      .query<{ cursor: number }, [number]>(
-        `SELECT last_classified_prompt_number AS cursor
-         FROM note_debt_cursor WHERE session_id = ?`,
-      )
-      .get(sessionId)?.cursor ?? 0
-  );
-}
-
 export function getMaxPromptNumber(db: Database, sessionId: number): number {
   return (
     db
@@ -272,36 +265,30 @@ export function getMaxPromptNumber(db: Database, sessionId: number): number {
 }
 
 /**
- * Last prompt_number of the contiguous DECIDED prefix starting at `windowStart`.
- * Returns `windowStart - 1` when nothing is decided yet (an empty window).
+ * Last prompt_number of the contiguous DECIDED prefix starting at `windowStart`,
+ * under the shared prompt-clock default (spec D10, ticket 05): a turn has ended
+ * once a LATER prompt exists, full stop — the highest ended turn is always one
+ * behind the session's current max, so the current (open) turn is excluded by
+ * construction. This is the bound `consecutive` uses as-is; `compact` and
+ * `sessionend` narrow it further with their own frozen boundary marker (see
+ * `planNoteSettlementWindows`).
  *
- * Two bounds, and both are load-bearing:
- *   - the note-debt classification cursor, because a turn that has not been
- *     classified yet has no ledger row for exactly the same reason a trivial
- *     turn has none. Without this bound an in-flight turn would read as decided;
- *   - the first still-`pending` debt, which is the note that has not been
- *     written. Everything from there on belongs to a later window.
+ * The note-debt classification cursor and the first-still-`pending`-debt
+ * truncation are BOTH gone: owed notes are a derived query now (03), `note_debt`
+ * no longer gates what a window may contain, and a stray legacy `pending` row
+ * left by the one-time migration cleanup (06) must not wedge a window that has
+ * otherwise moved on (spec D10's "含存量 pending 历史的会话窗口照常推进").
+ *
+ * Returns `windowStart - 1` (an EMPTY window) when the session has not even
+ * reached `windowStart` yet.
  */
 export function getDecidedPrefixEnd(
   db: Database,
   sessionId: number,
   windowStart: number,
 ): number {
-  const classifiedThrough = getClassifiedThrough(db, sessionId);
-  if (classifiedThrough < windowStart) {
-    return windowStart - 1;
-  }
-  const firstPending =
-    db
-      .query<{ promptNumber: number | null }, [number, number]>(
-        `SELECT MIN(prompt_number) AS promptNumber FROM note_debt
-         WHERE session_id = ? AND status = 'pending' AND prompt_number >= ?`,
-      )
-      .get(sessionId, windowStart)?.promptNumber ?? null;
-  if (firstPending === null) {
-    return classifiedThrough;
-  }
-  return Math.min(classifiedThrough, firstPending - 1);
+  const ended = getMaxPromptNumber(db, sessionId) - 1;
+  return Math.max(windowStart - 1, ended);
 }
 
 /**
@@ -340,19 +327,35 @@ export interface NoteSettlementWindowOptions {
  * plan and never opens a transaction, so the overwhelmingly common event leaves
  * no trace in the database at all.
  *
- * Full 50-turn blocks are cut for BOTH triggers — a backfill that lands 130
- * decided turns at once produces two 50-turn windows plus (at a compact) the
- * 30-turn remainder, rather than one 130-turn payload. Only the remainder is
- * subject to the minimum-window floor, and only a compact may take it.
+ * Full 50-turn blocks are cut for EVERY trigger — a backfill that lands 130
+ * decided turns at once produces two 50-turn windows plus (at a compact or a
+ * sessionend) the 30-turn remainder, rather than one 130-turn payload. Only the
+ * remainder is subject to the minimum-window floor, and only `compact`/
+ * `sessionend` may take it — `consecutive` never cuts a partial block.
  *
- * A COMPACT trigger is additionally bounded by the repaired boundary marker
- * (spec D9: 「compact 触发以捕获修复后的 boundary marker 为准」). Between
- * `updateCompactAnchor` and this call the worker drains its queue, which
- * classifies more turns, so the decided prefix can already run past the turns
- * the compact actually closed over; without the bound those later turns would
- * be swallowed into the compact's window instead of the next one. The bound
- * applies to the whole plan, 50-blocks included — a block reaching past the
- * boundary is not lost, it is simply cut by the next turn-stop trigger.
+ * `compact` and `sessionend` each narrow the shared decided-prefix default with
+ * their OWN frozen boundary (spec D10, ticket 05 — the three trigger types are
+ * NOT interchangeable, each states its upper bound explicitly):
+ *
+ *   - `compact` is bounded by the repaired anchor marker
+ *     (`getCompactBoundaryPromptNumber`), used AS-IS rather than intersected
+ *     with the prompt-clock default: the anchor is itself already "the highest
+ *     prompt_number that had reached a terminal status when the compact was
+ *     handled", computed independently, and can legitimately equal the
+ *     session's current max turn (a compact landing between that turn's Stop
+ *     and the next prompt). Absent an anchor (never compacted) there is no
+ *     boundary to narrow by, so the shared default stands unclamped — never a
+ *     licence to settle everything, since the default is itself bounded;
+ *   - `sessionend` is bounded by the LIVE max prompt number, read at the exact
+ *     moment the hook calls this — that read IS the freeze (spec D7's "hook
+ *     冻结的 end 边界"): a session actually ending is stronger evidence than
+ *     "a later prompt exists", so unlike the shared default the current turn is
+ *     NOT excluded. The frozen value survives only inside the enqueued job's
+ *     `window_end`; nothing else persists it, and nothing needs to.
+ *
+ * `sessionend`'s remainder is additionally EXEMPT from the minimum-window floor
+ * (spec D7, 用户定案 T570): a session may end after a single turn, and without
+ * the exemption the tail would never be settled at all.
  */
 export function planNoteSettlementWindows(
   db: Database,
@@ -374,10 +377,12 @@ export function planNoteSettlementWindows(
   if (trigger === "compact") {
     const boundary = getCompactBoundaryPromptNumber(db, sessionId);
     // Null means no compact has ever been anchored on this session, so there is
-    // no boundary to be bounded by — never a licence to settle everything.
+    // no boundary to be bounded by — the shared default stands unclamped.
     if (boundary !== null) {
-      prefixEnd = Math.min(prefixEnd, boundary);
+      prefixEnd = boundary;
     }
+  } else if (trigger === "sessionend") {
+    prefixEnd = getMaxPromptNumber(db, sessionId);
   }
   const plans: NoteSettlementWindowPlan[] = [];
 
@@ -392,16 +397,50 @@ export function planNoteSettlementWindows(
     windowStart = windowEnd + 1;
   }
 
-  if (trigger === "compact" && prefixEnd - windowStart + 1 >= minWindowTurns) {
+  const remainderFloor = trigger === "sessionend" ? 1 : minWindowTurns;
+  if (
+    (trigger === "compact" || trigger === "sessionend") &&
+    prefixEnd - windowStart + 1 >= remainderFloor
+  ) {
     plans.push({
       sessionId,
       windowStart,
       windowEnd: prefixEnd,
-      triggerType: "compact",
+      triggerType: trigger,
     });
   }
 
   return plans;
+}
+
+/**
+ * The hook's own half of spec D7: freeze this session's SessionEnd boundary and
+ * enqueue whatever window it closes over, in one pass. "Freeze" is nothing more
+ * than the plan/enqueue pair below reading `getMaxPromptNumber` and committing
+ * it into a job's `window_end` — nothing else can create a turn for this
+ * session between that read and the commit, so there is no separate boundary
+ * column to keep in sync with the job table.
+ *
+ * Idempotent by construction, satisfying spec D7's "同一会话重复收到 end 事件
+ * 只产生一条边界/一单作业": a repeat SessionEnd with no new activity re-derives
+ * the identical, already-consumed window, `planNoteSettlementWindows` returns
+ * nothing to plan, and `enqueueNoteSettlementWindows` opens no transaction at
+ * all. A SessionEnd after a genuine resume with new turns derives a NEW window
+ * starting past the previous one (`getNoteSettlementWindowStart` already reads
+ * the highest enqueued `window_end`) — the boundary is only ever a boundary,
+ * never a lock on the session (spec D7: "边界只是边界,其后新 turn 归下一窗口,
+ * 已入队作业不失效").
+ */
+export function enqueueSessionEndNoteSettlementWindow(
+  db: Database,
+  sessionId: number,
+  nowEpoch: number,
+  eraCutoffEpoch: number,
+): NoteSettlementJob[] {
+  const plans = planNoteSettlementWindows(db, sessionId, "sessionend", {
+    eraCutoffEpoch,
+  });
+  return enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch);
 }
 
 /**

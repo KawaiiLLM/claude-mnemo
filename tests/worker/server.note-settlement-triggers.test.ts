@@ -9,6 +9,7 @@ import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import {
   countNoteSettlementJobs,
+  enqueueNoteSettlementWindows,
   getNoteSettlementCursor,
   listNoteSettlementJobs,
   NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
@@ -184,11 +185,95 @@ describe("worker settlement trigger surface", () => {
     expect(sdkImportsReachableFromWorkerCore()).toEqual([]);
   });
 
+  /**
+   * The leak point (spec D7, ticket 05): a `sessionend` job has no trigger of
+   * its own — nothing in this worker ever calls `onTurnStop`/`onCompact` for
+   * the session that owns it once it is recorded — so every OTHER settlement
+   * entry point has to take one attempt at whatever is due, unconditionally,
+   * including the overwhelmingly common below-threshold turn-stop that used to
+   * return before any cross-session scan ran at all.
+   */
+  test("the leak dispatches another session's due job even on a below-threshold turn-stop", async () => {
+    const busySessionDbId = seedDecidedSession(db, "content-leak-busy", 3);
+    const otherSessionDbId = upsertSession(db, {
+      contentSessionId: "content-leak-other",
+      project: "/tmp/project-note-settlement-triggers",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: otherSessionDbId,
+          windowStart: 1,
+          windowEnd: 7,
+          triggerType: "sessionend",
+        },
+      ],
+      1_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
+
+    await core.handleTurnStop(busySessionDbId);
+
+    // Nothing of busySessionDbId's own — 3 turns never reach the threshold —
+    // yet the other session's recorded job was dispatched in passing.
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.sessionId).toBe(otherSessionDbId);
+    expect(dispatched[0]!.triggerType).toBe("sessionend");
+    expect(listNoteSettlementJobs(db, otherSessionDbId)[0]!.status).toBe(
+      "done",
+    );
+  });
+
+  test("finishSession (flush) also attempts the leak", async () => {
+    const flushingSessionDbId = seedDecidedSession(db, "content-leak-flush", 3);
+    const otherSessionDbId = upsertSession(db, {
+      contentSessionId: "content-leak-flush-other",
+      project: "/tmp/project-note-settlement-triggers",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: 1,
+      updatedAtEpoch: 1,
+      completedAtEpoch: null,
+    }).id;
+    enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: otherSessionDbId,
+          windowStart: 1,
+          windowEnd: 12,
+          triggerType: "sessionend",
+        },
+      ],
+      1_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
+
+    await core.finishSession(flushingSessionDbId);
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.sessionId).toBe(otherSessionDbId);
+    expect(dispatched[0]!.triggerType).toBe("sessionend");
+  });
+
   test("sessionEnd, resume, worker start and every timer settle nothing", async () => {
+    // +1: the prompt clock never counts the session's current max turn as
+    // ENDED (spec D10 — a turn ends only once a LATER one exists), so two full
+    // 50-turn windows need a 101st turn open past them, not exactly 100.
     const sessionDbId = seedDecidedSession(
       db,
       "content-non-triggers",
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS * 2 + 1,
     );
     const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
 
@@ -215,10 +300,11 @@ describe("worker settlement trigger surface", () => {
   });
 
   test("the era cutoff alone brings settlement up", async () => {
+    // +1: the current max turn is never itself ended (spec D10).
     const sessionDbId = seedDecidedSession(
       db,
       "content-cutoff-only",
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
     );
     // The one and only difference from the shipped default (ticket 14): an
     // operator sets a cutoff, and the whole new era comes up behind it.
@@ -237,10 +323,11 @@ describe("worker settlement trigger surface", () => {
     // The shipped shape: nobody pins a cutoff by hand, the first process of the
     // build records one (db/era.ts). Gating on the config alone left settlement
     // permanently inert on exactly the installs ticket 14 was built for.
+    // +1: the current max turn is never itself ended (spec D10).
     const sessionDbId = seedDecidedSession(
       db,
       "content-cutoff-recorded",
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
     );
     ensureRecordedEraCutoff(db, SETTLEMENT_ERA_CUTOFF_EPOCH);
     const { core, dispatched } = createHarness(db, DEFAULT_CONFIG);
@@ -297,10 +384,11 @@ describe("worker settlement trigger surface", () => {
   });
 
   test("the stub payload is the default: no dispatch dep still settles without a model", async () => {
+    // +1: the current max turn is never itself ended (spec D10).
     const sessionDbId = seedDecidedSession(
       db,
       "content-default-stub",
-      NOTE_SETTLEMENT_CONSECUTIVE_TURNS,
+      NOTE_SETTLEMENT_CONSECUTIVE_TURNS + 1,
     );
     const core = createWorkerCore({
       db,

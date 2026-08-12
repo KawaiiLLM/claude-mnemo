@@ -316,6 +316,65 @@ export function listOwedNoteTurns(
     }));
 }
 
+export interface OwedNoteTurnInRange {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+}
+
+/**
+ * Settlement's "still owes a note" judgement (spec D7, ticket 05), bounded by
+ * an explicit inclusive prompt-number range instead of the reminder's aging
+ * window relative to "now". Read at DISPATCH time rather than at
+ * window-freeze time, so a main-agent note written while the job sat queued
+ * is already excluded by the `NOT EXISTS shadow_notes` clause below, the same
+ * way it excludes a noted turn from the live reminder (裁決: 回写只填空缺).
+ *
+ * Deliberately NOT `listOwedNoteTurns`'s exact predicate — the two differ in
+ * one place, and the difference is load-bearing: the live reminder treats ANY
+ * `note_debt.status = 'skipped'` row as answered, but settlement's backfill
+ * must still reconstruct a turn residual settlement wrote off with reason
+ * `closed` (spec 裁決 20's interior/trailing-hole reconstruction, which this
+ * ticket keeps — only the position-dependent "interior vs trailing" split and
+ * the "no debt row is trivial" call are deleted, per D7's 用户裁定). `closed`
+ * is the SYSTEM abandoning a dead session's ledger, not a value judgement
+ * about the turn; only `declined` is the main agent's own real-time skip
+ * (spec: "价值分流只属于主 agent 的实时 skip"), so only `declined` excludes a
+ * turn here. A legacy `aged`/`rolled-back` reason (pre note-prompt-clock) is
+ * read the same as `closed`: historical bookkeeping, not a judgement to defer to.
+ */
+export function listOwedNoteTurnsInRange(
+  db: Database,
+  sessionId: number,
+  rangeStart: number,
+  rangeEnd: number,
+): OwedNoteTurnInRange[] {
+  return db
+    .query<OwedNoteTurnInRange, [number, number, number]>(
+      `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number BETWEEN ? AND ?
+         AND t.status != 'undone'
+         AND t.was_rolled_back = 0
+         AND (t.type IS NULL OR t.type != 'compact')
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id
+             AND d.status = 'skipped'
+             AND d.reason = 'declined'
+         )
+       ORDER BY t.prompt_number ASC`,
+    )
+    .all(sessionId, rangeStart, rangeEnd);
+}
+
 export type NoteIdExposureSource = "reminder" | "injection";
 
 export interface RecordNoteIdExposureInput {

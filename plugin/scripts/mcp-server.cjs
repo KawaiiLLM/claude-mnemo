@@ -7984,6 +7984,7 @@ function initializeSchema(db) {
   ensureNoteDebtReasonVocabulary(db);
   ensureNoteDebtRemindedColumn(db);
   ensureNoteDebtCursorReliefColumn(db);
+  ensureNoteSettlementSessionEndTrigger(db);
   dropLegacyMemoriesTable(db);
 }
 function noteDebtReasonVocabularyIsStale(db) {
@@ -8030,6 +8031,41 @@ function ensureNoteDebtCursorReliefColumn(db) {
     "last_relief_prompt_number",
     "INTEGER NOT NULL DEFAULT 0"
   );
+}
+function noteSettlementTriggerVocabularyIsStale(db) {
+  const storedDdl = db.query(
+    `SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_settlement_jobs'`
+  ).get()?.sql ?? null;
+  return storedDdl !== null && !storedDdl.includes("'sessionend'");
+}
+function ensureNoteSettlementSessionEndTrigger(db) {
+  if (!noteSettlementTriggerVocabularyIsStale(db)) {
+    return;
+  }
+  runWriteTransaction(db, () => {
+    if (!noteSettlementTriggerVocabularyIsStale(db)) {
+      return;
+    }
+    db.exec(
+      "ALTER TABLE note_settlement_jobs RENAME TO note_settlement_jobs_pre_sessionend"
+    );
+    db.exec(NOTE_SETTLEMENT_JOBS_TABLE_DDL);
+    db.exec(
+      `INSERT INTO note_settlement_jobs (
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       )
+       SELECT
+         id, session_id, window_start, window_end, trigger_type, status,
+         attempts, retry_at_epoch, claimed_at_epoch, claim_generation,
+         last_error, created_at_epoch, updated_at_epoch
+       FROM note_settlement_jobs_pre_sessionend`
+    );
+    db.exec("DROP TABLE note_settlement_jobs_pre_sessionend");
+    db.exec(NOTE_SETTLEMENT_JOBS_INDEX_DDL);
+  });
 }
 function ensureObservationExtractionExclusionColumn(db) {
   addColumnIfMissing(
@@ -8343,7 +8379,7 @@ function initializeDatabase(db) {
     rebuildSearchIndex(db);
   }
 }
-var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, EXPECTED_FTS_COLUMNS;
+var MEMORY_FTS_DDL, NOTE_DEBT_TABLE_DDL, NOTE_DEBT_INDEX_DDL, NOTE_SETTLEMENT_JOBS_TABLE_DDL, NOTE_SETTLEMENT_JOBS_INDEX_DDL, SCHEMA_SQL, MEMORY_EDGES_DDL, EXPECTED_FTS_COLUMNS;
 var init_schema = __esm({
   "src/db/schema.ts"() {
     "use strict";
@@ -8386,6 +8422,41 @@ var init_schema = __esm({
     NOTE_DEBT_INDEX_DDL = `
   CREATE INDEX IF NOT EXISTS idx_note_debt_open
     ON note_debt(session_id, status, prompt_number);
+`;
+    NOTE_SETTLEMENT_JOBS_TABLE_DDL = `
+  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
+    -- after the window was cut joins the next window, never this one, so a retry
+    -- settles the same set the first attempt saw.
+    window_start INTEGER NOT NULL,
+    window_end INTEGER NOT NULL,
+    trigger_type TEXT NOT NULL CHECK (
+      trigger_type IN ('consecutive', 'compact', 'residual', 'sessionend')
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+      status IN ('pending', 'claimed', 'done', 'failed')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
+    -- no clock for settlement, so a due retry is noticed in passing by the next
+    -- trigger event rather than woken by anything.
+    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
+    claimed_at_epoch INTEGER,
+    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
+    -- A dispatch whose lease expired CASes on the generation it was claimed
+    -- under and so writes nothing over the attempt that displaced it.
+    claim_generation INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at_epoch INTEGER NOT NULL,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(session_id, window_start, trigger_type)
+  );
+`;
+    NOTE_SETTLEMENT_JOBS_INDEX_DDL = `
+  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
+    ON note_settlement_jobs(session_id, status, window_start);
 `;
     SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS sessions (
@@ -8627,38 +8698,8 @@ var init_schema = __esm({
   -- Identity is (session, window_start, trigger_type): the enqueue is idempotent
   -- under replay, and the two triggers can each own a window that starts at the
   -- same place without one silently swallowing the other.
-  CREATE TABLE IF NOT EXISTS note_settlement_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    -- Inclusive prompt_number bounds, FROZEN at enqueue. A turn that is decided
-    -- after the window was cut joins the next window, never this one, so a retry
-    -- settles the same set the first attempt saw.
-    window_start INTEGER NOT NULL,
-    window_end INTEGER NOT NULL,
-    trigger_type TEXT NOT NULL CHECK (
-      trigger_type IN ('consecutive', 'compact', 'residual')
-    ),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (
-      status IN ('pending', 'claimed', 'done', 'failed')
-    ),
-    attempts INTEGER NOT NULL DEFAULT 0,
-    -- Exponential backoff by TIMESTAMP COMPARISON, not by timer: the worker owns
-    -- no clock for settlement, so a due retry is noticed in passing by the next
-    -- trigger event rather than woken by anything.
-    retry_at_epoch INTEGER NOT NULL DEFAULT 0,
-    claimed_at_epoch INTEGER,
-    -- Ownership fence, bumped on every successful claim (settlement_jobs idiom).
-    -- A dispatch whose lease expired CASes on the generation it was claimed
-    -- under and so writes nothing over the attempt that displaced it.
-    claim_generation INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    created_at_epoch INTEGER NOT NULL,
-    updated_at_epoch INTEGER NOT NULL,
-    UNIQUE(session_id, window_start, trigger_type)
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_note_settlement_jobs_claim
-    ON note_settlement_jobs(session_id, status, window_start);
+  ${NOTE_SETTLEMENT_JOBS_TABLE_DDL}
+  ${NOTE_SETTLEMENT_JOBS_INDEX_DDL}
 
   CREATE TABLE IF NOT EXISTS note_settlement_cursors (
     session_id INTEGER PRIMARY KEY
@@ -32695,8 +32736,13 @@ var MNEMO_TOOL_DESCRIPTIONS = {
   timeline: "Render the temporal/decision shape of a past session \u2014 gaps, tool bursts, compact boundary, broken-prompt candidates, and view-specific timeline bodies. Single-session view with range selectors plus page/pageSize pagination. Optional `view` selects `turns` (default turn table), `milestones` (key chronological digest), or `phases` (phase overview).",
   // The per-field budgets are spliced in from `NOTE_TOKEN_BUDGET`, the constant
   // the receipt measures a write against, rather than restated as prose here.
-  // Three surfaces say these numbers; two of them used to say them from memory.
-  note: "Write your own note about the turn you are in. `turn` is the fully qualified `S<session>/T<prompt>` address \u2014 normally the current turn's, from the `mnemo current turn` line, sent in a batch whose result cannot change what the note says (a commit, a check you expect to pass). Which batch is last is not knowable before its results return, so do not wait for it: a turn that ends still owing its note is written from any batch of a later turn, results in hand, and that is the ordinary path. Never open a batch of only note calls except for a backlog-relief list or to correct a note already written. The note describes its addressed turn only. title (~" + NOTE_TOKEN_BUDGET.title + " tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the addressing line, one glance says what the turn did. content (~" + NOTE_TOKEN_BUDGET.content + ' tokens): the conclusion, then the distilled evidence chain that produced it, including rejected alternatives and who decided; never restate the title, and never narrate the act of looking ("I checked the transcript and found it has no X" is "the transcript has no X"). insight (~' + NOTE_TOKEN_BUDGET.insight + " tokens): optional study note \u2014 only knowledge worth keeping long-term that is hard to reacquire, and orthogonal to this turn's conclusion. It is read far from its turn, so it must stand alone: claim first, evidence after, and no session-local literal (id, ticket number) in the opening sentence. Each successful write answers with its own token count against those budgets. skip: set true, with `turn` alone, to decline a turn you owe that holds nothing worth keeping, or whose details have left your context (e.g. it predates a compact) and are not worth a lookup of their own \u2014 details a batch recovers in passing make it writable again, but never invent a note from the listed line. Write in English; quoted user phrases keep their original language. Re-sending a turn's note requires `replace: true` (its receipt starts `Updated`, not `Noted`) \u2014 send it whenever a later result, in that turn or a following one, changes what it should say; this works after a skip too, and a real note after a skip needs no `replace` (a decline leaves no note to overwrite). `crossSession: true` is required only if `turn` addresses a session other than this one \u2014 every address you are ever given is your own session's, so you should never need it. Never include <private> content."
+  //
+  // Single home of the note contract (user ruling, S15069 T586): fields,
+  // budgets, the skip test and replace live HERE and nowhere else; the
+  // SessionStart block (src/hooks/handlers/context-note-taking.ts) carries
+  // only the batch-timing digest and points at this text. Capped at 500
+  // tokens by tests/mcp/definitions.test.ts.
+  note: "Write a note about one of this session's turns. `turn` is the `S<session>/T<prompt>` address from the injected `mnemo current turn` line, its `owed:` suffix, or the backlog-relief block \u2014 the only sources of an address; never recall or invent one. Timing: the SessionStart block's three rules. A note describes its addressed turn only, in English; quoted user phrases keep their original language. title (~" + NOTE_TOKEN_BUDGET.title + " tokens): `<activity>+<topic>: <what this turn covered>` \u2014 the activity word states the real stage, never a hoped-for one. content (~" + NOTE_TOKEN_BUDGET.content + ' tokens): the conclusion, then the evidence chain that produced it \u2014 rejected alternatives with reasons, who decided (user/data/literature/inference); proper nouns over narration; never restate the title, never narrate looking ("I checked X and found no Y" is "X has no Y"). insight (~' + NOTE_TOKEN_BUDGET.insight + " tokens): empty by default \u2014 only long-term, hard-to-reacquire knowledge orthogonal to the conclusion; it is read far from its turn, so claim first, evidence after, and no session-local literal in the opening sentence. The receipt reports token counts against these budgets \u2014 over budget, cut the next one. skip: true with `turn` alone, when a future retriever would find nothing unique in the turn; the check: deleting it from history would cost the project no decision, progress, or coherence. Content that left your context and is not recovered in passing is skipped, never invented; recovered in passing, it is writable again. Never skip a user decision, correction, or veto, or any turn with a conclusion, a rejected option, or a lesson \u2014 whatever the tool count. Re-sending a turn's note requires `replace: true` (receipt `Updated`) \u2014 send it whenever a later result changes what it should say; a real note after a skip needs no replace. `crossSession: true` only for another session's turn; you should never need it. The note call goes last in its batch; cite other turns only as [S15069/T332], only ids seen in injected context; never include <private> content."
 };
 var recallInputShape = {
   id: external_exports3.string().optional(),

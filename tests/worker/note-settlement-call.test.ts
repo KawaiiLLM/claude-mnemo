@@ -31,6 +31,7 @@ import { renderNoteSettlementPrompt } from "../../src/worker/note-settlement-pro
 import { parseNoteSettlementResponse } from "../../src/worker/note-settlement-response";
 import {
   createNoteSettlementDispatch,
+  NOTE_SETTLEMENT_METRICS_PREFIX,
   type NoteSettlementQuery,
   type NoteSettlementWindowMetrics,
 } from "../../src/worker/note-settlement-dispatch";
@@ -171,8 +172,10 @@ interface Fixture {
 }
 
 /**
- * Four turns: two noted, one interior hole (written off, but T4 after it was
- * noted) and one trailing hole (written off with nothing noted after it).
+ * Four turns: two noted, and two written off by residual settlement (reason
+ * `closed`) with no note of their own — T2 has a later noted turn (T3), T4
+ * does not. Ticket 05 deletes the old interior/trailing distinction: BOTH are
+ * now plain holes the payload mechanically backfills, position irrelevant.
  */
 function seedInteriorHoleWindow(): Fixture {
   const sessionDbId = seedSession();
@@ -231,7 +234,7 @@ function dispatchWith(
 }
 
 describe("settlement context assembly", () => {
-  test("injects raw material for an interior hole and none for a trailing hole", () => {
+  test("injects raw material for every hole regardless of what follows it (spec D7, ticket 05)", () => {
     const fixture = seedInteriorHoleWindow();
     const context = buildNoteSettlementContext(db, fixture.job, {
       nowEpoch: NOW,
@@ -242,15 +245,19 @@ describe("settlement context assembly", () => {
     );
     expect(kinds).toEqual({
       1: "noted",
-      2: "interior-hole",
+      2: "hole",
       3: "noted",
-      4: "trailing-hole",
+      4: "hole",
     });
-    expect(context.interiorHoles.map((turn) => turn.promptNumber)).toEqual([2]);
+    // Both holes, position irrelevant — the old interior/trailing split (and
+    // its "trailing gets nothing" refusal) is gone.
+    expect(context.interiorHoles.map((turn) => turn.promptNumber)).toEqual([
+      2, 4,
+    ]);
 
     expect(
       context.windowTurns.map((turn) => turn.rawMaterial !== null),
-    ).toEqual([false, true, false, false]);
+    ).toEqual([false, true, false, true]);
 
     // Assert on the window section rather than the whole prompt: the arc
     // rendering above it is the production timeline view, which quotes prompt
@@ -260,8 +267,8 @@ describe("settlement context assembly", () => {
     const window = prompt.slice(prompt.indexOf("## Window turns"));
     expect(window).toContain("raw> user: INTERIOR HOLE PROMPT");
     expect(window).toContain("raw> assistant: INTERIOR HOLE RESPONSE");
-    expect(window).not.toContain("TRAILING HOLE PROMPT");
-    expect(window).not.toContain("TRAILING HOLE RESPONSE");
+    expect(window).toContain("raw> user: TRAILING HOLE PROMPT");
+    expect(window).toContain("raw> assistant: TRAILING HOLE RESPONSE");
     // The window's notes are the material for turns that have one.
     expect(window).toContain("implement+settlement: lease fence");
   });
@@ -340,7 +347,7 @@ describe("settlement write-back", () => {
           no_candidate_reason:
             "No open segment and no registered topic covers hole reconstruction.",
           title: "design+holes: reconstructing written-off turns",
-          content: "Interior holes get a note; trailing holes do not. [S1/T2]",
+          content: "Every gap in this window gets a note now. [S1/T2]",
           type: ["design"],
           tags: ["hole reconstruction"],
           status: "open",
@@ -360,14 +367,21 @@ describe("settlement write-back", () => {
         },
         {
           turn: "S1/T4",
+          title: "research+lease: what the trailing gap covered",
+          content: "The old refusal is gone (spec D7, ticket 05): position no",
+        },
+        {
+          // T1 already has an agent note — reconstruction is refused for any
+          // turn that is not a `hole` of this window, noted or otherwise.
+          turn: "S1/T1",
           title: "should be refused",
-          content: "Trailing hole, no dependency after it.",
+          content: "T1 is already noted, not a hole.",
         },
       ],
       session_summary: {
         title: "settlement fixture",
         content: "Settled one window.",
-        decision: "Interior holes are reconstructed.",
+        decision: "Every gap gets reconstructed.",
         done: "window 1-4",
         current: "waiting for the next window",
         next_steps: "settle 5-8",
@@ -419,18 +433,25 @@ describe("settlement write-back", () => {
     expect(judged[0]!.provenance).toBe("judged");
     expect(judged[0]!.relation).toBe("builds-on");
 
-    // Interior hole reconstructed with settlement provenance; trailing refused.
+    // BOTH holes reconstructed with settlement provenance now (spec D7, ticket
+    // 05 — the old interior/trailing split, and the trailing refusal, are gone).
     const holeNote = getShadowNote(db, fixture.turnIds[1]!)!;
     expect(holeNote.writerOrigin).toBe("settlement");
     expect(holeNote.title).toContain("what the hole covered");
-    expect(getShadowNote(db, fixture.turnIds[3]!)).toBeNull();
-    // The agent's own notes keep their origin.
+    const trailingNote = getShadowNote(db, fixture.turnIds[3]!)!;
+    expect(trailingNote.writerOrigin).toBe("settlement");
+    expect(trailingNote.title).toContain("what the trailing gap covered");
+    // The agent's own notes keep their origin — and reconstruction is refused
+    // for a turn that is not a `hole` of this window, T1 included.
     expect(getShadowNote(db, fixture.turnIds[0]!)!.writerOrigin).toBe("agent");
+    expect(getShadowNote(db, fixture.turnIds[0]!)!.title).not.toContain(
+      "should be refused",
+    );
 
     // Session summary and job/cursor resolution.
     const session = getSession(db, fixture.sessionDbId)!;
     expect(session.current).toBe("waiting for the next window");
-    expect(session.decision).toBe("Interior holes are reconstructed.");
+    expect(session.decision).toBe("Every gap gets reconstructed.");
     expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("done");
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(4);
 
@@ -440,7 +461,8 @@ describe("settlement write-back", () => {
     expect(metricsSeen[0]!.topicsReused).toBe(0);
     expect(metricsSeen[0]!.segmentsCreated).toBe(1);
     expect(metricsSeen[0]!.segmentsExtended).toBe(1);
-    expect(metricsSeen[0]!.notesReconstructed).toBe(1);
+    expect(metricsSeen[0]!.notesReconstructed).toBe(2);
+    expect(metricsSeen[0]!.notesYielded).toBe(0);
     expect(metricsSeen[0]!.notesRejected).toBe(1);
     expect(metricsSeen[0]!.rejectedReferences).toBeGreaterThan(0);
   });
@@ -483,6 +505,50 @@ describe("settlement write-back", () => {
     expect(countMemoryEdges(db)).toBe(0);
     expect(getSession(db, fixture.sessionDbId)!.current).toBeNull();
     expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
+  });
+
+  /**
+   * Spec D7 (ticket 05), the race a mechanical backfill must lose on purpose:
+   * the main agent can write a hole's real note WHILE the model call is in
+   * flight — after `buildNoteSettlementContext` already classified the turn
+   * as a hole, before this write-back ever runs. The agent's own account of
+   * its turn wins, `writer_origin` stays `agent`, and the yield is counted
+   * separately from a genuine rejection.
+   */
+  test("a mid-flight agent note wins over settlement's own reconstruction of the same turn", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const reply = JSON.stringify({
+      segments: [],
+      reconstructed_notes: [
+        {
+          turn: "S1/T2",
+          title: "settlement's reconstruction",
+          content: "Written from the raw material.",
+        },
+      ],
+    });
+    const racingQuery: NoteSettlementQuery = async () => {
+      upsertShadowNote(db, {
+        turnId: fixture.turnIds[1]!,
+        title: "agent+lease: the turn's own account",
+        content: "Written by the agent while settlement was thinking.",
+        nowEpoch: NOW,
+      });
+      return reply;
+    };
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const outcome = await dispatchWith(racingQuery, (value) =>
+      metricsSeen.push(value),
+    )({ job: fixture.job });
+
+    expect(outcome).toEqual({ ok: true });
+    const note = getShadowNote(db, fixture.turnIds[1]!)!;
+    expect(note.writerOrigin).toBe("agent");
+    expect(note.title).toBe("agent+lease: the turn's own account");
+    expect(metricsSeen[0]!.notesReconstructed).toBe(0);
+    expect(metricsSeen[0]!.notesYielded).toBe(1);
+    expect(metricsSeen[0]!.notesRejected).toBe(0);
   });
 
   test("replays a CAS-conflicted segment without rolling back the committed writes", async () => {
@@ -622,6 +688,9 @@ describe("settlement payload at the scheduler seam", () => {
       });
       seedDebt(turnId, sessionDbId, promptNumber, "noted", null);
     }
+    // A 5th, still-open turn: turn 4 alone is not yet decided (spec D10) —
+    // this is what makes it so, and it stays outside window 1-4.
+    seedTurn(sessionDbId, 5, { userPrompt: "still open" });
     classifyThrough(sessionDbId, 4);
 
     const reply = JSON.stringify({
@@ -660,6 +729,82 @@ describe("settlement payload at the scheduler seam", () => {
     // own transaction; the scheduler's completion re-asserts the same facts.
     expect(getNoteSettlementJob(db, pass.created[0]!.id)!.status).toBe("done");
     expect(getNoteSettlementCursor(db, sessionDbId)).toBe(4);
+  });
+
+  /**
+   * Acceptance criterion (spec D7, ticket 05): a genuine gap scenario run all
+   * the way from the scheduler trigger through the real payload seam to the
+   * write-back must produce a `notesReconstructed > 0` LOG LINE — the
+   * observability the ticket requires, not just a row in the database.
+   */
+  test("a genuine gap end to end produces a notesReconstructed > 0 log line", async () => {
+    const sessionDbId = seedSession();
+    if (sessionDbId !== 1) {
+      throw new Error("fixture expected session id 1");
+    }
+    const t1 = seedTurn(sessionDbId, 1, {
+      note: { title: "design+seam: window shape", content: "Chose windows." },
+    });
+    seedDebt(t1, sessionDbId, 1, "noted", null);
+    // T2 has no note AND no note_debt row at all — a plain gap. Spec D7: a
+    // missing debt row no longer reads as "trivial", it is a hole like any
+    // other.
+    const t2 = seedTurn(sessionDbId, 2, {
+      userPrompt: "GAP PROMPT never written up",
+      assistantResponse: "GAP RESPONSE never written up",
+    });
+    // Turn 3, still open: turn 2 alone is not yet decided (spec D10).
+    seedTurn(sessionDbId, 3, { userPrompt: "still open" });
+    classifyThrough(sessionDbId, 2);
+
+    const reply = JSON.stringify({
+      segments: [],
+      reconstructed_notes: [
+        {
+          turn: "S1/T2",
+          title: "research+seam: reconstructed end to end",
+          content: "Filled in from raw material.",
+        },
+      ],
+    });
+
+    const lines: string[] = [];
+    const dispatch = createNoteSettlementDispatch({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      runQuery: stubQuery(reply),
+      logger: {
+        warn: () => {},
+        error: () => {},
+        log: (line: string) => lines.push(line),
+      },
+    });
+    const scheduler = createNoteSettlementScheduler({
+      db,
+      config: SETTLEMENT_ENABLED_CONFIG,
+      now: () => NOW,
+      nowMs: () => NOW * 1000,
+      consecutiveTurns: 2,
+      dispatch,
+      logger: { warn: () => {}, error: () => {} },
+    });
+
+    const pass = await scheduler.onTurnStop(sessionDbId);
+    expect(pass.dispatched).toHaveLength(1);
+
+    const note = getShadowNote(db, t2)!;
+    expect(note.writerOrigin).toBe("settlement");
+    expect(note.title).toContain("reconstructed end to end");
+
+    const metricsLine = lines.find((line) =>
+      line.startsWith(NOTE_SETTLEMENT_METRICS_PREFIX),
+    );
+    expect(metricsLine).toBeDefined();
+    const parsedMetrics = JSON.parse(
+      metricsLine!.slice(NOTE_SETTLEMENT_METRICS_PREFIX.length + 1),
+    );
+    expect(parsedMetrics.notesReconstructed).toBeGreaterThan(0);
   });
 });
 
