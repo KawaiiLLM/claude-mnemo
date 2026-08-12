@@ -7,6 +7,7 @@ import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { getShadowNote } from "../../src/db/shadow-notes";
 import { upsertSession } from "../../src/db/sessions";
+import { settleOutstandingTurns } from "../../src/db/turn-settlement";
 import { getStrandedTurns, getTurnById } from "../../src/db/turns";
 import { createDatabaseBackedHandlers } from "../../src/mcp/handlers";
 import { isNoteSuccess, noteTool } from "../../src/mcp/note";
@@ -122,10 +123,14 @@ describe("era cutover write path", () => {
     insertObservation.run(eraTurnId, 3_000);
     insertTurnStop.run(legacyTurnId, sessionId, 1_000);
     insertTurnStop.run(eraTurnId, sessionId, 3_000);
-    // Ticket 15: the same pass that opens the debts settles the turns, because
-    // no subagent is coming to write their records. The era turn becomes the
+    // Ticket 15 gave the turns their terminal statuses in the same pass that
+    // opened their debts; note-prompt-clock ticket 02 split that pass in two.
+    // Settlement now runs first through its own channel, then the ledger
+    // classifies — the same order every production call site uses, and the
+    // same end state this fixture always asserted. The era turn becomes the
     // hole `skipped` names; the pre-era one becomes `failed`, which is what a
     // turn whose only writer is gone has always been called.
+    settleOutstandingTurns(db, sessionId, CUTOFF, 3_200);
     reconcileNoteDebt(db, {
       sessionId,
       nowEpoch: 3_200,

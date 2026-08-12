@@ -3,7 +3,6 @@ import type { Database } from "bun:sqlite";
 
 import { createDatabase } from "../../src/db/database";
 import { createObservation, getObservation } from "../../src/db/observations";
-import { getNoteDebt, reconcileNoteDebt } from "../../src/db/note-debt";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession } from "../../src/db/sessions";
 import { getTurnById, promoteTurnFromNote } from "../../src/db/turns";
@@ -164,55 +163,10 @@ describe("mechanical turn completion", () => {
     expect(getTurnById(db, turnId)?.status).toBe("undone");
   });
 
-  test("the note-debt classification walk settles every turn it admits", () => {
-    const first = seedTurn({ promptNumber: 1, createdAtEpoch: 3_000 });
-    const second = seedTurn({ promptNumber: 2, createdAtEpoch: 3_100 });
-    seedObservation(first, "Edit", { file_path: "/a.ts" });
-    seedObservation(second, "Edit", { file_path: "/b.ts" });
-    for (const turnId of [first, second]) {
-      db.query(
-        `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
-         VALUES ('turn-stop', ?, ?, 10)`,
-      ).run(turnId, sessionId);
-    }
-
-    const result = reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 4_000,
-      completedTurnId: second,
-      eraCutoffEpoch: CUTOFF,
-    });
-
-    expect(result.settled).toEqual([first, second]);
-    expect(getTurnById(db, first)?.status).toBe("skipped");
-    expect(getTurnById(db, second)?.status).toBe("skipped");
-    // Settling is not paying: both still owe a note, which the relief valve may
-    // still collect.
-    expect(getNoteDebt(db, first)?.status).toBe("pending");
-    expect(getNoteDebt(db, second)?.status).toBe("pending");
-  });
-
-  test("the walk stops at a turn with no completion evidence, and settles nothing past it", () => {
-    const stranded = seedTurn({ promptNumber: 1, createdAtEpoch: 3_000 });
-    const later = seedTurn({ promptNumber: 2, createdAtEpoch: 3_100 });
-    seedObservation(later, "Edit", { file_path: "/b.ts" });
-    db.query(
-      `INSERT INTO pending_queue (kind, target_id, session_db_id, enqueued_at_epoch)
-       VALUES ('turn-stop', ?, ?, 10)`,
-    ).run(later, sessionId);
-
-    // `stranded` has neither a terminal status nor a queued turn-stop, so the
-    // contiguous prefix blocks on it. That is the ledger's existing contract and
-    // the stranded repair is what ends the block; the point here is that the
-    // settlement inherits it rather than skipping over a turn.
-    const result = reconcileNoteDebt(db, {
-      sessionId,
-      nowEpoch: 4_000,
-      eraCutoffEpoch: CUTOFF,
-    });
-
-    expect(result.settled).toEqual([]);
-    expect(getTurnById(db, stranded)?.status).toBe("active");
-    expect(getTurnById(db, later)?.status).toBe("active");
-  });
+  // The integration between this walk and the note-debt ledger's own
+  // classification (which turn ids get settled from a session, and which are
+  // left stranded) moved to db/turn-settlement.ts along with the write itself
+  // (ticket 02, spec D10) — see tests/db/turn-settlement.test.ts. Nothing in
+  // this file drives `settleCompletedTurn` through `reconcileNoteDebt` any
+  // more, because nothing in the source does either.
 });

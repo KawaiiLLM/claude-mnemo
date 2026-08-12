@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import { captureConsultedMemories } from "../../db/consulted-memories";
 import { runHookWriteTransaction } from "../../db/database";
 import { reconcileNoteDebt } from "../../db/note-debt";
+import { settleOutstandingTurns } from "../../db/turn-settlement";
 import { createObservation } from "../../db/observations";
 import { getSessionByContentId } from "../../db/sessions";
 import { resolveEraCutoff } from "../../db/era";
@@ -91,6 +92,12 @@ export function createPostToolUseHandler(
     const excludedFromExtraction = isExtractionExcludedToolName(toolName);
 
     const writeResult = writeTransaction(dependencies.db, () => {
+      // Settlement runs first (ticket 02, spec D10): db/turn-settlement.ts is
+      // now the only caller of `settleCompletedTurn`, so a turn's terminal
+      // status, file sets and tool count land here before the note-debt sweep
+      // below reads its completion evidence — the same order the write used
+      // to happen in when it ran embedded inside the ledger's own reconcile.
+      //
       // Note-debt ownership (spec D2/D3): the asynchronous capture entry
       // maintains the ledger, the synchronous reminder entry only reads it.
       // Here it is a catch-up sweep — only turns older than the open one are
@@ -103,8 +110,16 @@ export function createPostToolUseHandler(
       // and the next sweep walks on.
       //
       // Wrapped: the shadow ledger is a P1 trial artefact and must never be
-      // able to abort the capture write it shares a transaction with.
+      // able to abort the capture write it shares a transaction with; settlement
+      // inherits the same tolerance it had when it ran embedded in the ledger.
       try {
+        settleOutstandingTurns(
+          dependencies.db,
+          session.id,
+          eraCutoffEpoch,
+          createdAtEpoch,
+        );
+
         reconcileNoteDebt(dependencies.db, {
           sessionId: session.id,
           nowEpoch: createdAtEpoch,

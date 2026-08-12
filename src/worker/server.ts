@@ -21,6 +21,7 @@ import {
   updateCompactAnchor,
 } from "../db/sessions";
 import { reconcileNoteDebt } from "../db/note-debt";
+import { settleOutstandingTurns } from "../db/turn-settlement";
 import { getTurnById } from "../db/turns";
 import {
   claimNextItem,
@@ -410,13 +411,15 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
   /**
    * Retire one claimed queue item.
    *
-   * A `turn-stop` row is the turn's completion event, and completion is what
-   * settles the row — through `reconcileNoteDebt`, the one place that knows both
-   * "this turn is over" and "here is what it carries". Settling BEFORE the
-   * delete matters: the ledger's completion-evidence predicate counts a queued
-   * turn-stop as evidence, so a row deleted first would leave a turn with no
-   * evidence and no terminal status, which the stranded repair would re-enqueue
-   * on every end event forever.
+   * A `turn-stop` row is the turn's completion event. Completion is what
+   * settles the row — `settleOutstandingTurns` (db/turn-settlement.ts, ticket
+   * 02) is now the one place that knows both "this turn is over" and "here is
+   * what it carries" — and `reconcileNoteDebt` still runs right after it, for
+   * the note-debt ledger's own reasons (spec D2/D3), unrelated to settlement.
+   * Settling BEFORE the delete matters: the settlement candidate predicate
+   * counts a queued turn-stop as evidence, so a row deleted first would leave
+   * a turn with no evidence and no terminal status, which the stranded repair
+   * would re-enqueue on every end event forever.
    *
    * Every other kind is just dropped — deletion is unconditional below. The only
    * other kind ever seen here was `obs` (observation-queue-teardown ticket): it
@@ -433,11 +436,14 @@ export function createWorkerCore(deps: WorkerCoreDeps): WorkerCore {
       if (item.kind === "turn-stop") {
         const turn = getTurnById(deps.db, item.targetId);
         if (turn) {
+          const eraCutoffEpoch =
+            config.eraCutoffEpoch ?? resolveEraCutoff(deps.db);
+          settleOutstandingTurns(deps.db, turn.sessionId, eraCutoffEpoch, now());
           reconcileNoteDebt(deps.db, {
             sessionId: turn.sessionId,
             nowEpoch: now(),
             completedTurnId: turn.id,
-            eraCutoffEpoch: config.eraCutoffEpoch ?? resolveEraCutoff(deps.db),
+            eraCutoffEpoch,
           });
         }
       }

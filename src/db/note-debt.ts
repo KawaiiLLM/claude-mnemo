@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 
-import { settleCompletedTurn } from "./turn-completion";
 import { isMnemoOwnToolName } from "../shared/note-tool";
 
 /**
@@ -80,6 +79,12 @@ export interface ReconcileNoteDebtInput {
   /**
    * P2 era boundary (spec D11). Only decides what an un-noted turn is settled
    * to — `skipped` in the new era, `failed` before it. Omitted = legacy.
+   *
+   * No longer used to settle anything here (ticket 02 moved that write to
+   * db/turn-settlement.ts, called by every caller of this function BEFORE it
+   * runs). Kept on the input type because `eraCutoffEpoch` is otherwise
+   * unused by classification/debt logic and every call site already threads
+   * it through from the same era resolution as the settlement call.
    */
   eraCutoffEpoch?: number | null;
 }
@@ -89,8 +94,6 @@ export interface ReconcileNoteDebtResult {
   noted: number[];
   aged: number[];
   rolledBack: number[];
-  /** Turns this pass carried to a terminal status (see `settleCompletedTurn`). */
-  settled: number[];
   classifiedThroughPromptNumber: number;
 }
 
@@ -213,12 +216,16 @@ function setClassificationCursor(
  *     to avoid, and it would also leave a repaired turn blocked until its
  *     re-extraction finished.
  *
- * Since the extraction subagent was removed (ticket 15) this predicate is also
- * where the turn gets its terminal status: `settleCompletedTurn` runs on every
- * turn the walk below admits. The `turn-stop` clause therefore still earns its
- * place — it is what the Stop hook and the stranded repair leave behind, and it
- * is evidence BEFORE the settlement in the same pass has written the status the
- * first clause tests.
+ * Ticket 02 moved the turn's actual settlement — its terminal status,
+ * `files_read`/`files_modified`/`tool_call_count`, and its observations'
+ * retirement — out of this walk and into db/turn-settlement.ts, which every
+ * caller of `reconcileNoteDebt` now calls first (spec D10). This predicate is
+ * unchanged by that move: it is still the gate for whether an un-answered
+ * turn owes a note, and it still reads the SAME evidence (a terminal status,
+ * or a queued `turn-stop`) — the terminal status just now comes from the
+ * settlement channel's own writer instead of from a call embedded in this
+ * loop. The `turn-stop` clause is what makes that safe: it is evidence a
+ * finished turn carries even before its (now external) settlement lands.
  */
 const COMPLETION_EVIDENCE_SQL = `(
   t.status NOT IN ('active', 'provisional')
@@ -401,7 +408,6 @@ export function reconcileNoteDebt(
   input: ReconcileNoteDebtInput,
 ): ReconcileNoteDebtResult {
   const { sessionId, nowEpoch } = input;
-  const eraCutoffEpoch = input.eraCutoffEpoch ?? null;
   const agingTurns = input.agingTurns ?? NOTE_DEBT_AGING_TURNS;
   const maxPromptNumber = getMaxPromptNumber(db, sessionId);
   const cursor = getClassificationCursor(db, sessionId);
@@ -422,7 +428,6 @@ export function reconcileNoteDebt(
   }
 
   const opened: number[] = [];
-  const settled: number[] = [];
   let classifiedThrough = cursor;
   if (classifyThrough > cursor) {
     const candidates = db
@@ -457,15 +462,6 @@ export function reconcileNoteDebt(
       ) {
         blockedAtPromptNumber = candidate.promptNumber;
         break;
-      }
-      // This is the point at which a turn is known to be over, and the row is
-      // right here — which is why the mechanical settlement lives here rather
-      // than in a scan of its own (ticket 15). With the extraction subagent
-      // gone nothing else will ever carry the row to a terminal status, and a
-      // turn left `active`/`provisional` is re-selected by the stranded repair
-      // on every end event, forever.
-      if (settleCompletedTurn(db, candidate.id, eraCutoffEpoch, nowEpoch)) {
-        settled.push(candidate.id);
       }
       if (classifyCompletedTurn(db, candidate, nowEpoch)) {
         opened.push(candidate.id);
@@ -538,7 +534,6 @@ export function reconcileNoteDebt(
     noted,
     aged,
     rolledBack,
-    settled,
     classifiedThroughPromptNumber: Math.max(cursor, classifiedThrough),
   };
 }
