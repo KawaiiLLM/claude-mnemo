@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msqba1yc" : "dev";
+var BUILD_ID = true ? "0.9.11-msqd3ety" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1588,6 +1588,112 @@ function updateCompactAnchor(db, sessionId) {
   ).run(sessionId, sessionId);
 }
 
+// src/db/note-debt.ts
+var NOTE_DEBT_COLUMNS = `
+  turn_id AS turnId,
+  session_id AS sessionId,
+  prompt_number AS promptNumber,
+  status,
+  reason,
+  opened_at_epoch AS openedAtEpoch,
+  closed_at_epoch AS closedAtEpoch,
+  updated_at_epoch AS updatedAtEpoch
+`;
+function getNoteDebt(db, turnId) {
+  return db.query(
+    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
+  ).get(turnId) ?? null;
+}
+function closeDebt(db, turnId, status, reason, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ? AND status = 'pending'`
+  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+         SET status = 'noted', reason = NULL,
+             closed_at_epoch = ?, updated_at_epoch = ?
+         WHERE turn_id = ?
+           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
+  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
+}
+function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
+  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
+}
+function recordDeclinedNoteDebt(db, turn, nowEpoch) {
+  return db.query(
+    `INSERT OR IGNORE INTO note_debt (
+           turn_id, session_id, prompt_number, status, reason,
+           opened_at_epoch, closed_at_epoch, updated_at_epoch
+         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
+  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
+}
+function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
+  return db.query(
+    `UPDATE note_debt
+       SET status = 'skipped', reason = 'closed',
+           closed_at_epoch = ?, updated_at_epoch = ?
+       WHERE session_id = ? AND status = 'pending'`
+  ).run(nowEpoch, nowEpoch, sessionId).changes;
+}
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR ${alias}.type != 'compact')`;
+}
+function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number BETWEEN ? AND ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id
+             AND d.status = 'skipped'
+             AND d.reason = 'declined'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, rangeStart, rangeEnd);
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+function getExposedTurnIds(db, sessionId, source) {
+  const rows = source ? db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ? AND source = ?`
+  ).all(sessionId, source) : db.query(
+    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
+           FROM note_id_exposures WHERE session_id = ?`
+  ).all(sessionId);
+  return new Set(rows.map((row) => row.exposedTurnId));
+}
+
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
   id,
@@ -1952,6 +2058,7 @@ var SETTLEMENT_CANDIDATE_SQL = `
         SELECT 1 FROM turns later
         WHERE later.session_id = t.session_id
           AND later.prompt_number > t.prompt_number
+          AND ${realPromptPredicate("later")}
       )
       OR EXISTS (
         SELECT 1 FROM pending_queue q
@@ -3643,111 +3750,6 @@ function runTranscriptPathBackfill(db, options = {}) {
   return summary;
 }
 
-// src/db/note-debt.ts
-var NOTE_DEBT_COLUMNS = `
-  turn_id AS turnId,
-  session_id AS sessionId,
-  prompt_number AS promptNumber,
-  status,
-  reason,
-  opened_at_epoch AS openedAtEpoch,
-  closed_at_epoch AS closedAtEpoch,
-  updated_at_epoch AS updatedAtEpoch
-`;
-function getNoteDebt(db, turnId) {
-  return db.query(
-    `SELECT ${NOTE_DEBT_COLUMNS} FROM note_debt WHERE turn_id = ?`
-  ).get(turnId) ?? null;
-}
-function closeDebt(db, turnId, status, reason, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = ?, reason = ?, closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ? AND status = 'pending'`
-  ).run(status, reason, nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsNoted(db, turnId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-         SET status = 'noted', reason = NULL,
-             closed_at_epoch = ?, updated_at_epoch = ?
-         WHERE turn_id = ?
-           AND (status = 'pending' OR (status = 'skipped' AND reason = 'declined'))`
-  ).run(nowEpoch, nowEpoch, turnId).changes > 0;
-}
-function closeNoteDebtAsDeclined(db, turnId, nowEpoch) {
-  return closeDebt(db, turnId, "skipped", "declined", nowEpoch);
-}
-function recordDeclinedNoteDebt(db, turn, nowEpoch) {
-  return db.query(
-    `INSERT OR IGNORE INTO note_debt (
-           turn_id, session_id, prompt_number, status, reason,
-           opened_at_epoch, closed_at_epoch, updated_at_epoch
-         ) VALUES (?, ?, ?, 'skipped', 'declined', ?, ?, ?)`
-  ).run(turn.id, turn.sessionId, turn.promptNumber, nowEpoch, nowEpoch, nowEpoch).changes > 0;
-}
-function closePendingNoteDebtsAsClosed(db, sessionId, nowEpoch) {
-  return db.query(
-    `UPDATE note_debt
-       SET status = 'skipped', reason = 'closed',
-           closed_at_epoch = ?, updated_at_epoch = ?
-       WHERE session_id = ? AND status = 'pending'`
-  ).run(nowEpoch, nowEpoch, sessionId).changes;
-}
-function listOwedNoteTurnsInRange(db, sessionId, rangeStart, rangeEnd) {
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number BETWEEN ? AND ?
-         AND t.status != 'undone'
-         AND t.was_rolled_back = 0
-         AND (t.type IS NULL OR t.type != 'compact')
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id
-             AND d.status = 'skipped'
-             AND d.reason = 'declined'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, rangeStart, rangeEnd);
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
-}
-function getExposedTurnIds(db, sessionId, source) {
-  const rows = source ? db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ? AND source = ?`
-  ).all(sessionId, source) : db.query(
-    `SELECT DISTINCT exposed_turn_id AS exposedTurnId
-           FROM note_id_exposures WHERE session_id = ?`
-  ).all(sessionId);
-  return new Set(rows.map((row) => row.exposedTurnId));
-}
-
 // src/db/note-settlement.ts
 var NOTE_SETTLEMENT_CONSECUTIVE_TURNS = 50;
 var NOTE_SETTLEMENT_MIN_WINDOW_TURNS = 20;
@@ -3810,7 +3812,8 @@ function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
 }
 function getMaxPromptNumber(db, sessionId) {
   return db.query(
-    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+    `SELECT MAX(t.prompt_number) AS maxPromptNumber FROM turns t
+         WHERE t.session_id = ? AND ${realPromptPredicate("t")}`
   ).get(sessionId)?.maxPromptNumber ?? 0;
 }
 function getDecidedPrefixEnd(db, sessionId, windowStart) {
@@ -3881,27 +3884,31 @@ function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch,
   }
   return job;
 }
-function enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch) {
-  if (plans.length === 0) {
-    return [];
-  }
-  return runWriteTransaction(db, () => {
-    const created = [];
-    for (const plan of plans) {
-      const job = insertJob(
-        db,
-        plan.sessionId,
-        plan.windowStart,
-        plan.windowEnd,
-        plan.triggerType,
-        nowEpoch,
-        eraCutoffEpoch
-      );
-      if (job) {
-        created.push(job);
-      }
+function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
+  const created = [];
+  for (const plan of plans) {
+    const job = insertJob(
+      db,
+      plan.sessionId,
+      plan.windowStart,
+      plan.windowEnd,
+      plan.triggerType,
+      nowEpoch,
+      eraCutoffEpoch
+    );
+    if (job) {
+      created.push(job);
     }
-    return created;
+  }
+  return created;
+}
+function planAndEnqueueNoteSettlementWindows(db, sessionId, trigger, nowEpoch, options) {
+  return runWriteTransaction(db, () => {
+    const plans = planNoteSettlementWindows(db, sessionId, trigger, options);
+    if (plans.length === 0) {
+      return [];
+    }
+    return insertJobs(db, plans, nowEpoch, options.eraCutoffEpoch);
   });
 }
 function listResidualNoteSettlementCandidates(db, options) {
@@ -4380,7 +4387,10 @@ function createNoteSettlementScheduler(deps) {
     let dueSessionIds = [];
     try {
       created.push(
-        ...enqueueNoteSettlementWindows(db, plans, now(), eraCutoffEpoch)
+        ...planAndEnqueueNoteSettlementWindows(db, sessionDbId, trigger, now(), {
+          ...windowOptions,
+          eraCutoffEpoch
+        })
       );
       dueSessionIds = listDispatchableNoteSettlementSessions(db, {
         excludeSessionIds: /* @__PURE__ */ new Set([sessionDbId]),
@@ -10936,6 +10946,8 @@ function writeMemoryEdges(db, edges, nowEpoch) {
 var ANCHOR_RELATION = "builds-on";
 var ANCHOR_PROVENANCE = "text-ref";
 var JUDGED_PROVENANCE = "judged";
+var UnfilledGapError = class extends Error {
+};
 var EMPTY_COUNTS = {
   segmentsCreated: 0,
   segmentsExtended: 0,
@@ -11010,6 +11022,21 @@ function writeAnchorEdges(db, segment, options) {
   return { written: written.length, rejected: rejected.length };
 }
 function applyNoteSettlementWriteBack(db, options) {
+  try {
+    return applyNoteSettlementWriteBackTransaction(db, options);
+  } catch (error49) {
+    if (error49 instanceof UnfilledGapError) {
+      return {
+        ...EMPTY_COUNTS,
+        committed: false,
+        reason: error49.message,
+        conflicts: []
+      };
+    }
+    throw error49;
+  }
+}
+function applyNoteSettlementWriteBackTransaction(db, options) {
   const { job, response } = options;
   return runWriteTransaction(db, () => {
     const current = getNoteSettlementJob(db, job.id);
@@ -11175,6 +11202,14 @@ function applyNoteSettlementWriteBack(db, options) {
         options.nowEpoch
       );
       counts.summaryUpdated = updated !== null;
+    }
+    const stillOpen = [...options.reconstructableTurnIds].filter(
+      (turnId) => getShadowNote(db, turnId) === null
+    );
+    if (stillOpen.length > 0) {
+      throw new UnfilledGapError(
+        `settlement job ${job.id}: ${stillOpen.length} runtime gap(s) left unfilled by the reconstruction batch (turn ids: ${stillOpen.join(", ")})`
+      );
     }
     completeNoteSettlementJob(db, job.id, options.nowEpoch, job.claimGeneration);
     advanceNoteSettlementCursor(

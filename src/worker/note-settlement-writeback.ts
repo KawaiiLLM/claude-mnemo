@@ -30,7 +30,7 @@ import {
   type SegmentWrite,
 } from "../db/segments";
 import { updateSessionSummaryRewrite } from "../db/sessions";
-import { upsertReconstructedShadowNote } from "../db/shadow-notes";
+import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
 import type {
   NoteSettlementResponse,
   SettlementSegmentDirective,
@@ -68,6 +68,16 @@ const ANCHOR_RELATION: CitationRelation = "builds-on";
  */
 const ANCHOR_PROVENANCE: EdgeProvenance = "text-ref";
 const JUDGED_PROVENANCE: EdgeProvenance = "judged";
+
+/**
+ * Thrown INSIDE the write-back transaction when the mechanical backfill left a
+ * runtime gap unfilled (spec D7, P1-2). Never escapes `applyNoteSettlementWriteBack`
+ * uncaught — it is what forces the whole transaction to roll back (every
+ * segment/edge/note this window's reply also produced, not just the missed
+ * turn), matching the parser's own all-or-nothing rule: a batch that leaves a
+ * hole open is a different and wrong answer, not a partial one to keep.
+ */
+class UnfilledGapError extends Error {}
 
 export interface NoteSettlementWriteBackOptions {
   job: NoteSettlementJob;
@@ -228,7 +238,34 @@ function writeAnchorEdges(
   return { written: written.length, rejected: rejected.length };
 }
 
+/**
+ * Runtime gap coverage guard (spec D7, P1-2). A window's mechanical backfill is
+ * validated against `options.reconstructableTurnIds` AFTER the reply's
+ * directives have been applied, so a turn any OTHER writer already noted (the
+ * main agent's own note landing mid-flight, spec D7's race guard above)
+ * correctly reads as covered without the payload having said anything about
+ * it — "回写只填空缺" applies here too: agent-covered is not a gap.
+ */
 export function applyNoteSettlementWriteBack(
+  db: Database,
+  options: NoteSettlementWriteBackOptions,
+): NoteSettlementWriteBackResult {
+  try {
+    return applyNoteSettlementWriteBackTransaction(db, options);
+  } catch (error) {
+    if (error instanceof UnfilledGapError) {
+      return {
+        ...EMPTY_COUNTS,
+        committed: false,
+        reason: error.message,
+        conflicts: [],
+      };
+    }
+    throw error;
+  }
+}
+
+function applyNoteSettlementWriteBackTransaction(
   db: Database,
   options: NoteSettlementWriteBackOptions,
 ): NoteSettlementWriteBackResult {
@@ -443,6 +480,23 @@ export function applyNoteSettlementWriteBack(
         options.nowEpoch,
       );
       counts.summaryUpdated = updated !== null;
+    }
+
+    // --- runtime gap coverage guard (spec D7, P1-2) ------------------------
+    // Checked AFTER the reconstruction loop above, so a turn it just wrote —
+    // or one another writer covered while this call was in flight — reads as
+    // filled. Anything still open here is a gap the batch was supposed to
+    // mechanically close and did not; throwing rolls back everything this
+    // reply produced (segments, edges, the OTHER holes it did fill) and the
+    // job stays `claimed`, so the caller's existing attempts/retry path picks
+    // it up rather than a partially-covered window silently committing.
+    const stillOpen = [...options.reconstructableTurnIds].filter(
+      (turnId) => getShadowNote(db, turnId) === null,
+    );
+    if (stillOpen.length > 0) {
+      throw new UnfilledGapError(
+        `settlement job ${job.id}: ${stillOpen.length} runtime gap(s) left unfilled by the reconstruction batch (turn ids: ${stillOpen.join(", ")})`,
+      );
     }
 
     // --- completion + cursor, same transaction -----------------------------

@@ -3147,7 +3147,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.9.11-msqba1yc" : "dev";
+var BUILD_ID = true ? "0.9.11-msqd3ety" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -19656,6 +19656,57 @@ function captureConsultedMemories(db, turnId, call) {
   return recordConsultedMemories(db, turnId, addresses).length;
 }
 
+// src/db/note-debt.ts
+function realPromptPredicate(alias = "t") {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR ${alias}.type != 'compact')`;
+}
+var NOTE_DEBT_AGING_TURNS = 50;
+function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
+  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
+  return db.query(
+    `SELECT
+         t.id AS turnId,
+         t.session_id AS sessionId,
+         t.prompt_number AS promptNumber,
+         t.user_prompt AS userPrompt
+       FROM turns t
+       WHERE t.session_id = ?
+         AND t.prompt_number < ?
+         AND t.prompt_number >= ?
+         AND ${realPromptPredicate("t")}
+         AND NOT EXISTS (
+           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM note_debt d
+           WHERE d.turn_id = t.id AND d.status = 'skipped'
+         )
+       ORDER BY t.prompt_number ASC`
+  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
+    ...row,
+    pendingTurns: currentPromptNumber - row.promptNumber
+  }));
+}
+function recordNoteIdExposure(db, input) {
+  const statement = db.query(
+    `INSERT OR IGNORE INTO note_id_exposures (
+       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
+     ) VALUES (?, ?, ?, ?, ?)`
+  );
+  let written = 0;
+  for (const exposedTurnId of input.exposedTurnIds) {
+    statement.run(
+      input.sessionId,
+      input.rideTurnId,
+      exposedTurnId,
+      input.source,
+      input.nowEpoch
+    );
+    written += 1;
+  }
+  return written;
+}
+
 // src/db/observations.ts
 var OBSERVATION_COLUMNS = `
   id,
@@ -19817,6 +19868,7 @@ var SETTLEMENT_CANDIDATE_SQL = `
         SELECT 1 FROM turns later
         WHERE later.session_id = t.session_id
           AND later.prompt_number > t.prompt_number
+          AND ${realPromptPredicate("later")}
       )
       OR EXISTS (
         SELECT 1 FROM pending_queue q
@@ -20125,56 +20177,6 @@ function getSessionEffectiveCitations(db, sessionId) {
     });
   }
   return effective;
-}
-
-// src/db/note-debt.ts
-var NOTE_DEBT_AGING_TURNS = 50;
-function listOwedNoteTurns(db, sessionId, currentPromptNumber, options = {}) {
-  const agingTurns = options.agingTurns ?? NOTE_DEBT_AGING_TURNS;
-  return db.query(
-    `SELECT
-         t.id AS turnId,
-         t.session_id AS sessionId,
-         t.prompt_number AS promptNumber,
-         t.user_prompt AS userPrompt
-       FROM turns t
-       WHERE t.session_id = ?
-         AND t.prompt_number < ?
-         AND t.prompt_number >= ?
-         AND t.status != 'undone'
-         AND t.was_rolled_back = 0
-         AND (t.type IS NULL OR t.type != 'compact')
-         AND NOT EXISTS (
-           SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM note_debt d
-           WHERE d.turn_id = t.id AND d.status = 'skipped'
-         )
-       ORDER BY t.prompt_number ASC`
-  ).all(sessionId, currentPromptNumber, currentPromptNumber - agingTurns).map((row) => ({
-    ...row,
-    pendingTurns: currentPromptNumber - row.promptNumber
-  }));
-}
-function recordNoteIdExposure(db, input) {
-  const statement = db.query(
-    `INSERT OR IGNORE INTO note_id_exposures (
-       session_id, ride_turn_id, exposed_turn_id, source, created_at_epoch
-     ) VALUES (?, ?, ?, ?, ?)`
-  );
-  let written = 0;
-  for (const exposedTurnId of input.exposedTurnIds) {
-    statement.run(
-      input.sessionId,
-      input.rideTurnId,
-      exposedTurnId,
-      input.source,
-      input.nowEpoch
-    );
-    written += 1;
-  }
-  return written;
 }
 
 // src/shared/type-vocabulary.ts
@@ -23499,7 +23501,8 @@ function ensureNoteSettlementCursor(db, sessionId, eraCutoffEpoch, nowEpoch) {
 }
 function getMaxPromptNumber2(db, sessionId) {
   return db.query(
-    "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?"
+    `SELECT MAX(t.prompt_number) AS maxPromptNumber FROM turns t
+         WHERE t.session_id = ? AND ${realPromptPredicate("t")}`
   ).get(sessionId)?.maxPromptNumber ?? 0;
 }
 function getDecidedPrefixEnd(db, sessionId, windowStart) {
@@ -23551,10 +23554,9 @@ function planNoteSettlementWindows(db, sessionId, trigger, options) {
   return plans;
 }
 function enqueueSessionEndNoteSettlementWindow(db, sessionId, nowEpoch, eraCutoffEpoch) {
-  const plans = planNoteSettlementWindows(db, sessionId, "sessionend", {
+  return planAndEnqueueNoteSettlementWindows(db, sessionId, "sessionend", nowEpoch, {
     eraCutoffEpoch
   });
-  return enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch);
 }
 function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch, eraCutoffEpoch) {
   if (windowStart < getNoteSettlementWindowStart(db, sessionId, eraCutoffEpoch)) {
@@ -23576,27 +23578,31 @@ function insertJob(db, sessionId, windowStart, windowEnd, triggerType, nowEpoch,
   }
   return job;
 }
-function enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch) {
-  if (plans.length === 0) {
-    return [];
-  }
-  return runWriteTransaction(db, () => {
-    const created = [];
-    for (const plan of plans) {
-      const job = insertJob(
-        db,
-        plan.sessionId,
-        plan.windowStart,
-        plan.windowEnd,
-        plan.triggerType,
-        nowEpoch,
-        eraCutoffEpoch
-      );
-      if (job) {
-        created.push(job);
-      }
+function insertJobs(db, plans, nowEpoch, eraCutoffEpoch) {
+  const created = [];
+  for (const plan of plans) {
+    const job = insertJob(
+      db,
+      plan.sessionId,
+      plan.windowStart,
+      plan.windowEnd,
+      plan.triggerType,
+      nowEpoch,
+      eraCutoffEpoch
+    );
+    if (job) {
+      created.push(job);
     }
-    return created;
+  }
+  return created;
+}
+function planAndEnqueueNoteSettlementWindows(db, sessionId, trigger, nowEpoch, options) {
+  return runWriteTransaction(db, () => {
+    const plans = planNoteSettlementWindows(db, sessionId, trigger, options);
+    if (plans.length === 0) {
+      return [];
+    }
+    return insertJobs(db, plans, nowEpoch, options.eraCutoffEpoch);
   });
 }
 

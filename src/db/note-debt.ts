@@ -220,6 +220,22 @@ export function closePendingNoteDebtsAsClosed(
     .run(nowEpoch, nowEpoch, sessionId).changes;
 }
 
+/**
+ * The prompt clock's "is this a REAL prompt" predicate (spec D1/D10): a row
+ * only counts as session progression when it is not a sidechain's pending
+ * marker (`undone`), not invalidated (`was_rolled_back`), and not a compact
+ * marker (`type = 'compact'`). `listOwedNoteTurns`/`listOwedNoteTurnsInRange`
+ * apply it to the CANDIDATE row below; db/turn-settlement.ts's settlement
+ * candidate predicate and db/note-settlement.ts's `getMaxPromptNumber` apply
+ * the same definition to decide whether a LATER row is real evidence that a
+ * turn has ended — one definition, so "what counts as a real prompt" cannot
+ * drift between readers (P1-1: a sidechain row born with a higher prompt
+ * number must never read as proof that an earlier, still-running turn ended).
+ */
+export function realPromptPredicate(alias = "t"): string {
+  return `${alias}.status != 'undone' AND ${alias}.was_rolled_back = 0 AND (${alias}.type IS NULL OR ${alias}.type != 'compact')`;
+}
+
 /** Turns before which the reminder no longer counts a turn as owed (spec D1's only hard bound — it governs display, not writability; see mcp/note.ts). */
 export const NOTE_DEBT_AGING_TURNS = 50;
 
@@ -297,9 +313,7 @@ export function listOwedNoteTurns(
        WHERE t.session_id = ?
          AND t.prompt_number < ?
          AND t.prompt_number >= ?
-         AND t.status != 'undone'
-         AND t.was_rolled_back = 0
-         AND (t.type IS NULL OR t.type != 'compact')
+         AND ${realPromptPredicate("t")}
          AND NOT EXISTS (
            SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
          )
@@ -358,9 +372,7 @@ export function listOwedNoteTurnsInRange(
        FROM turns t
        WHERE t.session_id = ?
          AND t.prompt_number BETWEEN ? AND ?
-         AND t.status != 'undone'
-         AND t.was_rolled_back = 0
-         AND (t.type IS NULL OR t.type != 'compact')
+         AND ${realPromptPredicate("t")}
          AND NOT EXISTS (
            SELECT 1 FROM shadow_notes n WHERE n.turn_id = t.id
          )

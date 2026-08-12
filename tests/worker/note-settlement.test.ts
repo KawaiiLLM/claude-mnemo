@@ -16,10 +16,14 @@ import {
   completeNoteSettlementJob,
   countNoteSettlementJobs,
   enqueueNoteSettlementWindows,
+  enqueueSessionEndNoteSettlementWindow,
   failNoteSettlementJob,
+  getDecidedPrefixEnd,
+  getMaxPromptNumber,
   getNoteSettlementCursor,
   getNoteSettlementJob,
   listNoteSettlementJobs,
+  planNoteSettlementWindows,
   type NoteSettlementJob,
 } from "../../src/db/note-settlement";
 import {
@@ -1206,6 +1210,156 @@ describe("note settlement window disjointness", () => {
 
     expect(created).toHaveLength(1);
     expect(created[0]!.windowEnd).toBe(50);
+  });
+});
+
+describe("note settlement prompt clock vs. sidechain rows (P1-1)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedRawTurn(
+    sessionDbId: number,
+    promptNumber: number,
+    status: string,
+    createdAtEpoch = 1_000,
+  ): number {
+    return db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, ?, ?, 'prompt', ?) RETURNING id`,
+      )
+      .get(sessionDbId, promptNumber, status, createdAtEpoch)!.id;
+  }
+
+  const ERA = 100;
+
+  test("getMaxPromptNumber ignores a sidechain row's borrowed, higher prompt number", () => {
+    const sessionDbId = seedSession(db, "content-max-prompt-sidechain");
+    seedRawTurn(sessionDbId, 1, "active"); // the root's own turn, still running
+    seedRawTurn(sessionDbId, 2, "undone"); // the sidechain's pending row
+
+    expect(getMaxPromptNumber(db, sessionDbId)).toBe(1);
+  });
+
+  test("getDecidedPrefixEnd does not pull the still-running root turn into the decided prefix (P1-1)", () => {
+    const sessionDbId = seedSession(db, "content-decided-prefix-sidechain");
+    seedRawTurn(sessionDbId, 1, "active"); // still running
+    seedRawTurn(sessionDbId, 2, "undone");
+
+    // An unfiltered MAX (2) would compute `ended = 1`, wrongly declaring turn 1
+    // decided. The real max is 1 (the sidechain's borrowed number does not
+    // count), so windowStart=1 has nothing ended before it yet.
+    expect(getDecidedPrefixEnd(db, sessionDbId, 1)).toBe(0);
+  });
+
+  test("a sessionend plan does not reach into a sidechain row's borrowed prompt number (P1-1)", () => {
+    const sessionDbId = seedSession(db, "content-sessionend-sidechain");
+    seedRawTurn(sessionDbId, 1, "active");
+    seedRawTurn(sessionDbId, 2, "undone");
+
+    const plans = planNoteSettlementWindows(db, sessionDbId, "sessionend", {
+      eraCutoffEpoch: ERA,
+    });
+
+    // `sessionend`'s prefixEnd is the live max prompt number (spec D7) — which
+    // must be 1 (the root turn's own number), not 2 (the sidechain's borrowed
+    // one). The window still cuts (sessionend's tail-window floor exemption),
+    // but its end must stop at the real turn.
+    expect(plans).toEqual([
+      { sessionId: sessionDbId, windowStart: 1, windowEnd: 1, triggerType: "sessionend" },
+    ]);
+  });
+});
+
+describe("note settlement sessionend/compact race (P1-4)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const ERA = 100;
+
+  test("a stale sessionend plan raced by a concurrent compact insert loses its remainder entirely", () => {
+    const sessionDbId = seedSession(db, "content-race-stale");
+    seedTurns(db, sessionDbId, 1, 40, "trivial");
+
+    // Step 1 of what `enqueueSessionEndNoteSettlementWindow` does today: plan,
+    // a bare read, captured and NOT yet committed to anything.
+    const stalePlans = planNoteSettlementWindows(db, sessionDbId, "sessionend", {
+      eraCutoffEpoch: ERA,
+    });
+    expect(stalePlans).toEqual([
+      { sessionId: sessionDbId, windowStart: 1, windowEnd: 40, triggerType: "sessionend" },
+    ]);
+
+    // The race: a DIFFERENT writer (the worker, handling a concurrent compact
+    // trigger for the same session) commits its OWN job while the plan above
+    // is still sitting unenqueued.
+    const compactJobs = enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 35, triggerType: "compact" }],
+      1_000,
+      ERA,
+    );
+    expect(compactJobs).toHaveLength(1);
+
+    // Step 2: the sessionend plan's enqueue finally runs, against the now-stale
+    // plan from step 1 — exactly what the two-step decomposition does.
+    const sessionEndJobs = enqueueNoteSettlementWindows(db, stalePlans, 1_000, ERA);
+
+    // The whole sessionend attempt is refused whole by insertJob's freshness
+    // check, and nothing recomputes a smaller replacement: turns 36-40 are
+    // never covered by any job, and the session already ended, so nothing will
+    // ever come back to retry it.
+    expect(sessionEndJobs).toHaveLength(0);
+    const jobs = listNoteSettlementJobs(db, sessionDbId);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.windowEnd).toBe(35);
+  });
+
+  test("the atomic sessionend enqueue recomputes fresh and stays gap-free against an already-landed compact job", () => {
+    const sessionDbId = seedSession(db, "content-race-fixed");
+    seedTurns(db, sessionDbId, 1, 40, "trivial");
+
+    // The compact job already committed — the only interleaving SQLite's
+    // mutual exclusion between writers can produce once plan+enqueue is one
+    // transaction (P1-4's fix): either this call starts first and the compact
+    // waits, or the compact commits first and this call sees it.
+    enqueueNoteSettlementWindows(
+      db,
+      [{ sessionId: sessionDbId, windowStart: 1, windowEnd: 35, triggerType: "compact" }],
+      1_000,
+      ERA,
+    );
+
+    const created = enqueueSessionEndNoteSettlementWindow(db, sessionDbId, 1_000, ERA);
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.windowStart).toBe(36);
+    expect(created[0]!.windowEnd).toBe(40);
+
+    const jobs = listNoteSettlementJobs(db, sessionDbId)
+      .sort((left, right) => left.windowStart - right.windowStart)
+      .map((job) => [job.windowStart, job.windowEnd]);
+    expect(jobs).toEqual([
+      [1, 35],
+      [36, 40],
+    ]);
   });
 });
 

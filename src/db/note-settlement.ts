@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 import { runWriteTransaction } from "./database";
-import { closePendingNoteDebtsAsClosed } from "./note-debt";
+import { closePendingNoteDebtsAsClosed, realPromptPredicate } from "./note-debt";
 
 /**
  * P2 note settlement, persistence half (spec D9, ticket 05).
@@ -254,11 +254,25 @@ export function ensureNoteSettlementCursor(
   ).run(sessionId, sessionId, eraCutoffEpoch, nowEpoch);
 }
 
+/**
+ * The session's highest REAL prompt number (note-debt.ts's
+ * `realPromptPredicate`, spec D1/D10 — reused rather than re-derived here).
+ *
+ * A sidechain row is born `undone` with a HIGHER prompt number than the root
+ * turn dispatching it, so an unfiltered MAX would inflate both readers of this
+ * function: `getDecidedPrefixEnd` (whose `ended = MAX - 1` would then land on
+ * the still-running root turn itself, one short of covering the phantom
+ * sidechain slot) and `planNoteSettlementWindows`'s `sessionend` branch (whose
+ * `prefixEnd = MAX` would reach straight past the root turn into the
+ * sidechain's own borrowed number). Either way a turn still actively running
+ * its subagent would be pulled into a settlement window mid-flight (P1-1).
+ */
 export function getMaxPromptNumber(db: Database, sessionId: number): number {
   return (
     db
       .query<{ maxPromptNumber: number | null }, [number]>(
-        "SELECT MAX(prompt_number) AS maxPromptNumber FROM turns WHERE session_id = ?",
+        `SELECT MAX(t.prompt_number) AS maxPromptNumber FROM turns t
+         WHERE t.session_id = ? AND ${realPromptPredicate("t")}`,
       )
       .get(sessionId)?.maxPromptNumber ?? 0
   );
@@ -437,10 +451,9 @@ export function enqueueSessionEndNoteSettlementWindow(
   nowEpoch: number,
   eraCutoffEpoch: number,
 ): NoteSettlementJob[] {
-  const plans = planNoteSettlementWindows(db, sessionId, "sessionend", {
+  return planAndEnqueueNoteSettlementWindows(db, sessionId, "sessionend", nowEpoch, {
     eraCutoffEpoch,
   });
-  return enqueueNoteSettlementWindows(db, plans, nowEpoch, eraCutoffEpoch);
 }
 
 /**
@@ -499,6 +512,36 @@ function insertJob(
   return job;
 }
 
+/**
+ * Insert every plan against the disjointness bound, WITHOUT opening its own
+ * transaction — callers that are already inside one (`planAndEnqueueNoteSettlementWindows`)
+ * call this directly; `enqueueNoteSettlementWindows` below wraps it in one for
+ * callers that are not.
+ */
+function insertJobs(
+  db: Database,
+  plans: readonly NoteSettlementWindowPlan[],
+  nowEpoch: number,
+  eraCutoffEpoch: number,
+): NoteSettlementJob[] {
+  const created: NoteSettlementJob[] = [];
+  for (const plan of plans) {
+    const job = insertJob(
+      db,
+      plan.sessionId,
+      plan.windowStart,
+      plan.windowEnd,
+      plan.triggerType,
+      nowEpoch,
+      eraCutoffEpoch,
+    );
+    if (job) {
+      created.push(job);
+    }
+  }
+  return created;
+}
+
 /** Persist a plan. Idempotent through UNIQUE(session, window_start, trigger). */
 export function enqueueNoteSettlementWindows(
   db: Database,
@@ -509,23 +552,44 @@ export function enqueueNoteSettlementWindows(
   if (plans.length === 0) {
     return [];
   }
+  return runWriteTransaction(db, () => insertJobs(db, plans, nowEpoch, eraCutoffEpoch));
+}
+
+/**
+ * Plan and enqueue in ONE write transaction (spec D7, P1-4).
+ *
+ * `planNoteSettlementWindows` is a bare read and `enqueueNoteSettlementWindows`
+ * opens its own separate write transaction — calling them back to back (as
+ * `enqueueSessionEndNoteSettlementWindow` used to, and as `runTrigger` in
+ * worker/note-settlement.ts still does for its FIRST, gate-only read) leaves a
+ * window between the read and the write in which a concurrent writer — another
+ * trigger for the SAME session, racing in from a different process — can land
+ * its own job. `insertJob`'s freshness check then refuses the now-stale plan
+ * WHOLE rather than shrinking it to the remainder: nothing recomputes a smaller
+ * replacement, so the turns between the concurrent job's end and this plan's
+ * original end are never covered by any job at all. A `sessionend` window has
+ * no trigger of its own to come back and retry, so that remainder is lost for
+ * good, not just delayed.
+ *
+ * `BEGIN IMMEDIATE` (via `runWriteTransaction`) is what closes this: once this
+ * transaction starts, no other writer can commit anything about this session
+ * until it finishes, so the plan computed inside it is always read against
+ * whatever the LAST committed writer left — never a state that goes stale
+ * mid-call.
+ */
+export function planAndEnqueueNoteSettlementWindows(
+  db: Database,
+  sessionId: number,
+  trigger: Exclude<NoteSettlementTrigger, "residual">,
+  nowEpoch: number,
+  options: NoteSettlementWindowOptions,
+): NoteSettlementJob[] {
   return runWriteTransaction(db, () => {
-    const created: NoteSettlementJob[] = [];
-    for (const plan of plans) {
-      const job = insertJob(
-        db,
-        plan.sessionId,
-        plan.windowStart,
-        plan.windowEnd,
-        plan.triggerType,
-        nowEpoch,
-        eraCutoffEpoch,
-      );
-      if (job) {
-        created.push(job);
-      }
+    const plans = planNoteSettlementWindows(db, sessionId, trigger, options);
+    if (plans.length === 0) {
+      return [];
     }
-    return created;
+    return insertJobs(db, plans, nowEpoch, options.eraCutoffEpoch);
   });
 }
 

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
-import { NOTE_DEBT_AGING_TURNS } from "../../db/note-debt";
+import { resolveEraCutoff } from "../../db/era";
+import { NOTE_DEBT_AGING_TURNS, realPromptPredicate } from "../../db/note-debt";
 import { agentAuthoredNotePredicate } from "../../db/shadow-notes";
 import { isMnemoOwnToolName } from "../../shared/note-tool";
 
@@ -112,6 +113,15 @@ export interface ComplianceReport {
 export interface CollectDebtFactsOptions {
   sessionId?: number;
   agingTurns?: number;
+  /**
+   * The note-prompt-clock era boundary (P2 fix): turns created at or after this
+   * epoch get the DERIVED denominator below instead of the `note_debt`-based
+   * one, because the new protocol only ever writes a `note_debt` row for a
+   * decline or a residual close-out — an on-time note leaves none. Defaults to
+   * `resolveEraCutoff(db)`; `null` (no era recorded) leaves every turn on the
+   * old, `note_debt`-based reading, unchanged.
+   */
+  eraCutoffEpoch?: number | null;
 }
 
 interface DebtRow {
@@ -267,6 +277,82 @@ function dominantWriterModelPerSession(db: Database): Map<number, string> {
   );
 }
 
+interface DerivedFactRow {
+  turnId: number;
+  sessionId: number;
+  promptNumber: number;
+  wasRolledBack: number;
+  sessionTurnCount: number;
+  sessionMaxPromptNumber: number;
+  writerModel: string | null;
+  ridePromptNumber: number | null;
+  reminderExposures: number;
+  hasNote: number;
+}
+
+/**
+ * The post-era denominator (P2 fix): every turn `note_debt` was never asked to
+ * open a row for, because the new protocol closed one only for a decline or a
+ * residual write-off (spec D1/D8) — an on-time note leaves no row at all. Read
+ * directly off `turns`/`shadow_notes`, with the SAME base filter
+ * `listOwedNoteTurns` uses (note-debt.ts's `realPromptPredicate`) so a
+ * sidechain row, a rolled-back prompt, or a compact marker cannot inflate the
+ * denominator either. The session's own current (not yet ended) turn is
+ * excluded the same way `listOwedNoteTurns` excludes it: nothing can be a
+ * violation before a later prompt has even arrived.
+ *
+ * Deliberately disjoint from the `note_debt`-based rows above: `NOT EXISTS`
+ * against `note_debt` means a turn already counted through a decline/close row
+ * is never double-counted here.
+ */
+function collectDerivedDebtFacts(
+  db: Database,
+  eraCutoffEpoch: number,
+  sessionId: number | undefined,
+): DerivedFactRow[] {
+  const sql = `
+    WITH session_size AS (
+      SELECT session_id AS sessionId,
+             COUNT(*) AS turnCount,
+             MAX(prompt_number) AS maxPromptNumber
+      FROM turns
+      GROUP BY session_id
+    )
+    SELECT
+      t.id AS turnId,
+      t.session_id AS sessionId,
+      t.prompt_number AS promptNumber,
+      t.was_rolled_back AS wasRolledBack,
+      z.turnCount AS sessionTurnCount,
+      z.maxPromptNumber AS sessionMaxPromptNumber,
+      n.writer_model AS writerModel,
+      r.prompt_number AS ridePromptNumber,
+      (SELECT COUNT(*) FROM note_id_exposures e
+        WHERE e.session_id = t.session_id
+          AND e.exposed_turn_id = t.id
+          AND e.source IN ('reminder', 'injection')) AS reminderExposures,
+      (CASE WHEN n.turn_id IS NOT NULL THEN 1 ELSE 0 END) AS hasNote
+    FROM turns t
+    JOIN session_size z ON z.sessionId = t.session_id
+    LEFT JOIN shadow_notes n ON n.turn_id = t.id
+      AND ${agentAuthoredNotePredicate()}
+    LEFT JOIN turns r ON r.id = n.ride_turn_id
+    WHERE t.created_at_epoch >= ?
+      AND ${realPromptPredicate("t")}
+      AND NOT EXISTS (SELECT 1 FROM note_debt d WHERE d.turn_id = t.id)
+      AND t.prompt_number < (
+        SELECT MAX(latest.prompt_number) FROM turns latest
+        WHERE latest.session_id = t.session_id AND latest.status != 'undone'
+      )
+      ${sessionId === undefined ? "" : "AND t.session_id = ?"}
+    ORDER BY t.session_id ASC, t.prompt_number ASC
+  `;
+
+  return sessionId === undefined
+    ? db.query<DerivedFactRow, [number]>(sql).all(eraCutoffEpoch)
+    : db.query<DerivedFactRow, [number, number]>(sql).all(eraCutoffEpoch, sessionId);
+}
+
 export function collectDebtFacts(
   db: Database,
   options: CollectDebtFactsOptions = {},
@@ -314,7 +400,7 @@ export function collectDebtFacts(
   const toolCalls = countSubstantiveToolCallsForDebts(db, options.sessionId);
   const sessionModels = dominantWriterModelPerSession(db);
 
-  return rows.map((row) => {
+  const facts = rows.map((row) => {
     const exposed = row.reminderExposures > 0;
     const pastBound = row.sessionMaxPromptNumber - row.promptNumber > agingTurns;
     const lazyAged = row.status === "pending" && pastBound;
@@ -360,6 +446,69 @@ export function collectDebtFacts(
           : row.ridePromptNumber - row.promptNumber,
     };
   });
+
+  const eraCutoffEpoch =
+    options.eraCutoffEpoch !== undefined
+      ? options.eraCutoffEpoch
+      : resolveEraCutoff(db);
+  if (eraCutoffEpoch === null) {
+    return facts;
+  }
+
+  const derivedFacts = collectDerivedDebtFacts(
+    db,
+    eraCutoffEpoch,
+    options.sessionId,
+  ).map((row) => {
+    const exposed = row.reminderExposures > 0;
+    const pastBound = row.sessionMaxPromptNumber - row.promptNumber > agingTurns;
+
+    let outcome: DebtOutcome;
+    if (row.hasNote === 1) {
+      outcome = "noted";
+    } else if (row.wasRolledBack === 1) {
+      outcome = "waived";
+    } else if (pastBound) {
+      outcome = exposed ? "defaulted" : "unreached";
+    } else {
+      outcome = "open";
+    }
+
+    const inferredModel = sessionModels.get(row.sessionId);
+    const writerModel = row.writerModel ?? inferredModel ?? UNKNOWN_MODEL;
+
+    return {
+      turnId: row.turnId,
+      sessionId: row.sessionId,
+      promptNumber: row.promptNumber,
+      // No `note_debt` row exists for a derived fact (that is the whole point
+      // — see `collectDerivedDebtFacts`), so there is no ledger `status`/
+      // `reason` pair to report; `outcome` alone is the derived judgement.
+      status: outcome === "noted" ? "noted" : "derived",
+      reason: null,
+      outcome,
+      exposures: row.reminderExposures,
+      exposed,
+      lazyAged: false,
+      // `countSubstantiveToolCallsForDebts`'s batch join is keyed off
+      // `note_debt`, which a derived fact by definition has no row in — read
+      // per turn instead of falling back to a silent (and wrong) 0.
+      substantiveToolCalls: countSubstantiveToolCalls(db, row.turnId),
+      sessionTurnCount: row.sessionTurnCount,
+      writerModel,
+      writerModelInferred: row.writerModel === null && writerModel !== UNKNOWN_MODEL,
+      latencyTurns:
+        row.ridePromptNumber === null
+          ? null
+          : row.ridePromptNumber - row.promptNumber,
+    };
+  });
+
+  return [...facts, ...derivedFacts].sort((left, right) =>
+    left.sessionId !== right.sessionId
+      ? left.sessionId - right.sessionId
+      : left.promptNumber - right.promptNumber,
+  );
 }
 
 function emptyCounts(): OutcomeCounts {
@@ -469,16 +618,34 @@ function summarizeLatency(facts: DebtFact[]): LatencySummary {
  * different turn still is one. The ledger-based tables above only ever see the
  * reminder era — the trial's cross-era read hangs on this split, since no
  * deploy epoch is recorded anywhere.
+ *
+ * Note-prompt-clock (P2 fix) adds a SECOND non-anomalous signature, and it is
+ * the OPPOSITE shape: its discipline is "the current turn's note is left for
+ * the next turn to write" (principle 2), so an on-time note under this
+ * protocol rides a LATER turn than the one it is about — `ride_turn_id !=
+ * turn_id`, exactly what the reminder-era read alone would have called
+ * anomalous. `eraCutoffEpoch` tells the two protocols' debtless notes apart by
+ * the NOTED TURN's own creation time; `null` (no era recorded) leaves every
+ * note on the reminder-era-only reading, unchanged.
  */
 function countNotesWithoutDebt(
   db: Database,
-  sessionId?: number,
+  sessionId: number | undefined,
+  eraCutoffEpoch: number | null,
 ): { anomalous: number; currentTurn: number } {
+  // `null` (no era recorded) leaves the reminder-era-only signature exactly as
+  // it always read; a recorded era adds the second, opposite-shaped signature
+  // as an OR clause rather than sending it as an always-true/false bound
+  // parameter.
+  const notAnomalousClause =
+    eraCutoffEpoch === null
+      ? "n.ride_turn_id = n.turn_id"
+      : "(n.ride_turn_id = n.turn_id OR t.created_at_epoch >= ?)";
   const sql = `
     SELECT
-      COALESCE(SUM(CASE WHEN n.ride_turn_id = n.turn_id THEN 1 ELSE 0 END), 0)
+      COALESCE(SUM(CASE WHEN ${notAnomalousClause} THEN 1 ELSE 0 END), 0)
         AS currentTurn,
-      COALESCE(SUM(CASE WHEN n.ride_turn_id = n.turn_id THEN 0 ELSE 1 END), 0)
+      COALESCE(SUM(CASE WHEN ${notAnomalousClause} THEN 0 ELSE 1 END), 0)
         AS anomalous
     FROM shadow_notes n
     JOIN turns t ON t.id = n.turn_id
@@ -486,13 +653,13 @@ function countNotesWithoutDebt(
     WHERE d.turn_id IS NULL AND ${agentAuthoredNotePredicate()}
     ${sessionId === undefined ? "" : "AND t.session_id = ?"}
   `;
+  const eraParams = eraCutoffEpoch === null ? [] : [eraCutoffEpoch, eraCutoffEpoch];
+  const params =
+    sessionId === undefined ? eraParams : [...eraParams, sessionId];
 
-  const row =
-    sessionId === undefined
-      ? db.query<{ anomalous: number; currentTurn: number }, []>(sql).get()
-      : db
-          .query<{ anomalous: number; currentTurn: number }, [number]>(sql)
-          .get(sessionId);
+  const row = db
+    .query<{ anomalous: number; currentTurn: number }, number[]>(sql)
+    .get(...params);
   return { anomalous: row?.anomalous ?? 0, currentTurn: row?.currentTurn ?? 0 };
 }
 
@@ -501,7 +668,11 @@ export function computeCompliance(
   options: CollectDebtFactsOptions = {},
 ): ComplianceReport {
   const facts = collectDebtFacts(db, options);
-  const debtless = countNotesWithoutDebt(db, options.sessionId);
+  const eraCutoffEpoch =
+    options.eraCutoffEpoch !== undefined
+      ? options.eraCutoffEpoch
+      : resolveEraCutoff(db);
+  const debtless = countNotesWithoutDebt(db, options.sessionId, eraCutoffEpoch);
   const overallCounts = emptyCounts();
   for (const fact of facts) {
     accumulate(overallCounts, fact);

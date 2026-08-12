@@ -6,13 +6,13 @@ import {
   advanceNoteSettlementCursor,
   claimNextNoteSettlementJob,
   completeNoteSettlementJob,
-  enqueueNoteSettlementWindows,
   enqueueResidualNoteSettlementJob,
   failNoteSettlementJob,
   getNoteSettlementJob,
   listDispatchableNoteSettlementSessions,
   listResidualNoteSettlementCandidates,
   NOTE_SETTLEMENT_RESIDUAL_PER_TRIGGER,
+  planAndEnqueueNoteSettlementWindows,
   planNoteSettlementWindows,
   releaseNoteSettlementJobClaim,
   type NoteSettlementJob,
@@ -474,8 +474,18 @@ export function createNoteSettlementScheduler(
     // favour of newly derived work it is overlooked forever.
     let dueSessionIds: number[] = [];
     try {
+      // Re-plans INSIDE the same write transaction as the insert (spec D7,
+      // P1-4) rather than reusing `plans` above, which was only ever a gate
+      // read: a concurrent writer for this same session (another trigger,
+      // racing in from a different process) could have landed a job in the
+      // gap between that read and this write, and committing against the
+      // stale `plans` would either refuse the whole window or double-count a
+      // range the concurrent writer already claimed.
       created.push(
-        ...enqueueNoteSettlementWindows(db, plans, now(), eraCutoffEpoch),
+        ...planAndEnqueueNoteSettlementWindows(db, sessionDbId, trigger, now(), {
+          ...windowOptions,
+          eraCutoffEpoch,
+        }),
       );
       dueSessionIds = listDispatchableNoteSettlementSessions(db, {
         excludeSessionIds: new Set([sessionDbId]),

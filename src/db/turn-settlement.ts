@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 
+import { realPromptPredicate } from "./note-debt";
 import { settleCompletedTurn } from "./turn-completion";
 
 /**
@@ -42,6 +43,15 @@ import { settleCompletedTurn } from "./turn-completion";
  * worker/turn-liveness.ts to repair — settling it would freeze a guess (zero
  * observations read as "trivial") that a late-arriving tool call could later
  * prove wrong.
+ *
+ * The `later` row must itself be a REAL prompt (note-debt.ts's
+ * `realPromptPredicate`, spec D1/D10 — reused rather than re-derived here).
+ * A sidechain prompt's row is born already `undone` and takes a HIGHER
+ * `prompt_number` than the root turn dispatching it (session-init.ts's
+ * `createPendingTurn`), so without this filter a root turn still actively
+ * running its subagent would read as already ended the instant the sidechain
+ * row landed — frozen and retired while the tool that would have produced
+ * its files/tool-count evidence was still in flight (P1-1).
  */
 const SETTLEMENT_CANDIDATE_SQL = `
   SELECT t.id AS id
@@ -53,6 +63,7 @@ const SETTLEMENT_CANDIDATE_SQL = `
         SELECT 1 FROM turns later
         WHERE later.session_id = t.session_id
           AND later.prompt_number > t.prompt_number
+          AND ${realPromptPredicate("later")}
       )
       OR EXISTS (
         SELECT 1 FROM pending_queue q

@@ -136,6 +136,19 @@ describe("turn settlement channel", () => {
     expect(getTurnById(db, undone)?.status).toBe("undone");
   });
 
+  test("a later undone sidechain row is not evidence that the still-running root turn ended (P1-1)", () => {
+    // The root turn is still active — its own tool batch dispatched a
+    // subagent, and session-init.ts's createPendingTurn (裁決 25) born the
+    // sidechain's row already `undone` at a HIGHER prompt_number than the
+    // root's, before the root turn's Stop has ever fired.
+    const root = seedTurn(1); // active — the root's own turn
+    seedTurn(2, "undone"); // the sidechain's pending row, born ahead of it
+
+    expect(listSettlementCandidateTurnIds(db, sessionId)).toEqual([]);
+    expect(settleOutstandingTurns(db, sessionId, CUTOFF, 4_000)).toEqual([]);
+    expect(getTurnById(db, root)?.status).toBe("active");
+  });
+
   test("carries the mechanical writes through: file aggregate, tool count, observation retirement", () => {
     const earlier = seedTurn(1);
     const observationId = createObservation(db, {

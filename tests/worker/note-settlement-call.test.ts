@@ -525,6 +525,14 @@ describe("settlement write-back", () => {
           title: "settlement's reconstruction",
           content: "Written from the raw material.",
         },
+        // The fixture's OTHER hole (T4) — covered here so the write-back's
+        // gap-coverage guard (P1-2) sees this window fully backfilled; this
+        // test's own subject is the T2 race, not gap coverage.
+        {
+          turn: "S1/T4",
+          title: "settlement's reconstruction of the trailing hole",
+          content: "Written from the raw material.",
+        },
       ],
     });
     const racingQuery: NoteSettlementQuery = async () => {
@@ -546,7 +554,8 @@ describe("settlement write-back", () => {
     const note = getShadowNote(db, fixture.turnIds[1]!)!;
     expect(note.writerOrigin).toBe("agent");
     expect(note.title).toBe("agent+lease: the turn's own account");
-    expect(metricsSeen[0]!.notesReconstructed).toBe(0);
+    // T2 yields to the agent's own note; T4 has no racing write and lands.
+    expect(metricsSeen[0]!.notesReconstructed).toBe(1);
     expect(metricsSeen[0]!.notesYielded).toBe(1);
     expect(metricsSeen[0]!.notesRejected).toBe(0);
   });
@@ -589,6 +598,13 @@ describe("settlement write-back", () => {
           members: ["S1/T3"],
         },
       ],
+      // The fixture's two holes — covered here so the write-back's
+      // gap-coverage guard (P1-2) sees this window fully backfilled; this
+      // test's own subject is the CAS replay, not gap coverage.
+      reconstructed_notes: [
+        { turn: "S1/T2", title: "hole T2 reconstructed", content: "Filled in." },
+        { turn: "S1/T4", title: "hole T4 reconstructed", content: "Filled in." },
+      ],
     });
     const replayReply = JSON.stringify({
       segments: [
@@ -630,6 +646,66 @@ describe("settlement write-back", () => {
     expect(metricsSeen[0]!.casReplaysApplied).toBe(1);
   });
 
+  /**
+   * P1-2 (spec D7): the mechanical backfill's contract is coverage, not just a
+   * parseable reply. `{"reconstructed_notes":[]}` parses fine — it is not
+   * malformed — but the window's two genuine holes (T2, T4) still have no
+   * note after it runs, and the old code committed the window as `done`
+   * anyway, permanently walking the cursor past the gap.
+   */
+  test("an empty reconstruction batch against a real gap fails the job and writes nothing", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const reply = JSON.stringify({ segments: [], reconstructed_notes: [] });
+
+    const outcome = await dispatchWith(stubQuery(reply))({ job: fixture.job });
+
+    expect(outcome.ok).toBe(false);
+    // Nothing committed — not even the fact that the job was attempted.
+    expect(listOpenSegments(db)).toHaveLength(0);
+    expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
+    expect(getShadowNote(db, fixture.turnIds[3]!)).toBeNull();
+    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
+    expect(getNoteSettlementCursor(db, fixture.sessionDbId)).toBe(0);
+  });
+
+  /**
+   * The counterpart: a batch that covers every hole EXCEPT one still fails
+   * whole and rolls back the segments it also produced — half a judgement is
+   * not a smaller correct one (note-settlement-response.ts's own rule).
+   */
+  test("a reconstruction batch that misses one of two holes fails the whole window", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const reply = JSON.stringify({
+      segments: [
+        {
+          action: "create",
+          topic: "partial gap coverage",
+          no_candidate_reason: "no open segment covers this",
+          title: "design+partial: should not survive",
+          content: "Committed alongside a partial reconstruction. [S1/T1]",
+          type: ["design"],
+          tags: ["partial gap coverage"],
+          members: ["S1/T1"],
+        },
+      ],
+      reconstructed_notes: [
+        {
+          turn: "S1/T2",
+          title: "research+partial: only the interior hole covered",
+          content: "T4 (the trailing hole) is left open on purpose.",
+        },
+      ],
+    });
+
+    const outcome = await dispatchWith(stubQuery(reply))({ job: fixture.job });
+
+    expect(outcome.ok).toBe(false);
+    expect(listOpenSegments(db)).toHaveLength(0);
+    expect(getShadowNote(db, fixture.turnIds[1]!)).toBeNull();
+    expect(getShadowNote(db, fixture.turnIds[3]!)).toBeNull();
+    expect(getNoteSettlementJob(db, fixture.job.id)!.status).toBe("claimed");
+  });
+
   test("rejects malformed output whole and writes nothing", async () => {
     const fixture = seedInteriorHoleWindow();
     const outcome = await dispatchWith(
@@ -655,6 +731,13 @@ describe("settlement write-back", () => {
           tags: ["note settlement"],
           members: ["S1/T1"],
         },
+      ],
+      // The fixture's two holes — covered here so the write-back's
+      // gap-coverage guard (P1-2) sees this window fully backfilled; this
+      // test's own subject is topic reuse, not gap coverage.
+      reconstructed_notes: [
+        { turn: "S1/T2", title: "hole T2 reconstructed", content: "Filled in." },
+        { turn: "S1/T4", title: "hole T4 reconstructed", content: "Filled in." },
       ],
     });
     db.query<unknown, [number, number]>(

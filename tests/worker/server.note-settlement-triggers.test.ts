@@ -266,6 +266,59 @@ describe("worker settlement trigger surface", () => {
     expect(dispatched[0]!.triggerType).toBe("sessionend");
   });
 
+  /**
+   * P1-3 investigation: `finishSession`'s own leak excludes the flushing
+   * session itself (server.ts's `finishSession` passes its own id as
+   * `excludeSessionDbId`), so a single-turn session's own sessionend job is
+   * NOT dispatched by its own flush. This confirms the claim in the leak's own
+   * doc comment (worker/note-settlement.ts): such a job is not permanently
+   * stranded, only deferred — the very next OTHER session's leak (which
+   * excludes only ITS OWN id) picks it up, and `listDispatchableNoteSettlementSessions`
+   * has no turn-count/residual floor that could block it. Not a confirmed bug;
+   * kept as a regression guard on the cross-session leak mechanism P1-3 relies
+   * on staying intact.
+   */
+  test("P1-3: a single-turn session's own sessionend job outlives its own finishSession, and the next session's leak dispatches it", async () => {
+    const staleSessionDbId = seedDecidedSession(db, "content-p1-3-stale", 1);
+    // What the SessionEnd hook already froze and enqueued synchronously
+    // (session-end.ts, ticket 05) before this flush was ever notified.
+    enqueueNoteSettlementWindows(
+      db,
+      [
+        {
+          sessionId: staleSessionDbId,
+          windowStart: 1,
+          windowEnd: 1,
+          triggerType: "sessionend",
+        },
+      ],
+      1_000,
+      SETTLEMENT_ERA_CUTOFF_EPOCH,
+    );
+    const { core, dispatched } = createHarness(db, SETTLEMENT_ENABLED_CONFIG);
+
+    await core.finishSession(staleSessionDbId);
+
+    // finishSession's own leak excludes its OWN session — the job it just
+    // owns is not dispatched by this same call.
+    expect(dispatched).toHaveLength(0);
+    expect(listNoteSettlementJobs(db, staleSessionDbId)[0]!.status).toBe(
+      "pending",
+    );
+
+    // No floor blocks it, and the very next unrelated content event — here, an
+    // ordinary below-threshold turn-stop for a DIFFERENT session — leaks it:
+    // deferred, not stranded.
+    const otherSessionDbId = seedDecidedSession(db, "content-p1-3-other", 3);
+    await core.handleTurnStop(otherSessionDbId);
+
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]!.sessionId).toBe(staleSessionDbId);
+    expect(listNoteSettlementJobs(db, staleSessionDbId)[0]!.status).toBe(
+      "done",
+    );
+  });
+
   test("sessionEnd, resume, worker start and every timer settle nothing", async () => {
     // +1: the prompt clock never counts the session's current max turn as
     // ENDED (spec D10 — a turn ends only once a LATER one exists), so two full

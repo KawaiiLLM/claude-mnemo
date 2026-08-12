@@ -1,6 +1,10 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 
+import { createDatabase } from "../../src/db/database";
+import { initializeSchema } from "../../src/db/schema";
+import { upsertSession } from "../../src/db/sessions";
+import { upsertShadowNote } from "../../src/db/shadow-notes";
 import {
   collectDebtFacts,
   computeCompliance,
@@ -122,5 +126,112 @@ describe("P1 compliance metric", () => {
 
     expect(report.overall.counts.total).toBe(1);
     expect(report.sessionsCovered).toBe(1);
+  });
+});
+
+/**
+ * P2 (note-prompt-clock): a purely new-protocol session opens no `note_debt`
+ * row at all (D1/D8 — the owed set is derived, not written), and its notes
+ * ride a LATER turn than the one they are about (principle 2 — the opposite
+ * shape of 裁決 25's current-turn signature). Before the fix, `collectDebtFacts`
+ * read `note_debt` alone, so such a session's compliance rate was always
+ * `null` and every one of its normal notes was flagged `notesWithoutDebt`.
+ */
+describe("P1 compliance metric, note-prompt-clock era", () => {
+  let db: Database;
+  const ERA_CUTOFF = 500;
+  const NOW = 1_000;
+
+  beforeEach(() => {
+    db = createDatabase(":memory:");
+    initializeSchema(db);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  function seedTurn(sessionId: number, promptNumber: number): number {
+    return db
+      .query<{ id: number }, [number, number, number]>(
+        `INSERT INTO turns (
+           session_id, prompt_number, status, user_prompt, created_at_epoch
+         ) VALUES (?, ?, 'active', 'prompt', ?) RETURNING id`,
+      )
+      .get(sessionId, promptNumber, NOW)!.id;
+  }
+
+  test("a pure new-protocol session reports a non-null, correct compliance rate and no debtless-note anomalies", () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "content-prompt-clock",
+      project: "/tmp/project-prompt-clock",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+
+    const t1 = seedTurn(sessionId, 1);
+    const t2 = seedTurn(sessionId, 2);
+    const t3 = seedTurn(sessionId, 3);
+    // T4: the session's current, still-running turn — never itself a
+    // candidate for a note yet (the prompt clock has not ended it).
+    const t4 = seedTurn(sessionId, 4);
+
+    // Principle 2: each note is written a turn LATER than the one it is
+    // about — never `ride_turn_id === turn_id`, and no `note_debt` row is
+    // ever opened for any of them (no decline, no residual close-out). T4 is
+    // both the vessel riding T3's note AND the session's own current turn —
+    // it is never itself a candidate, correctly excluded from the denominator.
+    upsertShadowNote(db, { turnId: t1, title: "a", content: "a", rideTurnId: t2, nowEpoch: NOW });
+    upsertShadowNote(db, { turnId: t2, title: "b", content: "b", rideTurnId: t3, nowEpoch: NOW });
+    upsertShadowNote(db, { turnId: t3, title: "c", content: "c", rideTurnId: t4, nowEpoch: NOW });
+
+    const report = computeCompliance(db, {
+      sessionId,
+      eraCutoffEpoch: ERA_CUTOFF,
+    });
+
+    // Before the fix: complianceRate was null (denominator = 0 note_debt rows).
+    expect(report.overall.complianceRate).not.toBeNull();
+    expect(report.overall.complianceRate).toBeCloseTo(1, 10);
+    expect(report.overall.counts).toMatchObject({ total: 3, noted: 3 });
+
+    // Before the fix: all three notes counted as `notesWithoutDebt` anomalies.
+    expect(report.notesWithoutDebt).toBe(0);
+    expect(report.currentTurnNotes).toBe(3);
+  });
+
+  test("a legacy (pre-era) session keeps reading null with no eraCutoffEpoch supplied — the old caliber is untouched", () => {
+    const sessionId = upsertSession(db, {
+      contentSessionId: "content-legacy-only",
+      project: "/tmp/project-prompt-clock",
+      title: null,
+      content: null,
+      insight: null,
+      createdAtEpoch: NOW,
+      updatedAtEpoch: NOW,
+      completedAtEpoch: null,
+    }).id;
+    const t1 = seedTurn(sessionId, 1);
+    seedTurn(sessionId, 2);
+    upsertShadowNote(db, {
+      turnId: t1,
+      title: "a",
+      content: "a",
+      rideTurnId: null,
+      nowEpoch: NOW,
+    });
+
+    // No eraCutoffEpoch resolvable (never configured, never recorded in
+    // era_state) — every turn stays on the old, note_debt-only caliber.
+    const report = computeCompliance(db, { sessionId });
+
+    expect(report.overall.complianceRate).toBeNull();
+    // The debtless note still rides no turn at all (null), which is neither
+    // signature — still counted anomalous under the unchanged old reading.
+    expect(report.notesWithoutDebt).toBe(1);
   });
 });
