@@ -2715,6 +2715,29 @@ describe("renderTimeline", () => {
     expect(turn21Line).toContain("⏳");
   });
 
+  it("a titled turn renders its title even when it has no type", () => {
+    // The shape every turn has between landing and its settlement review: a
+    // title, no type. Gating the title on the type column hid these behind ⏳
+    // for as long as nothing wrote types, and no test noticed — this is that
+    // missing test.
+    const db = createDatabase(":memory:");
+
+    seedSession(db);
+    db.query("UPDATE turns SET title = ? WHERE prompt_number = ?").run(
+      "reviewed later",
+      21,
+    );
+
+    const output = renderTimeline(buildTimelineView(db, { id: "S1/T19..21" }));
+    const turn21Line = output
+      .split("\n")
+      .find((line) => line.startsWith("T21 |"));
+
+    expect(turn21Line).toContain("reviewed later");
+    expect(turn21Line).toContain("•");
+    expect(turn21Line).not.toContain("⏳");
+  });
+
   it("renders transcript line anchors in the turn table", () => {
     const db = createDatabase(":memory:");
 

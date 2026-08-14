@@ -3429,6 +3429,17 @@ function renderStats(turn: TurnRecord): string {
   return stats.length > 0 ? stats.join(" ") : "—";
 }
 
+/**
+ * The glyph for a turn's type, including the case where it has none.
+ *
+ * A turn's `type` is written by the settlement review pass, so between a turn
+ * landing and its window being reviewed the column is simply absent — that is
+ * the normal state of recent work, not a defect. The `•` stands in for it.
+ */
+function typeGlyph(type: string | null): string {
+  return (type === null ? undefined : TYPE_EMOJI_MAP[type]) ?? "•";
+}
+
 function renderTitleCell(
   turn: TurnRecord,
   isUndone: boolean,
@@ -3445,16 +3456,22 @@ function renderTitleCell(
     return `${markerPrefix}${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
 
+  // A missing type no longer withholds the title. Gating on it conflated "is
+  // there anything to show" with "is every column populated", and since the
+  // extraction agent that used to write `type` was retired, that conflation
+  // hid every unreviewed turn's title behind ⏳ — 926 titles in one measured
+  // session, of which 661 rendered. The fallback for an unknown type already
+  // existed one line under the gate that made it unreachable.
   if (isUndone) {
-    if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+    if (turn.title !== null) {
+      const body = `${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}⨯`.trim();
   }
 
-  if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "•"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+  if (turn.status === "extracted" && turn.title !== null) {
+    return `${markerPrefix}${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
   }
 
   return `${markerPrefix}⏳`.trim();
