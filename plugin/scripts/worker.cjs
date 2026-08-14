@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msqdbiq3" : "dev";
+var BUILD_ID = true ? "0.10.0-mstctqi5" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1835,13 +1835,22 @@ function getTurnById(db, turnId) {
     db.query(`${TURN_SELECT} WHERE id = ?`).get(turnId) ?? null
   );
 }
+function resolveNullable(value, existing) {
+  return value === void 0 ? existing : value;
+}
 function updateTurnById(db, turnId, input) {
   const existing = getTurnById(db, turnId);
   if (!existing) {
     return null;
   }
-  const mergedTitle = input.title ?? existing.title;
-  const mergedContent = input.content ?? existing.content;
+  const mergedTitle = resolveNullable(input.title, existing.title);
+  const mergedContent = resolveNullable(input.content, existing.content);
+  const mergedInsight = resolveNullable(input.insight, existing.insight);
+  const mergedType = resolveNullable(input.type, existing.type);
+  const mergedGrade = resolveNullable(
+    input.significanceGrade,
+    existing.significanceGrade
+  );
   const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus = input.status ?? (existing.status === "active" && hasSubstance ? "extracted" : existing.status);
   const nextTags = input.replaceTags ?? mergeTags(existing.tags, input.tags);
@@ -1896,11 +1905,11 @@ function updateTurnById(db, turnId, input) {
       nextStatus,
       input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
       input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
-      input.title ?? existing.title,
-      input.content ?? existing.content,
-      input.insight ?? existing.insight,
-      input.type ?? existing.type,
-      input.significanceGrade ?? existing.significanceGrade,
+      mergedTitle,
+      mergedContent,
+      mergedInsight,
+      mergedType,
+      mergedGrade,
       input.transcriptLineStart ?? existing.transcriptLineStart,
       stringifyArray(nextTags),
       stringifyArray(input.filesRead ?? existing.filesRead),
@@ -4667,6 +4676,33 @@ function draftTypeFromTitle(title) {
   }
   return UNKNOWN_TYPE;
 }
+var NOTE_TITLE_SHAPE = /^([^+:]+)\+([^:]+):/;
+function draftTurnFactsFromTitle(title) {
+  if (!title) {
+    return { type: null, tag: null };
+  }
+  const normalized = title.normalize("NFKC").trimStart();
+  const match = NOTE_TITLE_SHAPE.exec(normalized);
+  if (!match) {
+    return { type: null, tag: null };
+  }
+  const topic = match[2].trim();
+  if (!topic) {
+    return { type: null, tag: null };
+  }
+  const draft = draftTypeFromTitle(normalized);
+  return {
+    type: draft === UNKNOWN_TYPE ? null : draft,
+    tag: `${TOPIC_TAG_PREFIX}${topic}`
+  };
+}
+var TOPIC_TAG_PREFIX = "topic:";
+function withDraftedTopicTag(existing, topicTag) {
+  return [
+    ...existing.filter((tag) => !tag.startsWith(TOPIC_TAG_PREFIX)),
+    topicTag
+  ];
+}
 var RestrictedTypeError = class extends Error {
   constructor(value) {
     super(
@@ -5629,6 +5665,25 @@ function orphanSignals(facts) {
     signals.push(`cited ${facts.citedBy}`);
   }
   return signals;
+}
+function getSegmentMembershipForTurns(db, turnIds) {
+  const membership = /* @__PURE__ */ new Map();
+  if (turnIds.length === 0) {
+    return membership;
+  }
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db.query(
+    `SELECT turn_id AS turnId, segment_id AS segmentId
+       FROM segment_members
+       WHERE turn_id IN (${placeholders})
+       ORDER BY turn_id ASC, segment_id ASC`
+  ).all(...turnIds);
+  for (const row of rows) {
+    if (!membership.has(row.turnId)) {
+      membership.set(row.turnId, row.segmentId);
+    }
+  }
+  return membership;
 }
 
 // src/shared/transcript-parser.ts
@@ -6914,6 +6969,10 @@ function renderSegmentSpineBlock(input) {
   }
   for (const row of keptSegments) {
     lines.push(renderSpineRow(row, titleCap));
+    const nested = input.milestoneLinesBySegmentId?.get(row.segment.id);
+    if (nested !== void 0 && nested.length > 0) {
+      lines.push(...nested);
+    }
   }
   for (const row of keptOrphans) {
     lines.push(renderOrphanRow(row, titleCap));
@@ -7011,6 +7070,14 @@ var REVERSAL_KEYWORD_TAGS = /* @__PURE__ */ new Set([
   "design-pivot",
   "pivot"
 ]);
+var EMPTY_MILESTONE_SELECTION = {
+  kept: [],
+  ranked: [],
+  pulled: [],
+  overflowByDay: [],
+  effGradeByTurnId: /* @__PURE__ */ new Map()
+};
+var EMPTY_TURN_ID_SET = /* @__PURE__ */ new Set();
 var TYPE_EMOJI_MAP = {
   bugfix: "\u{1F534}",
   feature: "\u{1F7E3}",
@@ -7878,6 +7945,7 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const eraWindowTurns = eraCutoffEpoch === null ? [] : windowTurns.filter(isEra);
   const legacyWindowTurns = eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
   const legacySessionTurns = eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
+  const eraSessionTurns = eraCutoffEpoch === null ? [] : allTurns.filter(isEra);
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -7893,16 +7961,14 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
+  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
   const milestoneSelection = selectMilestoneTurns({
     session,
     windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
     sessionTurns: legacySessionTurns,
-    // One read for the whole selection: in-degree, victim demotion and
-    // pull-through all consume this map (spec §B). A caller that already read it
-    // (settlement) hands its own snapshot in rather than paying for a second.
-    citations: preloadedCitations ?? getSessionEffectiveCitations(db, session.id)
+    citations
   });
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
@@ -7919,6 +7985,15 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
   const eraWindowTurnIds = new Set(eraWindowTurns.map((turn) => turn.id));
   const segmentSpine = renderSegments ? listSegmentSpineForSession(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
   const orphanAnchors = renderSegments ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds) : [];
+  const eraMilestoneSelection = renderSegments ? selectMilestoneTurns({
+    session,
+    windowTurns: eraWindowTurns,
+    windowSignals,
+    compactBoundaries,
+    sessionTurns: eraSessionTurns,
+    citations
+  }) : EMPTY_MILESTONE_SELECTION;
+  const eraSegmentIdByTurnId = renderSegments ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id)) : /* @__PURE__ */ new Map();
   const viewItemTotal = viewKind === "turns" ? pagedTurns.total : viewKind === "milestones" ? pagedMilestones.total : pagedPhases.total;
   const pageCount = viewKind === "turns" ? pagedTurns.pageCount : viewKind === "milestones" ? pagedMilestones.pageCount : pagedPhases.pageCount;
   const pageAnchorEpoch = viewKind === "turns" ? pagedTurns.items[0]?.createdAtEpoch ?? null : viewKind === "milestones" ? pagedMilestones.items[0]?.turn.createdAtEpoch ?? null : pagedPhases.items[0]?.startEpoch ?? null;
@@ -7953,7 +8028,10 @@ function buildTimelineView(db, input, preloadedTurns, preloadedCitations) {
     eraCutoffEpoch,
     eraWindowTurns,
     segmentSpine,
-    orphanAnchors
+    orphanAnchors,
+    eraKeptMilestones: eraMilestoneSelection.kept,
+    eraMilestonePulled: eraMilestoneSelection.pulled,
+    eraSegmentIdByTurnId
   };
 }
 function buildMilestoneDayGroups(pagedMilestones, allMilestones, overflowByDay) {
@@ -8811,6 +8889,9 @@ function renderStats(turn) {
   }
   return stats.length > 0 ? stats.join(" ") : "\u2014";
 }
+function typeGlyph(type) {
+  return (type === null ? void 0 : TYPE_EMOJI_MAP[type]) ?? "\u2022";
+}
 function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = null, signal) {
   const markerPrefix = marker ? `${marker} ` : "";
   if (turn.type === "compact") {
@@ -8819,14 +8900,14 @@ function renderTitleCell(turn, isUndone, compactMetadata, titleCap, marker = nul
     return `${markerPrefix}${TYPE_EMOJI_MAP.compact} /compact ${preTokens} tokens, ${trigger}`;
   }
   if (isUndone) {
-    if (turn.type !== null && turn.title !== null) {
-      const body = `${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+    if (turn.title !== null) {
+      const body = `${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
       return `${markerPrefix}~~${body}~~`;
     }
     return `${markerPrefix}\u2A2F`.trim();
   }
-  if (turn.status === "extracted" && turn.type !== null && turn.title !== null) {
-    return `${markerPrefix}${TYPE_EMOJI_MAP[turn.type] ?? "\u2022"} ${truncateText(turn.title, { limit: titleCap, signal })}`;
+  if (turn.status === "extracted" && turn.title !== null) {
+    return `${markerPrefix}${typeGlyph(turn.type)} ${truncateText(turn.title, { limit: titleCap, signal })}`;
   }
   return `${markerPrefix}\u23F3`.trim();
 }
@@ -8963,19 +9044,98 @@ function withLegacyEraHeader(view, bodyLines, hasSpine) {
   const [first, ...rest] = bodyLines;
   return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
 }
+function renderEraMilestoneLines(view, titleCap, removed, descOff, signal) {
+  const bySegment = /* @__PURE__ */ new Map();
+  if (view.eraKeptMilestones.length === 0) {
+    return bySegment;
+  }
+  const renderable = view.eraKeptMilestones.filter(
+    (milestone) => !removed.has(milestone.turn.id) && view.eraSegmentIdByTurnId.has(milestone.turn.id)
+  );
+  const renderablePrompts = new Set(
+    renderable.map((milestone) => milestone.turn.promptNumber)
+  );
+  const homedPulled = /* @__PURE__ */ new Map();
+  for (const antecedent of view.eraMilestonePulled) {
+    const home = antecedent.citerPromptNumbers.find(
+      (promptNumber) => renderablePrompts.has(promptNumber)
+    );
+    if (home === void 0) {
+      continue;
+    }
+    const bucket = homedPulled.get(home) ?? [];
+    bucket.push(antecedent);
+    homedPulled.set(home, bucket);
+  }
+  for (const milestone of renderable) {
+    const segmentId = view.eraSegmentIdByTurnId.get(milestone.turn.id);
+    const pulled = homedPulled.get(milestone.turn.promptNumber) ?? [];
+    const lines = renderUnitFitted(
+      { milestone, pulled },
+      titleCap,
+      descOff.has(milestone.turn.id),
+      signal
+    );
+    const bucket = bySegment.get(segmentId) ?? [];
+    bucket.push(...lines);
+    bySegment.set(segmentId, bucket);
+  }
+  return bySegment;
+}
+function eraMilestoneDegradationOrder(kept) {
+  return [...kept].sort(compareMilestoneRank).reverse();
+}
+function fitEraMilestonesToBudget(view, titleCap, tokenBudget, measure, signal) {
+  if (view.eraKeptMilestones.length === 0) {
+    return /* @__PURE__ */ new Map();
+  }
+  const removed = /* @__PURE__ */ new Set();
+  const descOff = /* @__PURE__ */ new Set();
+  const build = () => {
+    const lines = renderEraMilestoneLines(view, titleCap, removed, descOff, signal);
+    const spineLines = renderSegmentSpineBlock({
+      spine: view.segmentSpine,
+      orphans: view.orphanAnchors,
+      titleCap,
+      milestoneLinesBySegmentId: lines
+    });
+    return { lines, spineLines };
+  };
+  let current = build();
+  if (measure(current.spineLines) <= tokenBudget) {
+    return current.lines;
+  }
+  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
+    descOff.add(milestone.turn.id);
+    current = build();
+    if (measure(current.spineLines) <= tokenBudget) {
+      return current.lines;
+    }
+  }
+  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
+    removed.add(milestone.turn.id);
+    current = build();
+    if (measure(current.spineLines) <= tokenBudget) {
+      return current.lines;
+    }
+  }
+  return current.lines;
+}
 function renderTimeline(view, options = {}) {
   const promptCap = options.promptCap ?? PROMPT_COLUMN_CAP;
   const titleCap = options.titleCap ?? DEFAULT_TITLE_CAP;
   const signal = createTruncationSignal();
+  const eraMilestoneLinesFull = view.view === "milestones" ? renderEraMilestoneLines(view, titleCap, EMPTY_TURN_ID_SET, EMPTY_TURN_ID_SET, signal) : /* @__PURE__ */ new Map();
   let spineLines = view.view === "milestones" ? renderSegmentSpineBlock({
     spine: view.segmentSpine,
     orphans: view.orphanAnchors,
-    titleCap
+    titleCap,
+    milestoneLinesBySegmentId: eraMilestoneLinesFull
   }) : [];
-  const assemble = (bodyLines) => [
+  const assemble = (bodyLines, spineOverride = spineLines) => [
     ...renderSessionHeader(view),
-    ...spineLines,
-    ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
+    ...spineOverride,
+    ...withLegacyEraHeader(view, bodyLines, spineOverride.length > 0),
     ...renderShapeSignals(view),
     ...renderEarlierHint(view, options),
     ...renderLineagePointer(view)
@@ -8998,6 +9158,19 @@ function renderTimeline(view, options = {}) {
     });
   }
   if (spineLines.length > 0) {
+    const fittedMilestoneLines = fitEraMilestonesToBudget(
+      view,
+      titleCap,
+      options.tokenBudget,
+      (candidateSpineLines) => estimateDiaryTokens(assemble([], candidateSpineLines)),
+      signal
+    );
+    spineLines = renderSegmentSpineBlock({
+      spine: view.segmentSpine,
+      orphans: view.orphanAnchors,
+      titleCap,
+      milestoneLinesBySegmentId: fittedMilestoneLines
+    });
     shedSpineToBudget({
       view,
       titleCap,
@@ -9005,7 +9178,8 @@ function renderTimeline(view, options = {}) {
       apply: (candidate) => {
         spineLines = candidate;
       },
-      measure: () => estimateDiaryTokens(assemble([]))
+      measure: () => estimateDiaryTokens(assemble([])),
+      milestoneLinesBySegmentId: fittedMilestoneLines
     });
   }
   const body = fitMilestoneBodyToBudget(
@@ -9025,7 +9199,7 @@ function renderTimeline(view, options = {}) {
   });
 }
 function shedSpineToBudget(options) {
-  const { view, titleCap, tokenBudget, apply, measure } = options;
+  const { view, titleCap, tokenBudget, apply, measure, milestoneLinesBySegmentId } = options;
   let segments = view.segmentSpine.length;
   let orphans = view.orphanAnchors.length;
   while (measure() > tokenBudget && (orphans > 0 || segments > 0)) {
@@ -9040,7 +9214,8 @@ function shedSpineToBudget(options) {
         orphans: view.orphanAnchors,
         titleCap,
         maxSegments: segments,
-        maxOrphans: orphans
+        maxOrphans: orphans,
+        milestoneLinesBySegmentId
       })
     );
   }
@@ -11182,6 +11357,14 @@ function applyNoteSettlementWriteBackTransaction(db, options) {
       });
       if (written) {
         counts.notesReconstructed += 1;
+        const drafted = draftTurnFactsFromTitle(note.title);
+        if (drafted.type || drafted.tag) {
+          const existingTags = drafted.tag ? getTurnById(db, turnId)?.tags ?? [] : [];
+          updateTurnById(db, turnId, {
+            type: drafted.type ?? void 0,
+            replaceTags: drafted.tag ? withDraftedTopicTag(existingTags, drafted.tag) : void 0
+          });
+        }
       } else {
         counts.notesYielded += 1;
       }
@@ -46122,7 +46305,12 @@ var workerRecallInputShape = {
 };
 var rememberInputShape = {
   id: external_exports.string().optional(),
-  grade: external_exports.number().int().min(0).max(4).optional(),
+  // `.nullable()` on grade/type/title/content/insight (spec D10, ticket 04):
+  // omitted (the key absent) leaves the field exactly as it was; an explicit
+  // `null` clears it. The two are indistinguishable through plain `??`
+  // coalescing, which is why the clear needs its own value rather than reusing
+  // omission — see resolveNullable in db/turns.ts.
+  grade: external_exports.number().int().min(0).max(4).nullable().optional(),
   regrade: external_exports.object({
     id: external_exports.string(),
     grade: external_exports.number().int().min(0).max(4)
@@ -46144,10 +46332,10 @@ var rememberInputShape = {
       relation: external_exports.enum(CITATION_RELATIONS)
     }).strict()
   ).optional(),
-  type: external_exports.string().optional(),
-  title: external_exports.string().optional(),
-  content: external_exports.string().optional(),
-  insight: external_exports.string().optional(),
+  type: external_exports.string().nullable().optional(),
+  title: external_exports.string().nullable().optional(),
+  content: external_exports.string().nullable().optional(),
+  insight: external_exports.string().nullable().optional(),
   tags: external_exports.array(external_exports.string()).optional(),
   status: external_exports.enum([
     "pending",
@@ -46390,6 +46578,13 @@ function noteTool(db, rawInput, options = {}) {
         insight,
         updatedAtEpoch: nowEpoch
       });
+      const drafted = draftTurnFactsFromTitle(title);
+      if (drafted.type || drafted.tag) {
+        updateTurnById(db, turn.id, {
+          type: drafted.type ?? void 0,
+          replaceTags: drafted.tag ? withDraftedTopicTag(turn.tags, drafted.tag) : void 0
+        });
+      }
     }
     return { ok: true, existing: existing !== null };
   });
@@ -46512,11 +46707,20 @@ function validateStatusForRoute(status, allowedStatuses, routeLabel) {
   return null;
 }
 function validateGrade(value, label) {
-  if (value === void 0) {
+  if (value === void 0 || value === null) {
     return null;
   }
   if (!Number.isInteger(value) || value < 0 || value > 4) {
     return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+function validateType(value) {
+  if (value === void 0 || value === null) {
+    return null;
+  }
+  if (!isMemoryType(value)) {
+    return `type "${value}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
   }
   return null;
 }
@@ -46552,31 +46756,10 @@ var RegradeTargetMissingError = class extends Error {
   }
   targetId;
 };
-function settleEraTurnWithoutNote(db, turnId, current) {
-  const changed = db.query(
-    `UPDATE turns
-         SET status = CASE
-               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
-               ELSE 'skipped'
-             END,
-             updated_at_epoch = ?
-         WHERE id = ? AND status IN ('active', 'provisional')`
-  ).run(Math.floor(Date.now() / 1e3), turnId).changes > 0;
-  const settled = getTurnById(db, turnId) ?? current;
-  if (changed) {
-    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
-  }
-  return textResult2(
-    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are noted by the session's own agent, so nothing this call supplied was stored.`
-  );
-}
-function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
+function handleTurnRemember(db, turnId, input) {
   const current = getTurnById(db, turnId);
   if (!current) {
     return textResult2(`Turn T${turnId} not found.`);
-  }
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
   }
   const statusError = validateStatusForRoute(
     input.status,
@@ -46590,7 +46773,11 @@ function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
   if (gradeError) {
     return parameterError2(gradeError);
   }
-  if ((current.status === "active" || current.status === "provisional") && input.grade === void 0) {
+  const typeError = validateType(input.type);
+  if (typeError) {
+    return parameterError2(typeError);
+  }
+  if ((current.status === "active" || current.status === "provisional") && (input.grade === void 0 || input.grade === null)) {
     return parameterError2(
       "grade is required when extracting a new turn (integer 0 through 4)."
     );
@@ -46625,10 +46812,14 @@ function handleTurnRemember(db, turnId, input, eraCutoffEpoch) {
     written = runWriteTransaction(db, () => {
       const turn = updateTurnById(db, turnId, {
         status: deriveTurnStatusForUpdate(current, input),
-        title: input.title ?? null,
-        content: input.content != null ? bracketBareTurnReferences(input.content, isValidPredecessor) : null,
-        insight: input.insight ?? null,
-        type: input.type ?? null,
+        // Passed straight through (no `?? null`): input.title/insight/type are
+        // already `T | null | undefined`, and collapsing them onto a shared
+        // `null` here would be the exact omit-vs-clear ambiguity this ticket
+        // removes — undefined must reach updateTurnById as undefined.
+        title: input.title,
+        content: typeof input.content === "string" ? bracketBareTurnReferences(input.content, isValidPredecessor) : input.content,
+        insight: input.insight,
+        type: input.type,
         significanceGrade: input.grade,
         tags: input.tags ?? [],
         updatedAtEpoch: nowEpoch
@@ -46685,7 +46876,11 @@ function handleObservationRemember(db, observationId, input) {
     );
   }
   const observation = updateObservation(db, observationId, {
-    title: input.title,
+    // Observation remember has no clear concept (out of ticket 04's scope);
+    // `UpdateObservationInput.title` stays `string | undefined`, so an
+    // explicit `null` here — which the shared schema now technically allows
+    // through — degrades to "omitted" rather than a type error.
+    title: input.title ?? void 0,
     content: input.content,
     status: deriveObservationStatus(input)
   });
@@ -46708,7 +46903,7 @@ function handleSessionRemember(db, sessionId, input) {
   if (!session) {
     return textResult2(`Session ${sessionId} not found.`);
   }
-  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === void 0);
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] == null);
   if (missing.length > 0) {
     return parameterError2(
       `session remember rewrites the whole summary \u2014 supply all fields (${SESSION_SUMMARY_KEYS.join(
@@ -46763,7 +46958,7 @@ function rememberTool(db, rawInput, options = {}) {
   }
   const turnId = parseTurnId(input.id);
   if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
+    return handleTurnRemember(db, turnId, input);
   }
   const sessionId = parseSessionId(input.id);
   if (sessionId !== null) {
