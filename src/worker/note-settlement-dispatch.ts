@@ -3,6 +3,7 @@ import type { Database } from "bun:sqlite";
 import type { NoteSettlementJob } from "../db/note-settlement";
 import type { MnemoConfig } from "../shared/config";
 import { DEFAULT_CONFIG } from "../shared/config";
+import { SIGNIFICANCE_TARGET_SHARES } from "../task-causality-rubric";
 import {
   buildNoteSettlementContext,
   type NoteSettlementContext,
@@ -70,6 +71,14 @@ export interface NoteSettlementWindowMetrics
   /** Segments whose write lost the revision CAS and were replayed. */
   casConflicts: number;
   casReplaysApplied: number;
+  /**
+   * D13's drift-is-a-comparison-not-an-investigation ask: the standing
+   * calibration targets ride every line beside the actual histogram
+   * (`gradeHistogram`, inherited from `NoteSettlementWriteBackCounts`), so a
+   * reader scanning the log does not have to open `task-causality-rubric.ts`
+   * to know what "too many 3s" means. Imported, never restated.
+   */
+  gradeTargets: typeof SIGNIFICANCE_TARGET_SHARES;
 }
 
 export type NoteSettlementMetricsSink = (
@@ -325,6 +334,10 @@ export function createNoteSettlementDispatch(
       interiorHoles: context.interiorHoles.length,
       casConflicts: result.conflicts.length,
       casReplaysApplied,
+      gradeTargets: SIGNIFICANCE_TARGET_SHARES,
+      turnsReviewed: result.turnsReviewed,
+      gradeHistogram: result.gradeHistogram,
+      reviewsYieldedToLateNote: result.reviewsYieldedToLateNote,
       segmentsCreated: result.segmentsCreated,
       segmentsExtended: result.segmentsExtended,
       topicsMinted: result.topicsMinted,

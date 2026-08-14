@@ -1,6 +1,10 @@
 import { isCitationRelation, type CitationRelation } from "../db/citations";
 import { SEGMENT_STATUSES, type SegmentStatus } from "../db/segments";
-import { isMemoryType, MEMORY_TYPES } from "../shared/type-vocabulary";
+import {
+  isMemoryType,
+  MEMORY_TYPES,
+  type MemoryType,
+} from "../shared/type-vocabulary";
 
 /**
  * The settlement call's structured output (spec D9: "Sonnet 输出走结构化 schema").
@@ -45,6 +49,28 @@ export interface SettlementNoteDirective {
   insight: string | null;
 }
 
+/**
+ * One turn's review verdict (spec D3, ticket 05): grade, type and tag
+ * together, keyed by address. Separate from `SettlementNoteDirective` on
+ * purpose — notes cover only the turns needing backfill, review covers every
+ * turn in the window, including ones that already have a note.
+ *
+ * `grade` is REQUIRED, matching the retired resident agent's own rubric
+ * ("grade: REQUIRED integer 0-4") — the model states a verdict for every turn
+ * it reviews, confirming or correcting, never leaving the field ambiguous
+ * between "unchanged" and "omitted". `type`/`tag` are nullable: `null` is an
+ * explicit clear (a turn whose title carries no activity or topic, or whose
+ * type/topic the model is retracting), never "leave alone" — this schema has
+ * no way to say "leave alone" for a field it is reviewing, by design.
+ */
+export interface SettlementTurnReviewDirective {
+  turn: string;
+  grade: number;
+  type: MemoryType | null;
+  /** Bare topic word, not yet namespaced — the writeback owns the `topic:` prefix. */
+  tag: string | null;
+}
+
 export interface SettlementSessionSummary {
   title: string;
   content: string;
@@ -59,6 +85,7 @@ export interface NoteSettlementResponse {
   segments: SettlementSegmentDirective[];
   edges: SettlementEdgeDirective[];
   reconstructedNotes: SettlementNoteDirective[];
+  turnReview: SettlementTurnReviewDirective[];
   sessionSummary: SettlementSessionSummary | null;
 }
 
@@ -130,6 +157,45 @@ function asTypeArray(value: unknown, what: string): string[] {
     }
   }
   return values;
+}
+
+/**
+ * A turn-review grade: integer 0-4 (spec's task-causality scale). Out of
+ * range is a schema violation, not a value to clamp — clamping would let a
+ * model's miscalibrated 5 or -1 silently become a 4 or 0, which is exactly
+ * the kind of drift D13's histogram exists to catch, not paper over.
+ */
+function asGrade(value: unknown, what: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 0 ||
+    value > 4
+  ) {
+    fail(`${what} is not an integer 0-4`);
+  }
+  return value;
+}
+
+/** `null`/absent is an explicit clear; anything else must be in the closed vocabulary. */
+function asMemoryTypeOrNull(value: unknown, what: string): MemoryType | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = asString(value, what);
+  if (!isMemoryType(text)) {
+    fail(`${what} "${text}" is not one of ${MEMORY_TYPES.join(", ")}`);
+  }
+  return text;
+}
+
+/** `null`/absent/empty is an explicit clear — the tag facet has no "leave alone". */
+function asTagOrNull(value: unknown, what: string): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = asString(value, what).trim();
+  return text.length === 0 ? null : text;
 }
 
 function asPositiveInteger(value: unknown, what: string): number {
@@ -260,6 +326,20 @@ function parseNote(value: unknown, index: number): SettlementNoteDirective {
   };
 }
 
+function parseTurnReview(
+  value: unknown,
+  index: number,
+): SettlementTurnReviewDirective {
+  const what = `turn_review[${index}]`;
+  const record = asRecord(value, what);
+  return {
+    turn: asNonEmptyString(record.turn, `${what}.turn`),
+    grade: asGrade(record.grade, `${what}.grade`),
+    type: asMemoryTypeOrNull(record.type, `${what}.type`),
+    tag: asTagOrNull(record.tag, `${what}.tag`),
+  };
+}
+
 function parseSessionSummary(value: unknown): SettlementSessionSummary | null {
   if (value === undefined || value === null) {
     return null;
@@ -293,6 +373,9 @@ export function parseNoteSettlementResponse(
           root.reconstructed_notes,
           "reconstructed_notes",
         ).map(parseNote),
+        turnReview: asArray(root.turn_review, "turn_review").map(
+          parseTurnReview,
+        ),
         sessionSummary: parseSessionSummary(root.session_summary),
       },
     };

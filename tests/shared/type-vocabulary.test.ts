@@ -118,4 +118,21 @@ describe("draftTurnFactsFromTitle", () => {
       "topic:auth-race",
     ]);
   });
+
+  test("null clears the topic facet without setting a replacement (ticket 05)", () => {
+    // A corrected title that no longer matches the <activity>+<topic>: shape
+    // drafts neither a type nor a tag — the topic facet must not survive that
+    // correction any more than the type should. `null` is how a caller says
+    // "no topic", distinct from omitting the call entirely.
+    const existing = [
+      "topic:login-flow",
+      "rolled-back",
+      "compact:trigger=manual",
+    ];
+    expect(withDraftedTopicTag(existing, null)).toEqual([
+      "rolled-back",
+      "compact:trigger=manual",
+    ]);
+    expect(withDraftedTopicTag([], null)).toEqual([]);
+  });
 });

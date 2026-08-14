@@ -33470,10 +33470,10 @@ function draftTurnFactsFromTitle(title) {
 }
 var TOPIC_TAG_PREFIX = "topic:";
 function withDraftedTopicTag(existing, topicTag) {
-  return [
-    ...existing.filter((tag) => !tag.startsWith(TOPIC_TAG_PREFIX)),
-    topicTag
-  ];
+  const withoutTopic = existing.filter(
+    (tag) => !tag.startsWith(TOPIC_TAG_PREFIX)
+  );
+  return topicTag ? [...withoutTopic, topicTag] : withoutTopic;
 }
 
 // src/mcp/note.ts
@@ -33679,12 +33679,10 @@ function noteTool(db, rawInput, options = {}) {
         updatedAtEpoch: nowEpoch
       });
       const drafted = draftTurnFactsFromTitle(title);
-      if (drafted.type || drafted.tag) {
-        updateTurnById(db, turn.id, {
-          type: drafted.type ?? void 0,
-          replaceTags: drafted.tag ? withDraftedTopicTag(turn.tags, drafted.tag) : void 0
-        });
-      }
+      updateTurnById(db, turn.id, {
+        type: drafted.type,
+        replaceTags: withDraftedTopicTag(turn.tags, drafted.tag)
+      });
     }
     return { ok: true, existing: existing !== null };
   });

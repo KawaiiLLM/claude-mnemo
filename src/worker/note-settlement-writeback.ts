@@ -34,6 +34,7 @@ import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes
 import { getTurnById, updateTurnById } from "../db/turns";
 import {
   draftTurnFactsFromTitle,
+  TOPIC_TAG_PREFIX,
   withDraftedTopicTag,
 } from "../shared/type-vocabulary";
 import type {
@@ -84,6 +85,18 @@ const JUDGED_PROVENANCE: EdgeProvenance = "judged";
  */
 class UnfilledGapError extends Error {}
 
+/**
+ * Thrown INSIDE the write-back transaction when a `turn_review` entry names an
+ * address this writer was never shown, or one that does not resolve to a real
+ * turn (ticket 05). Unlike a `members`/`edges` token — where an illegal
+ * reference is dropped and logged, because a segment's judgement is still
+ * meaningful without one citation — a review verdict for a turn nobody can
+ * verify is not a smaller correct review, it is evidence the batch invented an
+ * address. Same discipline as `UnfilledGapError`: throwing here rolls back
+ * everything this reply produced, and the job stays `claimed` for a retry.
+ */
+class UnknownTurnAddressError extends Error {}
+
 export interface NoteSettlementWriteBackOptions {
   job: NoteSettlementJob;
   response: NoteSettlementResponse;
@@ -127,6 +140,18 @@ export interface NoteSettlementWriteBackCounts {
    */
   notesYielded: number;
   summaryUpdated: boolean;
+  /** Turns a `turn_review` directive actually landed on (spec D3, ticket 05). */
+  turnsReviewed: number;
+  /** Per-grade counts among `turnsReviewed`, indexed 0-4 (spec D13). */
+  gradeHistogram: number[];
+  /**
+   * Reviewed turns whose type/tag verdict stepped aside because the agent's
+   * own note landed after this job was claimed — the review graded them but
+   * did not restate facts about a note it never read. A steady nonzero here
+   * is not a fault; a LARGE share means settlement is routinely racing the
+   * live agent and the window is being cut too close to the frontier.
+   */
+  reviewsYieldedToLateNote: number;
 }
 
 export interface NoteSettlementWriteBackResult
@@ -149,6 +174,9 @@ const EMPTY_COUNTS: NoteSettlementWriteBackCounts = {
   notesRejected: 0,
   notesYielded: 0,
   summaryUpdated: false,
+  turnsReviewed: 0,
+  gradeHistogram: [0, 0, 0, 0, 0],
+  reviewsYieldedToLateNote: 0,
 };
 
 /**
@@ -258,7 +286,10 @@ export function applyNoteSettlementWriteBack(
   try {
     return applyNoteSettlementWriteBackTransaction(db, options);
   } catch (error) {
-    if (error instanceof UnfilledGapError) {
+    if (
+      error instanceof UnfilledGapError ||
+      error instanceof UnknownTurnAddressError
+    ) {
       return {
         ...EMPTY_COUNTS,
         committed: false,
@@ -292,7 +323,15 @@ function applyNoteSettlementWriteBackTransaction(
       };
     }
 
-    const counts: NoteSettlementWriteBackCounts = { ...EMPTY_COUNTS };
+    // `gradeHistogram` is mutated in place below (per-directive `+= 1`), so it
+    // must be this call's OWN array — spreading `EMPTY_COUNTS` alone would
+    // share its array reference across every window this process ever
+    // settles, corrupting every later histogram with every earlier one's
+    // counts.
+    const counts: NoteSettlementWriteBackCounts = {
+      ...EMPTY_COUNTS,
+      gradeHistogram: [0, 0, 0, 0, 0],
+    };
     const conflicts: NoteSettlementSegmentConflict[] = [];
     const landed: Array<{
       segment: SegmentRecord;
@@ -467,25 +506,176 @@ function applyNoteSettlementWriteBackTransaction(
         // spec D7/D8, ticket 02: a mechanical reconstruction drafts its
         // turn's type and tag exactly as an agent-written note does — same
         // function, same title-derived answer, so a reader cannot tell which
-        // write path produced the draft.
+        // write path produced the draft. Unconditional now (ticket 05, same
+        // fix as note.ts's promotion path): a title with no `<activity>+
+        // <topic>:` shape drafts neither, and that must CLEAR any stale
+        // value rather than skip the write — there is nothing stale to clear
+        // on a first-ever reconstruction, but the two call sites share one
+        // derivation and one write discipline on purpose, so a future editor
+        // cannot fix the bug in one and leave it in the other.
+        //
+        // Re-read rather than carry the row down: the topic tag replaces
+        // only its own namespace, so the write needs whatever tags this turn
+        // holds AT THIS MOMENT, and a window can reconstruct several notes —
+        // or a `turn_review` directive further down can revise this same
+        // turn — before this point is reached.
         const drafted = draftTurnFactsFromTitle(note.title);
-        if (drafted.type || drafted.tag) {
-          // Re-read rather than carry the row down: the topic tag replaces
-          // only its own namespace, so the write needs whatever tags this turn
-          // holds at this moment, and a window can reconstruct several notes
-          // before this point is reached.
-          const existingTags = drafted.tag
-            ? (getTurnById(db, turnId)?.tags ?? [])
-            : [];
-          updateTurnById(db, turnId, {
-            type: drafted.type ?? undefined,
-            replaceTags: drafted.tag
-              ? withDraftedTopicTag(existingTags, drafted.tag)
-              : undefined,
-          });
-        }
+        const existingTags = getTurnById(db, turnId)?.tags ?? [];
+        updateTurnById(db, turnId, {
+          type: drafted.type,
+          replaceTags: withDraftedTopicTag(existingTags, drafted.tag),
+        });
       } else {
         counts.notesYielded += 1;
+      }
+    }
+
+    // --- turn review: grade, type, tag (spec D3/D9, ticket 05) -------------
+    //
+    // THE FENCE (spec's "note committed after the worker read the row is not
+    // overwritten by the worker's older view"), argued once here rather than
+    // per-line below:
+    //
+    // This whole function runs inside ONE `runWriteTransaction`, i.e. one
+    // `BEGIN IMMEDIATE` … `COMMIT`. SQLite's IMMEDIATE mode takes the write
+    // lock at BEGIN, before this callback's first statement — so no OTHER
+    // writer transaction (in particular `note.ts`'s `noteTool`, which the
+    // main agent calls WHILE its own turn is still running and which also
+    // goes through `runWriteTransaction`) can commit while this transaction
+    // is open: its own `BEGIN IMMEDIATE` blocks until this one finishes. That
+    // makes the classic cross-process interleave — read, someone else
+    // commits, write over them — structurally impossible for anything that
+    // happens strictly BETWEEN this transaction's BEGIN and COMMIT.
+    //
+    // It does NOT make every write in this loop safe by itself. The gap the
+    // ticket actually found is upstream of this transaction: the settlement
+    // window's CONTEXT is built, then an async model call runs for seconds,
+    // during which any number of agent notes can land and commit in full
+    // (ordinary, already-committed transactions, done before this one even
+    // opens). Freshness alone is therefore not the whole fence, and it is
+    // worth being precise about what each half buys, because the two are easy
+    // to confuse:
+    //
+    //   1. RE-READ FRESH. Any value merged into a write must come from a read
+    //      taken here, immediately before that write — never from context-
+    //      build time, never from a read taken earlier in this transaction and
+    //      carried down. `getTurnById` below is that read; it is what keeps a
+    //      turn's non-topic tags (its session-arc role, its `compact:`
+    //      machinery) from being erased by a stale copy of the tag list.
+    //
+    //   2. YIELD WHEN THE DOCUMENT CHANGED. Freshness cannot rescue a verdict
+    //      that was formed about a note the model never saw. `type` and `tag`
+    //      are facts ABOUT the note — derived from its title on every other
+    //      write path in this codebase — so a review of a turn whose note
+    //      arrived during the async gap is a review of a document that no
+    //      longer exists. Re-reading the row would faithfully write a stale
+    //      judgement onto fresh data, which is worse, not better. That case is
+    //      detected below and the note-derived half of the verdict stands
+    //      down.
+    //
+    // `title`, `content` and `insight` are never named in this call at all
+    // (stay `undefined` ⇒ omitted, see `resolveNullable`), so a note's own
+    // prose was never at risk from this loop — which is why a test that only
+    // watches those three columns survive the interleave proves nothing about
+    // either half above. `fireAfterNextTurnRead` in the test suite drops an
+    // agent note into exactly this gap and pins the columns that CAN move.
+    //
+    // `grade` is the one field written unconditionally from the directive
+    // regardless of what is stored — that is NOT the race, that is "confirm
+    // or override" (D4): it judges what the turn did, read off raw material
+    // no later note can change, and nothing else writes that column.
+    if (response.turnReview.length > 0) {
+      const tokens = response.turnReview.map((directive) => directive.turn);
+      const { nodes, rejected } = resolveTokens(db, tokens, options);
+      if (rejected > 0) {
+        const badToken = tokens.find((token) => !nodes.has(token.trim()));
+        throw new UnknownTurnAddressError(
+          `settlement job ${job.id}: turn_review referenced an address this ` +
+            `writer was not shown or that does not exist` +
+            (badToken ? ` ("${badToken}")` : ""),
+        );
+      }
+
+      for (const directive of response.turnReview) {
+        const node = nodes.get(directive.turn.trim());
+        if (!node || node.kind !== "turn") {
+          throw new UnknownTurnAddressError(
+            `settlement job ${job.id}: turn_review entry "${directive.turn}" ` +
+              "is not a turn address",
+          );
+        }
+        const turnId = node.id;
+
+        // The fence: fresh, right here, right before the write that uses it.
+        const freshExisting = getTurnById(db, turnId);
+        if (!freshExisting) {
+          // Cannot happen — `node` above just resolved through a live DB
+          // lookup — but a turn that vanished between that lookup and here
+          // is nothing this directive can apply to.
+          throw new UnknownTurnAddressError(
+            `settlement job ${job.id}: turn_review entry "${directive.turn}" ` +
+              "resolved to a turn that no longer exists",
+          );
+        }
+
+        // The OTHER half of the fence. Re-reading the row is not enough on its
+        // own, because `type` and `tag` are not free-standing verdicts: they
+        // are facts ABOUT the note, derived from its title everywhere else in
+        // this codebase. So if the note under review is no longer the note the
+        // model reviewed, the verdict is about a document that no longer
+        // exists, and writing it produces a row whose type/tag answer a title
+        // nobody kept.
+        //
+        // That is exactly what the async gap above delivers: the agent notes
+        // its own turn WHILE the turn runs, so a note can land between this
+        // job being claimed and this write. One loop up, the reconstruction
+        // already ruled on that collision — `upsertReconstructedShadowNote`'s
+        // `WHERE writer_origin != 'agent'` makes the agent's account win and
+        // the hindsight one yield. Letting this loop then stamp the yielded
+        // reconstruction's type/tag onto the row would overturn that ruling in
+        // the same transaction that made it.
+        //
+        // `>=`, not `>`: these are epoch SECONDS, so a note committed in the
+        // very second of the claim is ambiguous, and the safe reading is that
+        // the model missed it. The cost of being wrong that way is one turn
+        // keeping its mechanical title-derived type instead of a reviewed one;
+        // the cost of the other way is the clobber this whole comment is
+        // about. Origin matters too: a note THIS window just reconstructed
+        // also has a fresh timestamp, and its type/tag are precisely what the
+        // review should be allowed to override — only an `agent` note outranks
+        // the reviewer.
+        const currentNote = getShadowNote(db, turnId);
+        const noteSupersedesReview =
+          currentNote !== null &&
+          currentNote.writerOrigin === "agent" &&
+          job.claimedAtEpoch !== null &&
+          currentNote.updatedAtEpoch >= job.claimedAtEpoch;
+
+        if (noteSupersedesReview) {
+          // Grade still lands: it judges what the turn DID, read off the raw
+          // material, and no other writer competes for the column. Only the
+          // note-derived facts step aside.
+          updateTurnById(db, turnId, { significanceGrade: directive.grade });
+          counts.reviewsYieldedToLateNote += 1;
+        } else {
+          const bareTag = directive.tag?.startsWith(TOPIC_TAG_PREFIX)
+            ? directive.tag.slice(TOPIC_TAG_PREFIX.length)
+            : directive.tag;
+          const nextTags = withDraftedTopicTag(
+            freshExisting.tags,
+            bareTag ? `${TOPIC_TAG_PREFIX}${bareTag}` : null,
+          );
+
+          updateTurnById(db, turnId, {
+            significanceGrade: directive.grade,
+            type: directive.type,
+            replaceTags: nextTags,
+          });
+        }
+
+        counts.turnsReviewed += 1;
+        counts.gradeHistogram[directive.grade] =
+          (counts.gradeHistogram[directive.grade] ?? 0) + 1;
       }
     }
 
@@ -605,6 +795,7 @@ export function applyNoteSettlementSegmentReplay(
         segments: [],
         edges: [],
         reconstructedNotes: [],
+        turnReview: [],
         sessionSummary: null,
       },
       nowEpoch: options.nowEpoch,

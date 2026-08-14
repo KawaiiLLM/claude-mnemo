@@ -553,15 +553,21 @@ export function noteTool(
       // the draft only ever lands alongside the promotion that already
       // touches this row. `replace: true` re-runs this on every rewrite, so a
       // corrected title's new answer is what lands, not the first one.
+      //
+      // Unconditional now (ticket 05): the old `if (drafted.type ||
+      // drafted.tag)` guard skipped the write entirely when a corrected
+      // title no longer matched the `<activity>+<topic>:` shape, so a STALE
+      // type/tag from the turn's PREVIOUS title survived a correction that
+      // should have cleared it. `type: drafted.type` and the tag write below
+      // both carry `null` through explicitly — `updateTurnById`'s
+      // `resolveNullable` treats that as a real clear, not "leave alone" —
+      // so a title that stops parsing now clears both, same as one that never
+      // parsed would have left them.
       const drafted = draftTurnFactsFromTitle(title);
-      if (drafted.type || drafted.tag) {
-        updateTurnById(db, turn.id, {
-          type: drafted.type ?? undefined,
-          replaceTags: drafted.tag
-            ? withDraftedTopicTag(turn.tags, drafted.tag)
-            : undefined,
-        });
-      }
+      updateTurnById(db, turn.id, {
+        type: drafted.type,
+        replaceTags: withDraftedTopicTag(turn.tags, drafted.tag),
+      });
     }
 
     return { ok: true, existing: existing !== null };

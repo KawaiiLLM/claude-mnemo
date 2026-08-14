@@ -1,5 +1,9 @@
 import { CITATION_RELATIONS } from "../db/citations";
 import { MEMORY_TYPES } from "../shared/type-vocabulary";
+import {
+  TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC,
+  TASK_CAUSALITY_GRADE_RUBRIC,
+} from "../task-causality-rubric";
 import type {
   NoteSettlementContext,
   NoteSettlementWindowTurn,
@@ -22,6 +26,10 @@ export const NOTE_SETTLEMENT_SYSTEM_PROMPT =
   "Answer with one JSON object and nothing else.";
 
 const RESPONSE_SCHEMA = `{
+  "turn_review": [
+    { "turn": "S12/T30", "grade": 0, "type": "fix", "tag": "extraction-redesign" },
+    { "turn": "S12/T31", "grade": 2, "type": null, "tag": null }
+  ],
   "segments": [
     {
       "action": "extend" | "create",
@@ -57,6 +65,7 @@ function renderWindowTurn(turn: NoteSettlementWindowTurn): string {
   const facts = [
     `kind=${turn.kind}`,
     turn.typeDraft ? `type_draft=${turn.typeDraft}` : null,
+    turn.tagDraft ? `tag_draft=${turn.tagDraft}` : null,
     turn.toolCallCount === null ? null : `tools=${turn.toolCallCount}`,
     turn.filesModified.length > 0
       ? `files_modified=${turn.filesModified.slice(0, 6).join(",")}`
@@ -132,7 +141,50 @@ export function renderNoteSettlementPrompt(
     "",
     "## Duties",
     "",
-    "1. SEGMENT ATTACHMENT. For each window turn decide which segment it joins:",
+    "Three ordered steps. First review and label every window turn — grade,",
+    "type, tags — confirming or overriding the mechanical draft shown on its",
+    "line. Second, backfill a note for every turn that still owes one. Only",
+    "THEN, third, assign segment membership — segmentation is LAST because it",
+    "consumes the facts the first two steps just settled: a segment's type is",
+    "the union of its members' real activities, which is only meaningful once",
+    "those members have activities.",
+    "",
+    "1. TURN REVIEW. For EVERY turn in the window below — including one that",
+    "   already carries a note, and regardless of what its line's `type_draft`/",
+    "   `tag_draft` say — write one entry into turn_review: {turn, grade, type,",
+    "   tag}. `type_draft`/`tag_draft` are a MECHANICAL GUESS made from the",
+    "   turn's title at write time, nothing more; confirm it by repeating the",
+    "   same value, or override it by writing a different one. `type` and `tag`",
+    "   are each either a value or `null` — `null` is an explicit \"this turn has",
+    "   none\", never \"leave it as it was\". `type` is single-valued from",
+    `   ${MEMORY_TYPES.join(", ")}. \`tag\` is one bare topic word (no`,
+    "   namespace prefix — that is applied for you). You may ALSO revise a turn",
+    "   from the preceding-turns section below if you can see it needs",
+    "   correcting — grade a Grade 4 down once the arc's real scale is visible,",
+    "   fix a type a later window shows was wrong. That is not a loophole, it is",
+    "   what the grading rubric below expects.",
+    "",
+    "   Grade every reviewed turn against this rubric — the exact standard",
+    "   historical grades were assigned under:",
+    "",
+    TASK_CAUSALITY_GRADE_RUBRIC,
+    "",
+    TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC,
+    "",
+    "   This schema has no separate `regrade` verb: express any grade —",
+    "   first assignment or correction of an earlier window's verdict — as one",
+    "   turn_review entry naming that turn's address.",
+    "",
+    holes.length > 0
+      ? `2. RECONSTRUCTION. These turns still owe a note: ${holes.join(", ")}. ` +
+        `Their raw material is in the window below (marked raw>). Write one ` +
+        `reconstruction note each into reconstructed_notes, same discipline as ` +
+        `a turn note: title names the activity and topic, content leads with ` +
+        `the conclusion. Do not write notes for any other turn.`
+      : "2. RECONSTRUCTION. No turn in this window needs one; leave " +
+        "reconstructed_notes empty.",
+    "",
+    "3. SEGMENT ATTACHMENT. For each window turn decide which segment it joins:",
     "   - same topic as an open segment, work continuous with it → EXTEND that",
     "     segment (action=extend, copy its expected_revision);",
     "   - same topic but the segment has been silent for a long stretch, or the",
@@ -146,39 +198,32 @@ export function renderNoteSettlementPrompt(
     "   A change of activity (design → implement) is NOT a segment boundary; a",
     "   change of topic is. Members need not be consecutive turn numbers.",
     "",
-    "2. SEGMENT BODY. Conclusion first, then how the work got there, including",
+    "4. SEGMENT BODY. Conclusion first, then how the work got there, including",
     "   the alternatives that were rejected and who decided. Cite member turns",
     "   inline as [S<session>/T<prompt>] and other segments as [E<n>] — those",
     "   citations become the segment's anchors, so cite the turns that carry the",
     "   conclusion, not every member. Only ids shown in this prompt are legal.",
     "",
-    "3. EDGES. Classify the dependencies you can see between turns and segments:",
+    "5. EDGES. Classify the dependencies you can see between turns and segments:",
     `   relations are ${CITATION_RELATIONS.join(" / ")}. The four sources of an`,
     "   edge are a retrieval hit, a citation in a note body, a rollback and",
     "   retry pair, and your own reading of the window's sequence. Record what",
     "   the sequence shows and the note bodies claim; a retry that replaces an",
     "   abandoned attempt is `supersedes`.",
     "",
-    `4. TYPE AND TAG. type is multi-valued from ${MEMORY_TYPES.filter((value) => value !== "rolled-back").join(", ")}`,
-    "   — a segment's type is the union of its members' real activities. The",
-    "   value `rolled-back` may ONLY be written here, and only when the segment's",
+    `6. SEGMENT TYPE AND TAG. Now that step 1 settled every member's own`,
+    `   activity, a segment's type is the union of those reviewed activities —`,
+    `   multi-valued, from ${MEMORY_TYPES.filter((value) => value !== "rolled-back").join(", ")}`,
+    "   — never a fresh guess at the chapter as a whole. The value",
+    "   `rolled-back` may ONLY be written here, and only when the segment's",
     "   conclusion was later overturned or withdrawn. tags are topic words drawn",
     "   from the registry below; reuse the registered spelling.",
     "",
-    "5. SESSION SUMMARY. Rewrite the summary below whole (all seven fields, each",
+    "7. SESSION SUMMARY. Rewrite the summary below whole (all seven fields, each",
     "   may be empty). It is the session's current working state, not a log:",
     "   `current` is where the work stands, `decision` and `done` accumulate the",
     "   settled outcomes, `next_steps` is what a resumed session would do first.",
     "   Keep it inside its existing budget — roughly the length shown.",
-    "",
-    holes.length > 0
-      ? `6. RECONSTRUCTION. These turns still owe a note: ${holes.join(", ")}. ` +
-        `Their raw material is in the window below (marked raw>). Write one ` +
-        `reconstruction note each into reconstructed_notes, same discipline as ` +
-        `a turn note: title names the activity and topic, content leads with ` +
-        `the conclusion. Do not write notes for any other turn.`
-      : "6. RECONSTRUCTION. No turn in this window needs one; leave " +
-        "reconstructed_notes empty.",
     "",
     "## Session state (rewrite target)",
     "",
@@ -196,7 +241,9 @@ export function renderNoteSettlementPrompt(
     "",
     context.milestoneRendering || "(no milestones)",
     "",
-    "## Preceding turns (context only — do not settle these)",
+    "## Preceding turns (context — segment membership is settled window turns",
+    "   only, but turn_review MAY revise one of these if you can see it needs",
+    "   correcting; see duty 1)",
     "",
     context.priorTurnsRendering || "(none)",
     "",

@@ -417,6 +417,42 @@ describe("era cutover write path", () => {
       expect(turn.tags).toContain("topic:auth-bug");
       expect(turn.tags).not.toContain("topic:login-flow");
     });
+
+    test("a corrected title that no longer parses clears the stale type and tag rather than leaving them (ticket 05)", () => {
+      // Before ticket 05, `if (drafted.type || drafted.tag)` skipped the
+      // write entirely whenever a title stopped matching the
+      // <activity>+<topic>: shape, so a REPLACE that corrected a title into
+      // a shape without a topic left the previous draft standing — a stale
+      // fact surviving a correction that should have retired it.
+      const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+login-flow: first pass",
+          content: "First answer.",
+        },
+        options,
+      );
+      expect(getTurnById(db, eraTurnId)!.type).toBe("implement");
+      expect(getTurnById(db, eraTurnId)!.tags).toContain("topic:login-flow");
+
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "a plain corrected title with no shape at all",
+          content: "The correction dropped the <activity>+<topic>: shape.",
+          replace: true,
+        },
+        { ...options, now: () => 3_400 },
+      );
+
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.type).toBeNull();
+      expect(turn.tags).not.toContain("topic:login-flow");
+      expect(turn.tags.some((tag) => tag.startsWith("topic:"))).toBe(false);
+    });
   });
 
   describe("remember writes era turns like legacy ones (ticket 04, D10 — the era refusal is lifted)", () => {

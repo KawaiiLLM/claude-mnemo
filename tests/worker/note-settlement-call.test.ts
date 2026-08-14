@@ -5,6 +5,7 @@ import { createDatabase } from "../../src/db/database";
 import { initializeSchema } from "../../src/db/schema";
 import { upsertSession, getSession } from "../../src/db/sessions";
 import { upsertShadowNote, getShadowNote } from "../../src/db/shadow-notes";
+import { getTurnById } from "../../src/db/turns";
 import {
   claimNextNoteSettlementJob,
   enqueueNoteSettlementWindows,
@@ -23,6 +24,10 @@ import {
   countMemoryEdges,
   getOutgoingEdges,
 } from "../../src/db/memory-edges";
+import {
+  draftTurnFactsFromTitle,
+  draftTypeFromTitle,
+} from "../../src/shared/type-vocabulary";
 import {
   buildNoteSettlementContext,
   NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET,
@@ -296,6 +301,71 @@ describe("settlement context assembly", () => {
       NOTE_SETTLEMENT_HOLE_TOKEN_BUDGET * 3,
     );
     expect(hole.rawMaterial).toContain("lease");
+  });
+
+  /**
+   * Ticket 05: the prompt's `type_draft`/`tag_draft` must be the SAME
+   * derivation storage uses (`draftTurnFactsFromTitle`), not the looser
+   * whole-title scan the old `type_draft` alone used — the two disagreed on a
+   * title like "review the extraction spec" (matches the `review` prefix,
+   * but never matches the `<activity>+<topic>:` shape storage requires).
+   */
+  test("the window's type_draft/tag_draft are exactly what draftTurnFactsFromTitle would store", () => {
+    const fixture = seedInteriorHoleWindow();
+    const context = buildNoteSettlementContext(db, fixture.job, {
+      nowEpoch: NOW,
+    })!;
+
+    const t1 = context.windowTurns.find((turn) => turn.promptNumber === 1)!;
+    expect(t1.typeDraft).toBe("design");
+    expect(t1.tagDraft).toBe("topic:settlement");
+    const t3 = context.windowTurns.find((turn) => turn.promptNumber === 3)!;
+    expect(t3.typeDraft).toBe("implement");
+    expect(t3.tagDraft).toBe("topic:settlement");
+
+    const prompt = renderNoteSettlementPrompt(context);
+    const window = prompt.slice(prompt.indexOf("## Window turns"));
+    expect(window).toContain("type_draft=design");
+    expect(window).toContain("tag_draft=topic:settlement");
+    expect(window).toContain("type_draft=implement");
+
+    // A title that would NOT parse under the strict shape check draws no
+    // draft at all in the prompt either — the same title
+    // `draftTypeFromTitle`'s looser scan alone would have matched (it starts
+    // with the `review` alias), which is exactly the disagreement ticket 05
+    // closes: one derivation, used by both what is shown and what is stored.
+    expect(draftTurnFactsFromTitle("review the extraction spec")).toEqual({
+      type: null,
+      tag: null,
+    });
+    expect(draftTypeFromTitle("review the extraction spec")).toBe("review");
+  });
+
+  test("the prompt states the rubric verbatim (imported, not restated) and the three-step order with segmentation last", () => {
+    const fixture = seedInteriorHoleWindow();
+    const context = buildNoteSettlementContext(db, fixture.job, {
+      nowEpoch: NOW,
+    })!;
+    const prompt = renderNoteSettlementPrompt(context);
+
+    // The rubric's own words, not a paraphrase — a snippet unique enough
+    // that only the imported constant, never a rewrite, would produce it.
+    expect(prompt).toContain(
+      "Grade 4 — task origin or re-foundation",
+    );
+    expect(prompt).toContain("Misleading-turn downgrade");
+
+    // The three duties appear in this order, and duty 1 is the turn review
+    // while segmentation (duty 3, "SEGMENT ATTACHMENT") comes after both duty
+    // 1 (review) and duty 2 (reconstruction).
+    const reviewIndex = prompt.indexOf("1. TURN REVIEW");
+    const reconstructionIndex = prompt.indexOf("RECONSTRUCTION.");
+    const segmentIndex = prompt.indexOf("SEGMENT ATTACHMENT");
+    expect(reviewIndex).toBeGreaterThan(-1);
+    expect(reconstructionIndex).toBeGreaterThan(reviewIndex);
+    expect(segmentIndex).toBeGreaterThan(reconstructionIndex);
+    expect(prompt).toContain("segmentation is LAST because it");
+    expect(prompt).toContain("turn_review");
   });
 
   test("records the rendered window ids in the exposure ledger", () => {
@@ -754,6 +824,67 @@ describe("settlement write-back", () => {
     expect(metricsSeen[0]!.topicsMinted).toBe(0);
     expect(metricsSeen[0]!.topicsReused).toBe(1);
   });
+
+  /**
+   * Spec D4/D6, ticket 05: the subagent may revise a turn from an earlier
+   * window that is still in its context — not a loophole, the mechanism the
+   * rubric's own Grade-4 "provisional, confirmed or demoted later" language
+   * assumes. T1's Grade 4 from window one is demoted in window two, once T1
+   * is a PRECEDING turn rather than a window turn.
+   */
+  test("turn_review revises a turn settled by an earlier window once it is only in the preceding-turns context", async () => {
+    const fixture = seedInteriorHoleWindow();
+    const firstReply = JSON.stringify({
+      reconstructed_notes: [
+        { turn: "S1/T2", title: "research+lease: hole reconstructed", content: "Filled in." },
+        { turn: "S1/T4", title: "research+lease: trailing hole reconstructed", content: "Filled in." },
+      ],
+      turn_review: [
+        { turn: "S1/T1", grade: 4, type: "design", tag: "settlement" },
+        { turn: "S1/T2", grade: 1, type: "research", tag: "lease" },
+        { turn: "S1/T3", grade: 2, type: "implement", tag: "settlement" },
+        { turn: "S1/T4", grade: 1, type: "research", tag: "lease" },
+      ],
+    });
+    const firstOutcome = await dispatchWith(stubQuery(firstReply))({
+      job: fixture.job,
+    });
+    expect(firstOutcome).toEqual({ ok: true });
+    expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(4);
+
+    // A second window, T5-T8: T1-T4 are now PRECEDING turns in its context,
+    // not window turns — buildNoteSettlementContext still exposes them (the
+    // previous-50 lookback), which is what makes citing S1/T1 legal here.
+    for (let promptNumber = 5; promptNumber <= 8; promptNumber += 1) {
+      const turnId = seedTurn(fixture.sessionDbId, promptNumber, {
+        note: {
+          title: `implement+seam: turn ${promptNumber}`,
+          content: "Noted.",
+        },
+      });
+      seedDebt(turnId, fixture.sessionDbId, promptNumber, "noted", null);
+    }
+    classifyThrough(fixture.sessionDbId, 8);
+    const secondJob = claimWindow(fixture.sessionDbId, 5, 8);
+
+    const secondReply = JSON.stringify({
+      // T1's arc turned out short-lived — demoted now that its real scale is
+      // visible, exactly what the rubric's own Grade-4 language expects.
+      turn_review: [{ turn: "S1/T1", grade: 0, type: "design", tag: "settlement" }],
+    });
+
+    const metricsSeen: NoteSettlementWindowMetrics[] = [];
+    const secondOutcome = await dispatchWith(
+      stubQuery(secondReply),
+      (value) => metricsSeen.push(value),
+    )({ job: secondJob });
+
+    expect(secondOutcome).toEqual({ ok: true });
+    expect(getTurnById(db, fixture.turnIds[0]!)!.significanceGrade).toBe(0);
+    expect(metricsSeen[0]!.turnsReviewed).toBe(1);
+    expect(metricsSeen[0]!.gradeHistogram).toEqual([1, 0, 0, 0, 0]);
+    expect(metricsSeen[0]!.gradeTargets).toBeDefined();
+  });
 });
 
 describe("settlement payload at the scheduler seam", () => {
@@ -926,5 +1057,54 @@ describe("settlement response schema", () => {
       edges: [{ citing: "S1/T1", cited: "S1/T2", relation: "relates-to" }],
     });
     expect(parseNoteSettlementResponse(badRelation).ok).toBe(false);
+  });
+
+  test("turn_review: accepts a full verdict and rejects an out-of-range grade or an unknown type whole (ticket 05)", () => {
+    const good = JSON.stringify({
+      turn_review: [
+        { turn: "S1/T1", grade: 4, type: "design", tag: "widgets" },
+        { turn: "S1/T2", grade: 0, type: null, tag: null },
+      ],
+    });
+    const parsed = parseNoteSettlementResponse(good);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ok && parsed.response.turnReview).toEqual([
+      { turn: "S1/T1", grade: 4, type: "design", tag: "widgets" },
+      { turn: "S1/T2", grade: 0, type: null, tag: null },
+    ]);
+
+    const outOfRangeHigh = JSON.stringify({
+      turn_review: [{ turn: "S1/T1", grade: 5, type: null, tag: null }],
+    });
+    const rejectedHigh = parseNoteSettlementResponse(outOfRangeHigh);
+    expect(rejectedHigh.ok).toBe(false);
+    expect(rejectedHigh.ok === false && rejectedHigh.reason).toContain(
+      "grade",
+    );
+
+    const outOfRangeLow = JSON.stringify({
+      turn_review: [{ turn: "S1/T1", grade: -1, type: null, tag: null }],
+    });
+    expect(parseNoteSettlementResponse(outOfRangeLow).ok).toBe(false);
+
+    const missingGrade = JSON.stringify({
+      turn_review: [{ turn: "S1/T1", type: null, tag: null }],
+    });
+    expect(parseNoteSettlementResponse(missingGrade).ok).toBe(false);
+
+    const badVocabWord = JSON.stringify({
+      turn_review: [{ turn: "S1/T1", grade: 2, type: "refactor", tag: null }],
+    });
+    const rejectedType = parseNoteSettlementResponse(badVocabWord);
+    expect(rejectedType.ok).toBe(false);
+    expect(rejectedType.ok === false && rejectedType.reason).toContain(
+      "type",
+    );
+
+    // Omitting the array entirely — like every other duty array — is not
+    // malformed; "nothing to report" is a legal, empty answer.
+    expect(parseNoteSettlementResponse("{}").ok).toBe(true);
+    const empty = parseNoteSettlementResponse("{}");
+    expect(empty.ok && empty.response.turnReview).toEqual([]);
   });
 });

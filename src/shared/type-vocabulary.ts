@@ -219,7 +219,10 @@ export const TOPIC_TAG_PREFIX = "topic:";
 
 /**
  * Set the drafted topic, replacing a previously drafted one and leaving every
- * other namespace alone.
+ * other namespace alone. `topicTag: null` clears the facet without setting a
+ * replacement — the case a title that no longer parses needs (ticket 05): the
+ * old topic must not survive a correction that dropped it, any more than the
+ * old type should.
  *
  * Neither of the two obvious writes is correct here. Merging leaves a turn
  * claiming two topics once its title is corrected, and replacing the whole
@@ -228,12 +231,12 @@ export const TOPIC_TAG_PREFIX = "topic:";
  */
 export function withDraftedTopicTag(
   existing: readonly string[],
-  topicTag: string,
+  topicTag: string | null,
 ): string[] {
-  return [
-    ...existing.filter((tag) => !tag.startsWith(TOPIC_TAG_PREFIX)),
-    topicTag,
-  ];
+  const withoutTopic = existing.filter(
+    (tag) => !tag.startsWith(TOPIC_TAG_PREFIX),
+  );
+  return topicTag ? [...withoutTopic, topicTag] : withoutTopic;
 }
 
 export type TypeWriteSource = "draft" | "settlement";
