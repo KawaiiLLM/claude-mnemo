@@ -469,3 +469,37 @@ export function hasEraTurns(
 ): boolean {
   return turns.some((turn) => isSegmentEra(turn.createdAtEpoch, eraCutoffEpoch));
 }
+
+/**
+ * Turn id → owning segment id, for exactly the turn ids passed in (spec D8:
+ * nesting ticket 03). The schema allows a turn to join more than one segment,
+ * but spec D8 measured zero double-membership in practice; `ORDER BY
+ * segment_id ASC` makes the (should-never-happen) tie deterministic rather than
+ * leaving it to unspecified row order.
+ */
+export function getSegmentMembershipForTurns(
+  db: Database,
+  turnIds: readonly number[],
+): Map<number, number> {
+  const membership = new Map<number, number>();
+  if (turnIds.length === 0) {
+    return membership;
+  }
+
+  const placeholders = turnIds.map(() => "?").join(", ");
+  const rows = db
+    .query<{ turnId: number; segmentId: number }, number[]>(
+      `SELECT turn_id AS turnId, segment_id AS segmentId
+       FROM segment_members
+       WHERE turn_id IN (${placeholders})
+       ORDER BY turn_id ASC, segment_id ASC`,
+    )
+    .all(...turnIds);
+
+  for (const row of rows) {
+    if (!membership.has(row.turnId)) {
+      membership.set(row.turnId, row.segmentId);
+    }
+  }
+  return membership;
+}

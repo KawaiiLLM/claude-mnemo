@@ -5,6 +5,7 @@ import {
   type EffectiveCitations,
 } from "../db/citations";
 import {
+  getSegmentMembershipForTurns,
   listOrphanAnchorTurns,
   listSegmentSpineForSession,
   type OrphanAnchorRow,
@@ -105,6 +106,28 @@ export interface TimelineView {
   segmentSpine: SegmentSpineRow[];
   /** Era turns with hard mechanical signals that no segment claimed. */
   orphanAnchors: OrphanAnchorRow[];
+  /**
+   * Milestone-row selection for the era window (ticket 03), from the SAME
+   * `selectMilestoneTurns` the legacy body calls — admission, victim demotion
+   * and corrector promotion all run unchanged, just over `eraWindowTurns`
+   * instead of the legacy window. In prompt order. Empty with no era cutoff or
+   * no eligible era turn.
+   */
+  eraKeptMilestones: KeptMilestone[];
+  /**
+   * ↳ antecedents the era selection pulls in (mirrors `milestonePulled`), for
+   * whichever kept era row is their earliest citer. A renderer homes each one
+   * under its citer's row the same way the legacy body does.
+   */
+  eraMilestonePulled: PulledAntecedent[];
+  /**
+   * Turn DB id → owning segment id, scoped to `eraWindowTurns` (spec D8:
+   * membership is exclusive in practice, so this is a plain map, not a
+   * multimap). A kept era row absent from this map belongs to no segment and
+   * renders no nested row (spec D9) — it may still surface as an orphan
+   * anchor, which is a separate, pre-existing mechanism.
+   */
+  eraSegmentIdByTurnId: ReadonlyMap<number, number>;
 }
 
 export interface RenderTimelineOptions {
@@ -392,6 +415,18 @@ export interface MilestoneSelection {
    */
   effGradeByTurnId: Map<number, number>;
 }
+
+/** The zero-turn result `selectMilestoneTurns` returns for an empty window, named once for the era path's early-out. */
+const EMPTY_MILESTONE_SELECTION: MilestoneSelection = {
+  kept: [],
+  ranked: [],
+  pulled: [],
+  overflowByDay: [],
+  effGradeByTurnId: new Map(),
+};
+
+/** Shared immutable empty set: the era row-degradation ladder's starting state. */
+const EMPTY_TURN_ID_SET: ReadonlySet<number> = new Set();
 
 export interface MilestoneDayGroup {
   date: string;
@@ -1802,6 +1837,12 @@ export function buildTimelineView(
     eraCutoffEpoch === null ? windowTurns : windowTurns.filter((turn) => !isEra(turn));
   const legacySessionTurns =
     eraCutoffEpoch === null ? allTurns : allTurns.filter((turn) => !isEra(turn));
+  // The era selection's own universe (spec D8/D9, ticket 03): symmetric with
+  // `legacySessionTurns` above, so a legacy turn can no more be pulled into the
+  // era block as an antecedent than an era turn can be pulled into the legacy
+  // one — `selectMilestoneTurns` below resolves citations against this set
+  // alone.
+  const eraSessionTurns = eraCutoffEpoch === null ? [] : allTurns.filter(isEra);
   const page = Math.max(1, input.page ?? 1);
   const pageSize = Math.max(1, input.pageSize ?? DEFAULT_TIMELINE_PAGE_SIZE);
   const typesDistribution = computeTypesDistribution(allTurns);
@@ -1822,16 +1863,18 @@ export function buildTimelineView(
   const jsonlPath = resolveSessionTranscriptPath(session) ?? null;
   const tz = getSystemTimezone(session.createdAtEpoch);
   const breadcrumb = deriveTimelineBreadcrumb(db, session);
+  // One read for BOTH selections: in-degree, victim demotion and pull-through
+  // all consume this map (spec §B), and the legacy and era selections must see
+  // the identical snapshot for the same reason settlement hands its own
+  // snapshot in rather than paying for a second read.
+  const citations = preloadedCitations ?? getSessionEffectiveCitations(db, session.id);
   const milestoneSelection = selectMilestoneTurns({
     session,
     windowTurns: legacyWindowTurns,
     windowSignals,
     compactBoundaries,
     sessionTurns: legacySessionTurns,
-    // One read for the whole selection: in-degree, victim demotion and
-    // pull-through all consume this map (spec §B). A caller that already read it
-    // (settlement) hands its own snapshot in rather than paying for a second.
-    citations: preloadedCitations ?? getSessionEffectiveCitations(db, session.id),
+    citations,
   });
   const phases = segmentPhases(windowTurns);
   const nonSkippedTurns = windowTurns.filter((turn) => turn.status !== "skipped");
@@ -1873,6 +1916,23 @@ export function buildTimelineView(
   const orphanAnchors = renderSegments
     ? listOrphanAnchorTurns(db, session.id, eraCutoffEpoch, eraWindowTurnIds)
     : [];
+  // Milestone rows nested under a segment line (ticket 03): the SAME selection
+  // machinery the legacy body calls, over the era window instead of the legacy
+  // one — admission, victim demotion and corrector promotion are unchanged.
+  // Gated with the spine itself, since neither is spent outside the arc view.
+  const eraMilestoneSelection = renderSegments
+    ? selectMilestoneTurns({
+        session,
+        windowTurns: eraWindowTurns,
+        windowSignals,
+        compactBoundaries,
+        sessionTurns: eraSessionTurns,
+        citations,
+      })
+    : EMPTY_MILESTONE_SELECTION;
+  const eraSegmentIdByTurnId = renderSegments
+    ? getSegmentMembershipForTurns(db, eraWindowTurns.map((turn) => turn.id))
+    : new Map<number, number>();
   const viewItemTotal =
     viewKind === "turns"
       ? pagedTurns.total
@@ -1926,6 +1986,9 @@ export function buildTimelineView(
     eraWindowTurns,
     segmentSpine,
     orphanAnchors,
+    eraKeptMilestones: eraMilestoneSelection.kept,
+    eraMilestonePulled: eraMilestoneSelection.pulled,
+    eraSegmentIdByTurnId,
   };
 }
 
@@ -3604,6 +3667,148 @@ function withLegacyEraHeader(
   return first === "" ? ["", header, ...rest] : [header, ...bodyLines];
 }
 
+/**
+ * Milestone rows nested beneath each segment line (ticket 03), grouped by
+ * segment id and rendered through `renderUnitFitted` — the SAME per-unit
+ * renderer and the SAME `MILESTONE_UNIT_TOKEN_CAP` the legacy day-grouped body
+ * uses, so a nested row is indistinguishable from a legacy one. `removed` and
+ * `descOff` are the budget ladder's knobs (spec D10); called with both empty,
+ * this is the undegraded render.
+ *
+ * A kept row only ever renders when its turn maps to a segment (spec D9); a
+ * ↳ antecedent only ever homes onto a row that will actually render — onto
+ * the earliest surviving citer whose OWN turn has a segment — so a shared
+ * antecedent can never be silently lost to a citer this pass skips.
+ */
+function renderEraMilestoneLines(
+  view: TimelineView,
+  titleCap: number,
+  removed: ReadonlySet<number>,
+  descOff: ReadonlySet<number>,
+  signal?: TruncationSignal,
+): Map<number, readonly string[]> {
+  const bySegment = new Map<number, string[]>();
+  if (view.eraKeptMilestones.length === 0) {
+    return bySegment;
+  }
+
+  const renderable = view.eraKeptMilestones.filter(
+    (milestone) =>
+      !removed.has(milestone.turn.id) &&
+      view.eraSegmentIdByTurnId.has(milestone.turn.id),
+  );
+  const renderablePrompts = new Set(
+    renderable.map((milestone) => milestone.turn.promptNumber),
+  );
+
+  const homedPulled = new Map<number, PulledAntecedent[]>();
+  for (const antecedent of view.eraMilestonePulled) {
+    const home = antecedent.citerPromptNumbers.find((promptNumber) =>
+      renderablePrompts.has(promptNumber),
+    );
+    if (home === undefined) {
+      continue;
+    }
+    const bucket = homedPulled.get(home) ?? [];
+    bucket.push(antecedent);
+    homedPulled.set(home, bucket);
+  }
+
+  // `renderable` is already in prompt order (it is a filtered pass over
+  // `eraKeptMilestones`, itself built in prompt order), so appending to each
+  // segment's bucket in this same pass keeps every bucket in prompt order too.
+  for (const milestone of renderable) {
+    const segmentId = view.eraSegmentIdByTurnId.get(milestone.turn.id)!;
+    const pulled = homedPulled.get(milestone.turn.promptNumber) ?? [];
+    const lines = renderUnitFitted(
+      { milestone, pulled },
+      titleCap,
+      descOff.has(milestone.turn.id),
+      signal,
+    );
+    const bucket = bySegment.get(segmentId) ?? [];
+    bucket.push(...lines);
+    bySegment.set(segmentId, bucket);
+  }
+
+  return bySegment;
+}
+
+/**
+ * Score-ascending degradation order over the era-side kept rows: the same
+ * comparator `milestoneDegradationOrder` uses for the legacy page, reversed, so
+ * the row the selection ranks last is the first one the budget cuts. There is
+ * no page on this side — every kept era row is always a candidate.
+ */
+function eraMilestoneDegradationOrder(
+  kept: readonly KeptMilestone[],
+): KeptMilestone[] {
+  return [...kept].sort(compareMilestoneRank).reverse();
+}
+
+/**
+ * Phase 1 of the era-side budget (spec D10): degrades the nested milestone
+ * rows — description first, then whole rows, lowest score first — until the
+ * FULL spine (every segment and orphan line still present, none shed) fits, or
+ * every row is gone. A segment LINE is never touched here; `shedSpineToBudget`
+ * is the only thing that sheds one, and it only runs once this phase can no
+ * longer help — "milestone rows degrade before any segment line is touched."
+ *
+ * Not incrementally optimized like the legacy day model: it rebuilds the whole
+ * era block on every step. Deliberately — a session's segment count runs to "a
+ * few dozen" (`segment-spine.ts`), nowhere near the hundreds of legacy days the
+ * day model's O(1)-per-step design exists for, so the simpler O(rows) rebuild
+ * is not a measurable cost here.
+ */
+function fitEraMilestonesToBudget(
+  view: TimelineView,
+  titleCap: number,
+  tokenBudget: number,
+  measure: (candidateSpineLines: string[]) => number,
+  signal?: TruncationSignal,
+): ReadonlyMap<number, readonly string[]> {
+  if (view.eraKeptMilestones.length === 0) {
+    return new Map();
+  }
+
+  const removed = new Set<number>();
+  const descOff = new Set<number>();
+  const build = (): {
+    lines: ReadonlyMap<number, readonly string[]>;
+    spineLines: string[];
+  } => {
+    const lines = renderEraMilestoneLines(view, titleCap, removed, descOff, signal);
+    const spineLines = renderSegmentSpineBlock({
+      spine: view.segmentSpine,
+      orphans: view.orphanAnchors,
+      titleCap,
+      milestoneLinesBySegmentId: lines,
+    });
+    return { lines, spineLines };
+  };
+
+  let current = build();
+  if (measure(current.spineLines) <= tokenBudget) {
+    return current.lines;
+  }
+
+  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
+    descOff.add(milestone.turn.id);
+    current = build();
+    if (measure(current.spineLines) <= tokenBudget) {
+      return current.lines;
+    }
+  }
+  for (const milestone of eraMilestoneDegradationOrder(view.eraKeptMilestones)) {
+    removed.add(milestone.turn.id);
+    current = build();
+    if (measure(current.spineLines) <= tokenBudget) {
+      return current.lines;
+    }
+  }
+  return current.lines;
+}
+
 export function renderTimeline(
   view: TimelineView,
   options: RenderTimelineOptions = {},
@@ -3615,21 +3820,32 @@ export function renderTimeline(
   // it, so the day-fold `hiddenTurns` signal is no longer the only thing that
   // can trigger the navigation legend.
   const signal = createTruncationSignal();
+  // Undegraded era milestone rows (ticket 03), nested under their segment line
+  // by `renderSegmentSpineBlock` below. Empty whenever there is no era cutoff
+  // or no admitted era row, which is what keeps a session with no graded era
+  // turns byte-identical to the pre-nesting renderer (spec D6/D9).
+  const eraMilestoneLinesFull: ReadonlyMap<number, readonly string[]> =
+    view.view === "milestones"
+      ? renderEraMilestoneLines(view, titleCap, EMPTY_TURN_ID_SET, EMPTY_TURN_ID_SET, signal)
+      : new Map();
   // Spine lines are recomputed whenever the budget sheds a row; everything else
-  // in `assemble` is fixed.
+  // in `assemble` is fixed. `spineOverride` lets the era budget phase price a
+  // CANDIDATE spine without installing it first — the default keeps every
+  // existing call site (which never passes it) reading the live variable.
   let spineLines =
     view.view === "milestones"
       ? renderSegmentSpineBlock({
           spine: view.segmentSpine,
           orphans: view.orphanAnchors,
           titleCap,
+          milestoneLinesBySegmentId: eraMilestoneLinesFull,
         })
       : [];
-  const assemble = (bodyLines: string[]): string =>
+  const assemble = (bodyLines: string[], spineOverride: string[] = spineLines): string =>
     [
       ...renderSessionHeader(view),
-      ...spineLines,
-      ...withLegacyEraHeader(view, bodyLines, spineLines.length > 0),
+      ...spineOverride,
+      ...withLegacyEraHeader(view, bodyLines, spineOverride.length > 0),
       ...renderShapeSignals(view),
       ...renderEarlierHint(view, options),
       ...renderLineagePointer(view),
@@ -3673,6 +3889,26 @@ export function renderTimeline(
   // yet), so this measurement stays legend-blind; the body fitter below is the
   // one that has to get it right, since ITS output is what the legend attaches to.
   if (spineLines.length > 0) {
+    // Phase 1 (spec D10): degrade the nested milestone rows — desc, then whole
+    // rows, lowest score first — until the FULL spine (every segment/orphan
+    // line still present) fits, or every row is gone. A segment line is the
+    // anchor on this side of the boundary, so it is never shed here.
+    const fittedMilestoneLines = fitEraMilestonesToBudget(
+      view,
+      titleCap,
+      options.tokenBudget,
+      (candidateSpineLines) => estimateDiaryTokens(assemble([], candidateSpineLines)),
+      signal,
+    );
+    spineLines = renderSegmentSpineBlock({
+      spine: view.segmentSpine,
+      orphans: view.orphanAnchors,
+      titleCap,
+      milestoneLinesBySegmentId: fittedMilestoneLines,
+    });
+
+    // Phase 2 (pre-existing): only once every nested row is gone and the spine
+    // still overruns does a segment/orphan LINE itself get shed.
     shedSpineToBudget({
       view,
       titleCap,
@@ -3681,6 +3917,7 @@ export function renderTimeline(
         spineLines = candidate;
       },
       measure: () => estimateDiaryTokens(assemble([])),
+      milestoneLinesBySegmentId: fittedMilestoneLines,
     });
   }
 
@@ -3715,6 +3952,13 @@ interface ShedSpineOptions {
   apply: (lines: string[]) => void;
   /** Token cost of the whole assembled output with an EMPTY legacy body. */
   measure: () => number;
+  /**
+   * The era milestone lines phase 1 already fit to budget (ticket 03). Carried
+   * through so a segment that survives THIS shedding still shows the rows
+   * phase 1 kept for it, instead of losing them just because phase 2 re-renders
+   * the block.
+   */
+  milestoneLinesBySegmentId?: ReadonlyMap<number, readonly string[]>;
 }
 
 /**
@@ -3725,7 +3969,7 @@ interface ShedSpineOptions {
  * measurement is always of the output that would actually be emitted.
  */
 function shedSpineToBudget(options: ShedSpineOptions): void {
-  const { view, titleCap, tokenBudget, apply, measure } = options;
+  const { view, titleCap, tokenBudget, apply, measure, milestoneLinesBySegmentId } = options;
   let segments = view.segmentSpine.length;
   let orphans = view.orphanAnchors.length;
 
@@ -3742,6 +3986,7 @@ function shedSpineToBudget(options: ShedSpineOptions): void {
         titleCap,
         maxSegments: segments,
         maxOrphans: orphans,
+        milestoneLinesBySegmentId,
       }),
     );
   }

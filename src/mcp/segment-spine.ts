@@ -103,6 +103,15 @@ export interface SegmentSpineBlockInput {
   /** Rows retained after budget shedding; undefined = all. */
   maxSegments?: number;
   maxOrphans?: number;
+  /**
+   * Milestone rows nested beneath each segment line (ticket 03), keyed by
+   * segment id and pre-rendered by the caller through the same row renderer
+   * the legacy arc uses — this module only places the lines, it never formats
+   * one. A missing or empty entry means no nested content, which is exactly
+   * what keeps a segment with no admitted rows byte-identical to the
+   * pre-nesting renderer (spec D6/D9).
+   */
+  milestoneLinesBySegmentId?: ReadonlyMap<number, readonly string[]>;
 }
 
 /**
@@ -150,6 +159,10 @@ export function renderSegmentSpineBlock(
   }
   for (const row of keptSegments) {
     lines.push(renderSpineRow(row, titleCap));
+    const nested = input.milestoneLinesBySegmentId?.get(row.segment.id);
+    if (nested !== undefined && nested.length > 0) {
+      lines.push(...nested);
+    }
   }
   for (const row of keptOrphans) {
     lines.push(renderOrphanRow(row, titleCap));
