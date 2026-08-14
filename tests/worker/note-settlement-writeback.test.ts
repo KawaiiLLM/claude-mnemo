@@ -70,6 +70,19 @@ function seedHoleTurn(sessionDbId: number, promptNumber: number): number {
     )!.id;
 }
 
+/**
+ * Every turn these fixtures seeded, standing in for "what this prompt showed".
+ * A real context builds this from the window plus the rendered lookback; the
+ * fixtures seed only turns that are in the window, so the two coincide — except
+ * where a test deliberately seeds a turn OUTSIDE the prompt to exercise the
+ * gate, which passes its own narrower set.
+ */
+function allSeededTurnIds(): Set<number> {
+  return new Set(
+    db.query<{ id: number }, []>("SELECT id FROM turns").all().map((row) => row.id),
+  );
+}
+
 function claimWindow(
   sessionDbId: number,
   windowStart: number,
@@ -118,6 +131,8 @@ test("a mechanical reconstruction drafts its turn's type and tag exactly as an a
     ]),
     nowEpoch: NOW,
     reconstructableTurnIds: new Set([turnId]),
+    reviewableTurnIds: allSeededTurnIds(),
+    contextBuiltAtEpoch: NOW,
     exposedSegmentIds: new Set(),
     rideTurnId: turnId,
   });
@@ -148,6 +163,8 @@ test("an unrecognised activity word leaves the reconstruction's type empty, same
     ]),
     nowEpoch: NOW,
     reconstructableTurnIds: new Set([turnId]),
+    reviewableTurnIds: allSeededTurnIds(),
+    contextBuiltAtEpoch: NOW,
     exposedSegmentIds: new Set(),
     rideTurnId: turnId,
   });
@@ -174,6 +191,8 @@ test("a malformed reconstruction title drafts neither, and the reconstruction st
     ]),
     nowEpoch: NOW,
     reconstructableTurnIds: new Set([turnId]),
+    reviewableTurnIds: allSeededTurnIds(),
+    contextBuiltAtEpoch: NOW,
     exposedSegmentIds: new Set(),
     rideTurnId: turnId,
   });
@@ -261,6 +280,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t2,
     });
@@ -298,6 +319,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -323,6 +346,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ]),
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -350,6 +375,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       response,
       nowEpoch: NOW,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -365,6 +392,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       response,
       nowEpoch: NOW + 1,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -417,6 +446,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ]),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -467,6 +498,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ]),
       nowEpoch: NOW + 1,
       reconstructableTurnIds: new Set(),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -477,6 +510,35 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
     expect(turn.type).toBe("fix");
     expect(turn.tags).toContain("topic:settlement");
     expect(turn.tags).not.toContain("topic:scheduling");
+  });
+
+  test("an exposed turn this prompt did not show is refused, not silently revised", () => {
+    const sessionDbId = seedSession();
+    const t1 = seedHoleTurn(sessionDbId, 1);
+    // A real turn from an older window: it exists, and the session-lifetime
+    // exposure ledger remembers showing it, so resolution alone lets it
+    // through. Only "was it in THIS prompt" stops a hallucinated address from
+    // landing a destructive write on it.
+    const older = seedHoleTurn(sessionDbId, 2);
+    const job = claimWindow(sessionDbId, 1, 1);
+    expose(sessionDbId, t1, [t1, older]);
+
+    const result = applyNoteSettlementWriteBack(db, {
+      job,
+      response: emptyResponse([], [
+        { turn: `S${sessionDbId}/T2`, grade: 4, type: "fix", tag: "hallucinated" },
+      ]),
+      nowEpoch: NOW,
+      reconstructableTurnIds: new Set(),
+      reviewableTurnIds: new Set([t1]),
+      contextBuiltAtEpoch: NOW,
+      exposedSegmentIds: new Set(),
+      rideTurnId: t1,
+    });
+
+    expect(result.committed).toBe(false);
+    expect(result.reason).toContain("outside this window");
+    expect(getTurnById(db, older)!.significanceGrade).toBeNull();
   });
 
   test("a reconstruction this window just wrote is still the review's to override", () => {
@@ -503,6 +565,8 @@ describe("turn review: grade, type, tag (ticket 05)", () => {
       ),
       nowEpoch: NOW + 6,
       reconstructableTurnIds: new Set([t1]),
+      reviewableTurnIds: allSeededTurnIds(),
+      contextBuiltAtEpoch: NOW,
       exposedSegmentIds: new Set(),
       rideTurnId: t1,
     });
@@ -542,6 +606,8 @@ test("a yielded reconstruction (an agent note already won) never touches the tur
     ]),
     nowEpoch: NOW,
     reconstructableTurnIds: new Set([turnId]),
+    reviewableTurnIds: allSeededTurnIds(),
+    contextBuiltAtEpoch: NOW,
     exposedSegmentIds: new Set(),
     rideTurnId: turnId,
   });

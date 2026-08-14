@@ -177,9 +177,9 @@ function asGrade(value: unknown, what: string): number {
   return value;
 }
 
-/** `null`/absent is an explicit clear; anything else must be in the closed vocabulary. */
+/** Explicit `null` is a clear; anything else must be in the closed vocabulary. */
 function asMemoryTypeOrNull(value: unknown, what: string): MemoryType | null {
-  if (value === undefined || value === null) {
+  if (value === null) {
     return null;
   }
   const text = asString(value, what);
@@ -189,9 +189,9 @@ function asMemoryTypeOrNull(value: unknown, what: string): MemoryType | null {
   return text;
 }
 
-/** `null`/absent/empty is an explicit clear — the tag facet has no "leave alone". */
+/** Explicit `null` or empty is a clear — the tag facet has no "leave alone". */
 function asTagOrNull(value: unknown, what: string): string | null {
-  if (value === undefined || value === null) {
+  if (value === null) {
     return null;
   }
   const text = asString(value, what).trim();
@@ -332,6 +332,18 @@ function parseTurnReview(
 ): SettlementTurnReviewDirective {
   const what = `turn_review[${index}]`;
   const record = asRecord(value, what);
+  // An OMITTED field is a schema violation; only an explicit `null` clears.
+  // The two used to be the same, which meant a model that answered
+  // `{"turn": …, "grade": 2}` — lazily, or because its output was truncated
+  // mid-array — silently wiped the type and topic tag off every turn it
+  // touched, up to a whole window plus its lookback. Failing loudly costs a
+  // retry; the alternative cost real facts, invisibly. `null` still means
+  // clear, so the expressiveness this schema was built for survives.
+  for (const field of ["type", "tag"] as const) {
+    if (!(field in record)) {
+      fail(`${what}.${field} is missing (use null to clear it)`);
+    }
+  }
   return {
     turn: asNonEmptyString(record.turn, `${what}.turn`),
     grade: asGrade(record.grade, `${what}.grade`),

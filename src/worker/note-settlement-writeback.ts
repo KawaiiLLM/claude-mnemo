@@ -103,6 +103,14 @@ export interface NoteSettlementWriteBackOptions {
   nowEpoch: number;
   /** Turn ids this window may write a reconstruction note for (interior holes). */
   reconstructableTurnIds: ReadonlySet<number>;
+  /**
+   * Turns this prompt actually showed — the gate for `turn_review` addresses.
+   * See `NoteSettlementContext.reviewableTurnIds` for why a review may not use
+   * the session-lifetime exposure ledger the way a citation may.
+   */
+  reviewableTurnIds: ReadonlySet<number>;
+  /** When the context was read; see `NoteSettlementContext.builtAtEpoch`. */
+  contextBuiltAtEpoch: number;
   /** Segment ids the writer was shown — the exposure gate for `[E<n>]`. */
   exposedSegmentIds: ReadonlySet<number>;
   /** Ride turn recorded on reconstruction notes; the window's last turn. */
@@ -542,10 +550,18 @@ function applyNoteSettlementWriteBackTransaction(
     // writer transaction (in particular `note.ts`'s `noteTool`, which the
     // main agent calls WHILE its own turn is still running and which also
     // goes through `runWriteTransaction`) can commit while this transaction
-    // is open: its own `BEGIN IMMEDIATE` blocks until this one finishes. That
-    // makes the classic cross-process interleave — read, someone else
-    // commits, write over them — structurally impossible for anything that
-    // happens strictly BETWEEN this transaction's BEGIN and COMMIT.
+    // is open. That makes the classic interleave — read, someone else commits,
+    // write over them — impossible for anything strictly BETWEEN this
+    // transaction's BEGIN and COMMIT.
+    //
+    // Note what that costs rather than what it buys: the MCP server and the
+    // worker are separate processes on one WAL database, so the agent's note
+    // does not silently lose the race, it BLOCKS on it — bounded by
+    // `busy_timeout`, after which `runWriteTransaction` retries and finally
+    // throws, and `noteTool` does not catch that. A long enough write-back
+    // therefore surfaces as a failed note for the user. Serialization here is
+    // a correctness guarantee bought with an availability risk elsewhere, not
+    // a free one.
     //
     // It does NOT make every write in this loop safe by itself. The gap the
     // ticket actually found is upstream of this transaction: the settlement
@@ -582,8 +598,14 @@ function applyNoteSettlementWriteBackTransaction(
     //
     // `grade` is the one field written unconditionally from the directive
     // regardless of what is stored — that is NOT the race, that is "confirm
-    // or override" (D4): it judges what the turn did, read off raw material
-    // no later note can change, and nothing else writes that column.
+    // or override" (D4): it judges what the turn did, read off raw material no
+    // later note can change.
+    //
+    // It is NOT, however, uncontended. `remember` writes `grade`, `type` and
+    // tags directly, so an agent correcting a turn during the model call is a
+    // third writer this fence does not see: `remember` leaves no mark the
+    // note-timestamp test can read, and a stale review will overwrite it. That
+    // gap is open and known, not handled here.
     if (response.turnReview.length > 0) {
       const tokens = response.turnReview.map((directive) => directive.turn);
       const { nodes, rejected } = resolveTokens(db, tokens, options);
@@ -605,6 +627,19 @@ function applyNoteSettlementWriteBackTransaction(
           );
         }
         const turnId = node.id;
+
+        // Resolving through the exposure ledger is not enough for this
+        // directive. That ledger accumulates every id ever shown to a writer
+        // in this session, so a hallucinated `S1/T10` from a window settled
+        // days ago resolves cleanly and lands a destructive write on a turn
+        // nobody was looking at. A review may only revise what THIS prompt
+        // showed.
+        if (!options.reviewableTurnIds.has(turnId)) {
+          throw new UnknownTurnAddressError(
+            `settlement job ${job.id}: turn_review entry "${directive.turn}" ` +
+              "names a turn outside this window and its rendered lookback",
+          );
+        }
 
         // The fence: fresh, right here, right before the write that uses it.
         const freshExisting = getTurnById(db, turnId);
@@ -635,8 +670,14 @@ function applyNoteSettlementWriteBackTransaction(
         // reconstruction's type/tag onto the row would overturn that ruling in
         // the same transaction that made it.
         //
+        // The boundary is when the CONTEXT was read, not when the job was
+        // claimed: claiming happens first, context-building a moment later,
+        // and a note arriving in between is one the model did see. Claim time
+        // is also nullable, which would have made the whole fence fail open on
+        // a row that never got one.
+        //
         // `>=`, not `>`: these are epoch SECONDS, so a note committed in the
-        // very second of the claim is ambiguous, and the safe reading is that
+        // very second of the read is ambiguous, and the safe reading is that
         // the model missed it. The cost of being wrong that way is one turn
         // keeping its mechanical title-derived type instead of a reviewed one;
         // the cost of the other way is the clobber this whole comment is
@@ -648,8 +689,7 @@ function applyNoteSettlementWriteBackTransaction(
         const noteSupersedesReview =
           currentNote !== null &&
           currentNote.writerOrigin === "agent" &&
-          job.claimedAtEpoch !== null &&
-          currentNote.updatedAtEpoch >= job.claimedAtEpoch;
+          currentNote.updatedAtEpoch >= options.contextBuiltAtEpoch;
 
         if (noteSupersedesReview) {
           // Grade still lands: it judges what the turn DID, read off the raw
@@ -800,6 +840,11 @@ export function applyNoteSettlementSegmentReplay(
       },
       nowEpoch: options.nowEpoch,
       reconstructableTurnIds: new Set<number>(),
+      // A segment replay carries an empty `turnReview`, so neither of these is
+      // ever consulted — an empty gate and the replay's own clock are the
+      // honest values, not a borrowed context's.
+      reviewableTurnIds: new Set<number>(),
+      contextBuiltAtEpoch: options.nowEpoch,
       exposedSegmentIds: options.exposedSegmentIds,
       rideTurnId: null,
       logger: options.logger,

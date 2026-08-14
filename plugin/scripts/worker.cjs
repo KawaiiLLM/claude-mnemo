@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-mstezzun" : "dev";
+var BUILD_ID = true ? "0.10.0-mstfnhib" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -10647,6 +10647,7 @@ function buildNoteSettlementContext(db, job, options) {
     ).map((turn) => turn.promptNumber)
   );
   const priorTurnsRendering = buildCollapsedTurnsForSession(db, job.sessionId).filter((turn) => priorPromptNumbers.has(turn.promptNumber)).map((turn) => formatTurnCollapsed(turn, { sessionId: job.sessionId })).join("\n");
+  const priorTurnIds = allTurns.filter((turn) => priorPromptNumbers.has(turn.promptNumber)).map((turn) => turn.id);
   const openSegments = listOpenSegments(db);
   const context = {
     job,
@@ -10667,14 +10668,16 @@ function buildNoteSettlementContext(db, job, options) {
       nextSteps: session.nextSteps,
       reference: session.reference
     }),
-    exposedSegmentIds: new Set(openSegments.map((segment) => segment.id))
+    exposedSegmentIds: new Set(openSegments.map((segment) => segment.id)),
+    reviewableTurnIds: /* @__PURE__ */ new Set([
+      ...windowTurns.map((turn) => turn.turnId),
+      ...priorTurnIds
+    ]),
+    builtAtEpoch: options.nowEpoch
   };
   if (options.recordExposure !== false && windowTurns.length > 0) {
     const rideTurnId = windowTurns[windowTurns.length - 1].turnId;
-    const exposedTurnIds = [
-      ...windowTurns.map((turn) => turn.turnId),
-      ...allTurns.filter((turn) => priorPromptNumbers.has(turn.promptNumber)).map((turn) => turn.id)
-    ];
+    const exposedTurnIds = [...context.reviewableTurnIds];
     runWriteTransaction(
       db,
       () => recordNoteIdExposure(db, {
@@ -10800,7 +10803,9 @@ function renderNoteSettlementPrompt(context) {
     "   turn's title at write time, nothing more; confirm it by repeating the",
     "   same value, or override it by writing a different one. `type` and `tag`",
     '   are each either a value or `null` \u2014 `null` is an explicit "this turn has',
-    '   none", never "leave it as it was". `type` is single-valued from',
+    '   none", never "leave it as it was". Both keys must be PRESENT on every',
+    "   entry: omitting one is not the same as writing `null`, and rejects the",
+    "   whole batch. `type` is single-valued from",
     `   ${MEMORY_TYPES.join(", ")}. \`tag\` is one bare topic word (no`,
     "   namespace prefix \u2014 that is applied for you). You may ALSO revise a turn",
     "   from the preceding-turns section below if you can see it needs",
@@ -10959,7 +10964,7 @@ function asGrade(value, what) {
   return value;
 }
 function asMemoryTypeOrNull(value, what) {
-  if (value === void 0 || value === null) {
+  if (value === null) {
     return null;
   }
   const text = asString(value, what);
@@ -10969,7 +10974,7 @@ function asMemoryTypeOrNull(value, what) {
   return text;
 }
 function asTagOrNull(value, what) {
-  if (value === void 0 || value === null) {
+  if (value === null) {
     return null;
   }
   const text = asString(value, what).trim();
@@ -11073,6 +11078,11 @@ function parseNote(value, index) {
 function parseTurnReview(value, index) {
   const what = `turn_review[${index}]`;
   const record3 = asRecord2(value, what);
+  for (const field of ["type", "tag"]) {
+    if (!(field in record3)) {
+      fail(`${what}.${field} is missing (use null to clear it)`);
+    }
+  }
   return {
     turn: asNonEmptyString(record3.turn, `${what}.turn`),
     grade: asGrade(record3.grade, `${what}.grade`),
@@ -11496,6 +11506,11 @@ function applyNoteSettlementWriteBackTransaction(db, options) {
           );
         }
         const turnId = node.id;
+        if (!options.reviewableTurnIds.has(turnId)) {
+          throw new UnknownTurnAddressError(
+            `settlement job ${job.id}: turn_review entry "${directive.turn}" names a turn outside this window and its rendered lookback`
+          );
+        }
         const freshExisting = getTurnById(db, turnId);
         if (!freshExisting) {
           throw new UnknownTurnAddressError(
@@ -11503,7 +11518,7 @@ function applyNoteSettlementWriteBackTransaction(db, options) {
           );
         }
         const currentNote = getShadowNote(db, turnId);
-        const noteSupersedesReview = currentNote !== null && currentNote.writerOrigin === "agent" && job.claimedAtEpoch !== null && currentNote.updatedAtEpoch >= job.claimedAtEpoch;
+        const noteSupersedesReview = currentNote !== null && currentNote.writerOrigin === "agent" && currentNote.updatedAtEpoch >= options.contextBuiltAtEpoch;
         if (noteSupersedesReview) {
           updateTurnById(db, turnId, { significanceGrade: directive.grade });
           counts.reviewsYieldedToLateNote += 1;
@@ -11596,6 +11611,11 @@ function applyNoteSettlementSegmentReplay(db, options) {
       },
       nowEpoch: options.nowEpoch,
       reconstructableTurnIds: /* @__PURE__ */ new Set(),
+      // A segment replay carries an empty `turnReview`, so neither of these is
+      // ever consulted — an empty gate and the replay's own clock are the
+      // honest values, not a borrowed context's.
+      reviewableTurnIds: /* @__PURE__ */ new Set(),
+      contextBuiltAtEpoch: options.nowEpoch,
       exposedSegmentIds: options.exposedSegmentIds,
       rideTurnId: null,
       logger: options.logger
@@ -11776,6 +11796,8 @@ function createNoteSettlementDispatch(options) {
         context.interiorHoles.map((turn) => turn.turnId)
       ),
       exposedSegmentIds: context.exposedSegmentIds,
+      reviewableTurnIds: context.reviewableTurnIds,
+      contextBuiltAtEpoch: context.builtAtEpoch,
       rideTurnId,
       writerModel: options.writerModel ?? model,
       logger

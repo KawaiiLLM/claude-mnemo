@@ -306,6 +306,8 @@ export function createNoteSettlementDispatch(
         context.interiorHoles.map((turn) => turn.turnId),
       ),
       exposedSegmentIds: context.exposedSegmentIds,
+      reviewableTurnIds: context.reviewableTurnIds,
+      contextBuiltAtEpoch: context.builtAtEpoch,
       rideTurnId,
       writerModel: options.writerModel ?? model,
       logger,

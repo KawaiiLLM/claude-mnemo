@@ -119,6 +119,25 @@ export interface NoteSettlementContext {
   sessionStateRendering: string;
   /** Segment ids shown — the exposure gate for `[E<n>]` citations. */
   exposedSegmentIds: Set<number>;
+  /**
+   * Turn ids THIS prompt put in front of the model — window plus the rendered
+   * lookback — and therefore the only turns its review may revise.
+   *
+   * The session-lifetime exposure ledger is deliberately not the gate here.
+   * That ledger answers "was this id ever legal to cite", which is right for a
+   * citation: naming an old turn in a segment body is additive. A review
+   * verdict is destructive — it overwrites grade, type and tags — so an
+   * address the model could only have produced from its own imagination must
+   * not resolve onto a real row from some earlier window.
+   */
+  reviewableTurnIds: Set<number>;
+  /**
+   * When this context was read out of the database. The write-back compares
+   * note timestamps against it to tell a note the model reviewed from one that
+   * landed during the model call; `job.claimedAtEpoch` is close but not the
+   * same instant, and is nullable besides.
+   */
+  builtAtEpoch: number;
 }
 
 export interface BuildNoteSettlementContextOptions {
@@ -272,6 +291,10 @@ export function buildNoteSettlementContext(
     .map((turn) => formatTurnCollapsed(turn, { sessionId: job.sessionId }))
     .join("\n");
 
+  const priorTurnIds = allTurns
+    .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
+    .map((turn) => turn.id);
+
   const openSegments = listOpenSegments(db);
   const context: NoteSettlementContext = {
     job,
@@ -293,6 +316,11 @@ export function buildNoteSettlementContext(
       reference: session.reference,
     }),
     exposedSegmentIds: new Set(openSegments.map((segment) => segment.id)),
+    reviewableTurnIds: new Set([
+      ...windowTurns.map((turn) => turn.turnId),
+      ...priorTurnIds,
+    ]),
+    builtAtEpoch: options.nowEpoch,
   };
 
   if (options.recordExposure !== false && windowTurns.length > 0) {
@@ -300,12 +328,7 @@ export function buildNoteSettlementContext(
     // own, and the window's end is the point in the session's history at which
     // these ids were put in front of a writer.
     const rideTurnId = windowTurns[windowTurns.length - 1]!.turnId;
-    const exposedTurnIds = [
-      ...windowTurns.map((turn) => turn.turnId),
-      ...allTurns
-        .filter((turn) => priorPromptNumbers.has(turn.promptNumber))
-        .map((turn) => turn.id),
-    ];
+    const exposedTurnIds = [...context.reviewableTurnIds];
     runWriteTransaction(db, () =>
       recordNoteIdExposure(db, {
         sessionId: job.sessionId,
