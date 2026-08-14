@@ -203,12 +203,11 @@ describe("era cutover write path", () => {
 
     test("a late note on a turn that already ended lands as extracted", () => {
       // The backlog relief's case: the turn was settled as a hole, and the
-      // agent answers for it afterwards.
-      rememberTool(
-        db,
-        { id: `T${eraTurnId}`, title: "nothing to extract" },
-        { eraCutoffEpoch: CUTOFF },
-      );
+      // agent answers for it afterwards. `beforeEach` already produced that
+      // hole via settleOutstandingTurns (status 'skipped', no title/content);
+      // ticket 04 lifted remember's era refusal, so remember is no longer a
+      // way to reaffirm a hole without writing to it — the settled state
+      // asserted here comes straight from the fixture.
       expect(getTurnById(db, eraTurnId)!.status).toBe("skipped");
 
       noteTool(
@@ -329,8 +328,99 @@ describe("era cutover write path", () => {
     });
   });
 
-  describe("the extraction subagent stops writing era turn notes", () => {
-    test("stores nothing it supplied and settles the hole as skipped", () => {
+  describe("note also drafts the turn's type and tag (ticket 02, spec D7/D8)", () => {
+    test("a recognised activity word drafts the type, and the topic half becomes the tag as written", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+shadow-store: notes land in their own table",
+          content: "Promotion writes turns directly.",
+        },
+        { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.type).toBe("implement");
+      expect(turn.tags).toContain("topic:shadow-store");
+    });
+
+    test("an activity word outside the closed vocabulary leaves type empty rather than written", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "addendum+the-plan: appended a clause nobody expected",
+          content: "The activity word has no alias in the vocabulary.",
+        },
+        { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      const turn = getTurnById(db, eraTurnId)!;
+      // Never the literal unrecognised word, and never the "unknown" sentinel
+      // either — the column stays empty, which is the reviewable state.
+      expect(turn.type).toBeNull();
+      expect(turn.tags).toContain("topic:the-plan");
+    });
+
+    test("a title that does not match the <activity>+<topic>: shape yields neither, and is not an error", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "a plain title with no delimiters at all",
+          content: "Plenty of legacy-shaped titles won't match.",
+        },
+        { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.type).toBeNull();
+      expect(turn.tags).toEqual([]);
+    });
+
+    test("replace re-drafts: a corrected title's new type replaces the stale one", () => {
+      const options = { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF };
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "implement+login-flow: first pass",
+          content: "First answer.",
+        },
+        options,
+      );
+      expect(getTurnById(db, eraTurnId)!.type).toBe("implement");
+
+      noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T11`,
+          title: "fix+auth-bug: corrected after review",
+          content: "The first pass mischaracterised the turn.",
+          replace: true,
+        },
+        { ...options, now: () => 3_400 },
+      );
+
+      const turn = getTurnById(db, eraTurnId)!;
+      // The stale "implement" from the first title must not survive a redraft.
+      expect(turn.type).toBe("fix");
+      // The topic is a single-valued facet, so a redraft replaces it rather
+      // than accumulating: a turn whose title was corrected claims one topic,
+      // not both. Replacement is scoped to the `topic:` namespace — the role
+      // tags and the `compact:` / `invalidated:` machinery share this column
+      // and must survive a redraft untouched.
+      expect(turn.tags).toContain("topic:auth-bug");
+      expect(turn.tags).not.toContain("topic:login-flow");
+    });
+  });
+
+  describe("remember writes era turns like legacy ones (ticket 04, D10 — the era refusal is lifted)", () => {
+    test("a never-noted era turn (a hole) is fully writable through remember", () => {
       const result = rememberTool(
         db,
         {
@@ -339,34 +429,36 @@ describe("era cutover write path", () => {
           type: "implement",
           title: "observer's reconstruction",
           content: "Written from the transcript, not from the turn itself.",
-          insight: "Should never reach the record.",
+          insight: "A late correction reaching the record.",
           tags: ["era-cutover"],
         },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      // Reads as a success on purpose: an error would leave the turn id
-      // unresolved in the worker's work unit and start the derailment ladder.
+      // Before ticket 04 this call would have read as a success while
+      // storing nothing (裁决 27, ticket 09's now-retired refusal). The
+      // review pass that replaced the resident extraction agent needs the
+      // opposite — a real write path — so every field supplied now lands,
+      // exactly as it would on a legacy turn.
       expect(isRememberSuccess(result)).toBe(true);
-      expect(resultText(result)).toContain("status skipped");
+      expect(resultText(result)).toContain("status extracted");
 
       const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.title).toBeNull();
-      expect(turn.content).toBeNull();
-      expect(turn.insight).toBeNull();
-      expect(turn.type).toBeNull();
-      expect(turn.tags).toEqual([]);
-      expect(turn.significanceGrade).toBeNull();
-      // 裁决 27: an un-noted era turn stays a hole. `skipped` is what a hole
-      // has always looked like, not a rescue.
-      expect(turn.status).toBe("skipped");
+      expect(turn.title).toBe("observer's reconstruction");
+      expect(turn.content).toBe(
+        "Written from the transcript, not from the turn itself.",
+      );
+      expect(turn.insight).toBe("A late correction reaching the record.");
+      expect(turn.type).toBe("implement");
+      expect(turn.tags).toEqual(["era-cutover"]);
+      expect(turn.significanceGrade).toBe(3);
+      expect(turn.status).toBe("extracted");
     });
 
-    test("a settled hole is not re-offered — nothing spins", () => {
-      // The turn's own completion already took it out of the selection; the
-      // writeback must not put it back. This is the loop the mechanical
-      // settlement exists to close — the stranded repair re-enqueues anything
-      // left `active`/`provisional` on every end event, forever.
+    test("a settled hole given only a title still leaves the stranded selection", () => {
+      // The turn's own completion already took it out of the selection
+      // (status 'skipped', not 'active'/'provisional'); a remember call must
+      // not put it back there, whatever it supplies.
       expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
         eraTurnId,
       );
@@ -382,7 +474,7 @@ describe("era cutover write path", () => {
       );
     });
 
-    test("never demotes or overwrites a turn the main agent already noted", () => {
+    test("a single field can be patched on an era turn without restating the rest, even after the main agent noted it", () => {
       noteTool(
         db,
         {
@@ -393,45 +485,33 @@ describe("era cutover write path", () => {
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
+      // grade-only: title/content are omitted, not restated.
       const result = rememberTool(
         db,
-        {
-          id: `T${eraTurnId}`,
-          grade: 2,
-          title: "the observer's version",
-          content: "Reconstructed after the fact.",
-        },
+        { id: `T${eraTurnId}`, grade: 2 },
         { eraCutoffEpoch: CUTOFF },
       );
 
       expect(isRememberSuccess(result)).toBe(true);
       const turn = getTurnById(db, eraTurnId)!;
+      // The note's own title/content survive untouched (D10: per-field patch
+      // semantics already existed and are kept for era turns too).
       expect(turn.title).toBe("the agent's own note");
       expect(turn.content).toBe("First-person record of this turn.");
-      // The turn's end is what finishes the promotion the note started: the
-      // record is there, so the settle reads `extracted` rather than `skipped`.
+      expect(turn.significanceGrade).toBe(2);
       expect(turn.status).toBe("extracted");
     });
 
-    test("a noted turn is out of the stranded selection once its turn ends", () => {
-      noteTool(
-        db,
-        {
-          turn: `S${sessionId}/T11`,
-          title: "the agent's own note",
-          content: "First-person record of this turn.",
-        },
-        { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
-      );
-
-      rememberTool(db, { id: `T${eraTurnId}` }, { eraCutoffEpoch: CUTOFF });
-
-      expect(getStrandedTurns(db, sessionId).map((t) => t.id)).not.toContain(
-        eraTurnId,
-      );
-    });
-
-    test("decides from the row as it stands when a note commits mid-settle", () => {
+    test("a field remember DOES supply overwrites even a note that committed mid-call — no special protection survives for era turns", () => {
+      // Before ticket 04, the retired refusal re-read the row inside its own
+      // UPDATE statement, so a note committing between remember's initial
+      // read and its write could never be clobbered — remember's payload was
+      // dropped wholesale regardless. Now era turns share the legacy write
+      // path, which has no equivalent protection: whatever field remember
+      // supplies wins over a concurrently-committed note, exactly like
+      // legacy always has. This is a direct, intended consequence of "per-
+      // field patch semantics already exist and are kept" (D10) — not
+      // something this ticket added protection against.
       fireAfterNextTurnRead(db, () => {
         noteTool(
           db,
@@ -450,52 +530,74 @@ describe("era cutover write path", () => {
         { eraCutoffEpoch: CUTOFF },
       );
 
-      // A decision taken before the note committed would force `skipped` onto a
-      // turn that now holds a record — hiding it from search.
       expect(isRememberSuccess(result)).toBe(true);
       expect(resultText(result)).toContain("status extracted");
       const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.title).toBe("the agent's own note");
+      // title was supplied, so it overwrites the note's title …
+      expect(turn.title).toBe("the observer's version");
+      // … but content, which this call omitted, keeps what the note wrote.
+      expect(turn.content).toBe(
+        "Written while the writeback was still deciding.",
+      );
       expect(turn.status).toBe("extracted");
     });
 
-    test("leaves an already-terminal turn exactly as it found it", () => {
-      // The stranded repair's floor may have settled the turn first
-      // (worker/turn-liveness.ts); a late writeback is not a licence to move a
-      // terminal status, in either direction.
+    test("a title-bearing remember call now resurrects a terminal era turn, matching legacy — the era-specific immunity is gone", () => {
+      // The retired refusal's own SQL guard (`status IN ('active',
+      // 'provisional')`) made 'failed' rows immune to remember. That guard
+      // was part of the refusal, not a separate protection — lifting the
+      // refusal lifts this too. An era turn now runs the exact status
+      // derivation a legacy turn always has (deriveTurnStatus), which has no
+      // terminal-status floor: a late, title-bearing call resurrects it.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'failed' WHERE id = ?",
       ).run(eraTurnId);
+
+      const result = rememberTool(
+        db,
+        { id: `T${eraTurnId}`, grade: 2, title: "late observer" },
+        { eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isRememberSuccess(result)).toBe(true);
+      expect(resultText(result)).toContain("status extracted");
+      const turn = getTurnById(db, eraTurnId)!;
+      expect(turn.title).toBe("late observer");
+      expect(turn.status).toBe("extracted");
+    });
+
+    test("an 'undone' sidechain row is no longer immune either — flagged, not fixed, as out of this ticket's scope", () => {
+      // note.ts's promoteTurnFromNote explicitly refuses an 'undone' row ("a
+      // sidechain row is not part of this session's arc, and promoting it
+      // would put it back in view"). remember.ts's deriveTurnStatus has no
+      // equivalent floor for an EXISTING undone row receiving an unrelated
+      // field — it only special-cases an explicit `status: "undone"` in the
+      // input. This was already true for legacy turns (untested, since a
+      // resident extraction agent never targeted a sidechain row in
+      // practice); routing era turns through the same path exposes it there
+      // too. Pinned here as a regression marker, not a guarantee to keep.
       db.query<unknown, [number]>(
         "UPDATE turns SET status = 'undone' WHERE id = ?",
       ).run(rideTurnId);
-      const beforeFailed = snapshotTurnRow(db, eraTurnId);
-      const beforeUndone = snapshotTurnRow(db, rideTurnId);
 
-      const failedResult = rememberTool(
-        db,
-        { id: `T${eraTurnId}`, title: "late observer" },
-        { eraCutoffEpoch: CUTOFF },
-      );
-      const undoneResult = rememberTool(
+      const result = rememberTool(
         db,
         { id: `T${rideTurnId}`, title: "late observer" },
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isRememberSuccess(failedResult)).toBe(true);
-      expect(resultText(failedResult)).toContain("status failed");
-      expect(snapshotTurnRow(db, eraTurnId)).toBe(beforeFailed);
-      expect(isRememberSuccess(undoneResult)).toBe(true);
-      expect(snapshotTurnRow(db, rideTurnId)).toBe(beforeUndone);
+      expect(isRememberSuccess(result)).toBe(true);
+      const turn = getTurnById(db, rideTurnId)!;
+      expect(turn.title).toBe("late observer");
+      expect(turn.status).toBe("extracted");
     });
 
-    test("settles an era turn whose status field the turn route would reject", () => {
-      // `extracted` is not in the turn route's allowed set, and the validation
-      // that says so used to run before the turn was even loaded — so an era
-      // turn came back `Parameter error`, leaving its id unresolved in the
-      // worker's work unit and starting the derailment ladder.
-      const result = rememberTool(
+    test("status validation applies to era turns exactly as it does to legacy ones", () => {
+      // `extracted` was never in the turn route's allowed status set
+      // (TURN_REMEMBER_STATUSES). Before ticket 04 an era turn never reached
+      // this check — the retired refusal ran first and read as a success
+      // regardless of the input. Now every turn is validated identically.
+      const eraResult = rememberTool(
         db,
         {
           id: `T${eraTurnId}`,
@@ -504,15 +606,7 @@ describe("era cutover write path", () => {
         },
         { eraCutoffEpoch: CUTOFF },
       );
-
-      expect(isRememberSuccess(result)).toBe(true);
-      const turn = getTurnById(db, eraTurnId)!;
-      expect(turn.status).toBe("skipped");
-      expect(turn.title).toBeNull();
-    });
-
-    test("still rejects that status on a pre-cutoff turn", () => {
-      const result = rememberTool(
+      const legacyResult = rememberTool(
         db,
         {
           id: `T${legacyTurnId}`,
@@ -523,7 +617,9 @@ describe("era cutover write path", () => {
         { eraCutoffEpoch: CUTOFF },
       );
 
-      expect(resultText(result)).toContain("Parameter error");
+      expect(resultText(eraResult)).toContain("Parameter error");
+      expect(getTurnById(db, eraTurnId)!.title).toBeNull();
+      expect(resultText(legacyResult)).toContain("Parameter error");
       expect(getTurnById(db, legacyTurnId)!.title).toBeNull();
     });
 
@@ -623,7 +719,7 @@ describe("era cutover write path", () => {
   });
 
   describe("handler wiring", () => {
-    test("hands reads and writes the one resolved cutoff", async () => {
+    test("hands note the one resolved cutoff; remember writes regardless of it (ticket 04)", async () => {
       const handlers = createDatabaseBackedHandlers(db, {
         eraCutoffEpoch: CUTOFF,
       });
@@ -637,15 +733,18 @@ describe("era cutover write path", () => {
         "implement+era-cutover: wiring",
       );
 
+      // remember no longer branches on the era at all (ticket 04 lifted the
+      // refusal), so a later call overwrites the note's title exactly as it
+      // would on a legacy turn — the handler layer still hands it the
+      // resolved cutoff, but handleTurnRemember no longer reads it.
       await handlers.remember!({
         id: `T${eraTurnId}`,
         grade: 4,
         title: "observer override",
-        content: "Must not land.",
+        content: "Now lands.",
       });
-      expect(getTurnById(db, eraTurnId)!.title).toBe(
-        "implement+era-cutover: wiring",
-      );
+      expect(getTurnById(db, eraTurnId)!.title).toBe("observer override");
+      expect(getTurnById(db, eraTurnId)!.content).toBe("Now lands.");
     });
 
     test("picks up a boundary recorded after the handlers were built", async () => {

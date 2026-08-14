@@ -31,6 +31,11 @@ import {
 } from "../db/segments";
 import { updateSessionSummaryRewrite } from "../db/sessions";
 import { getShadowNote, upsertReconstructedShadowNote } from "../db/shadow-notes";
+import { getTurnById, updateTurnById } from "../db/turns";
+import {
+  draftTurnFactsFromTitle,
+  withDraftedTopicTag,
+} from "../shared/type-vocabulary";
 import type {
   NoteSettlementResponse,
   SettlementSegmentDirective,
@@ -458,6 +463,27 @@ function applyNoteSettlementWriteBackTransaction(
       });
       if (written) {
         counts.notesReconstructed += 1;
+
+        // spec D7/D8, ticket 02: a mechanical reconstruction drafts its
+        // turn's type and tag exactly as an agent-written note does — same
+        // function, same title-derived answer, so a reader cannot tell which
+        // write path produced the draft.
+        const drafted = draftTurnFactsFromTitle(note.title);
+        if (drafted.type || drafted.tag) {
+          // Re-read rather than carry the row down: the topic tag replaces
+          // only its own namespace, so the write needs whatever tags this turn
+          // holds at this moment, and a window can reconstruct several notes
+          // before this point is reached.
+          const existingTags = drafted.tag
+            ? (getTurnById(db, turnId)?.tags ?? [])
+            : [];
+          updateTurnById(db, turnId, {
+            type: drafted.type ?? undefined,
+            replaceTags: drafted.tag
+              ? withDraftedTopicTag(existingTags, drafted.tag)
+              : undefined,
+          });
+        }
       } else {
         counts.notesYielded += 1;
       }

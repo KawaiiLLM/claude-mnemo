@@ -13,8 +13,11 @@
  * `note` promotes onto the row must be exactly the turn the renderer draws as
  * era, or a turn could be written under one era's rules and read under the
  * other's. Read side — recall/timeline/settlement context; write side —
- * `mcp/note.ts` (promotion) and `mcp/remember.ts` (the extraction subagent's
- * writeback, refused from here on).
+ * `mcp/note.ts` (promotion). Ticket 04 (spec D10) lifted the write-side use
+ * this function used to also have in `mcp/remember.ts`: the settlement review
+ * pass needs `remember` to correct an era turn's grade/type/tags, so that
+ * route no longer branches on the era at all and writes every turn, era or
+ * legacy, through the one patch/clear path.
  *
  * The cutoff is `null` in the product default, and `null` means EVERY turn is
  * legacy — every path guarded by this is therefore inert until an operator sets

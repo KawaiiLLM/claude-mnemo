@@ -186,7 +186,7 @@ export interface UpdateTurnByIdInput {
   content?: string | null;
   insight?: string | null;
   type?: string | null;
-  significanceGrade?: number;
+  significanceGrade?: number | null;
   transcriptLineStart?: number | null;
   tags?: string[];
   replaceTags?: string[];
@@ -194,6 +194,23 @@ export interface UpdateTurnByIdInput {
   filesModified?: string[];
   toolCallCount?: number | null;
   updatedAtEpoch?: number | null;
+}
+
+/**
+ * Undefined = the field was omitted, so the existing value survives; `null` =
+ * an explicit clear, so a real SQL NULL is written; anything else is the new
+ * value. Plain `??` cannot express this — it treats `null` and `undefined`
+ * alike, collapsing "leave alone" and "clear" onto the same written value,
+ * which is exactly the ambiguity ticket 04 (spec D10) closes for `remember`'s
+ * per-field patch. Every caller that never sets these fields (they stay
+ * `undefined`) sees no change in behaviour: `resolveNullable` falls back to
+ * `existing` exactly where `??` used to.
+ */
+function resolveNullable<T>(
+  value: T | null | undefined,
+  existing: T | null,
+): T | null {
+  return value === undefined ? existing : value;
 }
 
 export function updateTurnById(
@@ -207,8 +224,14 @@ export function updateTurnById(
     return null;
   }
 
-  const mergedTitle = input.title ?? existing.title;
-  const mergedContent = input.content ?? existing.content;
+  const mergedTitle = resolveNullable(input.title, existing.title);
+  const mergedContent = resolveNullable(input.content, existing.content);
+  const mergedInsight = resolveNullable(input.insight, existing.insight);
+  const mergedType = resolveNullable(input.type, existing.type);
+  const mergedGrade = resolveNullable(
+    input.significanceGrade,
+    existing.significanceGrade,
+  );
   const hasSubstance = mergedTitle !== null || mergedContent !== null;
   const nextStatus =
     input.status ??
@@ -289,11 +312,11 @@ export function updateTurnById(
         nextStatus,
         input.wasInterrupted ?? existing.wasInterrupted ? 1 : 0,
         input.wasRolledBack ?? existing.wasRolledBack ? 1 : 0,
-        input.title ?? existing.title,
-        input.content ?? existing.content,
-        input.insight ?? existing.insight,
-        input.type ?? existing.type,
-        input.significanceGrade ?? existing.significanceGrade,
+        mergedTitle,
+        mergedContent,
+        mergedInsight,
+        mergedType,
+        mergedGrade,
         input.transcriptLineStart ?? existing.transcriptLineStart,
         stringifyArray(nextTags),
         stringifyArray(input.filesRead ?? existing.filesRead),

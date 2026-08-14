@@ -46,7 +46,12 @@ export const workerRecallInputShape = {
 
 export const rememberInputShape = {
   id: z.string().optional(),
-  grade: z.number().int().min(0).max(4).optional(),
+  // `.nullable()` on grade/type/title/content/insight (spec D10, ticket 04):
+  // omitted (the key absent) leaves the field exactly as it was; an explicit
+  // `null` clears it. The two are indistinguishable through plain `??`
+  // coalescing, which is why the clear needs its own value rather than reusing
+  // omission — see resolveNullable in db/turns.ts.
+  grade: z.number().int().min(0).max(4).nullable().optional(),
   regrade: z
     .object({
       id: z.string(),
@@ -75,10 +80,10 @@ export const rememberInputShape = {
         .strict(),
     )
     .optional(),
-  type: z.string().optional(),
-  title: z.string().optional(),
-  content: z.string().optional(),
-  insight: z.string().optional(),
+  type: z.string().nullable().optional(),
+  title: z.string().nullable().optional(),
+  content: z.string().nullable().optional(),
+  insight: z.string().nullable().optional(),
   tags: z.array(z.string()).optional(),
   status: z
     .enum([

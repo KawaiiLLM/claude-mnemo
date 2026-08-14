@@ -68,7 +68,7 @@ describe("task-causality era", () => {
       id: `T${currentTurn.id}`,
       title: "Correct premise",
       content: `Evidence overturned [T${legacyTurn.id}].`,
-      type: "discovery",
+      type: "research",
       grade: 2,
       regrade: { id: `T${legacyTurn.id}`, grade: 1 },
     });

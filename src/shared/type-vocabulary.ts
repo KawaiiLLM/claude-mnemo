@@ -158,6 +158,84 @@ export function draftTypeFromTitle(title: string | null | undefined): DraftType 
   return UNKNOWN_TYPE;
 }
 
+/** A title's `<activity>+<topic>:` shape — group 1 activity, group 2 topic. */
+const NOTE_TITLE_SHAPE = /^([^+:]+)\+([^:]+):/;
+
+export interface DraftedTurnFacts {
+  /** From the closed vocabulary; `null` when the activity word is unrecognised. */
+  type: MemoryType | null;
+  /** The topic half, exactly as written; `null` when the title has no topic. */
+  tag: string | null;
+}
+
+/**
+ * Both insert-time drafts in one parse (spec D7/D8, ticket 02): the topic half
+ * becomes the tag verbatim, and the activity half is resolved through
+ * `draftTypeFromTitle` above — the SAME resolver the settlement context
+ * already renders into its prompt, so the write path and that prompt can never
+ * disagree about what a title means. This is the sibling `draftTypeFromTitle`'s
+ * own doc comment invites: it reuses that function rather than re-implementing
+ * the alias walk.
+ *
+ * A title that does not match the `<activity>+<topic>:` shape yields neither —
+ * not an error, plenty of legacy titles won't match. This is a STRICTER gate
+ * than `draftTypeFromTitle` applies on its own: that function keeps its looser
+ * whole-title prefix scan, because the settlement context renders its answer as
+ * a hint a reviewing model reads, not a value a database column commits to.
+ */
+export function draftTurnFactsFromTitle(
+  title: string | null | undefined,
+): DraftedTurnFacts {
+  if (!title) {
+    return { type: null, tag: null };
+  }
+
+  const normalized = title.normalize("NFKC").trimStart();
+  const match = NOTE_TITLE_SHAPE.exec(normalized);
+  if (!match) {
+    return { type: null, tag: null };
+  }
+
+  const topic = match[2]!.trim();
+  if (!topic) {
+    return { type: null, tag: null };
+  }
+
+  const draft = draftTypeFromTitle(normalized);
+  return {
+    type: draft === UNKNOWN_TYPE ? null : draft,
+    tag: `${TOPIC_TAG_PREFIX}${topic}`,
+  };
+}
+
+/**
+ * The namespace a drafted topic lives in. A turn's tags are namespaced and a
+ * bare word means something else entirely — it is the session-arc role
+ * (`rolled-back`, `correction`, `deferred`) — so an unprefixed topic would not
+ * merely be untidy, it would enter the role vocabulary and answer role
+ * queries. Every topic tag in the store carries this prefix.
+ */
+export const TOPIC_TAG_PREFIX = "topic:";
+
+/**
+ * Set the drafted topic, replacing a previously drafted one and leaving every
+ * other namespace alone.
+ *
+ * Neither of the two obvious writes is correct here. Merging leaves a turn
+ * claiming two topics once its title is corrected, and replacing the whole
+ * list takes the role tags and the `compact:` / `invalidated:` machinery with
+ * it. The topic facet is single-valued and owns exactly its own prefix.
+ */
+export function withDraftedTopicTag(
+  existing: readonly string[],
+  topicTag: string,
+): string[] {
+  return [
+    ...existing.filter((tag) => !tag.startsWith(TOPIC_TAG_PREFIX)),
+    topicTag,
+  ];
+}
+
 export type TypeWriteSource = "draft" | "settlement";
 
 export class RestrictedTypeError extends Error {

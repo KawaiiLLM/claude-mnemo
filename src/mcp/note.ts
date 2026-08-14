@@ -8,10 +8,14 @@ import {
   recordDeclinedNoteDebt,
 } from "../db/note-debt";
 import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
-import { getTurn, promoteTurnFromNote } from "../db/turns";
+import { getTurn, promoteTurnFromNote, updateTurnById } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
 import { formatNoteBudget } from "../shared/note-budget";
 import { stripPrivateTags } from "../shared/tag-stripping";
+import {
+  draftTurnFactsFromTitle,
+  withDraftedTopicTag,
+} from "../shared/type-vocabulary";
 
 type ToolTextResult = {
   content: Array<{
@@ -542,6 +546,22 @@ export function noteTool(
         insight,
         updatedAtEpoch: nowEpoch,
       });
+
+      // spec D7/D8, ticket 02: the note title also drafts the turn's type and
+      // tag, gated behind the SAME era boundary the promotion above is — a
+      // legacy-era note leaves `turns` untouched entirely (P1 isolation), so
+      // the draft only ever lands alongside the promotion that already
+      // touches this row. `replace: true` re-runs this on every rewrite, so a
+      // corrected title's new answer is what lands, not the first one.
+      const drafted = draftTurnFactsFromTitle(title);
+      if (drafted.type || drafted.tag) {
+        updateTurnById(db, turn.id, {
+          type: drafted.type ?? undefined,
+          replaceTags: drafted.tag
+            ? withDraftedTopicTag(turn.tags, drafted.tag)
+            : undefined,
+        });
+      }
     }
 
     return { ok: true, existing: existing !== null };

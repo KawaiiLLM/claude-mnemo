@@ -6,7 +6,6 @@ import {
   type ReplaceTurnCitationsResult,
 } from "../db/citations";
 import { runWriteTransaction } from "../db/database";
-import { markSettledDiaryDayStaleForTurn } from "../db/diary-state";
 import { updateObservation } from "../db/observations";
 import { getSession, updateSessionSummaryRewrite } from "../db/sessions";
 import {
@@ -15,7 +14,7 @@ import {
   type TurnRecord,
   type TurnStatus,
 } from "../db/turns";
-import { isSegmentEra } from "../segment-era";
+import { isMemoryType, MEMORY_TYPES } from "../shared/type-vocabulary";
 import {
   CURRENT_SESSION_STATE_TOKEN_BUDGET,
   measureSessionStateTokens,
@@ -46,16 +45,19 @@ const OBSERVATION_REMEMBER_STATUSES = [
 
 export interface RememberToolInput {
   id?: string;
-  grade?: number;
+  // `null` explicitly clears; `undefined` (the field absent) leaves it as it
+  // was. See resolveNullable (db/turns.ts) for why the two cannot share a
+  // value.
+  grade?: number | null;
   regrade?: {
     id: string;
     grade: number;
   };
   cites?: CitationInput[];
-  type?: string;
-  title?: string;
-  content?: string;
-  insight?: string;
+  type?: string | null;
+  title?: string | null;
+  content?: string | null;
+  insight?: string | null;
   tags?: string[];
   status?: RememberStatus;
   next_steps?: string;
@@ -214,12 +216,32 @@ function validateStatusForRoute(
   return null;
 }
 
-function validateGrade(value: number | undefined, label: string): string | null {
-  if (value === undefined) {
+function validateGrade(
+  value: number | null | undefined,
+  label: string,
+): string | null {
+  if (value === undefined || value === null) {
     return null;
   }
   if (!Number.isInteger(value) || value < 0 || value > 4) {
     return `${label} must be an integer from 0 through 4.`;
+  }
+  return null;
+}
+
+/**
+ * The closed `type` vocabulary stays closed at the write boundary too: an
+ * unrecognised word is rejected rather than landing in the column (spec's
+ * "an illegal type … leave the column empty rather than write an unknown
+ * word"). `null` (an explicit clear) and `undefined` (omitted) both pass
+ * through untouched — validation only concerns a word that IS supplied.
+ */
+function validateType(value: string | null | undefined): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isMemoryType(value)) {
+    return `type "${value}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
   }
   return null;
 }
@@ -281,90 +303,24 @@ class RegradeTargetMissingError extends Error {
 }
 
 /**
- * Settle an era turn the extraction subagent just tried to write a note for,
- * storing nothing of what it wrote (裁决 27, ticket 09).
- *
- * The payload is dropped whole rather than merged. Half-accepting it — keeping
- * the tags, say, or the grade — would put an observer's reconstruction back
- * into the record the cutover just took away from it, and grade/cites/regrade
- * are the retired era's vocabulary anyway (D13).
- *
- * Status still moves, because a hole is a hole and not a stall: a turn left
- * `active`/`provisional` is re-selected by the stranded repair on every end
- * event and re-offered to the agent forever. The derivation is the one
- * `deriveTurnStatus` applies to a remember's INPUT, read off the stored record
- * instead — `extracted` when the main agent's note is already on the row (this
- * path must never demote one), `skipped` when nobody noted it, which is exactly
- * the shape a turn with nothing to extract has always had.
- *
- * It is ONE conditional statement, not a read followed by a decision followed
- * by a write. The main agent notes its own turn while the turn is still running
- * (裁决 26), so a note transaction can commit between any two of those steps;
- * a decision taken before it then wrote `skipped` over a row that had just been
- * noted. The CASE reads the row in the same statement that writes it, and the
- * WHERE leaves `undone` and every already-terminal row alone.
- *
- * The result deliberately reads as a success: "this era does not want your
- * note" is not a caller error, and answering with a `Parameter error:` would
- * make a well-formed call look broken.
- *
- * Reachable only from a hand-written `remember(T…)` now — the extraction
- * subagent that used to drive it is gone (ticket 15) and a turn's own
- * completion settles it (db/turn-completion.ts). What keeps this branch here is
- * the OTHER half of D13: without it an era turn's `remember` would fall back to
- * the legacy route below and be held to that route's grade/regrade/cites
- * enforcement, which the new era abolished.
+ * Ticket 04 (spec D10) lifted the era write refusal that used to live here.
+ * An era turn used to be settled without storing any of a `remember` call's
+ * payload (裁决 27, ticket 09) because the resident extraction agent — the
+ * only caller that ever reached this route for an era turn — was writing a
+ * reconstruction the cutover had already taken the record away from. That
+ * agent is retired (ticket 15), and its replacement, the settlement review
+ * pass, needs the opposite: a real write path onto era turns, to correct the
+ * grade/type/tags a note's mechanical draft got wrong. So every turn, era or
+ * legacy, now runs the one patch/clear path below.
  */
-function settleEraTurnWithoutNote(
-  db: Database,
-  turnId: number,
-  current: TurnRecord,
-): ToolTextResult {
-  const changed =
-    db
-      .query<unknown, [number, number]>(
-        `UPDATE turns
-         SET status = CASE
-               WHEN title IS NOT NULL OR content IS NOT NULL THEN 'extracted'
-               ELSE 'skipped'
-             END,
-             updated_at_epoch = ?
-         WHERE id = ? AND status IN ('active', 'provisional')`,
-      )
-      .run(Math.floor(Date.now() / 1000), turnId).changes > 0;
-
-  const settled = getTurnById(db, turnId) ?? current;
-  if (changed) {
-    // `updateTurnById` carried this before; a settled day whose turn just
-    // reached a terminal status has to be regenerated. No FTS re-index: the
-    // index is status-blind and nothing else on the row moved.
-    markSettledDiaryDayStaleForTurn(db, settled.createdAtEpoch);
-  }
-
-  return textResult(
-    `Updated turn T${turnId} with status ${settled.status}. Turns in this era are ` +
-      "noted by the session's own agent, so nothing this call supplied was stored.",
-  );
-}
-
 function handleTurnRemember(
   db: Database,
   turnId: number,
   input: RememberToolInput,
-  eraCutoffEpoch: number | null | undefined,
 ): ToolTextResult {
-  // The turn is loaded before anything is validated, because which rules apply
-  // is a property of the turn and not of the payload. For an era turn none of
-  // the validated fields is going to be stored, so rejecting the call over one
-  // of them would report a parameter problem about a payload nobody was going
-  // to keep.
   const current = getTurnById(db, turnId);
   if (!current) {
     return textResult(`Turn T${turnId} not found.`);
-  }
-
-  if (isSegmentEra(current.createdAtEpoch, eraCutoffEpoch)) {
-    return settleEraTurnWithoutNote(db, turnId, current);
   }
 
   const statusError = validateStatusForRoute(
@@ -381,9 +337,15 @@ function handleTurnRemember(
   if (gradeError) {
     return parameterError(gradeError);
   }
+
+  const typeError = validateType(input.type);
+  if (typeError) {
+    return parameterError(typeError);
+  }
+
   if (
     (current.status === "active" || current.status === "provisional") &&
-    input.grade === undefined
+    (input.grade === undefined || input.grade === null)
   ) {
     return parameterError(
       "grade is required when extracting a new turn (integer 0 through 4).",
@@ -438,13 +400,17 @@ function handleTurnRemember(
     written = runWriteTransaction(db, () => {
       const turn = updateTurnById(db, turnId, {
         status: deriveTurnStatusForUpdate(current, input),
-        title: input.title ?? null,
+        // Passed straight through (no `?? null`): input.title/insight/type are
+        // already `T | null | undefined`, and collapsing them onto a shared
+        // `null` here would be the exact omit-vs-clear ambiguity this ticket
+        // removes — undefined must reach updateTurnById as undefined.
+        title: input.title,
         content:
-          input.content != null
+          typeof input.content === "string"
             ? bracketBareTurnReferences(input.content, isValidPredecessor)
-            : null,
-        insight: input.insight ?? null,
-        type: input.type ?? null,
+            : input.content,
+        insight: input.insight,
+        type: input.type,
         significanceGrade: input.grade,
         tags: input.tags ?? [],
         updatedAtEpoch: nowEpoch,
@@ -538,7 +504,11 @@ function handleObservationRemember(
   }
 
   const observation = updateObservation(db, observationId, {
-    title: input.title,
+    // Observation remember has no clear concept (out of ticket 04's scope);
+    // `UpdateObservationInput.title` stays `string | undefined`, so an
+    // explicit `null` here — which the shared schema now technically allows
+    // through — degrades to "omitted" rather than a type error.
+    title: input.title ?? undefined,
     content: input.content,
     status: deriveObservationStatus(input),
   });
@@ -579,7 +549,12 @@ function handleSessionRemember(
   // All-or-nothing (D2): every summary field must be present (empty allowed).
   // A partial update would silently freeze the omitted fields — the exact
   // staleness root cause this redesign removes. Reject rather than half-write.
-  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] === undefined);
+  // `== null` on purpose: title/content are shared with the turn route's new
+  // clear expression (ticket 04), so the schema now technically lets a caller
+  // send `null` here too. The session route has no clear concept — an empty
+  // string already means "no value" — so an explicit `null` counts as missing
+  // exactly like an omitted key, rather than silently degrading to "".
+  const missing = SESSION_SUMMARY_KEYS.filter((key) => input[key] == null);
 
   if (missing.length > 0) {
     return parameterError(
@@ -634,10 +609,11 @@ function handleSessionRemember(
 
 export interface RememberToolOptions {
   /**
-   * P2 era boundary (spec D11/D12), resolved by the handler layer — see
-   * `NoteToolOptions.eraCutoffEpoch` for why it is passed rather than read.
-   * Absent or `null` = every turn is legacy, which is this tool's behaviour
-   * before ticket 09 and the rollback.
+   * P2 era boundary (spec D11/D12). Kept for call-site compatibility with the
+   * shared resolution in mcp/handlers.ts (note and remember are handed the
+   * same number) — but ticket 04 (spec D10) lifted the era write refusal this
+   * option used to gate, so `handleTurnRemember` no longer branches on it. A
+   * turn's era no longer changes whether `remember` can write it.
    */
   eraCutoffEpoch?: number | null;
 }
@@ -662,7 +638,7 @@ export function rememberTool(
 
   const turnId = parseTurnId(input.id);
   if (turnId !== null) {
-    return handleTurnRemember(db, turnId, input, options.eraCutoffEpoch);
+    return handleTurnRemember(db, turnId, input);
   }
 
   const sessionId = parseSessionId(input.id);

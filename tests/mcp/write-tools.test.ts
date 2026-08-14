@@ -64,7 +64,7 @@ describe("MCP write tools", () => {
       title: "Fix auth race",
       content: "Persists the extracted turn",
       insight: "- regression covered",
-      type: "bugfix",
+      type: "fix",
       grade: 2,
       tags: ["auth", "concurrency"],
     });
@@ -73,7 +73,7 @@ describe("MCP write tools", () => {
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
     expect(turn.status).toBe("extracted");
-    expect(turn.type).toBe("bugfix");
+    expect(turn.type).toBe("fix");
     expect(turn.tags).toEqual(["auth", "concurrency"]);
   });
 
