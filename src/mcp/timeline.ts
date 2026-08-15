@@ -20,8 +20,11 @@ import { isKnownSystemInjectedContent } from "../shared/transcript-parser";
 import { isTaskCausalityEra } from "../task-causality-era";
 import {
   COMPACT_TYPE_GLYPH,
+  LEGACY_TYPE_GLYPH,
+  MEMORY_TYPES,
   typeListGlyph,
   typeListsEqual,
+  typeWordGlyph,
 } from "../shared/type-vocabulary";
 
 import {
@@ -308,18 +311,28 @@ export interface Phase {
   externalInputs: string[];
 }
 
+/**
+ * The session-wide activity summary (the `types:` header line).
+ *
+ * Open, not a closed record. It used to be seven fixed legacy buckets read off
+ * `type[0]`, which ticket 02 turned into a silent regression rather than a
+ * stale nicety: a session written in the current vocabulary counted toward NO
+ * bucket at all — not even the empty one, since those turns do state a word —
+ * so the line rendered zeros for exactly the sessions it was meant to describe.
+ * Keying on the word itself is what stops the summary needing an edit every
+ * time the vocabulary does.
+ */
 export interface TypesDistribution {
-  bugfix: number;
-  feature: number;
-  refactor: number;
-  change: number;
-  discovery: number;
-  decision: number;
-  compact: number;
-  pending: number;
+  /**
+   * How many live turns stated each activity word. A multi-valued turn
+   * contributes once to EACH of its words, so these sum to more than the live
+   * turn count — the line answers "how much of each activity happened", not
+   * "how do the turns partition".
+   */
+  words: Record<string, number>;
+  /** Live turns that stated no activity word at all (spec B7's empty). */
+  none: number;
 }
-
-type TypedTurnKind = Exclude<keyof TypesDistribution, "pending">;
 
 export interface ShapeSignals {
   fastestGap: { afterPromptNumber: number; ms: number } | null;
@@ -1260,37 +1273,89 @@ export function segmentPhases(turns: TurnRecord[]): Phase[] {
 }
 
 export function computeTypesDistribution(turns: TurnRecord[]): TypesDistribution {
-  const distribution: TypesDistribution = {
-    bugfix: 0,
-    feature: 0,
-    refactor: 0,
-    change: 0,
-    discovery: 0,
-    decision: 0,
-    compact: 0,
-    pending: 0,
-  };
+  const words: Record<string, number> = {};
+  let none = 0;
 
   for (const turn of turns) {
     if (!isTimelineLiveTurn(turn)) {
       continue;
     }
 
-    // `TypesDistribution` is a closed LEGACY vocabulary (this function predates
-    // ticket 02's multi-value change and is not in its scope), so a
-    // multi-valued turn is read by its first stated word — the same word a
-    // single-valued legacy row's one-element array carries — and a current-
-    // vocabulary-only word (never in this closed set) simply counts toward
-    // neither bucket, same as an unrecognised word already did.
-    const legacyType = turn.type[0] ?? null;
-    if (legacyType === null) {
-      distribution.pending += 1;
-    } else if (isTypedTurnKind(legacyType)) {
-      distribution[legacyType] += 1;
+    if (turn.type.length === 0) {
+      none += 1;
+      continue;
+    }
+    // Every stated word counts, current vocabulary or legacy. Reading only
+    // `type[0]` would make a `["refactor","fix"]` turn look like pure
+    // refactoring, which is the same "pick an arbitrary primary" move the
+    // multi-glyph render already refused.
+    for (const word of turn.type) {
+      words[word] = (words[word] ?? 0) + 1;
     }
   }
 
-  return distribution;
+  return { words, none };
+}
+
+/**
+ * Render order for the `types:` line: current vocabulary first, then the
+ * legacy-only words, then one bucket for anything neither vocabulary knows,
+ * then the turns that stated nothing. Fixed rather than count-sorted so the
+ * line reads the same way across sessions.
+ *
+ * Counts are aggregated by GLYPH, not by word. The two vocabularies share
+ * glyphs on purpose — `design` and `decision` are both ⚖️, `review` and
+ * `change` both ✅, `fix` and `bugfix` both 🔴 — precisely so a turn's glyph
+ * does not change meaning across the migration, so a reader who sees ⚖️ twice
+ * on one counting line learns nothing except that the line is confusing.
+ * Merging says what the glyph already claims.
+ *
+ * An unrecognised word is rendered under `?` rather than `typeWordGlyph`'s `•`
+ * fallback, because `•` already means "stated nothing" here — two different
+ * facts must not share a glyph on a line whose whole job is counting.
+ */
+export function renderTypesDistribution(
+  distribution: TypesDistribution,
+): string[] {
+  const byGlyph = new Map<string, number>();
+  const counted = new Set<string>();
+
+  const accumulate = (word: string): void => {
+    if (counted.has(word)) {
+      return;
+    }
+    counted.add(word);
+    const count = distribution.words[word] ?? 0;
+    if (count === 0) {
+      return;
+    }
+    const glyph = typeWordGlyph(word);
+    byGlyph.set(glyph, (byGlyph.get(glyph) ?? 0) + count);
+  };
+
+  for (const word of MEMORY_TYPES) {
+    accumulate(word);
+  }
+  for (const word of Object.keys(LEGACY_TYPE_GLYPH)) {
+    accumulate(word);
+  }
+
+  const parts = [...byGlyph].map(([glyph, count]) => `${glyph}${count}`);
+
+  let unrecognised = 0;
+  for (const [word, count] of Object.entries(distribution.words)) {
+    if (!counted.has(word)) {
+      unrecognised += count;
+    }
+  }
+  if (unrecognised > 0) {
+    parts.push(`?${unrecognised}`);
+  }
+  if (distribution.none > 0) {
+    parts.push(`•${distribution.none}`);
+  }
+
+  return parts;
 }
 
 export function detectBrokenPromptPairs(
@@ -1346,17 +1411,6 @@ function sharedPrefixLength(left: string, right: string): number {
   return index;
 }
 
-function isTypedTurnKind(value: string): value is TypedTurnKind {
-  return (
-    value === "bugfix" ||
-    value === "feature" ||
-    value === "refactor" ||
-    value === "change" ||
-    value === "discovery" ||
-    value === "decision" ||
-    value === "compact"
-  );
-}
 
 function parsePositiveBound(raw: string, id: string): number {
   const value = Number(raw);
@@ -2183,32 +2237,7 @@ function renderSessionHeader(view: TimelineView): string[] {
     view.compactBoundaries.length > 0
       ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}`
       : "";
-  const typesParts: string[] = [];
-
-  if (view.typesDistribution.bugfix > 0) {
-    typesParts.push(`🔴${view.typesDistribution.bugfix}`);
-  }
-  if (view.typesDistribution.feature > 0) {
-    typesParts.push(`🟣${view.typesDistribution.feature}`);
-  }
-  if (view.typesDistribution.refactor > 0) {
-    typesParts.push(`🔄${view.typesDistribution.refactor}`);
-  }
-  if (view.typesDistribution.change > 0) {
-    typesParts.push(`✅${view.typesDistribution.change}`);
-  }
-  if (view.typesDistribution.discovery > 0) {
-    typesParts.push(`🔵${view.typesDistribution.discovery}`);
-  }
-  if (view.typesDistribution.decision > 0) {
-    typesParts.push(`⚖️${view.typesDistribution.decision}`);
-  }
-  if (view.typesDistribution.compact > 0) {
-    typesParts.push(`⏸${view.typesDistribution.compact}`);
-  }
-  if (view.typesDistribution.pending > 0) {
-    typesParts.push(`⏳${view.typesDistribution.pending}`);
-  }
+  const typesParts = renderTypesDistribution(view.typesDistribution);
   const startDate = formatLocalDate(sessionStart);
   const endDate = formatLocalDate(sessionEnd);
   const endLabel =

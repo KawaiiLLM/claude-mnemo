@@ -14,4 +14,5 @@ Three data-destructive defects came from re-implementing in a payload parser the
 - [ ] Each tool call remains one transaction over its body, its derived edges and its status
 - [ ] The three-strike cursor advance is documented in the job log as abandoning a remainder, not converging
 - [ ] Per-tool replay behaviour matches spec G5, and the three writes named unsafe there have a stated contract before this ticket closes
+- [ ] **The last surviving tag merge dies here.** The review directive carries a single `tag`, which is why the write-back still routes through `mergeTags` while every public write overwrites whole (spec D5a). Grow the directive to a full tag list in the same change, then delete `mergeTags` and the turn update input's additive `tags` parameter — a writer that can only state one value cannot be asked to state a set, so the shape has to change before the rule can
 - [ ] Full suite green

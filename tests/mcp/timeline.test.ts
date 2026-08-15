@@ -12,6 +12,7 @@ import {
   buildTimelineView,
   cleanPromptForLabel,
   computeTypesDistribution,
+  renderTypesDistribution,
   detectBrokenPromptPairs,
   buildCorrectionGraph,
   detectShapeSignals,
@@ -666,14 +667,8 @@ describe("skipped turns", () => {
     ];
 
     expect(computeTypesDistribution(turns)).toEqual({
-      bugfix: 0,
-      feature: 0,
-      refactor: 0,
-      change: 0,
-      discovery: 2,
-      decision: 0,
-      compact: 0,
-      pending: 0,
+      words: { discovery: 2 },
+      none: 0,
     });
 
     expect(segmentPhases(turns)).toHaveLength(1);
@@ -902,14 +897,8 @@ describe("computeTypesDistribution", () => {
     ]);
 
     expect(distribution).toEqual({
-      bugfix: 0,
-      feature: 0,
-      refactor: 0,
-      change: 1,
-      discovery: 2,
-      decision: 1,
-      compact: 1,
-      pending: 2,
+      words: { discovery: 2, decision: 1, change: 1, compact: 1 },
+      none: 2,
     });
   });
 
@@ -919,7 +908,61 @@ describe("computeTypesDistribution", () => {
       turn({ promptNumber: 2, type: "discovery", status: "undone" }),
     ]);
 
-    expect(distribution.discovery).toBe(1);
+    expect(distribution.words.discovery).toBe(1);
+  });
+
+  // The regression ticket 02 introduced: the buckets were a closed LEGACY set
+  // read off `type[0]`, so a session written entirely in the current
+  // vocabulary counted toward nothing at all — not even the empty bucket,
+  // since those turns DO state a word. The header line rendered zeros for
+  // exactly the sessions it exists to describe.
+  it("counts current-vocabulary words, which the closed legacy bucket set dropped entirely", () => {
+    const distribution = computeTypesDistribution([
+      turn({ promptNumber: 1, type: ["design"] }),
+      turn({ promptNumber: 2, type: ["implement"] }),
+      turn({ promptNumber: 3, type: ["implement"] }),
+      turn({ promptNumber: 4, type: ["review"] }),
+    ]);
+
+    expect(distribution).toEqual({
+      words: { design: 1, implement: 2, review: 1 },
+      none: 0,
+    });
+  });
+
+  it("counts a multi-valued turn once in EVERY word it states, not just the first", () => {
+    const distribution = computeTypesDistribution([
+      turn({ promptNumber: 1, type: ["refactor", "fix"] }),
+      turn({ promptNumber: 2, type: ["fix"] }),
+    ]);
+
+    // Reading `type[0]` would report one refactor and one fix, making the
+    // two-activity turn look like pure refactoring.
+    expect(distribution.words).toEqual({ refactor: 1, fix: 2 });
+    // The counts deliberately sum to more than the turn total.
+    expect(distribution.words.refactor! + distribution.words.fix!).toBe(3);
+  });
+});
+
+describe("renderTypesDistribution", () => {
+  it("orders current vocabulary first, then legacy, and omits empty buckets", () => {
+    expect(
+      renderTypesDistribution({
+        words: { discovery: 4, fix: 2, design: 1 },
+        none: 0,
+      }),
+    ).toEqual(["⚖️1", "🔴2", "🔵4"]);
+  });
+
+  it("separates 'stated nothing' from 'stated something unrecognised'", () => {
+    // Both would resolve to `•` through typeWordGlyph, and a counting line
+    // cannot let two different facts share a glyph.
+    expect(
+      renderTypesDistribution({
+        words: { fix: 1, "some-hand-written-word": 3 },
+        none: 5,
+      }),
+    ).toEqual(["🔴1", "?3", "•5"]);
   });
 });
 
@@ -2299,14 +2342,8 @@ describe("buildTimelineView", () => {
     expect(view.totalTurns).toBe(21);
     expect(view.totalToolCalls).toBe(68);
     expect(view.typesDistribution).toEqual({
-      bugfix: 0,
-      feature: 0,
-      refactor: 0,
-      change: 0,
-      discovery: 17,
-      decision: 3,
-      compact: 0,
-      pending: 1,
+      words: { discovery: 17, decision: 3 },
+      none: 1,
     });
     expect(view.window.startPromptNumber).toBe(1);
     expect(view.window.endPromptNumber).toBe(21);

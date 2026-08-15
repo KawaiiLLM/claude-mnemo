@@ -52,11 +52,27 @@ export const TASK_CAUSALITY_GRADE_RUBRIC = `   - grade: REQUIRED integer 0-4 mea
  * changes what a stored grade CLAIMS — its rules are part of the standard,
  * not a separate feature, so they live beside the definitions rather than
  * off in whatever module happens to call `regrade`.
+ *
+ * No longer byte-identical in one place: the misleading-turn clause used to
+ * order the grader to tag the casualty `rolled-back`. Ticket 02 removed that
+ * word from the type vocabulary, but the instruction named the TAG field,
+ * which `asTagOrNull` accepts without any vocabulary check — so the order was
+ * still followed, still stored, and still read as a reversal role by
+ * `REVERSED_ROLE_TAGS` in the timeline. That is a silent write of a retired
+ * concept, not the visible rejection ticket 02's closing note claimed, and it
+ * was live: 532 turns carry the tag, written continuously until the
+ * extraction pipeline stopped on 2026-08-11. The clause now prohibits the tag
+ * instead of requiring it.
+ *
+ * This closes the hazard; it does not finish ticket 12. The positive half —
+ * telling the grader to write a `supersedes` edge to the overturned turn
+ * (spec section I) — needs the edge write path tickets 06/07/10 build, so
+ * until then reversal is expressed by the `regrade` and the citation alone.
  */
 export const TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC = `Grade correction has two narrowly-scoped duties:
 
-- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn (the negate-on-cite \`rolled-back\` case above), you MUST both tag the casualty \`rolled-back\` AND lower its grade via \`regrade\` in the same call — tagging without regrading is incomplete. Demote it to the grade its surviving task-causal consequence warrants. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a ↳ row.
-- Grade-4 re-foundation: a radical redefinition may create a second Grade 4 in the same arc, but the new Grade 4 must cite the Grade 4 it re-founds. Do not demote the earlier foundation merely because the motive evolved; only witnessed disproof triggers the separate \`rolled-back\` downgrade above.
+- Misleading-turn downgrade: whenever THIS turn overturns a cited earlier turn, lower the casualty's grade via \`regrade\` to what its surviving task-causal consequence warrants. Do this only with witnessed disproof or rollback evidence in the current turn; never rewrite history from a guess. Keep the causal citation so the timeline can retain the casualty as a ↳ row. Do NOT tag the casualty \`rolled-back\`, or any other reversal word: \`rolled-back\` left the vocabulary, a turn does not state its own reversal, and reversal is carried by the citation that overturns it.
+- Grade-4 re-foundation: a radical redefinition may create a second Grade 4 in the same arc, but the new Grade 4 must cite the Grade 4 it re-founds. Do not demote the earlier foundation merely because the motive evolved; only witnessed disproof triggers the separate downgrade above.
 - Bridge Grade 4 for cutoff-straddling sessions: legacy Grade 3/4 rows are historical context, never trusted anchors, and \`regrade\` cannot change their creation era. Grade the first post-cutoff turn that can summarize the existing arc's motive and success criteria as a bridge Grade 4. Never try to turn a legacy row into the trusted foundation via \`regrade\`.
 
 Express one grade correction inside the current turn's call as \`regrade: { id: "T<n>", grade: 0|1|2|3|4 }\`. The target must be an earlier turn in this session. This is the only grade-only exception to the rule against updating a record not named by the current block.`;

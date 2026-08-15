@@ -136,7 +136,17 @@ const SCHEMA_SQL = `
     -- predates this shape, ensureTurnTypeMultiValueColumn rebuilds the table
     -- (a CHECK constraint cannot be ALTERed onto an existing column) and wraps
     -- every existing non-null scalar into a one-element array.
-    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    --
+    -- json_type(type) = 'array', not the looser json_valid(type) this
+    -- shipped with (peer review P2 on ticket 02): json_valid alone admits
+    -- any valid JSON value, so a JSON string ('"fix"') or object ('{"a":1}')
+    -- passed the CHECK while parseJsonArray (db/turns.ts) casts the parsed
+    -- result to a string array unconditionally — a row written by direct SQL
+    -- under the loose CHECK crashes every array consumer downstream. A
+    -- database that already rebuilt under the loose CHECK is rebuilt again by
+    -- ensureTurnTypeMultiValueColumn (its staleness predicate detects the
+    -- loose form too), so this only ever runs once per database going forward.
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
@@ -1240,12 +1250,27 @@ export function initializeSchema(db: Database): void {
  * Order-preserving and de-duplicating, because a turn can already carry both
  * spellings of one word; exactly one row in the live corpus does. Naturally
  * idempotent — a second run finds nothing prefixed left to strip.
+ *
+ * Peer review P1: `tags` carries no `json_valid` CHECK, so a malformed row is
+ * storable, and `json_each(turns.tags)` in the candidate SELECT below used to
+ * run unguarded — SQLite throws `malformed JSON` out of `.all()` itself, which
+ * is BEFORE the `JSON.parse` try/catch in the loop, making that catch
+ * unreachable for exactly the row it exists to handle and aborting
+ * `initializeSchema` for every caller on one bad row. The `json_valid` /
+ * `json_type … = 'array'` guards below stop the malformed or non-array row
+ * from ever reaching `json_each`; such a row is therefore left exactly as
+ * stored, forever un-strippable by this pass (it was already unreadable to
+ * every array-shaped consumer of `tags`, so this changes nothing about what a
+ * reader can already do with it) rather than aborting every other row's
+ * migration.
  */
 function stripRetiredTopicTagNamespace(db: Database): void {
   const rows = db
     .query<{ id: number; tags: string }, []>(
       `SELECT id, tags FROM turns
        WHERE tags IS NOT NULL
+         AND json_valid(tags)
+         AND json_type(tags) = 'array'
          AND EXISTS (
            SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
          )`,
@@ -1803,6 +1828,13 @@ function dropLegacyMemoriesTable(db: Database): void {
 // `ensureNoteDebtReasonVocabulary`: read the stored DDL rather than track a
 // version counter, so a fresh database (whose CREATE TABLE already carries the
 // CHECK) skips the rebuild entirely.
+//
+// Detects BOTH generations of "stale": the original nullable-scalar column
+// (no CHECK mentioning `type` at all) ticket 02 rebuilt away, and ticket 02's
+// own loose `CHECK (json_valid(type))` (peer review P2) — neither stored DDL
+// contains the strict array-only string this checks for, so both fall
+// through to the same rebuild. A database on the CURRENT strict form is the
+// only one that matches and skips.
 function turnsTypeColumnIsStale(db: Database): boolean {
   const storedDdl =
     db
@@ -1810,7 +1842,10 @@ function turnsTypeColumnIsStale(db: Database): boolean {
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'",
       )
       .get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("CHECK (json_valid(type))");
+  return (
+    storedDdl !== null &&
+    !storedDdl.includes("CHECK (json_type(type) = 'array')")
+  );
 }
 
 /**
@@ -1819,6 +1854,17 @@ function turnsTypeColumnIsStale(db: Database): boolean {
  * (`discovery` → `["discovery"]`, spec's Out of Scope: a value-preserving
  * wrap, never a remap onto the new vocabulary); NULL and empty-string become
  * `'[]'`.
+ *
+ * Runs a SECOND time, on the same shape, for a database that already ran it
+ * under the retired loose `CHECK (json_valid(type))` (peer review P2 on
+ * ticket 02 — see `turnsTypeColumnIsStale`). On that pass every existing
+ * value is already a valid JSON array, so the copy below leaves it alone
+ * instead of wrapping it a second time (`["fix"]` must stay `["fix"]`, never
+ * become `[["fix"]]`) — it only wraps a value that ISN'T already a valid JSON
+ * array, which also makes the copy safe against a row a direct-SQL write put
+ * a bare JSON scalar or object into under the loose CHECK: `json_array(...)`
+ * always produces a syntactically valid array, so the INSERT below can never
+ * itself violate the new table's stricter CHECK.
  *
  * A CHECK constraint cannot be ALTERed onto an existing column, so this is a
  * table rebuild, not an `ALTER TABLE ... ADD COLUMN` — same family of move as
@@ -1876,7 +1922,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           title TEXT,
           content TEXT,
           insight TEXT,
-          type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
@@ -1911,6 +1957,7 @@ function ensureTurnTypeMultiValueColumn(db: Database): void {
           assistant_transcript, title, content, insight,
           CASE
             WHEN type IS NULL OR type = '' THEN '[]'
+            WHEN json_valid(type) AND json_type(type) = 'array' THEN type
             ELSE json_array(type)
           END,
           significance_grade, tags, files_read, files_modified,

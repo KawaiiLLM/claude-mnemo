@@ -335,8 +335,15 @@ describe("timeline dual-path rendering across the era boundary", () => {
     // A property, not a magic number: whenever the orphan row survives, every
     // segment row has survived too. Sweeping the budget makes the claim about
     // the ORDER of the ladder rather than about one lucky measurement.
+    //
+    // Step 5, not 25. The window where both segments fit and the orphan does
+    // not is only about fifteen tokens wide in this fixture, so a coarser
+    // sweep finds the witness by luck: widening the `types:` header line by a
+    // few tokens moved the ladder and a step of 25 jumped straight over the
+    // window, failing the non-vacuity assertion while the property itself was
+    // entirely intact.
     const observed: Array<{ budget: number; orphan: boolean; segments: number }> = [];
-    for (let budget = 50; budget <= 800; budget += 25) {
+    for (let budget = 50; budget <= 800; budget += 5) {
       const view = buildTimelineView(db, {
         id: `S${sessionId}`,
         view: "milestones",
@@ -411,7 +418,7 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
   // renderer's blind spot for it is what changed.
   const PRE_SEGMENT_ARC = `- [S1] 2030-03-17 15:00 → 19:10 (4h 10m)
   /tmp/project | 7 turns | 0 tool_calls
-  types: 🟣1 ⚖️1 (session-wide)
+  types: 🔍1 ⚖️2 🔧1 🔴1 ✅1 🟣1 (session-wide)
   tz: UTC (+00:00)
   raw: /tmp/project/session-era.jsonl
 

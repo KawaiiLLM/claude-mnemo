@@ -8425,6 +8425,8 @@ function stripRetiredTopicTagNamespace(db) {
   const rows = db.query(
     `SELECT id, tags FROM turns
        WHERE tags IS NOT NULL
+         AND json_valid(tags)
+         AND json_type(tags) = 'array'
          AND EXISTS (
            SELECT 1 FROM json_each(turns.tags) j WHERE j.value LIKE 'topic:%'
          )`
@@ -8739,7 +8741,7 @@ function turnsTypeColumnIsStale(db) {
   const storedDdl = db.query(
     "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'"
   ).get()?.sql ?? null;
-  return storedDdl !== null && !storedDdl.includes("CHECK (json_valid(type))");
+  return storedDdl !== null && !storedDdl.includes("CHECK (json_type(type) = 'array')");
 }
 function ensureTurnTypeMultiValueColumn(db) {
   if (!turnsTypeColumnIsStale(db)) {
@@ -8766,7 +8768,7 @@ function ensureTurnTypeMultiValueColumn(db) {
           title TEXT,
           content TEXT,
           insight TEXT,
-          type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+          type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
           significance_grade INTEGER CHECK (
             significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
           ),
@@ -8800,6 +8802,7 @@ function ensureTurnTypeMultiValueColumn(db) {
           assistant_transcript, title, content, insight,
           CASE
             WHEN type IS NULL OR type = '' THEN '[]'
+            WHEN json_valid(type) AND json_type(type) = 'array' THEN type
             ELSE json_array(type)
           END,
           significance_grade, tags, files_read, files_modified,
@@ -9103,7 +9106,17 @@ var init_schema = __esm({
     -- predates this shape, ensureTurnTypeMultiValueColumn rebuilds the table
     -- (a CHECK constraint cannot be ALTERed onto an existing column) and wraps
     -- every existing non-null scalar into a one-element array.
-    type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+    --
+    -- json_type(type) = 'array', not the looser json_valid(type) this
+    -- shipped with (peer review P2 on ticket 02): json_valid alone admits
+    -- any valid JSON value, so a JSON string ('"fix"') or object ('{"a":1}')
+    -- passed the CHECK while parseJsonArray (db/turns.ts) casts the parsed
+    -- result to a string array unconditionally \u2014 a row written by direct SQL
+    -- under the loose CHECK crashes every array consumer downstream. A
+    -- database that already rebuilt under the loose CHECK is rebuilt again by
+    -- ensureTurnTypeMultiValueColumn (its staleness predicate detects the
+    -- loose form too), so this only ever runs once per database going forward.
+    type TEXT NOT NULL DEFAULT '[]' CHECK (json_type(type) = 'array'),
     significance_grade INTEGER CHECK (
       significance_grade IS NULL OR significance_grade BETWEEN 0 AND 4
     ),
@@ -33632,6 +33645,14 @@ function stripTag(text, tagName) {
 function stripPrivateTags(text) {
   return stripTag(text, "private");
 }
+var RETIRED_TAG_NAMESPACE = "topic:";
+function findRetiredTopicTag(tags) {
+  return tags.find((tag) => tag.startsWith(RETIRED_TAG_NAMESPACE)) ?? null;
+}
+function retiredTopicTagMessage(tag) {
+  const bare = tag.slice(RETIRED_TAG_NAMESPACE.length);
+  return `tag "${tag}" uses the retired topic: namespace (spec B6) \u2014 tags are bare subject words now. Use "${bare}" instead.`;
+}
 
 // src/shared/type-vocabulary.ts
 var MEMORY_TYPES = [
@@ -33873,6 +33894,10 @@ function noteTool(db, rawInput, options = {}) {
       return parameterError("tags must be an array of strings when present.");
     }
     tagValues = rawInput.tags;
+    const retiredTag = findRetiredTopicTag(tagValues);
+    if (retiredTag !== null) {
+      return parameterError(retiredTopicTagMessage(retiredTag));
+    }
   }
   const turn = getTurn(db, address.sessionId, address.promptNumber);
   if (!turn) {
@@ -36832,16 +36857,25 @@ function validateGrade(value, label) {
   }
   return null;
 }
-function validateType(value) {
+function resolveType(value) {
+  if (value === void 0) {
+    return { ok: true, value: void 0 };
+  }
+  try {
+    return { ok: true, value: normalizeTypeValues(value) };
+  } catch (error48) {
+    return {
+      ok: false,
+      message: `${error48 instanceof Error ? error48.message : String(error48)}. Allowed: ${MEMORY_TYPES.join(", ")}.`
+    };
+  }
+}
+function validateTags(value) {
   if (value === void 0) {
     return null;
   }
-  for (const entry of value) {
-    if (!isMemoryType(entry)) {
-      return `type "${entry}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
-    }
-  }
-  return null;
+  const retiredTag = findRetiredTopicTag(value);
+  return retiredTag === null ? null : retiredTopicTagMessage(retiredTag);
 }
 function deriveTurnStatus(input) {
   if (input.status === "undone") {
@@ -36892,9 +36926,13 @@ function handleTurnRemember(db, turnId, input) {
   if (gradeError) {
     return parameterError2(gradeError);
   }
-  const typeError = validateType(input.type);
-  if (typeError) {
-    return parameterError2(typeError);
+  const resolvedType = resolveType(input.type);
+  if (!resolvedType.ok) {
+    return parameterError2(resolvedType.message);
+  }
+  const tagsError = validateTags(input.tags);
+  if (tagsError) {
+    return parameterError2(tagsError);
   }
   if ((current.status === "active" || current.status === "provisional") && (input.grade === void 0 || input.grade === null)) {
     return parameterError2(
@@ -36938,9 +36976,14 @@ function handleTurnRemember(db, turnId, input) {
         title: input.title,
         content: typeof input.content === "string" ? bracketBareTurnReferences(input.content, isValidPredecessor) : input.content,
         insight: input.insight,
-        type: input.type,
+        type: resolvedType.value,
         significanceGrade: input.grade,
-        tags: input.tags ?? [],
+        // D5a (peer review item 2): present replaces the stored list whole,
+        // absent leaves it alone — the same `replaceTags` route `note`
+        // already takes. The old `tags: input.tags ?? []` merged through
+        // `mergeTags` and could never clear: an explicit `[]` merged to a
+        // no-op, so "tags: []" silently kept whatever was already stored.
+        replaceTags: input.tags,
         updatedAtEpoch: nowEpoch
       });
       if (!turn) {
@@ -37673,28 +37716,57 @@ function segmentPhases(turns) {
   return phases;
 }
 function computeTypesDistribution(turns) {
-  const distribution = {
-    bugfix: 0,
-    feature: 0,
-    refactor: 0,
-    change: 0,
-    discovery: 0,
-    decision: 0,
-    compact: 0,
-    pending: 0
-  };
+  const words = {};
+  let none = 0;
   for (const turn of turns) {
     if (!isTimelineLiveTurn(turn)) {
       continue;
     }
-    const legacyType = turn.type[0] ?? null;
-    if (legacyType === null) {
-      distribution.pending += 1;
-    } else if (isTypedTurnKind(legacyType)) {
-      distribution[legacyType] += 1;
+    if (turn.type.length === 0) {
+      none += 1;
+      continue;
+    }
+    for (const word of turn.type) {
+      words[word] = (words[word] ?? 0) + 1;
     }
   }
-  return distribution;
+  return { words, none };
+}
+function renderTypesDistribution(distribution) {
+  const byGlyph = /* @__PURE__ */ new Map();
+  const counted = /* @__PURE__ */ new Set();
+  const accumulate = (word) => {
+    if (counted.has(word)) {
+      return;
+    }
+    counted.add(word);
+    const count = distribution.words[word] ?? 0;
+    if (count === 0) {
+      return;
+    }
+    const glyph = typeWordGlyph(word);
+    byGlyph.set(glyph, (byGlyph.get(glyph) ?? 0) + count);
+  };
+  for (const word of MEMORY_TYPES) {
+    accumulate(word);
+  }
+  for (const word of Object.keys(LEGACY_TYPE_GLYPH)) {
+    accumulate(word);
+  }
+  const parts = [...byGlyph].map(([glyph, count]) => `${glyph}${count}`);
+  let unrecognised = 0;
+  for (const [word, count] of Object.entries(distribution.words)) {
+    if (!counted.has(word)) {
+      unrecognised += count;
+    }
+  }
+  if (unrecognised > 0) {
+    parts.push(`?${unrecognised}`);
+  }
+  if (distribution.none > 0) {
+    parts.push(`\u2022${distribution.none}`);
+  }
+  return parts;
 }
 function detectBrokenPromptPairs(turns) {
   const pairs = [];
@@ -37730,9 +37802,6 @@ function sharedPrefixLength(left, right) {
     index += 1;
   }
   return index;
-}
-function isTypedTurnKind(value) {
-  return value === "bugfix" || value === "feature" || value === "refactor" || value === "change" || value === "discovery" || value === "decision" || value === "compact";
 }
 function parsePositiveBound(raw, id) {
   const value = Number(raw);
@@ -38198,31 +38267,7 @@ function renderSessionHeader(view) {
   const sessionStart = view.session.createdAtEpoch;
   const sessionEnd = view.session.updatedAtEpoch ?? view.session.completedAtEpoch ?? view.session.createdAtEpoch;
   const compactSuffix = view.compactBoundaries.length > 0 ? `, compact at ${view.compactBoundaries.map((n) => `T${n}`).join(", ")}` : "";
-  const typesParts = [];
-  if (view.typesDistribution.bugfix > 0) {
-    typesParts.push(`\u{1F534}${view.typesDistribution.bugfix}`);
-  }
-  if (view.typesDistribution.feature > 0) {
-    typesParts.push(`\u{1F7E3}${view.typesDistribution.feature}`);
-  }
-  if (view.typesDistribution.refactor > 0) {
-    typesParts.push(`\u{1F504}${view.typesDistribution.refactor}`);
-  }
-  if (view.typesDistribution.change > 0) {
-    typesParts.push(`\u2705${view.typesDistribution.change}`);
-  }
-  if (view.typesDistribution.discovery > 0) {
-    typesParts.push(`\u{1F535}${view.typesDistribution.discovery}`);
-  }
-  if (view.typesDistribution.decision > 0) {
-    typesParts.push(`\u2696\uFE0F${view.typesDistribution.decision}`);
-  }
-  if (view.typesDistribution.compact > 0) {
-    typesParts.push(`\u23F8${view.typesDistribution.compact}`);
-  }
-  if (view.typesDistribution.pending > 0) {
-    typesParts.push(`\u23F3${view.typesDistribution.pending}`);
-  }
+  const typesParts = renderTypesDistribution(view.typesDistribution);
   const startDate = formatLocalDate(sessionStart);
   const endDate = formatLocalDate(sessionEnd);
   const endLabel = startDate === endDate ? formatLocalTime(sessionEnd) : `${endDate} ${formatLocalTime(sessionEnd)}`;

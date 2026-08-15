@@ -14,7 +14,11 @@ import {
   type TurnRecord,
   type TurnStatus,
 } from "../db/turns";
-import { isMemoryType, MEMORY_TYPES } from "../shared/type-vocabulary";
+import {
+  findRetiredTopicTag,
+  retiredTopicTagMessage,
+} from "../shared/tag-stripping";
+import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 import {
   CURRENT_SESSION_STATE_TOKEN_BUDGET,
   measureSessionStateTokens,
@@ -232,23 +236,49 @@ function validateGrade(
   return null;
 }
 
+type FieldResolution<T> =
+  | { ok: true; value: T }
+  | { ok: false; message: string };
+
 /**
- * The closed `type` vocabulary stays closed at the write boundary too: an
+ * The closed `type` vocabulary stays closed at the write boundary too, and
+ * now routes through the SAME normalizer `note` already uses (peer review
+ * item 5), rather than a bespoke re-validation that stops short of it: an
  * unrecognised word is rejected rather than landing in the column (spec B7:
  * an illegal or absent activity word leaves the column empty rather than
- * storing the bad word or a guess). `undefined` (omitted) passes through
- * untouched — validation only concerns a word that IS supplied.
+ * storing the bad word or a guess), and a repeated word collapses to one,
+ * order-preserving, rather than being stored twice. `undefined` (omitted)
+ * passes through untouched — normalization only concerns a value that IS
+ * supplied.
  */
-function validateType(value: readonly string[] | undefined): string | null {
+function resolveType(
+  value: readonly string[] | undefined,
+): FieldResolution<string[] | undefined> {
+  if (value === undefined) {
+    return { ok: true, value: undefined };
+  }
+  try {
+    return { ok: true, value: normalizeTypeValues(value) };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `${error instanceof Error ? error.message : String(error)}. Allowed: ${MEMORY_TYPES.join(", ")}.`,
+    };
+  }
+}
+
+/**
+ * spec B6, peer review item 3: the retired `topic:` namespace stays retired
+ * at the write boundary — rejected loudly rather than silently stripped, the
+ * same strictness `resolveType` already applies to an unrecognised word.
+ * `undefined` (omitted) passes through untouched.
+ */
+function validateTags(value: readonly string[] | undefined): string | null {
   if (value === undefined) {
     return null;
   }
-  for (const entry of value) {
-    if (!isMemoryType(entry)) {
-      return `type "${entry}" is not a recognised type. Allowed: ${MEMORY_TYPES.join(", ")}.`;
-    }
-  }
-  return null;
+  const retiredTag = findRetiredTopicTag(value);
+  return retiredTag === null ? null : retiredTopicTagMessage(retiredTag);
 }
 
 function deriveTurnStatus(input: RememberToolInput): TurnStatus {
@@ -343,9 +373,14 @@ function handleTurnRemember(
     return parameterError(gradeError);
   }
 
-  const typeError = validateType(input.type);
-  if (typeError) {
-    return parameterError(typeError);
+  const resolvedType = resolveType(input.type);
+  if (!resolvedType.ok) {
+    return parameterError(resolvedType.message);
+  }
+
+  const tagsError = validateTags(input.tags);
+  if (tagsError) {
+    return parameterError(tagsError);
   }
 
   if (
@@ -415,9 +450,14 @@ function handleTurnRemember(
             ? bracketBareTurnReferences(input.content, isValidPredecessor)
             : input.content,
         insight: input.insight,
-        type: input.type,
+        type: resolvedType.value,
         significanceGrade: input.grade,
-        tags: input.tags ?? [],
+        // D5a (peer review item 2): present replaces the stored list whole,
+        // absent leaves it alone — the same `replaceTags` route `note`
+        // already takes. The old `tags: input.tags ?? []` merged through
+        // `mergeTags` and could never clear: an explicit `[]` merged to a
+        // no-op, so "tags: []" silently kept whatever was already stored.
+        replaceTags: input.tags,
         updatedAtEpoch: nowEpoch,
       });
 

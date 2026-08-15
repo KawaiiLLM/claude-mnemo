@@ -11,7 +11,11 @@ import { getShadowNote, upsertShadowNote } from "../db/shadow-notes";
 import { getTurn, promoteTurnFromNote, updateTurnById } from "../db/turns";
 import { isSegmentEra } from "../segment-era";
 import { formatNoteBudget } from "../shared/note-budget";
-import { stripPrivateTags } from "../shared/tag-stripping";
+import {
+  findRetiredTopicTag,
+  retiredTopicTagMessage,
+  stripPrivateTags,
+} from "../shared/tag-stripping";
 import { MEMORY_TYPES, normalizeTypeValues } from "../shared/type-vocabulary";
 
 type ToolTextResult = {
@@ -452,6 +456,14 @@ export function noteTool(
       return parameterError("tags must be an array of strings when present.");
     }
     tagValues = rawInput.tags as string[];
+    // spec B6, peer review item 3: the retired `topic:` namespace stays
+    // retired at the write boundary — a caller reintroducing it is rejected
+    // loudly rather than silently stripped, the same strictness `type`
+    // already applies to an unrecognised word.
+    const retiredTag = findRetiredTopicTag(tagValues);
+    if (retiredTag !== null) {
+      return parameterError(retiredTopicTagMessage(retiredTag));
+    }
   }
 
   const turn = getTurn(db, address.sessionId, address.promptNumber);

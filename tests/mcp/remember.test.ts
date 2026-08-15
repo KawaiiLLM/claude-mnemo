@@ -171,7 +171,7 @@ describe("remember tool routing and validation", () => {
       content: "Recorded the initial estimate.",
       insight: "- initial",
       type: ["research"],
-      tags: ["topic:estimate"],
+      tags: ["estimate"],
       grade: 2,
     });
     const currentTurnId = db
@@ -189,7 +189,7 @@ describe("remember tool routing and validation", () => {
       title: "Corrected estimate",
       content: `Evidence disproved [T${turnId}].`,
       type: ["research"],
-      tags: ["correction", "topic:estimate"],
+      tags: ["correction", "estimate"],
       grade: 2,
       regrade: { id: `T${turnId}`, grade: 1 },
     });
@@ -576,14 +576,63 @@ describe("remember tool routing and validation", () => {
       title: "Fix auth race",
       content: "Persists the extracted turn.",
       type: ["fix"],
-      tags: ["topic:a&amp;b", "rolled-back"],
+      tags: ["a&amp;b", "rolled-back"],
       grade: 2,
     });
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
     const turn = getTurn(db, sessionId, 1)!;
-    expect(turn.tags).toContain("topic:a&b");
+    expect(turn.tags).toContain("a&b");
     expect(turn.tags).toContain("rolled-back");
+  });
+
+  // Peer review item 3 on ticket 02 (spec B6): the migration stripped every
+  // EXISTING `topic:`-prefixed tag once; nothing stopped a caller writing the
+  // prefix straight back in until this check landed — this test used to
+  // expect `topic:a&b` to persist (see the HTML-entity-decode test above,
+  // which used it incidentally and is now rewritten to a bare tag).
+  test("a topic:-prefixed tag is rejected with a readable parameter error, and nothing is stored (spec B6)", () => {
+    const before = getTurn(db, sessionId, 1);
+    const result = rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      tags: ["topic:estimate"],
+      grade: 2,
+    });
+
+    expect(result.content[0]?.text).toContain("Parameter error");
+    expect(result.content[0]?.text).toContain("topic:estimate");
+    expect(result.content[0]?.text).toContain("retired");
+    // Nothing lands — not the title, not the retired tag.
+    expect(getTurn(db, sessionId, 1)).toEqual(before);
+  });
+
+  // D5a (peer review item 2): `remember.tags` used to route through
+  // `mergeTags`, so `tags: ["b"]` over a stored `["a"]` appended instead of
+  // replacing, and `tags: []` merged to a no-op and cleared nothing. `note`
+  // already routed through `replaceTags`; this proves `remember` now matches
+  // it — present replaces the stored list whole, absent leaves it alone.
+  test("remember tags overwrite the stored list whole rather than merging, and an explicit [] clears it (D5a)", () => {
+    rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      tags: ["a"],
+      grade: 2,
+    });
+    expect(getTurn(db, sessionId, 1)!.tags).toEqual(["a"]);
+
+    const overwritten = rememberTool(db, { id: `T${turnId}`, tags: ["b"] });
+    expect(overwritten.content[0]?.text).toContain(`Updated turn T${turnId}`);
+    expect(getTurn(db, sessionId, 1)!.tags).toEqual(["b"]);
+
+    const cleared = rememberTool(db, { id: `T${turnId}`, tags: [] });
+    expect(cleared.content[0]?.text).toContain(`Updated turn T${turnId}`);
+    expect(getTurn(db, sessionId, 1)!.tags).toEqual([]);
+
+    // Omitting `tags` entirely leaves the stored value alone.
+    rememberTool(db, { id: `T${turnId}`, tags: ["c"] });
+    rememberTool(db, { id: `T${turnId}`, grade: 3 });
+    expect(getTurn(db, sessionId, 1)!.tags).toEqual(["c"]);
   });
 
   test("always advances summaryUpdatedAtEpoch on a successful rewrite (D5)", () => {
@@ -756,9 +805,10 @@ describe("remember tool routing and validation", () => {
     });
 
     expect(result.content[0]?.text).toContain("Parameter error");
-    expect(result.content[0]?.text).toContain(
-      'type "bugfix" is not a recognised type',
-    );
+    // Peer review item 5: routed through the SAME normalizer `note` already
+    // uses (normalizeTypeValues), which throws "unknown type value: …"
+    // rather than the bespoke wording the old, separate validator used.
+    expect(result.content[0]?.text).toContain("unknown type value: bugfix");
     // Nothing lands — not the title, not the bad word.
     expect(getTurn(db, sessionId, 1)).toEqual(before);
   });
@@ -773,6 +823,22 @@ describe("remember tool routing and validation", () => {
 
     expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
     expect(getTurn(db, sessionId, 1)!.type).toEqual(["fix"]);
+  });
+
+  // Peer review item 5: `note` already de-duplicated a repeated type value
+  // through `normalizeTypeValues`; `remember` only validated the vocabulary
+  // and stored the raw (possibly repeated) list. Both now route through the
+  // same normalizer.
+  test("a repeated type value de-duplicates, order-preserving, same as note", () => {
+    const result = rememberTool(db, {
+      id: `T${turnId}`,
+      title: "Fix auth race",
+      type: ["fix", "review", "fix"],
+      grade: 2,
+    });
+
+    expect(result.content[0]?.text).toContain(`Updated turn T${turnId}`);
+    expect(getTurn(db, sessionId, 1)!.type).toEqual(["fix", "review"]);
   });
 
   test("turn remember with a title yields extracted status", () => {

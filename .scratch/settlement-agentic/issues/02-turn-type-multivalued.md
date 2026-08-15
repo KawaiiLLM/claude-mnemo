@@ -33,6 +33,16 @@ Written down here because the ticket requires it rather than leaving a reader to
 
 The first pass shipped two per-field mechanisms — `type` cleared on omission, `tags` merged additively — and both were reverted. Omission is silence for every field; a stated value overwrites whole. The full `overwrite`/`append` vocabulary is ticket 03's (spec D5a), and this ticket leaves every field on a strict subset of it.
 
+### Corrected after peer review
+
+The claim below about the rubric was **wrong** and is kept only so the correction is legible. A stale-rubric run does not fail visibly: the rubric names the *tag* field, which carries no vocabulary check, so `rolled-back` is stored and read as a reversal role by the timeline. It was live — 532 turns carry the tag, written continuously until the extraction pipeline stopped on 2026-08-11. The rubric now forbids the tag (see `src/task-causality-rubric.ts`); ticket 12 still owes the positive half, the `supersedes` edge instruction.
+
+Also corrected: the session-wide `types:` header line counted `type[0]` against a closed legacy bucket set, so a session written in the current vocabulary rendered zeros. Ticket 02 changed that consumer's source semantics, so it was this ticket's to fix, not a deferred render redesign.
+
+### Known follow-up
+
+`segments.type` and `segments.tags` still carry the loose `CHECK (json_valid(...))` that this ticket tightened to `json_type(...) = 'array'` for `turns` — the same defect shape, unowned by any ticket. Low risk while only the internal segment tool writes them.
+
 ### Two seams left open on purpose
 
 - **`task-causality-rubric.ts` is internally inconsistent.** Its correction clause still tells the settlement model to tag a casualty `rolled-back` through a `regrade` verb, neither of which exists now. Spec section I owns the rewrite — ticket 12. Live consequence until then: a settlement reply that follows the stale instruction emits a type the validator rejects, failing the whole window visibly rather than corrupting it silently. **Ticket 12 should land before settlement writes through tools.**

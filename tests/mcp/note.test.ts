@@ -547,6 +547,28 @@ describe("note tool", () => {
     expect(getShadowNote(db, targetTurnId)).toBeNull();
   });
 
+  // Peer review item 3 on ticket 02 (spec B6): the migration
+  // (stripRetiredTopicTagNamespace) stripped every EXISTING `topic:`-prefixed
+  // tag once; nothing at the write boundary stopped a caller from writing the
+  // prefix straight back in until this check landed.
+  test("rejects a topic:-prefixed tag with a readable parameter error, and stores nothing (spec B6)", () => {
+    const result = noteTool(
+      db,
+      {
+        turn: `S${sessionId}/T332`,
+        title: "measure+note-routing: fallback share 32%→4%",
+        content: "Deferred writing wins; the subagent fallback is dropped.",
+        tags: ["topic:routing"],
+      },
+      { now: () => 900, env: {} },
+    );
+
+    expect(resultText(result)).toStartWith("Parameter error:");
+    expect(resultText(result)).toContain("topic:routing");
+    expect(resultText(result)).toContain("retired");
+    expect(getShadowNote(db, targetTurnId)).toBeNull();
+  });
+
   test("a successful note closes its debt on the spot", () => {
     noteTool(
       db,

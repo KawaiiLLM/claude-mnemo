@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { getEffectiveCitations } from "../../src/db/citations";
 import { createDatabase } from "../../src/db/database";
+import { getOutgoingEdges, writeMemoryEdges } from "../../src/db/memory-edges";
 import {
   backfillAllIntraChains,
   initializeDatabase,
@@ -13,6 +14,7 @@ import {
 } from "../../src/db/schema";
 import { createSegment } from "../../src/db/segments";
 import { getSession, upsertSession } from "../../src/db/sessions";
+import { getShadowNote, upsertShadowNote } from "../../src/db/shadow-notes";
 import { runTranscriptPathBackfill } from "../../src/db/transcript-path-backfill";
 import { getTurn, getTurnById } from "../../src/db/turns";
 import * as searchModule from "../../src/db/search";
@@ -1654,7 +1656,7 @@ describe("initializeSchema", () => {
  * marker depends on, and its render surface (⏸) must survive unchanged.
  */
 describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
-  test("wraps every legacy scalar into a one-element array, NULL and '' into '[]', and a migrated compact row still renders its ⏸ marker", () => {
+  test("wraps every legacy scalar into a one-element array, preserves gapped ids and their dependents, recreates the endpoint-deletion trigger, tightens the CHECK to array-only, and a migrated compact row still renders its ⏸ marker (peer review items 4a-4c)", () => {
     const db = createDatabase(":memory:");
     initializeSchema(db);
     const sessionId = upsertSession(db, {
@@ -1704,19 +1706,63 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
         UNIQUE(session_id, prompt_number)
       );
     `);
+    // Explicit, GAPPED ids (1, 3, 5, 7 — 2/4/6 never exist), not consecutive
+    // AUTOINCREMENT ones: a copy list that dropped `id` from the rebuild's
+    // INSERT/SELECT would still pass on consecutive fixture ids, because
+    // AUTOINCREMENT would happen to regenerate the same numbers by
+    // coincidence (peer review mutation-check item 4c).
     const insert = db.query<
       { id: number },
-      [number, number, string, string | null, string, number]
+      [
+        number,
+        number,
+        number,
+        string | null,
+        string,
+        number,
+        number | null,
+        number,
+      ]
     >(
       `INSERT INTO turns (
-         session_id, prompt_number, status, type, title, created_at_epoch
-       ) VALUES (?, ?, 'extracted', ?, ?, ?)
+         id, session_id, prompt_number, status, type, title, cites_recorded,
+         parent_turn_id, created_at_epoch
+       ) VALUES (?, ?, ?, 'extracted', ?, ?, ?, ?, ?)
        RETURNING id`,
     );
-    const discoveryId = insert.get(sessionId, 1, "discovery", "legacy discovery row", 100)!.id;
-    const compactId = insert.get(sessionId, 2, "compact", "/compact", 200)!.id;
-    const nullId = insert.get(sessionId, 3, null, "never typed", 300)!.id;
-    const emptyId = insert.get(sessionId, 4, "", "empty string typed", 400)!.id;
+    const discoveryId = insert.get(1, sessionId, 1, "discovery", "legacy discovery row", 1, null, 100)!.id;
+    const compactId = insert.get(3, sessionId, 2, "compact", "/compact", 0, null, 200)!.id;
+    const nullId = insert.get(5, sessionId, 3, null, "never typed", 0, discoveryId, 300)!.id;
+    const emptyId = insert.get(7, sessionId, 4, "", "empty string typed", 0, null, 400)!.id;
+    expect([discoveryId, compactId, nullId, emptyId]).toEqual([1, 3, 5, 7]);
+
+    // A dependent row in ANOTHER table (peer review mutation-check item
+    // 4c): a copy list that dropped `id` would remap ids and silently
+    // orphan or misdirect this FK reference instead of failing loudly.
+    upsertShadowNote(db, {
+      turnId: discoveryId,
+      title: "shadow title",
+      content: "shadow content",
+      nowEpoch: 100,
+    });
+
+    // A structured citation edge (peer review mutation-check item 4b): a
+    // copy list that dropped `cites_recorded` would silently fall this row
+    // back from structured-edge truth to inline `[T<n>]` parsing the
+    // moment the rebuild runs, even though the edge itself survives
+    // untouched in the separate `memory_edges` table.
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: discoveryId },
+          cited: { kind: "turn", id: compactId },
+          relation: "depends-on",
+          provenance: "asserted",
+        },
+      ],
+      100,
+    );
     db.exec("PRAGMA foreign_keys = ON");
 
     // The rebuild runs as part of the ordinary migration chain.
@@ -1727,13 +1773,48 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
     expect(getTurnById(db, nullId)!.type).toEqual([]);
     expect(getTurnById(db, emptyId)!.type).toEqual([]);
 
-    // The CHECK constraint is live going forward: a raw scalar write is
-    // rejected, and only a JSON array is accepted.
+    // Identity itself survived unchanged, not merely each row's contents.
+    expect(getTurnById(db, 1)!.id).toBe(1);
+    expect(getTurnById(db, 3)!.id).toBe(3);
+    expect(getTurnById(db, 5)!.id).toBe(5);
+    expect(getTurnById(db, 7)!.id).toBe(7);
+    // The intra-`turns` reference still resolves to the RIGHT row rather
+    // than to whatever an id remap happened to land on.
+    expect(getTurnById(db, nullId)!.parentTurnId).toBe(discoveryId);
+    // The cross-TABLE dependent row still resolves too.
+    expect(getShadowNote(db, discoveryId)?.title).toBe("shadow title");
+
+    // `cites_recorded` and its edge both survived, so the turn's effective
+    // citations still read from the structured edge table rather than
+    // falling back to reparsing `content`.
+    const discoveryTurn = getTurnById(db, discoveryId)!;
+    expect(discoveryTurn.citesRecorded).toBe(true);
+    const effective = getEffectiveCitations(db, discoveryTurn);
+    expect(effective.source).toBe("structured");
+    expect(effective.citedTurnIds).toEqual([compactId]);
+
+    // The CHECK constraint is live going forward and now array-only (peer
+    // review P2): a raw non-JSON scalar is rejected, as before, and so are
+    // the two shapes that used to pass the RETIRED, looser `json_valid`
+    // CHECK — a bare JSON string and a JSON object are both valid JSON but
+    // not arrays. Only a JSON array is accepted.
     expect(() =>
       db
         .query("UPDATE turns SET type = 'not-json-array' WHERE id = ?")
         .run(discoveryId),
     ).toThrow();
+    expect(() =>
+      db.query(`UPDATE turns SET type = '"fix"' WHERE id = ?`).run(discoveryId),
+    ).toThrow();
+    expect(() =>
+      db.query(`UPDATE turns SET type = '{"a":1}' WHERE id = ?`).run(discoveryId),
+    ).toThrow();
+    expect(() =>
+      db
+        .query(`UPDATE turns SET type = '["refactor"]' WHERE id = ?`)
+        .run(discoveryId),
+    ).not.toThrow();
+    db.query(`UPDATE turns SET type = '["discovery"]' WHERE id = ?`).run(discoveryId);
 
     // The migrated compact row still renders its ⏸ marker — the timeline's
     // whole reason for reading `type` at all on this row.
@@ -1742,6 +1823,113 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
     expect(rendered).toContain("⏸ /compact");
 
     expect(getTurn(db, sessionId, 2)!.type).toEqual(["compact"]);
+
+    // The endpoint-deletion trigger (spec C15) was recreated on the
+    // REBUILT table rather than silently lost with the dropped one (peer
+    // review mutation-check item 4a): deleting an edge's endpoint after the
+    // rebuild must still prune the edge, not orphan it.
+    expect(getOutgoingEdges(db, { kind: "turn", id: discoveryId })).toHaveLength(1);
+    db.query("DELETE FROM turns WHERE id = ?").run(compactId);
+    expect(getOutgoingEdges(db, { kind: "turn", id: discoveryId })).toEqual([]);
+
+    db.close();
+  });
+
+  test("a database already migrated to the retired looser json_valid(type) CHECK is rebuilt again to json_type(type) = 'array', and a third initializeSchema call is a no-op (peer review item 4, staleness detects the loose form too)", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-type-loose-check",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // Back `turns` out to the shape ticket 02 ORIGINALLY shipped — already
+    // widened to a JSON array, but under the retired, looser
+    // `json_valid(type)` CHECK rather than `json_type(type) = 'array'` —
+    // what a real installation that already ran the ticket 02 migration
+    // looks like the moment before this fix lands.
+    db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("DROP TABLE turns");
+    db.exec(`
+      CREATE TABLE turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        prompt_number INTEGER NOT NULL,
+        content_prompt_id TEXT,
+        was_interrupted INTEGER NOT NULL DEFAULT 0,
+        was_rolled_back INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        user_prompt TEXT,
+        assistant_response TEXT,
+        assistant_transcript TEXT,
+        title TEXT,
+        content TEXT,
+        insight TEXT,
+        type TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(type)),
+        significance_grade INTEGER,
+        tags TEXT,
+        files_read TEXT,
+        files_modified TEXT,
+        tool_call_count INTEGER,
+        transcript_line_start INTEGER,
+        cites_recorded INTEGER NOT NULL DEFAULT 0,
+        consulted_memories TEXT,
+        compact_boundary_uuid TEXT,
+        parent_turn_id INTEGER,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at_epoch INTEGER,
+        UNIQUE(session_id, prompt_number)
+      );
+    `);
+    const insert = db.query<{ id: number }, [number, number, string, number]>(
+      `INSERT INTO turns (session_id, prompt_number, status, type, created_at_epoch)
+       VALUES (?, ?, 'extracted', ?, ?)
+       RETURNING id`,
+    );
+    const fixId = insert.get(sessionId, 1, '["fix"]', 100)!.id;
+    db.exec("PRAGMA foreign_keys = ON");
+
+    // Rebuild #1: loose CHECK -> strict CHECK.
+    initializeSchema(db);
+
+    const ddlAfterFirstRebuild = db
+      .query<{ sql: string | null }, []>(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'turns'",
+      )
+      .get()?.sql;
+    expect(ddlAfterFirstRebuild).toContain("json_type(type) = 'array'");
+    // The already-array-shaped value survived un-double-wrapped.
+    expect(getTurnById(db, fixId)!.type).toEqual(["fix"]);
+
+    // The strict CHECK is live: the shapes the OLD, looser CHECK admitted
+    // are rejected now.
+    expect(() =>
+      db.query(`UPDATE turns SET type = '"fix"' WHERE id = ?`).run(fixId),
+    ).toThrow();
+    expect(() =>
+      db.query(`UPDATE turns SET type = '{"a":1}' WHERE id = ?`).run(fixId),
+    ).toThrow();
+    db.query(`UPDATE turns SET type = '["fix"]' WHERE id = ?`).run(fixId);
+
+    // Calls #2 and #3: proven, not just assumed, to be no-ops — spying on
+    // the connection catches a rebuild that silently re-ran and still
+    // happened to leave the data alone, which a value-level assertion alone
+    // cannot tell apart from "never ran again".
+    const execSpy = spyOn(db, "exec");
+    initializeSchema(db);
+    initializeSchema(db);
+    const rebuildExecCalls = execSpy.mock.calls.filter(
+      ([sql]) => typeof sql === "string" && sql.includes("DROP TABLE turns"),
+    );
+    expect(rebuildExecCalls).toHaveLength(0);
+    execSpy.mockRestore();
+
+    expect(getTurnById(db, fixId)!.type).toEqual(["fix"]);
 
     db.close();
   });
@@ -1825,6 +2013,63 @@ describe("stripRetiredTopicTagNamespace (ticket 02, spec B6)", () => {
 
     expect(tagsOf(db, only!)).toEqual(afterFirst);
     expect(afterFirst).toEqual(["svg-filter", "compact:auto"]);
+
+    db.close();
+  });
+
+  // Peer review P1 on ticket 02: `tags` carries no `json_valid` CHECK, so a
+  // malformed row is storable, and the candidate SELECT used to call
+  // `json_each(turns.tags)` unguarded — SQLite throws `malformed JSON` out of
+  // `.all()` itself, BEFORE the `JSON.parse` try/catch in the update loop
+  // ever runs, aborting `initializeSchema` for every caller over one bad row.
+  test("a malformed turns.tags row does not abort initializeSchema, and is left exactly as stored (peer review item 1)", () => {
+    const db = createDatabase(":memory:");
+    initializeSchema(db);
+    const sessionId = upsertSession(db, {
+      contentSessionId: "session-malformed-tags",
+      project: "/tmp/project",
+      title: null,
+      insight: null,
+      createdAtEpoch: 100,
+      updatedAtEpoch: null,
+      completedAtEpoch: null,
+    }).id;
+
+    // `tags` has no CHECK constraint, so raw SQL can store non-JSON text —
+    // exactly the row shape this guard exists for.
+    const malformedId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?)
+         RETURNING id`,
+      )
+      .get(sessionId, 1, "{not valid json", 100)!.id;
+    // A well-formed sibling row, prefixed, in the SAME migration pass — the
+    // malformed row must not take this one down with it.
+    const wellFormedId = db
+      .query<{ id: number }, [number, number, string, number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, tags, created_at_epoch)
+         VALUES (?, ?, 'extracted', ?, ?)
+         RETURNING id`,
+      )
+      .get(sessionId, 2, JSON.stringify(["topic:reopen"]), 200)!.id;
+
+    // Reopening (a fresh initializeSchema call, the same shape every hook
+    // process's entry point takes) must not throw.
+    expect(() => initializeSchema(db)).not.toThrow();
+
+    // The malformed row is left exactly as stored — un-strippable, since it
+    // cannot be safely parsed, but not corrupted or dropped either.
+    expect(
+      db
+        .query<{ tags: string }, [number]>(
+          "SELECT tags FROM turns WHERE id = ?",
+        )
+        .get(malformedId)!.tags,
+    ).toBe("{not valid json");
+    // The well-formed sibling row in the same pass still gets stripped
+    // normally — the guard excludes only the row it cannot read.
+    expect(tagsOf(db, wellFormedId)).toEqual(["reopen"]);
 
     db.close();
   });

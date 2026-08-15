@@ -30,9 +30,27 @@ describe("task-causality grade rubric — text pin", () => {
     );
   });
 
+  // Re-pinned once, deliberately. The previous hash
+  // (0dd801cf7f3826ae9074bf71eebbca95c8069a4ce9fe52d9b45bf22418ef8624) covered
+  // a clause that ORDERED the grader to tag a casualty `rolled-back`. Ticket
+  // 02 retired that word from the type vocabulary, but the clause named the
+  // tag field, which carries no vocabulary check — so the instruction kept
+  // being followed and the timeline kept reading the result as a reversal
+  // role. Re-pinning a hash is not a change to wave through, so the
+  // prohibition is also asserted positively below: a future re-pin that
+  // silently dropped it would pass this hash and fail that.
   test("grade correction text is unchanged", () => {
     expect(sha256(TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC)).toBe(
-      "0dd801cf7f3826ae9074bf71eebbca95c8069a4ce9fe52d9b45bf22418ef8624",
+      "6dbb7a4018d18cc251ad3944a8cff7b1704399a6dbbd460bfb3238febe1bca82",
+    );
+  });
+
+  test("the correction duty forbids the retired reversal tag rather than requiring it", () => {
+    expect(TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC).toContain(
+      "Do NOT tag the casualty `rolled-back`",
+    );
+    expect(TASK_CAUSALITY_GRADE_CORRECTION_RUBRIC).not.toContain(
+      "you MUST both tag the casualty",
     );
   });
 
