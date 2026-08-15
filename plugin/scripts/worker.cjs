@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msuqgqsi" : "dev";
+var BUILD_ID = true ? "0.10.0-msur1up9" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -7890,13 +7890,18 @@ function buildCorrectionGraph(turns, options = {}) {
       continue;
     }
     const supersededIds = /* @__PURE__ */ new Set();
+    const structuredTargets = /* @__PURE__ */ new Set();
     for (const edge of entry.edges) {
+      structuredTargets.add(edge.citedTurnId);
       if (edge.relation === "supersedes") {
         supersededIds.add(edge.citedTurnId);
       }
     }
-    if (entry.edges.length === 0 && !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
+    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
       for (const citedTurnId of entry.citedTurnIds) {
+        if (structuredTargets.has(citedTurnId)) {
+          continue;
+        }
         const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
         if (cited && milestoneMarker(cited) === "reversed") {
           supersededIds.add(citedTurnId);
@@ -8187,7 +8192,7 @@ function selectMilestoneTurns(view) {
   const inDegree = citationInDegree(citations);
   const universeById = new Map(universe.map((turn) => [turn.id, turn]));
   const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-  const graph = buildCorrectionGraph(seq, {
+  const graph = buildCorrectionGraph(universe, {
     citations,
     resolveCited: (id) => universeById.get(id),
     taskCausalityEraCutoffEpoch: eraCutoff
@@ -47459,19 +47464,22 @@ function handleSessionRemember(db, sessionId, input) {
       `rendered state exceeds ${CURRENT_SESSION_STATE_TOKEN_BUDGET} tokens; title=${tokenReport.title}, content=${tokenReport.content}, current=${tokenReport.current}, next_steps=${tokenReport.nextSteps}, decision=${tokenReport.decision}, done=${tokenReport.done}, reference=${tokenReport.reference}, total=${tokenReport.total}. Trim fields and retry.`
     );
   }
-  const updated = updateSessionSummaryRewrite(
+  const updated = runWriteTransaction(
     db,
-    sessionId,
-    {
-      title: input.title ?? "",
-      content: input.content ?? "",
-      decision: input.decision ?? "",
-      done: input.done ?? "",
-      current: input.current ?? "",
-      nextSteps: input.next_steps ?? "",
-      reference: input.reference ?? ""
-    },
-    Math.floor(Date.now() / 1e3)
+    () => updateSessionSummaryRewrite(
+      db,
+      sessionId,
+      {
+        title: input.title ?? "",
+        content: input.content ?? "",
+        decision: input.decision ?? "",
+        done: input.done ?? "",
+        current: input.current ?? "",
+        nextSteps: input.next_steps ?? "",
+        reference: input.reference ?? ""
+      },
+      Math.floor(Date.now() / 1e3)
+    )
   );
   if (!updated) {
     return textResult2(`Session ${sessionId} not found.`);

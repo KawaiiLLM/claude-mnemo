@@ -1324,6 +1324,58 @@ describe("buildCorrectionGraph", () => {
     expect(g.supersededBy.get(20)).toEqual([30]);
   });
 
+  // The legacy adapter's gate is PER TARGET. It was once `source === "inline"`,
+  // a whole-turn fact because the reader chose one source for the whole turn;
+  // translating that to `edges.length === 0` after the per-target union meant a
+  // single structured edge silently switched the adapter off for every OTHER
+  // target the same turn cited. Here the corrector has a structured edge about
+  // a settled target and only prose about a reversed victim.
+  it("still infers a pre-era reversal for a target the edges say nothing about", () => {
+    const settled = turn({ id: 10, promptNumber: 1, type: "decision", title: "settled", createdAtEpoch: base });
+    const victim = turn({
+      id: 20,
+      promptNumber: 2,
+      type: "decision",
+      title: "overturned later",
+      tags: ["rolled-back"],
+      createdAtEpoch: base + 60,
+    });
+    const corrector = turn({
+      id: 30,
+      promptNumber: 3,
+      type: "decision",
+      title: "cites both",
+      createdAtEpoch: base + 120,
+    });
+    const g = buildCorrectionGraph([settled, victim, corrector], {
+      citations: new Map([
+        [10, { citedTurnIds: [], edges: [] }],
+        [20, { citedTurnIds: [], edges: [] }],
+        [
+          30,
+          {
+            // Union shape: one structured edge (about `settled`) plus a prose
+            // citation of the victim that no edge covers.
+            citedTurnIds: [10, 20],
+            edges: [
+              {
+                citingTurnId: 30,
+                citedTurnId: 10,
+                relation: "depends-on" as const,
+                createdAtEpoch: base + 120,
+              },
+            ],
+          },
+        ],
+      ]),
+      taskCausalityEraCutoffEpoch: era,
+    });
+
+    expect([...g.supersededVictims]).toEqual([20]);
+    expect([...g.correctors]).toEqual([30]);
+    expect(g.supersededBy.get(20)).toEqual([30]);
+  });
+
   it("ignores a non-supersedes relation (builds-on is consumption, not correction)", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
@@ -3947,14 +3999,13 @@ describe("unified row renderer — row formats (spec §D)", () => {
   });
 
   it("still renders the →被T<n>推翻 back-link when a victim's own grade keeps it pulled (spec H1/H3)", () => {
-    // T3 in `seedDesignArc` is a poor fixture for this now: its own G3 clears
-    // the spine bar (spec H1: no floor), so it becomes its OWN row instead of
-    // a ↳ antecedent (see the frozen-shapes test below) — main rows do not
-    // print the back-link today. This fixture keeps the victim's own grade
-    // LOW enough that it still qualifies for pull-through on its own merit,
-    // which is what still proves the back-link mechanism survives. A leading
-    // origin turn keeps the victim (T2) from being a window endpoint itself,
-    // which would keep it regardless of grade and defeat the point.
+    // This one covers the ↳ row specifically. T3 in `seedDesignArc` no longer
+    // serves: its own G3 clears the spine bar (spec H1: no floor), so it
+    // becomes its OWN row — which the main-row test below covers instead.
+    // This fixture keeps the victim's grade LOW enough to still qualify for
+    // pull-through on its own merit. A leading origin turn keeps the victim
+    // (T2) from being a window endpoint itself, which would keep it
+    // regardless of grade and defeat the point.
     const db = createDatabase(":memory:");
     const rows = [
       turn({
@@ -5174,10 +5225,8 @@ describe("unified row renderer — frozen shapes", () => {
     // supersedes edge and rendered as a ↳ casualty under T5 with the
     // →被T5推翻 back-link. Spec H1 removes that floor: T3's own G3 clears the
     // spine bar, so it now renders as its OWN row, in prompt order ahead of
-    // T5 — and, since main rows do not print the back-link (pre-existing, not
-    // changed by this ticket), the →被T5推翻 text is gone from this output
-    // entirely, even though `KeptMilestone.supersededBy` still carries it as
-    // data (see the dedicated back-link test above).
+    // T5 — carrying the →被T5推翻 text with it, because H3's "the back-link
+    // survives" means it appears wherever the row lands.
     //
     // T2 also moves: T3 cites it too (evidence-for), and a shared antecedent
     // homes under its EARLIEST kept citer — now T3, not T5, since T3 itself
@@ -5371,5 +5420,57 @@ describe("navigation legend across folded day groups (spec D1/D4)", () => {
 
     expect(out).not.toContain("Legend:");
     expect(out).not.toContain(NAVIGATION_LEGEND);
+  });
+});
+
+
+// Spec H3, two ways the back-link can be lost that the ↳-row test cannot see.
+describe("the →被T<n>推翻 back-link on a main row", () => {
+  const era = 1_784_711_427;
+
+  const victimArc = () => [
+    turn({ id: 10, promptNumber: 1, type: "design", title: "origin", significanceGrade: 4, createdAtEpoch: era }),
+    turn({ id: 20, promptNumber: 2, type: "design", title: "the conclusion later overturned", significanceGrade: 3, createdAtEpoch: era + 60 }),
+    turn({ id: 30, promptNumber: 3, type: "fix", title: "overturns it", significanceGrade: 3, citesRecorded: true, createdAtEpoch: era + 120 }),
+  ];
+
+  it("renders on the victim's own main row, not only under a ↳", () => {
+    const rows = victimArc();
+    const selection = selectMilestoneTurns({
+      windowTurns: rows,
+      windowSignals: detectShapeSignals(rows),
+      compactBoundaries: [],
+      taskCausalityEraCutoffEpoch: era,
+      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
+    } as Parameters<typeof selectMilestoneTurns>[0]);
+
+    const victimRow = selection.kept.find((row) => row.turn.promptNumber === 2);
+    // Its own G3 keeps it (spec H1: no floor), so it is a main row — and the
+    // annotation has to travel with it.
+    expect(victimRow?.supersededBy).toEqual([3]);
+    // The render half is pinned by the frozen-shapes golden above, which
+    // carries `→被T5推翻` on a main row and goes red if the renderer drops it.
+  });
+
+  // The correction graph is built from the whole session, not the window. A
+  // ranged view whose CORRECTOR falls outside the range used to render the
+  // victim as an ordinary main row with no annotation at all — the reader was
+  // told less because they asked for less, which is not what a range means.
+  it("survives when the corrector sits outside the requested range", () => {
+    const all = victimArc();
+    const windowOnly = all.filter((row) => row.promptNumber <= 2);
+
+    const selection = selectMilestoneTurns({
+      windowTurns: windowOnly,
+      windowSignals: detectShapeSignals(windowOnly),
+      compactBoundaries: [],
+      sessionTurns: all,
+      taskCausalityEraCutoffEpoch: era,
+      citations: structuredCitations({ 30: [[20, "supersedes"]] }),
+    } as Parameters<typeof selectMilestoneTurns>[0]);
+
+    const victimRow = selection.kept.find((row) => row.turn.promptNumber === 2);
+    expect(victimRow).toBeDefined();
+    expect(victimRow?.supersededBy).toEqual([3]);
   });
 });

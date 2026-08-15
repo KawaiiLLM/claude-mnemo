@@ -636,19 +636,27 @@ function handleSessionRemember(
     );
   }
 
-  const updated = updateSessionSummaryRewrite(
-    db,
-    sessionId,
-    {
-      title: input.title ?? "",
-      content: input.content ?? "",
-      decision: input.decision ?? "",
-      done: input.done ?? "",
-      current: input.current ?? "",
-      nextSteps: input.next_steps ?? "",
-      reference: input.reference ?? "",
-    },
-    Math.floor(Date.now() / 1000),
+  // One transaction over the body AND the pairs it implies. `updateSessionSummaryRewrite`
+  // commits the summary UPDATE and then reconciles the citations it names, so
+  // running it bare let two concurrent session writes interleave into a final
+  // body from one of them and a final edge set from the other. The turn route
+  // has always wrapped (above), and the settlement write-back reaches this same
+  // function from inside its own transaction — this was the one uncovered path.
+  const updated = runWriteTransaction(db, () =>
+    updateSessionSummaryRewrite(
+      db,
+      sessionId,
+      {
+        title: input.title ?? "",
+        content: input.content ?? "",
+        decision: input.decision ?? "",
+        done: input.done ?? "",
+        current: input.current ?? "",
+        nextSteps: input.next_steps ?? "",
+        reference: input.reference ?? "",
+      },
+      Math.floor(Date.now() / 1000),
+    ),
   );
 
   if (!updated) {

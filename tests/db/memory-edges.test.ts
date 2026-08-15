@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { createDatabase } from "../../src/db/database";
 import {
   countMemoryEdges,
+  reconcileCitedPairs,
   formatNodeRef,
   getEdgeInDegree,
   getIncomingEdges,
@@ -47,6 +48,57 @@ describe("universal memory edges", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  // The four route-level "a rewrite drops its pair" tests were all written with
+  // a RELATIONLESS stale target, so narrowing this delete to
+  // `relation IS NULL` left three of the four green — a mutation that deletes
+  // only unattributed edges would have shipped. This is the shared causal
+  // witness the routes lean on: the stale pair here carries a relation, so the
+  // delete has to be relation-blind to pass.
+  describe("reconcileCitedPairs deletes a stale pair whatever relation it carries", () => {
+    test("a relation-bearing stale pair goes, and the surviving one keeps its relation", () => {
+      const citer = addTurn(1);
+      const keep = addTurn(2);
+      const drop = addTurn(3);
+
+      writeMemoryEdges(
+        db,
+        [
+          {
+            citing: { kind: "turn", id: citer },
+            cited: { kind: "turn", id: keep },
+            relation: "depends-on",
+            provenance: "judged",
+          },
+          {
+            citing: { kind: "turn", id: citer },
+            cited: { kind: "turn", id: drop },
+            relation: "supersedes",
+            provenance: "judged",
+          },
+        ],
+        500,
+      );
+      expect(getOutgoingEdges(db, { kind: "turn", id: citer })).toHaveLength(2);
+
+      // The body now cites only `keep`.
+      reconcileCitedPairs(
+        db,
+        { kind: "turn", id: citer },
+        [{ kind: "turn", id: keep }],
+        600,
+        "text-ref",
+      );
+
+      const survivors = getOutgoingEdges(db, { kind: "turn", id: citer });
+      expect(survivors).toHaveLength(1);
+      expect(survivors[0]!.cited).toEqual({ kind: "turn", id: keep });
+      // A bare re-statement of a pair that already carries a relation must not
+      // clear it (spec C14) — the reconcile is about which pairs exist, not
+      // about what they mean.
+      expect(survivors[0]!.relation).toBe("depends-on");
+    });
   });
 
   test("node refs round-trip through the type-prefixed form", () => {

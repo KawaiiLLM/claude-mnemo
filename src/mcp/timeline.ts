@@ -358,10 +358,11 @@ export interface KeptMilestone {
   /**
    * Prompt numbers of the turns that superseded this one, ascending. Present on
    * any kept row that is itself a victim, however it got kept — its own grade
-   * decided that (spec H1), not the edge. Carried for parity with
-   * `PulledAntecedent.supersededBy`; today's renderer only turns the latter into
-   * the `→被T<n>推翻` back-link, since a spine/always-keep main row does not yet
-   * print one (pre-existing, unchanged by this ticket).
+   * decided that (spec H1), not the edge. The renderer prints the
+   * `→被T<n>推翻` back-link from this field on a main row, and from
+   * `PulledAntecedent.supersededBy` on a ↳ row: spec H3's "the back-link
+   * survives" means it appears wherever the row lands, and H1 moved victims
+   * onto main rows.
    */
   supersededBy?: number[];
 }
@@ -1116,21 +1117,30 @@ export function buildCorrectionGraph(
     }
 
     const supersededIds = new Set<number>();
+    const structuredTargets = new Set<number>();
     for (const edge of entry.edges) {
+      structuredTargets.add(edge.citedTurnId);
       if (edge.relation === "supersedes") {
         supersededIds.add(edge.citedTurnId);
       }
     }
-    // The legacy adapter: a pre-era corrector with NO structured edge to speak
-    // with infers supersession from the cited turn's own reversal marker. The
-    // predicate used to be `source === "inline"`, which the union read removed;
-    // an empty edge set is the same fact stated directly — prose is the only
-    // signal this turn has.
-    if (
-      entry.edges.length === 0 &&
-      !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)
-    ) {
+    // The legacy adapter: a pre-era corrector infers supersession from a cited
+    // turn's own reversal marker, for the targets it has no structured edge
+    // about.
+    //
+    // PER TARGET, not per turn. The predicate was once `source === "inline"`,
+    // which was a whole-turn fact because the reader picked one source for the
+    // entire turn. The union is per target, so the first translation of it —
+    // `entry.edges.length === 0` — silently disabled the adapter for the whole
+    // turn as soon as ONE structured edge existed: a corrector whose prose
+    // cites both a settled target and a reversed victim would lose the victim
+    // entirely, along with its own corrector status and the victim's back-link.
+    // A per-turn gate cannot survive a per-target union.
+    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
       for (const citedTurnId of entry.citedTurnIds) {
+        if (structuredTargets.has(citedTurnId)) {
+          continue;
+        }
         const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
         if (cited && milestoneMarker(cited) === "reversed") {
           supersededIds.add(citedTurnId);
@@ -1600,7 +1610,16 @@ export function selectMilestoneTurns(view: {
   const universeById = new Map(universe.map((turn) => [turn.id, turn]));
   const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
 
-  const graph = buildCorrectionGraph(seq, {
+  // Built from the WHOLE session, not the window. `citations` already spans the
+  // session, and a supersession is a fact about the pair rather than about
+  // which turns a reader asked to see: with the window as the citer set, a
+  // ranged view whose corrector fell outside the range rendered its victim as
+  // an ordinary main row with no `→被T<n>推翻` at all. Selection and rendering
+  // stay ranged — `seq` still decides what is a candidate — so the only thing
+  // widening the citer set changes is which annotations are known. An
+  // out-of-window corrector landing in `graph.correctors` is inert, because
+  // always-keep is only ever asked about turns in `seq`.
+  const graph = buildCorrectionGraph(universe, {
     citations,
     resolveCited: (id) => universeById.get(id),
     taskCausalityEraCutoffEpoch: eraCutoff,

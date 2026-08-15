@@ -932,6 +932,42 @@ describe("session-wide effective citations", () => {
     expect(effective.get(selfCiter)?.citedTurnIds).toEqual([]);
   });
 
+  // The exact population the union exists to recover: settlement wrote a
+  // structured `supersedes` edge, nothing ever set `cites_recorded`, and the
+  // prose says nothing. Under the retired gate this turn read as citing
+  // NOTHING — 353 turns were in that state on the live database, and the
+  // reversal they recorded was invisible to the correction graph the timeline
+  // builds from this very map.
+  test("a settlement supersedes edge on a never-flagged turn reaches the graph", () => {
+    db.query("UPDATE turns SET content = NULL, cites_recorded = 0 WHERE id = ?").run(
+      structuredCiter,
+    );
+
+    const entry = getSessionEffectiveCitations(db, sessionA).get(structuredCiter)!;
+    expect(entry.citedTurnIds).toEqual([anchor]);
+    expect(entry.edges.map((edge) => edge.relation)).toEqual(["supersedes"]);
+    expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
+  });
+
+  // The batched reader dedupes per target, and the existing fixture cannot see
+  // it: its structured and prose targets differ, so swapping `appendUnseen` for
+  // a raw append would stay green while double-counting in-degree. This pins
+  // the same target named by BOTH sources.
+  test("a target named by both an edge and the prose counts once, not twice", () => {
+    db.query("UPDATE turns SET content = ? WHERE id = ?").run(
+      `supersedes [T${anchor}]`,
+      structuredCiter,
+    );
+
+    const effective = getSessionEffectiveCitations(db, sessionA);
+    const entry = effective.get(structuredCiter)!;
+    expect(entry.citedTurnIds).toEqual([anchor]);
+    expect(entry.citedTurnIds.filter((id) => id === anchor)).toHaveLength(1);
+
+    // legacyCiter also cites anchor, so the honest count is 2 — never 3.
+    expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
+  });
+
   test("in-degree counts legacy citers, not just structured ones", () => {
     const inDegree = getSessionCitationInDegree(db, sessionA);
 

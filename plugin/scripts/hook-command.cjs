@@ -3743,7 +3743,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msuqgqsi" : "dev";
+var BUILD_ID = true ? "0.10.0-msur1up9" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [
@@ -21741,13 +21741,18 @@ function buildCorrectionGraph(turns, options = {}) {
       continue;
     }
     const supersededIds = /* @__PURE__ */ new Set();
+    const structuredTargets = /* @__PURE__ */ new Set();
     for (const edge of entry.edges) {
+      structuredTargets.add(edge.citedTurnId);
       if (edge.relation === "supersedes") {
         supersededIds.add(edge.citedTurnId);
       }
     }
-    if (entry.edges.length === 0 && !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
+    if (!isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
       for (const citedTurnId of entry.citedTurnIds) {
+        if (structuredTargets.has(citedTurnId)) {
+          continue;
+        }
         const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
         if (cited && milestoneMarker(cited) === "reversed") {
           supersededIds.add(citedTurnId);
@@ -22038,7 +22043,7 @@ function selectMilestoneTurns(view) {
   const inDegree = citationInDegree(citations);
   const universeById = new Map(universe.map((turn) => [turn.id, turn]));
   const inWindowById = new Map(seq.map((turn) => [turn.id, turn]));
-  const graph = buildCorrectionGraph(seq, {
+  const graph = buildCorrectionGraph(universe, {
     citations,
     resolveCited: (id) => universeById.get(id),
     taskCausalityEraCutoffEpoch: eraCutoff
