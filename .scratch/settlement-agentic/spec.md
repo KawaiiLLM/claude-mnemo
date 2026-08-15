@@ -67,7 +67,7 @@ The result a user sees: a timeline whose rows carry real activity words again; a
 
 **A2a.** The current failure policy is not eventual convergence and the spec must not imply it is. After three attempts the cursor steps past a terminally failed window, which is "keep the partial result and abandon the remainder". If that remains policy under incremental writes it becomes more consequential, because the partial result is now durable rather than rolled back — so a partial window needs a named audit surface: which windows ended partial, and what a repair pass would have to redo.
 
-**A3.** The write tools are two: the unified note tool (a turn's note and facts) and a segment tool (create or extend, members, type, tags, body). There is **no edge tool** — an edge is always asserted by some turn, segment or session, so it exists as a field on those calls rather than as a free-standing write. There is **no session-summary tool for settlement** — see D1.
+**A3.** The write tools are two: the unified note tool (a turn's note and facts) and a segment tool (create or extend, members, type, tags, body). There is **no edge tool** — an edge is always asserted by some turn, segment or session, so it exists as a field on those calls rather than as a free-standing write. There is **no session-summary tool for settlement** — see D1. Alongside them the agent keeps its existing read tools and gains one more, `check`, specified in G8.
 
 **A4.** The settlement agent reuses the main agent's mnemo injection **interface**, not a copy of its content. This requires extracting a single assembly entry point that both the SessionStart hook and the settlement agent call. The reason is maintenance: managing the main agent's injected context must not require a second, divergent edit for the subagent.
 
@@ -248,6 +248,18 @@ Crash semantics then fall out rather than being designed: membership written but
 
 The exclusion is **job-scoped and must not become a column on the turn.** The window is a frozen work unit, and A2a requires a partial-window audit surface; a turn-level column would lose which window issued the negative verdict and would stop a later repair job from re-adjudicating it.
 
+**G8.** The coverage predicate is exposed to the agent as a **`check` tool**, so it can pull the answer instead of only meeting it at Stop.
+
+This is not the self-attestation G7 rejects. A flag is a claim the actor writes; `check` is a read of stored facts whose answer the actor cannot fake, computing the same predicate the gate computes. What it buys is timing: an agent that can verify before it believes it has finished never has to re-open work it had already closed, and the Stop hook demotes to a backstop for an agent that did not check.
+
+One predicate, three callers, decreasing trust — the `check` tool pulled by the agent at any time, the Stop hook pushed at stop and blocking, and the completion gate server-side inside the completion compare-and-set. Three implementations would drift, and drift resolves toward whichever is loosest. It reports what is missing — empty fields on eligible turns, and turns that are neither a segment member nor excluded — and never why; the agent knows why.
+
+**G9.** The per-grade histogram **must not be visible to the grading agent** at any point in its run. Its reader is the operator and its time is after the fact.
+
+Calibration targets are population-level expectations, not per-window quotas. In a twenty-turn window the variance is large, and a window that genuinely holds three Grade 4 turns must record three. An agent shown its own running distribution grades to the histogram rather than to the rubric, which is a worse failure than the drift it would be trying to correct — and this project has already measured judgement leaking toward whatever the judge can see, in an in-band scoring experiment abandoned for exactly that reason. Drift is a cross-window diagnostic; its remedy is the rubric or the model, never a live counter in the judge's context.
+
+This clause exists because the opposite is the natural thing to reach for. An implementer wiring up G8 will have the histogram in hand and adding it to the same payload will look like a courtesy.
+
 ### H. Milestone selection decouples from edges
 
 **H1.** An edge is an annotation and **must not move a grade automatically**. The victim demotion (flooring a superseded turn's effective grade to 1) and the corrector promotion (raising a citer's to 3) are removed, along with the two selection branches that made a victim ineligible to anchor.
@@ -279,7 +291,7 @@ A good test here asserts a behaviour a caller can observe, and can go red on the
 
 **Seam 1 — the write-tool boundary.** Every write, from the main agent and the settlement agent alike, passes through the note and segment tools, so this is the highest seam that sees all of them. Tested here: per-field writes and the omit-versus-clear distinction; the `append`/`overwrite` mode and its error when unspecified; budget receipts including the accumulated total for accumulating fields; a citation in a body creating an unattributed edge; a relation field naming a turn the body does not cite being rejected; content carrying tool-call syntax being rejected; and settlement being unable to mint an edge. Prior art: the existing note-settlement write-back and era-cutover fixtures, extended rather than replaced.
 
-**Seam 2 — the coverage check as a pure function.** Database in, gap list out. Tested here: an empty field producing a gap; a skipped turn counting as covered; compact markers and reply-less slash commands excluded; sidechain rows included. Keeping this a pure function is what lets the Stop hook and the job-completion gate share one implementation while trusting it differently.
+**Seam 2 — the coverage check as a pure function.** Database in, gap list out. Tested here: an empty field producing a gap; a turn that is neither a segment member nor excluded producing a gap; a skipped turn counting as covered; compact markers and reply-less slash commands excluded; sidechain rows included. Keeping this a pure function is what lets its three callers — the `check` tool, the Stop hook and the completion gate — share one implementation while trusting it differently, so a test at this seam covers all three at once.
 
 **Not tested: the SDK agent loop.** Driving a fake query through the full settlement conversation would add a third, brittle seam to assert behaviour the two seams above already cover. Judgement quality — whether the agent's grades and relations are *good* — is offline-evaluation territory, not unit-test territory.
 
