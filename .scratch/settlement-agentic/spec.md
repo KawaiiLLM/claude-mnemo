@@ -63,7 +63,9 @@ The result a user sees: a timeline whose rows carry real activity words again; a
 
 **A1.** Settlement changes from *one structured envelope parsed into a batch of instructions and applied in one atomic write-back transaction* to *an agent that writes through tools as it works*. It already runs as an SDK query with an in-process MCP server exposing `recall` and `timeline`; it gains write tools and a Stop hook.
 
-**A2.** Atomicity is given up deliberately. A crashed or abandoned window may leave a partially reviewed batch. The rule that replaces it: **a partially reviewed window must not be marked complete.** Job completion gates on a coverage check, not on the agent stopping.
+**A2.** **Window-level** atomicity is given up deliberately. A crashed or abandoned window may leave a partially reviewed batch. Per-call atomicity is **not** given up: each individual tool call stays one transaction over its body, its derived edges and its status. The rule that replaces window atomicity: **a partially reviewed window must not be marked complete.** Job completion gates on a coverage check, not on the agent stopping.
+
+**A2a.** The current failure policy is not eventual convergence and the spec must not imply it is. After three attempts the cursor steps past a terminally failed window, which is "keep the partial result and abandon the remainder". If that remains policy under incremental writes it becomes more consequential, because the partial result is now durable rather than rolled back — so a partial window needs a named audit surface: which windows ended partial, and what a repair pass would have to redo.
 
 **A3.** The write tools are two: the unified note tool (a turn's note and facts) and a segment tool (create or extend, members, type, tags, body). There is **no edge tool** — an edge is always asserted by some turn, segment or session, so it exists as a field on those calls rather than as a free-standing write. There is **no session-summary tool for settlement** — see D1.
 
@@ -210,7 +212,24 @@ no flow             (no relation)      I merely mention it
 
 **G4.** The eligible set is the window's turns minus compact markers and minus slash commands that need no model reply. **Sidechain rows are eligible** — they are legitimate turns.
 
-**G5.** With incremental writes, a retried window redoes work. No de-duplication ledger: the writes are idempotent by construction — a note rewrite is an overwrite, a segment extension is a union over members, `type` and grade are overwrites. The accumulating session fields are the only case needing care, and D5's explicit mode covers it.
+**G5.** Retry safety is a **per-tool replay contract**, not a blanket property. An earlier draft of this spec claimed the writes were idempotent by construction; a cross-session review disproved it against the source. Each tool states its own contract, and three of them do not have one yet:
+
+| write | replay behaviour |
+|---|---|
+| note rewrite | **idempotent** — keyed by turn address, an overwrite |
+| turn `type` / grade | **idempotent** — overwrite |
+| turn `tags` | idempotent **only as a replace-set**; merging makes a retry's revised judgement accumulate on top of the judgement it was revising |
+| segment membership | **idempotent** — the `(segment, turn)` pair is the natural key |
+| segment **create** | **not idempotent** — a plain insert with no natural key, so a lost receipt yields two segments |
+| segment **extend** | **not a union** — a revision compare-and-set that overwrites title, content, type, tags and status; replaying with a stale revision conflicts, and if the first write closed the segment it is frozen |
+| session `append` fields | **not idempotent** — `A`, then a committed `append(B)` whose receipt is lost, replays to `A+B+B` |
+| relation edges | need per-source replace/remove semantics, for the same reason as tags |
+
+The three unsafe rows need decisions before implementation: a stable idempotency key for segment creation plus replay semantics of "the target state already exists, so succeed"; a replay rule for extend that distinguishes a stale-revision retry from a genuine conflict; and for the accumulating session fields either a stable request key or a collapse to read-then-overwrite with concurrent-overwrite semantics acknowledged. D5's `append`/`overwrite` mode expresses intent and drives the receipt — it does **not** confer idempotency, and the earlier draft leaned on it for a job it cannot do.
+
+**G6.** Each settlement write tool must carry an **unforgeable job identity**. The atomic write-back validated the job's claim generation and claimed status at the opening of its transaction and discarded the entire result when the lease had been reclaimed under a new generation. The public write tools have no such capability, so a stale attempt that lost its lease would keep committing business writes and fail only at the final completion compare-and-set. The job id and claim generation must be injected by the in-process server closure — never passed by the model — and checked for claimed ownership **inside each tool's own write transaction**.
+
+**G7.** The completion gate must **prove segmentation ran**. Checking empty fields cannot: a window whose per-turn fields are all written but which crashed before the segment tool has no empty fields, so a retry sees nothing owed and marks it done, permanently unsegmented. A non-empty `type` is evidence the first duty completed, never the third. This needs either a persisted per-phase disposition on the job, or a per-turn verdict recording that the turn was assigned to a segment or deliberately left out.
 
 ### H. Milestone selection decouples from edges
 
