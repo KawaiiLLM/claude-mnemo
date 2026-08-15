@@ -303,7 +303,14 @@ describe("era cutover write path", () => {
       expect(getShadowNote(db, eraTurnId)!.insight).toBeNull();
     });
 
-    test("leaves a pre-cutoff turn's row byte-identical while the era is on", () => {
+    // Was: "leaves a pre-cutoff turn's row byte-identical while the era is
+    // on", which passed while the prose went to `shadow_notes` and the call
+    // answered "Noted". Nothing reads that table — not recall, timeline,
+    // search or the injected context — so the write produced a record no
+    // reader would ever meet. A write whose result cannot be read is a
+    // failure, and a failure has to be legible at the call (user ruling; the
+    // same rule spec E2 already applies to content carrying tool-call syntax).
+    test("refuses prose on a pre-cutoff turn rather than writing it where nothing reads", () => {
       const before = snapshotTurnRow(db, legacyTurnId);
 
       const result = noteTool(
@@ -317,8 +324,48 @@ describe("era cutover write path", () => {
         { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
       );
 
-      expect(isNoteSuccess(result)).toBe(true);
+      expect(isNoteSuccess(result)).toBe(false);
+      expect(result.content[0]?.text).toContain("pre-cutoff turn");
+      // Nothing landed on either surface — not the turns row, not the shadow
+      // row the refusal replaces.
       expect(snapshotTurnRow(db, legacyTurnId)).toBe(before);
+      expect(getShadowNote(db, legacyTurnId)).toBeNull();
+    });
+
+    test("still takes a pre-cutoff turn's grade, type and tags — the rule is about the destination, not the age", () => {
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T10`,
+          grade: 2,
+          type: ["fix"],
+          tags: ["era-cutover"],
+        },
+        { now: () => 3_300, env: {}, eraCutoffEpoch: CUTOFF },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
+      const turn = getTurnById(db, legacyTurnId)!;
+      expect(turn.significanceGrade).toBe(2);
+      expect(turn.type).toEqual(["fix"]);
+      expect(turn.tags).toEqual(["era-cutover"]);
+    });
+
+    test("the rollback still writes a shadow row, because that is what it is for", () => {
+      // An absent cutoff means "every turn is legacy" (spec D11/D12). The
+      // refusal must not fire there, or the safety valve becomes a system
+      // that cannot write a note at all.
+      const result = noteTool(
+        db,
+        {
+          turn: `S${sessionId}/T10`,
+          title: "implement+era-cutover: rollback shape",
+          content: "Shadow-only is the intended record under a null cutoff.",
+        },
+        { now: () => 3_300, env: {}, eraCutoffEpoch: null },
+      );
+
+      expect(isNoteSuccess(result)).toBe(true);
       expect(getShadowNote(db, legacyTurnId)).not.toBeNull();
     });
   });

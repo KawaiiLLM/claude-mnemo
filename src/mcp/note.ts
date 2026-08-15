@@ -694,6 +694,47 @@ function handleTurnWrite(
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
 
+  // Prose on a pre-cutoff turn is REFUSED, not written somewhere quiet (user
+  // ruling). A legacy turn never promotes, so its title/content/insight could
+  // only land in `shadow_notes` — and nothing reads that table: not recall,
+  // not timeline, not search, not the injected context. Only the metrics
+  // tooling and the debt ledger touch it. So the write succeeded, answered
+  // "Noted", and produced a record no reader would ever meet. Refusing says
+  // the same thing the tool already says about content carrying tool-call
+  // syntax (spec E2): a write whose result cannot be read is a failure, and a
+  // failure must be legible at the call.
+  //
+  // Grade, type and tags are NOT refused. They write `turns` directly for
+  // every era and every one of them renders, so settlement can still judge a
+  // pre-cutoff turn in its fifty-turn lookback. The rule is about the
+  // destination, not about the turn's age.
+  //
+  // Safe against the debt ledger, checked before landing: pre-cutoff turns
+  // carry 346 `skipped` debts and no `pending` ones in the live database, so
+  // a refusal cannot strand a debt that had been waiting for a note.
+  //
+  // Conditional on the era being CONFIGURED. An absent or null cutoff is the
+  // rollback (spec D11/D12): it means "treat every turn as legacy", and under
+  // it the shadow row is the intended and only record. Refusing there would
+  // turn the rollback from a safety valve into a system that cannot write a
+  // note at all — which the first version of this guard did, taking 39 tests
+  // with it.
+  const eraConfigured =
+    options.eraCutoffEpoch !== undefined && options.eraCutoffEpoch !== null;
+  if (
+    eraConfigured &&
+    !promotesTurnRecord &&
+    (input.title !== undefined ||
+      input.content !== undefined ||
+      input.insight !== undefined)
+  ) {
+    return parameterError(
+      `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader —` +
+        " title, content and insight cannot be written to it." +
+        " Its grade, type and tags are still writable.",
+    );
+  }
+
   let result: TurnWriteTransactionResult;
   try {
     result = writeTransaction(db, (): TurnWriteTransactionResult => {

@@ -34445,6 +34445,12 @@ function handleTurnWrite(db, address, input, options) {
   const rideTurnId = current?.id ?? null;
   const writeTransaction = options.runWriteTransaction ?? runWriteTransaction;
   const promotesTurnRecord = isSegmentEra(turn.createdAtEpoch, options.eraCutoffEpoch);
+  const eraConfigured = options.eraCutoffEpoch !== void 0 && options.eraCutoffEpoch !== null;
+  if (eraConfigured && !promotesTurnRecord && (input.title !== void 0 || input.content !== void 0 || input.insight !== void 0)) {
+    return parameterError(
+      `S${address.sessionId}/T${address.promptNumber} is a pre-cutoff turn, whose prose has no reader \u2014 title, content and insight cannot be written to it. Its grade, type and tags are still writable.`
+    );
+  }
   let result;
   try {
     result = writeTransaction(db, () => {
