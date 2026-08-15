@@ -38,7 +38,14 @@ export interface CitationInput {
 export interface TurnCitationEdge {
   citingTurnId: number;
   citedTurnId: number;
-  relation: CitationRelation;
+  /**
+   * C5: an attribute of the pair, not part of its identity. Null = a bare,
+   * unattributed citation — a real, storable state that the generic readers
+   * below (`getTurnCitations`, `getSessionEffectiveCitations`) must surface,
+   * not filter out. Only relation-SPECIFIC logic (e.g. the `supersedes`
+   * branch in `mcp/timeline.ts`) may narrow on this field.
+   */
+  relation: CitationRelation | null;
   createdAtEpoch: number;
 }
 
@@ -312,7 +319,12 @@ export function replaceTurnCitations(
        WHERE citing_kind = 'turn' AND citing_id = ? AND cited_kind = 'turn'`,
     ).run(citingTurnId);
 
-    const insert = db.query<unknown, [number, number, string, number]>(
+    // `written` is typed `TurnCitationEdge[]` (relation now `CitationRelation
+    // | null`, spec C5), but every entry here came from a validated
+    // `CitationInput` above and always carries a real relation — the `string
+    // | null` on the bind parameter is accuracy about the column, not a sign
+    // this path ever inserts a bare edge.
+    const insert = db.query<unknown, [number, number, string | null, number]>(
       `INSERT INTO memory_edges
          (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
        VALUES ('turn', ?, 'turn', ?, ?, 'asserted', ?)`,
@@ -342,7 +354,17 @@ export function replaceTurnCitations(
   return { written, droppedIds };
 }
 
-/** Every structured edge written by one turn, cross-session edges included. */
+/**
+ * Every structured edge written by one turn, cross-session edges included.
+ *
+ * A relationless (bare) pair is a real citation (spec C5) and is returned
+ * here same as any other — filtering it out would empty C5 of its content,
+ * since the whole point of pair identity is that an unattributed citation
+ * exists. Ordering needs no `relation` tiebreak beyond the one already
+ * written below: the pair's PRIMARY KEY (citing, cited) means at most one row
+ * exists per `cited_id` for a fixed `citing_id`, so `cited_id ASC` alone is
+ * already a total order and stays deterministic with NULLs present.
+ */
 export function getTurnCitations(
   db: Database,
   citingTurnId: number,
@@ -356,7 +378,7 @@ export function getTurnCitations(
          created_at_epoch AS createdAtEpoch
        FROM memory_edges
        WHERE citing_kind = 'turn' AND citing_id = ?
-         AND cited_kind = 'turn' AND relation IS NOT NULL
+         AND cited_kind = 'turn'
        ORDER BY cited_id ASC, relation ASC`,
     )
     .all(citingTurnId);
@@ -430,6 +452,11 @@ export function getEffectiveCitations(
  * prompt order. One query for the turns and one for the edges: a session
  * consumer (in-degree, victim demotion, ↳ pull-through) never needs N+1.
  *
+ * A relationless (bare) edge is included same as any other (spec C5) — it is
+ * not one of the three exclusions below, and it still contributes to
+ * `citedTurnIds` / in-degree; only relation-SPECIFIC consumers (e.g. victim
+ * demotion's `supersedes` check) have any reason to ignore it.
+ *
  * Session-local means three exclusions, applied to BOTH the structured and the
  * legacy inline path so the two can never disagree about what a session's graph
  * contains:
@@ -473,7 +500,6 @@ export function getSessionEffectiveCitations(
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
-         AND e.relation IS NOT NULL
        ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`,
     )
     .all(sessionId, sessionId);

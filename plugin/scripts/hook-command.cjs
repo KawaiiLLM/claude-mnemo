@@ -530,7 +530,6 @@ function getSessionEffectiveCitations(db, sessionId) {
        JOIN turns citing ON citing.id = e.citing_id AND e.citing_kind = 'turn'
        JOIN turns cited ON cited.id = e.cited_id AND e.cited_kind = 'turn'
        WHERE citing.session_id = ? AND cited.session_id = ?
-         AND e.relation IS NOT NULL
        ORDER BY e.citing_id ASC, e.cited_id ASC, e.relation ASC`
   ).all(sessionId, sessionId);
   for (const edge of edgeRows) {
@@ -1625,7 +1624,17 @@ function migrateTurnCitationsToEdges(db) {
        citing_kind, citing_id, cited_kind, cited_id,
        relation, provenance, created_at_epoch
      ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
-     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO NOTHING
+     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO UPDATE SET
+       -- Spec C16: the citation side wins outright on an overlap \u2014 no rank
+       -- test, unlike the live upsert's C14 rule (memory-edges.ts). Only the
+       -- timestamp is pooled rather than replaced: the earlier of the two
+       -- survives.
+       relation = excluded.relation,
+       provenance = excluded.provenance,
+       created_at_epoch = MIN(memory_edges.created_at_epoch, excluded.created_at_epoch)
+     WHERE memory_edges.relation IS NOT excluded.relation
+        OR memory_edges.provenance IS NOT excluded.provenance
+        OR memory_edges.created_at_epoch > excluded.created_at_epoch
      RETURNING 1 AS inserted`
   );
   let migrated = 0;
@@ -3493,7 +3502,7 @@ var import_node_fs4 = require("node:fs");
 var import_node_path7 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msuck0qd" : "dev";
+var BUILD_ID = true ? "0.10.0-msue4mn8" : "dev";
 
 // src/mnemosyne/env.ts
 var CAPTURED_SESSION_ENV_KEYS = [

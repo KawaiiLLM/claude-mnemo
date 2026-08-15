@@ -1013,9 +1013,22 @@ function ensureMemoryEdgesSchema(db: Database): void {
  * holds into the universal table (spec D13's original "收编重造", narrowed by
  * ticket 05/spec C13 — the table this fed used to stay alive forever on a
  * one-way migration; now it is a step on the way to dropping that table
- * outright, see `retireLegacyTurnCitationsTable`). Idempotent — a pair
- * already present in `memory_edges` is left untouched by `ON CONFLICT DO
- * NOTHING`, so it is safe to call again.
+ * outright, see `retireLegacyTurnCitationsTable`).
+ *
+ * Spec C16: on an OVERLAPPING pair the citation side wins outright — its
+ * relation and provenance overwrite whatever `memory_edges` already holds for
+ * that pair, unconditionally. This is deliberately NOT the live upsert's C14
+ * rule (`writeMemoryEdges`: a bare/relation-less write never clears an
+ * existing relation) — this is a one-time historical fold-in with its own
+ * rule, because the two graphs overlap almost entirely in production (every
+ * citation pair already exists in the edge table) and `turn_citations` was
+ * the timeline correction graph's replace-set truth right up to its
+ * retirement, i.e. the side that was actually being read. Only
+ * `created_at_epoch` is pooled rather than replaced: the EARLIER of the two
+ * timestamps survives, so the fold-in can only move "when did this edge first
+ * appear" earlier, never later. A pair present only in `memory_edges` is left
+ * untouched — this function only ever iterates `turn_citations` rows, so it
+ * has nothing to say about a pair that isn't one of them.
  *
  * A pair the legacy table held under two relations (its wider key allowed
  * that) is collapsed to the single relation `pickWinningLegacyRelation`
@@ -1027,9 +1040,17 @@ function ensureMemoryEdgesSchema(db: Database): void {
  * `asserted` by the SAME call that wrote the citing prose, which the
  * migration cannot know for certain rows this old.
  *
- * Returns the number of pairs newly inserted, so a caller (and the migration
- * test) can assert zero loss against the source table and idempotency on a
- * re-run.
+ * Idempotent: the upsert's `DO UPDATE` is WHERE-guarded to fire only when
+ * applying it would actually change the stored relation, provenance or
+ * created_at_epoch, so a re-run over unchanged source data writes nothing.
+ *
+ * Returns the number of pairs this call actually INSERTED OR CHANGED — a
+ * genuine no-op re-run (nothing in `turn_citations` says anything new)
+ * returns 0, not a count of pairs merely revisited. `RETURNING` used to fire
+ * only on insert (`DO NOTHING`); now that a conflict can also mutate a row,
+ * "newly inserted" is no longer the whole story, so this is "newly inserted
+ * or corrected" — the number a caller (and the migration tests) uses to
+ * assert zero loss on the first pass and true idempotency (0) on a repeat.
  */
 export function migrateTurnCitationsToEdges(db: Database): number {
   if (!hasTable(db, "turn_citations") || !hasTable(db, "memory_edges")) {
@@ -1074,7 +1095,17 @@ export function migrateTurnCitationsToEdges(db: Database): number {
        citing_kind, citing_id, cited_kind, cited_id,
        relation, provenance, created_at_epoch
      ) VALUES ('turn', ?, 'turn', ?, ?, ?, ?)
-     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO NOTHING
+     ON CONFLICT (citing_kind, citing_id, cited_kind, cited_id) DO UPDATE SET
+       -- Spec C16: the citation side wins outright on an overlap — no rank
+       -- test, unlike the live upsert's C14 rule (memory-edges.ts). Only the
+       -- timestamp is pooled rather than replaced: the earlier of the two
+       -- survives.
+       relation = excluded.relation,
+       provenance = excluded.provenance,
+       created_at_epoch = MIN(memory_edges.created_at_epoch, excluded.created_at_epoch)
+     WHERE memory_edges.relation IS NOT excluded.relation
+        OR memory_edges.provenance IS NOT excluded.provenance
+        OR memory_edges.created_at_epoch > excluded.created_at_epoch
      RETURNING 1 AS inserted`,
   );
 

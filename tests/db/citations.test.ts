@@ -672,6 +672,42 @@ describe("effective citations predicate", () => {
     expect(effective.citedTurnIds).toEqual([citedId]);
     expect(effective.edges.map((edge) => edge.relation)).toEqual(["supersedes"]);
   });
+
+  // Second review round: both generic pair readers used to filter
+  // `relation IS NOT NULL`, so a pair with no stated relation returned
+  // nothing at all — and since this turn's `cites_recorded = 1`, there was no
+  // inline fallback either. That emptied spec C5 of its content: the whole
+  // point of pair identity is that an unattributed citation is a real,
+  // storable, READABLE state. A bare write reaches `memory_edges` the way
+  // settlement's text-ref/bare writes do (writeMemoryEdges, spec C14);
+  // inserted directly here since `replaceTurnCitations` requires every entry
+  // in its replace-set to carry a relation.
+  test("a NULL-relation edge is still an effective citation, not a missing one (spec C5)", () => {
+    db.query(
+      `INSERT INTO memory_edges
+         (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+       VALUES ('turn', ?, 'turn', ?, NULL, 'text-ref', 500)`,
+    ).run(citerId, citedId);
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
+
+    const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
+    expect(effective.source).toBe("structured");
+    expect(effective.citedTurnIds).toEqual([citedId]);
+    expect(effective.edges).toEqual([
+      {
+        citingTurnId: citerId,
+        citedTurnId: citedId,
+        relation: null,
+        createdAtEpoch: 500,
+      },
+    ]);
+
+    const sessionEffective = getSessionEffectiveCitations(db, sessionId);
+    expect(sessionEffective.get(citerId)?.citedTurnIds).toEqual([citedId]);
+    expect(sessionEffective.get(citerId)?.source).toBe("structured");
+
+    expect(getSessionCitationInDegree(db, sessionId).get(citedId)).toBe(1);
+  });
 });
 
 describe("session-wide effective citations", () => {

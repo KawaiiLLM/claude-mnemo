@@ -493,5 +493,81 @@ describe("universal memory edges", () => {
       expect(migrateTurnCitationsToEdges(db)).toBe(0);
       expect(countMemoryEdges(db)).toBe(0);
     });
+
+    // Second review round (spec C16). Production shape: every citation pair
+    // ALREADY exists in `memory_edges` when this runs, so the fold-in's
+    // conflict clause decides essentially every row's outcome. The earlier
+    // tests in this block empty `memory_edges` first, which is exactly the
+    // shape that never exercises the conflict at all — this test does not.
+    describe("overlapping pair (spec C16, the case production actually contains)", () => {
+      function seedOverlappingPair(): {
+        citing: number;
+        cited: number;
+      } {
+        createLegacyTurnCitationsTable();
+        const citing = addTurn(1);
+        const cited = addTurn(2);
+        // The legacy citation table's row: a real, DIFFERENT relation, and the
+        // EARLIER timestamp.
+        db.query(
+          `INSERT INTO turn_citations (citing_turn_id, cited_turn_id, relation, created_at_epoch)
+           VALUES (?, ?, 'evidence-for', 1000)`,
+        ).run(citing, cited);
+        // The edge table already holds the SAME pair — e.g. written live
+        // between schema init and this fold-in — under a DIFFERENT relation
+        // and a LATER timestamp. If the edge row's timestamp were the earlier
+        // one, the MIN rule would be unobservable (nothing to prove).
+        db.query(
+          `INSERT INTO memory_edges
+             (citing_kind, citing_id, cited_kind, cited_id, relation, provenance, created_at_epoch)
+           VALUES ('turn', ?, 'turn', ?, 'depends-on', 'asserted', 2000)`,
+        ).run(citing, cited);
+        return { citing, cited };
+      }
+
+      function readEdge(pair: { citing: number; cited: number }) {
+        return db
+          .query<
+            { relation: string | null; provenance: string; createdAtEpoch: number },
+            [number, number]
+          >(
+            `SELECT relation, provenance, created_at_epoch AS createdAtEpoch
+             FROM memory_edges
+             WHERE citing_kind = 'turn' AND citing_id = ?
+               AND cited_kind = 'turn' AND cited_id = ?`,
+          )
+          .get(pair.citing, pair.cited);
+      }
+
+      test("the citation side's relation and provenance win, and the earlier timestamp survives", () => {
+        const pair = seedOverlappingPair();
+
+        const migrated = migrateTurnCitationsToEdges(db);
+
+        expect(migrated).toBe(1);
+        const edge = readEdge(pair);
+        // The citation table's relation ('evidence-for') beats the edge
+        // table's ('depends-on') outright — no rank test, C16's own rule.
+        expect(edge?.relation).toBe("evidence-for");
+        expect(edge?.provenance).toBe("judged");
+        // The EARLIER of the two timestamps (1000, not the edge row's 2000)
+        // survives.
+        expect(edge?.createdAtEpoch).toBe(1000);
+        expect(countMemoryEdges(db)).toBe(1);
+      });
+
+      test("a second call over the same overlap changes nothing", () => {
+        const pair = seedOverlappingPair();
+
+        migrateTurnCitationsToEdges(db);
+        const before = readEdge(pair);
+        const secondRun = migrateTurnCitationsToEdges(db);
+        const after = readEdge(pair);
+
+        expect(secondRun).toBe(0);
+        expect(after).toEqual(before);
+        expect(countMemoryEdges(db)).toBe(1);
+      });
+    });
   });
 });

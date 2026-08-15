@@ -1252,6 +1252,38 @@ describe("buildCorrectionGraph", () => {
     expect(g.supersededVictims.size).toBe(0);
   });
 
+  // Second review round (spec C5): a bare/relation-less edge is a readable
+  // citation now (the generic pair readers no longer filter it out), but it
+  // is still not a CORRECTION — only a stated `supersedes` relation may fire
+  // victim demotion. Built directly rather than through `structuredCitations`
+  // (whose helper type assumes a string relation) since the point here is
+  // specifically a `relation: null` edge.
+  it("ignores a NULL relation — an unattributed pair is a citation, not a correction", () => {
+    const seq = [
+      turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
+      turn({ id: 30, promptNumber: 3, type: "feature", citesRecorded: true, createdAtEpoch: era + 60 }),
+    ];
+    const citations = new Map<
+      number,
+      { source: "structured"; citedTurnIds: number[]; edges: unknown[] }
+    >([
+      [
+        30,
+        {
+          source: "structured",
+          citedTurnIds: [20],
+          edges: [{ citingTurnId: 30, citedTurnId: 20, relation: null, createdAtEpoch: 0 }],
+        },
+      ],
+    ]);
+    const g = buildCorrectionGraph(seq, {
+      citations,
+      taskCausalityEraCutoffEpoch: era,
+    });
+    expect(g.correctors.size).toBe(0);
+    expect(g.supersededVictims.size).toBe(0);
+  });
+
   it("orders multiple superseders of one victim by prompt number", () => {
     const seq = [
       turn({ id: 20, promptNumber: 2, type: "decision", createdAtEpoch: era }),
