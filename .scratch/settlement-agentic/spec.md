@@ -162,6 +162,12 @@ The rule this replaces the earlier one with: settlement may not mint a **free-st
 
 **C12.** Edge provenance must distinguish its three sources — the main agent's own assertion, a bare textual reference, and a settlement attribution. The current provenance column conflates the first and third.
 
+**C13. The dual edge graph must be resolved before C6 can be implemented, and it is already leaking.** Two tables hold edges and they disagree about deletion. `turn_citations` is a genuine replace-set: the main agent's `cites` path deletes a turn's rows before rewriting them. `memory_edges` — which the settlement pass writes, and which the timeline's correction graph and the segment ranking key actually read — is an additive upsert with no delete path anywhere. A one-way insert-only migration copies citations into edges and runs both at schema init and at worker start.
+
+The consequence is live today, not merely a hazard for this work: **a citation the main agent retracts vanishes from one graph and persists in the other**, where it goes on driving the correction rendering. Current row counts are 1182 against 2019.
+
+So C6's recompute-and-delete cannot be implemented by reaching for the existing edge writer — it would inherit the additive semantics and quietly maintain the divergence. Either the two layers collapse to one truth table or the older one is explicitly retired. Keeping both alive on an insert-only migration is not an option this design can carry.
+
 ### D. The session summary
 
 **D1.** The session summary is written by the **main agent**, not by settlement. Its purpose is to guide what to do next, and a description of *now* must be written by whoever is current. Settlement handles the past and gets no summary tool.
