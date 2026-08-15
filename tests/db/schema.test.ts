@@ -1184,12 +1184,21 @@ describe("initializeSchema", () => {
           .get(citerId, citedId);
         expect(edge?.relation).toBe("supersedes");
 
-        // The inline predicate still works end to end for a turn whose flag
-        // was never set — the retirement did not touch that column.
+        // End to end after the retirement: the folded-in edge and the prose
+        // name the same pair, so the union resolves to one id backed by one
+        // edge. Under the retired `cites_recorded` gate this turn's flag was
+        // never set, so the edge the migration had just created was invisible
+        // here — the assertion used to read `edges: []`.
         expect(getEffectiveCitations(migrated, row!)).toEqual({
-          source: "inline",
           citedTurnIds: [citedId],
-          edges: [],
+          edges: [
+            {
+              citingTurnId: citerId,
+              citedTurnId: citedId,
+              relation: "supersedes",
+              createdAtEpoch: 4,
+            },
+          ],
         });
       } finally {
         migrated.close();
@@ -1784,14 +1793,14 @@ describe("ensureTurnTypeMultiValueColumn (ticket 02, spec B5)", () => {
     // The cross-TABLE dependent row still resolves too.
     expect(getShadowNote(db, discoveryId)?.title).toBe("shadow title");
 
-    // `cites_recorded` and its edge both survived, so the turn's effective
-    // citations still read from the structured edge table rather than
-    // falling back to reparsing `content`.
+    // The edge survived the rebuild, which is what this assertion is for.
+    // `cites_recorded` survived too and is asserted only as a copied column
+    // now — no reader consults it since the union replaced the gate.
     const discoveryTurn = getTurnById(db, discoveryId)!;
     expect(discoveryTurn.citesRecorded).toBe(true);
     const effective = getEffectiveCitations(db, discoveryTurn);
-    expect(effective.source).toBe("structured");
     expect(effective.citedTurnIds).toEqual([compactId]);
+    expect(effective.edges.map((edge) => edge.citedTurnId)).toEqual([compactId]);
 
     // The CHECK constraint is live going forward and now array-only (peer
     // review P2): a raw non-JSON scalar is rejected, as before, and so are

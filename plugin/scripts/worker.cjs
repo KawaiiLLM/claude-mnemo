@@ -50,7 +50,7 @@ var import_node_os3 = require("node:os");
 var import_node_path16 = require("node:path");
 
 // src/shared/build-id.ts
-var BUILD_ID = true ? "0.10.0-msuq1mwm" : "dev";
+var BUILD_ID = true ? "0.10.0-msuqgqsi" : "dev";
 
 // src/db/database.ts
 var import_node_fs = require("node:fs");
@@ -1144,6 +1144,15 @@ function recomputeTurnCitedPairs(db, turnId, fields, nowEpoch, writerSessionId, 
   );
   return { written, deleted, rejected };
 }
+function appendUnseen(into, ids) {
+  const seen = new Set(into);
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      into.push(id);
+    }
+  }
+}
 function dedupeCitedIds(edges) {
   const citedTurnIds = [];
   const seen = /* @__PURE__ */ new Set();
@@ -1158,7 +1167,7 @@ function dedupeCitedIds(edges) {
 }
 function getSessionEffectiveCitations(db, sessionId) {
   const turns = db.query(
-    `SELECT id, content, cites_recorded AS citesRecorded
+    `SELECT id, content
        FROM turns
        WHERE session_id = ?
        ORDER BY prompt_number ASC, id ASC`
@@ -1190,22 +1199,15 @@ function getSessionEffectiveCitations(db, sessionId) {
   }
   const effective = /* @__PURE__ */ new Map();
   for (const turn of turns) {
-    if (turn.citesRecorded === 1) {
-      const edges = edgesByCiter.get(turn.id) ?? [];
-      effective.set(turn.id, {
-        source: "structured",
-        citedTurnIds: dedupeCitedIds(edges),
-        edges
-      });
-      continue;
-    }
-    effective.set(turn.id, {
-      source: "inline",
-      citedTurnIds: parseInlineCitations(turn.content).filter(
+    const edges = edgesByCiter.get(turn.id) ?? [];
+    const citedTurnIds = dedupeCitedIds(edges);
+    appendUnseen(
+      citedTurnIds,
+      parseInlineCitations(turn.content).filter(
         (id) => id !== turn.id && sessionTurnIds.has(id)
-      ),
-      edges: []
-    });
+      )
+    );
+    effective.set(turn.id, { citedTurnIds, edges });
   }
   return effective;
 }
@@ -7810,12 +7812,7 @@ function inlineCitationFallback(turns) {
   const sessionTurnIds = new Set(turns.map((turn) => turn.id));
   const effective = /* @__PURE__ */ new Map();
   for (const turn of turns) {
-    if (turn.citesRecorded) {
-      effective.set(turn.id, { source: "structured", citedTurnIds: [], edges: [] });
-      continue;
-    }
     effective.set(turn.id, {
-      source: "inline",
       citedTurnIds: parseInlineCitations(turn.content).filter(
         (id) => id !== turn.id && sessionTurnIds.has(id)
       ),
@@ -7898,7 +7895,7 @@ function buildCorrectionGraph(turns, options = {}) {
         supersededIds.add(edge.citedTurnId);
       }
     }
-    if (entry.source === "inline" && !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
+    if (entry.edges.length === 0 && !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)) {
       for (const citedTurnId of entry.citedTurnIds) {
         const cited = byDbId.get(citedTurnId) ?? options.resolveCited?.(citedTurnId);
         if (cited && milestoneMarker(cited) === "reversed") {

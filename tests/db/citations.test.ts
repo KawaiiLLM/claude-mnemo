@@ -681,13 +681,11 @@ describe("effective citations predicate", () => {
     db.close();
   });
 
-  test("falls back to inline parsing while the flag is unset", () => {
+  test("reads prose when there are no edges, and resolves what the parser cannot", () => {
     const turn = getTurnById(db, citerId)!;
-    expect(turn.citesRecorded).toBe(false);
     // T4242 names no turn: the parser is DB-blind and returns it, this layer
     // resolves and drops it.
     expect(getEffectiveCitations(db, turn)).toEqual({
-      source: "inline",
       citedTurnIds: [citedId],
       edges: [],
     });
@@ -704,17 +702,24 @@ describe("effective citations predicate", () => {
     ).toEqual([citedId]);
   });
 
-  test("a recorded empty set means genuinely none, not legacy absence", () => {
+  // Replaces "a recorded empty set means genuinely none, not legacy absence",
+  // which pinned the retired gate. `cites_recorded` used to let a writer
+  // retract prose by recording an authoritative empty set; that retraction is
+  // deliberately no longer expressible. After ticket 06 a body owns its pairs,
+  // so a turn that stops citing something loses it from BOTH sources at once —
+  // the retraction had nothing left to do, and the flag it depended on could be
+  // forgotten or lie. Measured on the live database before the change: 135 of
+  // 838 flagged turns gain citations, 185 ids in all, and sampling showed them
+  // to be real prose links the structured writer had failed to record.
+  test("an empty edge set no longer retracts what the prose still says", () => {
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
-    expect(effective.source).toBe("structured");
-    expect(effective.citedTurnIds).toEqual([]);
-    // The inline `[T…]` text is still in the content and is deliberately ignored.
-    expect(getTurnById(db, citerId)?.content).toContain(`[T${citedId}]`);
+    expect(effective.edges).toEqual([]);
+    expect(effective.citedTurnIds).toEqual([citedId]);
   });
 
-  test("structured edges win over disagreeing inline text", () => {
+  test("unions the two sources rather than letting either win", () => {
     writeMemoryEdges(
       db,
       [
@@ -730,10 +735,42 @@ describe("effective citations predicate", () => {
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
-    expect(effective.source).toBe("structured");
-    // 4242 is inline-only and dangling; the edge table does not carry it.
+    // The pair is named by both sources and counts once; 4242 is inline-only
+    // and dangling, so it is still dropped — the union widens the sources, it
+    // does not relax resolution.
     expect(effective.citedTurnIds).toEqual([citedId]);
     expect(effective.edges.map((edge) => edge.relation)).toEqual(["supersedes"]);
+  });
+
+  test("a prose citation the edge set never recorded is still effective", () => {
+    const extra = db
+      .query<{ id: number }, [number]>(
+        `INSERT INTO turns (session_id, prompt_number, status, title, created_at_epoch)
+         VALUES (?, 9, 'extracted', 'fixture', 100) RETURNING id`,
+      )
+      .get(sessionId)!.id;
+    db.query("UPDATE turns SET content = ? WHERE id = ?").run(
+      `builds on [T${citedId}] and also [T${extra}]`,
+      citerId,
+    );
+    writeMemoryEdges(
+      db,
+      [
+        {
+          citing: { kind: "turn", id: citerId },
+          cited: { kind: "turn", id: citedId },
+          relation: "depends-on",
+          provenance: "judged",
+        },
+      ],
+      500,
+    );
+    db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
+
+    // Structured first, then prose the edges did not cover.
+    expect(
+      getEffectiveCitations(db, getTurnById(db, citerId)!).citedTurnIds,
+    ).toEqual([citedId, extra]);
   });
 
   // Second review round: both generic pair readers used to filter
@@ -754,7 +791,6 @@ describe("effective citations predicate", () => {
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(citerId);
 
     const effective = getEffectiveCitations(db, getTurnById(db, citerId)!);
-    expect(effective.source).toBe("structured");
     expect(effective.citedTurnIds).toEqual([citedId]);
     expect(effective.edges).toEqual([
       {
@@ -767,7 +803,6 @@ describe("effective citations predicate", () => {
 
     const sessionEffective = getSessionEffectiveCitations(db, sessionId);
     expect(sessionEffective.get(citerId)?.citedTurnIds).toEqual([citedId]);
-    expect(sessionEffective.get(citerId)?.source).toBe("structured");
 
     expect(getSessionCitationInDegree(db, sessionId).get(citedId)).toBe(1);
   });
@@ -826,7 +861,7 @@ describe("session-wide effective citations", () => {
       2,
       `builds on [T${anchor}], [T4242] and [T${foreignTurn}]`,
     );
-    // Post-deployment turn: prose disagrees with the edges, edges win.
+    // Prose names something the edges do not: the union carries both.
     structuredCiter = insertTurn(sessionA, 3, `mentions [T${legacyCiter}]`);
     selfCiter = insertTurn(sessionA, 4, `revisits [T4243]`);
     db.query("UPDATE turns SET content = ? WHERE id = ?").run(
@@ -861,7 +896,7 @@ describe("session-wide effective citations", () => {
     db.close();
   });
 
-  test("carries one entry per turn, with the source that decided it", () => {
+  test("carries one entry per turn, including turns that cite nothing", () => {
     const effective = getSessionEffectiveCitations(db, sessionA);
 
     expect([...effective.keys()]).toEqual([
@@ -870,19 +905,25 @@ describe("session-wide effective citations", () => {
       structuredCiter,
       selfCiter,
     ]);
-    expect(effective.get(legacyCiter)?.source).toBe("inline");
-    expect(effective.get(structuredCiter)?.source).toBe("structured");
+    // No per-turn "which source decided this" any more: both are always read,
+    // so the only question left is what the union resolved to.
     expect(effective.get(anchor)?.citedTurnIds).toEqual([]);
+    expect(effective.get(legacyCiter)?.edges).toEqual([]);
+    expect(effective.get(structuredCiter)?.edges).not.toEqual([]);
   });
 
   test("resolves ids and drops dangling, cross-session and self citations", () => {
     const effective = getSessionEffectiveCitations(db, sessionA);
 
-    // Legacy path: T4242 is dangling and the foreign turn is another session's.
+    // Prose side: T4242 is dangling and the foreign turn is another session's.
     expect(effective.get(legacyCiter)?.citedTurnIds).toEqual([anchor]);
-    // Structured path: the cross-session edge stays out of the session view even
-    // though it is persisted as provenance.
-    expect(effective.get(structuredCiter)?.citedTurnIds).toEqual([anchor]);
+    // Structured side contributes `anchor` (the cross-session edge stays out of
+    // the session view even though it is persisted as provenance), and this
+    // turn's prose independently names `legacyCiter` — the union carries both.
+    expect(effective.get(structuredCiter)?.citedTurnIds).toEqual([
+      anchor,
+      legacyCiter,
+    ]);
     expect(effective.get(structuredCiter)?.edges.map((e) => e.citedTurnId)).toEqual([
       anchor,
     ]);
@@ -901,12 +942,20 @@ describe("session-wide effective citations", () => {
     expect(inDegree.has(selfCiter)).toBe(false);
   });
 
-  test("a recorded empty set retracts what the prose still says", () => {
+  // The batched reader loses the retraction for the same reason the single
+  // reader does, and it matters more here: in-degree feeds milestone selection,
+  // so a flag nobody sets any more would have silently zeroed a turn's inbound
+  // count. Setting it now changes nothing at all.
+  test("the retired flag no longer suppresses a turn's prose citations", () => {
+    const before = getSessionEffectiveCitations(db, sessionA)
+      .get(legacyCiter)?.citedTurnIds;
+
     db.query("UPDATE turns SET cites_recorded = 1 WHERE id = ?").run(legacyCiter);
 
     const effective = getSessionEffectiveCitations(db, sessionA);
-    expect(effective.get(legacyCiter)?.source).toBe("structured");
-    expect(effective.get(legacyCiter)?.citedTurnIds).toEqual([]);
-    expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(1);
+    expect(effective.get(legacyCiter)?.citedTurnIds).toEqual(before!);
+    expect(effective.get(legacyCiter)?.citedTurnIds).toEqual([anchor]);
+    // anchor is cited by legacyCiter AND by structuredCiter's edge.
+    expect(getSessionCitationInDegree(db, sessionA).get(anchor)).toBe(2);
   });
 });

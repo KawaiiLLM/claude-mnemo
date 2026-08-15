@@ -324,18 +324,29 @@ export function getTurnCitations(
     .all(citingTurnId);
 }
 
-export type CitationSubject = Pick<
-  TurnRecord,
-  "id" | "content" | "citesRecorded"
->;
+/**
+ * Deliberately does NOT include `citesRecorded`. That flag used to choose
+ * between the two sources below and no longer participates — narrowing the
+ * type is what stops a future reader reaching for it again.
+ */
+export type CitationSubject = Pick<TurnRecord, "id" | "content">;
 
 export interface EffectiveCitations {
-  /** `structured` = read from the edge table; `inline` = legacy content parse. */
-  source: "structured" | "inline";
   /** Cited DB turn ids, de-duplicated, resolved, in a stable order. */
   citedTurnIds: number[];
-  /** Structured edges; always empty when `source` is `inline`. */
+  /** Structured edges backing some of those ids; a prose-only pair has none. */
   edges: TurnCitationEdge[];
+}
+
+/** Append ids not already present, preserving first-seen order. */
+function appendUnseen(into: number[], ids: readonly number[]): void {
+  const seen = new Set(into);
+  for (const id of ids) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      into.push(id);
+    }
+  }
 }
 
 function dedupeCitedIds(edges: readonly TurnCitationEdge[]): number[] {
@@ -352,38 +363,50 @@ function dedupeCitedIds(edges: readonly TurnCitationEdge[]): number[] {
 }
 
 /**
- * The fallback predicate (spec §B). `cites_recorded = 1` means the extractor
- * spoke: the edge table is authoritative and an EMPTY edge set means this turn
- * genuinely cites nothing. `cites_recorded = 0` means it never spoke, so the
- * inline `[T<n>]` grammar is the only signal available.
+ * Both sources, always, unioned by target id — no gate.
  *
- * The flag — never a created-at epoch — decides, because a turn created before
- * the deployment can be extracted after it, and an explicit `cites: []` is
- * otherwise indistinguishable from legacy absence.
+ * There used to be one: `cites_recorded` picked the edge table when a writer
+ * had "spoken" and the inline `[T<n>]` grammar otherwise. Ticket 06 removed
+ * the last writer that set the flag, which would have left every ordinary turn
+ * reading prose alone; but restoring a setter was the wrong repair, because
+ * the flag conflates "a writer enumerated this turn's citations" with "this
+ * turn has structured edges" and cannot express "some structured edges, plus
+ * prose that may hold more". A flag that can be forgotten, or can lie, is
+ * stored state protecting a derivation — and after ticket 06 both sources
+ * derive from the SAME body, so the union cannot invent a pair and a rewrite
+ * that drops a reference removes it from both. Correctness now follows from
+ * what is in the tables at read time rather than from a bit somebody had to
+ * remember to set. The column survives as inert history; nothing reads it.
+ *
+ * Structured first, then prose the edges did not already cover: the recompute
+ * parses title, content and insight while the inline grammar sees `content`
+ * alone, so the edge set is the wider of the two for anything written since
+ * ticket 06, and the prose is the only signal for anything older.
  *
  * This is the layer that RESOLVES ids: the parser is deliberately DB-blind and
  * keeps returning raw ids, but a citation that names no turn is not a citation,
- * so dangling ids (and a legacy self-citation, which the structured write path
- * already refuses) are dropped here. Cross-session edges survive as provenance —
+ * so dangling ids (and a self-citation, which the write path already refuses)
+ * are dropped here. Cross-session edges survive as provenance —
  * `getSessionEffectiveCitations` is the session-local view that drops them.
  */
 export function getEffectiveCitations(
   db: Database,
   turn: CitationSubject,
 ): EffectiveCitations {
-  if (turn.citesRecorded) {
-    const edges = getTurnCitations(db, turn.id);
-    return { source: "structured", citedTurnIds: dedupeCitedIds(edges), edges };
-  }
+  const edges = getTurnCitations(db, turn.id);
+  const citedTurnIds = dedupeCitedIds(edges);
 
   const turnExists = db.query<{ id: number }, [number]>(
     "SELECT id FROM turns WHERE id = ?",
   );
-  const citedTurnIds = parseInlineCitations(turn.content).filter(
-    (id) => id !== turn.id && turnExists.get(id) != null,
+  appendUnseen(
+    citedTurnIds,
+    parseInlineCitations(turn.content).filter(
+      (id) => id !== turn.id && turnExists.get(id) != null,
+    ),
   );
 
-  return { source: "inline", citedTurnIds, edges: [] };
+  return { citedTurnIds, edges };
 }
 
 /**
@@ -397,9 +420,8 @@ export function getEffectiveCitations(
  * `citedTurnIds` / in-degree; only relation-SPECIFIC consumers (e.g. victim
  * demotion's `supersedes` check) have any reason to ignore it.
  *
- * Session-local means three exclusions, applied to BOTH the structured and the
- * legacy inline path so the two can never disagree about what a session's graph
- * contains:
+ * Session-local means three exclusions, applied to BOTH sources of the union so
+ * they can never disagree about what a session's graph contains:
  *
  *   - dangling ids — an id naming no turn is not an edge;
  *   - cross-session ids — written as provenance, but inert for every
@@ -407,8 +429,7 @@ export function getEffectiveCitations(
  *   - self-citations — a turn confirming its own in-degree would break the one
  *     mechanical confirmation rule the settle pass has (§A).
  *
- * Turns with no effective citations are present with an empty list, so a caller
- * can also read `source` (did this turn's extractor speak?) per turn.
+ * Turns with no effective citations are present with an empty list.
  */
 export function getSessionEffectiveCitations(
   db: Database,
@@ -416,10 +437,10 @@ export function getSessionEffectiveCitations(
 ): Map<number, EffectiveCitations> {
   const turns = db
     .query<
-      { id: number; content: string | null; citesRecorded: number },
+      { id: number; content: string | null },
       [number]
     >(
-      `SELECT id, content, cites_recorded AS citesRecorded
+      `SELECT id, content
        FROM turns
        WHERE session_id = ?
        ORDER BY prompt_number ASC, id ASC`,
@@ -457,23 +478,15 @@ export function getSessionEffectiveCitations(
 
   const effective = new Map<number, EffectiveCitations>();
   for (const turn of turns) {
-    if (turn.citesRecorded === 1) {
-      const edges = edgesByCiter.get(turn.id) ?? [];
-      effective.set(turn.id, {
-        source: "structured",
-        citedTurnIds: dedupeCitedIds(edges),
-        edges,
-      });
-      continue;
-    }
-
-    effective.set(turn.id, {
-      source: "inline",
-      citedTurnIds: parseInlineCitations(turn.content).filter(
+    const edges = edgesByCiter.get(turn.id) ?? [];
+    const citedTurnIds = dedupeCitedIds(edges);
+    appendUnseen(
+      citedTurnIds,
+      parseInlineCitations(turn.content).filter(
         (id) => id !== turn.id && sessionTurnIds.has(id),
       ),
-      edges: [],
-    });
+    );
+    effective.set(turn.id, { citedTurnIds, edges });
   }
 
   return effective;

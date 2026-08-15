@@ -427,7 +427,8 @@ describe("a null era cutoff is byte-identical to the pre-segment renderer", () =
         body text
       T14 ✅ G0 the user asked something → review the fix
         body text
-        … +5 more @ within T2..T13
+      ↳ T13 🔴 G0 fix the watchdog race
+        … +4 more @ within T2..T12
 
   shape signals (window T1-T14 = full session):
     - fastest gap:   after T10 (+1s)

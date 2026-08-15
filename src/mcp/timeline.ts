@@ -944,13 +944,14 @@ export function milestoneTieBreak(turn: TurnRecord, citedBy = 0): number {
 /**
  * The in-memory stand-in for `getSessionEffectiveCitations` (spec §B), for
  * callers that hold turn records but no `Database` — the pure-function selection
- * seam the tests use. It reproduces the DB reader's contract exactly for a
- * session with no edge rows: `cites_recorded = 1` means the extractor spoke and
- * an empty edge set is authoritative; `0` falls back to the inline grammar,
- * dropping dangling, cross-session and self citations.
+ * seam the tests use. It reproduces the DB reader's contract for a session with
+ * no edge rows: the union of both sources degenerates to the inline grammar
+ * alone, dropping dangling, cross-session and self citations.
  *
- * Production always passes the real map, so structured edges are never lost to
- * this fallback.
+ * No `cites_recorded` branch, because the reader has no gate any more: a turn
+ * with no edge rows reads its prose whether or not anything ever "spoke" for
+ * it. Production always passes the real map, so structured edges are never
+ * lost to this fallback.
  */
 function inlineCitationFallback(
   turns: readonly TurnRecord[],
@@ -959,12 +960,7 @@ function inlineCitationFallback(
   const effective = new Map<number, EffectiveCitations>();
 
   for (const turn of turns) {
-    if (turn.citesRecorded) {
-      effective.set(turn.id, { source: "structured", citedTurnIds: [], edges: [] });
-      continue;
-    }
     effective.set(turn.id, {
-      source: "inline",
       citedTurnIds: parseInlineCitations(turn.content).filter(
         (id) => id !== turn.id && sessionTurnIds.has(id),
       ),
@@ -1125,8 +1121,13 @@ export function buildCorrectionGraph(
         supersededIds.add(edge.citedTurnId);
       }
     }
+    // The legacy adapter: a pre-era corrector with NO structured edge to speak
+    // with infers supersession from the cited turn's own reversal marker. The
+    // predicate used to be `source === "inline"`, which the union read removed;
+    // an empty edge set is the same fact stated directly — prose is the only
+    // signal this turn has.
     if (
-      entry.source === "inline" &&
+      entry.edges.length === 0 &&
       !isTaskCausalityEra(corrector.createdAtEpoch, options.taskCausalityEraCutoffEpoch)
     ) {
       for (const citedTurnId of entry.citedTurnIds) {
